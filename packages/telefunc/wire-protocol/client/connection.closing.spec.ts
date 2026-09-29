@@ -1,18 +1,24 @@
 // A channel's end across a wire that dies without a word: the page's close request, close acknowledgement or abort, and
-// the answers that complete a close, replay after the reconnect as its data does. These drive the real ClientChannel
-// against the real server over each wire.
+// the answers that complete a close, replay after the reconnect as its data does, and a reconnect that needs what a
+// replay dropped ends the channel on both ends. These drive the real ClientChannel against the real server over each
+// wire.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import type { Peer } from 'crossws'
+import '../../node/server/async_hooks.js'
 
 import { ClientChannel } from './channel.js'
+import { pumpClientProducerToChannel } from './request/pumpToChannel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
 import { getChannelMux } from '../server/mux.js'
+import { pumpProducerToChannel } from '../server/response/ChannelResponseBody.js'
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { getTelefuncChannelHooks } from '../server/ws.js'
+import { ChannelStreamSource } from '../ChannelStreamSource.js'
 import { TAG, decode, type ReconcilePayload } from '../shared-ws.js'
 import { isAbort } from '../../shared/Abort.js'
+import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
@@ -159,6 +165,14 @@ function closedWith(channel: { onClose(callback: (err?: Error) => void): void })
   const closed: { err: unknown } = { err: 'open' }
   channel.onClose((err) => void (closed.err = err))
   return closed
+}
+
+/** Expects the error a channel ends with when a reconnect needs messages `side`'s replay buffer dropped. */
+function expectLost(err: unknown, side: 'server' | 'client') {
+  expect(err).toBeInstanceOf(NetworkError)
+  expect((err as NetworkError).message).toBe(
+    `Channel closed: a reconnect needed messages the ${side}'s replay buffer had dropped to stay within its size. Raise config.channel.${side}ReplayBuffer, or ${side}ReplayBufferBinary for binary messages and streams.`,
+  )
 }
 
 function sseServer(net: Net, refuseUpload: boolean): typeof fetch {
@@ -409,21 +423,23 @@ describe.each(WIRES)('over %s', (wire) => {
     expect(serverClosed.err).toBeUndefined()
   })
 
-  test('a page close whose request goes down with a dying wire behind a message over the replay budget completes on both ends after the reconnect', async () => {
+  test('a page close whose request goes down with a dying wire behind a message over the replay budget ends the channel with NetworkError on both ends after the reconnect', async () => {
     serverConfig.channel = { pingInterval: 1_000, clientReplayBuffer: 1_024 }
     ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
     const { net, channel } = page(wire)
     channel(register().id) // another channel on the page
     const server = register<string, never>()
     const pageChannel = channel<string, never>(server.id)
+    const pageClosed = closedWith(pageChannel)
     const serverClosed = closedWith(server)
     await advance(500)
     net.whenPageSends(TAG.TEXT, () => net.die())
     void pageChannel.send('x'.repeat(2_000), { ack: false }) // lost with the wire, and too big to replay
     const closing = settled(pageChannel.close({ timeout: 20_000 }))
     await advance(10_000)
-    expect(closing.value).toBe(0)
-    expect(serverClosed.err).toBeUndefined()
+    expect(closing.value).toBe(1)
+    expectLost(pageClosed.err, 'client')
+    expectLost(serverClosed.err, 'client')
   })
 
   test('a page close that times out as its request goes down with a dying wire ends the channel on the server, as the request asked', async () => {
@@ -692,6 +708,136 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
   })
 })
 
+describe.each(WIRES)('over %s, past the replay', (wire) => {
+  /** Chunks of a stream: the first, then, once `resume` is called, eight more. */
+  function chunks() {
+    let resume!: () => void
+    const resumed = new Promise<void>((resolve) => (resume = resolve))
+    const chunk = (n: number) => new Uint8Array(1_024).fill(n) as Uint8Array<ArrayBuffer>
+    const producer = {
+      chunks: (async function* () {
+        yield chunk(0)
+        await resumed
+        for (let n = 1; n <= 8; n++) yield chunk(n)
+      })(),
+      cancel: () => {},
+    }
+    return { producer, resume }
+  }
+
+  test("a reconnect that needs messages the server's replay dropped ends the channel with NetworkError on both ends, and the page gets none after them", async () => {
+    serverConfig.channel = { pingInterval: 1_000, serverReplayBuffer: 1_024 }
+    const { net, channel } = page(wire)
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message))
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    void server.send('before', { ack: false })
+    await advance(100)
+    net.die()
+    // Sent into the dead wire, more than the server's replay holds.
+    for (let n = 0; n < 8; n++) void server.send(String(n).padEnd(256), { ack: false })
+    await advance(10_000)
+    expect(got).toEqual(['before'])
+    expectLost(pageClosed.err, 'server')
+    expectLost(serverClosed.err, 'server')
+  })
+
+  test("a reconnect that needs messages the page's replay dropped ends the channel with NetworkError on both ends, and the server gets none after them", async () => {
+    serverConfig.channel = { pingInterval: 1_000, clientReplayBuffer: 1_024 }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net, channel } = page(wire)
+    const server = register<string, never>()
+    const got: string[] = []
+    server.listen((message) => void got.push(message))
+    const pageChannel = channel<string, never>(server.id)
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    void pageChannel.send('before', { ack: false })
+    await advance(100)
+    net.die()
+    // Sent into the dead wire, more than the page's replay holds.
+    for (let n = 0; n < 8; n++) void pageChannel.send(String(n).padEnd(256), { ack: false })
+    await advance(10_000)
+    expect(got).toEqual(['before'])
+    expectLost(pageClosed.err, 'client')
+    expectLost(serverClosed.err, 'client')
+  })
+
+  test('a reconnect whose gap the replays fill resumes without loss, past a message larger than them that arrived before', async () => {
+    serverConfig.channel = { pingInterval: 1_000, serverReplayBuffer: 1_024, clientReplayBuffer: 1_024 }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net, channel } = page(wire)
+    const server = register<string, string>()
+    const serverGot: string[] = []
+    server.listen((message) => void serverGot.push(message.slice(0, 8)))
+    const pageChannel = channel<string, string>(server.id)
+    const pageGot: string[] = []
+    pageChannel.listen((message) => void pageGot.push(message.slice(0, 8)))
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    void server.send('large'.padEnd(2_000), { ack: false })
+    void pageChannel.send('large'.padEnd(2_000), { ack: false })
+    await advance(100)
+    net.die()
+    for (let n = 0; n < 3; n++) {
+      void server.send(`s${n}`.padEnd(256), { ack: false })
+      void pageChannel.send(`p${n}`.padEnd(256), { ack: false })
+    }
+    await advance(10_000)
+    void server.send('after', { ack: false })
+    void pageChannel.send('after', { ack: false })
+    await advance(100)
+    expect(pageGot.map((message) => message.trim())).toEqual(['large', 's0', 's1', 's2', 'after'])
+    expect(serverGot.map((message) => message.trim())).toEqual(['large', 'p0', 'p1', 'p2', 'after'])
+    expect(pageClosed.err).toBe('open')
+    expect(serverClosed.err).toBe('open')
+  })
+
+  test("a stream over the 'channel' transport that a reconnect needs more of than the server's replay holds errors on the page rather than completing short", async () => {
+    serverConfig.channel = { pingInterval: 1_000, serverReplayBufferBinary: 4_096 }
+    const { net, channel } = page(wire)
+    const { producer, resume } = chunks()
+    const channelId = pumpProducerToChannel(() => producer, {
+      context: {} as never,
+      requestContext: { responseAbort: { errorPromise: new Promise(() => {}), abort: () => {} } } as never,
+      telefunctionName: 'onDownload',
+      telefuncFilePath: '/download.telefunc.ts',
+    })
+    const read = settled(ChannelStreamSource.create(channel(channelId)).bytes())
+    await advance(500)
+    net.die()
+    resume() // the rest of the stream, and its end, go into the dead wire
+    await advance(10_000)
+    expectLost(read.value, 'server')
+  })
+
+  test("an upload over the 'channel' transport that a reconnect needs more of than the page's replay holds errors on the server rather than completing short", async () => {
+    serverConfig.channel = { pingInterval: 1_000, clientReplayBufferBinary: 4_096 }
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
+    const { net } = page(wire)
+    const { producer, resume } = chunks()
+    const upload = pumpClientProducerToChannel(
+      () => producer,
+      wire === 'ws' ? ['ws'] : ['sse'],
+      `http://${crypto.randomUUID()}.test/_telefunc`,
+    )
+    const server = new ServerChannel({ id: upload.metadata.channelId })
+    getChannelMux().registerChannel(server)
+    const read = settled(ChannelStreamSource.create(server).bytes())
+    await advance(500)
+    net.die()
+    resume() // the rest of the upload, and its end, go into the dead wire
+    await advance(10_000)
+    expectLost(read.value, 'client')
+  })
+})
+
 test('on SSE batch POSTs, a close acknowledgement held behind an upgrade barrier that a dying wire never lets out reaches the server (#485)', async () => {
   const { net, channel } = page('sse-batch', { upgrade: true })
   const other = register<string, never>()
@@ -717,6 +863,26 @@ test('on SSE batch POSTs, a close acknowledgement held behind an upgrade barrier
   await advance(10_000)
   expect(serverClosed.err).toBeUndefined()
   expect(closing.value).toBe(0)
+})
+
+test("over sse, an upgrade whose barrier finds more on the old wire than the server's replay buffer holds keeps the channel, which the page gets all of in order", async () => {
+  serverConfig.channel = { pingInterval: 1_000, serverReplayBuffer: 1_024 }
+  const { net, channel } = page('sse', { upgrade: true })
+  const server = register<never, string>()
+  const pageChannel = channel<never, string>(server.id)
+  const got: string[] = []
+  pageChannel.listen((message) => void got.push(message.trim()))
+  const pageClosed = closedWith(pageChannel)
+  const serverClosed = closedWith(server)
+  // As the page writes its barrier, the server sends the old wire more than its replay holds.
+  net.whenPageSends(TAG.BARRIER, () => {
+    for (let n = 0; n < 8; n++) void server.send(String(n).padEnd(256), { ack: false })
+  })
+  await advance(5_000)
+  expect((pageChannel as any)._connection.transport.type).toBe('ws')
+  expect(got).toEqual(['0', '1', '2', '3', '4', '5', '6', '7'])
+  expect(pageClosed.err).toBe('open')
+  expect(serverClosed.err).toBe('open')
 })
 
 test('over ws, a page lets go of a closed channel whose close the server never got once nothing of it is left to replay', async () => {

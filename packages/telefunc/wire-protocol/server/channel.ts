@@ -29,7 +29,7 @@ import type { ShieldValidators } from '../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { CHANNEL_CLOSE_TIMEOUT_MS, CHANNEL_PING_INTERVAL_MIN_MS } from '../constants.js'
@@ -39,8 +39,23 @@ import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, isChannelCtrlTag, isSequencedFrame } from '../shared-ws.js'
-import type { AckResultStatus, ChannelCtrlFrame, ChannelDataFrame, ChannelFrame, ReattachState } from '../shared-ws.js'
+import {
+  ACK_STATUS,
+  ProtocolViolationError,
+  TAG,
+  assertProtocol,
+  isChannelCtrlTag,
+  isReplayLoss,
+  isSequencedFrame,
+} from '../shared-ws.js'
+import type {
+  AckResultStatus,
+  ChannelCtrlFrame,
+  ChannelDataFrame,
+  ChannelFrame,
+  ReattachState,
+  ReplayLoss,
+} from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {
@@ -450,6 +465,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.CLOSE_ACK:
         this._onPeerCloseAck()
         return
+      case TAG.ERROR:
+        assertProtocol(isReplayLoss(frame.reason), `ERROR reason ${frame.reason} from a page`)
+        this._shutdown(replayLossError('client', frame.reason))
+        return
       case TAG.WINDOW:
         this._flow.onPeerByteWindow(frame.bytes)
         return
@@ -640,6 +659,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown(undefined, true)
   }
 
+  /** @internal Its replay no longer holds what its page lacks of it: the channel ends on both ends, `peer` telling its
+   *  page so in place of the replay. What it made while no peer was attached is dropped, as it would reach the page
+   *  past the hole. */
+  _onReplayLost(peer: IndexedPeer, loss: ReplayLoss): void {
+    this._dropPending()
+    peer.sendError(loss)
+    this._shutdown(replayLossError('server', loss))
+  }
+
   /** @internal The page has what this channel sent it through `lastSeq`. */
   _onPageHas(lastSeq: number): void {
     if (lastSeq > this._pageLastSeq) this._pageLastSeq = lastSeq
@@ -818,6 +846,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _release(): void {
     this._replayBuffer?.dispose()
     this._replayBuffer = null
+    this._dropPending()
+  }
+
+  private _dropPending(): void {
     this._pendingAckRes.length = 0
     this._pendingCloseAck = false
     this._pendingCloseRequest = false

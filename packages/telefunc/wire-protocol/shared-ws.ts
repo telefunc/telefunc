@@ -12,6 +12,7 @@ export {
   isChannelDataFrame,
   isSequencedFrame,
   isConnCtrlTag,
+  isReplayLoss,
   encodePublishText,
   encodePublishBinary,
   payloadBytes,
@@ -19,6 +20,7 @@ export {
 export type {
   AckResultStatus,
   ErrorReason,
+  ReplayLoss,
   DecodedFrame,
   ChannelFrame,
   ChannelCtrlFrame,
@@ -117,7 +119,8 @@ const TAG = {
   CLOSE_ACK: 0x31 as const,
   /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
-  /** Server → client: channel closed with an error. Payload: u8 `ERROR_REASON`. Sequenced, as CLOSE is. */
+  /** Channel closed with an error. Payload: u8 `ERROR_REASON`. Server → client, and client → server for a `ReplayLoss`
+   *  only. Sequenced, as CLOSE is. */
   ERROR: 0x33 as const,
   /** Flow-control byte limit, receiver → sender: what the receiver has consumed plus its window, mod 2^32. */
   WINDOW: 0x34 as const,
@@ -246,9 +249,20 @@ const ERROR_REASON = {
   BUG: 0x00 as const,
   /** Its page fell further behind a broadcast than the server holds for it. */
   OVERFLOW: 0x01 as const,
+  /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
+  LOST: 0x02 as const,
+  /** A reconnect needed frames its sender's replay buffer had dropped for their age. */
+  EXPIRED: 0x03 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
+
+/** Why a replay can't give a peer what it lacks. */
+type ReplayLoss = typeof ERROR_REASON.LOST | typeof ERROR_REASON.EXPIRED
+
+function isReplayLoss(reason: number): reason is ReplayLoss {
+  return reason === ERROR_REASON.LOST || reason === ERROR_REASON.EXPIRED
+}
 
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
 type WirePublishInfo = { seq: number; timestamp: number }
@@ -659,6 +673,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PUBLISH_BINARY_ACK_REQ,
   TAG.CLOSE,
   TAG.CLOSE_ACK,
+  TAG.ERROR,
   TAG.WINDOW,
   TAG.MSG_WINDOW,
   TAG.SENT,

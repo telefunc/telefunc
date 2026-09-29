@@ -589,7 +589,10 @@ class ChannelMux {
       ctrl.sessionId !== undefined && ctrl.sessionId === transport.getSessionId(connection)
         ? ctrl.sessionId
         : crypto.randomUUID()
-    const attached = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection)
+    // What the server sent the page is on a wire that delivers it, unless the page reconnected: the one that holds the
+    // session, or a barrier's old wire, which the page reads to its FIN first.
+    const replay = !isBarrier && newSessionId !== ctrl.sessionId
+    const attached = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection, replay)
     // Its wire no longer has the session it names, which is gone with the handles it had.
     if (ctrl.sessionId) this.sessionWires.delete(ctrl.sessionId)
 
@@ -621,9 +624,10 @@ class ChannelMux {
     open: ReconcilePayload['open'],
     conn: ConnectionEntry,
     connection: Wire,
+    replay: boolean,
   ): ChannelHandle[] {
     const handles = open
-      .map((entry) => this.attach(entry, conn, connection))
+      .map((entry) => this.attach(entry, conn, connection, replay))
       .filter((h): h is ChannelHandle => h !== null)
 
     // Channels in the previous session that the client did NOT re-include are recovery-failed.
@@ -642,14 +646,19 @@ class ChannelMux {
   /** Null leaves the channel out of the RECONCILED. The wire awaits an initial one the server hasn't registered, and
    *  one it awaits stays out until attached; its ATTACH_RESULT settles it. Later reconciles fail fast if the channel
    *  is gone. */
-  private attach(entry: ReconcileOpenEntry, conn: ConnectionEntry, connection: Wire): ChannelHandle | null {
+  private attach(
+    entry: ReconcileOpenEntry,
+    conn: ConnectionEntry,
+    connection: Wire,
+    replay: boolean,
+  ): ChannelHandle | null {
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry
       if (awaited.phase !== 'attached') return null
     }
     const existing = this.channels.get(entry.id)
-    if (existing) return this.attachChannel(existing, entry, conn.sender)
+    if (existing) return this.attachChannel(existing, entry, conn.sender, replay)
     if (entry.initial && !awaited) this.awaitChannel(entry, conn, connection)
     return null
   }
@@ -676,7 +685,7 @@ class ChannelMux {
     const { conn, wire } = awaited
     const sessionId = conn.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
-    const handle = this.attachChannel(channel, awaited.entry, conn.sender)
+    const handle = this.attachChannel(channel, awaited.entry, conn.sender, false)
     if (!handle) {
       this.expireAwaited(awaited)
       return
@@ -756,15 +765,26 @@ class ChannelMux {
     state.awaited.clear()
   }
 
-  /** Drains replay frames missed since `lastSeq` (sends are sync — see `send`), then
-   *  attaches an `IndexedPeer`. Returns null if the channel shut down and kept nothing for its page. */
-  private attachChannel(channel: ServerChannel, entry: ReconcileOpenEntry, sender: PeerSender): ChannelHandle | null {
-    const replay = channel._replayBuffer
-    if (replay === null) return null
+  /** Attaches an `IndexedPeer`, after draining, with `replay`, the replay frames missed since `lastSeq` (sends are
+   *  sync, see `send`). If the replay no longer holds them the channel ends instead. Returns null if the channel shut
+   *  down and kept nothing for its page. */
+  private attachChannel(
+    channel: ServerChannel,
+    entry: ReconcileOpenEntry,
+    sender: PeerSender,
+    replay: boolean,
+  ): ChannelHandle | null {
+    const buffer = channel._replayBuffer
+    if (buffer === null) return null
     channel._onPageHas(entry.lastSeq)
-    for (const frame of replay.getAfter(entry.lastSeq)) sender.send(frame)
-    const peer = new IndexedPeer(sender, entry.ix, replay)
-    channel._attachPeer(peer, entry)
+    const peer = new IndexedPeer(sender, entry.ix, buffer)
+    const missed = replay ? buffer.getAfter(entry.lastSeq) : []
+    if (typeof missed === 'number') {
+      channel._onReplayLost(peer, missed)
+    } else {
+      for (const frame of missed) sender.send(frame)
+      channel._attachPeer(peer, entry)
+    }
     return { channel, ix: entry.ix, peer }
   }
 

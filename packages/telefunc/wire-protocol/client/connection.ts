@@ -4,7 +4,7 @@ export type { MuxChannel, MuxConnection }
 import { parse } from '@brillout/json-serializer/parse'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { assert, assertUsage } from '../../utils/assert.js'
-import { ChannelOverflowError } from '../channel-errors.js'
+import { ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import {
@@ -35,7 +35,16 @@ import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import { ACK_STATUS, ERROR_REASON, TAG, decode, encode, isSequencedFrame, payloadBytes } from '../shared-ws.js'
+import {
+  ACK_STATUS,
+  ERROR_REASON,
+  TAG,
+  decode,
+  encode,
+  isReplayLoss,
+  isSequencedFrame,
+  payloadBytes,
+} from '../shared-ws.js'
 import type {
   AckResultStatus,
   ChannelFrame,
@@ -47,6 +56,7 @@ import type {
   ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
+  ReplayLoss,
 } from '../shared-ws.js'
 import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
@@ -845,7 +855,9 @@ class ClientConnection implements MuxConnection {
             ? new ChannelOverflowError(
                 'Broadcast closed: this client fell further behind than config.channel.bufferLimit lets the server hold',
               )
-            : makeBugError(),
+            : isReplayLoss(frame.reason)
+              ? replayLossError('server', frame.reason)
+              : makeBugError(),
         )
         this.startTtlIfIdle()
         return
@@ -1516,10 +1528,8 @@ class ClientConnection implements MuxConnection {
         continue
       }
       if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
-      const replay = this.replayBuffers.get(ix)
-      if (replay)
-        for (const frame of replay.getAfter(serverMap.get(ix)!, (carriedFrom.get(ix) ?? Infinity) - 1))
-          releaseFrames.push({ kind: 'reconcile', frame })
+      for (const frame of this.replayTo(ix, entry, serverMap.get(ix)!, (carriedFrom.get(ix) ?? Infinity) - 1))
+        releaseFrames.push(frame)
       if (entry.state.tag !== 'closed') channelsToOpen.push(entry.channel)
     }
 
@@ -1559,19 +1569,35 @@ class ClientConnection implements MuxConnection {
     if (lastSeq === null) {
       this.releaseDeferredOmitted([ix])
     } else if (entry) {
+      const opened = entry.state.tag === 'pending'
+      if (opened) this.enterChannelOpen(ix)
+      else if (entry.state.tag === 'closed') this.serverHas(ix, entry.state, lastSeq)
       // As `applyReconciled` does: its replay, then what it queued.
-      const replay = this.replayBuffers.get(ix)!
-      for (const frame of replay.getAfter(lastSeq)) this.transport.sendFrame({ kind: 'reconcile', frame })
+      for (const frame of this.replayTo(ix, entry, lastSeq)) this.transport.sendFrame(frame)
       for (const frame of this.drainBufferedFrames(new Set([ix]), this.channels)) this.transport.sendFrame(frame)
-      if (entry.state.tag === 'pending') {
-        this.enterChannelOpen(ix)
-        entry.channel._onTransportOpen(this.transport.batched, this.wire)
-      } else if (entry.state.tag === 'closed') {
-        this.serverHas(ix, entry.state, lastSeq)
-      }
+      if (opened && entry.state.tag === 'open') entry.channel._onTransportOpen(this.transport.batched, this.wire)
     }
     this.startTtlIfIdle()
     this.maybeStartUpgrade()
+  }
+
+  /** What the server, which attached the channel with `lastSeq`, lacks of it through `throughSeq`: its replay, or, if
+   *  the replay no longer holds all of it, the ERROR that ends the channel on both ends in its place. */
+  private replayTo(ix: number, entry: ChannelEntry, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
+    const missed = this.replayBuffers.get(ix)!.getAfter(lastSeq, throughSeq)
+    if (typeof missed !== 'number') return missed.map((frame) => ({ kind: 'reconcile', frame }))
+    // One the server ended needs nothing more.
+    if (entry.state.tag === 'closed' && entry.state.delivered) return []
+    return [this.loseChannel(ix, entry, missed)]
+  }
+
+  /** Ends the channel on both ends. What it queued is dropped, as it would reach the server past the hole. The ERROR
+   *  isn't kept in the replay: a later reconcile finds the same hole and sends another. */
+  private loseChannel(ix: number, entry: ChannelEntry, loss: ReplayLoss): OutboundFrame {
+    this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => channelIx !== ix)
+    const frame = encode.error(ix, loss, this.replayBuffers.get(ix)!.nextSeq())
+    entry.channel._onTransportClose(replayLossError('client', loss))
+    return { kind: 'control', frame }
   }
 
   /** The server ended it, so it needs nothing more the page sent on it. */

@@ -16,6 +16,7 @@ import {
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
+import { NetworkError } from '../shared/NetworkError.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
 
 const LATENCY_MS = 5
@@ -243,6 +244,21 @@ function consume<T = number>(
 
 const flowOf = (channel: unknown) => (channel as { _flow: { msgWindow: number; byteWindow: number } })._flow
 
+/** Where each end's `onClose` leaves what it got: `'open'` until it fires. */
+function closedWith(ends: { page: { onClose(cb: (err?: Error) => void): void }; server: typeof ends.page }) {
+  const closed: { page: unknown; server: unknown } = { page: 'open', server: 'open' }
+  ends.page.onClose((err) => void (closed.page = err))
+  ends.server.onClose((err) => void (closed.server = err))
+  return closed
+}
+
+/** What a channel ends with when a reconnect needs messages `side`'s replay buffer dropped to stay within its size. */
+const lostOn = (side: 'server' | 'client') =>
+  new NetworkError(
+    `Channel closed: a reconnect needed messages the ${side}'s replay buffer had dropped to stay within its size. Raise config.channel.${side}ReplayBuffer, or ${side}ReplayBufferBinary for binary messages and streams.`,
+    true,
+  )
+
 const KIB = 1024
 
 /** The server's credit left with its page, in bytes. */
@@ -366,10 +382,11 @@ test("what a page has in flight to a slow server listener never exceeds the serv
   expect(excess).toBeLessThanOrEqual(0)
 })
 
-test('a stream keeps flowing after a reconnect that loses more than the replay buffer holds', async () => {
+test("a stream whose reconnect needs more than the server's replay buffer holds ends with NetworkError on both ends, the page having got it in order up to there", async () => {
   serverConfig.channel.serverReplayBuffer = 512
   const clock = loop.open<never, number>()
   const page = consume(clock.page)
+  const closed = closedWith(clock)
   produce(clock.server)
   await runUntil(() => flowOf(clock.page).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
   const window = flowOf(clock.page).msgWindow
@@ -381,18 +398,16 @@ test('a stream keeps flowing after a reconnect that loses more than the replay b
   await run(50)
   expect(loop.socket.toPage.length).toBeGreaterThanOrEqual(window)
   loop.socket.cut()
-  const before = page.received.length
-  await runUntil(() => page.received.length - before > 2 * window, 1_000)
-  expect(page.received.length - before).toBeGreaterThan(2 * window)
-  // Values were lost, and the ones that arrived are in order.
-  expect(page.received.some((n, i) => i > 0 && n > page.received[i - 1]! + 1)).toBe(true)
-  expect(page.received.every((n, i) => i === 0 || n > page.received[i - 1]!)).toBe(true)
+  await runUntil(() => closed.page !== 'open', 1_000)
+  expect(closed).toEqual({ page: lostOn('server'), server: lostOn('server') })
+  expect(page.received).toEqual([...page.received.keys()])
 })
 
-test("an upload keeps flowing after a reconnect that loses more than the page's replay buffer holds", async () => {
+test("an upload whose reconnect needs more than the page's replay buffer holds ends with NetworkError on both ends, the server having got it in order up to there", async () => {
   serverConfig.channel.clientReplayBuffer = 512
   const upload = loop.open<number, never>()
   const server = consume(upload.server)
+  const closed = closedWith(upload)
   produce(upload.page)
   await runUntil(() => flowOf(upload.server).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
   const window = flowOf(upload.server).msgWindow
@@ -404,11 +419,48 @@ test("an upload keeps flowing after a reconnect that loses more than the page's 
   await run(50)
   expect(loop.socket.toServer.length).toBeGreaterThanOrEqual(window)
   loop.socket.cut()
-  const before = server.received.length
-  await runUntil(() => server.received.length - before > 2 * window, 1_000)
-  expect(server.received.length - before).toBeGreaterThan(2 * window)
-  expect(server.received.some((n, i) => i > 0 && n > server.received[i - 1]! + 1)).toBe(true)
-  expect(server.received.every((n, i) => i === 0 || n > server.received[i - 1]!)).toBe(true)
+  await runUntil(() => closed.server !== 'open', 1_000)
+  expect(closed).toEqual({ page: lostOn('client'), server: lostOn('client') })
+  expect(server.received).toEqual([...server.received.keys()])
+})
+
+test("a page that opens another channel while more of a stream is on the wire than the server's replay buffer holds keeps the stream whole", async () => {
+  serverConfig.channel.serverReplayBuffer = 512
+  const clock = loop.open<never, number>()
+  const page = consume(clock.page)
+  const closed = closedWith(clock)
+  produce(clock.server)
+  await run(50)
+  loop.socket.toPage.hold()
+  await run(20)
+  expect(loop.socket.toPage.bytes).toBeGreaterThan(512)
+  loop.open<never, number>() // its RECONCILE attaches the stream's channel again, on the wire that carries the stream
+  await run(50)
+  loop.socket.toPage.release()
+  const before = page.received.length
+  await run(100)
+  expect(page.received.length).toBeGreaterThan(before)
+  expect(closed).toEqual({ page: 'open', server: 'open' })
+  expect(page.received).toEqual([...page.received.keys()])
+})
+
+test("a broadcast whose reconnect needs more publishes than the server's replay buffer holds closes on both ends with NetworkError", async () => {
+  serverConfig.channel.serverReplayBuffer = 1_024
+  const key = `room:${crypto.randomUUID()}`
+  const room = loop.openBroadcast<string>(key)
+  const closed = closedWith(room)
+  const seen: string[] = []
+  room.page.subscribe((text) => void seen.push(text))
+  await run(100)
+  Broadcast.publish(key, 'before')
+  await run(50)
+  loop.socket.toPage.hold()
+  for (let n = 0; n < 8; n++) Broadcast.publish(key, String(n).padEnd(256))
+  await run(50)
+  loop.socket.cut()
+  await runUntil(() => closed.page !== 'open', 1_000)
+  expect(closed).toEqual({ page: lostOn('server'), server: lostOn('server') })
+  expect(seen).toEqual(['before'])
 })
 
 test("a page that stops reading holds a channel's sends nobody awaits to its window and bufferLimit: the next rejects with ChannelOverflowError, and the channel stays open", async () => {
