@@ -683,6 +683,10 @@ class ChannelMux {
     connection: Wire,
     replay: boolean,
   ): ChannelHandle[] {
+    // Ahead of all that the attaches send, a replay among it, and of a registration the wire awaits: each answer's round
+    // trip is the path's. It measures, so it says nothing starved, and names no round trip.
+    for (const { ix, probe } of open)
+      if (probe !== undefined) conn.sender.send(encode.bdpPingAck(ix, probe, false, Infinity))
     const handles = open
       .map((entry) => this.attach(entry, conn, connection, replay))
       .filter((h): h is ChannelHandle => h !== null)
@@ -709,9 +713,6 @@ class ChannelMux {
     connection: Wire,
     replay: boolean,
   ): ChannelHandle | null {
-    // Ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip is the
-    // path's. It measures, so it says nothing starved, and names no round trip.
-    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, false, Infinity))
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry
