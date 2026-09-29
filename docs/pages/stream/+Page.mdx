@@ -512,7 +512,7 @@ onClose((err) => {
     // Either side called abort(value)
     console.log(err.abortValue)
   } else if (err instanceof NetworkError) {
-    // Connection lost (couldn't reconnect)
+    // Connection lost (couldn't reconnect, or couldn't replay what it missed)
   }
 })
 ```

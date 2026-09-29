@@ -413,7 +413,7 @@ Channels and broadcasts signal failure through four errors:
 | Error | When | Channel state | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
-| `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout` | Closed | Auto-closed — recreate if needed |
+| `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, or a reconnect needed messages a replay buffer no longer held | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
 | `ChannelOverflowError` | A send was dropped — what the server holds for a peer that is offline or behind exceeded `config.channel.bufferLimit` | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
@@ -432,6 +432,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
 - Both sides keep a bounded replay buffer; after reconnect, missing frames are replayed.
+- If a reconnect needs frames a replay buffer no longer holds, the channel closes on both ends with `NetworkError` instead of skipping them, and so does a stream riding it. The error names the setting to raise (see <Link href="/channel-config" />).
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.
