@@ -336,11 +336,16 @@ describe('seqs past 32 bits', () => {
         const seqs = standing(0, sent)
         expect(decode(encode.window(3, 1_024, lastSeq), seqs)).toMatchObject({ lastSeq })
         expect(decode(encode.attachResult(3, lastSeq), seqs)).toMatchObject({ lastSeq })
-        expect(decode(encode.ackRes(3, 1, lastSeq, '"x"'), seqs)).toMatchObject({ ackedSeq: lastSeq })
         expect(decode(encode.ping([{ ix: 3, lastSeq }]), seqs)).toMatchObject({ ended: [{ ix: 3, lastSeq }] })
         expect(decode(encode.pong([{ ix: 3, lastSeq }]), seqs)).toMatchObject({ ended: [{ ix: 3, lastSeq }] })
       }
     }
+  })
+
+  test('an ACK_RES carries the seq it answers whole, however many seqs its receiver sent since', () => {
+    for (const ackedSeq of [0, 1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER])
+      for (const sent of [ackedSeq, ackedSeq + 2 ** 32 + 5, Number.MAX_SAFE_INTEGER])
+        expect(decode(encode.ackRes(3, 1, ackedSeq, '"x"'), standing(0, sent))).toMatchObject({ ackedSeq })
   })
 
   test('a seq never reads below 0, whatever its bits', () => {

@@ -69,6 +69,8 @@ const HEADER = 7
 const SEQ_SPAN = 2 ** 32
 const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
+/** An ACK_RES's `ackedSeq` and status. */
+const ACK_RES_PREFIX = 9
 const payloadBytes = (frame: Uint8Array): number => frame.byteLength - HEADER
 const DATA_TAG_MIN = 0x10
 
@@ -109,7 +111,8 @@ const TAG = {
   BINARY: 0x11 as const,
   TEXT_ACK_REQ: 0x12 as const,
   BINARY_ACK_REQ: 0x13 as const,
-  /** ACK response — carries `ackedSeq` + serialized result. */
+  /** ACK response: carries `ackedSeq` whole, as an answer may come any number of seqs after its request, and the
+   *  serialized result. */
   ACK_RES: 0x14 as const,
   /** Replayable publish frame delivered to keyed-channel subscribers. */
   PUBLISH: 0x15 as const,
@@ -379,6 +382,12 @@ function readU16(buf: Uint8Array, offset: number): number {
   return (buf[offset] as number) | ((buf[offset + 1] as number) << 8)
 }
 
+/** u32 low, then u32 high: exact to 2^53, past which a JS number skips integers. */
+function writeU64(frame: Uint8Array, offset: number, n: number): void {
+  writeU32(frame, offset, n)
+  writeU32(frame, offset + 4, n / SEQ_SPAN)
+}
+
 function readU32(buf: Uint8Array, offset: number): number {
   return (
     ((buf[offset] as number) |
@@ -387,6 +396,10 @@ function readU32(buf: Uint8Array, offset: number): number {
       ((buf[offset + 3] as number) << 24)) >>>
     0
   )
+}
+
+function readU64(buf: Uint8Array, offset: number): number {
+  return readU32(buf, offset) + readU32(buf, offset + 4) * SEQ_SPAN
 }
 
 // ===== Seqs off the wire =====
@@ -457,7 +470,7 @@ const encode = {
     encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
   binaryAckReq: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.BINARY_ACK_REQ, index, data, seq),
 
-  /** Wire: [header][u32 ackedSeq][u8 status][result bytes...]
+  /** Wire: [header][u64 ackedSeq][u8 status][result bytes...]
    *  `ownSeq` — this frame's own replay sequence number.
    *  `ackedSeq` — the seq of the ACK_REQ frame being acknowledged. */
   ackRes(
@@ -468,11 +481,11 @@ const encode = {
     status: AckResultStatus = ACK_STATUS.OK,
   ): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(result)
-    const frame = new Uint8Array(HEADER + 5 + payload.byteLength)
+    const frame = new Uint8Array(HEADER + ACK_RES_PREFIX + payload.byteLength)
     writeHeader(frame, TAG.ACK_RES, index, ownSeq)
-    writeU32(frame, HEADER, ackedSeq)
-    frame[HEADER + 4] = status
-    frame.set(payload, HEADER + 5)
+    writeU64(frame, HEADER, ackedSeq)
+    frame[HEADER + 8] = status
+    frame.set(payload, HEADER + ACK_RES_PREFIX)
     return frame
   },
 
@@ -639,9 +652,9 @@ function decode(frame: Uint8Array, seqs: SeqReader): DecodedFrame {
     case TAG.PUBLISH_BINARY_ACK_REQ:
       return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, bytes, data: payload }
     case TAG.ACK_RES: {
-      assertProtocol(payload.length >= 5, 'ACK_RES payload too short')
-      const ackedSeq = seqThrough(readU32(payload, 0), seqs.sent(index))
-      const status = payload[4] as number
+      assertProtocol(payload.length >= ACK_RES_PREFIX, 'ACK_RES payload too short')
+      const ackedSeq = readU64(payload, 0)
+      const status = payload[8] as number
       assertProtocol(
         status === ACK_STATUS.OK ||
           status === ACK_STATUS.ERROR ||
@@ -649,7 +662,8 @@ function decode(frame: Uint8Array, seqs: SeqReader): DecodedFrame {
           status === ACK_STATUS.SHIELD_ERROR,
         `ACK_RES unknown status ${status}`,
       )
-      return { tag: TAG.ACK_RES, index, seq, bytes, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
+      const text = textDecoder.decode(payload.subarray(ACK_RES_PREFIX))
+      return { tag: TAG.ACK_RES, index, seq, bytes, ackedSeq, status, text }
     }
 
     case TAG.PING: {

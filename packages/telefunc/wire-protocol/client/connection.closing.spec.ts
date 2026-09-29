@@ -1260,6 +1260,24 @@ describe.each(WIRES)('over %s, a channel whose seqs pass 2^31 and 2^32', (wire) 
     },
   )
 
+  test('settles an ack request with its answer, from either end, after its requester sent 2^32 more frames', async () => {
+    const { channel } = page(wire)
+    const server = register<string, string>()
+    let serverAnswers!: () => void
+    server.listen(() => new Promise<string>((resolve) => (serverAnswers = () => resolve('server'))))
+    const pageChannel = channel<string, string>(server.id)
+    let pageAnswers!: () => void
+    pageChannel.listen(() => new Promise<string>((resolve) => (pageAnswers = () => resolve('page'))))
+    await advance(500)
+    const asked = [settled(server.send('?', { ack: true })), settled(pageChannel.send('?', { ack: true }))]
+    await advance(100)
+    skipSeqs(server, pageChannel, 2 ** 32)
+    pageAnswers()
+    serverAnswers()
+    await advance(1_000)
+    expect(asked.map(({ value }) => value)).toEqual(['page', 'server'])
+  })
+
   test.each([2 ** 31, 2 ** 32])(
     'closes gracefully from either end at %d, and the server lets each go within a ping round trip',
     async (boundary) => {
