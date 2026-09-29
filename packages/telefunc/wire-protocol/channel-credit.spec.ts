@@ -1057,6 +1057,31 @@ test.each([
   },
 )
 
+test("a Room member's page whose wire drops with more of the room's messages in flight than a wire holds besides its channels' allowances gets them all as it reconnects, and keeps its new wire", async () => {
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  const speaker = await room.join()
+  await run(100)
+  loop.socket.toPage.hold()
+  const publication = (n: number) => String(n).padEnd(256 * KIB)
+  // 72 MiB: past the 64 MiB a wire holds besides what its channels' flow control allows, within the 80 MiB a page may be
+  // behind.
+  const count = 288
+  for (let n = 0; n < count; n++) {
+    void speaker.publish(publication(n))
+    await run(0)
+  }
+  expect(serverEnd).toBe('open')
+  loop.socket.cut()
+  await runUntil(() => seen.length === count, 5_000)
+  expect(loop.sockets).toHaveLength(2)
+  expect(seen).toEqual(Array.from({ length: count }, (_, n) => publication(n)))
+  expect(serverEnd).toBe('open')
+})
+
 test("a Room member's page cut off further behind than the server's replay buffer holds is let go with ChannelOverflowError, having got the room's messages before it in order: its view closes and its member leaves", async () => {
   serverConfig.channel.serverReplayBuffer = 1_024
   const { room, stub, view } = await loop.openRoom()
