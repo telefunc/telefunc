@@ -39,6 +39,21 @@ function testFileDownload() {
     })
   })
 
+  test('file download: nested native File/Blob materialize on client', async () => {
+    await page.click('#test-eager-nested')
+    await autoRetry(async () => {
+      const result = await getResult('#download-result')
+      expect(result).deep.equal({
+        title: 'report',
+        isFile: true,
+        name: 'nested-eager.txt',
+        isBlob: true,
+        fileObjectUrlContent: TEXT,
+        blobObjectUrlContent: TEXT,
+      })
+    })
+  })
+
   test('file download: download(stream, {name}) → FileDownload', async () => {
     await page.click('#test-download-file-stream')
     await autoRetry(async () => {

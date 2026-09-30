@@ -92,7 +92,6 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
     receiveStream() {
       throw new Error('registry-level harness does not stream')
     },
-    waitFor() {},
   }
   const reviver = createStreamingReviver(
     context,
@@ -623,15 +622,30 @@ describe('reference identity — full pipeline', () => {
     expect(await retTyped.p).toEqual({ answer: 42 })
   })
 
-  test('duplicated File: one byte stream, same client File promise', async () => {
+  test('duplicated File: one byte stream, same client File in every container', async () => {
     const file = new File(['file-contents'], 'notes.txt', { type: 'text/plain', lastModified: 1234567890 })
-    const { ret } = await roundTrip({ file, fileDupe: file })
-    const retTyped = ret as { file: Promise<File>; fileDupe: Promise<File> }
+    const { ret } = await roundTrip({
+      file,
+      inArray: [file],
+      inMapKey: new Map([[file, 'k']]),
+      inMapValue: new Map([['k', file]]),
+      inSet: new Set([file]),
+    })
+    const retTyped = ret as {
+      file: File
+      inArray: File[]
+      inMapKey: Map<File, string>
+      inMapValue: Map<string, File>
+      inSet: Set<File>
+    }
 
-    expect(retTyped.file).toBe(retTyped.fileDupe)
-    const revived = await retTyped.file
-    expect(revived.name).toBe('notes.txt')
-    expect(await revived.text()).toBe('file-contents')
+    expect(retTyped.file).toBeInstanceOf(File)
+    expect(retTyped.inArray[0]).toBe(retTyped.file)
+    expect([...retTyped.inMapKey.keys()][0]).toBe(retTyped.file)
+    expect(retTyped.inMapValue.get('k')).toBe(retTyped.file)
+    expect([...retTyped.inSet][0]).toBe(retTyped.file)
+    expect(retTyped.file.name).toBe('notes.txt')
+    expect(await retTyped.file.text()).toBe('file-contents')
   })
 
   test('abort reaches a duplicated value exactly once', async () => {

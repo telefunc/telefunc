@@ -14,6 +14,7 @@ import {
   CREDIT_WINDOW_INITIAL_BYTES,
   CREDIT_WINDOW_MAX_BYTES,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  RECONCILE_TIMEOUT_MS,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
@@ -972,6 +973,91 @@ test("on an uplink slower than a window per ping deadline, the server doesn't cu
   await run(30_000)
   expect(terminateConnection).not.toHaveBeenCalled()
   expect(receipts).toHaveLength(32)
+})
+
+// 100 KB/s, with a ping every second: the page's ping waits 20 s behind its 2 MiB window, and the server's refresh for a
+// quarter of it comes every 5 s, both past the page's 2 s pong deadline.
+test("on an uplink slower than a quarter window per pong deadline, an upload's page keeps its wire while the upload keeps arriving ahead of its ping", async () => {
+  serverConfig.channel.pingInterval = 1_000
+  const feed = loop.open<string, never>()
+  const server = consume(feed.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(feed.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(30_000)
+  expect(loop.sockets).toHaveLength(1)
+  expect(server.received.length).toBeGreaterThan(40)
+})
+
+// The page's socket here reports nothing it holds, as a browser's does of what its network stack and kernel hold: a
+// WebSocket's bufferedAmount reads 0 in Chromium while more than a megabyte of the upload waits below it.
+test("on a slow uplink, the server's window for an upload stays at its initial size, however little the page's socket reports it holds", async () => {
+  const feed = loop.open<string, never>()
+  const server = consume(feed.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(feed.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(60_000)
+  expect(flowOf(feed.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
+  expect(server.received.length).toBeGreaterThan(80)
+})
+
+// 100 KB/s: the RECONCILE naming the new channel waits 20 s behind the 2 MiB window of the upload, twice the time a page
+// waits for its RECONCILED on a wire that delivers nothing. The server holds the new channel that long.
+test('a channel the page opens while its upload fills a slow uplink attaches on the same wire, however long its RECONCILE waits behind the upload', async () => {
+  serverConfig.channel.connectTtl = 60_000
+  const upload = loop.open<string, never>()
+  let uploaded = 0
+  upload.server.listen(() => void uploaded++)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(10_000)
+  const late = loop.open<string, never>()
+  let arrived = 0
+  late.server.listen(() => void arrived++)
+  produce(late.page, { message: () => 'y'.repeat(64 * KIB) })
+  await run(40_000)
+  expect(loop.sockets).toHaveLength(1)
+  expect(arrived).toBeGreaterThan(0)
+  expect(uploaded).toBeGreaterThan(30)
+})
+
+test('a page whose downlink stops while its RECONCILE waits behind its upload takes the wire for dead once it has delivered nothing for the time a page waits for its RECONCILED', async () => {
+  serverConfig.channel.connectTtl = 60_000
+  const upload = loop.open<string, never>()
+  consume(upload.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(10_000)
+  loop.open<string, never>()
+  await run(1_000)
+  // The server doesn't cut it: the page finds out on its own, as when the server can't reach it.
+  vi.spyOn(loop.transport, 'terminateConnection').mockImplementation(() => {})
+  loop.socket.toPage.hold()
+  const stoppedAt = Date.now()
+  await runUntil(() => loop.sockets.length === 2, 30_000)
+  expect(loop.sockets).toHaveLength(2)
+  expect(Date.now() - stoppedAt).toBeLessThanOrEqual(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100)
+})
+
+test('a page whose uplink stops with its upload queued on it takes the wire for dead within a pong deadline', async () => {
+  serverConfig.channel.pingInterval = 1_000
+  const feed = loop.open<string, never>()
+  consume(feed.server)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  produce(feed.page, { message: () => 'x'.repeat(64 * KIB) })
+  await run(10_000)
+  // The server doesn't cut it: the page finds out on its own, as when the server can't reach it either.
+  vi.spyOn(loop.transport, 'terminateConnection').mockImplementation(() => {})
+  loop.socket.toServer.hold()
+  const stoppedAt = Date.now()
+  await runUntil(() => loop.sockets.length === 2, 10_000)
+  expect(loop.sockets).toHaveLength(2)
+  // The pong deadline is two ping intervals; then the first reconnect waits its delay.
+  expect(Date.now() - stoppedAt).toBeLessThanOrEqual(2 * 1_000 + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100)
 })
 
 test('on a slow link, a producer that awaits its sends is not refused a message larger than its credit, sent with little credit left', async () => {

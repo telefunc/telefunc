@@ -226,7 +226,7 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
     const { flow, emit } = makeFlow()
     flow.onReceived(1)
     flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, true)
+    flow.onPingAck(emit.probe, true, Infinity)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES * 2)
     // BDP growth itself emits a WINDOW with the new value; reset the spy so the
     // consumption assertions below are clean.
@@ -247,7 +247,7 @@ describe('FlowControl — BDP integration', () => {
   const cycle = ({ flow, emit }: { flow: FlowControl; emit: Emit }, sampleBytes: number) => {
     flow.onReceived(1)
     flow.onReceived(sampleBytes)
-    flow.onPingAck(emit.probe, true)
+    flow.onPingAck(emit.probe, true, Infinity)
   }
 
   it('emits BDP_PING on the first onReceived', () => {
@@ -333,7 +333,7 @@ describe('FlowControl — whether the window starved the wire', () => {
     const { flow, emit } = makeFlow()
     flow.onReceived(1)
     flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, false)
+    flow.onPingAck(emit.probe, false, Infinity)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   })
 })
@@ -347,7 +347,7 @@ describe('FlowControl — reattach', () => {
     // Grow W via BDP first — fire ping, accumulate saturating sample, settle.
     flow.onReceived(1)
     flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, true)
+    flow.onPingAck(emit.probe, true, Infinity)
     const grownWindow = flow.byteWindow
     expect(grownWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
     flow.onConsumed(100)
@@ -533,8 +533,10 @@ describe('FlowControl — 32-bit wraparound', () => {
 /** A stream over a path of `bytesPerMs` with `delayMs` each way, a millisecond at a time. What the sender sends waits in
  *  its wire, which reports what it holds as a socket's `bufferedAmount` does, then in `hiddenBytes` below it that it
  *  doesn't report, as a kernel's send buffer, then on the link. The receiver attaches, with a probe unless `attach` is
- *  false, which the sender answers ahead of the channel's frames. One producer awaits every send of `frameBytes`, and
- *  the receiver consumes each frame as it arrives. Frames toward the sender only take `delayMs`. */
+ *  false, which the sender answers ahead of the channel's frames. Where `senderAttach`, the sender probed the path with
+ *  an attach of its own, as a page does where the server receives, answered ahead of all it sends. One producer awaits
+ *  every send of `frameBytes`, and the receiver consumes each frame as it arrives. Frames toward the sender only take
+ *  `delayMs`. */
 async function runPath({
   bytesPerMs,
   delayMs,
@@ -542,8 +544,17 @@ async function runPath({
   ms,
   hiddenBytes = 0,
   attach = true,
-}: { bytesPerMs: number; delayMs: number; frameBytes: number; ms: number; hiddenBytes?: number; attach?: boolean }) {
-  type Ack = { probe: number; starved: boolean }
+  senderAttach = false,
+}: {
+  bytesPerMs: number
+  delayMs: number
+  frameBytes: number
+  ms: number
+  hiddenBytes?: number
+  attach?: boolean
+  senderAttach?: boolean
+}) {
+  type Ack = { probe: number; starved: boolean; pathRtt: number }
   type Frame = { bytes: number } | Ack
   const size = (frame: Frame) => ('bytes' in frame ? frame.bytes : 0)
   const wire: Frame[] = []
@@ -555,24 +566,27 @@ async function runPath({
   let now = 0
   const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
   const sender = fitted(new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes))
-  const answer = (probe: number, starved: boolean) =>
-    wire.push(decode(encode.bdpPingAck(0, probe, starved), wireSeqs) as Ack)
+  const answer = (probe: number, starved: boolean, pathRtt: number) =>
+    wire.push(decode(encode.bdpPingAck(0, probe, starved, pathRtt), wireSeqs) as Ack)
   const receiver = fitted(
     new FlowControl(
       {
         byteWindowUpdate: (limit) => upstream(() => sender.onPeerByteWindow(limit)),
         msgWindowUpdate: (limit) => upstream(() => sender.onPeerMessageWindow(limit)),
-        bdpPing: (probe) => upstream(() => answer(probe, sender.onPing())),
+        bdpPing: (probe) => upstream(() => answer(probe, sender.onPing(), sender.pathRtt(0))),
       },
       () => 0,
     ),
   )
   let attached = false
   const attachProbe = attach ? receiver.probeAttach(0)! : undefined
+  const senderProbe = senderAttach ? sender.probeAttach(0)! : undefined
   upstream(() => {
-    if (attachProbe !== undefined) answer(attachProbe, false)
+    if (attachProbe !== undefined) answer(attachProbe, false, Infinity)
     attached = true
   })
+  if (senderProbe !== undefined)
+    toSender.push({ at: 2 * delayMs, deliver: () => sender.onPingAck(senderProbe, false, Infinity) })
   let blocked = false
   let budget = 0
   let delivered = 0
@@ -610,7 +624,7 @@ async function runPath({
     while (onLink[0] && onLink[0].at <= now) {
       const { frame } = onLink.shift()!
       if ('starved' in frame) {
-        receiver.onPingAck(frame.probe, frame.starved)
+        receiver.onPingAck(frame.probe, frame.starved, frame.pathRtt)
         continue
       }
       receiver.onReceived(frame.bytes)
@@ -658,6 +672,22 @@ describe('FlowControl — window on a path', () => {
     expect(path.deliveredBytesPerMs).toBeGreaterThan(0.95 * 4_000)
   })
 
+  // A server's receive side has no attach of its own, and a browser's socket reports none of what its kernel holds: the
+  // page says the round trip its own attach's probe took, and the sample counts at that.
+  it('keeps its initial window on that path without an attach of its own, where the sender cannot see its queue but measured the path', async () => {
+    const path = await runPath({
+      bytesPerMs: 4_000,
+      delayMs: 25,
+      frameBytes: 64 * 1024,
+      ms: 5_000,
+      hiddenBytes: CREDIT_WINDOW_INITIAL_BYTES,
+      attach: false,
+      senderAttach: true,
+    })
+    expect(path.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(path.deliveredBytesPerMs).toBeGreaterThan(0.95 * 4_000)
+  })
+
   // A window grows while a sample fills two thirds of it, so it doubles at most once past 1.5 times what the path holds.
 
   it('grows its window past the bandwidth-delay product of a fast path, and settles within three times it', async () => {
@@ -669,6 +699,22 @@ describe('FlowControl — window on a path', () => {
       frameBytes: 64 * 1024,
       ms: 3_000,
       hiddenBytes: 4 * 1024 * 1024,
+    })
+    expect(path.byteWindow).toBeGreaterThan(bdp)
+    expect(path.byteWindow).toBeLessThanOrEqual(3 * bdp)
+    expect(path.lastSecondBytesPerMs).toBeGreaterThan(0.95 * 400_000)
+  })
+
+  it('grows its window past the bandwidth-delay product of a fast path at the round trip its sender measured, and settles within three times it', async () => {
+    const bdp = 20_000_000
+    const path = await runPath({
+      bytesPerMs: 400_000,
+      delayMs: 25,
+      frameBytes: 64 * 1024,
+      ms: 3_000,
+      hiddenBytes: 4 * 1024 * 1024,
+      attach: false,
+      senderAttach: true,
     })
     expect(path.byteWindow).toBeGreaterThan(bdp)
     expect(path.byteWindow).toBeLessThanOrEqual(3 * bdp)

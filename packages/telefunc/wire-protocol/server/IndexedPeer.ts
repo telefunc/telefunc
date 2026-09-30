@@ -117,9 +117,9 @@ class IndexedPeer {
     }
   }
 
-  sendBdpPingAck(probe: number, starved: boolean): void {
+  sendBdpPingAck(probe: number, starved: boolean, pathRtt: number): void {
     try {
-      this.sender.send(encode.bdpPingAck(this.index, probe, starved))
+      this.sender.send(encode.bdpPingAck(this.index, probe, starved, pathRtt))
     } catch {
       /* transport may already be closed */
     }

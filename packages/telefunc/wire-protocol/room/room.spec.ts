@@ -3475,7 +3475,7 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
   const replay = stub._replayBuffer!
   if (lastSeq !== undefined) {
     const missed = replay.getAfter(lastSeq)
-    if (typeof missed === 'number') throw new Error('The replay dropped a frame the peer lacks')
+    if (missed === null) throw new Error('The replay dropped a frame the peer lacks')
     frames.push(...missed)
   }
   const peer = new IndexedPeer(

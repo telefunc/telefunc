@@ -78,24 +78,29 @@ describe('upgrade wire vocabulary', () => {
     expect(decode(encode.attachResult(3, null), wireSeqs)).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
   })
 
-  test('BDP_PING round-trips its probe, and BDP_PING_ACK the probe and whether the window starved its sender', () => {
+  test("BDP_PING round-trips its probe, and BDP_PING_ACK the probe, whether the window starved its sender, and the path's round trip it measured", () => {
     expect(decode(encode.bdpPing(3, 0xffff_ffff), wireSeqs)).toEqual({
       tag: TAG.BDP_PING,
       index: 3,
       probe: 0xffff_ffff,
     })
-    expect(decode(encode.bdpPingAck(3, 7, true), wireSeqs)).toEqual({
+    expect(decode(encode.bdpPingAck(3, 7, true, 42.5), wireSeqs)).toEqual({
       tag: TAG.BDP_PING_ACK,
       index: 3,
       probe: 7,
       starved: true,
+      pathRtt: 42.5,
     })
-    expect(decode(encode.bdpPingAck(3, 7, false), wireSeqs)).toEqual({
+    // Where it measured none.
+    expect(decode(encode.bdpPingAck(3, 7, false, Infinity), wireSeqs)).toEqual({
       tag: TAG.BDP_PING_ACK,
       index: 3,
       probe: 7,
       starved: false,
+      pathRtt: Infinity,
     })
+    // Under a microsecond, as on loopback, it still says it measured one.
+    expect(decode(encode.bdpPingAck(3, 7, false, 0.0001), wireSeqs)).toMatchObject({ pathRtt: 0.001 })
   })
 
   test('WINDOW round-trips its limit and the last seq its receiver has', () => {
@@ -294,7 +299,7 @@ describe('decodeClientFrame — direction', () => {
     ['WINDOW', encode.window(0, 1_024, 7)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
     ['BDP_PING', encode.bdpPing(0, 1)],
-    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, true)],
+    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, true, 50)],
     ['BROADCAST_SUB', encode.broadcastSub(0, false)],
     ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
   ]

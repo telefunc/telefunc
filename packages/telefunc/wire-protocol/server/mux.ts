@@ -43,7 +43,7 @@ import type {
   SeqReader,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { replayMaxAge, type ServerChannel } from './channel.js'
+import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
  *  identity and hands them back to the transport that created it. */
@@ -139,6 +139,8 @@ type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   /** When the wire last delivered a frame, or the ping deadline was last set. */
   lastReceivedAt: number
+  /** When the last PONG went out. */
+  pongedAt: number
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -190,8 +192,9 @@ class ChannelMux {
   private readonly stagedUpgrades = new Map<Wire, StagedUpgrade>()
   private readonly stagedByPrevSession = new Map<string, Wire>()
   private stagedBytes = 0
-  /** Channels that ended while their page may still lack their last frames, each let go at its timer at the latest. */
-  private readonly endedChannels = new Map<ServerChannel, ReturnType<typeof setTimeout>>()
+  /** Channels that ended while their page may still lack their last frames, each with the timer that lets it go once
+   *  its page stays away: none while the page is attached. */
+  private readonly endedChannels = new Map<ServerChannel, ReturnType<typeof setTimeout> | null>()
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
@@ -216,7 +219,9 @@ class ChannelMux {
     channel._registerChannel()
     this.channels.set(channel.id, channel)
     // Before a waiter attaches it: its `onOpen` may end it.
-    channel._onShutdown((keep) => (keep ? this.keepEnded(channel) : this.unregisterChannel(channel.id)))
+    channel._onShutdown((keep, pageAttached) =>
+      keep ? this.keepEnded(channel, pageAttached) : this.unregisterChannel(channel.id),
+    )
     const waiters = this.pendingRegisterWaiters.get(channel.id)
     if (waiters) {
       this.pendingRegisterWaiters.delete(channel.id)
@@ -229,14 +234,23 @@ class ChannelMux {
     this.sessions.removeChannel(channelId)
   }
 
-  /** An ended channel stays attachable, so what its page lacks of it replays, until the page has it all, leaves it out
-   *  of a RECONCILE or closes its wire for good, or its replay's age passes. */
-  private keepEnded(channel: ServerChannel): void {
-    this.endedChannels.set(channel, unrefTimer(setTimeout(() => this.releaseEnded(channel), replayMaxAge())))
+  /** An ended channel stays attachable, so what its page lacks of it replays, until the page takes nothing more of it
+   *  (see `_pageNeedsNothing`), leaves it out of a RECONCILE or closes its wire for good, or stays away
+   *  `reconnectTimeout`, since it ended or since its page left, as a channel that lives waits for it. Called again as
+   *  its page attaches it or leaves it. */
+  private keepEnded(channel: ServerChannel, pageAttached: boolean): void {
+    const timer = this.endedChannels.get(channel)
+    if (timer) clearTimeout(timer)
+    const { reconnectTimeout } = getServerConfig().channel
+    this.endedChannels.set(
+      channel,
+      pageAttached ? null : unrefTimer(setTimeout(() => this.releaseEnded(channel), reconnectTimeout)),
+    )
   }
 
   private releaseEnded(channel: ServerChannel): void {
-    clearTimeout(this.endedChannels.get(channel))
+    const timer = this.endedChannels.get(channel)
+    if (timer) clearTimeout(timer)
     this.endedChannels.delete(channel)
     this.unregisterChannel(channel.id)
     channel._release()
@@ -257,6 +271,7 @@ class ChannelMux {
       state: {
         pingTimer: null,
         lastReceivedAt: 0,
+        pongedAt: performance.now(),
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -372,6 +387,9 @@ class ChannelMux {
     const tag = peekTag(rawFrame)
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (tag === TAG.PING) return exec()
+    // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose frames keep arriving
+    // is answered all the same, once a ping interval, so the page knows they arrive.
+    if (performance.now() - state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
     return this.chainRecv(entry, exec)
   }
 
@@ -432,7 +450,7 @@ class ChannelMux {
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
-      this.send(connection, encode.pong(this.answerPing(entry, connection, frame.ended)))
+      this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -460,8 +478,8 @@ class ChannelMux {
 
   /** The page lists its closed channels the server attached, each with how far it has what the server sent on it. Each
    *  is answered with how far the server has what the page sent on it, or that the server no longer holds it: one that
-   *  ended here is let go once its page has all of it. Only the wire its session is on answers: that session has each
-   *  channel the page lists that the server holds. */
+   *  ended here is let go, as the page takes nothing more of it. Only the wire its session is on answers: that session
+   *  has each channel the page lists that the server holds. */
   private answerPing(entry: ConnectionEntry, connection: Wire, ended: PingEntry[]): PongEntry[] {
     assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     const sessionId = entry.transport.getSessionId(connection)
@@ -469,8 +487,8 @@ class ChannelMux {
     return ended.map(({ ix, lastSeq }) => {
       const channel = this.sessions.get(sessionId, ix)?.channel
       if (channel === undefined) return { ix, lastSeq: null }
-      channel._onPageHas(lastSeq)
-      if (!this.endedChannels.has(channel) || !channel._pageHasAll()) return { ix, lastSeq: channel._lastClientSeq }
+      channel._onPageClosed(lastSeq)
+      if (!this.endedChannels.has(channel)) return { ix, lastSeq: channel._lastClientSeq }
       this.releaseEnded(channel)
       return { ix, lastSeq: null }
     })
@@ -482,6 +500,11 @@ class ChannelMux {
     const sessionId = entry.transport.getSessionId(connection)
     if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return
     for (const { channel } of this.sessions.peekSession(sessionId)?.values() ?? []) channel._acknowledge()
+  }
+
+  private pong(entry: ConnectionEntry, connection: Wire, ended: PongEntry[]): void {
+    entry.state.pongedAt = performance.now()
+    this.send(connection, encode.pong(ended))
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
@@ -702,8 +725,8 @@ class ChannelMux {
     replay: boolean,
   ): ChannelHandle | null {
     // Ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip is the
-    // path's. It measures, so it says nothing starved.
-    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, false))
+    // path's. It measures, so it says nothing starved, and names no round trip.
+    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, false, Infinity))
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry
@@ -845,12 +868,13 @@ class ChannelMux {
     channel._onPageHas(entry.lastSeq)
     const peer = new IndexedPeer(sender, entry.ix, buffer)
     const missed = replay ? buffer.getAfter(entry.lastSeq) : []
-    if (typeof missed === 'number') {
-      channel._onReplayLost(peer, missed)
+    if (missed === null) {
+      channel._onReplayLost(peer)
     } else {
       for (const frame of missed) sender.send(frame)
       channel._attachPeer(peer, entry)
     }
+    if (this.endedChannels.has(channel)) this.keepEnded(channel, true)
     return { channel, ix: entry.ix, peer }
   }
 
@@ -895,7 +919,8 @@ class ChannelMux {
   private detachHandle(h: ChannelHandle, reason: DetachReason): void {
     // An ended channel waits out a lost wire for its page, which lets it go by leaving it out or leaving for good.
     if (this.endedChannels.has(h.channel)) {
-      if (reason !== DETACH_REASON.TRANSIENT) this.releaseEnded(h.channel)
+      if (reason === DETACH_REASON.TRANSIENT) this.keepEnded(h.channel, false)
+      else this.releaseEnded(h.channel)
       return
     }
     switch (reason) {

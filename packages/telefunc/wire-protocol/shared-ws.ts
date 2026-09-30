@@ -14,7 +14,6 @@ export {
   replayLaneOf,
   countsCredit,
   isConnCtrlTag,
-  isReplayLoss,
   encodePublishText,
   encodePublishBinary,
   payloadBytes,
@@ -22,7 +21,6 @@ export {
 export type {
   AckResultStatus,
   ErrorReason,
-  ReplayLoss,
   ReplayLaneKind,
   DecodedFrame,
   ChannelFrame,
@@ -133,8 +131,8 @@ const TAG = {
   CLOSE_ACK: 0x31 as const,
   /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
-  /** Channel closed with an error. Payload: u8 `ERROR_REASON`. Server → client, and client → server for a `ReplayLoss`
-   *  only. Sequenced, as CLOSE is. */
+  /** Channel closed with an error. Payload: u8 `ERROR_REASON`. Server → client, and client → server for `LOST` only.
+   *  Sequenced, as CLOSE is. */
   ERROR: 0x33 as const,
   /** Flow-control byte limit, receiver → sender: what the receiver has consumed plus its window, mod 2^32, and the last seq
    *  it has of what the sender sent on the channel, which the sender's replay no longer needs to keep. */
@@ -144,8 +142,8 @@ const TAG = {
   /** BDP probe — receiver→sender. Sender echoes `BDP_PING_ACK` immediately so the
    *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. Payload: u32, the probe's number. */
   BDP_PING: 0x37 as const,
-  /** Payload: u32, the probe it answers, and u8 1 when the sender's credit ran out while its wire held nothing, since it
-   *  last sent one. */
+  /** Payload: u32, the probe it answers, u8 1 when the sender's credit ran out while its wire held nothing, since it last
+   *  sent one, and u32, the path's round trip in µs as the sender measured it, 0 where it measured none. */
   BDP_PING_ACK: 0x38 as const,
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
@@ -298,18 +296,9 @@ const ERROR_REASON = {
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
-  /** A reconnect needed frames its sender's replay buffer had dropped for their age. */
-  EXPIRED: 0x03 as const,
 }
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
-
-/** Why a replay can't give a peer what it lacks. */
-type ReplayLoss = typeof ERROR_REASON.LOST | typeof ERROR_REASON.EXPIRED
-
-function isReplayLoss(reason: number): reason is ReplayLoss {
-  return reason === ERROR_REASON.LOST || reason === ERROR_REASON.EXPIRED
-}
 
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
 type WirePublishInfo = { seq: number; timestamp: number }
@@ -339,7 +328,8 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
   | { tag: typeof TAG.BDP_PING; index: number; probe: number }
-  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; starved: boolean }
+  /** `pathRtt` in ms, `Infinity` where the sender measured none. */
+  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; starved: boolean; pathRtt: number }
   /** `lastSeq` is null when the channel wasn't attached. */
   | { tag: typeof TAG.ATTACH_RESULT; index: number; lastSeq: number | null }
 
@@ -577,11 +567,17 @@ const encode = {
     writeU32(frame, HEADER, probe)
     return frame
   },
-  bdpPingAck(index: number, probe: number, starved: boolean): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 5)
+  /** `pathRtt` in ms, `Infinity` where the sender measured none. */
+  bdpPingAck(index: number, probe: number, starved: boolean, pathRtt: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 9)
     writeHeader(frame, TAG.BDP_PING_ACK, index, 0)
     writeU32(frame, HEADER, probe)
     frame[HEADER + 4] = starved ? 1 : 0
+    writeU32(
+      frame,
+      HEADER + 5,
+      pathRtt === Infinity ? 0 : Math.min(0xffffffff, Math.max(1, Math.round(pathRtt * 1000))),
+    )
     return frame
   },
   /** Wire: [header][u8 attached][u32 lastSeq] */
@@ -736,9 +732,17 @@ function decode(frame: Uint8Array, seqs: SeqReader): DecodedFrame {
     case TAG.BDP_PING:
       assertProtocol(payload.length >= 4, 'BDP_PING payload too short')
       return { tag: TAG.BDP_PING, index, probe: readU32(payload, 0) }
-    case TAG.BDP_PING_ACK:
-      assertProtocol(payload.length >= 5, 'BDP_PING_ACK payload too short')
-      return { tag: TAG.BDP_PING_ACK, index, probe: readU32(payload, 0), starved: payload[4] === 1 }
+    case TAG.BDP_PING_ACK: {
+      assertProtocol(payload.length >= 9, 'BDP_PING_ACK payload too short')
+      const pathRtt = readU32(payload, 5)
+      return {
+        tag: TAG.BDP_PING_ACK,
+        index,
+        probe: readU32(payload, 0),
+        starved: payload[4] === 1,
+        pathRtt: pathRtt === 0 ? Infinity : pathRtt / 1000,
+      }
+    }
     case TAG.BROADCAST_SUB:
       assertProtocol(payload.length >= 1, 'BROADCAST_SUB payload too short')
       return { tag: TAG.BROADCAST_SUB, index, binary: payload[0] === 1 }

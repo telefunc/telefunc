@@ -3,7 +3,7 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
-export { reconnectWindowOf, replayMaxAgeOf }
+export { reconnectWindowOf }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -522,12 +522,6 @@ function reconnectWindowOf({
   reconnectTimeout,
 }: Pick<ChannelConfigResolved, 'pingInterval' | 'reconnectTimeout'>): number {
   return Math.min(TIMER_DELAY_MAX_MS, Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + reconnectTimeout)
-}
-
-/** How long a frame stays replayable, up to the longest a timer waits: through the reconnect window, plus a second for
- *  the reconnect itself. */
-function replayMaxAgeOf(channel: Pick<ChannelConfigResolved, 'pingInterval' | 'reconnectTimeout'>): number {
-  return Math.min(TIMER_DELAY_MAX_MS, reconnectWindowOf(channel) + 1_000)
 }
 
 function applyBroadcastConfig(val: unknown): void {
