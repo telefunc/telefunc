@@ -13,12 +13,12 @@
   },
   "devDependencies": {
     "@sveltejs/adapter-auto": "^6.0.0",
-    "@sveltejs/kit": "^2.16.0",
+    "@sveltejs/kit": "^2.70.3",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.0.0",
     "telefunc": "0.2.24",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.3",
     "vite": "^6.2.6"
   },
   "pnpm": {
