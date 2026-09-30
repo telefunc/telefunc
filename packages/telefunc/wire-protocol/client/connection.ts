@@ -2433,9 +2433,10 @@ class SseTransport implements UpgradeSource {
     return bytes
   }
 
-  /** On batch POSTs, the longest a data or flow-control frame waits for its POST (see `getFrameDeadline`). */
+  /** On batch POSTs a frame waits for the POST under way to be answered, and that POST carries up to the window: no
+   *  round trip bounds the wait, so a window grows by its sender's word that its credit ran out, and fills each POST. */
   sendDelay(): number {
-    return this.batched ? Math.max(this.flushThrottleMs, this.postIdleFlushDelayMs) : 0
+    return this.batched ? Infinity : 0
   }
 
   private scheduleFlush(): void {

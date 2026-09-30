@@ -176,10 +176,9 @@ afterEach(() => {
   ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
 })
 
-describe.each([
-  { mode: 'a streaming upload', batched: false, pageWindow: CREDIT_WINDOW_INITIAL_BYTES },
-  { mode: 'batch POSTs', batched: true, pageWindow: CREDIT_WINDOW_INITIAL_BYTES_BATCH },
-])('over SSE with $mode', ({ batched, pageWindow }) => {
+describe('over SSE with a streaming upload', () => {
+  const batched = false
+  const pageWindow = CREDIT_WINDOW_INITIAL_BYTES
   // 1.25 MB/s: a 2 MiB window takes 1.7 s to go through, 34 round trips.
   test("on a slow uplink, the server's window for an upload stays at its initial size, however little the page's body or outbox holds", async () => {
     const sse = (current = link({ batched }))
@@ -225,9 +224,40 @@ describe.each([
     expect(flowOf(late.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
     expect(got.bytes / 30_000).toBeGreaterThan(0.9 * 1_250)
   })
+})
 
-  // Unshaped, the loop a window has to cover is the round trip, and on batch POSTs the flush throttle a frame waits
-  // for its POST: the window limits the stream, and grows.
+// A frame waits for the POST under way to be answered, and each POST costs a round trip: a larger window makes fewer,
+// fuller POSTs, however full the link.
+describe('over SSE with batch POSTs', () => {
+  test("on a slow uplink, the server's window for an upload grows as the page's credit runs out with nothing in its outbox", async () => {
+    const sse = (current = link({ batched: true }))
+    sse.up.bytesPerMs = 1_250
+    const upload = sse.open<string, never>()
+    const got = received(upload.server)
+    produce(upload.page, 'x'.repeat(64 * KIB))
+    await run(30_000)
+    expect(sse.batched).toBe(true)
+    expect(flowOf(upload.server).byteWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(got.bytes / 30_000).toBeGreaterThan(0.9 * 1_250)
+  })
+
+  test("on a slow downlink, the page's window for a download grows as the server's credit runs out with nothing in its stream", async () => {
+    const sse = (current = link({ batched: true }))
+    sse.down.bytesPerMs = 1_250
+    const download = sse.open<never, string>()
+    const got = received(download.page)
+    produce(download.server, 'x'.repeat(64 * KIB))
+    await run(30_000)
+    expect(sse.batched).toBe(true)
+    expect(flowOf(download.page).byteWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
+    expect(got.bytes / 30_000).toBeGreaterThan(0.9 * 1_250 * (3 / 4))
+  })
+})
+
+describe.each([
+  { mode: 'a streaming upload', batched: false, pageWindow: CREDIT_WINDOW_INITIAL_BYTES },
+  { mode: 'batch POSTs', batched: true, pageWindow: CREDIT_WINDOW_INITIAL_BYTES_BATCH },
+])('over SSE with $mode', ({ batched, pageWindow }) => {
   test("on a fast link, the server's window for an upload grows", async () => {
     const sse = (current = link({ batched }))
     const upload = sse.open<string, never>()
