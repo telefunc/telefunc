@@ -1,0 +1,1 @@
+#feature-list{grid-template-columns:repeat(2,auto)}@container (max-width: 800px){#feature-list{grid-template-columns:repeat(1,auto)}}
