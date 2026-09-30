@@ -249,6 +249,12 @@ class BdpEstimator {
     this._grewSincePing = true
   }
 
+  /** Grow-only bump of the message window. */
+  bumpInitialMsgWindow(count: number): void {
+    if (count <= this._msgWindow) return
+    this._msgWindow = Math.min(CREDIT_MSG_WINDOW_MAX, count)
+  }
+
   /** The byte window gets to `bytes` at most, `CREDIT_WINDOW_MAX_BYTES` if more, and is lowered to it. */
   capByteWindow(bytes: number): void {
     this._byteWindowMax = Math.min(CREDIT_WINDOW_MAX_BYTES, bytes)

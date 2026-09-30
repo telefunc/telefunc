@@ -1804,6 +1804,8 @@ describe.each(WIRES)('over %s, a channel whose seqs pass 2^31 and 2^32', (wire) 
       skipSeqs(server, pageChannel, boundary - 100)
       produce((n) => pageChannel.send(text(n), { ack: false }), 400, 1)
       while (replayOf(pageChannel).seq < dieAt) await advance(1)
+      // Over batch POSTs the server may still be short of the boundary as the page passes it.
+      while (dieAt > boundary && server._lastClientSeq <= boundary) await advance(1)
       await dieWithCredit(net, pageChannel, server)
       await advance(50)
       const lost = [server._lastClientSeq, replayOf(pageChannel).seq]

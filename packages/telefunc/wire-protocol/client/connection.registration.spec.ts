@@ -655,7 +655,8 @@ const { RECONCILE, RECONCILED, TEXT, WINDOW, MSG_WINDOW, BDP_PING, BDP_PING_ACK,
  *  each attach to another wire sent then, is gone. With the server's BDP_PING_ACK to the probe a RECONCILE entry
  *  carries on a wire whose round trip neither its channel nor the page's PING measured. With the WINDOW the server
  *  sends at the page's first heartbeat on SSE, which acknowledges the TEXT that RECONCILE carried: on a WebSocket, the
- *  TEXT follows that heartbeat. */
+ *  TEXT follows that heartbeat. Over batch POSTs, with the batched initial windows each end advertises as it learns the
+ *  page's frames go in them, in the POSTs and events that go anyway. */
 const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   sse: {
     requests: 2,
@@ -677,7 +678,20 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   },
   'sse-batch': {
     requests: 5,
-    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, MSG_WINDOW, RECONCILE, BDP_PING, WINDOW, WINDOW, MSG_WINDOW],
+    toServer: [
+      RECONCILE,
+      TEXT,
+      MSG_WINDOW,
+      BDP_PING_ACK,
+      WINDOW,
+      MSG_WINDOW,
+      RECONCILE,
+      BDP_PING,
+      WINDOW,
+      MSG_WINDOW,
+      WINDOW,
+      MSG_WINDOW,
+    ],
     toPage: [
       BDP_PING_ACK,
       WINDOW,
@@ -685,7 +699,10 @@ const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
       BDP_PING,
       RECONCILED,
       WINDOW,
+      MSG_WINDOW,
       TEXT,
+      WINDOW,
+      MSG_WINDOW,
       WINDOW,
       MSG_WINDOW,
       BDP_PING_ACK,

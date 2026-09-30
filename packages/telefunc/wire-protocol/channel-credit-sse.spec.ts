@@ -12,7 +12,11 @@ import { config as clientConfig } from '../client/clientConfig.js'
 import { ServerChannel } from './server/channel.js'
 import { getChannelMux } from './server/mux.js'
 import { getTelefuncSseChannelHooks } from './server/sse.js'
-import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH } from './constants.js'
+import {
+  CREDIT_MSG_WINDOW_INITIAL_BATCH,
+  CREDIT_WINDOW_INITIAL_BYTES,
+  CREDIT_WINDOW_INITIAL_BYTES_BATCH,
+} from './constants.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
 
 const LATENCY_MS = 25
@@ -160,7 +164,7 @@ function received(channel: { listen(cb: (data: string) => void): unknown }) {
   return got
 }
 
-const flowOf = (channel: unknown) => (channel as { _flow: { byteWindow: number } })._flow
+const flowOf = (channel: unknown) => (channel as { _flow: { byteWindow: number; msgWindow: number } })._flow
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -229,6 +233,21 @@ describe('over SSE with a streaming upload', () => {
 // A frame waits for the POST under way to be answered, and each POST costs a round trip: a larger window makes fewer,
 // fuller POSTs, however full the link.
 describe('over SSE with batch POSTs', () => {
+  test("the server's windows for an upload start at the batched initial windows, as the page's for a download do", async () => {
+    const sse = (current = link({ batched: true }))
+    const upload = sse.open<string, string>()
+    received(upload.server)
+    received(upload.page)
+    await run(1_000)
+    upload.page.send('x')
+    await run(1_000)
+    expect(sse.batched).toBe(true)
+    expect(flowOf(upload.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
+    expect(flowOf(upload.server).msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL_BATCH)
+    expect(flowOf(upload.page).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
+    expect(flowOf(upload.page).msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL_BATCH)
+  })
+
   test("on a slow uplink, the server's window for an upload grows as the page's credit runs out with nothing in its outbox", async () => {
     const sse = (current = link({ batched: true }))
     sse.up.bytesPerMs = 1_250

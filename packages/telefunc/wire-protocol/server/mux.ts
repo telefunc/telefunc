@@ -158,6 +158,8 @@ type ConnectionState = {
   /** Channels attaching to the wire in this turn, before its session holds them: what they send as they attach (their
    *  replay, what they buffered, what `onOpen` sends) counts under their flow control too. */
   attaching: Set<ServerChannel>
+  /** Its page sends its frames in batch POSTs. */
+  batched: boolean
 }
 
 type ConnectionEntry = {
@@ -279,6 +281,7 @@ class ChannelMux {
         largestSent: 0,
         pastSendBacklog: false,
         attaching: new Set(),
+        batched: false,
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
@@ -352,6 +355,17 @@ class ChannelMux {
     // permanent tears them down.
     this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
     if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
+  }
+
+  /** The page sends its frames on `connection` in batch POSTs: each costs a round trip, so the windows of the channels
+   *  on it, and of those that attach to it later, start at the batched initial window, as the page's do. */
+  onConnectionBatched(connection: Wire): void {
+    const entry = this.connectionEntries.get(connection)
+    if (!entry || entry.state.batched) return
+    entry.state.batched = true
+    const sessionId = entry.transport.getSessionId(connection)
+    if (sessionId === undefined) return
+    for (const { channel } of this.sessions.peekSession(sessionId)?.values() ?? []) channel._useBatchTransportInitial()
   }
 
   readPermanentTermination(connection: Wire): boolean {
@@ -733,7 +747,7 @@ class ChannelMux {
     const existing = this.channels.get(entry.id)
     if (existing) {
       conn.state.attaching.add(existing)
-      return this.attachChannel(existing, entry, conn.sender, replay)
+      return this.attachChannel(existing, entry, conn.sender, replay, conn.state.batched)
     }
     if (entry.initial && !awaited) this.awaitChannel(entry, conn, connection)
     return null
@@ -762,7 +776,7 @@ class ChannelMux {
     const sessionId = conn.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
     conn.state.attaching.add(channel)
-    const handle = this.attachChannel(channel, awaited.entry, conn.sender, false)
+    const handle = this.attachChannel(channel, awaited.entry, conn.sender, false, conn.state.batched)
     conn.state.attaching.delete(channel)
     if (!handle) {
       this.expireAwaited(awaited)
@@ -860,6 +874,7 @@ class ChannelMux {
     entry: ReconcileOpenEntry,
     sender: PeerSender,
     replay: boolean,
+    batched = false,
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
@@ -871,6 +886,7 @@ class ChannelMux {
     } else {
       for (const frame of missed) sender.send(frame)
       channel._attachPeer(peer, entry)
+      if (batched) channel._useBatchTransportInitial()
     }
     if (this.endedChannels.has(channel)) this.keepEnded(channel, true)
     return { channel, ix: entry.ix, peer }
