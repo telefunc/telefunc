@@ -181,7 +181,6 @@ class SseConnectionTransport {
   private async handleBatchPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
-    this.mux.onConnectionBatched(connection)
     if (!(await this.waitReady(connection))) return badRequest()
     const drain = this.drainDeferred(connection, reader)
     connection.pendingDispatches.add(drain)

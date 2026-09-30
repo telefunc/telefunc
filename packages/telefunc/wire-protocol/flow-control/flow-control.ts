@@ -7,7 +7,6 @@ import {
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
   CREDIT_WINDOW_INITIAL_BYTES_BATCH,
-  CREDIT_MSG_WINDOW_INITIAL_BATCH,
   CREDIT_WINDOW_MAX_BYTES,
   FC_SELF_TIME_WINDOW_MS,
   FC_SELF_UTIL_THRESHOLD,
@@ -329,14 +328,11 @@ class FlowControl {
     this._consume(bytes, 0)
   }
 
-  /** Bump to the batch-POST initial windows and advertise them. Grow-only / idempotent. */
+  /** Bump to the batch-POST initial window and advertise it. Grow-only / idempotent. */
   useBatchTransportInitial(): void {
-    const prevBytes = this.byteWindow
-    const prevMessages = this.msgWindow
+    const prev = this.byteWindow
     this._bdp.bumpInitialByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
-    this._bdp.bumpInitialMsgWindow(CREDIT_MSG_WINDOW_INITIAL_BATCH)
-    if (this.byteWindow > prevBytes) this._advertiseBytes()
-    if (this.msgWindow > prevMessages) this._advertiseMessages()
+    if (this.byteWindow > prev) this._advertiseBytes()
   }
 
   shutdown(): void {

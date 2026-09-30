@@ -437,11 +437,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._fireOpen()
   }
 
-  /** @internal — Its page sends its frames in batch POSTs. */
-  _useBatchTransportInitial(): void {
-    this._flow.useBatchTransportInitial()
-  }
-
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
    *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
   _dispatchFrame(frame: ChannelFrame): void {

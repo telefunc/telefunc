@@ -276,9 +276,6 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_B
  *  each saturating its own window independently. */
 export const CREDIT_MSG_WINDOW_INITIAL = 100
 
-/** Initial message-count window over SSE batch POSTs, as `CREDIT_WINDOW_INITIAL_BYTES_BATCH` is for bytes. */
-export const CREDIT_MSG_WINDOW_INITIAL_BATCH = 400
-
 /** Hard cap on the adaptive message-count window. The self-utilisation gate in
  *  `FlowControl.onPingAck` stops growth long before this on hosts that can't
  *  sustain the dispatch rate. */
