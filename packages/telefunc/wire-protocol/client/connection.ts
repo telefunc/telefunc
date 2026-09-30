@@ -11,6 +11,7 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
@@ -43,7 +44,6 @@ import {
   TAG,
   decode,
   encode,
-  isReplayLoss,
   isSequencedFrame,
   payloadBytes,
   pingProbe,
@@ -59,7 +59,6 @@ import type {
   ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
-  ReplayLoss,
   SeqReader,
 } from '../shared-ws.js'
 import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
@@ -99,15 +98,16 @@ class Heartbeat {
   private lastReceivedAt = 0
 
   constructor(
-    private readonly intervalMs: number,
+    readonly intervalMs: number,
     private readonly pongTimeoutMs: number,
     private readonly send: () => void,
     private readonly onDead: () => void,
   ) {}
 
-  start(): void {
+  /** `pingNow`: its first PING goes at once, rather than once its interval passed. */
+  start(pingNow = true): void {
     if (this.pingTimer) return
-    this.send()
+    if (pingNow) this.send()
     this.resetPong()
     this.pingTimer = setInterval(this.send, this.intervalMs)
   }
@@ -489,6 +489,8 @@ class ClientConnection implements MuxConnection {
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
+  /** The heartbeat last installed is the provisional one before a first RECONCILED (see `beatFromReconcile`). */
+  private provisionalHeartbeat = false
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
   /** The largest windows the replay buffers allow, the one the page grants and the one the server grants it, as the
@@ -640,14 +642,7 @@ class ClientConnection implements MuxConnection {
     }
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
-    this.replayBuffers.set(
-      ix,
-      new ReplayBuffer(
-        this.clientReplayBufferBytes,
-        this.replayMaxAgeMs(this.pingIntervalMs),
-        this.clientReplayBufferBinaryBytes,
-      ),
-    )
+    this.replayBuffers.set(ix, new ReplayBuffer(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes))
     this.fitReplays(channel)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
@@ -666,13 +661,8 @@ class ClientConnection implements MuxConnection {
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
-  reconnectWindow(pingIntervalMs = this.pingIntervalMs): number {
-    return Math.min(TIMER_DELAY_MAX_MS, 2 * pingIntervalMs + this.reconnectTimeoutMs)
-  }
-
-  /** As the server's, a frame stays replayable through the reconnect window, plus a second for the reconnect itself. */
-  private replayMaxAgeMs(pingIntervalMs: number): number {
-    return Math.min(TIMER_DELAY_MAX_MS, this.reconnectWindow(pingIntervalMs) + 1_000)
+  reconnectWindow(): number {
+    return Math.min(TIMER_DELAY_MAX_MS, 2 * this.pingIntervalMs + this.reconnectTimeoutMs)
   }
 
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
@@ -893,6 +883,7 @@ class ClientConnection implements MuxConnection {
     this.enterOpen()
     if (this.transport.sendReconcileOnOpen) {
       this.sendReconcileBatch(this.stageReconcileBatch())
+      this.beatFromReconcile(transport)
       return
     }
     if (!this.reconciling) {
@@ -948,8 +939,8 @@ class ClientConnection implements MuxConnection {
             ? new ChannelOverflowError(
                 'Broadcast closed: this client fell further behind than the server holds for a client',
               )
-            : isReplayLoss(frame.reason)
-              ? replayLossError('server', frame.reason)
+            : frame.reason === ERROR_REASON.LOST
+              ? replayLossError('server')
               : makeBugError(),
         )
         this.startTtlIfIdle()
@@ -1003,11 +994,29 @@ class ClientConnection implements MuxConnection {
     this.fallbackToSse(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
   }
 
-  /** Idempotent. Detaches first either way so a fresh install can never leak the prior. */
-  private installHeartbeat(transport: ClientChannelTransport, intervalMs: number): void {
-    if (transport.hasHeartbeat() && this.pingIntervalMs === intervalMs) return
+  /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
+  _onTransportReconcileSent(transport: ClientChannelTransport): void {
+    if (this.closed || transport !== this.transport) return
+    this.beatFromReconcile(transport)
+  }
+
+  /** A RECONCILED comes behind what the server sends as it attaches, a reconnect's replay or what a channel sent before
+   *  its page attached, so the heartbeat runs from the RECONCILE on: the server hears from the page, and the page tells a
+   *  wire that delivers from a dead one, however long that takes. At the interval the last RECONCILED said, or, before
+   *  the first, provisionally at the least one a server accepts, pinging only once that passed: a RECONCILED that comes
+   *  sooner replaces it before it adds a frame. */
+  private beatFromReconcile(transport: ClientChannelTransport): void {
+    if (this.sessionId !== null) this.installHeartbeat(transport, this.pingIntervalMs)
+    else this.installHeartbeat(transport, CHANNEL_PING_INTERVAL_MIN_MS, true)
+  }
+
+  /** Idempotent. Detaches first either way so a fresh install can never leak the prior. A provisional one leaves the
+   *  server's interval unknown, and the next install replaces it. */
+  private installHeartbeat(transport: ClientChannelTransport, intervalMs: number, provisional = false): void {
+    if (transport.hasHeartbeat() && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs) return
     transport.detachHeartbeat()
-    this.pingIntervalMs = intervalMs
+    if (!provisional) this.pingIntervalMs = intervalMs
+    this.provisionalHeartbeat = provisional
     const hb = new Heartbeat(
       intervalMs,
       intervalMs * 2,
@@ -1015,7 +1024,7 @@ class ClientConnection implements MuxConnection {
       () => this.handlePongTimeout(transport),
     )
     transport.attachHeartbeat(hb)
-    hb.start()
+    hb.start(!provisional)
   }
 
   /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */
@@ -1594,9 +1603,8 @@ class ClientConnection implements MuxConnection {
       peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary),
     }
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
-    const maxAgeMs = this.replayMaxAgeMs(ctrl.pingInterval)
     for (const replay of this.replayBuffers.values()) {
-      replay.setLimits(this.clientReplayBufferBytes, maxAgeMs, this.clientReplayBufferBinaryBytes)
+      replay.setLimits(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes)
     }
     for (const { channel } of this.channels.values()) this.fitReplays(channel)
 
@@ -1703,18 +1711,18 @@ class ClientConnection implements MuxConnection {
   private replayTo(ix: number, entry: ChannelEntry, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
     this.serverHasThrough(ix, lastSeq)
     const missed = this.replayBuffers.get(ix)!.getAfter(lastSeq, throughSeq)
-    if (typeof missed !== 'number') return missed.map((frame) => ({ kind: 'reconcile', frame }))
+    if (missed !== null) return missed.map((frame) => ({ kind: 'reconcile', frame }))
     // One the server ended needs nothing more.
     if (entry.state.tag === 'closed' && entry.state.delivered) return []
-    return [this.loseChannel(ix, entry, missed)]
+    return [this.loseChannel(ix, entry)]
   }
 
   /** Ends the channel on both ends. What it queued is dropped, as it would reach the server past the hole. The ERROR
    *  isn't kept in the replay: a later reconcile finds the same hole and sends another. */
-  private loseChannel(ix: number, entry: ChannelEntry, loss: ReplayLoss): OutboundFrame {
+  private loseChannel(ix: number, entry: ChannelEntry): OutboundFrame {
     this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => channelIx !== ix)
-    const frame = encode.error(ix, loss, this.replayBuffers.get(ix)!.nextSeq())
-    entry.channel._onTransportClose(replayLossError('client', loss))
+    const frame = encode.error(ix, ERROR_REASON.LOST, this.replayBuffers.get(ix)!.nextSeq())
+    entry.channel._onTransportClose(replayLossError('client'))
     return { kind: 'control', frame }
   }
 
@@ -2211,6 +2219,7 @@ class SseTransport implements UpgradeSource {
         return 'fetch-ended'
       })()
     }
+    this.owner._onTransportReconcileSent(this)
 
     const failOpen = (rejectedByServer: boolean): void => {
       this.rollbackInitialBatch(stage)
@@ -2486,7 +2495,6 @@ class SseTransport implements UpgradeSource {
   applyReconciledSettings(ctrl: ReconciledPayload): void {
     this.flushThrottleMs = ctrl.sseFlushThrottle
     this.postIdleFlushDelayMs = ctrl.ssePostIdleFlushDelay
-    this.heartbeatFlushDelayMs = Math.floor(ctrl.pingInterval / 2)
   }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
@@ -2494,8 +2502,10 @@ class SseTransport implements UpgradeSource {
     this.sendFrame({ kind: 'heartbeat', frame })
   }
 
+  /** Its PINGs wait for a POST half the heartbeat's interval at most. */
   attachHeartbeat(hb: Heartbeat): void {
     this.heartbeat = hb
+    this.heartbeatFlushDelayMs = Math.floor(hb.intervalMs / 2)
   }
 
   detachHeartbeat(): void {

@@ -169,7 +169,7 @@ describe('keyed in-process broadcast', () => {
     const broadcast = new ServerBroadcast<string>({ key: 'room:page-frames' })
     broadcast._registerChannel()
     const sent: DecodedFrame[] = []
-    const replay = new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024)
+    const replay = new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)
     broadcast._attachPeer(
       new IndexedPeer({ send: (frame) => void sent.push(decode(frame, wireSeqs)), bufferedAmount: () => 0 }, 7, replay),
     )
@@ -203,7 +203,7 @@ describe('keyed in-process broadcast', () => {
           bufferedAmount: () => 0,
         },
         7,
-        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+        new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
       ),
     )
 
@@ -232,7 +232,7 @@ describe('keyed in-process broadcast', () => {
             bufferedAmount: () => 0,
           },
           7,
-          new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+          new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
         ),
       )
       expect(frames.filter((frame) => frame[0] === TAG.PUBLISH)).toEqual([])
@@ -359,7 +359,7 @@ describe('Broadcast shield validation', () => {
           bufferedAmount: () => 0,
         },
         7,
-        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+        new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
       ),
     )
 
@@ -386,11 +386,7 @@ describe('Broadcast shield validation', () => {
     receiver.subscribe((m) => seen.push(m))
 
     sender._attachPeer(
-      new IndexedPeer(
-        { send: () => {}, bufferedAmount: () => 0 },
-        7,
-        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
-      ),
+      new IndexedPeer({ send: () => {}, bufferedAmount: () => 0 }, 7, new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)),
     )
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 

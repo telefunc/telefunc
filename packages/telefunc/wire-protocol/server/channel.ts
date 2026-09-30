@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, reconnectWindow, replayMaxAge }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, reconnectWindow }
 export { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
 
@@ -46,12 +46,12 @@ import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import {
   ACK_STATUS,
+  ERROR_REASON,
   ProtocolViolationError,
   TAG,
   assertProtocol,
   countsCredit,
   isChannelCtrlTag,
-  isReplayLoss,
   isSequencedFrame,
 } from '../shared-ws.js'
 import type {
@@ -61,7 +61,6 @@ import type {
   ChannelFrame,
   ErrorReason,
   ReattachState,
-  ReplayLoss,
 } from '../shared-ws.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
@@ -128,7 +127,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
-  private _shutdownCallback: ((keep: boolean) => void) | null = null
+  private _shutdownCallback: ((keep: boolean, pageAttached: boolean) => void) | null = null
   // The closing frames made while no peer was attached, sent to the next.
   private _pendingCloseAck = false
   private _pendingCloseRequest = false
@@ -137,6 +136,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _closeRequestSeq = 0
   /** How far the page is known to have what this channel sent it. */
   private _pageLastSeq = 0
+  /** Its page closed its end, and takes nothing more of it. */
+  private _pageClosed = false
 
   // ── Wire state — channel-owned, persistent across attach-mode transitions ────
   /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
@@ -192,8 +193,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** @internal — Register a one-shot callback that fires when the transport shuts down, with whether the channel keeps
-   *  what its page may still lack of it (see `_release`). Replaces any previously registered callback. */
-  _onShutdown(cb: (keep: boolean) => void): void {
+   *  what its page may still lack of it (see `_release`), and whether its page is attached. Replaces any previously
+   *  registered callback. */
+  _onShutdown(cb: (keep: boolean, pageAttached: boolean) => void): void {
     this._shutdownCallback = cb
   }
 
@@ -391,9 +393,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._didRegister = true
     // Allocate the replay buffer up-front: registration is the moment the channel
     // becomes addressable on the wire, so a peer can attach immediately after this
-    // returns. Its TTL covers a full reconnect window.
+    // returns.
     const c = getServerConfig().channel
-    this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, replayMaxAge(), c.serverReplayBufferBinary)
+    this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, c.serverReplayBufferBinary)
     this._clearTimer('_ttlTimer')
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
@@ -490,8 +492,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._onPeerCloseAck()
         return
       case TAG.ERROR:
-        assertProtocol(isReplayLoss(frame.reason), `ERROR reason ${frame.reason} from a page`)
-        this._shutdown(replayLossError('client', frame.reason))
+        assertProtocol(frame.reason === ERROR_REASON.LOST, `ERROR reason ${frame.reason} from a page`)
+        this._shutdown(replayLossError('client'))
         return
       case TAG.WINDOW:
         this._flow.onPeerByteWindow(frame.bytes)
@@ -683,10 +685,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal Its replay no longer holds what its page lacks of it: the channel ends on both ends, `peer` telling its
    *  page so in place of the replay. What it made while no peer was attached is dropped, as it would reach the page
    *  past the hole. */
-  _onReplayLost(peer: IndexedPeer, loss: ReplayLoss): void {
-    const err = replayLossError('server', loss)
+  _onReplayLost(peer: IndexedPeer): void {
+    const err = replayLossError('server')
     this._dropPending(err)
-    peer.sendError(loss)
+    peer.sendError(ERROR_REASON.LOST)
     this._shutdown(err)
   }
 
@@ -701,17 +703,25 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._replayBuffer?.acknowledge(lastSeq)
   }
 
-  /** @internal Its page has all this channel sent it, and it has nothing more to send. */
-  _pageHasAll(): boolean {
+  /** @internal Its page closed its end, having what this channel sent it through `lastSeq`. */
+  _onPageClosed(lastSeq: number): void {
+    this._pageClosed = true
+    this._onPageHas(lastSeq)
+  }
+
+  /** @internal Its page takes nothing more of it: the page closed its end, or has all this channel sent it while it has
+   *  nothing more to send. */
+  _pageNeedsNothing(): boolean {
     return (
       this._replayBuffer !== null &&
-      this._pageLastSeq >= this._replayBuffer.seq &&
-      this._prePeerBuffer.size === 0 &&
-      this._pendingAckRes.length === 0 &&
-      !this._pendingCloseAck &&
-      !this._pendingCloseRequest &&
-      this._pendingAbort === null &&
-      this._pendingError === null
+      (this._pageClosed ||
+        (this._pageLastSeq >= this._replayBuffer.seq &&
+          this._prePeerBuffer.size === 0 &&
+          this._pendingAckRes.length === 0 &&
+          !this._pendingCloseAck &&
+          !this._pendingCloseRequest &&
+          this._pendingAbort === null &&
+          this._pendingError === null))
     )
   }
 
@@ -880,6 +890,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._didShutdown = true
     this._isClosed = true
     this._closeError = err
+    const pageAttached = this._peer !== null
     this._peer = null
     this._awaitingCloseAck = false
     this._clearTimer('_ttlTimer')
@@ -888,9 +899,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // keeping the channel agnostic of who's listening.
     const shutdownCb = this._shutdownCallback
     this._shutdownCallback = null
-    const keep = !pageGone && shutdownCb !== null && !this._pageHasAll()
+    const keep = !pageGone && shutdownCb !== null && !this._pageNeedsNothing()
     if (!keep) this._release()
-    shutdownCb?.(keep)
+    shutdownCb?.(keep, pageAttached)
     this._fireClose(err)
     this._flow.shutdown()
     this._notifyCloseProgress()
@@ -1001,12 +1012,6 @@ function reportServerChannelError(err: unknown): void {
 function reconnectWindow(): number {
   const c = getServerConfig().channel
   return Math.min(TIMER_DELAY_MAX_MS, Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + c.reconnectTimeout)
-}
-
-/** How long a frame stays replayable: through the reconnect window, plus a second for the reconnect itself, as long as
- *  a timer waits at most. */
-function replayMaxAge(): number {
-  return Math.min(TIMER_DELAY_MAX_MS, reconnectWindow() + 1_000)
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

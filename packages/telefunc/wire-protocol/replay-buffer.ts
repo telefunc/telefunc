@@ -1,26 +1,24 @@
-import { unrefTimer } from '../utils/unrefTimer.js'
-import { ERROR_REASON, payloadBytes, replayLaneOf, type ReplayLaneKind, type ReplayLoss } from './shared-ws.js'
+import { payloadBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
 
 /**
  * High-performance replay buffer for outgoing WebSocket data frames.
  *
- * Stores encoded frames keyed by monotonic sequence number for replay on reconnect, until the peer acknowledges them.
- * Bounded by the bytes of their payloads, what flow control counts: oldest entries are evicted when full. Also bounded
- * by age: entries older than `maxAgeMs` are evicted. A budget lowered while the peer lacks frames sent under the higher
- * one applies once the peer has them.
+ * Stores encoded frames keyed by monotonic sequence number for replay on reconnect, until the peer acknowledges them,
+ * however long that takes: its channel lets it go when it gives up on a peer away for `reconnectTimeout`. Bounded by
+ * the bytes of their payloads, what flow control counts: oldest entries are evicted when full. A budget lowered while
+ * the peer lacks frames sent under the higher one applies once the peer has them.
  *
- * A frame goes in the lane its tag names (`replayLaneOf`), each with its own byte budget, and the frame that ends a
- * channel is dropped for its age alone.
+ * A frame goes in the lane its tag names (`replayLaneOf`), each with its own byte budget, none for the frame that ends
+ * a channel.
  *
  * A frame larger than its lane's budget isn't stored. `getAfter` gives a peer
- * all it lacks, or, if a dropped frame is among it, why it can't.
+ * all it lacks, or null if a dropped frame is among it.
  *
  * Requires non-decreasing seq values.
  */
 export class ReplayBuffer {
   private readonly lanes: Record<ReplayLaneKind, ReplayLane>
   private readonly allLanes: readonly ReplayLane[]
-  private maxAgeMs: number
   private _seq = 0
   /** The highest seq pushed. */
   private pushedSeq = 0
@@ -28,39 +26,34 @@ export class ReplayBuffer {
   private acknowledgedSeq = 0
   /** Lower budgets than the lanes', which apply once the peer acknowledged every seq through `throughSeq`. */
   private lowered: { budgets: Record<ReplayLaneKind, number>; throughSeq: number } | null = null
-  private cleanupTimer: ReturnType<typeof setTimeout> | null = null
-  private cleanupScheduledAt = Infinity
 
   /** Current sequence number. */
   get seq(): number {
     return this._seq
   }
 
-  constructor(maxBytes: number, maxAgeMs: number, binaryMaxBytes: number) {
+  constructor(maxBytes: number, binaryMaxBytes: number) {
     const budgets = laneBudgets(maxBytes, binaryMaxBytes)
     this.lanes = {
-      text: new ReplayLane(budgets.text, maxAgeMs),
-      binary: new ReplayLane(budgets.binary, maxAgeMs),
-      closing: new ReplayLane(budgets.closing, maxAgeMs),
+      text: new ReplayLane(budgets.text),
+      binary: new ReplayLane(budgets.binary),
+      closing: new ReplayLane(budgets.closing),
     }
     this.allLanes = Object.values(this.lanes)
-    this.maxAgeMs = maxAgeMs
   }
 
   /** Applies new budgets to what is stored and to what comes next. One lower than a lane's applies once the peer has
    *  every seq issued before it was first set: flow control let them be in flight under the higher one. */
-  setLimits(maxBytes: number, maxAgeMs: number, binaryMaxBytes: number): void {
-    this.maxAgeMs = maxAgeMs
+  setLimits(maxBytes: number, binaryMaxBytes: number): void {
     const budgets = laneBudgets(maxBytes, binaryMaxBytes)
     const unacknowledged = this.acknowledgedSeq < this._seq
     let lowered = false
     for (const kind of LANE_KINDS) {
       const lane = this.lanes[kind]
       if (unacknowledged && budgets[kind] < lane.budget) lowered = true
-      lane.setLimits(unacknowledged ? Math.max(budgets[kind], lane.budget) : budgets[kind], maxAgeMs)
+      lane.setBudget(unacknowledged ? Math.max(budgets[kind], lane.budget) : budgets[kind])
     }
     this.lowered = lowered ? { budgets, throughSeq: this.lowered?.throughSeq ?? this._seq } : null
-    this.scheduleCleanup()
   }
 
   /** Increment and return the next sequence number. */
@@ -74,9 +67,7 @@ export class ReplayBuffer {
    */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     this.pushed(seq)
-    const stored = this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
-    this.scheduleCleanup()
-    return stored
+    return this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
   }
 
   /** The peer has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
@@ -86,28 +77,16 @@ export class ReplayBuffer {
     if (this.lowered === null || lastSeq < this.lowered.throughSeq) return
     const { budgets } = this.lowered
     this.lowered = null
-    for (const kind of LANE_KINDS) this.lanes[kind].setLimits(budgets[kind], this.maxAgeMs)
+    for (const kind of LANE_KINDS) this.lanes[kind].setBudget(budgets[kind])
   }
 
-  /** The frames with afterSeq < seq <= throughSeq, merged by seq, or why they can't all be given. */
-  getAfter(afterSeq: number, throughSeq = Infinity): Uint8Array<ArrayBuffer>[] | ReplayLoss {
+  /** The frames with afterSeq < seq <= throughSeq, merged by seq, or null if it dropped one of them to stay within its
+   *  budget. */
+  getAfter(afterSeq: number, throughSeq = Infinity): Uint8Array<ArrayBuffer>[] | null {
     let run: Run = { seqs: [], frames: [] }
-    let overBudgetThrough = 0
-    for (const lane of this.allLanes) {
-      run = mergeBySeq(run, lane.getAfter(afterSeq, throughSeq))
-      overBudgetThrough = Math.max(overBudgetThrough, lane.overBudgetThrough)
-    }
+    for (const lane of this.allLanes) run = mergeBySeq(run, lane.getAfter(afterSeq, throughSeq))
     // Every seq through the highest pushed was pushed, each to one lane, so one missing was dropped.
-    if (run.frames.length >= Math.min(throughSeq, this.pushedSeq) - afterSeq) return run.frames
-    return overBudgetThrough > afterSeq ? ERROR_REASON.LOST : ERROR_REASON.EXPIRED
-  }
-
-  /**
-   * Eagerly evict expired entries without pushing a new frame.
-   * Call this periodically on idle channels to return memory promptly.
-   */
-  evict(now = Date.now()): void {
-    for (const lane of this.allLanes) lane.evict(now)
+    return run.frames.length >= Math.min(throughSeq, this.pushedSeq) - afterSeq ? run.frames : null
   }
 
   get length(): number {
@@ -128,11 +107,6 @@ export class ReplayBuffer {
     this.pushedSeq = 0
     this.acknowledgedSeq = 0
     this.lowered = null
-    if (this.cleanupTimer !== null) {
-      clearTimeout(this.cleanupTimer)
-      this.cleanupTimer = null
-      this.cleanupScheduledAt = Infinity
-    }
   }
 
   // ── Private ──
@@ -140,35 +114,6 @@ export class ReplayBuffer {
   private pushed(seq: number): void {
     if (seq > this._seq) this._seq = seq
     if (seq > this.pushedSeq) this.pushedSeq = seq
-  }
-
-  /** Schedule cleanup for the oldest entry's expiry. Skips if a timer already
-   *  fires at or before that deadline — new entries are always newer than existing
-   *  ones (FIFO), so the oldest entry never moves earlier on push. */
-  private scheduleCleanup(): void {
-    let oldest = Infinity
-    for (const lane of this.allLanes) oldest = Math.min(oldest, lane.oldestTime)
-    if (oldest === Infinity) return
-
-    const deadlineAt = oldest + this.maxAgeMs
-    if (this.cleanupTimer !== null && this.cleanupScheduledAt <= deadlineAt) return
-
-    if (this.cleanupTimer !== null) {
-      clearTimeout(this.cleanupTimer)
-      this.cleanupTimer = null
-    }
-    this.cleanupScheduledAt = deadlineAt
-    const timer = setTimeout(
-      () => {
-        this.cleanupTimer = null
-        this.cleanupScheduledAt = Infinity
-        this.evict()
-        this.scheduleCleanup()
-      },
-      Math.max(0, deadlineAt - Date.now()),
-    )
-    unrefTimer(timer)
-    this.cleanupTimer = timer
   }
 }
 
@@ -208,22 +153,12 @@ class ReplayLane {
   // Parallel arrays — seqs separate for cache-friendly access
   private seqs: number[] = []
   private frames: Uint8Array<ArrayBuffer>[] = []
-  private times: number[] = []
-  /** The highest seq dropped to stay within the byte budget. */
-  overBudgetThrough = 0
   private head = 0
   private totalBytes = 0
   private maxBytes: number
-  private maxAgeMs: number
 
-  constructor(maxBytes: number, maxAgeMs: number) {
+  constructor(maxBytes: number) {
     this.maxBytes = maxBytes
-    this.maxAgeMs = maxAgeMs
-  }
-
-  /** Time of the oldest buffered entry, or Infinity if empty. */
-  get oldestTime(): number {
-    return this.head < this.times.length ? this.times[this.head]! : Infinity
   }
 
   get length(): number {
@@ -243,20 +178,11 @@ class ReplayLane {
    * @returns `true` if the frame was stored, `false` if it was larger than the budget.
    */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
-    const now = Date.now()
-
-    if (payloadBytes(frame) > this.maxBytes) {
-      this.overBudgetThrough = seq
-      // Still evict by age, as the normal push path does.
-      this._evict(now)
-      return false
-    }
-
+    if (payloadBytes(frame) > this.maxBytes) return false
     this.seqs.push(seq)
     this.frames.push(frame)
-    this.times.push(now)
     this.totalBytes += payloadBytes(frame)
-    this._evict(now)
+    this.trim()
     return true
   }
 
@@ -269,10 +195,9 @@ class ReplayLane {
     if (this.head > head) this.compact()
   }
 
-  setLimits(maxBytes: number, maxAgeMs: number): void {
+  setBudget(maxBytes: number): void {
     this.maxBytes = maxBytes
-    this.maxAgeMs = maxAgeMs
-    this._evict(Date.now())
+    this.trim()
   }
 
   /** The stored frames with afterSeq < seq <= throughSeq. */
@@ -285,41 +210,23 @@ class ReplayLane {
     return { seqs: this.seqs.slice(lo, hi), frames: this.frames.slice(lo, hi) }
   }
 
-  /**
-   * Eagerly evict expired entries without pushing a new frame.
-   */
-  evict(now: number): void {
-    if (this.head >= this.frames.length) return
-    const cutoff = now - this.maxAgeMs
-    while (this.head < this.frames.length && this.times[this.head]! < cutoff) {
-      this.totalBytes -= payloadBytes(this.frames[this.head]!)
-      this.head++
-    }
-    this.compact()
-  }
-
   dispose(): void {
     this.seqs.length = 0
     this.frames.length = 0
-    this.times.length = 0
     this.head = 0
     this.totalBytes = 0
-    this.overBudgetThrough = 0
   }
 
   // ── Private ──
 
-  private _evict(now: number): void {
-    // Single pass: evict entries that are too old OR push us over the byte budget.
-    const cutoff = now - this.maxAgeMs
-    while (this.head < this.frames.length) {
-      const expired = this.times[this.head]! < cutoff
-      if (!expired && this.totalBytes <= this.maxBytes) break
-      if (!expired) this.overBudgetThrough = Math.max(this.overBudgetThrough, this.seqs[this.head]!)
+  /** Evicts the oldest entries while over the byte budget. */
+  private trim(): void {
+    const head = this.head
+    while (this.head < this.frames.length && this.totalBytes > this.maxBytes) {
       this.totalBytes -= payloadBytes(this.frames[this.head]!)
       this.head++
     }
-    this.compact()
+    if (this.head > head) this.compact()
   }
 
   /** Compact when dead zone ≥ live zone (amortised O(1)). */
@@ -327,7 +234,6 @@ class ReplayLane {
     if (this.head >= this.frames.length) {
       this.seqs.length = 0
       this.frames.length = 0
-      this.times.length = 0
       this.head = 0
       this.totalBytes = 0
       return
@@ -335,7 +241,6 @@ class ReplayLane {
     if (this.head > 0 && this.head >= this.frames.length - this.head) {
       this.seqs = this.seqs.slice(this.head)
       this.frames = this.frames.slice(this.head)
-      this.times = this.times.slice(this.head)
       this.head = 0
     }
   }

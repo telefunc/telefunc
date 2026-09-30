@@ -11,7 +11,7 @@ import {
 } from '../../wire-protocol/shared-ws.js'
 import type { ChannelFrame } from '../../wire-protocol/shared-ws.js'
 import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
-import { ServerChannel, reconnectWindow, replayMaxAge } from '../../wire-protocol/server/channel.js'
+import { ServerChannel, reconnectWindow } from '../../wire-protocol/server/channel.js'
 import { config } from './serverConfig.js'
 
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
@@ -28,7 +28,7 @@ function createPeer(frames: Uint8Array[]) {
       bufferedAmount: () => 0,
     },
     7,
-    new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+    new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
   )
 }
 
@@ -62,7 +62,6 @@ describe('self-initiated close', () => {
       const channel = new ServerChannel<never, never>()
       channel._attachPeer(createPeer([]))
       expect(reconnectWindow()).toBe(2 ** 31 - 1)
-      expect(replayMaxAge()).toBe(2 ** 31 - 1)
       expect(() => channel.close({ timeout: reconnectWindow() })).not.toThrow()
     } finally {
       config.channel = {}
