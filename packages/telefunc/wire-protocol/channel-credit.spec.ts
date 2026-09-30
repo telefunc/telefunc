@@ -843,25 +843,6 @@ test("on a slow uplink, the server's window for an upload stays at its initial s
   expect(server.received.length).toBeGreaterThan(80)
 })
 
-// 1.25 MB/s: the RECONCILE naming the new channel, and the probe it carries, wait 1.7 s behind the 2 MiB window of the
-// first upload.
-test("on a slow uplink, the server's window for an upload a channel begins while another uploads stays at its initial size, however long its attach waited", async () => {
-  const first = loop.open<string, never>()
-  consume(first.server)
-  await run(100)
-  loop.socket.toServer.bytesPerMs = 1_250
-  produce(first.page, { message: () => 'x'.repeat(64 * KIB) })
-  await run(10_000)
-  const late = loop.open<string, never>()
-  const server = consume(late.server)
-  produce(late.page, { message: () => 'y'.repeat(64 * KIB) })
-  await run(3_000)
-  first.page.abort()
-  await run(30_000)
-  expect(flowOf(late.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-  expect(server.received.length).toBeGreaterThan(500)
-})
-
 // 100 KB/s: the RECONCILE naming the new channel waits 20 s behind the 2 MiB window of the upload, twice the time a page
 // waits for its RECONCILED on a wire that delivers nothing. The server holds the new channel that long.
 test('a channel the page opens while its upload fills a slow uplink attaches on the same wire, however long its RECONCILE waits behind the upload', async () => {

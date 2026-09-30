@@ -385,7 +385,7 @@ class ChannelMux {
     if (tag === TAG.PING) return exec()
     // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose frames keep arriving
     // is answered all the same, once a ping interval, so the page knows they arrive.
-    if (performance.now() - state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [], 0)
+    if (performance.now() - state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
     return this.chainRecv(entry, exec)
   }
 
@@ -446,7 +446,7 @@ class ChannelMux {
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
-      this.pong(entry, connection, this.answerPing(entry, connection, frame.ended), frame.probe)
+      this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -498,10 +498,9 @@ class ChannelMux {
     for (const { channel } of this.sessions.peekSession(sessionId)?.values() ?? []) channel._acknowledge()
   }
 
-  /** `probe`: the PING's it answers, 0 for one sent unasked. */
-  private pong(entry: ConnectionEntry, connection: Wire, ended: PongEntry[], probe: number): void {
+  private pong(entry: ConnectionEntry, connection: Wire, ended: PongEntry[]): void {
     entry.state.pongedAt = performance.now()
-    this.send(connection, encode.pong(ended, probe))
+    this.send(connection, encode.pong(ended))
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
@@ -695,10 +694,6 @@ class ChannelMux {
     connection: Wire,
     replay: boolean,
   ): ChannelHandle[] {
-    // Ahead of all that the attaches send, a replay among it, and of a registration the wire awaits: each answer's round
-    // trip is the path's. It measures, so it says nothing starved, and names no round trip.
-    for (const { ix, probe } of open)
-      if (probe !== undefined) conn.sender.send(encode.bdpPingAck(ix, probe, false, Infinity))
     const handles = open
       .map((entry) => this.attach(entry, conn, connection, replay))
       .filter((h): h is ChannelHandle => h !== null)
@@ -725,6 +720,9 @@ class ChannelMux {
     connection: Wire,
     replay: boolean,
   ): ChannelHandle | null {
+    // Ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip is the
+    // path's. It measures, so it says nothing starved, and names no round trip.
+    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, false, Infinity))
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry

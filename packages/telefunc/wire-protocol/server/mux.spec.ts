@@ -290,66 +290,6 @@ test("an attach's probe is answered as the RECONCILE naming it is read, for a ch
   mux.registerChannel(new ServerChannel({ id: 'late' }))
 })
 
-// Each answer's round trip is the path's only while nothing the RECONCILE brings on waits ahead of it: a replay of one
-// channel would hold up the answer to the next.
-test("a reconnect's RECONCILE has its attaches' probes answered ahead of what any of them sends, a replay among it", async () => {
-  const mux = new ChannelMux()
-  const feed = new ServerChannel<unknown, string>({ id: 'feed' })
-  mux.registerChannel(feed)
-  mux.registerChannel(new ServerChannel({ id: 'upload' }))
-  const { sessions, open, sent } = wires(mux)
-  const previous = open()
-  await mux.onConnectionRawMessage(
-    previous,
-    encode.reconcile({
-      open: [
-        { id: 'feed', ix: 0, lastSeq: 0, initial: true },
-        { id: 'upload', ix: 1, lastSeq: 0, initial: true },
-      ],
-    }),
-  )
-  void feed.send('missed')
-  const next = open()
-  await mux.onConnectionRawMessage(
-    next,
-    encode.reconcile({
-      sessionId: sessions.get(previous),
-      open: [
-        { id: 'feed', ix: 0, lastSeq: 0, probe: 1 },
-        { id: 'upload', ix: 1, lastSeq: 0, probe: 2 },
-      ],
-    }),
-  )
-  const order = sent
-    .get(next)!
-    .flatMap((frame) =>
-      frame.tag === TAG.BDP_PING_ACK ? [`ack ${frame.probe}`] : frame.tag === TAG.TEXT ? [frame.text] : [],
-    )
-  expect(order).toEqual(['ack 1', 'ack 2', '"missed"'])
-})
-
-// The page times a PING to its PONG, which it tells from another by the probe: one the server sends unasked carries none.
-test("a PONG echoes the probe of the PING it answers, and one the server sends unasked as the page's frames arrive carries none", async () => {
-  vi.useFakeTimers()
-  try {
-    const mux = new ChannelMux()
-    mux.registerChannel(new ServerChannel({ id: 'upload' }))
-    const { open, sent } = wires(mux)
-    const wire = open()
-    await mux.onConnectionRawMessage(
-      wire,
-      encode.reconcile({ open: [{ id: 'upload', ix: 0, lastSeq: 0, initial: true }] }),
-    )
-    await mux.onConnectionRawMessage(wire, encode.ping([], 7))
-    await vi.advanceTimersByTimeAsync(getServerConfig().channel.pingInterval)
-    await mux.onConnectionRawMessage(wire, encode.text(0, '"x"', 1))
-    const pongs = sent.get(wire)!.flatMap((frame) => (frame.tag === TAG.PONG ? [frame.probe] : []))
-    expect(pongs).toEqual([7, 0])
-  } finally {
-    vi.useRealTimers()
-  }
-})
-
 test("a burst of a channel's full message window, with the refresh and probe a page sends among it, is processed", async () => {
   const wire = await attachedWire()
   const frames = Array.from({ length: CREDIT_MSG_WINDOW_MAX }, (_, i) => encode.text(0, '1', i + 1))

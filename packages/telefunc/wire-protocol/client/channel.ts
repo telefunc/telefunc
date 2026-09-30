@@ -91,8 +91,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _flow: FlowControl
   /** The connection's wire at the last attach. */
   private _attachedWire: number | null = null
-  /** The wire of its last RECONCILE entry, or a barrier's, which its frames go on from then. */
-  private _declaredWire: number | null = null
 
   constructor({
     channelId,
@@ -123,7 +121,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
       },
       () => this._connection.bufferedAmount(),
-      () => this._connection.sendDelay(),
     )
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
@@ -278,16 +275,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Called by transport connection ──
 
-  /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured. */
-  _reattachState(wire: number): ReattachState {
-    this._declaredWire = wire
-    const probe = this._flow.probeAttach(wire)
+  /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
+   *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
+  _reattachState(wire: number, batched: boolean): ReattachState {
+    const probe = batched ? undefined : this._flow.probeAttach(wire)
     return probe === undefined ? {} : { probe }
-  }
-
-  /** @internal The least round trip the connection measured on `wire`. */
-  _onPathRtt(wire: number, rtt: number): void {
-    this._flow.notePathRtt(wire, rtt)
   }
 
   /** @internal */
@@ -432,16 +424,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
         return
-      case TAG.BDP_PING: {
-        const starved = this._flow.onPing()
-        const wire = this._attachedWire
-        // Until its attach on the wire settles, the page holds the answer, and all it sends, for its RECONCILED: the
-        // probe's round trip is that wait's, and says nothing of the window.
-        if (wire === null || wire !== this._declaredWire)
-          this._connection.sendBdpPingAck(this, frame.probe, false, Infinity)
-        else this._connection.sendBdpPingAck(this, frame.probe, starved, this._flow.pathRtt(wire))
+      case TAG.BDP_PING:
+        this._connection.sendBdpPingAck(
+          this,
+          frame.probe,
+          this._flow.onPing(),
+          this._attachedWire === null ? Infinity : this._flow.pathRtt(this._attachedWire),
+        )
         return
-      }
       case TAG.BDP_PING_ACK:
         this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
         return

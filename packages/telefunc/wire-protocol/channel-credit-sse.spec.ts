@@ -176,56 +176,6 @@ afterEach(() => {
   ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
 })
 
-describe('over SSE with a streaming upload', () => {
-  const batched = false
-  const pageWindow = CREDIT_WINDOW_INITIAL_BYTES
-  // 1.25 MB/s: a 2 MiB window takes 1.7 s to go through, 34 round trips.
-  test("on a slow uplink, the server's window for an upload stays at its initial size, however little the page's body or outbox holds", async () => {
-    const sse = (current = link({ batched }))
-    sse.up.bytesPerMs = 1_250
-    const upload = sse.open<string, never>()
-    const got = received(upload.server)
-    produce(upload.page, 'x'.repeat(64 * KIB))
-    await run(30_000)
-    expect(sse.batched).toBe(batched)
-    expect(flowOf(upload.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-    // The link stays full.
-    expect(got.bytes / 30_000).toBeGreaterThan(0.9 * 1_250)
-  })
-
-  test("on a slow downlink, the page's window for a download stays at its initial size, however little the server's stream holds", async () => {
-    const sse = (current = link({ batched }))
-    sse.down.bytesPerMs = 1_250
-    const download = sse.open<never, string>()
-    const got = received(download.page)
-    produce(download.server, 'x'.repeat(64 * KIB))
-    await run(30_000)
-    expect(sse.batched).toBe(batched)
-    expect(flowOf(download.page).byteWindow).toBe(pageWindow)
-    // An event carries its frame in base64, 4 bytes for every 3: the link stays full.
-    expect(got.bytes / 30_000).toBeGreaterThan(0.9 * 1_250 * (3 / 4))
-  })
-
-  // Its RECONCILE, and the probe it carries, wait behind the first channel's upload, 2 MiB at 1.25 MB/s.
-  test("on a slow uplink, the server's window for an upload a channel begins while another uploads stays at its initial size, however long its attach waited", async () => {
-    const sse = (current = link({ batched }))
-    sse.up.bytesPerMs = 1_250
-    const first = sse.open<string, never>()
-    received(first.server)
-    produce(first.page, 'x'.repeat(64 * KIB))
-    await run(10_000)
-    const late = sse.open<string, never>()
-    const got = received(late.server)
-    produce(late.page, 'y'.repeat(64 * KIB))
-    await run(3_000)
-    first.page.abort()
-    await run(30_000)
-    expect(sse.batched).toBe(batched)
-    expect(flowOf(late.server).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(got.bytes / 30_000).toBeGreaterThan(0.9 * 1_250)
-  })
-})
-
 // A frame waits for the POST under way to be answered, and each POST costs a round trip: a larger window makes fewer,
 // fuller POSTs, however full the link.
 describe('over SSE with batch POSTs', () => {

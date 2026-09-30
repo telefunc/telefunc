@@ -172,8 +172,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         bdpPing: (probe) => this._peer?.sendBdpPing(probe),
       },
       () => this._peer?.sender.bufferedAmount(),
-      // Its wire takes each frame as it is sent.
-      () => 0,
     )
     const c = getServerConfig().channel
     this._flow.fitReplays(
