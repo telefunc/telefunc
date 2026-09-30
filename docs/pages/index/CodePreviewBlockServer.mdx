@@ -1,0 +1,20 @@
+```ts ts-only max-width=60
+// Todo.telefunc.ts
+
+import { Abort, getContext } from 'telefunc'
+
+// `shield()` is generated from the types
+export async function onTextChange(
+  id: number,
+  text: string,
+) {
+  const { user } = getContext()
+  if (!user) {
+    // `throw Abort` to reject requests
+    throw Abort({ code: 'unauthenticated' })
+  }
+
+  // Query the database, call APIs, ...
+  await Todo.update(id, { text })
+}
+```

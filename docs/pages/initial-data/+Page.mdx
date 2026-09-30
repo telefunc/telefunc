@@ -1,22 +1,14 @@
 import { Link } from '@brillout/docpress'
-import { MostlyMutations } from '../../components'
 
-<MostlyMutations
-  toolName="your framework"
-  builtInMechanism={
-    <>
-      See:
-      <ul>
-        <li>
-          <Link href="/next#initial-data" />
-        </li>
-        <li>
-          <Link href="/svelte-kit#initial-data" />
-        </li>
-        <li>
-          <Link href="/vike#initial-data" />
-        </li>
-      </ul>
-    </>
-  }
-/>
+For fetching the initial data of pages (SSR data) use your framework's built-in data fetching mechanism instead of Telefunc. For more information, see:
+- [Next.js Docs > Data Fetching](https://nextjs.org/docs/app/building-your-application/data-fetching)
+- [SvelteKit Docs > Loading data > Universal vs server](https://svelte.dev/docs/kit/load#Universal-vs-server)
+- [vike.dev > Data Fetching](https://vike.dev/data-fetching)
+
+You can still use Telefunc for fetching data but only after the initial rendering of the page, for example for pagination or infinite scroll.
+
+> You cannot use Telefunc for server-side rendered (SSR) data because only the framework can pass SSR data from the server to the client-side (which is needed for hydration). This is common to all SSR frameworks.
+
+### Next
+
+<Link href="/permissions" />

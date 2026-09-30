@@ -1,5 +1,6 @@
 #header {
   margin-top: 24px;
+  margin-bottom: 20px;
 }
 #tagline-primary {
   font-size: 2em;
@@ -7,7 +8,7 @@
 }
 #tagline-secondary {
   font-size: 27px;
-  margin-bottom: 53px;
+  margin-bottom: 36px;
 }
 
 @media screen and (max-width: 700px) {

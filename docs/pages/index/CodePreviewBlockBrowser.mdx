@@ -1,0 +1,16 @@
+```tsx ts-only
+// Todo.tsx
+
+import { onTextChange } from './Todo.telefunc'
+
+function TodoItem({ id, text }: Todo) {
+  return (
+    <input
+      defaultValue={text}
+      onBlur={(ev) =>
+        onTextChange(id, ev.target.value)
+      }
+    />
+  )
+}
+```

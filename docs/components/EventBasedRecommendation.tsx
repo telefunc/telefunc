@@ -12,12 +12,11 @@ function EventBasedRecommendation({ samePage }: { samePage?: boolean }) {
         </p>
         <p>
           We recommend reading{' '}
-          {samePage ? <Link href="#example">the example above</Link> : <Link href="/event-based" />} before opting out.
-          It explains why event-based telefunctions lead to increased:
+          {samePage ? <Link href="#example">the example above</Link> : <Link href="/best-practices" />} before opting
+          out. It explains why event-based telefunctions lead to increased:
         </p>
         <ul>
           <li>Development speed </li>
-
           <li>Security </li>
           <li>Performance </li>
         </ul>
