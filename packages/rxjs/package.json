@@ -38,7 +38,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc --build",
+    "build": "tsc",
     "dev": "tsc --watch"
   },
   "peerDependencies": {
