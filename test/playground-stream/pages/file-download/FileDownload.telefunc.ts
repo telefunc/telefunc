@@ -2,6 +2,7 @@ export {
   // Eager native — goes through `new File`/`new Blob`, auto-materializes on client.
   onDownloadFileEager,
   onDownloadBlobEager,
+  onDownloadEagerNested,
   // Streaming via `download()` — returns a FileDownload/BlobDownload tuple on client.
   onDownloadFileStream,
   onDownloadFileStreamNoSize,
@@ -43,6 +44,14 @@ const onDownloadFileEager = async () => {
 
 const onDownloadBlobEager = async () => {
   return new Blob([TEXT], { type: 'text/plain' })
+}
+
+const onDownloadEagerNested = async () => {
+  return {
+    title: 'report',
+    file: new File([TEXT], 'nested-eager.txt', { type: 'text/plain', lastModified: FIXED_LAST_MODIFIED }),
+    blob: new Blob([TEXT], { type: 'text/plain' }),
+  }
 }
 
 // ----- streaming via download() (returns tuple) -----
