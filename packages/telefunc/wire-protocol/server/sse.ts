@@ -7,17 +7,12 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
-import {
-  CHANNEL_TRANSPORT,
-  SSE_METADATA_MAX_BYTES,
-  WIRE_MAX_RAW_FRAME_BYTES,
-  WIRE_RECV_BACKLOG_BASE_BYTES,
-} from '../constants.js'
+import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { createPushReadable, type PushReadable } from '../push-readable.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 import { textEncoder } from '../frame.js'
-import { parseSseRequestMetadata, SSE_FLUSH_READ, SSE_FLUSH_TAKEN, type SseRequestMetadata } from '../sse-request.js'
+import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
@@ -45,13 +40,9 @@ type SseConnection = {
   /** Dispatches in flight for this connection. A reconcile waits on these before reporting a seq,
    *  so a batch POST's `_lastClientSeq` mutations can't land after the RECONCILED that reports them. */
   pendingDispatches: Set<Promise<unknown>>
-  /** Settles once the server is done with the last flush that took its turn: whether it read all of it. */
-  flushRead: Promise<boolean>
 }
 
 const sseOpenComment = textEncoder.encode(': open\n\n')
-const flushTakenBytes = textEncoder.encode(SSE_FLUSH_TAKEN)
-const flushReadBytes = textEncoder.encode(SSE_FLUSH_READ)
 
 const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
   defaultHooks: null as ReturnType<typeof getTelefuncSseChannelHooks> | null,
@@ -92,7 +83,6 @@ class SseConnectionTransport {
       connId = metadata.connId
       if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
-      if (metadata.flush) return await this.handleFlushPost(connId, reader, useNodeStream)
       return await this.handleBatchPost(connId, reader)
     } catch (err) {
       // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
@@ -141,7 +131,6 @@ class SseConnectionTransport {
       ready,
       resolveReady,
       pendingDispatches: new Set(),
-      flushRead: Promise.resolve(true),
     }
     this.mux.onConnectionOpen(connection, this.transport)
     this.resolvePendingConnections(connId, connection)
@@ -185,72 +174,14 @@ class SseConnectionTransport {
     return okResponse()
   }
 
-  /** Batch POST read at once, a heartbeat's PING or the barrier, and answered once read. */
+  /** Short-lived outbox batch POST. Body ends quickly, so we collect the reconcile that
+   *  may fire during the body and emit `reconciled` at body end — that way all dispatched
+   *  frames have lifted `_lastClientSeq` before the seq is reported. Tracked in
+   *  `pendingDispatches` so `runStreamResponse` won't send its own reconciled mid-batch. */
   private async handleBatchPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
     if (!(await this.waitReady(connection))) return badRequest()
-    await this.readBatch(connection, reader)
-    return okResponse()
-  }
-
-  /** A batch POST of the page's outbox. It takes its turn after the flush before it, and is answered as the server
-   *  begins to read it, so the page's next flush crosses the link while it reads this one. */
-  private async handleFlushPost(
-    connId: string,
-    reader: StreamReader,
-    useNodeStream: boolean,
-  ): Promise<SseChannelHttpResponse> {
-    const connection = await this.resolveConnection(connId)
-    if (!connection) return badRequest()
-    if (!(await this.waitReady(connection))) return badRequest()
-    const body = new FlushBody(reader)
-    const before = connection.flushRead
-    let done!: (read: boolean) => void
-    connection.flushRead = new Promise<boolean>((resolve) => {
-      done = resolve
-    })
-    // The page resends from the server's lastSeq, and this one's frames would move it past what the rest of that one
-    // carried.
-    if (!(await before)) {
-      body.drop()
-      done(false)
-      return badRequest()
-    }
-    const answer = useNodeStream ? createPushReadable() : createPushReadableStream<Uint8Array<ArrayBuffer>>()
-    answer.push(flushTakenBytes)
-    let read = false
-    void this.readBatch(connection, body.taken())
-      .then(
-        () => {
-          read = true
-          answer.push(flushReadBytes)
-        },
-        (err) => {
-          // What the page would have got as a 400, or as a 500 for our bug: the answer ends without saying it was read.
-          reportDispatchBug(err)
-          if (err instanceof OversizeFrameError) this.closeConnection(connection, { permanent: true })
-        },
-      )
-      .finally(() => {
-        answer.close()
-        done(read)
-      })
-    return {
-      statusCode: 200,
-      contentType: 'text/plain',
-      headers: [
-        ['Cache-Control', 'no-cache, no-transform'],
-        ['X-Accel-Buffering', 'no'],
-      ],
-      body: answer,
-    }
-  }
-
-  /** A batch POST's body ends quickly, so we collect the reconcile that may fire during the body and emit `reconciled`
-   *  at body end — that way all dispatched frames have lifted `_lastClientSeq` before the seq is reported. Tracked in
-   *  `pendingDispatches` so `runStreamResponse` won't send its own reconciled mid-batch. */
-  private async readBatch(connection: SseConnection, reader: FrameSource): Promise<void> {
     const drain = this.drainDeferred(connection, reader)
     connection.pendingDispatches.add(drain)
     try {
@@ -259,6 +190,7 @@ class SseConnectionTransport {
     } finally {
       connection.pendingDispatches.delete(drain)
     }
+    return okResponse()
   }
 
   /** Stream-response POST lifecycle: consume the initial reconcile batch, drain the batch POSTs
@@ -301,7 +233,7 @@ class SseConnectionTransport {
 
   /** Read length-prefixed frames from `reader`, dispatch each through the deferred-reconcile
    *  path. Returns the last `ReconcileOutcome` produced in this body, or null if none did. */
-  private async drainDeferred(connection: SseConnection, reader: FrameSource): Promise<ReconcileOutcome | null> {
+  private async drainDeferred(connection: SseConnection, reader: StreamReader): Promise<ReconcileOutcome | null> {
     let outcome: ReconcileOutcome | null = null
     while (true) {
       const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
@@ -382,59 +314,6 @@ class SseConnectionTransport {
 
   private terminateConnection(connection: SseConnection): void {
     this.closeConnection(connection, { permanent: this.mux.readPermanentTermination(connection) })
-  }
-}
-
-type FrameSource = Pick<StreamReader, 'readLengthPrefixedBytesOrNull'>
-
-/** A flush's body, read as it arrives while the flush waits its turn: left unread, its connection would stall, and pick
- *  up slowly once read. It holds at most what a wire's backlog may before any channel adds to it; past that the rest
- *  waits in the socket. */
-class FlushBody {
-  private readonly held: Uint8Array<ArrayBuffer>[] = []
-  private heldBytes = 0
-  private ended = false
-  private failure: { err: unknown } | null = null
-  private waiting = true
-  private readonly readingAhead: Promise<void>
-
-  constructor(private readonly reader: StreamReader) {
-    this.readingAhead = this.readAhead()
-  }
-
-  private async readAhead(): Promise<void> {
-    try {
-      while (this.waiting && this.heldBytes <= WIRE_RECV_BACKLOG_BASE_BYTES) {
-        const raw = await this.reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
-        if (!raw) {
-          this.ended = true
-          return
-        }
-        this.held.push(raw)
-        this.heldBytes += raw.byteLength
-      }
-    } catch (err) {
-      this.failure = { err }
-    }
-  }
-
-  /** Its turn: what it read ahead, then the rest as it's asked for. */
-  taken(): FrameSource {
-    this.waiting = false
-    return {
-      readLengthPrefixedBytesOrNull: async (maxBytes) => {
-        if (this.held.length === 0) await this.readingAhead
-        const raw = this.held.shift()
-        if (raw) return raw
-        if (this.failure) throw this.failure.err
-        if (this.ended) return null
-        return this.reader.readLengthPrefixedBytesOrNull(maxBytes)
-      },
-    }
-  }
-
-  drop(): void {
-    this.waiting = false
   }
 }
 

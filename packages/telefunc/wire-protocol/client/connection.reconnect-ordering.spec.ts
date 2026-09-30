@@ -18,7 +18,6 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { ClientConnection } from './connection.js'
 import { ServerChannel } from '../server/channel.js'
 import { decode, encode, TAG, type SeqReader } from '../shared-ws.js'
-import { SSE_FLUSH_READ, SSE_FLUSH_TAKEN } from '../sse-request.js'
 import { decodeU32, concat } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 
@@ -153,7 +152,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
         const f = decode(raw as any, wireSeqs)
         if (f.tag === TAG.TEXT) serverCh._dispatchFrame(f)
       }
-      return new Response(metadata.flush ? SSE_FLUSH_TAKEN + SSE_FLUSH_READ : '', { status: 200 })
+      return new Response('', { status: 200 })
     }
 
     // ReadableStream body → long-lived streamRequest POST.

@@ -2,8 +2,8 @@
 // handler over a link with a fixed latency and a bandwidth each way, on fake timers, so each run is deterministic. What
 // the link carries has left the page and the server, as what a browser's network stack and the kernel hold has: a
 // streaming upload's body and the server's event stream read empty, and a batch POST under way is no longer in the
-// page's outbox. The page gets a request's response only once its body is in the socket, all but what the socket holds
-// of it carried: Chromium and Firefox hand it over only once they have written the body to the socket.
+// page's outbox. The page gets a request's response only once the link has carried its body: Chromium and Firefox hand
+// it over only once they have written the body to the socket.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
@@ -19,8 +19,6 @@ const LATENCY_MS = 25
 /** What one read of a request body hands the server, as a socket read does. */
 const CHUNK_BYTES = 16 * 1024
 const KIB = 1024
-/** What the page's socket holds of a request body the link hasn't carried yet. */
-const SOCKET_BYTES = 256 * KIB
 
 /** One direction of the link: delivers what it carries in order, `LATENCY_MS` after it was sent, and no faster than
  *  `bytesPerMs`. */
@@ -71,17 +69,13 @@ function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; re
     const send = (chunk: Uint8Array) => up.push(chunk.byteLength, () => signal.aborted || toServer.enqueue(chunk))
     const end = () => up.push(0, () => signal.aborted || toServer.close())
     signal.addEventListener('abort', () => toServer.error(new TypeError('network error')))
-    let written: Promise<unknown> = Promise.resolve()
+    let sent: Promise<unknown> = Promise.resolve()
     if (body instanceof Blob) {
       // Bytes rather than the Blob: a Request reads a Blob on a later event-loop turn, which fake timers don't give.
       const bytes = new Uint8Array(await body.arrayBuffer())
-      const inSocketFrom = bytes.length - SOCKET_BYTES
-      for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) {
-        send(bytes.slice(offset, offset + CHUNK_BYTES))
-        if (offset <= inSocketFrom && inSocketFrom < offset + CHUNK_BYTES)
-          written = new Promise((resolve) => up.push(0, () => resolve(undefined)))
-      }
+      for (let offset = 0; offset < bytes.length; offset += CHUNK_BYTES) send(bytes.slice(offset, offset + CHUNK_BYTES))
       end()
+      sent = new Promise((resolve) => up.push(0, () => resolve(undefined)))
     } else {
       // Taken as it is written, so the body reads empty while the link carries it.
       void (async () => {
@@ -115,10 +109,7 @@ function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; re
         },
       })
     }
-    await Promise.race([
-      Promise.all([new Promise((resolve) => down.push(0, () => resolve(undefined))), written]),
-      aborted,
-    ])
+    await Promise.race([Promise.all([new Promise((resolve) => down.push(0, () => resolve(undefined))), sent]), aborted])
     return new Response(pageBody, { status: response.statusCode, headers: { 'Content-Type': response.contentType } })
   }) as typeof globalThis.fetch
   clientConfig.fetch = fetch
@@ -256,35 +247,6 @@ describe.each([
     expect(sse.batched).toBe(batched)
     expect(flowOf(download.page).byteWindow).toBeGreaterThan(pageWindow)
   })
-})
-
-// The server answers a flush as it begins to read it, and the browser hands the page that answer once the body is in the
-// socket: the page's next flush goes into the link while the one before still crosses it.
-test("over batch POSTs, on a slow uplink, a page's upload keeps the link full from one POST to the next", async () => {
-  const sse = (current = link({ batched: true }))
-  sse.up.bytesPerMs = 1_250
-  const upload = sse.open<string, never>()
-  const got = received(upload.server)
-  produce(upload.page, 'x'.repeat(64 * KIB))
-  await run(5_000)
-  const from = got.bytes
-  await run(30_000)
-  expect(sse.batched).toBe(true)
-  expect((got.bytes - from) / 30_000).toBeGreaterThan(0.99 * 1_250)
-})
-
-test('over batch POSTs, what a page sends arrives in the order it sent it, as one POST crosses the link while the server reads the one before', async () => {
-  const sse = (current = link({ batched: true }))
-  sse.up.bytesPerMs = 1_250
-  const upload = sse.open<string, never>()
-  const got: number[] = []
-  upload.server.listen((data) => void got.push(Number(data.slice(0, data.indexOf(':')))))
-  void (async () => {
-    for (let i = 0; !upload.page.isClosed; i++) await upload.page.send(`${i}:${'x'.repeat(64 * KIB)}`)
-  })().catch(() => {})
-  await run(20_000)
-  expect(got.length).toBeGreaterThan(300)
-  expect(got).toEqual(got.map((_, i) => i))
 })
 
 // Firefox answers the streaming upload it can't send with the server's 400, a round trip after the page's first RECONCILE

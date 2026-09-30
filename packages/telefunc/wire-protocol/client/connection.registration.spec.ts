@@ -136,17 +136,11 @@ function sseServer(
     }
     const request = new Request(url, { method: 'POST', body: logged, duplex: 'half' } as RequestInit)
     const response = (await sse.handleRequest(request))!
-    if (fails === 'read') {
-      // A flush is answered as the server begins to read it, and its answer ends once it has.
-      if (response.body instanceof ReadableStream) await new Response(response.body).text()
-      throw new TypeError('fetch failed')
-    }
+    if (fails === 'read') throw new TypeError('fetch failed')
     const responseBody =
-      response.contentType === 'text/event-stream'
-        ? (response.body as ReadableStream<Uint8Array>).pipeThrough(
-            eventsThrough((frame) => traffic.toPage.push(frame[0]!), cuts, delays),
-          )
-        : (response.body as BodyInit)
+      response.body instanceof ReadableStream
+        ? response.body.pipeThrough(eventsThrough((frame) => traffic.toPage.push(frame[0]!), cuts, delays))
+        : (response.body as string)
     return new Response(responseBody, {
       status: response.statusCode,
       headers: { 'Content-Type': response.contentType },

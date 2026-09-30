@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 import { ClientConnection } from './connection.js'
 import { decode, encode, TAG, type SeqReader } from '../shared-ws.js'
 import type { DecodedFrame } from '../shared-ws.js'
-import { SSE_FLUSH_READ, SSE_FLUSH_TAKEN } from '../sse-request.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 
@@ -156,8 +155,7 @@ async function upgradeToBarrier(): Promise<Harness> {
         if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]?.ix ?? 0
         onUpstreamFrame(frame)
       }
-      if (!metadata.streamResponse)
-        return new Response(metadata.flush ? SSE_FLUSH_TAKEN + SSE_FLUSH_READ : '', { status: 200 })
+      if (!metadata.streamResponse) return new Response('', { status: 200 })
       downstream.open()
       downstream.push(reconciled({ ix, sessionId }))
       return new Response(downstream.stream as BodyInit, {
@@ -294,8 +292,7 @@ describe('flow control across an upgrade attempt', () => {
       if (!(body instanceof Blob)) throw new TypeError('upload streams are not supported')
       const [metadata, ...frames] = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
       const decoded = frames.map((raw) => decode(bytes(raw), wireSeqs))
-      const { streamResponse, flush } = JSON.parse(new TextDecoder().decode(metadata))
-      if (streamResponse) {
+      if (JSON.parse(new TextDecoder().decode(metadata)).streamResponse) {
         const reconcile = decoded.find((frame) => frame.tag === TAG.RECONCILE)!
         const ix = reconcile.tag === TAG.RECONCILE ? reconcile.payload.open[0]!.ix : 0
         downstream.open()
@@ -321,11 +318,10 @@ describe('flow control across an upgrade attempt', () => {
         })
       }
       posted.push(...decoded)
-      const answer = flush ? SSE_FLUSH_TAKEN + SSE_FLUSH_READ : ''
-      if (!holdNextPost) return new Response(answer, { status: 200 })
+      if (!holdNextPost) return new Response('', { status: 200 })
       holdNextPost = false
       return await new Promise<Response>((resolve) => {
-        releasePost = () => resolve(new Response(answer, { status: 200 }))
+        releasePost = () => resolve(new Response('', { status: 200 }))
       })
     }) as unknown as typeof fetch
 
