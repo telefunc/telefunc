@@ -125,11 +125,11 @@ const TAG = {
   PUBLISH_BINARY_ACK_REQ: 0x18 as const,
 
   // ─── Per-channel control (carries ix) ───
-  /** A close request, or a page's abort (timeout 0). Sequenced, so it replays like data. */
+  /** A close request. Sequenced, so it replays like data. */
   CLOSE: 0x30 as const,
   /** Sequenced, as CLOSE is. */
   CLOSE_ACK: 0x31 as const,
-  /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
+  /** Channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
   /** Channel closed with an error. Payload: u8 `ERROR_REASON`. Server → client, and client → server for `LOST` only.
    *  Sequenced, as CLOSE is. */
@@ -774,6 +774,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PUBLISH_BINARY_ACK_REQ,
   TAG.CLOSE,
   TAG.CLOSE_ACK,
+  TAG.ABORT,
   TAG.ERROR,
   TAG.WINDOW,
   TAG.MSG_WINDOW,

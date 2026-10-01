@@ -24,6 +24,8 @@ export const FN_SHIELD_ERROR_KEY = '__telefunc_fn_shield_error'
 /** 1-byte tag prefixed to every binary send in per-channel streaming pumps. */
 export const CHANNEL_PUMP_TAG_DATA = 0x00
 export const CHANNEL_PUMP_TAG_ERROR = 0x01
+/** The producer's end, before its close: a stream whose channel closes without it was cut short. */
+export const CHANNEL_PUMP_TAG_END = 0x02
 
 // ===== Streaming error frames =====
 
@@ -156,7 +158,7 @@ export const SSE_METADATA_MAX_BYTES = 64 * 1024
  *  wire dead and reconnecting, and then only once the wire has delivered nothing that long, where
  *  its heartbeat tracks it. A downstream that stalls without erroring (bytes stop, no FIN)
  *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`
- *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
+ *  is suppressed while the wire opens, so nothing notices the dead wire and every call buffered
  *  behind the un-acked RECONCILE hangs. */
 export const RECONCILE_TIMEOUT_MS = 10_000
 
@@ -195,8 +197,10 @@ export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
 export const ESTABLISH_HOLD_MS = 60_000
 
 /** How long a channel waits for a peer to connect after the server→client
- *  HTTP response carrying `channel.client` has been serialized. */
-export const CHANNEL_CONNECT_TTL_MS = 5_000
+ *  HTTP response carrying `channel.client` has been serialized. It outlasts a page's noticing that its wire died without
+ *  a word, twice the ping interval after the wire's last frame, then its first reconnect delay and a reconcile round
+ *  trip. */
+export const CHANNEL_CONNECT_TTL_MS = 15_000
 
 // Client-side channel reconnect defaults
 export const CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500

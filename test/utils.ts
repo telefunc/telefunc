@@ -77,6 +77,9 @@ function testRunClassic(
         },
         { timeout: 5000 },
       )
+      // Vite's file watcher drops a change of a file within 50 ms of the one before, which a revert as soon as the edit
+      // shows can be on a busy runner.
+      await new Promise((resolve) => setTimeout(resolve, 500))
       editFileRevert()
       await autoRetry(
         async () => {

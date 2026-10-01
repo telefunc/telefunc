@@ -267,7 +267,6 @@ describe('decodeClientFrame — direction', () => {
     ['STREAM_REQUEST_OPEN_ACK', encode.streamRequestOpenAck()],
     ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
     ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(14), 1)],
-    ['ABORT', encode.abort(0, JSON.stringify('nope'))],
     ['RECONCILED', encode.reconciled(reconciled())],
     ['ATTACH_RESULT', encode.attachResult(0, 0)],
   ]
@@ -295,6 +294,7 @@ describe('decodeClientFrame — direction', () => {
     ['PUBLISH_BINARY_ACK_REQ', encode.publishBinaryAckReq(0, new Uint8Array([1]), 1)],
     ['CLOSE', encode.close(0, 1_000)],
     ['CLOSE_ACK', encode.closeAck(0)],
+    ['ABORT', encode.abort(0, JSON.stringify('nope'), 1)],
     ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
     ['WINDOW', encode.window(0, 1_024, 7)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],

@@ -40,14 +40,15 @@ test('a returned stream that ends while its page is away is still closing when i
     const gone = new IndexedPeer(createSender(lost), 7, channel._replayBuffer!)
     channel._attachPeer(gone)
     await vi.advanceTimersByTimeAsync(8_000)
-    expect(lost.map((frame) => decode(frame, wireSeqs).tag)).toEqual([TAG.BINARY, TAG.CLOSE]) // the stream ended meanwhile
+    // The stream ended meanwhile: its chunk, its end and the close.
+    expect(lost.map((frame) => decode(frame, wireSeqs).tag)).toEqual([TAG.BINARY, TAG.BINARY, TAG.CLOSE])
     expect(channel._didShutdown).toBe(false)
     channel._onPeerDisconnect(gone, 60_000) // the drop is noticed
     const frames: Uint8Array[] = []
     // The page is back within its reconnect window, with the stream's chunk.
     const attachChannel = getChannelMux()['attachChannel'].bind(getChannelMux())
     attachChannel(channel, { id: channel.id, ix: 7, lastSeq: 1 }, createSender(frames), true)
-    expect(frames.map((frame) => decode(frame, wireSeqs).tag)).toEqual([TAG.CLOSE])
+    expect(frames.map((frame) => decode(frame, wireSeqs).tag)).toEqual([TAG.BINARY, TAG.CLOSE])
   } finally {
     vi.useRealTimers()
     vi.restoreAllMocks()

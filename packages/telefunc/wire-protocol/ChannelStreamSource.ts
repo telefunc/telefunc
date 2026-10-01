@@ -2,7 +2,8 @@ export { ChannelStreamSource }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { textDecoder } from './frame.js'
-import { CHANNEL_PUMP_TAG_ERROR } from './constants.js'
+import { CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from './constants.js'
+import { NetworkError } from '../shared/NetworkError.js'
 import { isObject } from '../utils/isObject.js'
 import { assert } from '../utils/assert.js'
 import { createReadableChunkStream } from './createReadableChunkStream.js'
@@ -16,8 +17,8 @@ type StreamSourceChannel = Pick<Channel, 'listenBinary' | 'onClose' | 'close' | 
 /**
  * Receives tagged binary frames from a channel with credit-based backpressure.
  *
- * Each binary frame is tagged: `[TAG_DATA (0x00)][payload]` or
- * `[TAG_ERROR (0x01)][JSON error payload]`.
+ * Each binary frame is tagged: `[TAG_DATA (0x00)][payload]`,
+ * `[TAG_ERROR (0x01)][JSON error payload]`, or `[TAG_END (0x02)]` at the producer's end.
  *
  * Used by both directions:
  * - Client response: receives chunks from server-side channel pump
@@ -39,6 +40,7 @@ class ChannelStreamSource {
   private closed = false
   private closeError: Error | null = null
   private cancelled = false
+  private ended = false
   private readonly channel: StreamSourceChannel
   private readonly throwError?: (errorPayload: Record<string, unknown>) => never
 
@@ -95,8 +97,10 @@ class ChannelStreamSource {
 
   private async readNextChunk(): Promise<Uint8Array<ArrayBuffer> | null> {
     while (this.readHead >= this.queue.length) {
+      if (this.ended) return null
       if (this.closed) {
         if (this.closeError) throw this.closeError
+        if (!this.cancelled) throw new NetworkError('Channel closed before the end of its stream', true)
         return null
       }
       await new Promise<void>((r) => {
@@ -113,8 +117,12 @@ class ChannelStreamSource {
       this.queue = this.queue.slice(this.readHead)
       this.readHead = 0
     }
-    // Tag is the first byte: 0x00 = data, 0x01 = error.
+    // Tag is the first byte: 0x00 = data, 0x01 = error, 0x02 = end.
     const tag = entry.frame[0]
+    if (tag === CHANNEL_PUMP_TAG_END) {
+      this.ended = true
+      return null
+    }
     const payload = entry.frame.subarray(1)
     if (tag === CHANNEL_PUMP_TAG_ERROR) {
       const errorPayload: unknown = parse(textDecoder.decode(payload))

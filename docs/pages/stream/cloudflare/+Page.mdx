@@ -35,8 +35,9 @@ export default {
 {
   "compatibility_date": "2025-08-15", // or later: channels need MessageChannel
   // Required: Telefunc finds a subscription's session through AsyncLocalStorage (`nodejs_compat` works too).
+  // enable_request_signal lets context.signal see a client disconnect.
   // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
-  "compatibility_flags": ["nodejs_als"],
+  "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
