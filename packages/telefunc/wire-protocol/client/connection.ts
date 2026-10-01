@@ -1033,10 +1033,10 @@ class ClientConnection implements MuxConnection {
     this._onTransportClosed(transport)
   }
 
-  /** Funnel for pong-timeouts. Suppress while reconciling — pings are delayed by the round-trip;
-   *  `reconcileTimer` (armed by `enterReconciling`) is the liveness bound for that window. */
+  /** While a wire opens, its RECONCILE deadline bounds it: an SSE wire delivers once the server answers the request that
+   *  opens it. */
   private handlePongTimeout(transport: ClientChannelTransport): void {
-    if (this.reconciling) return
+    if (this.reconciling && !this.connected) return
     this.dropWire(transport)
   }
 

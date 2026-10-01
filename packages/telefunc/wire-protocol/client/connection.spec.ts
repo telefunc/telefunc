@@ -476,7 +476,7 @@ describe('SSE reconcile watchdog', () => {
 
     // The downstream is silent, so RECONCILED never lands. Without the watchdog the
     // connection wedges here forever: pings keep flowing but `handlePongTimeout` is
-    // suppressed while reconciling, so the dead wire is never noticed. The watchdog must
+    // suppressed while the wire opens, so the dead wire is never noticed. The watchdog must
     // instead time out the reconcile and reconnect.
     await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)
     expect(getSseDownstreamOpens()).toBeGreaterThanOrEqual(2)

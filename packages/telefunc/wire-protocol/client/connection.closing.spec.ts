@@ -488,7 +488,7 @@ describe.each(WIRES)('over %s', (wire) => {
     net.whenPageSends(TAG.RECONCILE, () => net.die())
     channel(register().id) // the listener opens a channel, whose registration holds the answer
     answer()
-    await advance(15_000) // a wire awaiting its RECONCILED is dropped at the reconcile timeout
+    await advance(15_000)
     expect(closing.value).toBe(0)
     expect(asked.value).toBe('reply')
     expect(serverClosed.err).toBeUndefined()
@@ -539,6 +539,23 @@ describe.each(WIRES)('over %s', (wire) => {
     await advance(10_000)
     expect(closing.value).toBe(1)
     expect(serverClosed.err).toBeUndefined()
+  })
+
+  test("a channel returned while the page's wire is dead without a word opens on both ends once the page reconnects (#482)", async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    await advance(500)
+    net.die()
+    const server = register()
+    const pageChannel = channel(server.id)
+    let opened = false
+    pageChannel.onOpen(() => (opened = true))
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    await advance(20_000)
+    expect(pageClosed.err).toBe('open')
+    expect(serverClosed.err).toBe('open')
+    expect(opened).toBe(true)
   })
 
   test('an abort the page queues behind a registration reaches the server', async () => {

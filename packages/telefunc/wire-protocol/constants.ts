@@ -153,7 +153,7 @@ export const SSE_METADATA_MAX_BYTES = 64 * 1024
  *  wire dead and reconnecting, and then only once the wire has delivered nothing that long, where
  *  its heartbeat tracks it. A downstream that stalls without erroring (bytes stop, no FIN)
  *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`
- *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
+ *  is suppressed while the wire opens, so nothing notices the dead wire and every call buffered
  *  behind the un-acked RECONCILE hangs. */
 export const RECONCILE_TIMEOUT_MS = 10_000
 
