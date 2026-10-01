@@ -201,26 +201,39 @@ async function reviveResponse(
 
 // ===== Frame demultiplexer =====
 
+/** A FIFO of frames with O(1) amortized reads, where `Array#shift` would copy what's left on every read. */
+class FrameQueue {
+  private frames: (Uint8Array<ArrayBuffer> | undefined)[] = []
+  private head = 0
+
+  push(frame: Uint8Array<ArrayBuffer>): void {
+    this.frames.push(frame)
+  }
+
+  shift(): Uint8Array<ArrayBuffer> | undefined {
+    const frame = this.frames[this.head]
+    if (!frame) return undefined
+    this.frames[this.head++] = undefined
+    if (this.head > 16 && this.head >= this.frames.length >>> 1) {
+      this.frames = this.frames.slice(this.head)
+      this.head = 0
+    }
+    return frame
+  }
+}
+
 /** Demultiplexes indexed frames from a single HTTP stream to multiple consumers.
  *
- *  Best-effort backpressure: stops reading when an idle consumer's buffer hits
- *  MAX_BUFFER_BYTES_PER_INDEX, resumes when drained. Active consumers (registered as
- *  waiters) receive frames via direct dispatch — zero buffering, zero delay.
- *
- *  Note: an index's buffer may briefly exceed MAX_BUFFER_BYTES_PER_INDEX. This happens when
- *  another consumer's drain restarts the read loop, and the next frame on the wire
- *  is for the already-full index. Each restart adds at most 1 frame of overshoot.
- *  This is the unavoidable cost of multiplexing over a single stream — we can't
- *  peek at the next frame's index without reading it.
+ *  Reads only while a consumer waits. Waiting consumers receive frames via direct dispatch; frames for a consumer that
+ *  isn't reading are buffered until it reads, as a `.tee()` branch's are: a waiting consumer's next frame can be behind
+ *  them on the wire.
  *
  *  Cancellation follows .tee() semantics: cancelling one consumer marks its index
  *  as cancelled and drops future frames for it. Other consumers continue normally.
- *  The upstream reader is only cancelled when ALL consumers are cancelled. */
+ *  The upstream reader is cancelled once every consumer is terminal and at least one cancelled. */
 class FrameDemuxer {
-  private static readonly MAX_BUFFER_BYTES_PER_INDEX = 1024 * 1024 // 1 MB
   private streamReader: BaseStreamReader
-  private pendingFrames = new Map<number, Uint8Array<ArrayBuffer>[]>()
-  private pendingBytes = new Map<number, number>()
+  private pendingFrames = new Map<number, FrameQueue>()
   private indexWaiters = new Map<
     number,
     { resolve: (v: Uint8Array<ArrayBuffer> | null) => void; reject: (e: unknown) => void }
@@ -252,21 +265,24 @@ class FrameDemuxer {
   }
 
   /** Cancel the given index. Follows .tee() semantics:
-   *  drops its buffered/future frames, resolves any pending waiter with null.
-   *  Upstream is cancelled only when all consumers are cancelled. */
+   *  drops its buffered/future frames, resolves any pending waiter with null. */
   cancelIndex(index: number): void {
     if (this.cancelledIndices.has(index)) return
-    this.cancelledIndices.add(index)
-    // Drop buffered frames for this index
+    // Drop buffered frames for this index; a finished one is not counted as cancelled.
     this.pendingFrames.delete(index)
+    if (this.doneIndices.has(index)) return
+    this.cancelledIndices.add(index)
     // Resolve any pending waiter with null (stream ended for this consumer)
     const waiter = this.indexWaiters.get(index)
     if (waiter) {
       this.indexWaiters.delete(index)
       waiter.resolve(null)
     }
-    // Cancel upstream when all consumers are cancelled
-    if (this.cancelledIndices.size >= this.totalConsumers) {
+    this.cancelUpstreamIfAllTerminal()
+  }
+
+  private cancelUpstreamIfAllTerminal(): void {
+    if (this.cancelledIndices.size > 0 && this.cancelledIndices.size + this.doneIndices.size >= this.totalConsumers) {
       this.streamReader.cancel()
     }
   }
@@ -275,13 +291,8 @@ class FrameDemuxer {
     if (this.cancelledIndices.has(index)) return null
     if (this.streamError) throw this.streamError
 
-    const pending = this.pendingFrames.get(index)
-    if (pending && pending.length > 0) {
-      const frame = pending.shift()!
-      this.pendingBytes.set(index, (this.pendingBytes.get(index) ?? 0) - frame.byteLength)
-      this.ensureReading()
-      return frame
-    }
+    const buffered = this.pendingFrames.get(index)?.shift()
+    if (buffered) return buffered
     if (this.doneIndices.has(index)) return null
     if (this.ended) return null
 
@@ -332,6 +343,7 @@ class FrameDemuxer {
         // Empty payload = per-index "done" signal
         if (frame.payload.length === 0) {
           this.doneIndices.add(frame.index)
+          this.cancelUpstreamIfAllTerminal()
           if (waiter) {
             this.indexWaiters.delete(frame.index)
             waiter.resolve(null)
@@ -347,15 +359,9 @@ class FrameDemuxer {
         }
 
         // No consumer waiting — buffer it
-        const pending = this.pendingFrames.get(frame.index)
-        if (pending) pending.push(frame.payload)
-        else this.pendingFrames.set(frame.index, [frame.payload])
-        const newBytes = (this.pendingBytes.get(frame.index) ?? 0) + frame.payload.byteLength
-        this.pendingBytes.set(frame.index, newBytes)
-
-        // Per-index backpressure: stop reading when this index's buffer exceeds 1 MB.
-        // The loop restarts when the consumer drains via readNextChunkForIndex().
-        if (newBytes >= FrameDemuxer.MAX_BUFFER_BYTES_PER_INDEX) break
+        let pending = this.pendingFrames.get(frame.index)
+        if (!pending) this.pendingFrames.set(frame.index, (pending = new FrameQueue()))
+        pending.push(frame.payload)
       }
     } catch (err) {
       this.streamError ??= err

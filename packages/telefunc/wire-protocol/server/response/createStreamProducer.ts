@@ -23,7 +23,8 @@ function createStreamProducer(stream: ReadableStream<Uint8Array<ArrayBuffer>>): 
     chunks,
     cancel: (reason) => {
       chunks.return(undefined)
-      reader.cancel(reason)
+      // Nothing awaits it: it rejects with an error the read already reported, or with the source's cancel() failure.
+      reader.cancel(reason).catch(() => {})
     },
   }
 }

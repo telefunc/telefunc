@@ -1,10 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ACK_STATUS, TAG, decode } from '../shared-ws.js'
+import { ACK_STATUS, TAG, decode, encode, type DecodedFrame, type SeqReader } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
+import { ChannelMux, type ServerTransport } from './mux.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcast.js'
 import type { BroadcastTransport } from './broadcast.js'
+import { config } from '../../node/server/serverConfig.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -142,6 +147,39 @@ describe('keyed in-process broadcast', () => {
     expect(seen).toEqual([1])
   })
 
+  it("keeps delivering to the server's own listeners after the page unsubscribes", () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:page-unsub' })
+    broadcast._registerChannel()
+    const seen: string[] = []
+    const seenBinary: number[] = []
+    broadcast.subscribe((m) => seen.push(m))
+    broadcast.subscribeBinary((data) => seenBinary.push(data.length))
+    for (const binary of [false, true]) {
+      broadcast._onPeerBroadcastSubscribe(binary)
+      broadcast._onPeerBroadcastUnsubscribe(binary)
+    }
+
+    broadcast.publish('after')
+    broadcast.publishBinary(new Uint8Array(3))
+
+    expect([seen, seenBinary]).toEqual([['after'], [3]])
+  })
+
+  it("takes the page's subscribe and unsubscribe frames", async () => {
+    const broadcast = new ServerBroadcast<string>({ key: 'room:page-frames' })
+    broadcast._registerChannel()
+    const sent: DecodedFrame[] = []
+    const replay = new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)
+    broadcast._attachPeer(
+      new IndexedPeer({ send: (frame) => void sent.push(decode(frame, wireSeqs)), bufferedAmount: () => 0 }, 7, replay),
+    )
+    broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })
+    await broadcast.publish('on')
+    broadcast._dispatchFrame({ tag: TAG.BROADCAST_UNSUB, index: 7, binary: false })
+    await broadcast.publish('off')
+    expect(sent.flatMap((frame) => (frame.tag === TAG.PUBLISH ? [frame.text] : []))).toEqual(['"on"'])
+  })
+
   // Edge case: a Broadcast can be created and have `publish` called on it BEFORE
   // any peer attaches. The behavioral contract: when the peer eventually attaches,
   // the previously-published message is delivered to it (not silently dropped).
@@ -162,14 +200,45 @@ describe('keyed in-process broadcast', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          bufferedAmount: () => 0,
         },
         7,
-        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+        new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
       ),
     )
 
-    // One publish made before attach → exactly one frame replayed on attach.
-    expect(frames.length).toBe(1)
+    // One publish made before attach → exactly one publish frame flushed on attach.
+    expect(frames.filter((frame) => frame[0] === TAG.PUBLISH).length).toBe(1)
+  })
+
+  it('opens channels under a zero config.channel.bufferLimit and holds no publish', () => {
+    config.channel = { bufferLimit: 0, bufferLimitBinary: 0 }
+    try {
+      const sender = new ServerBroadcast<{ text: string }>({ key: 'room:zero-limit' })
+      const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:zero-limit' })
+      sender._registerChannel()
+      receiver._registerChannel()
+      receiver._onPeerBroadcastSubscribe(false)
+
+      sender.publish({ text: 'hello' })
+
+      const frames: Uint8Array[] = []
+      receiver._attachPeer(
+        new IndexedPeer(
+          {
+            send: (frame) => {
+              frames.push(frame)
+            },
+            bufferedAmount: () => 0,
+          },
+          7,
+          new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
+        ),
+      )
+      expect(frames.filter((frame) => frame[0] === TAG.PUBLISH)).toEqual([])
+    } finally {
+      config.channel = {}
+    }
   })
 
   it('buffers keyed publishes that arrive before a sibling has registered yet', () => {
@@ -287,15 +356,16 @@ describe('Broadcast shield validation', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          bufferedAmount: () => 0,
         },
         7,
-        new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+        new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
       ),
     )
 
     void broadcast._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
 
-    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
+    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>, wireSeqs)).find((d) => d.tag === TAG.ACK_RES)
     expect(ack).toBeDefined()
     if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
     expect(ack.status).toBe(ACK_STATUS.SHIELD_ERROR)
@@ -315,7 +385,9 @@ describe('Broadcast shield validation', () => {
     const seen: Array<{ text: string }> = []
     receiver.subscribe((m) => seen.push(m))
 
-    sender._attachPeer(new IndexedPeer({ send: () => {} }, 7, new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024)))
+    sender._attachPeer(
+      new IndexedPeer({ send: () => {}, bufferedAmount: () => 0 }, 7, new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)),
+    )
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
@@ -455,6 +527,57 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast static bus (publish/subscribe)', () => {
+  it('delivers a publish made from a listener after the message it answers, to every subscriber', () => {
+    const seen: string[] = []
+    Broadcast.subscribe<number>('room:answer-order', (n) => {
+      seen.push(`first:${n}`)
+      if (n === 1) Broadcast.publish('room:answer-order', 2)
+    })
+    Broadcast.subscribe<number>('room:answer-order', (n) => void seen.push(`second:${n}`))
+    Broadcast.publish('room:answer-order', 1)
+    expect(seen).toEqual(['first:1', 'second:1', 'first:2', 'second:2'])
+  })
+
+  it('lets the event loop run while a listener answers every message on its own key', async () => {
+    let answers = 0
+    const unsubscribe = Broadcast.subscribe<number>('room:self-answer', (n) => {
+      answers++
+      void Broadcast.publish('room:self-answer', n + 1)
+    })
+    const unsubscribeAsync = Broadcast.subscribe<number>('room:self-answer-async', async (n) => {
+      await Promise.resolve()
+      answers++
+      void Broadcast.publish('room:self-answer-async', n + 1)
+    })
+    Broadcast.publish('room:self-answer', 0)
+    Broadcast.publish('room:self-answer-async', 0)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    unsubscribe()
+    unsubscribeAsync()
+    expect(answers).toBeGreaterThan(0)
+  })
+
+  it('delivers a burst in order, publishes past 1,024 after the event loop runs', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    const seen: number[] = []
+    adapter.subscribe('burst', (_, info) => void seen.push(info.seq))
+    const results = Array.from({ length: 1025 }, () => adapter.publish('burst', '"x"'))
+    expect(results.filter((result) => result instanceof Promise)).toHaveLength(1)
+    expect(seen).toHaveLength(1024)
+    await results[1024]
+    expect(seen).toEqual(Array.from({ length: 1025 }, (_, i) => i + 1))
+  })
+
+  it('resolves a static publish to a receipt with its key, as a subscriber gets it', async () => {
+    const key = `room:receipt-${crypto.randomUUID()}`
+    const text = await Broadcast.publish(key, 'hi')
+    const binary = await Broadcast.publishBinary(key, new Uint8Array([1]))
+    expect([text, binary]).toMatchObject([
+      { key, seq: 1 },
+      { key, seq: 2 },
+    ])
+  })
+
   it('static publish + static subscribe deliver without any instance', async () => {
     const received: Array<{ text: string }> = []
     const unsubscribe = Broadcast.subscribe<{ text: string }>('room:static', (msg) => received.push(msg))
@@ -474,5 +597,73 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     await Broadcast.publish('room:static-unsub', { text: 'second' })
 
     expect(received).toEqual([{ text: 'first' }])
+  })
+
+  it("a BroadcastChannel subscriber that unsubscribes itself doesn't make the next one miss the message", async () => {
+    const channel = new ServerBroadcast<string>({ key: 'broadcast:self-unsubscribe' })
+    const seen: string[] = []
+    const off = channel.subscribe((message) => {
+      seen.push(`once:${message}`)
+      off()
+    })
+    channel.subscribe((message) => void seen.push(`other:${message}`))
+    await channel.publish('one')
+    await channel.publish('two')
+    expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+    channel.abort()
+  })
+})
+
+describe('Broadcast subscriptions declared on attach', () => {
+  /** A mux, and the texts of the PUBLISH frames it sends down any wire. */
+  function muxWires() {
+    const mux = new ChannelMux()
+    const sessions = new Map<object, string>()
+    const published: string[] = []
+    const transport: ServerTransport<object> = {
+      getSessionId: (wire) => sessions.get(wire),
+      setSessionId: (wire, id) => void sessions.set(wire, id),
+      getConnId: () => null,
+      sendNow: (_wire, frame) => {
+        const decoded = decode(frame, wireSeqs)
+        if (decoded.tag === TAG.PUBLISH) published.push(decoded.text)
+      },
+      bufferedAmount: () => 0,
+      terminateConnection: () => {},
+    }
+    const open = () => {
+      const wire = {}
+      mux.onConnectionOpen(wire, transport)
+      return wire
+    }
+    return { mux, sessions, published, open }
+  }
+
+  it("delivers onOpen's publish to the client whose open declared its subscription", async () => {
+    const { mux, published, open } = muxWires()
+    const wire = open()
+    const chat = new ServerBroadcast<string>({ key: 'broadcast:joined-on-open' })
+    chat.onOpen(() => void chat.publish('joined'))
+    mux.registerChannel(chat)
+    const entry = { id: chat.id, ix: 0, lastSeq: 0, initial: true, broadcast: { text: true, binary: false } } as const
+    await mux.onConnectionRawMessage(wire, encode.reconcile({ open: [entry] }))
+    await vi.waitFor(() => expect(published).toContain('"joined"'))
+  })
+
+  it('restores a subscription whose BROADCAST_SUB died with the previous transport from the reconnect entry', async () => {
+    const { mux, sessions, published, open } = muxWires()
+    const key = 'broadcast:reconnect-entry'
+    const chat = new ServerBroadcast<string>({ key })
+    mux.registerChannel(chat)
+    const first = open()
+    const entry = { id: chat.id, ix: 0, lastSeq: 0, broadcast: { text: false, binary: false } }
+    await mux.onConnectionRawMessage(first, encode.reconcile({ open: [{ ...entry, initial: true }] }))
+    mux.onConnectionClosed(first, { permanent: false })
+
+    const second = open()
+    const reopened = { ...entry, broadcast: { text: true, binary: false } }
+    await mux.onConnectionRawMessage(second, encode.reconcile({ sessionId: sessions.get(first), open: [reopened] }))
+    await Broadcast.publish(key, 'after-reconnect')
+    await vi.waitFor(() => expect(published).toContain('"after-reconnect"'))
   })
 })

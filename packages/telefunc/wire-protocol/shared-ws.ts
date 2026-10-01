@@ -1,6 +1,7 @@
 export {
   TAG,
   ACK_STATUS,
+  ERROR_REASON,
   encode,
   decode,
   decodeClientFrame,
@@ -9,6 +10,9 @@ export {
   ProtocolViolationError,
   isChannelCtrlTag,
   isChannelDataFrame,
+  isSequencedFrame,
+  replayLaneOf,
+  countsCredit,
   isConnCtrlTag,
   encodePublishText,
   encodePublishBinary,
@@ -16,20 +20,27 @@ export {
 }
 export type {
   AckResultStatus,
+  ErrorReason,
+  ReplayLaneKind,
   DecodedFrame,
   ChannelFrame,
   ChannelCtrlFrame,
   ChannelDataFrame,
   ReconcilePayload,
   ReconcileOpenEntry,
+  ReattachState,
   BarrierPayload,
   ReconciledPayload,
   PreparePayload,
   ReadyPayload,
+  PingEntry,
+  PongEntry,
+  SeqReader,
   WirePublishInfo,
 }
 
 import type { ChannelTransports } from './constants.js'
+import { assert } from '../utils/assert.js'
 
 // ===== Wire protocol =====
 //
@@ -38,18 +49,26 @@ import type { ChannelTransports } from './constants.js'
 //
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
-// `seq` is the replay sequence number for sequenced data frames; 0 for ctrl frames.
+// `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
+// ctrl frames carry 0. Seqs count on past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` reads
+// as the whole seq from where its receiver stands on the channel (see `SeqReader`).
 //
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x09  connection-level control (no ix, no seq)
 //   0x10–0x29  data plane (carries seq, payload varies)
-//   0x30–      per-channel control (carries ix, no seq)
+//   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 //
 // Channel indices are client-owned and stable for the channel's lifetime.
 // Sequence numbers are sender-assigned for replayable data frames in both directions.
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
 const HEADER = 7
+/** How many seqs a u32 tells apart. */
+const SEQ_SPAN = 2 ** 32
+const PING_ENTRY_BYTES = 6
+const PONG_ENTRY_BYTES = 7
+/** An ACK_RES's `ackedSeq` and status. */
+const ACK_RES_PREFIX = 9
 const payloadBytes = (frame: Uint8Array): number => frame.byteLength - HEADER
 const DATA_TAG_MIN = 0x10
 
@@ -62,7 +81,11 @@ const textDecoder = new TextDecoder()
 
 const TAG = {
   // ─── Connection-level control (no ix, no seq) ───
+  /** Client → server heartbeat. Payload: a `PingEntry` for each closed channel the page holds that the server
+   *  attached. */
   PING: 0x01 as const,
+  /** Server → client heartbeat. Payload: a `PongEntry` for each channel the PING names, if the page's session is on this
+   *  wire. */
   PONG: 0x02 as const,
   /** Server → client on old transport after upgrade drain: signals last frame on this transport. */
   FIN: 0x03 as const,
@@ -86,7 +109,8 @@ const TAG = {
   BINARY: 0x11 as const,
   TEXT_ACK_REQ: 0x12 as const,
   BINARY_ACK_REQ: 0x13 as const,
-  /** ACK response — carries `ackedSeq` + serialized result. */
+  /** ACK response: carries `ackedSeq` whole, as an answer may come any number of seqs after its request, and the
+   *  serialized result. */
   ACK_RES: 0x14 as const,
   /** Replayable publish frame delivered to keyed-channel subscribers. */
   PUBLISH: 0x15 as const,
@@ -97,25 +121,33 @@ const TAG = {
   /** Replayable keyed binary publish frame that requests an acknowledgement receipt. */
   PUBLISH_BINARY_ACK_REQ: 0x18 as const,
 
-  // ─── Per-channel control (carries ix, no seq) ───
+  // ─── Per-channel control (carries ix) ───
+  /** A close request. Sequenced, so it replays like data. */
   CLOSE: 0x30 as const,
+  /** Sequenced, as CLOSE is. */
   CLOSE_ACK: 0x31 as const,
-  /** Server → client: channel closed with an abort value (analogous to `throw Abort()`). */
+  /** Channel closed with an abort value (analogous to `throw Abort()`). Sequenced, as CLOSE is. */
   ABORT: 0x32 as const,
-  /** Server → client: channel closed due to an unhandled server error (no payload). */
+  /** Channel closed with an error. Payload: u8 `ERROR_REASON`. Server → client, and client → server for `LOST` only.
+   *  Sequenced, as CLOSE is. */
   ERROR: 0x33 as const,
-  /** Flow-control window update — sets the peer's send credit to the advertised value. */
+  /** Flow-control byte limit, receiver → sender: what the receiver has consumed plus its window, mod 2^32, and the last seq
+   *  it has of what the sender sent on the channel, which the sender's replay no longer needs to keep. */
   WINDOW: 0x34 as const,
   BROADCAST_SUB: 0x35 as const,
   BROADCAST_UNSUB: 0x36 as const,
   /** BDP probe — receiver→sender. Sender echoes `BDP_PING_ACK` immediately so the
-   *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. */
+   *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. Payload: u32, the probe's number. */
   BDP_PING: 0x37 as const,
+  /** Payload: u32, the probe it answers, u8 1 when the sender's credit ran out while its wire held nothing, since it last
+   *  sent one, and u32, the path's round trip in µs as the sender measured it, 0 where it measured none. */
   BDP_PING_ACK: 0x38 as const,
-  /** Flow-control message-count update — sets the peer's send msg-credit to the
-   *  advertised value. Parallel to `WINDOW` but counted in messages, not bytes,
+  /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
   MSG_WINDOW: 0x39 as const,
+  /** Server → client: settles an initial channel a RECONCILED left out because the server hadn't registered it yet,
+   *  either attached with the server's `lastSeq`, or not registered within `connectTtl`. */
+  ATTACH_RESULT: 0x3b as const,
 }
 
 function isConnCtrlTag(tag: number): boolean {
@@ -130,6 +162,39 @@ function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
   return frame.tag >= DATA_TAG_MIN && frame.tag < CHANNEL_CTRL_TAG_MIN
 }
 
+/** What a replay holds: data, and the closing frames. */
+function isSequencedFrame(frame: DecodedFrame): frame is SequencedFrame {
+  return isSequencedTag(frame.tag)
+}
+
+function isSequencedTag(tag: number): boolean {
+  return (tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag)
+}
+
+function isClosingTag(tag: number): boolean {
+  return tag === TAG.CLOSE || tag === TAG.CLOSE_ACK || tag === TAG.ABORT || tag === TAG.ERROR
+}
+
+/** The replay lane a sequenced frame goes in: a data lane under its byte budget, or, for the frame that ends a channel,
+ *  one no byte budget drops from. */
+type ReplayLaneKind = 'text' | 'binary' | 'closing'
+
+function replayLaneOf(tag: number): ReplayLaneKind {
+  if (isClosingTag(tag)) return 'closing'
+  assert(tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN)
+  return tag === TAG.BINARY ||
+    tag === TAG.BINARY_ACK_REQ ||
+    tag === TAG.PUBLISH_BINARY ||
+    tag === TAG.PUBLISH_BINARY_ACK_REQ
+    ? 'binary'
+    : 'text'
+}
+
+/** Whether flow control counts a data frame (see `constants.ts`): a message, not an ack request or its answer. */
+function countsCredit(tag: number): boolean {
+  return tag === TAG.TEXT || tag === TAG.BINARY || tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
+}
+
 // ===== Reconcile payloads (JSON-encoded after the header) =====
 
 type ReconcileOpenEntry = {
@@ -138,11 +203,20 @@ type ReconcileOpenEntry = {
   lastSeq: number
   /** `initial: true` means this is the first reconcile for that channel — the server may
    *  not have created it yet (late-creation race during request body parse), so the server
-   *  should wait up to `connectTtl` for it. Established channels (already reconciled at
-   *  least once) omit `initial`; the server fails them fast if they're missing rather than
-   *  stalling the entire reconcile. */
+   *  awaits it up to `connectTtl`, and an ATTACH_RESULT settles it. Established channels
+   *  (already reconciled at least once) omit `initial`; the server fails them fast if they're
+   *  missing. */
   initial?: true
+  /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
+  broadcast?: { text: boolean; binary: boolean }
+  /** A BDP probe's number, which the server answers as it reads the entry, ahead of what the attach sends of the
+   *  channel: on another wire than the last, the ack queues behind none of the channel's data, so its round trip is the
+   *  path's. */
+  probe?: number
 }
+
+/** What a channel adds to its own RECONCILE entry. */
+type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 
 type ReconcilePayload = {
   sessionId?: string
@@ -166,6 +240,12 @@ type ReadyPayload = {
   upgradeId: string
 }
 
+/** A closed channel of the page's: the last seq the page has of what the server sent on it. */
+type PingEntry = { ix: number; lastSeq: number }
+
+/** The last seq the server has of what the page sent on that channel, or null: the server no longer holds it. */
+type PongEntry = { ix: number; lastSeq: number | null }
+
 /** Per-channel acknowledgment: the server confirms each `ix` it attached and tells the
  *  client which `lastSeq` it has on file, so the client can replay frames after that. */
 type ReconciledPayload = {
@@ -174,6 +254,8 @@ type ReconciledPayload = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
+  serverReplayBuffer: number
+  serverReplayBufferBinary: number
   clientReplayBuffer: number
   clientReplayBufferBinary: number
   sseFlushThrottle: number
@@ -197,40 +279,61 @@ const ACK_STATUS = {
 
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 
+/** Why the server closed a channel with `ERROR`. */
+const ERROR_REASON = {
+  /** An unhandled server error. */
+  BUG: 0x00 as const,
+  /** Its page fell further behind a broadcast than the server holds for it. */
+  OVERFLOW: 0x01 as const,
+  /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
+  LOST: 0x02 as const,
+}
+
+type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON]
+
 /** Ordering metadata embedded in PUBLISH frames on the wire. */
 type WirePublishInfo = { seq: number; timestamp: number }
 
 // ===== Decoded frame =====
 
-type ChannelDataFrame =
-  | { tag: typeof TAG.TEXT; index: number; seq: number; text: string; bytes: number }
-  | { tag: typeof TAG.BINARY; index: number; seq: number; data: Uint8Array }
-  | { tag: typeof TAG.TEXT_ACK_REQ; index: number; seq: number; text: string }
-  | { tag: typeof TAG.BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
-  | { tag: typeof TAG.ACK_RES; index: number; seq: number; ackedSeq: number; status: AckResultStatus; text: string }
-  | { tag: typeof TAG.PUBLISH; index: number; seq: number; text: string; info: WirePublishInfo }
-  | { tag: typeof TAG.PUBLISH_ACK_REQ; index: number; seq: number; text: string }
-  | { tag: typeof TAG.PUBLISH_BINARY; index: number; seq: number; data: Uint8Array; info: WirePublishInfo }
-  | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; index: number; seq: number; data: Uint8Array }
+/** `bytes`: the payload's size, what flow control counts. */
+type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
+  | { tag: typeof TAG.TEXT; text: string }
+  | { tag: typeof TAG.BINARY; data: Uint8Array }
+  | { tag: typeof TAG.TEXT_ACK_REQ; text: string }
+  | { tag: typeof TAG.BINARY_ACK_REQ; data: Uint8Array }
+  | { tag: typeof TAG.ACK_RES; ackedSeq: number; status: AckResultStatus; text: string }
+  | { tag: typeof TAG.PUBLISH; text: string; info: WirePublishInfo }
+  | { tag: typeof TAG.PUBLISH_ACK_REQ; text: string }
+  | { tag: typeof TAG.PUBLISH_BINARY; data: Uint8Array; info: WirePublishInfo }
+  | { tag: typeof TAG.PUBLISH_BINARY_ACK_REQ; data: Uint8Array }
+)
 
 type ChannelCtrlFrame =
-  | { tag: typeof TAG.CLOSE; index: number; timeoutMs: number }
-  | { tag: typeof TAG.CLOSE_ACK; index: number }
-  | { tag: typeof TAG.ABORT; index: number; abortValue: string }
-  | { tag: typeof TAG.ERROR; index: number }
-  | { tag: typeof TAG.WINDOW; index: number; bytes: number }
+  | { tag: typeof TAG.CLOSE; index: number; seq: number; timeoutMs: number }
+  | { tag: typeof TAG.CLOSE_ACK; index: number; seq: number }
+  | { tag: typeof TAG.ABORT; index: number; seq: number; abortValue: string }
+  | { tag: typeof TAG.ERROR; index: number; seq: number; reason: number }
+  | { tag: typeof TAG.WINDOW; index: number; bytes: number; lastSeq: number }
   | { tag: typeof TAG.MSG_WINDOW; index: number; count: number }
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
-  | { tag: typeof TAG.BDP_PING; index: number }
-  | { tag: typeof TAG.BDP_PING_ACK; index: number }
+  | { tag: typeof TAG.BDP_PING; index: number; probe: number }
+  /** `pathRtt` in ms, `Infinity` where the sender measured none. */
+  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; starved: boolean; pathRtt: number }
+  /** `lastSeq` is null when the channel wasn't attached. */
+  | { tag: typeof TAG.ATTACH_RESULT; index: number; lastSeq: number | null }
 
 /** Frames that carry an `index` (channel ix) — both data and per-channel ctrl. */
 type ChannelFrame = ChannelDataFrame | ChannelCtrlFrame
 
+type SequencedFrame =
+  | ChannelDataFrame
+  | Extract<ChannelCtrlFrame, { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.ABORT | typeof TAG.ERROR }>
+
 type ConnCtrlFrame =
-  | { tag: typeof TAG.PING }
-  | { tag: typeof TAG.PONG }
+  | { tag: typeof TAG.PING; ended: PingEntry[] }
+  | { tag: typeof TAG.PONG; ended: PongEntry[] }
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
@@ -253,6 +356,11 @@ function writeHeader(frame: Uint8Array, tag: number, index: number, seq: number)
   frame[6] = (seq >> 24) & 0xff
 }
 
+function writeU16(frame: Uint8Array, offset: number, n: number): void {
+  frame[offset] = n & 0xff
+  frame[offset + 1] = (n >> 8) & 0xff
+}
+
 function writeU32(frame: Uint8Array, offset: number, n: number): void {
   frame[offset] = n & 0xff
   frame[offset + 1] = (n >> 8) & 0xff
@@ -260,13 +368,55 @@ function writeU32(frame: Uint8Array, offset: number, n: number): void {
   frame[offset + 3] = (n >> 24) & 0xff
 }
 
+function readU16(buf: Uint8Array, offset: number): number {
+  return (buf[offset] as number) | ((buf[offset + 1] as number) << 8)
+}
+
+/** u32 low, then u32 high: exact to 2^53, past which a JS number skips integers. */
+function writeU64(frame: Uint8Array, offset: number, n: number): void {
+  writeU32(frame, offset, n)
+  writeU32(frame, offset + 4, n / SEQ_SPAN)
+}
+
 function readU32(buf: Uint8Array, offset: number): number {
   return (
-    (buf[offset] as number) |
-    ((buf[offset + 1] as number) << 8) |
-    ((buf[offset + 2] as number) << 16) |
-    ((buf[offset + 3] as number) << 24)
+    ((buf[offset] as number) |
+      ((buf[offset + 1] as number) << 8) |
+      ((buf[offset + 2] as number) << 16) |
+      ((buf[offset + 3] as number) << 24)) >>>
+    0
   )
+}
+
+function readU64(buf: Uint8Array, offset: number): number {
+  return readU32(buf, offset) + readU32(buf, offset + 4) * SEQ_SPAN
+}
+
+// ===== Seqs off the wire =====
+
+/** Where a frame's receiver stands on each channel, from which `decode` reads the low 32 bits of a seq as the whole. */
+type SeqReader = {
+  /** The highest seq it has of what its peer sent on channel `ix`. */
+  received(ix: number): number
+  /** The last seq it gave what it sent on channel `ix`. */
+  sent(ix: number): number
+}
+
+/** A frame's seq: the one with those low bits nearest the next its receiver expects, as QUIC reads a packet number
+ *  (RFC 9000, appendix A.3). A seq reaches its receiver less than 2^31 frames from the next it expects: no wire or
+ *  replay holds that many. */
+function seqNear(bits: number, expected: number): number {
+  const seq = expected - (expected % SEQ_SPAN) + bits
+  if (seq <= expected - SEQ_SPAN / 2) return seq + SEQ_SPAN
+  if (seq > expected + SEQ_SPAN / 2 && seq >= SEQ_SPAN) return seq - SEQ_SPAN
+  return seq
+}
+
+/** A peer's acknowledgement of what this side sent: the latest seq with those low bits through `sent`, the last this
+ *  side gave. A peer never lacks 2^32 frames of what was sent: no wire or replay holds that many. */
+function seqThrough(bits: number, sent: number): number {
+  const seq = sent - (sent % SEQ_SPAN) + bits
+  return seq > sent && seq >= SEQ_SPAN ? seq - SEQ_SPAN : seq
 }
 
 function encodeTextFrame(tag: number, index: number, text: string, seq: number): Uint8Array<ArrayBuffer> {
@@ -310,7 +460,7 @@ const encode = {
     encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
   binaryAckReq: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.BINARY_ACK_REQ, index, data, seq),
 
-  /** Wire: [header][u32 ackedSeq][u8 status][result bytes...]
+  /** Wire: [header][u64 ackedSeq][u8 status][result bytes...]
    *  `ownSeq` — this frame's own replay sequence number.
    *  `ackedSeq` — the seq of the ACK_REQ frame being acknowledged. */
   ackRes(
@@ -321,17 +471,40 @@ const encode = {
     status: AckResultStatus = ACK_STATUS.OK,
   ): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(result)
-    const frame = new Uint8Array(HEADER + 5 + payload.byteLength)
+    const frame = new Uint8Array(HEADER + ACK_RES_PREFIX + payload.byteLength)
     writeHeader(frame, TAG.ACK_RES, index, ownSeq)
-    writeU32(frame, HEADER, ackedSeq)
-    frame[HEADER + 4] = status
-    frame.set(payload, HEADER + 5)
+    writeU64(frame, HEADER, ackedSeq)
+    frame[HEADER + 8] = status
+    frame.set(payload, HEADER + ACK_RES_PREFIX)
     return frame
   },
 
   // ── Connection-level ctrls ──
-  ping: () => encodeBareFrame(TAG.PING),
-  pong: () => encodeBareFrame(TAG.PONG),
+  /** Wire: [header]([u16 ix][u32 lastSeq])* */
+  ping(ended: PingEntry[] = []): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + PING_ENTRY_BYTES * ended.length)
+    writeHeader(frame, TAG.PING, 0, 0)
+    let offset = HEADER
+    for (const { ix, lastSeq } of ended) {
+      writeU16(frame, offset, ix)
+      writeU32(frame, offset + 2, lastSeq)
+      offset += PING_ENTRY_BYTES
+    }
+    return frame
+  },
+  /** Wire: [header]([u16 ix][u8 held][u32 lastSeq])* */
+  pong(ended: PongEntry[] = []): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + PONG_ENTRY_BYTES * ended.length)
+    writeHeader(frame, TAG.PONG, 0, 0)
+    let offset = HEADER
+    for (const { ix, lastSeq } of ended) {
+      writeU16(frame, offset, ix)
+      frame[offset + 2] = lastSeq === null ? 0 : 1
+      writeU32(frame, offset + 3, lastSeq ?? 0)
+      offset += PONG_ENTRY_BYTES
+    }
+    return frame
+  },
   fin: () => encodeBareFrame(TAG.FIN),
   reconcile: (payload: ReconcilePayload) => encodeJsonFrame(TAG.RECONCILE, payload),
   barrier: (payload: BarrierPayload) => encodeJsonFrame(TAG.BARRIER, payload),
@@ -341,25 +514,36 @@ const encode = {
   ready: (payload: ReadyPayload) => encodeJsonFrame(TAG.READY, payload),
 
   // ── Per-channel ctrls ──
-  close(index: number, timeoutMs: number): Uint8Array<ArrayBuffer> {
+  close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 4)
-    writeHeader(frame, TAG.CLOSE, index, 0)
+    writeHeader(frame, TAG.CLOSE, index, seq)
     writeU32(frame, HEADER, timeoutMs)
     return frame
   },
-  closeAck: (index: number) => encodeBareFrame(TAG.CLOSE_ACK, index),
-  abort(index: number, abortValue: string): Uint8Array<ArrayBuffer> {
+  closeAck(index: number, seq = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER)
+    writeHeader(frame, TAG.CLOSE_ACK, index, seq)
+    return frame
+  },
+  abort(index: number, abortValue: string, seq = 0): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(abortValue)
     const frame = new Uint8Array(HEADER + payload.byteLength)
-    writeHeader(frame, TAG.ABORT, index, 0)
+    writeHeader(frame, TAG.ABORT, index, seq)
     frame.set(payload, HEADER)
     return frame
   },
-  error: (index: number) => encodeBareFrame(TAG.ERROR, index),
-  window(index: number, bytes: number): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 4)
+  error(index: number, reason: ErrorReason, seq = 0): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 1)
+    writeHeader(frame, TAG.ERROR, index, seq)
+    frame[HEADER] = reason
+    return frame
+  },
+  /** Wire: [header][u32 limit][u32 lastSeq] */
+  window(index: number, bytes: number, lastSeq: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 8)
     writeHeader(frame, TAG.WINDOW, index, 0)
     writeU32(frame, HEADER, bytes)
+    writeU32(frame, HEADER + 4, lastSeq)
     return frame
   },
   msgWindow(index: number, count: number): Uint8Array<ArrayBuffer> {
@@ -368,8 +552,33 @@ const encode = {
     writeU32(frame, HEADER, count)
     return frame
   },
-  bdpPing: (index: number) => encodeBareFrame(TAG.BDP_PING, index),
-  bdpPingAck: (index: number) => encodeBareFrame(TAG.BDP_PING_ACK, index),
+  bdpPing(index: number, probe: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 4)
+    writeHeader(frame, TAG.BDP_PING, index, 0)
+    writeU32(frame, HEADER, probe)
+    return frame
+  },
+  /** `pathRtt` in ms, `Infinity` where the sender measured none. */
+  bdpPingAck(index: number, probe: number, starved: boolean, pathRtt: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 9)
+    writeHeader(frame, TAG.BDP_PING_ACK, index, 0)
+    writeU32(frame, HEADER, probe)
+    frame[HEADER + 4] = starved ? 1 : 0
+    writeU32(
+      frame,
+      HEADER + 5,
+      pathRtt === Infinity ? 0 : Math.min(0xffffffff, Math.max(1, Math.round(pathRtt * 1000))),
+    )
+    return frame
+  },
+  /** Wire: [header][u8 attached][u32 lastSeq] */
+  attachResult(index: number, lastSeq: number | null): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 5)
+    writeHeader(frame, TAG.ATTACH_RESULT, index, 0)
+    frame[HEADER] = lastSeq === null ? 0 : 1
+    writeU32(frame, HEADER + 1, lastSeq ?? 0)
+    return frame
+  },
   broadcastSub(index: number, binary: boolean): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
     writeHeader(frame, TAG.BROADCAST_SUB, index, 0)
@@ -408,38 +617,40 @@ function peekTag(raw: Uint8Array): number | undefined {
   return raw[0]
 }
 
-function decode(frame: Uint8Array): DecodedFrame {
+function decode(frame: Uint8Array, seqs: SeqReader): DecodedFrame {
   assertProtocol(frame.length >= HEADER, 'frame too short')
   const tag = frame[0] as number
   const index = (frame[1] as number) | ((frame[2] as number) << 8)
-  const seq = readU32(frame, 3)
+  const seq = isSequencedTag(tag) ? seqNear(readU32(frame, 3), seqs.received(index) + 1) : 0
   const payload = frame.subarray(HEADER)
+
+  const bytes = payload.byteLength
 
   switch (tag) {
     case TAG.TEXT:
-      return { tag: TAG.TEXT, index, seq, text: textDecoder.decode(payload), bytes: payload.byteLength }
+      return { tag: TAG.TEXT, index, seq, bytes, text: textDecoder.decode(payload) }
     case TAG.BINARY:
-      return { tag: TAG.BINARY, index, seq, data: payload }
+      return { tag: TAG.BINARY, index, seq, bytes, data: payload }
     case TAG.TEXT_ACK_REQ:
-      return { tag: TAG.TEXT_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
+      return { tag: TAG.TEXT_ACK_REQ, index, seq, bytes, text: textDecoder.decode(payload) }
     case TAG.BINARY_ACK_REQ:
-      return { tag: TAG.BINARY_ACK_REQ, index, seq, data: payload }
+      return { tag: TAG.BINARY_ACK_REQ, index, seq, bytes, data: payload }
     case TAG.PUBLISH: {
       const { text, info } = decodePublishText(textDecoder.decode(payload))
-      return { tag: TAG.PUBLISH, index, seq, text, info }
+      return { tag: TAG.PUBLISH, index, seq, bytes, text, info }
     }
     case TAG.PUBLISH_ACK_REQ:
-      return { tag: TAG.PUBLISH_ACK_REQ, index, seq, text: textDecoder.decode(payload) }
+      return { tag: TAG.PUBLISH_ACK_REQ, index, seq, bytes, text: textDecoder.decode(payload) }
     case TAG.PUBLISH_BINARY: {
       const { data, info } = decodePublishBinary(payload)
-      return { tag: TAG.PUBLISH_BINARY, index, seq, data, info }
+      return { tag: TAG.PUBLISH_BINARY, index, seq, bytes, data, info }
     }
     case TAG.PUBLISH_BINARY_ACK_REQ:
-      return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, data: payload }
+      return { tag: TAG.PUBLISH_BINARY_ACK_REQ, index, seq, bytes, data: payload }
     case TAG.ACK_RES: {
-      assertProtocol(payload.length >= 5, 'ACK_RES payload too short')
-      const ackedSeq = readU32(payload, 0)
-      const status = payload[4] as number
+      assertProtocol(payload.length >= ACK_RES_PREFIX, 'ACK_RES payload too short')
+      const ackedSeq = readU64(payload, 0)
+      const status = payload[8] as number
       assertProtocol(
         status === ACK_STATUS.OK ||
           status === ACK_STATUS.ERROR ||
@@ -447,13 +658,29 @@ function decode(frame: Uint8Array): DecodedFrame {
           status === ACK_STATUS.SHIELD_ERROR,
         `ACK_RES unknown status ${status}`,
       )
-      return { tag: TAG.ACK_RES, index, seq, ackedSeq, status, text: textDecoder.decode(payload.subarray(5)) }
+      const text = textDecoder.decode(payload.subarray(ACK_RES_PREFIX))
+      return { tag: TAG.ACK_RES, index, seq, bytes, ackedSeq, status, text }
     }
 
-    case TAG.PING:
-      return { tag: TAG.PING }
-    case TAG.PONG:
-      return { tag: TAG.PONG }
+    case TAG.PING: {
+      assertProtocol(payload.length % PING_ENTRY_BYTES === 0, 'PING payload')
+      const ended: PingEntry[] = []
+      for (let offset = 0; offset < payload.length; offset += PING_ENTRY_BYTES) {
+        const ix = readU16(payload, offset)
+        ended.push({ ix, lastSeq: seqThrough(readU32(payload, offset + 2), seqs.sent(ix)) })
+      }
+      return { tag: TAG.PING, ended }
+    }
+    case TAG.PONG: {
+      assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')
+      const ended: PongEntry[] = []
+      for (let offset = 0; offset < payload.length; offset += PONG_ENTRY_BYTES) {
+        const ix = readU16(payload, offset)
+        const held = payload[offset + 2] === 1
+        ended.push({ ix, lastSeq: held ? seqThrough(readU32(payload, offset + 3), seqs.sent(ix)) : null })
+      }
+      return { tag: TAG.PONG, ended }
+    }
     case TAG.FIN:
       return { tag: TAG.FIN }
     // Client→server payloads are validated here, at the trust boundary; server→client ones are
@@ -473,29 +700,50 @@ function decode(frame: Uint8Array): DecodedFrame {
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
-      return { tag: TAG.CLOSE, index, timeoutMs: readU32(payload, 0) }
+      return { tag: TAG.CLOSE, index, seq, timeoutMs: readU32(payload, 0) }
     case TAG.CLOSE_ACK:
-      return { tag: TAG.CLOSE_ACK, index }
+      return { tag: TAG.CLOSE_ACK, index, seq }
     case TAG.ABORT:
-      return { tag: TAG.ABORT, index, abortValue: textDecoder.decode(payload) }
+      return { tag: TAG.ABORT, index, seq, abortValue: textDecoder.decode(payload) }
     case TAG.ERROR:
-      return { tag: TAG.ERROR, index }
+      assertProtocol(payload.length >= 1, 'ERROR payload too short')
+      return { tag: TAG.ERROR, index, seq, reason: payload[0] as number }
     case TAG.WINDOW:
-      assertProtocol(payload.length >= 4, 'WINDOW payload too short')
-      return { tag: TAG.WINDOW, index, bytes: readU32(payload, 0) }
+      assertProtocol(payload.length >= 8, 'WINDOW payload too short')
+      return {
+        tag: TAG.WINDOW,
+        index,
+        bytes: readU32(payload, 0),
+        lastSeq: seqThrough(readU32(payload, 4), seqs.sent(index)),
+      }
     case TAG.MSG_WINDOW:
       assertProtocol(payload.length >= 4, 'MSG_WINDOW payload too short')
       return { tag: TAG.MSG_WINDOW, index, count: readU32(payload, 0) }
     case TAG.BDP_PING:
-      return { tag: TAG.BDP_PING, index }
-    case TAG.BDP_PING_ACK:
-      return { tag: TAG.BDP_PING_ACK, index }
+      assertProtocol(payload.length >= 4, 'BDP_PING payload too short')
+      return { tag: TAG.BDP_PING, index, probe: readU32(payload, 0) }
+    case TAG.BDP_PING_ACK: {
+      assertProtocol(payload.length >= 9, 'BDP_PING_ACK payload too short')
+      const pathRtt = readU32(payload, 5)
+      return {
+        tag: TAG.BDP_PING_ACK,
+        index,
+        probe: readU32(payload, 0),
+        starved: payload[4] === 1,
+        pathRtt: pathRtt === 0 ? Infinity : pathRtt / 1000,
+      }
+    }
     case TAG.BROADCAST_SUB:
       assertProtocol(payload.length >= 1, 'BROADCAST_SUB payload too short')
       return { tag: TAG.BROADCAST_SUB, index, binary: payload[0] === 1 }
     case TAG.BROADCAST_UNSUB:
       assertProtocol(payload.length >= 1, 'BROADCAST_UNSUB payload too short')
       return { tag: TAG.BROADCAST_UNSUB, index, binary: payload[0] === 1 }
+    case TAG.ATTACH_RESULT: {
+      assertProtocol(payload.length >= 5, 'ATTACH_RESULT payload too short')
+      const lastSeq = payload[0] === 1 ? seqThrough(readU32(payload, 1), seqs.sent(index)) : null
+      return { tag: TAG.ATTACH_RESULT, index, lastSeq }
+    }
 
     default:
       throw new ProtocolViolationError(`unknown wire frame tag ${tag}`)
@@ -516,6 +764,8 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PUBLISH_BINARY_ACK_REQ,
   TAG.CLOSE,
   TAG.CLOSE_ACK,
+  TAG.ABORT,
+  TAG.ERROR,
   TAG.WINDOW,
   TAG.MSG_WINDOW,
   TAG.BDP_PING,
@@ -527,11 +777,11 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
 /** Server ingress: `decode` owns the frame's shape, this owns its direction and the upgrade frames'
  *  size cap. The cap is checked on the raw bytes because its job is to bound what an unauthenticated
  *  peer can make us parse — after `decode` it would be bounding nothing. */
-function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number): DecodedFrame {
+function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number, seqs: SeqReader): DecodedFrame {
   const tag = peekTag(raw)
   const isUpgradeFrame = tag === TAG.PREPARE || tag === TAG.BARRIER
   assertProtocol(!isUpgradeFrame || raw.byteLength <= maxUpgradeFrameBytes, 'upgrade frame over byte cap')
-  const frame = decode(raw)
+  const frame = decode(raw, seqs)
   assertProtocol(CLIENT_TAGS.has(frame.tag), `client sent a server-only frame ${frame.tag}`)
   return frame
 }
@@ -573,8 +823,16 @@ function parseOpenList(payload: Record<string, unknown>): void {
     // `ix` is truncated to u16 by the header writer, so a wider one would alias onto another channel.
     assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix), 'RECONCILE entry ix')
     indexes.add(entry.ix)
-    assertProtocol(isUint(entry.lastSeq, 0xffffffff), 'RECONCILE entry lastSeq')
+    assertProtocol(isUint(entry.lastSeq, Number.MAX_SAFE_INTEGER), 'RECONCILE entry lastSeq')
     assertProtocol(entry.initial === undefined || entry.initial === true, 'RECONCILE entry initial')
+    assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'RECONCILE entry probe')
+    if (entry.broadcast !== undefined) {
+      const broadcast = asObject(entry.broadcast)
+      assertProtocol(
+        typeof broadcast.text === 'boolean' && typeof broadcast.binary === 'boolean',
+        'RECONCILE entry broadcast',
+      )
+    }
   }
 }
 
@@ -615,15 +873,16 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
 }
 
 // ===== Binary publish info helpers =====
-// Format: [4 bytes: seq as u32 LE][8 bytes: timestamp as f64 LE][binary data]
+// Format: [8 bytes: seq as f64 LE][8 bytes: timestamp as f64 LE][binary data]
+// The seq goes as the number a text publish's decimal carries, so both deliver the same one.
 
-const PUBLISH_BINARY_HEADER = 12
+const PUBLISH_BINARY_HEADER = 16
 
 function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
   const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
   const view = new DataView(result.buffer)
-  view.setUint32(0, info.seq, true)
-  view.setFloat64(4, info.timestamp, true)
+  view.setFloat64(0, info.seq, true)
+  view.setFloat64(8, info.timestamp, true)
   result.set(data, PUBLISH_BINARY_HEADER)
   return result
 }
@@ -631,8 +890,8 @@ function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Arra
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
   assertProtocol(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
   const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
-  const seq = view.getUint32(0, true)
-  const timestamp = view.getFloat64(4, true)
+  const seq = view.getFloat64(0, true)
+  const timestamp = view.getFloat64(8, true)
   assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
   return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
 }

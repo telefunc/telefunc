@@ -68,7 +68,7 @@ vi.mock('crossws/adapters/cloudflare', () => ({
 }))
 
 vi.mock('../../ws.js', () => ({
-  getTelefuncChannelHooks: vi.fn(() => ({ onMessage: vi.fn() })),
+  getTelefuncChannelHooks: vi.fn(() => ({ message: vi.fn() })),
 }))
 
 vi.mock('../../../../node/server/serverConfig.js', () => ({
@@ -109,6 +109,7 @@ vi.mock('./routing.js', () => ({
 }))
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
+import { resolveSessionRoutingTarget } from './routing.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -196,17 +197,16 @@ describe('cloudflare adapter entrypoint', () => {
     expect(response?.headers.get('x-telefunc-session')).toBe('my-token')
   })
 
-  it('derives a new shard and stores a KV token when no token is provided', async () => {
+  it('derives a new shard and token when no token is provided, and hands the token to the session Durable Object', async () => {
     const { binding, get, fetch } = createBinding()
     const tf = new Telefunc()
     const kv = createMockKV()
-    const waitUntilFns: Array<Promise<unknown>> = []
     const request = new Request('https://telefunc.test/_telefunc')
 
     const response = await tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: (p: Promise<unknown>) => waitUntilFns.push(p) } as unknown as ExecutionContext,
+      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
     })
 
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-0' }), {
@@ -215,24 +215,68 @@ describe('cloudflare adapter entrypoint', () => {
     expect(fetch).toHaveBeenCalledTimes(1)
 
     const token = response?.headers.get('x-telefunc-session')
-    expect(token).toBeTruthy()
-    expect(token).toMatch(/^telefunc-shard-weur-0:/)
+    expect(token).toMatch(/^[0-9a-f-]{36}$/)
+    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toBe(token)
+  })
 
-    await Promise.all(waitUntilFns)
-    const stored = await kv.get(`session:${token}`, 'json')
-    expect(stored).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
+  it("leaves a page's pin to its session Durable Object, however many of its first requests miss KV", async () => {
+    const { binding } = createBinding()
+    const tf = new Telefunc()
+    const kv = createMockKV()
+    const put = vi.spyOn(kv, 'put')
+    for (let i = 0; i < 3; i++) {
+      await tf.serve({
+        request: new Request('https://telefunc.test/_telefunc?session=new-token'),
+        env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+        ctx: { waitUntil: (p: Promise<unknown>) => void p } as unknown as ExecutionContext,
+      })
+    }
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('keeps a presented token whose KV entry lapsed, and routes it by that token again', async () => {
+    const { binding } = createBinding()
+    const tf = new Telefunc()
+    const kv = createMockKV()
+    const response = await tf.serve({
+      request: new Request('https://telefunc.test/_telefunc?session=lapsed-token'),
+      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+      ctx: { waitUntil: (p: Promise<unknown>) => void p.then(() => {}) } as unknown as ExecutionContext,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(vi.mocked(resolveSessionRoutingTarget)).toHaveBeenLastCalledWith(
+      'telefunc',
+      undefined,
+      expect.any(Request),
+      'weur',
+      'lapsed-token',
+    )
+    expect(response?.headers.get('x-telefunc-session')).toBe('lapsed-token')
+  })
+
+  it('takes the session token from the session query parameter only', async () => {
+    const { binding } = createBinding()
+    const tf = new Telefunc()
+    const response = await tf.serve({
+      request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
+      env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
+      ctx: { waitUntil: (p: Promise<unknown>) => void p.then(() => {}) } as unknown as ExecutionContext,
+    })
+    expect(response?.headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
   })
 
   it('returns undefined for non-telefunc traffic', async () => {
     const tf = new Telefunc()
 
-    await expect(
-      tf.serve({
-        request: new Request('https://telefunc.test/other'),
-        env: {} as Cloudflare.Env,
-        ctx: {} as ExecutionContext,
-      }),
-    ).resolves.toBeUndefined()
+    for (const path of ['/other', '/_telefunc-other']) {
+      await expect(
+        tf.serve({
+          request: new Request(`https://telefunc.test${path}`),
+          env: {} as Cloudflare.Env,
+          ctx: {} as ExecutionContext,
+        }),
+      ).resolves.toBeUndefined()
+    }
   })
 
   it('asserts when binding is missing for telefunc traffic', async () => {
@@ -354,5 +398,88 @@ describe('cloudflare adapter entrypoint', () => {
       serialized: '{"text":"hello"}',
       info: expect.any(Object),
     })
+  })
+})
+
+describe("the session Durable Object's pin", () => {
+  function sessionObject(kv: KVNamespace) {
+    const { binding } = createBinding()
+    const tf = new Telefunc()
+    const waitUntil: Array<Promise<unknown>> = []
+    const ctx = { id: { name: 'telefunc-shard-weur-0' }, waitUntil: (p: Promise<unknown>) => void waitUntil.push(p) }
+    const env = { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env
+    const instance = new tf.TelefuncDurableObject(ctx as unknown as DurableObjectState, env) as unknown as {
+      fetch(request: Request): Promise<Response>
+    }
+    const request = (token: string) =>
+      instance.fetch(
+        new Request('https://telefunc.test/_telefunc', {
+          headers: {
+            'x-telefunc-shard': 'telefunc-shard-weur-0',
+            'x-telefunc-broadcast-bucket': 'weur',
+            'x-telefunc-session': token,
+          },
+        }),
+      )
+    return { request, settled: () => Promise.all(waitUntil) }
+  }
+
+  it('writes a token once for its first requests, then again only as the pin nears its TTL', async () => {
+    const kv = createMockKV()
+    const put = vi.spyOn(kv, 'put')
+    const { request, settled } = sessionObject(kv)
+    await Promise.all([request('token-a'), request('token-a')])
+    await request('token-a')
+    await settled()
+    expect(put).toHaveBeenCalledTimes(1)
+    expect(await kv.get('session:token-a', 'json')).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
+    vi.useFakeTimers({ now: Date.now() + 13 * 60 * 60 * 1000 })
+    try {
+      await request('token-a')
+    } finally {
+      vi.useRealTimers()
+    }
+    await settled()
+    expect(put).toHaveBeenCalledTimes(2)
+  })
+
+  it("renews a page's pin as the WebSocket it opened keeps carrying its messages, with no request in between", async () => {
+    const kv = createMockKV()
+    const put = vi.spyOn(kv, 'put')
+    const { request, settled } = sessionObject(kv)
+    const hooks = (mocks.crosswsFactory.mock.calls.at(-1) as unknown as [{ hooks: Record<string, Function> }])[0].hooks
+    // The request the page's WebSocket was opened with, as the socket's peer keeps it.
+    const upgrade = new Request('https://telefunc.test/_telefunc?session=token-c', {
+      headers: {
+        'x-telefunc-shard': 'telefunc-shard-weur-0',
+        'x-telefunc-broadcast-bucket': 'weur',
+        'x-telefunc-session': 'token-c',
+      },
+    })
+    await request('token-c')
+    await settled()
+    expect(put).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers({ now: Date.now() + 13 * 60 * 60 * 1000 })
+    try {
+      hooks.message!({ request: upgrade }, { uint8Array: () => new Uint8Array() })
+    } finally {
+      vi.useRealTimers()
+    }
+    await settled()
+    expect(put).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports a pin it failed to write, and writes it on the next request', async () => {
+    const kv = createMockKV()
+    const put = vi.spyOn(kv, 'put').mockRejectedValueOnce(new Error('KV is down'))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { request, settled } = sessionObject(kv)
+    await request('token-b')
+    await settled()
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('KV is down'))
+    await request('token-b')
+    await settled()
+    expect(put).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
   })
 })

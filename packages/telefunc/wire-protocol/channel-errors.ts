@@ -1,4 +1,6 @@
-export { ChannelClosedError, ChannelOverflowError }
+export { ChannelClosedError, ChannelOverflowError, replayLossError }
+
+import { NetworkError } from '../shared/NetworkError.js'
 
 /** Thrown synchronously by `send()` when the channel is already closed.
  *  Also used to reject pending ack promises when the channel shuts down. */
@@ -15,4 +17,12 @@ class ChannelOverflowError extends Error {
     super(message)
     this.name = 'ChannelOverflowError'
   }
+}
+
+/** How a channel ends when a reconnect needs what `side`'s replay buffer dropped. */
+function replayLossError(side: 'server' | 'client'): NetworkError {
+  return new NetworkError(
+    `Channel closed: a reconnect needed messages the ${side}'s replay buffer had dropped to stay within its size. Raise config.channel.${side}ReplayBuffer, or ${side}ReplayBufferBinary for binary messages and streams.`,
+    true,
+  )
 }

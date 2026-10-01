@@ -21,6 +21,8 @@ export const FN_SHIELD_ERROR_KEY = '__telefunc_fn_shield_error'
 /** 1-byte tag prefixed to every binary send in per-channel streaming pumps. */
 export const CHANNEL_PUMP_TAG_DATA = 0x00
 export const CHANNEL_PUMP_TAG_ERROR = 0x01
+/** The producer's end, before its close: a stream whose channel closes without it was cut short. */
+export const CHANNEL_PUMP_TAG_END = 0x02
 
 // ===== Streaming error frames =====
 
@@ -104,8 +106,9 @@ export const UPGRADE_STAGE_TTL_MS = 10_000
 export const UPGRADE_MAX_ID_BYTES = 256
 
 /** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
- *  `"lastSeq":4294967295`, `"initial":true` and the separator. */
-const RECONCILE_ENTRY_ENVELOPE_BYTES = 96
+ *  `"lastSeq":9007199254740991`, `"initial":true`, `"broadcast":{"text":false,"binary":false}`, `"probe":4294967295`
+ *  and the separator. */
+const RECONCILE_ENTRY_ENVELOPE_BYTES = 124
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
 export const UPGRADE_MAX_STAGED_RECORDS = 1_024
@@ -129,17 +132,30 @@ export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
 /** Per-connection ceiling on accepted-but-unprocessed frames: a peer that outruns its recv chain
- *  is terminated rather than allowed to queue without bound. */
-export const WIRE_MAX_RECV_BACKLOG_BYTES = 64 * 1024 * 1024
-export const WIRE_MAX_RECV_BACKLOG_FRAMES = 50_000
+ *  is terminated rather than allowed to queue without bound. This base is the allowance for what
+ *  credit doesn't govern: control frames, ack-bearing sends, sends nobody awaits. Each channel
+ *  attached to the wire adds a window at `CREDIT_WINDOW_MAX_BYTES` and `CREDIT_MSG_WINDOW_MAX`,
+ *  the most a peer that awaits its sends can have in flight on it: a cap that refuses a legal
+ *  burst is worse than no cap. */
+export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
+export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
+
+/** Per-connection ceiling on what the server's wire holds for its peer, where the runtime reports it. Each channel
+ *  attached to the wire adds the most its flow control lets wait there for a page that reads (see
+ *  `ServerChannel._sendAllowance`), and the largest frame sent on the wire, as a send puts one frame past a limit. This
+ *  base is room for what flow control doesn't count, control frames and the answers to a page's ack requests, as much
+ *  as the largest frame a page may send. A wire holding more serves a peer that grants credit it can't take, or doesn't
+ *  read what it asked for, and is terminated as a transient loss. */
+export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
 
 /** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
- *  wire dead and reconnecting. A downstream that stalls without erroring (bytes stop, no FIN)
+ *  wire dead and reconnecting, and then only once the wire has delivered nothing that long, where
+ *  its heartbeat tracks it. A downstream that stalls without erroring (bytes stop, no FIN)
  *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`
- *  is suppressed while reconciling, so nothing notices the dead wire and every call buffered
+ *  is suppressed while the wire opens, so nothing notices the dead wire and every call buffered
  *  behind the un-acked RECONCILE hangs. */
 export const RECONCILE_TIMEOUT_MS = 10_000
 
@@ -164,14 +180,8 @@ export const CHANNEL_IDLE_TIMEOUT_MS = 60_000
 export const CHANNEL_PING_INTERVAL_MS = 5_000
 export const CHANNEL_PING_INTERVAL_MIN_MS = 1_000
 export const CHANNEL_CLOSE_TIMEOUT_MS = 5_000
-/** Per-channel replay buffer for text frames kept on the server for reconnect recovery. */
-export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 256 * 1024
-/** Per-channel replay buffer for binary frames kept on the server for reconnect recovery. */
-export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
-/** Per-channel replay buffer for text frames advertised to the client for reconnect replay. */
-export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 1024 * 1024
-/** Per-channel replay buffer for binary frames advertised to the client for reconnect replay. */
-export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * 1024 * 1024
+/** The longest delay a timer takes: past it, setTimeout fires at once. Bounds every duration a channel waits out. */
+export const TIMER_DELAY_MAX_MS = 2 ** 31 - 1
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the
@@ -182,8 +192,10 @@ export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
 
 /** How long a channel waits for a peer to connect after the server→client
- *  HTTP response carrying `channel.client` has been serialized. */
-export const CHANNEL_CONNECT_TTL_MS = 5_000
+ *  HTTP response carrying `channel.client` has been serialized. It outlasts a page's noticing that its wire died without
+ *  a word, twice the ping interval after the wire's last frame, then its first reconnect delay and a reconcile round
+ *  trip. */
+export const CHANNEL_CONNECT_TTL_MS = 15_000
 
 // Client-side channel reconnect defaults
 export const CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500
@@ -196,9 +208,9 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 // link's BDP is the only way to avoid this stall (no algorithm beats W/RTT). Rather
 // than picking a single fixed `W`, the receiver maintains a gRPC-style BDP estimator
 // (see `bdp-estimator.ts`) that probes the in-flight byte count once per RTT and
-// doubles `W` whenever the sample saturates ≥ 2/3 of the current window. Idle channels
-// stay at the small initial cost; fat-pipe channels climb to the cap within a handful
-// of RTTs.
+// doubles `W` whenever the sample saturates ≥ 2/3 of the current window, unless a queue
+// the probe's ack waited behind accounts for it. Idle channels stay at the small initial
+// cost; fat-pipe channels climb to the cap within a handful of RTTs.
 //
 // Scope — which frames credit governs:
 //
@@ -217,13 +229,29 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             deadlocks (server with depleted credit could otherwise
 //                             never reply to a client that's waiting for that reply
 //                             to free credit).
-//   PUBLISH, PUBLISH_BINARY   broadcast fan-out, separate flow control entirely.
+//   PUBLISH, PUBLISH_BINARY   broadcast fan-out: counted in bytes only, taking no
+//                             message credit and starting no BDP probe, against the
+//                             largest byte window the page grants, from the start.
+//                             Nothing waits on them: the count tells the server how
+//                             far behind the page is, past which it closes the
+//                             page's broadcast channel.
 //
-// Window semantics — `WINDOW` frame advertises an absolute value (not additive like
-// HTTP/2). Sender resets `_peerWindow` to `CREDIT_WINDOW_INITIAL_BYTES` on transport
-// reattach; receiver preserves its grown `W` across reconnect (BDP is a property of
-// the path, not of any single wire instance — slight divergence from gRPC's
-// per-connection reset, acceptable for typical transport hiccups).
+// Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA
+// does: what the receiver has consumed plus its window. The sender's credit is that limit
+// minus what it has sent, so what is still in flight counts against it. Each side advertises
+// its limits again on a reattach to another wire, and the receiver keeps its grown `W` across
+// one (BDP is a property of the path, not of any single wire instance: slight divergence from
+// gRPC's per-connection reset, acceptable for typical transport hiccups). A reattach on the
+// same wire lost nothing and advertises nothing.
+//
+// Replay: each end keeps what it sent on a channel until its peer acknowledges it, to replay after a reconnect. A
+// `WINDOW` carries the last seq the receiver has, so each one acknowledges: one goes out as a limit does, once a
+// quarter window of what credit doesn't count, ack requests and their answers, arrived since the last, and at each
+// heartbeat for what arrived since the last, so a quiet channel's replay empties. A receiver never grants a window past
+// half the smaller lane of its peer's replay buffer (`replayWindow`), so what credit lets be in flight, and a message
+// up to as large sent as the credit ran out, always fit it. What credit doesn't hold back, sends nobody awaits past it,
+// ack requests and their answers, takes the rest, and a reconnect that needs what a replay dropped ends the channel on
+// both ends with `NetworkError`.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */
@@ -236,6 +264,14 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
 /** Hard cap on the adaptive credit window — bounds per-channel buffering worst case.
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
+
+/** Each lane of a channel's replay buffer, text and binary, on the server and on the page: twice the largest window, so
+ *  nothing but `CREDIT_WINDOW_MAX_BYTES` caps a window (see `replayWindow`). A replay holds what its peer hasn't
+ *  acknowledged: for a stream that awaits its sends, its window and a message at most. */
+export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
+export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 
 /** Initial per-channel message-count credit. Independent of the byte budget:
  *  many tiny frames within a normal byte window can still bury the receive loop

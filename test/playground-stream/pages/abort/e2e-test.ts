@@ -123,6 +123,12 @@ function testAbort() {
     await resetCleanupState()
 
     await page.click('#test-slow-normal-telefunc')
+    // Abort once the server runs the telefunc.
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.slowNormal).toBe('running')
+    })
+    await page.click('#test-slow-normal-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)
@@ -139,12 +145,18 @@ function testAbort() {
 
   // ── Upload abort ────────────────────────────────────────────────────
 
-  // 1MB file with sleep(100) between reads — client aborts at 300ms
+  // 1MB file with sleep(100) between reads — the client aborts while the server reads it
   test('abort: single file upload — client cancel, server disconnect error', async () => {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     await page.click('#test-upload-abort-single')
+    // Abort once the server reads the file.
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.uploadAbortSingle).toBe('running')
+    })
+    await page.click('#test-upload-abort-single-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)
@@ -160,13 +172,19 @@ function testAbort() {
     })
   })
 
-  // Three 50MB files — file1 consumed fully, client aborts at 3s during
+  // Three 50MB files — file1 consumed fully, the client aborts during the
   // post-file1 sleep, file2+file3 error on disconnect
   test('abort: multiple file upload — file1 received, file2+file3 error on disconnect', async () => {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
     await page.click('#test-upload-abort-multiple')
+    // Abort once the server has read file1.
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.uploadAbortMultiFilesRead).toBe('1')
+    })
+    await page.click('#test-upload-abort-multiple-abort')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
       expect(result.isAbort).toBe(true)

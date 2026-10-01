@@ -15,6 +15,7 @@ import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wi
 import { CloseHandler } from '../close.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
+import { randomUuid } from '../../utils/randomUuid.js'
 
 const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
   gcRegistry: new GcRegistry(),
@@ -30,6 +31,7 @@ type CallContext = {
   extensions?: Record<string, unknown>
   extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
   connectionKey?: string
+  channelIdleTimeout?: number
   headers?: Record<string, string> | null
   telefuncUrl: string
 }
@@ -57,6 +59,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
 
   const channelTransports = callContext.channel.transports
   const connectionKey = callContext.connectionKey
+  const idleTimeout = callContext.channelIdleTimeout
   const headers = callContext.headers ?? undefined
   const telefuncUrl = callContext.telefuncUrl
   const abortSignal = callContext.abortController.signal
@@ -72,16 +75,24 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
       },
       createChannel(opts) {
         return new ClientChannel({
-          channelId: crypto.randomUUID(),
+          channelId: randomUuid(),
           ack: opts?.ack,
           transports: channelTransports,
           connectionKey,
           headers,
           telefuncUrl,
+          idleTimeout,
         })
       },
       sendStream(createProducer) {
-        return pumpClientProducerToChannel(createProducer, channelTransports, telefuncUrl, connectionKey, headers)
+        return pumpClientProducerToChannel(
+          createProducer,
+          channelTransports,
+          telefuncUrl,
+          connectionKey,
+          headers,
+          idleTimeout,
+        )
       },
     },
     function onReplaced(replaced) {

@@ -61,6 +61,9 @@ class SseConnectionTransport {
     },
     getConnId: (connection) => connection.connId,
     sendNow: (connection, frame) => this.sendNow(connection, frame),
+    // An event carries its frame in base64, 4 bytes for every 3 and framing on top: three quarters of what waits is
+    // never fewer bytes than the frames it carries.
+    bufferedAmount: (connection) => Math.floor((connection.stream.bufferedAmount * 3) / 4),
     terminateConnection: (connection) => this.terminateConnection(connection),
   }
 
@@ -155,7 +158,10 @@ class SseConnectionTransport {
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
     // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
     this.sendNow(connection, encode.streamRequestOpenAck())
-    if (!(await this.waitReady(connection))) return badRequest()
+    // No deadline: the client trusts this POST from the ack on. The gate opens on every path, when runStreamResponse
+    // ends or the connection closes.
+    await connection.ready
+    if (connection.closed) return badRequest()
     try {
       while (true) {
         const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
@@ -307,8 +313,7 @@ class SseConnectionTransport {
   }
 
   private terminateConnection(connection: SseConnection): void {
-    const terminatePermanently = this.mux.readPermanentTermination(connection)
-    this.closeConnection(connection, { permanent: terminatePermanently === true })
+    this.closeConnection(connection, { permanent: this.mux.readPermanentTermination(connection) })
   }
 }
 

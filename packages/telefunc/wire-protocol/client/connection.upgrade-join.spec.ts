@@ -10,10 +10,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { ClientConnection } from './connection.js'
-import { decode, encode, TAG } from '../shared-ws.js'
+import { decode, encode, TAG, type SeqReader } from '../shared-ws.js'
 import type { DecodedFrame } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Long enough for the connect POST, the probe handshake and any chained microtasks to drain. */
@@ -53,7 +56,7 @@ class FakeWebSocket {
     queueMicrotask(() => this.onopen?.())
   }
   send(data: ArrayBuffer | Uint8Array): void {
-    const frame = decode(new Uint8Array(data instanceof Uint8Array ? data : new Uint8Array(data)))
+    const frame = decode(new Uint8Array(data instanceof Uint8Array ? data : new Uint8Array(data)), wireSeqs)
     this.sent.push(frame)
     this.onSent?.(frame)
   }
@@ -78,6 +81,8 @@ function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string }
     reconnectTimeout: 60_000,
     idleTimeout: 60_000,
     pingInterval: 100_000,
+    serverReplayBuffer: 1_000_000,
+    serverReplayBufferBinary: 2_000_000,
     clientReplayBuffer: 1_000_000,
     clientReplayBufferBinary: 2_000_000,
     sseFlushThrottle: 300,
@@ -146,7 +151,7 @@ async function upgradeToBarrier(): Promise<Harness> {
       const frames = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]!))
       for (const raw of frames.slice(1)) {
-        const frame = decode(bytes(raw))
+        const frame = decode(bytes(raw), wireSeqs)
         if (frame.tag === TAG.RECONCILE) ix = frame.payload.open[0]?.ix ?? 0
         onUpstreamFrame(frame)
       }
@@ -184,7 +189,7 @@ async function upgradeToBarrier(): Promise<Harness> {
               sawMetadata = true
               continue
             }
-            onUpstreamFrame(decode(bytes(raw)))
+            onUpstreamFrame(decode(bytes(raw), wireSeqs))
           }
         }
         resolve(new Response('', { status: 200 }))
@@ -269,5 +274,88 @@ describe('SSE→WS handoff join', () => {
     h.probe.deliver(encode.text(h.ix, '"new-1"', 1))
     await settle()
     expect(h.dispatched, 'the join must still be waiting for its own COMMITTED').toEqual([])
+  })
+})
+
+describe('flow control across an upgrade attempt', () => {
+  // Sends are held from the barrier's emission until its COMMITTED. An attempt that ends without emitting its barrier
+  // releases the hold with no reattach, so no limit advertised again on attach repairs a refresh dropped meanwhile.
+  test('a window refresh made while the barrier waits for the old wire reaches the server when the attempt ends without it', async () => {
+    const channel = createChannel([])
+    const downstream = makeDownstream()
+    const posted: DecodedFrame[] = []
+    let releasePost: (() => void) | null = null
+    let holdNextPost = false
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const body = init.body as unknown
+      // No upload stream: every client→server frame goes in a batch POST.
+      if (!(body instanceof Blob)) throw new TypeError('upload streams are not supported')
+      const [metadata, ...frames] = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
+      const decoded = frames.map((raw) => decode(bytes(raw), wireSeqs))
+      if (JSON.parse(new TextDecoder().decode(metadata)).streamResponse) {
+        const reconcile = decoded.find((frame) => frame.tag === TAG.RECONCILE)!
+        const ix = reconcile.tag === TAG.RECONCILE ? reconcile.payload.open[0]!.ix : 0
+        downstream.open()
+        downstream.push(
+          encode.reconciled({
+            sessionId: crypto.randomUUID(),
+            open: [{ ix, lastSeq: 0 }],
+            reconnectTimeout: 60_000,
+            idleTimeout: 60_000,
+            pingInterval: 100_000,
+            serverReplayBuffer: 1_000_000,
+            serverReplayBufferBinary: 2_000_000,
+            clientReplayBuffer: 1_000_000,
+            clientReplayBufferBinary: 2_000_000,
+            sseFlushThrottle: 0,
+            ssePostIdleFlushDelay: 0,
+            transports: ['sse', 'ws'],
+          }),
+        )
+        return new Response(downstream.stream as BodyInit, {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        })
+      }
+      posted.push(...decoded)
+      if (!holdNextPost) return new Response('', { status: 200 })
+      holdNextPost = false
+      return await new Promise<Response>((resolve) => {
+        releasePost = () => resolve(new Response('', { status: 200 }))
+      })
+    }) as unknown as typeof fetch
+
+    const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+      transports: ['sse', 'ws'],
+      fetchImpl,
+      connectionKey: crypto.randomUUID(),
+    })
+    await settle()
+    const probe = FakeWebSocket.last!
+    probe.answer((frame) => {
+      if (frame.tag === TAG.PING) probe.deliver(encode.pong())
+    })
+    probe.deliver(encode.pong())
+    await settle()
+    const prepare = probe.sent.find((frame) => frame.tag === TAG.PREPARE)
+    expect(prepare, 'the client should have staged its upgrade').toBeDefined()
+
+    // A batch POST is in flight when the upgrade commits, so the barrier waits for it with sends held.
+    holdNextPost = true
+    connection.send(channel as never, '"in-flight"')
+    await settle()
+    expect(releasePost).not.toBeNull()
+    probe.deliver(encode.ready({ upgradeId: prepare!.tag === TAG.PREPARE ? prepare!.payload.upgradeId : '' }))
+    await settle()
+    connection.sendMsgWindowUpdate(channel as never, 2_000)
+
+    // The attempt ends before the barrier could go: the probe dies, then the POST it waited for settles.
+    probe.close()
+    releasePost!()
+    await settle()
+    expect(posted.some((frame) => frame.tag === TAG.BARRIER)).toBe(false)
+    expect(posted.filter((frame) => frame.tag === TAG.MSG_WINDOW)).toEqual([
+      { tag: TAG.MSG_WINDOW, index: expect.any(Number), count: 2_000 },
+    ])
   })
 })

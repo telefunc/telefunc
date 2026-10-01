@@ -1,8 +1,11 @@
 import { expect, test } from 'vitest'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
 import { ServerChannel } from './server/channel.js'
-import { decode, encode, TAG, type DecodedFrame } from './shared-ws.js'
+import { decode, encode, TAG, type DecodedFrame, type SeqReader } from './shared-ws.js'
 import { WIRE_MAX_CONN_CTRL_FRAME_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from './constants.js'
+
+/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
+const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 function createHarness() {
   const mux = new ChannelMux()
@@ -15,7 +18,8 @@ function createHarness() {
       getSessionId: () => sessionId,
       setSessionId: (_conn, id) => (sessionId = id),
       getConnId: () => null,
-      sendNow: (_conn, frame) => sent.push(decode(frame)),
+      sendNow: (_conn, frame) => sent.push(decode(frame, wireSeqs)),
+      bufferedAmount: () => 0,
       terminateConnection: () => (terminated = true),
     }
     mux.onConnectionOpen(conn, transport)
@@ -78,7 +82,11 @@ test('a control frame is bounded by what the protocol can describe, a data frame
   // A perfectly well-formed RECONCILE, just larger than a connection could legitimately need.
   // Well-formed matters: a malformed one would be refused by the parser either way, which is
   // exactly what this has to distinguish — the cap has to reject it without parsing it.
-  const open = Array.from({ length: 5_200 }, (_, ix) => ({ id: 'x'.repeat(256), ix, lastSeq: 0 }))
+  const open = Array.from({ length: Math.ceil(WIRE_MAX_CONN_CTRL_FRAME_BYTES / 256) }, (_, ix) => ({
+    id: 'x'.repeat(256),
+    ix,
+    lastSeq: 0,
+  }))
   const oversize = encode.reconcile({ open })
   expect(oversize.byteLength).toBeGreaterThan(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
   await wire.deliver(oversize)
