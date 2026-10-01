@@ -2030,6 +2030,8 @@ class SseTransport implements UpgradeSource {
     void this.flushOutbox()
   })
   private flushing = false
+  /** Bytes pushed to the outbox since `foldOutbox` last folded: when to fold, not what. */
+  private unfolded = 0
   /** The next POST's body, as far as `foldOutbox` built it. */
   private folded: { blob: Blob; count: number; first: OutboxEntry; last: OutboxEntry } | null = null
   private lastPostStartedAt = 0
@@ -2123,6 +2125,7 @@ class SseTransport implements UpgradeSource {
     const now = Date.now()
     const deadline = this.getFrameDeadline(frame.kind, now)
     this.outbox.push({ frame: frame.frame, deadline })
+    this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
     if (this.flushing) this.foldOutbox()
     this.scheduleFlush()
     if (deadline <= now) void this.flushOutbox()
@@ -2134,10 +2137,9 @@ class SseTransport implements UpgradeSource {
   private foldOutbox(): void {
     const folded = this.folded
     const valid = folded !== null && this.outbox[0] === folded.first && this.outbox[folded.count - 1] === folded.last
+    if (this.unfolded < SSE_FOLD_BYTES) return
+    this.unfolded = 0
     const from = valid ? folded.count : 0
-    let bytes = 0
-    for (let i = from; i < this.outbox.length; i++) bytes += this.outbox[i]!.frame.byteLength
-    if (bytes < SSE_FOLD_BYTES) return
     const parts: (Blob | Uint8Array<ArrayBuffer>)[] = valid ? [folded.blob] : []
     for (let i = from; i < this.outbox.length; i++) {
       const { frame } = this.outbox[i]!
