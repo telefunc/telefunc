@@ -7,7 +7,7 @@ import { encodeLengthPrefixedFrames } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { decode, encode, TAG, type DecodedFrame, type SeqReader } from '../shared-ws.js'
 import { Readable } from 'node:stream'
-import { getServerConfig } from '../../node/server/serverConfig.js'
+import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import { CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import type { PushReadable } from '../push-readable.js'
@@ -55,6 +55,9 @@ function collectFrames(body: ReadableStream<Uint8Array>): DecodedFrame[] {
 
 test("an acknowledged upload POST waits out the connection's first reconcile, however long that reconcile's POST takes", async () => {
   vi.useFakeTimers()
+  // Within the ping deadline, which this page, sending no PING, would otherwise pass.
+  config.channel = { connectTtl: 5_000 }
+  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
   try {
     const sse = getTelefuncSseChannelHooks()
     const connId = crypto.randomUUID()
@@ -88,6 +91,8 @@ test("an acknowledged upload POST waits out the connection's first reconcile, ho
     expect(didOpen).toBe(true)
   } finally {
     vi.useRealTimers()
+    config.channel = {}
+    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
   }
 })
 
