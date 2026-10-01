@@ -1172,6 +1172,22 @@ describe.each(WIRES)(
       expect(net.links).toHaveLength(1)
     })
 
+    test("keeps its wire while one message ahead of it, which the server's onOpen sends, takes longer than the ping deadline to cross the link", async () => {
+      const { net, channel } = page(wire)
+      net.rate.down = SLOW
+      const server = register()
+      server.onOpen(() => void server.sendBinary(new Uint8Array(4 * SLOW).fill(7))) // 4 s on the link
+      const pageChannel = channel(server.id)
+      let opened = false
+      pageChannel.onOpen(() => (opened = true))
+      const got: number[] = []
+      pageChannel.listenBinary((data) => void got.push(data.byteLength))
+      await advance(20_000)
+      expect(opened).toBe(true)
+      expect(got).toEqual([4 * SLOW])
+      expect(net.links).toHaveLength(1)
+    })
+
     test('sends no PING before it over a link that carries it within a second, and so no frame or request more', async () => {
       const { net, channel } = page(wire)
       // 2 KiB a second each way, which carries a RECONCILE and its RECONCILED in well under a second.
