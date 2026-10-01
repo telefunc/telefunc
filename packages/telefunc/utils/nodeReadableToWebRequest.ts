@@ -1,5 +1,6 @@
 export { nodeReadableToWebRequest }
 
+import type { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'
 import { loadStreamNodeModule } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
@@ -13,7 +14,7 @@ async function nodeReadableToWebRequest(
   method: string,
   headers: HeadersInput,
   response?: Writable,
-): Promise<Request> {
+): Promise<{ request: Request; unwatch: () => void }> {
   const { Readable: ReadableClass } = await loadStreamNodeModule()
   const body = ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>
 
@@ -28,11 +29,21 @@ async function nodeReadableToWebRequest(
   readable.on('close', () => {
     if (readable.readableAborted && !abortController.signal.aborted) abortController.abort()
   })
-  // The readable closes as soon as its body is read: a later disconnect only shows on the response.
-  response?.once('close', () => {
-    if (!response.writableEnded) abortController.abort()
-  })
-  return new Request(url, {
+  // The readable closes as soon as its body is read: a later disconnect only shows on the response, or else on the
+  // connection, watched until `unwatch()`. `req.socket`: an HTTP/1 connection, which keep-alive reuses, or an HTTP/2
+  // request's stream.
+  let unwatch = () => {}
+  const socket = (readable as { socket?: EventEmitter | null }).socket
+  if (response) {
+    response.once('close', () => {
+      if (!response.writableEnded) abortController.abort()
+    })
+  } else if (socket) {
+    const abort = () => abortController.abort()
+    socket.once('close', abort)
+    unwatch = () => socket.off('close', abort)
+  }
+  const request = new Request(url, {
     method,
     headers: headerPairs,
     body,
@@ -40,6 +51,7 @@ async function nodeReadableToWebRequest(
     // @ts-expect-error duplex required for streaming request bodies
     duplex: 'half',
   })
+  return { request, unwatch }
 }
 
 function normalizeHeaders(headers: HeadersInput): [string, string][] {
