@@ -6,6 +6,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getRawContext } from '../../node/server/context/context.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
+import { GcRegistry } from '../gcRegistry.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
@@ -179,6 +180,12 @@ function getChannelMux(): ChannelMux {
 
 class ChannelMux {
   private readonly channels = new Map<string, ServerChannel>()
+  /** Holder-side GC tracking of the revived request stubs (callbacks, streams) whose channels this mux holds. Its scan
+   *  timer is made and cleared in the calls of the server that owns the mux, as a Cloudflare session DO's timers must
+   *  be: one cleared from another DO's call keeps running. It must NOT be per-request: a per-request closure hung on the
+   *  (rooted) request context pins that request's `envelope.args` via the V8 scope chain, so the stub is never
+   *  collected. */
+  readonly gcRegistry = new GcRegistry()
   /** Waiters registered by `attach` when a reconcile lands before the channel is registered.
    *  Fired synchronously from `registerChannel`. */
   private readonly pendingRegisterWaiters = new Map<string, Set<(channel: ServerChannel) => void>>()

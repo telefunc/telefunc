@@ -26,6 +26,12 @@ import { OrderedStubs } from '../../packages/telefunc/wire-protocol/server/adapt
 import { withCloudflareSession } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/session.js'
 import { ChannelMux } from '../../packages/telefunc/wire-protocol/server/mux.js'
 import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
+import { getChannelMux } from '../../packages/telefunc/wire-protocol/server/mux.js'
+import { parseHttpRequest } from '../../packages/telefunc/node/server/runTelefunc/parseHttpRequest.js'
+import { createRequestContext } from '../../packages/telefunc/node/server/context/requestContext.js'
+import { getServerConfig } from '../../packages/telefunc/node/server/serverConfig.js'
+import { SERIALIZER_PREFIX_FUNCTION } from '../../packages/telefunc/wire-protocol/constants.js'
+import { stringify } from '@brillout/json-serializer/stringify'
 const broadcast = new CloudflareBroadcast({
   baseInstanceName: 'telefunc',
   locationFallback: 'weur',
@@ -33,6 +39,18 @@ const broadcast = new CloudflareBroadcast({
 })
 installBackend(() => new CloudflareBackend({ rooms: () => workerEnv.TELEFUNC, broadcast }), ['cloudflare-room-ci'])
 const textEncoder = new TextEncoder()
+// The isolate's intervals, each with the session DO whose call made it and how often it has fired.
+const intervals: { by: string; fired: number }[] = []
+let makingFor = ''
+const nativeSetInterval = globalThis.setInterval
+globalThis.setInterval = ((callback: () => void, ms?: number) => {
+  const interval = { by: makingFor, fired: 0 }
+  intervals.push(interval)
+  return nativeSetInterval(() => {
+    interval.fired++
+    callback()
+  }, ms)
+}) as typeof setInterval
 const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
 // Broadcast's roles as the production class plays them: each instance is a session, a key authority and a coordinator.
@@ -69,6 +87,49 @@ export class TelefuncProbeDurableObject extends DurableObject<Env> {
       .exec<{ seq: number; text: string }>('SELECT seq, text FROM probe_received ORDER BY rowid')
       .toArray()
   }
+  // A call whose argument is a callback, as a page makes it: the telefunction holds the callback, and the response
+  // went out.
+  callWithCallback(name: string): Promise<string> {
+    return this.#run(async () => {
+      const callback = { channelId: crypto.randomUUID() }
+      const body = stringify(
+        { file: '/pages/Upload.telefunc.ts', name: 'onUpload', args: [callback] },
+        {
+          replacer: (_key, value, serializer) =>
+            value === callback
+              ? {
+                  replacement: SERIALIZER_PREFIX_FUNCTION + serializer({ channelId: callback.channelId }),
+                  resolved: true,
+                }
+              : undefined,
+        },
+      )
+      const request = new Request('https://room.test/_telefunc', { method: 'POST', body })
+      const requestContext = createRequestContext(request)
+      const parsed = await parseHttpRequest({
+        request,
+        requestContext,
+        logMalformedRequests: false,
+        serverConfig: getServerConfig(),
+      })
+      if (parsed.isMalformedRequest || parsed.isSseRequest) throw new Error('expected a telefunction request')
+      makingFor = name
+      const resolved = parsed.resolveRequest((() => undefined) as never)
+      makingFor = ''
+      if (resolved.isMalformedRequest) throw new Error('expected a resolved request')
+      requestContext.markComplete()
+      this.#held.set(callback.channelId, resolved.telefunctionArgs)
+      return callback.channelId
+    })
+  }
+  // Its page leaves: the callback's channel closes.
+  leave(channelId: string): Promise<void> {
+    return this.#run(async () => {
+      getChannelMux()['channels'].get(channelId)!._onPeerClose()
+      this.#held.delete(channelId)
+    })
+  }
+  readonly #held = new Map<string, unknown[]>()
   telefuncBroadcastPublish(request: BroadcastPublishRequest) {
     return broadcast.publishToSubscribers(this.#broadcastAuthority, this.#calls, request)
   }
@@ -128,6 +189,7 @@ type Session = RpcMethods<Pick<SessionDurableObject, 'refuse' | 'release' | 'arr
 type BroadcastSession = RpcMethods<
   Pick<TelefuncProbeDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
+type CallbackSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'callWithCallback' | 'leave'>>
 type Env = Cloudflare.Env
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/lost-target': lostTarget,
@@ -138,6 +200,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/large-retained': largeRetainedReplay,
   '/broadcast-sessions': broadcastAcrossSessions,
   '/refused-first-write': refusedFirstWrite,
+  '/callback-timers': callbackTimers,
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -251,6 +314,33 @@ async function broadcastAcrossSessions(env: Env, suffix: string) {
   await b.broadcastSubscribe(key)
   await a.broadcastPublish(key, ['one', 'two', 'three'])
   return { a: await a.broadcastReceived(), b: await b.broadcastReceived() }
+}
+// Two session DOs in one isolate each take a call with a callback; a's page leaves, then b's. Reports, per session DO,
+// how often the intervals its calls made fired while it held no callback, and after both pages left.
+async function callbackTimers(env: Env, suffix: string) {
+  const session = (name: string) =>
+    env.TELEFUNC.get(env.TELEFUNC.idFromName(`callback-${name}-${suffix}`)) as unknown as CallbackSession
+  const [a, b] = [session('a'), session('b')]
+  const made = intervals.length
+  const firedBy = (name: string) =>
+    intervals
+      .slice(made)
+      .filter((interval) => interval.by === name)
+      .reduce((fired, interval) => fired + interval.fired, 0)
+  const scanPeriod = () => new Promise((resolve) => setTimeout(resolve, 5_500))
+  const callA = await a.callWithCallback('a')
+  const callB = await b.callWithCallback('b')
+  await a.leave(callA)
+  const aLeft = firedBy('a')
+  await scanPeriod()
+  const whileOnlyBHolds = { a: firedBy('a') - aLeft, made: intervals.slice(made).map(({ by }) => by) }
+  await b.leave(callB)
+  const bothLeft = { a: firedBy('a'), b: firedBy('b') }
+  await scanPeriod()
+  return {
+    whileOnlyBHolds,
+    afterBothLeft: { a: firedBy('a') - bothLeft.a, b: firedBy('b') - bothLeft.b },
+  }
 }
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')

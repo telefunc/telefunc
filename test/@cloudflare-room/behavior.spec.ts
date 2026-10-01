@@ -79,3 +79,10 @@ test('Broadcast reaches every session DO in the isolate in seq order, each throu
   ]
   expect(await probe('/broadcast-sessions')).toEqual({ a: inOrder, b: inOrder })
 })
+
+test("a session DO whose calls' callbacks all closed keeps no timer of the GC scan, while another session DO's callback is open (#469)", async () => {
+  expect(await probe('/callback-timers')).toEqual({
+    whileOnlyBHolds: { a: 0, made: ['a', 'b'] },
+    afterBothLeft: { a: 0, b: 0 },
+  })
+})
