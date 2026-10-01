@@ -558,6 +558,22 @@ describe.each(WIRES)('over %s', (wire) => {
     expect(opened).toBe(true)
   })
 
+  test("a channel the page closes while a reconnect's RECONCILED goes down with its wire ends on the server at the next reconnect (#486)", async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    const server = register()
+    const pageChannel = channel(server.id)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    net.die()
+    net.whenServerSends(TAG.RECONCILED, () => {
+      net.die()
+      void pageChannel.close({ timeout: 500 })
+    })
+    await advance(15_000)
+    expect(serverClosed.err).toBeUndefined()
+  })
+
   test('an abort the page queues behind a registration reaches the server', async () => {
     const { channel } = page(wire)
     const server = register()
