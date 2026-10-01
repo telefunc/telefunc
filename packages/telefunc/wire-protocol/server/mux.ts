@@ -180,11 +180,8 @@ function getChannelMux(): ChannelMux {
 
 class ChannelMux {
   private readonly channels = new Map<string, ServerChannel>()
-  /** Holder-side GC tracking of the revived request stubs (callbacks, streams) whose channels this mux holds. Its scan
-   *  timer is made and cleared in the calls of the server that owns the mux, as a Cloudflare session DO's timers must
-   *  be: one cleared from another DO's call keeps running. It must NOT be per-request: a per-request closure hung on the
-   *  (rooted) request context pins that request's `envelope.args` via the V8 scope chain, so the stub is never
-   *  collected. */
+  /** Per mux, not per isolate: a session DO's scan timer must be made and cleared in its own calls. Not per request
+   *  either: a closure on the request context would pin the call's arguments, so a stub is never collected. */
   readonly gcRegistry = new GcRegistry()
   /** Waiters registered by `attach` when a reconcile lands before the channel is registered.
    *  Fired synchronously from `registerChannel`. */
