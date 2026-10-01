@@ -210,6 +210,8 @@ interface MuxConnection {
   sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean, pathRtt: number): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
+  /** What the wire holds goes out without waiting for more. */
+  flushNow(): void
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -255,6 +257,8 @@ type ClientChannelTransport = {
   sendFrame(frame: OutboundFrame): void
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
+  /** What it holds goes out without waiting for more. */
+  flushNow(): void
   abandonActiveTransport(): void
   closeAbandonedTransport(): void
   applyReconciledSettings(ctrl: ReconciledPayload): void
@@ -796,6 +800,10 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     this.sendFlowControl(ix, encode.bdpPingAck(ix, probe, starved, pathRtt))
+  }
+
+  flushNow(): void {
+    this.transport.flushNow()
   }
 
   bufferedAmount(): number {
@@ -1909,6 +1917,9 @@ class WsTransport implements UpgradeTarget {
     return this.heartbeat?.quietFor() ?? Infinity
   }
 
+  /** A WebSocket takes each frame as it is sent. */
+  flushNow(): void {}
+
   drained(): Promise<void> {
     // A socket sends what it buffered before its close.
     return Promise.resolve()
@@ -2444,6 +2455,14 @@ class SseTransport implements UpgradeSource {
 
   quietFor(): number {
     return this.heartbeat?.quietFor() ?? Infinity
+  }
+
+  /** Over batch POSTs, what the outbox holds goes in the next POST without waiting out the flush throttle. */
+  flushNow(): void {
+    if (this.outbox.length === 0) return
+    const now = Date.now()
+    for (const entry of this.outbox) entry.deadline = now
+    void this.flushOutbox()
   }
 
   drained(): Promise<void> {

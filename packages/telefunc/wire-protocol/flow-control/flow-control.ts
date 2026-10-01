@@ -18,6 +18,8 @@ interface FlowControlEmit {
   byteWindowUpdate(limit: number): void
   msgWindowUpdate(limit: number): void
   bdpPing(probe: number): void
+  /** A send waits for credit: nothing more of this side's goes out until what went is read. */
+  outOfCredit?(): void
 }
 
 /** The largest window a receiver grants a sender whose replay buffer's lanes hold `text` and `binary` bytes: half the
@@ -394,6 +396,7 @@ class FlowControl {
 
   private _waitForCredit(): Promise<void> {
     if (this._shutdown) return resolvedPromise
+    this._emit.outOfCredit?.()
     return new Promise<void>((resolve) => this._waiters.push(resolve))
   }
 }

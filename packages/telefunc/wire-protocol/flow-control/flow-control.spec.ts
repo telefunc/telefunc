@@ -85,6 +85,15 @@ function fitted(flow: FlowControl): FlowControl {
 }
 
 describe('FlowControl — sender-side credit', () => {
+  it('says it is out of credit as a send starts to wait for it', () => {
+    let outOfCredit = 0
+    const fc = new FlowControl({ ...makeEmit(), outOfCredit: () => void outOfCredit++ }, () => undefined)
+    expect(fc.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
+    expect(outOfCredit).toBe(0)
+    void fc.decrement(1)
+    expect(outOfCredit).toBe(1)
+  })
+
   // The advertised value starts at INITIAL — pessimistic until the peer's BDP
   // estimator decides to grow. Both sides agree on this initial floor.
   it('initial window equals CREDIT_WINDOW_INITIAL_BYTES', () => {
