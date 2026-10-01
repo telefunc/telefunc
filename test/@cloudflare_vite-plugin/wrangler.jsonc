@@ -1,6 +1,6 @@
 {
   // spellcheck-ignore
-  "compatibility_flags": ["nodejs_als"],
+  "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "$schema": "node_modules/wrangler/config-schema.json",
   "compatibility_date": "2025-08-15",
   "name": "vike_test_cloudflare_vite-plugin",
