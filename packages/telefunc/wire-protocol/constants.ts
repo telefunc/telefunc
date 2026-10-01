@@ -192,8 +192,10 @@ export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
 
 /** How long a channel waits for a peer to connect after the server→client
- *  HTTP response carrying `channel.client` has been serialized. */
-export const CHANNEL_CONNECT_TTL_MS = 5_000
+ *  HTTP response carrying `channel.client` has been serialized. It outlasts a page's noticing that its wire died without
+ *  a word, twice the ping interval after the wire's last frame, then its first reconnect delay and a reconcile round
+ *  trip. */
+export const CHANNEL_CONNECT_TTL_MS = 15_000
 
 // Client-side channel reconnect defaults
 export const CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500
