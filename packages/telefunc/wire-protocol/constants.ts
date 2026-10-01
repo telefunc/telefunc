@@ -21,6 +21,8 @@ export const FN_SHIELD_ERROR_KEY = '__telefunc_fn_shield_error'
 /** 1-byte tag prefixed to every binary send in per-channel streaming pumps. */
 export const CHANNEL_PUMP_TAG_DATA = 0x00
 export const CHANNEL_PUMP_TAG_ERROR = 0x01
+/** The producer's end, before its close: a stream whose channel closes without it was cut short. */
+export const CHANNEL_PUMP_TAG_END = 0x02
 
 // ===== Streaming error frames =====
 

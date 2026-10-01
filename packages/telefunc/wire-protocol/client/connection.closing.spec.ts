@@ -9,6 +9,7 @@ import type { Peer } from 'crossws'
 import '../../node/server/async_hooks.js'
 
 import { ClientChannel } from './channel.js'
+import { ClientConnection } from './connection.js'
 import { pumpClientProducerToChannel } from './request/pumpToChannel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
@@ -1666,6 +1667,16 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     resume() // the rest of the upload, and its end, go into the dead wire
     await advance(10_000)
     expect(read.value).toEqual(all)
+  })
+
+  test("an upload over the 'channel' transport whose page leaves mid-upload errors on the server rather than completing short (#471)", async () => {
+    serverConfig.channel = { pingInterval: 1_000, reconnectTimeout: 5_000 }
+    const { read } = upload(wire, 1_024)
+    await advance(500)
+    const connection = [...(ClientConnection as unknown as { cache: Map<string, { dispose(): void }> }).cache.values()]
+    connection.at(-1)!.dispose() // the page unloads: its wire closes, a WebSocket with a close frame
+    await advance(10_000)
+    expect(read.value).toBeInstanceOf(NetworkError)
   })
 
   test("a stream over the 'channel' transport that a reconnect needs a chunk of larger than the server's replay errors on the page rather than completing short", async () => {
