@@ -52,7 +52,7 @@ import type {
   ReconciledPayload,
   SeqReader,
 } from '../shared-ws.js'
-import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
+import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 
@@ -2293,9 +2293,9 @@ class SseTransport implements UpgradeSource {
 
       try {
         const response = await this.post(
-          encodeSseRequest(
+          encodeSseBatch(
             { connId: this.connId },
-            encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
+            queued.map((entry) => entry.frame),
           ),
           wire.signal,
         )

@@ -2,7 +2,7 @@ import { expect, test, vi } from 'vitest'
 import { getTelefuncSseChannelHooks } from './sse.js'
 import { getChannelMux } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { encodeSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
+import { encodeSseBatch, encodeSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
 import { encodeLengthPrefixedFrames } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { decode, encode, TAG, type DecodedFrame, type SeqReader } from '../shared-ws.js'
@@ -119,6 +119,17 @@ function fullWindow() {
   frames.push(encode.msgWindow(0, 2 * CREDIT_MSG_WINDOW_MAX), encode.bdpPing(0, 1))
   return frames
 }
+
+test('a batch POST whose body is built from its frames as they are reads as the frames it carries', async () => {
+  const wire = await reconciledSseWire()
+  const frames = [encode.text(0, '1', 1), encode.text(0, '2', 2)]
+  const request = new Request('http://localhost/_telefunc', {
+    method: 'POST',
+    body: encodeSseBatch({ connId: wire.connId }, frames),
+  })
+  expect((await wire.sse.handleRequest(request))!.statusCode).toBe(200)
+  expect(wire.received.count).toBe(2)
+})
 
 test("a batch POST carrying a channel's full message window is processed", async () => {
   const wire = await reconciledSseWire()
