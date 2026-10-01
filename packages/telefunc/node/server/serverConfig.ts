@@ -3,6 +3,7 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
+export { reconnectWindowOf }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -20,11 +21,8 @@ import type { TelefuncServerExtension } from './extensions.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
-import {
-  installBroadcastAdapter,
-  DefaultBroadcastAdapter,
-  type BroadcastTransport,
-} from '../../wire-protocol/server/broadcast.js'
+import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
+import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/transport.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -32,6 +30,7 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
@@ -516,20 +515,34 @@ function applyChannelConfig(val: unknown): void {
   configState.channel = next
 }
 
+/** How long a gone client is still held, up to the longest a timer waits: until its drop is noticed at the ping
+ *  deadline, then for `reconnectTimeout`. */
+function reconnectWindowOf({
+  pingInterval,
+  reconnectTimeout,
+}: Pick<ChannelConfigResolved, 'pingInterval' | 'reconnectTimeout'>): number {
+  return Math.min(TIMER_DELAY_MAX_MS, Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + reconnectTimeout)
+}
+
 function applyBroadcastConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.broadcast should be an object')
+  const next: BroadcastConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
       assertUsage(
-        isObject(value) && typeof (value as any).send === 'function' && typeof (value as any).listen === 'function',
-        'config.broadcast.transport must be a BroadcastTransport with send() and listen() methods',
+        isObject(value) &&
+          (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
+            (method) => typeof value[method] === 'function',
+          ),
+        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and listenBinary() methods',
       )
-      configState.broadcast.transport = value as BroadcastTransport
-      installBroadcastAdapter(() => new DefaultBroadcastAdapter(value as BroadcastTransport))
+      next.transport = value as BroadcastTransport
     } else {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
+  configState.broadcast = next
+  if (next.transport) configureBroadcastTransport(next.transport)
 }
 
 function validateStreamTransport(val: unknown, configPath: string): StreamTransport {

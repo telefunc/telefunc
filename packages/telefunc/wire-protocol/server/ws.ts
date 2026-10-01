@@ -18,7 +18,6 @@ function getTelefuncChannelHooks(
   bufferedAmount: (peer: Peer) => number | undefined = (peer) => peer.websocket.bufferedAmount,
 ) {
   enableChannelTransports(['ws'])
-  const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
     getSessionId: (peer) => peer.context.telefuncSessionId,
     setSessionId: (peer, sessionId) => {
@@ -34,6 +33,7 @@ function getTelefuncChannelHooks(
     // Closed at once, as an SSE wire is: a Durable Object peer's terminate() is a close handshake a vanished client
     // never answers, so its close hook would run late, if at all.
     terminateConnection: (peer) => {
+      const mux = getChannelMux()
       const permanent = mux.readPermanentTermination(peer)
       terminate(peer)
       mux.onConnectionClosed(peer, { permanent })
@@ -41,12 +41,14 @@ function getTelefuncChannelHooks(
   }
 
   return defineHooks({
-    open: (peer) => mux.onConnectionOpen(peer, transport),
-    message: (peer, message) => mux.onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
+    open: (peer) => getChannelMux().onConnectionOpen(peer, transport),
+    message: (peer, message) =>
+      getChannelMux().onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     close: (peer, details) => {
+      const mux = getChannelMux()
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === 1000 || details?.code === 1001
       mux.onConnectionClosed(peer, { permanent: isPermanent })
     },
-    error: (peer) => mux.onConnectionClosed(peer, { permanent: false }),
+    error: (peer) => getChannelMux().onConnectionClosed(peer, { permanent: false }),
   })
 }

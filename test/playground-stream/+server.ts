@@ -3,9 +3,9 @@ import * as path from 'node:path'
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http'
 import { Hono } from 'hono'
 import vike from '@vikejs/hono'
-import IORedis from 'ioredis'
+import IORedis, { Cluster } from 'ioredis'
 import { installRedis } from '@telefunc/redis'
-import { config } from 'telefunc'
+import { BroadcastChannel, config, Room, type LocalParticipant } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 
@@ -14,11 +14,19 @@ config.shield = true
 
 const INST = process.env.INSTANCE_ID ?? '?'
 
-if (process.env.REDIS_URL) {
-  installRedis(new IORedis(process.env.REDIS_URL))
-  console.log(`[INST=${INST}] Redis broadcast transport installed`)
+if (process.env.REDIS_CLUSTER_NODES) {
+  const nodes = process.env.REDIS_CLUSTER_NODES.split(',').map((entry) => {
+    const separator = entry.lastIndexOf(':')
+    const host = entry.slice(0, separator)
+    const port = Number(entry.slice(separator + 1))
+    return { host, port }
+  })
+  installRedis(new Cluster(nodes, { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }))
+  console.log(`[INST=${INST}] Redis Cluster backend installed (${nodes.length} seeds)`)
+} else if (process.env.REDIS_URL) {
+  installRedis(new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 }))
+  console.log(`[INST=${INST}] Redis backend installed`)
 }
-
 // Translate Ctrl-C / docker-stop into a clean `process.exit(0)`. Without this, Node's
 // default SIGINT/SIGTERM handlers tear the process down without flushing the V8 CPU
 // profile written by `--cpu-prof`, leaving `profiles/` empty.
@@ -43,6 +51,100 @@ app.get('/api/cleanup-state', async (c) => c.json(await getCleanupStateSnapshot(
 app.post('/api/cleanup-state/reset', async (c) => {
   await resetCleanupState()
   return c.json({ ok: true })
+})
+
+type CrossInstanceRoomFixture = {
+  participant: LocalParticipant
+  received: unknown[]
+  unsubscribe(): void
+}
+const crossInstanceRooms = new Map<string, CrossInstanceRoomFixture>()
+type CrossInstanceBroadcastFixture = {
+  channel: BroadcastChannel<unknown>
+  received: unknown[]
+  unsubscribe(): void
+}
+const crossInstanceBroadcasts = new Map<string, CrossInstanceBroadcastFixture>()
+
+app.post('/api/room-cross-instance/join', async (c) => {
+  const roomId = c.req.query('roomId')
+  if (!roomId) return c.json({ ok: false, reason: 'missing roomId' }, 400)
+  if (crossInstanceRooms.has(roomId)) return c.json({ ok: true, instance: INST })
+
+  const room = await Room.getOrCreate(roomId, { meta: { purpose: 'cross-instance-e2e' } })
+  const participant = await room.join({ meta: { instance: INST } })
+  const received: unknown[] = []
+  const unsubscribe = room.subscribe((data) => received.push(data))
+  crossInstanceRooms.set(roomId, { participant, received, unsubscribe })
+  return c.json({ ok: true, instance: INST })
+})
+
+app.post('/api/room-cross-instance/publish', async (c) => {
+  const roomId = c.req.query('roomId')
+  const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
+  if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
+  await fixture.participant.publish(await c.req.json())
+  return c.json({ ok: true, instance: INST })
+})
+
+app.get('/api/room-cross-instance/received', (c) => {
+  const roomId = c.req.query('roomId')
+  const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
+  if (!fixture) return c.json({ ok: false, reason: 'room fixture not joined on this instance' }, 404)
+  return c.json({ ok: true, instance: INST, received: fixture.received })
+})
+
+app.delete('/api/room-cross-instance/leave', async (c) => {
+  const roomId = c.req.query('roomId')
+  const fixture = roomId ? crossInstanceRooms.get(roomId) : undefined
+  if (!roomId || !fixture) return c.json({ ok: true, instance: INST })
+  crossInstanceRooms.delete(roomId)
+  fixture.unsubscribe()
+  await fixture.participant.leave()
+  return c.json({ ok: true, instance: INST })
+})
+
+app.post('/api/broadcast-cross-instance/subscribe', async (c) => {
+  const key = c.req.query('key')
+  if (!key) return c.json({ ok: false, reason: 'missing key' }, 400)
+  if (crossInstanceBroadcasts.has(key)) return c.json({ ok: true, instance: INST })
+
+  const channel = new BroadcastChannel<unknown>({ key })
+  const received: unknown[] = []
+  const readiness = crypto.randomUUID()
+  const unsubscribe = channel.subscribe((data) => {
+    if (data !== readiness) received.push(data)
+  })
+  // A publish right after a subscribe waits until the subscription is set up, so other instances' publishes reach it.
+  await channel.publish(readiness)
+  crossInstanceBroadcasts.set(key, { channel, received, unsubscribe })
+  return c.json({ ok: true, instance: INST })
+})
+
+app.post('/api/broadcast-cross-instance/publish', async (c) => {
+  const key = c.req.query('key')
+  if (!key) return c.json({ ok: false, reason: 'missing key' }, 400)
+  const channel = new BroadcastChannel<unknown>({ key })
+  const receipt = await channel.publish(await c.req.json())
+  await channel.close()
+  return c.json({ ok: true, instance: INST, seq: receipt.seq })
+})
+
+app.get('/api/broadcast-cross-instance/received', (c) => {
+  const key = c.req.query('key')
+  const fixture = key ? crossInstanceBroadcasts.get(key) : undefined
+  if (!fixture) return c.json({ ok: false, reason: 'broadcast fixture not subscribed on this instance' }, 404)
+  return c.json({ ok: true, instance: INST, received: fixture.received })
+})
+
+app.delete('/api/broadcast-cross-instance/unsubscribe', async (c) => {
+  const key = c.req.query('key')
+  const fixture = key ? crossInstanceBroadcasts.get(key) : undefined
+  if (!key || !fixture) return c.json({ ok: true, instance: INST })
+  crossInstanceBroadcasts.delete(key)
+  fixture.unsubscribe()
+  await fixture.channel.close()
+  return c.json({ ok: true, instance: INST })
 })
 
 // Forces server-side GC so tests can deterministically exercise GC-driven cleanup (e.g. a

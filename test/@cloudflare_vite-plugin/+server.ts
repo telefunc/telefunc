@@ -1,4 +1,5 @@
 import vike from 'vike/fetch'
+import { Broadcast } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
 
 const tf = new Telefunc({ scale: 5 })
@@ -17,6 +18,11 @@ const vikeAsCloudflareHandler = vike as unknown as ExportedHandler<Env>
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
+    // Outside any session DO, as a cron trigger or a queue consumer publishes.
+    if (new URL(request.url).pathname === '/__broadcast-publish-from-worker') {
+      await Broadcast.publish('worker-publish', { from: 'worker' })
+      return new Response(null, { status: 204 })
+    }
     const resp = await tf.serve({ request, env, ctx })
     return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)
   },

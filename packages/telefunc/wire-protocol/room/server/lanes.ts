@@ -1,0 +1,110 @@
+export {
+  CONTROL_LANE,
+  SEMANTIC_LANE,
+  commitRoomLane,
+  commitRoomLaneOrThrow,
+  openConfig,
+  configFromHead,
+  decodeRoomRecord,
+  decodeRoomText,
+  encodeRoomRecord,
+  publishCtrl,
+  staleCommitError,
+  withinRoomHorizon,
+}
+
+import { parse } from '@brillout/json-serializer/parse'
+import { stringify } from '@brillout/json-serializer/stringify'
+import { raceTimeout } from '../../../utils/raceTimeout.js'
+import { getRoomBackend } from '../../backend/install.js'
+import type { CommitAccepted, LaneId, RoomHead, StaleCommit, CommitOptions } from '../../backend/room/contract.js'
+import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
+import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
+import { assert } from '../../../utils/assert.js'
+import { ROOM_HORIZON_MS } from '../constants.js'
+import { reportRoomError } from './errors.js'
+import { memberIdOfCellKey } from './cells.js'
+
+const roomTextEncoder = new TextEncoder()
+const roomTextDecoder = new TextDecoder()
+const SEMANTIC_LANE = { kind: 'semantic' } as const satisfies LaneId
+const CONTROL_LANE = { kind: 'control' } as const satisfies LaneId
+
+function decodeRoomText(value: Uint8Array): string {
+  return roomTextDecoder.decode(value)
+}
+
+function encodeRoomRecord(value: unknown): Uint8Array {
+  return roomTextEncoder.encode(stringify(value))
+}
+
+function decodeRoomRecord<T>(bytes: Uint8Array): T {
+  return parse(decodeRoomText(bytes)) as T
+}
+
+function configFromHead(head: RoomHead): RoomConfigRecord {
+  const config = decodeRoomRecord<RoomConfigRecord>(head.config)
+  assert(head.currentInc === null || config.inc === head.currentInc)
+  return config
+}
+
+/** The config of an open head, and only of `inc` when given. */
+function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | null {
+  if (current?.state !== 'open' || (inc !== undefined && current.currentInc !== inc)) return null
+  return configFromHead(current)
+}
+
+async function commitRoomLane(
+  id: string,
+  inc: string,
+  lane: LaneId,
+  payload: Uint8Array,
+  opts?: CommitOptions,
+): Promise<CommitAccepted | StaleCommit> {
+  const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
+  if ('stale' in result) return result
+  // Delivery is at-most-once: a handoff that rejects or never settles is lost, not the caller's failure.
+  const delivered = raceTimeout(
+    result.delivery.then(
+      () => true,
+      () => false,
+    ),
+    ROOM_HORIZON_MS,
+    () => false,
+  )
+  if (!(await delivered))
+    reportRoomError(new Error(`Room delivery handoff lost (rejected or unconfirmed within the horizon): ${id}`))
+  return result
+}
+
+async function commitRoomLaneOrThrow(
+  id: string,
+  inc: string,
+  lane: LaneId,
+  payload: Uint8Array,
+  opts?: { retain?: boolean; requiredCellKeys?: string[] },
+): Promise<CommitAccepted> {
+  const result = await commitRoomLane(id, inc, lane, payload, opts)
+  if ('stale' in result) throw staleCommitError(id, result)
+  return result
+}
+
+function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
+  return raceTimeout(promise, ROOM_HORIZON_MS, () => {
+    throw new RoomError('Room subscription recovery horizon expired')
+  })
+}
+
+async function publishCtrl(
+  roomId: string,
+  inc: string,
+  event: RoomCtrlEnvelope,
+  opts?: { requiredCellKeys: string[] },
+): Promise<void> {
+  await commitRoomLaneOrThrow(roomId, inc, CONTROL_LANE, encodeRoomRecord(event), opts)
+}
+
+/** Required cells are member records, so a missing one names the member that left. */
+function staleCommitError(roomId: string, stale: StaleCommit): RoomError {
+  return stale.stale === 'cell' ? participantGoneError(memberIdOfCellKey(stale.key)) : roomClosedError(roomId)
+}

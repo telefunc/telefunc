@@ -46,3 +46,17 @@ test('channel config refuses a pingInterval whose deadline, twice it, is longer 
     config.channel = {}
   }
 })
+
+describe('config.broadcast', () => {
+  it('rejects an undefined config.broadcast.transport as a usage error', () => {
+    expect(() => {
+      config.broadcast.transport = undefined
+    }).toThrow('config.broadcast.transport must be a BroadcastTransport')
+  })
+  it('rejects a Broadcast transport missing a binary method when it is configured', () => {
+    const textOnly = { send: () => ({ seq: 1, timestamp: 1 }), listen: () => () => {}, listenBinary: () => () => {} }
+    expect(() => {
+      config.broadcast = { transport: textOnly as never }
+    }).toThrow('config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary()')
+  })
+})

@@ -1,10 +1,12 @@
-export { ChannelMux, getChannelMux }
+export { ChannelMux, getChannelMux, CHANNEL_MUX }
 export type { ReconcileOutcome, ServerTransport }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { getRawContext } from '../../node/server/context/context.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
+import { GcRegistry } from '../gcRegistry.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
@@ -169,12 +171,18 @@ type ConnectionEntry = {
   seqs: SeqReader
 }
 
+/** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
+const CHANNEL_MUX = Symbol('telefunc.channelMux')
+
 function getChannelMux(): ChannelMux {
-  return getGlobals().mux
+  return (getRawContext()?.[CHANNEL_MUX] as ChannelMux | undefined) ?? getGlobals().mux
 }
 
 class ChannelMux {
   private readonly channels = new Map<string, ServerChannel>()
+  /** Per mux, not per isolate: a session DO's scan timer must be made and cleared in its own calls. Not per request
+   *  either: a closure on the request context would pin the call's arguments, so a stub is never collected. */
+  readonly gcRegistry = new GcRegistry()
   /** Waiters registered by `attach` when a reconcile lands before the channel is registered.
    *  Fired synchronously from `registerChannel`. */
   private readonly pendingRegisterWaiters = new Map<string, Set<(channel: ServerChannel) => void>>()

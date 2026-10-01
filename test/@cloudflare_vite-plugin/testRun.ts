@@ -5,6 +5,8 @@ import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
 import { testCounter, testRunClassic } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
+  // First, so no session Durable Object exists in the isolate yet.
+  testBroadcastPublishFromWorker()
   testCloudflareBindings()
   testRunClassic(cmd, {
     tolerateError: (log) =>
@@ -12,11 +14,24 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // The Channel/Chat streaming (SSE) connection surfaces a benign
       // `net::ERR_ALPN_NEGOTIATION_FAILED` browser error; the channel still works
       // (the message flow is asserted by testChannel()/testChat()).
-      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED'),
+      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
+      // Leaving the Chat page while its SSE response is being written makes workerd log the write to the gone
+      // browser; the next test navigates away from it.
+      (log.logSource === 'stderr' &&
+        log.logText.includes('disconnected: ::write') &&
+        log.logText.includes('Broken pipe')),
   })
   testTodolist()
   testChannel()
   testChat()
+  testRoom()
+}
+
+function testBroadcastPublishFromWorker() {
+  test('Broadcast.publish() from the Worker, outside any session', async () => {
+    const response = await fetch(getServerUrl() + '/__broadcast-publish-from-worker')
+    expect(response.status).toBe(204)
+  })
 }
 
 function testCloudflareBindings() {
@@ -136,6 +151,18 @@ function testChat() {
     await autoRetry(
       async () => {
         expect(await page.textContent('#root')).toContain(`${username} joined`)
+      },
+      { timeout: 10000 },
+    )
+  })
+}
+
+function testRoom() {
+  test('Room inside a telefunction', async () => {
+    await page.goto(getServerUrl() + '/room')
+    await autoRetry(
+      async () => {
+        expect(await page.textContent('#room-result')).toBe(JSON.stringify({ joined: 1, received: ['hello'] }))
       },
       { timeout: 10000 },
     )
