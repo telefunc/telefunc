@@ -166,26 +166,6 @@ test('a batch POST goes a flush throttle after the one before it started, whenev
   connection.dispose()
 })
 
-test('a page out of credit sends what its outbox holds at once over batch POSTs, though within the flush throttle', () => {
-  const connection = ClientConnection.getOrCreate(
-    'http://out-of-credit.test',
-    createChannel() as never,
-    stalledOptions(),
-  ) as any
-  const transport = connection.transport
-  const posted: unknown[] = []
-  transport.post = (body: unknown) => {
-    posted.push(body)
-    return new Promise(() => {})
-  }
-  transport.transportAbort = new AbortController()
-  transport.lastPostStartedAt = Date.now()
-  transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: Date.now() + SSE_FLUSH_THROTTLE_MS }]
-  connection.flushNow()
-  expect(posted).toHaveLength(1)
-  connection.dispose()
-})
-
 test('a batch POST that fails after the next wire started puts back only its window refreshes', async () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate('http://late-post.test', channel as never, stalledOptions()) as any

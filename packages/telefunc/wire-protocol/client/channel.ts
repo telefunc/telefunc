@@ -119,7 +119,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         byteWindowUpdate: (limit) => this._connection.sendByteWindowUpdate(this, limit),
         msgWindowUpdate: (limit) => this._connection.sendMsgWindowUpdate(this, limit),
         bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
-        outOfCredit: () => this._connection.flushNow(),
       },
       () => this._connection.bufferedAmount(),
     )
