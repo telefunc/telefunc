@@ -2392,10 +2392,9 @@ class SseTransport implements UpgradeSource {
       case 'flow-control':
       case 'ack':
       case 'data':
-        return (
-          now +
-          (now - this.lastPostStartedAt >= this.flushThrottleMs ? this.postIdleFlushDelayMs : this.flushThrottleMs)
-        )
+        // A throttle after the last POST started, not after this frame: a frame that comes as that POST's credit
+        // returns would otherwise hold the next POST a throttle past it.
+        return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
     }
   }
 

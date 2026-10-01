@@ -149,6 +149,23 @@ test("an SSE reconnect sends its own reconcile and leaves a dead POST's messages
   connection.dispose()
 })
 
+test('a batch POST goes a flush throttle after the one before it started, whenever its first frame came', () => {
+  const connection = ClientConnection.getOrCreate(
+    'http://throttle.test',
+    createChannel() as never,
+    stalledOptions(),
+  ) as any
+  const transport = connection.transport
+  const startedAt = 1_000_000
+  transport.lastPostStartedAt = startedAt
+  // A frame that comes as the last POST's credit returns, 100 ms into the throttle.
+  expect(transport.getFrameDeadline('data', startedAt + 100)).toBe(startedAt + SSE_FLUSH_THROTTLE_MS)
+  // After a quiet spell, the idle delay.
+  const later = startedAt + 10 * SSE_FLUSH_THROTTLE_MS
+  expect(transport.getFrameDeadline('data', later)).toBe(later + SSE_POST_IDLE_FLUSH_DELAY_MS)
+  connection.dispose()
+})
+
 test('a batch POST that fails after the next wire started puts back only its window refreshes', async () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate('http://late-post.test', channel as never, stalledOptions()) as any
