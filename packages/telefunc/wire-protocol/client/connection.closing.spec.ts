@@ -23,8 +23,11 @@ import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
-import { SSE_FLUSH_THROTTLE_MS } from '../constants.js'
+import { SSE_FLUSH_THROTTLE_MS, STREAM_TRANSPORT } from '../constants.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
+import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
+import { createRequestContext } from '../../node/server/context/requestContext.js'
+import { parseResponse } from './response/parse.js'
 
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
 const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
@@ -574,6 +577,56 @@ describe.each(WIRES)('over %s', (wire) => {
     expect(serverClosed.err).toBeUndefined()
   })
 
+  test("a page's abort(value) closes the server's end with Abort and that value (#481)", async () => {
+    const { channel } = page(wire)
+    const server = register()
+    const pageChannel = channel(server.id)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    pageChannel.abort({ reason: 'gone', code: 7 })
+    await advance(1_000)
+    expect(isAbort(serverClosed.err)).toBe(true)
+    expect((serverClosed.err as { abortValue: unknown }).abortValue).toEqual({ reason: 'gone', code: 7 })
+  })
+
+  test("a withContext signal that aborts a call closes the server's end of a channel the call returned with Abort (#481)", async () => {
+    page(wire)
+    const server = new ServerChannel()
+    const serverClosed = closedWith(server)
+    const requestContext = createRequestContext(new Request('http://localhost/_telefunc', { method: 'POST' }))
+    const result = serializeTelefunctionResult({
+      telefunctionReturn: server.client,
+      telefunctionName: 'onChat',
+      telefuncFilePath: '/chat.telefunc.ts',
+      telefunctionAborted: false,
+      context: {},
+      requestContext,
+      abortSignal: requestContext.abortSignal,
+      streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
+      useNodeStream: false,
+      serverConfig: { log: { shieldErrors: { dev: false, prod: false } } },
+    })
+    const abortController = new AbortController() // the call's, which its withContext signal aborts
+    await parseResponse(
+      new Response(result.body as string),
+      {
+        telefunctionName: 'onChat',
+        telefuncFilePath: '/chat.telefunc.ts',
+        abortController,
+        channel: { transports: wire === 'ws' ? ['ws'] : ['sse'] },
+        requestCloseHandlers: [],
+        extensionResponseTypes: [],
+        headers: null,
+        telefuncUrl: `http://${crypto.randomUUID()}.test/_telefunc`,
+      },
+      crypto.randomUUID(),
+    )
+    await advance(500)
+    abortController.abort()
+    await advance(1_000)
+    expect(isAbort(serverClosed.err)).toBe(true)
+  })
+
   test('an abort the page queues behind a registration reaches the server', async () => {
     const { channel } = page(wire)
     const server = register()
@@ -583,7 +636,7 @@ describe.each(WIRES)('over %s', (wire) => {
     channel(register().id) // its RECONCILE holds the page's sends
     pageChannel.abort()
     await advance(1_000)
-    expect(serverClosed.err).toBeUndefined()
+    expect(isAbort(serverClosed.err)).toBe(true)
   })
 
   test('a close acknowledgement the page queues while its RECONCILE is in flight reaches the server', async () => {
@@ -938,14 +991,14 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     const unconfirmed = again.channel(aborted.id)
     await advance(500)
     let reconciled = 0
-    again.net.whenPageSends(TAG.CLOSE, () => {
+    again.net.whenPageSends(TAG.ABORT, () => {
       again.net.die()
       again.net.whenPageSends(TAG.RECONCILE, () => reconciled++)
     })
     unconfirmed.abort() // its abort goes down with the wire
     await advance(5_000)
     expect(reconciled).toBe(1)
-    expect(abortedClosed.err).toBeUndefined()
+    expect(isAbort(abortedClosed.err)).toBe(true)
   })
 })
 

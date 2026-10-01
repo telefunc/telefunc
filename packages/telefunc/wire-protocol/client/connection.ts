@@ -198,7 +198,7 @@ interface MuxConnection {
   sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void
   sendBinary(channel: MuxChannel, data: Uint8Array): void
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
-  sendAbort(channel: MuxChannel): void
+  sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
   sendByteWindowUpdate(channel: MuxChannel, limit: number): void
@@ -742,8 +742,8 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'ack', frame })
   }
 
-  sendAbort(channel: MuxChannel): void {
-    this.sendClosingFrame(channel, (ix, seq) => encode.close(ix, 0, seq))
+  sendAbort(channel: MuxChannel, abortValue: string): void {
+    this.sendClosingFrame(channel, (ix, seq) => encode.abort(ix, abortValue, seq))
   }
 
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {

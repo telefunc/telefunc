@@ -210,7 +210,7 @@ test('a closed channel counts against neither the channel cap nor, when a new on
   const connection = ClientConnection.getOrCreate('http://cap-closed.test', closing as never, options) as any
   for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++)
     ClientConnection.getOrCreate('http://cap-closed.test', createChannel() as never, options)
-  connection.sendAbort(closing) // its abort waits for the wire
+  connection.sendAbort(closing, 'null') // its abort waits for the wire
   connection.unregister(closing)
   expect(ClientConnection.getOrCreate('http://cap-closed.test', createChannel() as never, options)).toBe(connection)
   expect(connection.channels.size).toBe(MAX_CHANNELS_PER_CONNECTION)
@@ -286,7 +286,7 @@ test('a channel closed during a reconnect sends what the dead wire lost before w
   replay.push(replay.nextSeq(), encode.text(0, 'lost with the wire', 1))
   connection.buildReconcileFrame() // the reconnect's: sends wait for its RECONCILED
   connection.send(channel, 'queued')
-  connection.sendAbort(channel)
+  connection.sendAbort(channel, 'null')
   connection.unregister(channel)
   const { frames } = connection.applyReconciled(
     reconciled({ sessionId: 'draining', open: [{ ix: 0, lastSeq: 0 }] }),
@@ -296,7 +296,7 @@ test('a channel closed during a reconnect sends what the dead wire lost before w
   expect(sent.map((frame: { tag: number; seq?: number }) => [frame.tag, frame.seq])).toEqual([
     [TAG.TEXT, 1],
     [TAG.TEXT, 2],
-    [TAG.CLOSE, 3],
+    [TAG.ABORT, 3],
   ])
   connection.dispose()
 })
@@ -309,7 +309,7 @@ test('a channel whose abort went out with a reconcile on a wire that then died s
   connection.applyReconciled(reconciled({ sessionId: 'lost', open: [{ ix: 0, lastSeq: 0 }] }), null)
   ClientConnection.getOrCreate('http://abort-lost.test', createChannel() as never, options) // a call's callback
   connection.buildReconcileFrame() // its registration: sends wait for the RECONCILED
-  connection.sendAbort(closing)
+  connection.sendAbort(closing, 'null')
   connection.unregister(closing)
   connection.stageReconcileBatch() // the abort leaves with the registration's reconcile
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true }) after that
@@ -322,7 +322,7 @@ test('a channel whose abort went out with a reconcile on a wire that then died s
   const { frames } = connection.applyReconciled(reconciled({ sessionId: 'lost', open }), null)
   const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame, wireSeqs))
   expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
-    { tag: TAG.CLOSE, seq: 1, timeoutMs: 0 },
+    { tag: TAG.ABORT, seq: 1, abortValue: 'null' },
   ])
   connection.dispose()
 })

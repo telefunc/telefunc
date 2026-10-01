@@ -489,6 +489,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.CLOSE_ACK:
         this._onPeerCloseAck()
         return
+      case TAG.ABORT:
+        this._shutdown(createAbortError(parsePeerText(frame.abortValue)))
+        return
       case TAG.ERROR:
         assertProtocol(frame.reason === ERROR_REASON.LOST, `ERROR reason ${frame.reason} from a page`)
         this._shutdown(replayLossError('client'))
