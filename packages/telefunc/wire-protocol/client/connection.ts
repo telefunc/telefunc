@@ -2006,6 +2006,9 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
+/** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
+const SSE_FOLD_BYTES = 1024 * 1024
+
 class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
@@ -2027,6 +2030,8 @@ class SseTransport implements UpgradeSource {
     void this.flushOutbox()
   })
   private flushing = false
+  /** The next POST's body, as far as `foldOutbox` built it. */
+  private folded: { blob: Blob; count: number; first: OutboxEntry; last: OutboxEntry } | null = null
   private lastPostStartedAt = 0
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
@@ -2118,8 +2123,32 @@ class SseTransport implements UpgradeSource {
     const now = Date.now()
     const deadline = this.getFrameDeadline(frame.kind, now)
     this.outbox.push({ frame: frame.frame, deadline })
+    if (this.flushing) this.foldOutbox()
     this.scheduleFlush()
     if (deadline <= now) void this.flushOutbox()
+  }
+
+  /** While a POST is out, what joins the outbox goes into the next one's body a MiB at a time, so the flush after the
+   *  answer copies only the rest. Held with the first and last entries it covers: the outbox only grows at its end, or
+   *  is replaced or prepended to, which changes its first entry. */
+  private foldOutbox(): void {
+    const folded = this.folded
+    const valid = folded !== null && this.outbox[0] === folded.first && this.outbox[folded.count - 1] === folded.last
+    const from = valid ? folded.count : 0
+    let bytes = 0
+    for (let i = from; i < this.outbox.length; i++) bytes += this.outbox[i]!.frame.byteLength
+    if (bytes < SSE_FOLD_BYTES) return
+    const parts: (Blob | Uint8Array<ArrayBuffer>)[] = valid ? [folded.blob] : []
+    for (let i = from; i < this.outbox.length; i++) {
+      const { frame } = this.outbox[i]!
+      parts.push(encodeU32(frame.byteLength), frame)
+    }
+    this.folded = {
+      blob: new Blob(parts),
+      count: this.outbox.length,
+      first: this.outbox[0]!,
+      last: this.outbox[this.outbox.length - 1]!,
+    }
   }
 
   private async openStream(): Promise<void> {
@@ -2288,6 +2317,10 @@ class SseTransport implements UpgradeSource {
     try {
       const now = Date.now()
       const queued = this.outbox.splice(0, this.outbox.length)
+      const folded = this.folded
+      this.folded = null
+      const head =
+        folded !== null && queued[0] === folded.first && queued[folded.count - 1] === folded.last ? folded : null
       this.lastPostStartedAt = now
       const wire = this.transportAbort
 
@@ -2295,7 +2328,8 @@ class SseTransport implements UpgradeSource {
         const response = await this.post(
           encodeSseBatch(
             { connId: this.connId },
-            queued.map((entry) => entry.frame),
+            queued.slice(head?.count ?? 0).map((entry) => entry.frame),
+            head?.blob,
           ),
           wire.signal,
         )
@@ -2459,6 +2493,7 @@ class SseTransport implements UpgradeSource {
     }
     this.flushScheduler.cancel()
     this.outbox = []
+    this.folded = null
     this.closeStreamRequest()
     this.transportAbort?.abort()
     this.transportAbort = null

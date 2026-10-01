@@ -30,9 +30,10 @@ function encodeSseRequest(metadata: SseRequestMetadata, batch?: Uint8Array<Array
 }
 
 /** As `encodeSseRequest` with `frames` length-prefixed, but the Blob takes the frames as they are: a batch POST of a
- *  window's worth isn't copied into one buffer first. */
-function encodeSseBatch(metadata: SseRequestMetadata, frames: Uint8Array<ArrayBuffer>[]): Blob {
-  const parts: Uint8Array<ArrayBuffer>[] = [encodeSseRequestMetadata(metadata)]
+ *  window's worth isn't copied into one buffer first. `head`: the first frames, length-prefixed already. */
+function encodeSseBatch(metadata: SseRequestMetadata, frames: Uint8Array<ArrayBuffer>[], head?: Blob): Blob {
+  const parts: (Blob | Uint8Array<ArrayBuffer>)[] = [encodeSseRequestMetadata(metadata)]
+  if (head) parts.push(head)
   for (const frame of frames) parts.push(encodeU32(frame.byteLength), frame)
   return new Blob(parts)
 }

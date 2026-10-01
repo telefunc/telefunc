@@ -16,6 +16,8 @@ import {
   SSE_POST_IDLE_FLUSH_DELAY_MS,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
+import { encodeSseRequest } from '../sse-request.js'
+import { encodeLengthPrefixedFrames } from '../frame.js'
 import { TAG, decode, encode, type ReconciledPayload, type SeqReader } from '../shared-ws.js'
 
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
@@ -163,6 +165,35 @@ test('a batch POST goes a flush throttle after the one before it started, whenev
   // After a quiet spell, the idle delay.
   const later = startedAt + 10 * SSE_FLUSH_THROTTLE_MS
   expect(transport.getFrameDeadline('data', later)).toBe(later + SSE_POST_IDLE_FLUSH_DELAY_MS)
+  connection.dispose()
+})
+
+test('what joins the outbox while a batch POST is out goes into the next body as it comes, and that body carries every frame in order', async () => {
+  const connection = ClientConnection.getOrCreate('http://fold.test', createChannel() as never, stalledOptions()) as any
+  const transport = connection.transport
+  const bodies: Blob[] = []
+  let answer!: () => void
+  transport.post = (body: Blob) => {
+    bodies.push(body)
+    return new Promise<Response>((resolve) => void (answer = () => resolve(new Response(''))))
+  }
+  transport.transportAbort = new AbortController()
+  transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
+  const first = transport.flushOutbox()
+  const frames = Array.from({ length: 40 }, (_, i) =>
+    encode.text(0, JSON.stringify(String(i).repeat(64 * 1024)), i + 1),
+  )
+  for (const frame of frames) transport.sendFrame({ kind: 'data', frame })
+  // A MiB and more joined while the POST was out: it is in the next body before that POST is answered.
+  expect(transport.folded?.count).toBeGreaterThanOrEqual(16)
+  answer()
+  await first
+  await vi.waitFor(() => expect(bodies).toHaveLength(2))
+  const sent = new Uint8Array(await bodies[1]!.arrayBuffer())
+  const expected = new Uint8Array(
+    await encodeSseRequest({ connId: transport.connId }, encodeLengthPrefixedFrames(frames)).arrayBuffer(),
+  )
+  expect(sent).toEqual(expected)
   connection.dispose()
 })
 
