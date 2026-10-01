@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "compatibility_date": "2025-08-15",
+  "compatibility_flags": ["enable_request_signal"],
   "name": "telefunc_examples_cloudflare-workers",
   "dev": { "port": 3000 },
   "define": {

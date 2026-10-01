@@ -269,7 +269,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didTerminate || this._isClosed) return
     this._isClosed = true
     const abortError = createAbortError(abortValue, message)
-    this._connection.sendAbort(this)
+    this._connection.sendAbort(this, stringify(abortValue))
     this._finalizeClose(abortError)
   }
 

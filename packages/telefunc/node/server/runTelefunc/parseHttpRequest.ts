@@ -142,7 +142,8 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
             // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
             // underlying channel/stream closes and the client releases the original.
             const wrapper = wrapProxy(value)
-            globalObject.gcRegistry.register(wrapper, close)
+            // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
+            requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
             revived.value = wrapper
           }
           {

@@ -3,7 +3,7 @@ export type { ChannelPumpRunContext }
 
 import type { StreamingProducer } from '../../types.js'
 import { concat } from '../../frame.js'
-import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
+import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
 import { ChannelClosedError, ServerChannel, reconnectWindow } from '../channel.js'
 import { getChannelMux } from '../mux.js'
 import { isAbort } from '../../../node/server/Abort.js'
@@ -14,6 +14,7 @@ import type { RequestContext } from '../../../node/server/context/requestContext
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
+const TAG_END = new Uint8Array([CHANNEL_PUMP_TAG_END])
 
 type ChannelPumpRunContext = {
   context: Context
@@ -29,7 +30,7 @@ type ChannelPumpRunContext = {
  * chunks with proper context restoration and cleanup.
  *
  * Each binary send is tagged: `[TAG_DATA][payload]` for data, `[TAG_ERROR][errorPayload]`
- * for errors. Tags are defined in constants.ts and shared with the client's
+ * for errors, `[TAG_END]` at the producer's end. Tags are defined in constants.ts and shared with the client's
  * ChannelStreamSource. Errors are encoded with `encodeErrorPayload` — the same
  * payload format as inline streaming.
  *
@@ -85,7 +86,11 @@ function pumpProducerToChannel(
             cancelledPromise,
             producer.chunks.next(),
           ])
-          if (done || cancelled) break
+          if (cancelled) break
+          if (done) {
+            channel.sendBinary(TAG_END)
+            break
+          }
           const pending = channel._sendBinary(concat(TAG_DATA, value))
           if (pending) await pending
         }

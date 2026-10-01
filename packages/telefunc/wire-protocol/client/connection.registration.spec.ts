@@ -16,6 +16,7 @@ import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
 import { config as serverConfig, getServerConfig } from '../../node/server/serverConfig.js'
 import { NetworkError } from '../../shared/NetworkError.js'
+import { isAbort } from '../../shared/Abort.js'
 
 type Wire = 'sse' | 'sse-batch' | 'ws'
 const WIRES: Wire[] = ['sse', 'sse-batch', 'ws']
@@ -350,7 +351,7 @@ describe.each(WIRES)('over %s', (wire) => {
     let closedWith: unknown = 'open'
     server.onClose((err) => void (closedWith = err))
     await vi.advanceTimersByTimeAsync(200)
-    expect(closedWith).toBeUndefined()
+    expect(isAbort(closedWith)).toBe(true)
   })
 
   test('a callback the page aborts while the server awaits it gets the abort once its call arrives', async () => {
@@ -367,7 +368,7 @@ describe.each(WIRES)('over %s', (wire) => {
     let closedWith: unknown = 'open'
     server.onClose((err) => void (closedWith = err))
     await vi.advanceTimersByTimeAsync(200)
-    expect(closedWith).toBeUndefined()
+    expect(isAbort(closedWith)).toBe(true)
   })
 
   test('what a callback sends before and after a reconnect reaches it in order once its call arrives', async () => {
@@ -407,7 +408,7 @@ describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
     let closedWith: unknown = 'open'
     callback.onClose((err) => void (closedWith = err))
     await vi.advanceTimersByTimeAsync(200)
-    expect(closedWith).toBeUndefined()
+    expect(isAbort(closedWith)).toBe(true)
     void server.send('over the WebSocket', { ack: false })
     await vi.advanceTimersByTimeAsync(200)
     expect(received).toEqual(['over the WebSocket'])

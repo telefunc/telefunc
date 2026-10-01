@@ -9,6 +9,7 @@ import type { Peer } from 'crossws'
 import '../../node/server/async_hooks.js'
 
 import { ClientChannel } from './channel.js'
+import { ClientConnection } from './connection.js'
 import { pumpClientProducerToChannel } from './request/pumpToChannel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
@@ -23,8 +24,11 @@ import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
-import { SSE_FLUSH_THROTTLE_MS } from '../constants.js'
+import { SSE_FLUSH_THROTTLE_MS, STREAM_TRANSPORT } from '../constants.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
+import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
+import { createRequestContext } from '../../node/server/context/requestContext.js'
+import { parseResponse } from './response/parse.js'
 
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
 const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
@@ -488,7 +492,7 @@ describe.each(WIRES)('over %s', (wire) => {
     net.whenPageSends(TAG.RECONCILE, () => net.die())
     channel(register().id) // the listener opens a channel, whose registration holds the answer
     answer()
-    await advance(15_000) // a wire awaiting its RECONCILED is dropped at the reconcile timeout
+    await advance(15_000)
     expect(closing.value).toBe(0)
     expect(asked.value).toBe('reply')
     expect(serverClosed.err).toBeUndefined()
@@ -541,6 +545,89 @@ describe.each(WIRES)('over %s', (wire) => {
     expect(serverClosed.err).toBeUndefined()
   })
 
+  test("a channel returned while the page's wire is dead without a word opens on both ends once the page reconnects (#482)", async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    await advance(500)
+    net.die()
+    const server = register()
+    const pageChannel = channel(server.id)
+    let opened = false
+    pageChannel.onOpen(() => (opened = true))
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    await advance(20_000)
+    expect(pageClosed.err).toBe('open')
+    expect(serverClosed.err).toBe('open')
+    expect(opened).toBe(true)
+  })
+
+  test("a channel the page closes while a reconnect's RECONCILED goes down with its wire ends on the server at the next reconnect (#486)", async () => {
+    const { net, channel } = page(wire)
+    channel(register().id) // another channel on the page
+    const server = register()
+    const pageChannel = channel(server.id)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    net.die()
+    net.whenServerSends(TAG.RECONCILED, () => {
+      net.die()
+      void pageChannel.close({ timeout: 500 })
+    })
+    await advance(15_000)
+    expect(serverClosed.err).toBeUndefined()
+  })
+
+  test("a page's abort(value) closes the server's end with Abort and that value (#481)", async () => {
+    const { channel } = page(wire)
+    const server = register()
+    const pageChannel = channel(server.id)
+    const serverClosed = closedWith(server)
+    await advance(500)
+    pageChannel.abort({ reason: 'gone', code: 7 })
+    await advance(1_000)
+    expect(isAbort(serverClosed.err)).toBe(true)
+    expect((serverClosed.err as { abortValue: unknown }).abortValue).toEqual({ reason: 'gone', code: 7 })
+  })
+
+  test("a withContext signal that aborts a call closes the server's end of a channel the call returned with Abort (#481)", async () => {
+    page(wire)
+    const server = new ServerChannel()
+    const serverClosed = closedWith(server)
+    const requestContext = createRequestContext(new Request('http://localhost/_telefunc', { method: 'POST' }))
+    const result = serializeTelefunctionResult({
+      telefunctionReturn: server.client,
+      telefunctionName: 'onChat',
+      telefuncFilePath: '/chat.telefunc.ts',
+      telefunctionAborted: false,
+      context: {},
+      requestContext,
+      abortSignal: requestContext.abortSignal,
+      streamTransport: STREAM_TRANSPORT.BINARY_INLINE,
+      useNodeStream: false,
+      serverConfig: { log: { shieldErrors: { dev: false, prod: false } } },
+    })
+    const abortController = new AbortController() // the call's, which its withContext signal aborts
+    await parseResponse(
+      new Response(result.body as string),
+      {
+        telefunctionName: 'onChat',
+        telefuncFilePath: '/chat.telefunc.ts',
+        abortController,
+        channel: { transports: wire === 'ws' ? ['ws'] : ['sse'] },
+        requestCloseHandlers: [],
+        extensionResponseTypes: [],
+        headers: null,
+        telefuncUrl: `http://${crypto.randomUUID()}.test/_telefunc`,
+      },
+      crypto.randomUUID(),
+    )
+    await advance(500)
+    abortController.abort()
+    await advance(1_000)
+    expect(isAbort(serverClosed.err)).toBe(true)
+  })
+
   test('an abort the page queues behind a registration reaches the server', async () => {
     const { channel } = page(wire)
     const server = register()
@@ -550,7 +637,7 @@ describe.each(WIRES)('over %s', (wire) => {
     channel(register().id) // its RECONCILE holds the page's sends
     pageChannel.abort()
     await advance(1_000)
-    expect(serverClosed.err).toBeUndefined()
+    expect(isAbort(serverClosed.err)).toBe(true)
   })
 
   test('a close acknowledgement the page queues while its RECONCILE is in flight reaches the server', async () => {
@@ -905,14 +992,14 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     const unconfirmed = again.channel(aborted.id)
     await advance(500)
     let reconciled = 0
-    again.net.whenPageSends(TAG.CLOSE, () => {
+    again.net.whenPageSends(TAG.ABORT, () => {
       again.net.die()
       again.net.whenPageSends(TAG.RECONCILE, () => reconciled++)
     })
     unconfirmed.abort() // its abort goes down with the wire
     await advance(5_000)
     expect(reconciled).toBe(1)
-    expect(abortedClosed.err).toBeUndefined()
+    expect(isAbort(abortedClosed.err)).toBe(true)
   })
 })
 
@@ -1580,6 +1667,16 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     resume() // the rest of the upload, and its end, go into the dead wire
     await advance(10_000)
     expect(read.value).toEqual(all)
+  })
+
+  test("an upload over the 'channel' transport whose page leaves mid-upload errors on the server rather than completing short (#471)", async () => {
+    serverConfig.channel = { pingInterval: 1_000, reconnectTimeout: 5_000 }
+    const { read } = upload(wire, 1_024)
+    await advance(500)
+    const connection = [...(ClientConnection as unknown as { cache: Map<string, { dispose(): void }> }).cache.values()]
+    connection.at(-1)!.dispose() // the page unloads: its wire closes, a WebSocket with a close frame
+    await advance(10_000)
+    expect(read.value).toBeInstanceOf(NetworkError)
   })
 
   test("a stream over the 'channel' transport that a reconnect needs a chunk of larger than the server's replay errors on the page rather than completing short", async () => {

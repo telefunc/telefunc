@@ -1,6 +1,6 @@
 export { pumpClientProducerToChannel }
 
-import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
+import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
 import { concat, textEncoder } from '../../frame.js'
 import { ChannelClosedError } from '../../channel-errors.js'
 import { ClientChannel } from '../channel.js'
@@ -10,6 +10,7 @@ import { randomUuid } from '../../../utils/randomUuid.js'
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
+const TAG_END = new Uint8Array([CHANNEL_PUMP_TAG_END])
 
 /**
  * Pump a single producer's chunks to the server through a dedicated ClientChannel.
@@ -64,7 +65,11 @@ function pumpClientProducerToChannel(
       })
       while (true) {
         const { done, value } = await Promise.race([cancelledPromise, producer.chunks.next()])
-        if (done || cancelled) break
+        if (cancelled) break
+        if (done) {
+          channel.sendBinary(TAG_END)
+          break
+        }
         const pending = channel._sendBinary(concat(TAG_DATA, value))
         if (pending) await pending
       }
