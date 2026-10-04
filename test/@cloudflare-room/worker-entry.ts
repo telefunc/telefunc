@@ -31,6 +31,7 @@ import { parseHttpRequest } from '../../packages/telefunc/node/server/runTelefun
 import { createRequestContext } from '../../packages/telefunc/node/server/context/requestContext.js'
 import { getServerConfig } from '../../packages/telefunc/node/server/serverConfig.js'
 import { SERIALIZER_PREFIX_FUNCTION } from '../../packages/telefunc/wire-protocol/constants.js'
+import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 const broadcast = new CloudflareBroadcast({
   baseInstanceName: 'telefunc',
@@ -53,15 +54,16 @@ globalThis.setInterval = ((callback: () => void, ms?: number) => {
 }) as typeof setInterval
 const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
-// Broadcast's roles as the production class plays them: each instance is a session, a key authority and a coordinator.
-export class TelefuncProbeDurableObject extends DurableObject<Env> {
+// The production class's roles: each instance is a session, a Broadcast key authority and coordinator, and a room
+// authority.
+export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
   readonly #manager: CloudflareRoomSessionManager
   readonly #calls: BroadcastCalls = new OrderedStubs()
   readonly #broadcastAuthority: CloudflareBroadcastAuthorityState
   readonly #member: CloudflareBroadcastMember
   readonly #mux = new ChannelMux()
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env)
+    super(ctx, env, env.TelefuncDurableObject)
     this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
     this.#broadcastAuthority = new CloudflareBroadcastAuthorityState(ctx)
     this.#member = broadcast.member(ctx.id.toString(), this.#calls)
@@ -130,6 +132,19 @@ export class TelefuncProbeDurableObject extends DurableObject<Env> {
     })
   }
   readonly #held = new Map<string, unknown[]>()
+  // A server creates a room nothing ever holds.
+  createRoom(roomId: string, emptyTimeout: number): Promise<void> {
+    return this.#run(async () => {
+      await Room.create(roomId, { emptyTimeout })
+    })
+  }
+  // The server is gone, with the timers it set.
+  die(): void {
+    this.ctx.abort()
+  }
+  scheduledAlarm(): Promise<number | null> {
+    return this.ctx.storage.getAlarm()
+  }
   telefuncBroadcastPublish(request: BroadcastPublishRequest) {
     return broadcast.publishToSubscribers(this.#broadcastAuthority, this.#calls, request)
   }
@@ -190,6 +205,8 @@ type BroadcastSession = RpcMethods<
   Pick<TelefuncProbeDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
 type CallbackSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'callWithCallback' | 'leave'>>
+type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'die'>>
+type TelefuncAuthority = RpcMethods<Pick<TelefuncProbeDurableObject, 'readHead' | 'scheduledAlarm'>>
 type Env = Cloudflare.Env
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/lost-target': lostTarget,
@@ -201,6 +218,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/broadcast-sessions': broadcastAcrossSessions,
   '/refused-first-write': refusedFirstWrite,
   '/callback-timers': callbackTimers,
+  '/auto-close': autoClose,
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -340,6 +358,34 @@ async function callbackTimers(env: Env, suffix: string) {
   return {
     whileOnlyBHolds,
     afterBothLeft: { a: firedBy('a') - bothLeft.a, b: firedBy('b') - bothLeft.b },
+  }
+}
+// Two servers each create a room nothing holds, closing 1 s on; one is gone at once. The live one closes its room as
+// Room.close() does; the other's room lapses at its authority's alarm, with nothing left for the alarm after.
+async function autoClose(env: Env, suffix: string) {
+  const roomOf = (name: string) => {
+    const roomId = `auto-close-${name}-${suffix}`
+    const server = env.TELEFUNC.get(
+      env.TELEFUNC.idFromName(`auto-close-server-${name}-${suffix}`),
+    ) as unknown as RoomServer
+    const authority = env.TELEFUNC.get(
+      env.TELEFUNC.idFromName(`__telefunc_room__:${roomId}`),
+    ) as unknown as TelefuncAuthority
+    return { roomId, server, authority, state: async () => (await authority.readHead())?.state ?? 'absent' }
+  }
+  const [live, gone] = [roomOf('live'), roomOf('gone')]
+  await live.server.createRoom(live.roomId, 1_000)
+  await gone.server.createRoom(gone.roomId, 1_000)
+  const alarmArmed = (await gone.authority.scheduledAlarm()) !== null
+  await gone.server.die().catch(() => {})
+  await new Promise((resolve) => setTimeout(resolve, 2_000))
+  const afterTimeout = { live: await live.state(), gone: await gone.state() }
+  await new Promise((resolve) => setTimeout(resolve, 5_000))
+  return {
+    alarmArmed,
+    afterTimeout,
+    afterLapse: await gone.state(),
+    alarmAfterLapse: await gone.authority.scheduledAlarm(),
   }
 }
 async function largeRetainedReplay(env: Env, suffix: string) {

@@ -82,7 +82,14 @@ import {
 } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { reconnectWindow, reportServerChannelError } from '../../server/channel.js'
-import { createMember, evictMember, reapAndReadMembersById, updateMemberRecord } from './membership.js'
+import {
+  createMember,
+  createView,
+  evictMember,
+  reapAndReadMembersById,
+  removeView,
+  updateMemberRecord,
+} from './membership.js'
 import { memberCellKey } from './cells.js'
 import type {
   BinaryPublishOptions,
@@ -133,6 +140,8 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal */ readonly _state: RoomState
   private readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
+  /** Each stub's view record, written as it attaches; its removal waits for it. */
+  private readonly _views = new Map<RoomStubChannel, Promise<void>>()
   /** Stubs whose first roster read failed: the next successful refresh sends them one. */
   private readonly _rosterOwed = new Set<RoomStubChannel>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
@@ -703,6 +712,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
+    this._views.set(stub, createView(this.id, this._inc, stub.id).catch(reportRoomError))
     if (this._tail !== null) {
       stub._beginTail(this._tail.take(), () => this._subs.replan())
       this._tail = null
@@ -732,6 +742,9 @@ class ServerRoom extends RoomStateView implements Room {
   }
   private _detachStub(stub: RoomStubChannel): void {
     this._stubs.delete(stub)
+    const view = this._views.get(stub)
+    this._views.delete(stub)
+    void view?.then(() => removeView(this.id, this._inc, stub.id)).catch(reportRoomError)
     this._rosterOwed.delete(stub)
     stub._endTail()
     for (const id of stub._heldMembers()) {
@@ -826,6 +839,11 @@ class ServerRoom extends RoomStateView implements Room {
       for (const id of demand.members) members.add(id)
     }
     return { all: false, members }
+  }
+
+  /** @internal The views of this instance's stubs. */
+  _ownedViews(): string[] {
+    return [...this._stubs].map((stub) => stub.id)
   }
 
   /** @internal */

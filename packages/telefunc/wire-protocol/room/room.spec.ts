@@ -25,12 +25,15 @@ import {
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
   ROOM_NAMED_TRACKS_MAX,
+  ROOM_EMPTY_TIMEOUT_MS,
+  ROOM_DEPARTURE_TIMEOUT_MS,
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes } from './model.js'
 import { hasRoomTag, type InboxMessage, type RoomSnapshotMetadata } from './protocol.js'
 import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
+import { createView } from './server/membership.js'
 import type { LeaveCause, ParticipantMeta, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
@@ -3571,6 +3574,142 @@ describe('room protocol validation', () => {
 type Peer = ReturnType<typeof attachPeer>
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
 const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
+describe('a room nothing holds closes on its own', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    config.room = {}
+  })
+  const isListed = async (id: string) => (await Room.list()).some((room) => room.id === id)
+  /** Watches the room from a server handle, which doesn't hold it. */
+  async function observe(id: string) {
+    const observer = await Room.get(id)
+    const closed = vi.fn()
+    observer.onClose(closed)
+    return closed
+  }
+  /** As `Room.close()` leaves it: a tombstone, its holders told, and no longer listed. */
+  async function expectClosed(id: string, closed: () => void) {
+    await vi.waitFor(async () => expect((await getRoomBackend().readHead(id))?.state).toBe('closed'))
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledOnce())
+    expect(await isListed(id)).toBe(false)
+  }
+  /** One member joins and leaves. */
+  async function visit(room: Room) {
+    await (await room.join()).leave()
+  }
+
+  it('keeps a room a page was returned open for 10 minutes, and its join then works, while one nobody holds closes at emptyTimeout', async () => {
+    const held = (await Room.create('page-holds')) as ServerRoom
+    const unheld = await Room.create('nobody-holds')
+    const unheldClosed = await observe(unheld.id)
+    const { stub } = serve(held)
+    await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)
+    await expectClosed(unheld.id, unheldClosed)
+    await vi.advanceTimersByTimeAsync(10 * 60_000 - ROOM_EMPTY_TIMEOUT_MS)
+    const id = await joinThrough(stub)
+    expect((await Room.getParticipants(held.id)).map((member) => member.id)).toEqual([id])
+  })
+  it('closes a room emptyTimeout after the page it was returned to closes, when nobody joined it', async () => {
+    const room = (await Room.create('page-closed-unjoined')) as ServerRoom
+    const closed = await observe(room.id)
+    const { stub } = serve(room)
+    await vi.advanceTimersByTimeAsync(60_000)
+    stub._onPeerClose()
+    await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS - 1_000)
+    expect(await isListed(room.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await expectClosed(room.id, closed)
+  })
+  it('closes a room departureTimeout after its last member left with its page', async () => {
+    const room = (await Room.create('page-closed-joined')) as ServerRoom
+    const closed = await observe(room.id)
+    const { stub } = serve(room)
+    await joinThrough(stub)
+    await vi.advanceTimersByTimeAsync(60_000)
+    stub._onPeerClose()
+    await vi.advanceTimersByTimeAsync(ROOM_DEPARTURE_TIMEOUT_MS - 1_000)
+    expect(await isListed(room.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await expectClosed(room.id, closed)
+  })
+  it("lets a page's view lapse once its server stops renewing it, as a member does, and closes the room emptyTimeout after", async () => {
+    const room = (await Room.create('view-lapses')) as ServerRoom
+    const closed = await observe(room.id)
+    // A view the server holding the page wrote before it died, renewed by nothing since.
+    await createView(room.id, room._inc, 'gone-page')
+    await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
+    expect(await isListed(room.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)
+    await expectClosed(room.id, closed)
+  })
+  it('lets no hidden participant hold a room: alone it closes at emptyTimeout, after players at departureTimeout', async () => {
+    const alone = await Room.create('hidden-alone')
+    const aloneClosed = await observe(alone.id)
+    await alone.join({ hidden: true, identity: 'authority' })
+    const played = await Room.create('hidden-after-players')
+    const playedClosed = await observe(played.id)
+    const authority = await played.join({ hidden: true, identity: 'authority' })
+    const authorityLeft = vi.fn()
+    authority.onLeave(authorityLeft)
+    await visit(played)
+    await vi.advanceTimersByTimeAsync(ROOM_DEPARTURE_TIMEOUT_MS)
+    await expectClosed(played.id, playedClosed)
+    expect(authorityLeft).toHaveBeenCalledWith({ type: 'closed' })
+    expect(await isListed(alone.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS - ROOM_DEPARTURE_TIMEOUT_MS)
+    await expectClosed(alone.id, aloneClosed)
+  })
+  it('keeps a room held again before its timeout, and closes it once nothing holds it again', async () => {
+    const room = await Room.create('held-again')
+    const closed = await observe(room.id)
+    await visit(room)
+    await vi.advanceTimersByTimeAsync(ROOM_DEPARTURE_TIMEOUT_MS - 5_000)
+    const back = await room.join()
+    await vi.advanceTimersByTimeAsync(ROOM_DEPARTURE_TIMEOUT_MS)
+    expect(await isListed(room.id)).toBe(true)
+    await back.leave()
+    await vi.advanceTimersByTimeAsync(ROOM_DEPARTURE_TIMEOUT_MS)
+    await expectClosed(room.id, closed)
+  })
+  it('keeps a room whose timeout is Infinity open until Room.close()', async () => {
+    const left = await Room.create('never-after-leave', { departureTimeout: Infinity })
+    const unjoined = await Room.getOrCreate('never-unjoined', { emptyTimeout: Infinity })
+    await visit(left)
+    await vi.advanceTimersByTimeAsync(60 * 60_000)
+    expect(await isListed(left.id)).toBe(true)
+    expect(await isListed(unjoined.id)).toBe(true)
+  })
+  it("takes its timeouts from config.room, which a room's own options override", async () => {
+    config.room = { departureTimeout: 1_000 }
+    const byConfig = await Room.create('config-timeout')
+    const byConfigClosed = await observe(byConfig.id)
+    const own = await Room.create('own-timeout', { departureTimeout: 5_000 })
+    const ownClosed = await observe(own.id)
+    await visit(byConfig)
+    await visit(own)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await expectClosed(byConfig.id, byConfigClosed)
+    expect(await isListed(own.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(4_000)
+    await expectClosed(own.id, ownClosed)
+  })
+  it('accepts a timeout of 0 to 2^31 - 1 ms or Infinity, and refuses anything else as a usage error', async () => {
+    for (const valid of [0, 2 ** 31 - 1, Infinity]) {
+      await Room.create(`valid-${valid}`, { emptyTimeout: valid, departureTimeout: valid })
+    }
+    for (const invalid of [-1, 1.5, 2 ** 31, Number.NaN, '1000']) {
+      const message = 'should be a non-negative safe integer of milliseconds, at most 2147483647'
+      await expect(Room.create('invalid', { emptyTimeout: invalid as number })).rejects.toThrow(
+        `\`options.emptyTimeout\` ${message}`,
+      )
+      await expect(Room.getOrCreate('invalid', { departureTimeout: invalid as number })).rejects.toThrow(
+        `\`options.departureTimeout\` ${message}`,
+      )
+    }
+  })
+})
 function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: BroadcastSubscriptions) {
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!

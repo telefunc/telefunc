@@ -8,6 +8,8 @@ export {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HORIZON_MS,
   ROOM_NAMED_TRACKS_MAX,
+  ROOM_EMPTY_TIMEOUT_MS,
+  ROOM_DEPARTURE_TIMEOUT_MS,
 }
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
 // Four heartbeats: a member is reaped only after several renewals in a row were missed.
@@ -26,3 +28,6 @@ const ROOM_HORIZON_MS = 60_000
 // Each named track opens a lane at every instance listening to it, so neither a subscriber nor a publisher can name
 // unbounded tracks.
 const ROOM_NAMED_TRACKS_MAX = 16
+// LiveKit's defaults: an unheld room nobody joined closes after 5 minutes, one a member had joined after 20 seconds.
+const ROOM_EMPTY_TIMEOUT_MS = 300_000
+const ROOM_DEPARTURE_TIMEOUT_MS = 20_000

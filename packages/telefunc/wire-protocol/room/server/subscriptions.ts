@@ -19,7 +19,8 @@ import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey } from './replay.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
-import { reapAndReadRoster, renewMemberLease } from './membership.js'
+import { reapAndReadRoster, renewMemberLease, renewView } from './membership.js'
+import { maintainHold } from './lifecycle.js'
 assertIsNotBrowser()
 
 const ROSTER_REFRESH_RETRY_LIMIT = 5
@@ -46,6 +47,7 @@ type SubscriptionHost = {
   _wantsBinary(member: string, track: string): boolean
   /** A pending admission owns its inbox, but its record is renewed only once it commits. */
   _ownedMembers(): { all: string[]; renewable: string[] }
+  _ownedViews(): string[]
   _onCtrlMessage(serialized: string, info: WirePublishInfo): void
   _onTextData(serialized: string, info: WirePublishInfo): void
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
@@ -302,15 +304,20 @@ class RoomSubscriptions {
       // No cell I/O, so member-cell latency never delays demand renewal.
       this._demand.heartbeat()
       let renewalFailure: { error: unknown } | null = null
-      for (const id of host._ownedMembers().renewable) {
+      const renewals = [
+        ...host._ownedMembers().renewable.map((id) => () => renewMemberLease(host.id, host._inc, id)),
+        ...host._ownedViews().map((id) => () => renewView(host.id, host._inc, id)),
+      ]
+      for (const renew of renewals) {
         try {
-          await renewMemberLease(host.id, host._inc, id)
+          await renew()
         } catch (error) {
           renewalFailure ??= { error }
         }
       }
       this.replan() // bounded retry trigger for still-wanted terminal lanes
-      await this.reconcileAuthority() // the roster read reaps crashed instances' expired members
+      await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views
+      if (!host._state.closed) await maintainHold(host.id, host._inc)
       if (renewalFailure) throw renewalFailure.error
     } finally {
       this._heartbeatBusy = false

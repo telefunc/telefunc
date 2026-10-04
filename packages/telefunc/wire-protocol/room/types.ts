@@ -106,6 +106,10 @@ type ParticipantRef = { id: string } | { identity: string }
 type RoomOptions<M extends RoomMeta = RoomMeta> = {
   /** Room metadata, visible to all observers. Default: `{}`. */
   meta?: M
+  /** Milliseconds an unheld room nobody joined stays before it closes; `Infinity` never. Default: `config.room.emptyTimeout`. */
+  emptyTimeout?: number
+  /** Milliseconds an unheld room a member had joined stays before it closes; `Infinity` never. Default: `config.room.departureTimeout`. */
+  departureTimeout?: number
 }
 
 type RoomGetOptions = {

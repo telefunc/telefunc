@@ -86,3 +86,12 @@ test("a session DO whose calls' callbacks all closed keeps no timer of the GC sc
     afterBothLeft: { a: 0, b: 0 },
   })
 })
+
+test("closes a room nothing holds as Room.close() does, and one whose server is gone lapses at its authority's alarm", async () => {
+  expect(await probe('/auto-close')).toEqual({
+    alarmArmed: true,
+    afterTimeout: { live: 'closed', gone: 'open' },
+    afterLapse: 'absent',
+    alarmAfterLapse: null,
+  })
+})

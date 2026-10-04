@@ -9,13 +9,14 @@ import { RoomError, isRoomError, participantGoneError, roomClosedError } from '.
 import {
   assertKnownOptions,
   assertParticipantIdentity,
+  assertRoomTimeout,
   isRecord,
   mergeAttributes,
   ownMessage,
   ownMetadata,
   removedCause,
 } from '../model.js'
-import type { MemberSnapshot, RoomConfigRecord, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope } from '../protocol.js'
+import type { MemberSnapshot, RoomConfigRecord, RoomDmEnvelope, RoomEnvelope } from '../protocol.js'
 import type {
   AfterJoinHook,
   AfterPublishHook,
@@ -36,6 +37,7 @@ import type {
   SendGuard,
 } from '../types.js'
 import {
+  createHold,
   evictMember,
   reapAndCountPresence,
   reapAndReadMembersById,
@@ -44,11 +46,9 @@ import {
 } from './membership.js'
 import { memberCellKey } from './cells.js'
 import {
-  CONTROL_LANE,
   SEMANTIC_LANE,
   commitRoomLane,
   commitRoomLaneOrThrow,
-  configFromHead,
   openConfig,
   encodeRoomRecord,
   publishCtrl,
@@ -56,6 +56,9 @@ import {
 } from './lanes.js'
 import { ServerRoom } from './room.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
+import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
+import { creationBackstopMs, newHoldRecord } from './lifecycle.js'
+import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
   M,
@@ -113,8 +116,6 @@ const Room: RoomStatic = {
   getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
 }
 
-const ROOM_TOMBSTONE_TTL_MS = 60_000
-const ROOM_CLOSE_LEASE_MS = 15_000
 let _writerId: string | undefined
 
 function writerId(): string {
@@ -160,7 +161,7 @@ async function repairRoomIndex(
 type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
-  const { meta } = normalizeRoomOptions(options)
+  const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
   const backend = getRoomBackend()
   return await retryCompareExchange(id, async () => {
     let current = await backend.readHead(id)
@@ -177,10 +178,15 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       by: writerId(),
       inc: crypto.randomUUID(),
     }
+    const hold = newHoldRecord(emptyTimeout, departureTimeout)
+    const ttlMs = creationBackstopMs(hold)
     const result = await backend.compareExchangeHead(
       id,
       current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
-      { head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) } },
+      {
+        head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) },
+        ...(ttlMs === undefined ? {} : { ttlMs }),
+      },
     )
     if ('conflict' in result) {
       // A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again.
@@ -188,6 +194,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
     }
     assert('head' in result)
+    if (hold !== null) await createHold(id, created.inc, hold)
     await backend.directoryPut(id, created.inc)
     return { kind: 'created', room: new ServerRoom(id, created, { members: [] }) }
   })
@@ -319,7 +326,10 @@ async function writeRoomConfig(
     const result = await backend.compareExchangeHead(
       id,
       { form: 'rev', rev: current.rev },
-      { head: { currentInc: config.inc, state: 'open', config: encodeRoomRecord({ ...next, inc: config.inc }) } },
+      {
+        head: { currentInc: config.inc, state: 'open', config: encodeRoomRecord({ ...next, inc: config.inc }) },
+        ttlMs: 'keep',
+      },
     )
     return 'conflict' in result ? CX_CONFLICT : next
   })
@@ -328,72 +338,7 @@ async function writeRoomConfig(
 
 async function closeRoom(id: string): Promise<void> {
   assertRoomId(id)
-  const backend = getRoomBackend()
-  for (;;) {
-    const current = await backend.readHead(id)
-    if (current === null) return
-    if (current.state === 'closed') {
-      await cleanupFinalizedIncarnation(backend, id, current)
-      return
-    }
-    const closing = await acquireClosingLease(backend, id, current)
-    if (closing !== null && (await finishClose(backend, id, closing))) return
-    await new Promise((resolve) => setTimeout(resolve, 100))
-  }
-}
-
-async function acquireClosingLease(backend: RoomBackend, roomId: string, current: RoomHead): Promise<RoomHead | null> {
-  assert(current.currentInc !== null) // only open and closing heads reach here; both name an incarnation
-  const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
-  const result = await backend.compareExchangeHead(
-    roomId,
-    current.state === 'open' ? { form: 'rev', rev: current.rev } : { form: 'takeover', rev: current.rev },
-    {
-      head: {
-        currentInc: current.currentInc,
-        state: 'closing',
-        config: current.config,
-        closeLease,
-      },
-    },
-  )
-  if ('conflict' in result) return null
-  assert('head' in result)
-  return result.head
-}
-
-async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHead): Promise<boolean> {
-  const inc = closing.currentInc
-  const lease = closing.closeLease
-  assert(inc !== null && lease !== undefined) // the closing head acquireClosingLease just wrote
-  const closedEvent = await commitRoomLane(
-    roomId,
-    inc,
-    CONTROL_LANE,
-    encodeRoomRecord({ __r: 'closed' } satisfies RoomCtrlEnvelope),
-    { closingLease: lease.id },
-  )
-  if ('stale' in closedEvent) return false
-  const finalized = await backend.compareExchangeHead(
-    roomId,
-    { form: 'finalize', rev: closing.rev, lease: lease.id },
-    {
-      head: { currentInc: null, state: 'closed', config: closing.config },
-      ttlMs: ROOM_TOMBSTONE_TTL_MS,
-    },
-  )
-  if ('conflict' in finalized) return false
-  assert('head' in finalized)
-  await cleanupFinalizedIncarnation(backend, roomId, finalized.head)
-  return true
-}
-
-async function cleanupFinalizedIncarnation(backend: RoomBackend, roomId: string, closed: RoomHead): Promise<void> {
-  // A closed tombstone's incarnation, which a random `inc` never makes current again.
-  assert(closed.state === 'closed' && closed.currentInc === null, 'Dropping the current incarnation')
-  const inc = configFromHead(closed).inc
-  await backend.dropGeneration(roomId, inc)
-  await backend.directoryDelete(roomId, inc)
+  await closeIncarnation(id)
 }
 
 async function resolveParticipantRef(roomId: string, inc: string, target: ParticipantRef): Promise<MemberSnapshot[]> {
@@ -471,10 +416,19 @@ async function sendServerDm(roomId: string, inc: string, memberId: string, data:
   throw staleCommitError(roomId, committed)
 }
 
-function normalizeRoomOptions(options: RoomOptions | undefined): { meta: RoomMeta } {
+function normalizeRoomOptions(options: RoomOptions | undefined): {
+  meta: RoomMeta
+  emptyTimeout: number
+  departureTimeout: number
+} {
   assertUsage(options === undefined || isObject(options), 'Room options should be an object')
-  assertKnownOptions(options, ['meta'], 'Room')
+  assertKnownOptions(options, ['meta', 'emptyTimeout', 'departureTimeout'], 'Room')
   const meta = options?.meta ?? {}
   assertUsage(isRecord(meta), 'options.meta should be an object')
-  return { meta: ownMetadata(meta) }
+  const defaults = getServerConfig().room
+  const emptyTimeout = options?.emptyTimeout ?? defaults.emptyTimeout
+  const departureTimeout = options?.departureTimeout ?? defaults.departureTimeout
+  assertRoomTimeout(emptyTimeout, 'options.emptyTimeout')
+  assertRoomTimeout(departureTimeout, 'options.departureTimeout')
+  return { meta: ownMetadata(meta), emptyTimeout, departureTimeout }
 }

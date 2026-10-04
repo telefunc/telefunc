@@ -7,6 +7,10 @@ export {
   memberIdOfCleanupKey,
   identityCellKey,
   identityCellPrefix,
+  HOLD_CELL_KEY,
+  VIEW_CELL_PREFIX,
+  viewCellKey,
+  viewIdOfCellKey,
 }
 
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
@@ -31,4 +35,14 @@ function identityCellPrefix(identity: string): string {
 }
 function identityCellKey(identity: string, memberId: string): string {
   return identityCellPrefix(identity) + memberId
+}
+/** The room's hold record (see `lifecycle.ts`), changed in the compare-exchange that adds or removes a hold. */
+const HOLD_CELL_KEY = 'hold'
+/** One per page holding the room: its view, renewed like a member and reaped once it lapses. */
+const VIEW_CELL_PREFIX = 'v:'
+function viewCellKey(viewId: string): string {
+  return VIEW_CELL_PREFIX + viewId
+}
+function viewIdOfCellKey(key: string): string {
+  return key.slice(VIEW_CELL_PREFIX.length)
 }

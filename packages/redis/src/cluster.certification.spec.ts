@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { Cluster, Redis } from 'ioredis'
 import type { CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/__internal'
@@ -10,6 +11,7 @@ import {
   getBroadcastBackend,
   getRoomBackend,
 } from '../../telefunc/dist/wire-protocol/backend/install.js'
+import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
 import { broadcastSequenceKey, channelKey, generationKeysKey, headKey, orderKey } from './keys.js'
 import { REDIS_COMMANDS, REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 type RedisClusterNode = { host: string; port: number }
@@ -268,6 +270,50 @@ describe('Redis real three-master Cluster CI certification', () => {
     expect(keys.filter((_, i) => expiries[i] === -1)).toEqual([])
     await waitFor(async () => (await roomKeys()).length === 0)
     expect((await open(backend, roomId, `${inc}-next`)).rev).not.toBe(opened.rev)
+  })
+  it('closes a room nothing holds as Room.close() does, departureTimeout after its last member left', async () => {
+    ownBackend(cluster, uniquePrefix('auto-close'))
+    const room = await Room.create('auto-close-room', { departureTimeout: 200 })
+    const closed = deferred()
+    room.onClose(() => closed.resolve())
+    await (await room.join()).leave()
+    expect(await settlesWithin(closed.promise, 5_000)).toBe(true)
+    await waitFor(async () => (await getRoomBackend().readHead(room.id))?.state === 'closed')
+    expect(await Room.list()).toEqual([])
+  })
+  it('lets a room whose server is gone lapse by itself past its emptyTimeout, a meta write keeping that lapse', async () => {
+    const prefix = uniquePrefix('auto-close-gone')
+    const roomId = 'gone-room'
+    // A server that creates the room, writes its meta and exits before its close timer fires.
+    const server = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `import { Cluster } from 'ioredis'
+import { Room } from 'telefunc'
+import { installRedis } from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)}
+const { NODES, PREFIX, ROOM } = process.env
+installRedis(new Cluster(JSON.parse(NODES), { scaleReads: 'master', retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }), { prefix: PREFIX })
+await Room.create(ROOM, { emptyTimeout: 1_000 })
+await Room.setMeta(ROOM, { topic: 'kept' })
+process.exit(0)`,
+      ],
+      {
+        cwd: new URL('..', import.meta.url),
+        encoding: 'utf8',
+        env: { ...process.env, NODES: JSON.stringify(CLUSTER_NODES), PREFIX: prefix, ROOM: roomId },
+      },
+    )
+    expect(server.status, server.stderr).toBe(0)
+    ownBackend(cluster, prefix)
+    expect((await getRoomBackend().readHead(roomId))?.state).toBe('open')
+    await waitFor(async () => (await getRoomBackend().readHead(roomId)) === null)
+    const master = owner(await slot(headKey(prefix, roomId))).client
+    expect(await master.exists(headKey(prefix, roomId))).toBe(0)
+    expect(await Room.list()).toEqual([])
+    // The listing's repair dropped what the room left behind.
+    expect(await master.keys(`${prefix}room:{${encodeURIComponent(roomId)}}*`)).toEqual([])
   })
   it('round-trips MAX_SAFE seq through commit, retain and a fresh read', async () => {
     const { prefix, roomId, inc } = room('max-safe')

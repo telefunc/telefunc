@@ -60,3 +60,25 @@ describe('config.broadcast', () => {
     }).toThrow('config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary()')
   })
 })
+
+describe('config.room', () => {
+  afterEach(() => {
+    config.room = {}
+  })
+  it('defaults to 300000 and 20000, and takes 0 to 2^31 - 1 ms or Infinity', () => {
+    expect(getServerConfig().room).toEqual({ emptyTimeout: 300_000, departureTimeout: 20_000 })
+    config.room = { emptyTimeout: Infinity, departureTimeout: 2 ** 31 - 1 }
+    config.room.departureTimeout = 0
+    expect(getServerConfig().room).toEqual({ emptyTimeout: Infinity, departureTimeout: 0 })
+  })
+  it.each([-1, 1.5, 2 ** 31, Number.NaN, '1000'])('refuses %s as a usage error', (value) => {
+    const message = 'should be a non-negative safe integer of milliseconds, at most 2147483647'
+    expect(() => (config.room.emptyTimeout = value as number)).toThrow(`\`config.room.emptyTimeout\` ${message}`)
+    expect(() => (config.room = { departureTimeout: value as number })).toThrow(
+      `\`config.room.departureTimeout\` ${message}`,
+    )
+  })
+  it('refuses an option it does not have', () => {
+    expect(() => (config.room = { timeout: 1 } as never)).toThrow('Unknown config.room.timeout')
+  })
+})

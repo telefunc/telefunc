@@ -271,6 +271,12 @@ const headings = [
   },
   {
     level: 2,
+    titleInNav: '`room`',
+    title: '`room` (config)',
+    url: '/room-config',
+  },
+  {
+    level: 2,
     title: '`fetch`',
     url: '/fetch',
   },

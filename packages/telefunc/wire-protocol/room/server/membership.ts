@@ -1,4 +1,8 @@
 export {
+  createHold,
+  createView,
+  renewView,
+  removeView,
   createMember,
   updateMemberRecord,
   renewMemberLease,
@@ -19,21 +23,28 @@ import type { MemberSnapshot, RoomDataEnvelope, RoomMemberRecord, WireLeaveCause
 import type { LeaveCause } from '../types.js'
 import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
+import { afterHoldChange, countHold, scheduleClose, type HoldChange, type HoldRecord } from './lifecycle.js'
 import {
   CLEANUP_CELL_PREFIX,
+  HOLD_CELL_KEY,
   MEMBER_CELL_PREFIX,
+  VIEW_CELL_PREFIX,
   cleanupCellKey,
   identityCellKey,
   identityCellPrefix,
   memberCellKey,
   memberIdOfCellKey,
   memberIdOfCleanupKey,
+  viewCellKey,
+  viewIdOfCellKey,
 } from './cells.js'
 
 type CellPlan<T> = { value: T; mutations: CellMutation[] }
 type PendingMemberCleanup = { cause: WireLeaveCause; hidden?: true }
+/** A page's view of the room, renewed like a member record. */
+type ViewRecord = { seenAt: number }
 
-function isLapsed(record: RoomMemberRecord): boolean {
+function isLapsed(record: { seenAt: number }): boolean {
   return Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS
 }
 
@@ -61,12 +72,58 @@ async function mutateCells<T>(
   })
 }
 
-/** Persist a join's member record and identity marker. */
+/** A new room's hold record, before anything can hold it. */
+async function createHold(roomId: string, inc: string, record: HoldRecord): Promise<void> {
+  const mutations = [{ key: HOLD_CELL_KEY, bytes: encodeRoomRecord(record) }]
+  await mutateCells(roomId, inc, { keys: [HOLD_CELL_KEY] }, () => ({ value: undefined, mutations }))
+  if (record.closesAt !== undefined) scheduleClose(roomId, inc, record.closesAt)
+}
+
+/** Persist a join's member record and identity marker; a non-hidden member holds the room. */
 async function createMember(roomId: string, inc: string, id: string, record: RoomMemberRecord): Promise<void> {
   const mutations: CellMutation[] = [{ key: memberCellKey(id), bytes: encodeRoomRecord(record) }]
   if (record.identity !== undefined)
     mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
-  await mutateCells(roomId, inc, { keys: mutations.map(({ key }) => key) }, () => ({ value: undefined, mutations }))
+  const keys = [...mutations.map(({ key }) => key), HOLD_CELL_KEY]
+  const hold = await mutateCells(roomId, inc, { keys }, (cells) => {
+    const hold = record.hidden ? null : countHold(cells, 1, true)
+    return { value: hold, mutations: hold === null ? mutations : [...mutations, hold.mutation] }
+  })
+  afterHoldChange(roomId, inc, hold)
+}
+
+/** A page's view holds the room; a room without a hold record keeps none. */
+async function createView(roomId: string, inc: string, id: string): Promise<void> {
+  const key = viewCellKey(id)
+  const hold = await mutateCells(roomId, inc, { keys: [key, HOLD_CELL_KEY] }, (cells) => {
+    const hold = cells.has(key) ? null : countHold(cells, 1)
+    if (hold === null) return { value: null, mutations: [] }
+    const view: ViewRecord = { seenAt: Date.now() }
+    return { value: hold, mutations: [{ key, bytes: encodeRoomRecord(view) }, hold.mutation] }
+  })
+  afterHoldChange(roomId, inc, hold)
+}
+
+async function renewView(roomId: string, inc: string, id: string): Promise<void> {
+  const key = viewCellKey(id)
+  const view: ViewRecord = { seenAt: Date.now() }
+  await mutateCells(roomId, inc, { keys: [key] }, (cells) => ({
+    value: undefined,
+    mutations: cells.has(key) ? [{ key, bytes: encodeRoomRecord(view) }] : [],
+  }))
+}
+
+/** With `onlyIfLapsed`, a view renewed meanwhile stays. */
+async function removeView(roomId: string, inc: string, id: string, opts?: { onlyIfLapsed: true }): Promise<void> {
+  const key = viewCellKey(id)
+  const hold = await mutateCells(roomId, inc, { keys: [key, HOLD_CELL_KEY] }, (cells) => {
+    const raw = cells.get(key)
+    if (raw === undefined || (opts?.onlyIfLapsed && !isLapsed(decodeRoomRecord<ViewRecord>(raw))))
+      return { value: null, mutations: [] }
+    const hold = countHold(cells, -1)
+    return { value: hold, mutations: [{ key, bytes: null }, ...(hold === null ? [] : [hold.mutation])] }
+  })
+  afterHoldChange(roomId, inc, hold)
 }
 
 /** Read-modify-write one member record; a returned `next` is stored with a renewed lease. */
@@ -134,35 +191,38 @@ async function removeMemberCells(
   const memberKey = memberCellKey(id)
   const cleanupKey = cleanupCellKey(id)
   const removedKeys = identity === null ? [memberKey] : [memberKey, identityCellKey(identity, id)]
-  const outcome = await mutateCells<{ live: RoomMemberRecord } | { cleanup: boolean }>(
+  const outcome = await mutateCells<{ live: RoomMemberRecord } | { cleanup: boolean; hold: HoldChange | null }>(
     roomId,
     inc,
-    { keys: [...removedKeys, cleanupKey] },
+    { keys: [...removedKeys, cleanupKey, HOLD_CELL_KEY] },
     (cells) => {
       const pending = cells.has(cleanupKey)
       const raw = cells.get(memberKey)
       const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
       if (record !== null && opts?.onlyIfLapsed && !isLapsed(record)) return { value: { live: record }, mutations: [] }
-      if (record === null) return { value: { cleanup: pending }, mutations: [] }
+      if (record === null) return { value: { cleanup: pending, hold: null }, mutations: [] }
       const cleanup: PendingMemberCleanup = {
         cause: leaveCauseToWire(cause),
         ...(record.hidden ? { hidden: true } : {}),
       }
+      const hold = record.hidden ? null : countHold(cells, -1)
       return {
-        value: { cleanup: true },
+        value: { cleanup: true, hold },
         mutations: [
           ...removedKeys.map((key) => ({ key, bytes: null })),
           ...(pending ? [] : [{ key: cleanupKey, bytes: encodeRoomRecord(cleanup) }]),
+          ...(hold === null ? [] : [hold.mutation]),
         ],
       }
     },
   )
   if ('live' in outcome) return outcome.live
+  afterHoldChange(roomId, inc, outcome.hold)
   if (outcome.cleanup) await finishPendingMemberCleanup(roomId, inc, id)
   return null
 }
 
-/** Live members, and departing ones whose eviction the read completes; lapsed members are reaped on the way. */
+/** Live members, and departing ones whose eviction the read completes; lapsed members and views are reaped on the way. */
 async function reapAndReadRoster(
   roomId: string,
   inc: string,
@@ -175,6 +235,10 @@ async function reapAndReadRoster(
     const id = memberIdOfCleanupKey(key)
     departing.add(id)
     await completeCleanup(roomId, inc, id, raw)
+  }
+  for (const [key, raw] of await readCells(roomId, inc, { prefix: VIEW_CELL_PREFIX })) {
+    if (isLapsed(decodeRoomRecord<ViewRecord>(raw)))
+      await removeView(roomId, inc, viewIdOfCellKey(key), { onlyIfLapsed: true })
   }
   const members = await liveMembers(
     roomId,
