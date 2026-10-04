@@ -316,7 +316,7 @@ class FlowControl {
     if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
-  onReceivedBytes(): void {
+  onArrived(): void {
     this._arrived = true
   }
 

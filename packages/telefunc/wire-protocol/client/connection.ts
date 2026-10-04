@@ -1502,7 +1502,7 @@ class ClientConnection implements MuxConnection {
       const state = entry.channel._reattachState(wire, batched)
       Object.assign(payloadEntry, state)
       // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
-      if (state?.broadcast)
+      if (state.broadcast)
         this.sendBuffer = this.sendBuffer.filter(
           ({ channelIx, frame }) =>
             channelIx !== ix || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
