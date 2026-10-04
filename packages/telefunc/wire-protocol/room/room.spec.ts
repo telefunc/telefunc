@@ -3702,6 +3702,20 @@ describe('a room nothing holds closes on its own', () => {
     await Room.setMeta(room.id, { topic: 'kept' })
     expect((await getRoomBackend().readHead(room.id))?.expiresAt).toBe(expiresAt)
   })
+  it('waits on when its close timer fires early: another server left the room unheld later than this one armed it for', async () => {
+    const room = (await Room.create('close-fires-early', { emptyTimeout: 10_000 })) as ServerRoom
+    const closed = await observe(room.id)
+    // Another server's write: held, then unheld again, closing 4 s after this server's timer fires.
+    const read = await driver.readCells(room.id, room._inc, { keys: ['hold'] })
+    if ('staleInc' in read) throw new Error('the room is gone')
+    const hold = parse(decoder.decode(read.cells.get('hold')!)) as Record<string, unknown>
+    const later = encodeRoomRecord({ ...hold, holds: 0, joined: true, closesAt: Date.now() + 14_000 })
+    await driver.compareExchangeCells(room.id, room._inc, read.revision, [{ key: 'hold', bytes: later }])
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(await isListed(room.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(4_000)
+    await expectClosed(room.id, closed)
+  })
   it('lets no hidden participant hold a room: alone it closes at emptyTimeout, after players at departureTimeout', async () => {
     const alone = await Room.create('hidden-alone')
     const aloneClosed = await observe(alone.id)
