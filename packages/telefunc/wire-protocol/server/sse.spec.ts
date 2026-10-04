@@ -27,6 +27,7 @@ function openPost(metadata: SseRequestMetadata) {
     push: (frame: Uint8Array<ArrayBuffer>) => controller.enqueue(encodeLengthPrefixedFrames([frame])),
     /** All of `frames` in one chunk, as a body read hands them over. */
     pushAll: (frames: Uint8Array<ArrayBuffer>[]) => controller.enqueue(encodeLengthPrefixedFrames(frames)),
+    pushBytes: (bytes: Uint8Array) => controller.enqueue(bytes),
     end: () => controller.close(),
   }
 }
@@ -95,6 +96,46 @@ test("an acknowledged upload POST waits out the connection's first reconcile, ho
     ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
   }
 })
+
+test.each([
+  ['an upload stream', true],
+  ['a batch POST', false],
+])(
+  'a message that %s carries for longer than the ping deadline keeps its wire, and the page hears meanwhile that it arrives',
+  async (_, streamRequest) => {
+    vi.useFakeTimers()
+    try {
+      const sse = getTelefuncSseChannelHooks()
+      const connId = crypto.randomUUID()
+      const channel = new ServerChannel<unknown, never>()
+      let received = 0
+      channel.listen(() => void received++)
+      getChannelMux().registerChannel(channel)
+      const downstream = openPost({ connId, streamResponse: true })
+      const response = await sse.handleRequest(downstream.request)
+      const frames = collectFrames(response!.body as ReadableStream<Uint8Array>)
+      downstream.push(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
+      downstream.end()
+      await vi.advanceTimersByTimeAsync(10)
+      const post = openPost(streamRequest ? { connId, streamRequest } : { connId })
+      void sse.handleRequest(post.request)
+      // Its bytes cross a slow link half a ping interval at a time, for twice the ping deadline.
+      const { pingInterval } = getServerConfig().channel
+      const bytes = encodeLengthPrefixedFrames([encode.text(0, JSON.stringify('x'.repeat(8 * 1024)), 1)])
+      const chunk = Math.ceil(bytes.length / 8)
+      for (let at = 0; at < bytes.length; at += chunk) {
+        post.pushBytes(bytes.subarray(at, at + chunk))
+        await vi.advanceTimersByTimeAsync(pingInterval / 2)
+      }
+      expect(getChannelMux().getConnectionByConnId(connId)).toBeDefined()
+      expect(received).toBe(1)
+      expect(frames.filter((frame) => frame.tag === TAG.PONG).length).toBeGreaterThanOrEqual(3)
+      post.end()
+    } finally {
+      vi.useRealTimers()
+    }
+  },
+)
 
 /** An SSE wire whose page has one channel attached, which counts what reaches its listener. */
 async function reconciledSseWire() {
