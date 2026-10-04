@@ -37,7 +37,6 @@ export type {
   ReadyPayload,
   PingEntry,
   PongEntry,
-  SeqReader,
   WirePublishInfo,
 }
 
@@ -52,8 +51,8 @@ import { assert } from '../utils/assert.js'
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
 // `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
-// ctrl frames carry 0. Seqs count on past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` reads
-// as the whole seq from where its receiver stands on the channel (see `SeqReader`).
+// ctrl frames carry 0. Seqs count on past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` returns
+// as they are: the frame's owner reads the whole seq from where it stands on the channel (`seqNear`, `seqThrough`).
 //
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x09  connection-level control (no ix, no seq)
@@ -396,14 +395,6 @@ function readU64(buf: Uint8Array, offset: number): number {
 
 // ===== Seqs off the wire =====
 
-/** Where a frame's receiver stands on each channel, from which `decode` reads the low 32 bits of a seq as the whole. */
-type SeqReader = {
-  /** The highest seq it has of what its peer sent on channel `ix`. */
-  received(ix: number): number
-  /** The last seq it gave what it sent on channel `ix`. */
-  sent(ix: number): number
-}
-
 /** A frame's seq: the one with those low bits nearest the next its receiver expects, as QUIC reads a packet number
  *  (RFC 9000, appendix A.3). A seq reaches its receiver less than 2^31 frames from the next it expects: no wire or
  *  replay holds that many. */
@@ -615,13 +606,11 @@ function peekTag(raw: Uint8Array): number | undefined {
   return raw[0]
 }
 
-function decode(frame: Uint8Array, seqs?: SeqReader): DecodedFrame {
+function decode(frame: Uint8Array): DecodedFrame {
   assertProtocol(frame.length >= HEADER, 'frame too short')
   const tag = frame[0] as number
   const index = (frame[1] as number) | ((frame[2] as number) << 8)
-  const bits = isSequencedTag(tag) ? readU32(frame, 3) : 0
-  const seq = seqs && isSequencedTag(tag) ? seqNear(bits, seqs.received(index) + 1) : bits
-  const through = (lastBits: number, ix: number) => (seqs ? seqThrough(lastBits, seqs.sent(ix)) : lastBits)
+  const seq = isSequencedTag(tag) ? readU32(frame, 3) : 0
   const payload = frame.subarray(HEADER)
 
   const bytes = payload.byteLength
@@ -667,7 +656,7 @@ function decode(frame: Uint8Array, seqs?: SeqReader): DecodedFrame {
       const ended: PingEntry[] = []
       for (let offset = 0; offset < payload.length; offset += PING_ENTRY_BYTES) {
         const ix = readU16(payload, offset)
-        ended.push({ ix, lastSeq: through(readU32(payload, offset + 2), ix) })
+        ended.push({ ix, lastSeq: readU32(payload, offset + 2) })
       }
       return { tag: TAG.PING, ended }
     }
@@ -677,7 +666,7 @@ function decode(frame: Uint8Array, seqs?: SeqReader): DecodedFrame {
       for (let offset = 0; offset < payload.length; offset += PONG_ENTRY_BYTES) {
         const ix = readU16(payload, offset)
         const held = payload[offset + 2] === 1
-        ended.push({ ix, lastSeq: held ? through(readU32(payload, offset + 3), ix) : null })
+        ended.push({ ix, lastSeq: held ? readU32(payload, offset + 3) : null })
       }
       return { tag: TAG.PONG, ended }
     }
@@ -714,7 +703,7 @@ function decode(frame: Uint8Array, seqs?: SeqReader): DecodedFrame {
         tag: TAG.WINDOW,
         index,
         bytes: readU32(payload, 0),
-        lastSeq: through(readU32(payload, 4), index),
+        lastSeq: readU32(payload, 4),
       }
     case TAG.MSG_WINDOW:
       assertProtocol(payload.length >= 4, 'MSG_WINDOW payload too short')
@@ -741,7 +730,7 @@ function decode(frame: Uint8Array, seqs?: SeqReader): DecodedFrame {
       return { tag: TAG.BROADCAST_UNSUB, index, binary: payload[0] === 1 }
     case TAG.ATTACH_RESULT: {
       assertProtocol(payload.length >= 5, 'ATTACH_RESULT payload too short')
-      const lastSeq = payload[0] === 1 ? through(readU32(payload, 1), index) : null
+      const lastSeq = payload[0] === 1 ? readU32(payload, 1) : null
       return { tag: TAG.ATTACH_RESULT, index, lastSeq }
     }
 

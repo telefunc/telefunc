@@ -18,10 +18,7 @@ import {
 import { ClientConnection } from './connection.js'
 import { encodeSseRequest } from '../sse-request.js'
 import { encodeLengthPrefixedFrames } from '../frame.js'
-import { TAG, decode, encode, type ReconciledPayload, type SeqReader } from '../shared-ws.js'
-
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
+import { TAG, decode, encode, type ReconciledPayload } from '../shared-ws.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
 function createChannel(id = crypto.randomUUID()) {
@@ -126,7 +123,7 @@ test("a reconnect declares a broadcast's subscriptions, not the toggles queued b
   connection.sendBroadcastUnsubscribe(channel, false)
   connection.sendBroadcastSubscribe(channel, false)
   const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch()
-  expect(decode(reconcileFrame.frame, wireSeqs)).toMatchObject({
+  expect(decode(reconcileFrame.frame)).toMatchObject({
     payload: { open: [{ broadcast: { text: true, binary: false } }] },
   })
   const queued: Array<number | undefined> = [...connection.sendBuffer, ...movedBufferedFrames].map(
@@ -321,7 +318,7 @@ test("a channel whose close timed out while its reconnect's reconcile is in flig
     reconciled({ sessionId: 'meanwhile', open: [{ ix: 0, lastSeq: 0 }] }),
     null,
   )
-  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame, wireSeqs))
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
   expect(sent).toMatchObject([{ tag: TAG.CLOSE, index: 0, seq: 1 }])
   connection.dispose()
 })
@@ -345,7 +342,7 @@ test('a channel closed during a reconnect sends what the dead wire lost before w
     reconciled({ sessionId: 'draining', open: [{ ix: 0, lastSeq: 0 }] }),
     null,
   )
-  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame, wireSeqs))
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
   expect(sent.map((frame: { tag: number; seq?: number }) => [frame.tag, frame.seq])).toEqual([
     [TAG.TEXT, 1],
     [TAG.TEXT, 2],
@@ -373,7 +370,7 @@ test('a channel whose abort went out with a reconcile on a wire that then died s
     { ix: 1, lastSeq: 0 },
   ]
   const { frames } = connection.applyReconciled(reconciled({ sessionId: 'lost', open }), null)
-  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame, wireSeqs))
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
   expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
     { tag: TAG.ABORT, seq: 1, abortValue: 'null' },
   ])
@@ -390,7 +387,7 @@ test("a closing channel's listener answer, held while another channel registers 
   connection.sendAckRes(closing, 1, '"answer"') // then answers; the registration holds it
   connection.unregister(closing) // its close round trip is done
   const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch()
-  const reconcile = decode(reconcileFrame.frame, wireSeqs) as { payload: { open: { ix: number }[] } }
+  const reconcile = decode(reconcileFrame.frame) as { payload: { open: { ix: number }[] } }
   const listed = reconcile.payload.open.map((entry) => entry.ix)
   const queued = [...movedBufferedFrames, ...connection.sendBuffer].map(({ frame }: { frame: Uint8Array }) => frame[0])
   expect({ listed: listed.includes(0), answer: queued.includes(TAG.ACK_RES) }).toEqual({ listed: true, answer: true })
@@ -424,14 +421,14 @@ test('a channel whose close request went down with the wire stays in the reconne
   const { connection, closing } = closeLostWithWire('http://close-lost.test')
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true })
   connection.unregister(closing) // its close times out
-  const reconcile = decode(connection.buildReconcileFrame().frame, wireSeqs) as { payload: { open: { ix: number }[] } }
+  const reconcile = decode(connection.buildReconcileFrame().frame) as { payload: { open: { ix: number }[] } }
   expect(reconcile.payload.open.map((entry) => entry.ix)).toEqual([0, 1])
   const open = [
     { ix: 0, lastSeq: 0 },
     { ix: 1, lastSeq: 0 },
   ]
   const { frames } = connection.applyReconciled(reconciled({ sessionId: 'close-lost', open }), null)
-  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame, wireSeqs))
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
   expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
     { tag: TAG.CLOSE, seq: 1 },
     { tag: TAG.ACK_RES, seq: 2 },
@@ -449,7 +446,7 @@ test('such a channel, closed while the reconnect listing it is in flight, sends 
     { ix: 1, lastSeq: 0 },
   ]
   const { frames } = connection.applyReconciled(reconciled({ sessionId: 'close-lost', open }), null)
-  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame, wireSeqs))
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
   expect(sent.filter((frame: { tag: number }) => frame.tag === TAG.RECONCILE)).toEqual([])
   expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
     { tag: TAG.CLOSE, seq: 1 },
@@ -477,7 +474,7 @@ test('a channel whose close timed out while the reconnect listing it is in fligh
   connection.sendAckRes(closing, 1, '"answer"') // its async listener answers a server send({ ack: true })
   connection.unregister(closing) // its close times out while the attempt is held
   const { frames } = connection.applyReconciled(reconciled({ sessionId: 'gap', open }), null)
-  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame, wireSeqs))
+  const sent = frames.map(({ frame }: { frame: Uint8Array<ArrayBuffer> }) => decode(frame))
   expect(sent.filter((frame: { index?: number }) => frame.index === 0)).toMatchObject([
     { tag: TAG.TEXT, seq: 1 },
     { tag: TAG.CLOSE, seq: 2 },
@@ -491,7 +488,7 @@ test('a channel whose ATTACH_RESULT overtakes the RECONCILED leaving it out open
   const connection = ClientConnection.getOrCreate('http://attach-early.test', channel as never, stalledOptions()) as any
   connection.buildReconcileFrame()
   // Its call reached the server before the end of the batch POST carrying the RECONCILE, whose RECONCILED goes then.
-  connection.dispatchFrame(decode(encode.attachResult(0, 0), wireSeqs))
+  connection.dispatchFrame(decode(encode.attachResult(0, 0)))
   const { channelsToOpen } = connection.applyReconciled(reconciled({ sessionId: 'early', open: [] }), null)
   expect(channelsToOpen).toEqual([channel])
   connection.dispose()

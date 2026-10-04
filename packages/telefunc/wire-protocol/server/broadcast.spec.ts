@@ -1,15 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Broadcast, ServerBroadcast } from './server-broadcast.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { ACK_STATUS, TAG, decode, encode, type DecodedFrame, type SeqReader } from '../shared-ws.js'
+import { ACK_STATUS, TAG, decode, encode, type DecodedFrame } from '../shared-ws.js'
 import { IndexedPeer } from './IndexedPeer.js'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcast.js'
 import type { BroadcastTransport } from './broadcast.js'
 import { config } from '../../node/server/serverConfig.js'
-
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
@@ -171,7 +168,7 @@ describe('keyed in-process broadcast', () => {
     const sent: DecodedFrame[] = []
     const replay = new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)
     broadcast._attachPeer(
-      new IndexedPeer({ send: (frame) => void sent.push(decode(frame, wireSeqs)), bufferedAmount: () => 0 }, 7, replay),
+      new IndexedPeer({ send: (frame) => void sent.push(decode(frame)), bufferedAmount: () => 0 }, 7, replay),
     )
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })
     await broadcast.publish('on')
@@ -365,7 +362,7 @@ describe('Broadcast shield validation', () => {
 
     void broadcast._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
 
-    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>, wireSeqs)).find((d) => d.tag === TAG.ACK_RES)
+    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
     expect(ack).toBeDefined()
     if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
     expect(ack.status).toBe(ACK_STATUS.SHIELD_ERROR)
@@ -625,7 +622,7 @@ describe('Broadcast subscriptions declared on attach', () => {
       setSessionId: (wire, id) => void sessions.set(wire, id),
       getConnId: () => null,
       sendNow: (_wire, frame) => {
-        const decoded = decode(frame, wireSeqs)
+        const decoded = decode(frame)
         if (decoded.tag === TAG.PUBLISH) published.push(decoded.text)
       },
       bufferedAmount: () => 0,
