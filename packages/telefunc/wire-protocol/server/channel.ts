@@ -125,10 +125,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
    *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
   protected _flow: FlowControl
-  /** How far past its credit the peer can be sent while it reads: a burst up to the largest window a page grants,
-   *  however small the window this one granted. A page taking publishes grants that window from the start, which a
-   *  burst fits in: past it and a quarter more, that page is behind by more than what it read and hasn't reported,
-   *  which it reports sooner than that. */
+  /** How far past its credit the peer may be sent before it counts as behind: the largest window a page grants, or a
+   *  quarter of its own largest window for a page that granted that window from the start (`publishes`). */
   private readonly _pastCreditAllowance: number
   private readonly _closesWhenBehind: boolean
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
