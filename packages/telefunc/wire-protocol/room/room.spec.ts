@@ -33,7 +33,7 @@ import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js
 import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes } from './model.js'
 import { hasRoomTag, type InboxMessage, type RoomSnapshotMetadata } from './protocol.js'
 import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
-import { holdView } from './server/membership.js'
+import { holdViews } from './server/membership.js'
 import type { LeaveCause, ParticipantMeta, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
@@ -3642,11 +3642,34 @@ describe('a room nothing holds closes on its own', () => {
     await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS + ROOM_HEARTBEAT_INTERVAL_MS)
     expect(await isListed(room.id)).toBe(true)
   })
+  it("renews the views of hundreds of pages on one server in one write, with the room's other writes alongside", async () => {
+    const room = (await Room.create('many-views')) as ServerRoom
+    const views = (room as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views
+    for (let page = 0; page < 300; page++) await views.get(register(room))
+    const writes = vi.spyOn(driver, 'compareExchangeCells')
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const tick = captureOutcome(subsOf(room)._heartbeatTick())
+    const join = captureOutcome(room.join())
+    await vi.advanceTimersByTimeAsync(5_000)
+    const viewWrites = writes.mock.calls.filter(([, , , mutations]) =>
+      mutations.some(({ key }) => key.startsWith('v:')),
+    )
+    expect({
+      tick: tick.value,
+      joined: (join.value as { id?: string }).id !== undefined,
+      report: report.mock.calls,
+    }).toEqual({
+      tick: undefined,
+      joined: true,
+      report: [],
+    })
+    expect(viewWrites.length).toBeLessThanOrEqual(2)
+  })
   it("lets a page's view lapse once its server stops renewing it, as a member does, and closes the room emptyTimeout after", async () => {
     const room = (await Room.create('view-lapses')) as ServerRoom
     const closed = await observe(room.id)
     // A view the server holding the page wrote before it died, renewed by nothing since.
-    await holdView(room.id, room._inc, 'gone-page')
+    await holdViews(room.id, room._inc, ['gone-page'])
     await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
     expect(await isListed(room.id)).toBe(true)
     await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)

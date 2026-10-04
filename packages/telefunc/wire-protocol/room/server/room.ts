@@ -85,7 +85,7 @@ import { reconnectWindow, reportServerChannelError } from '../../server/channel.
 import {
   createMember,
   evictMember,
-  holdView,
+  holdViews,
   reapAndReadMembersById,
   removeView,
   updateMemberRecord,
@@ -712,7 +712,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
-    this._views.set(stub, holdView(this.id, this._inc, stub.id).catch(reportRoomError))
+    this._views.set(stub, holdViews(this.id, this._inc, [stub.id]).catch(reportRoomError))
     if (this._tail !== null) {
       stub._beginTail(this._tail.take(), () => this._subs.replan())
       this._tail = null
@@ -841,16 +841,21 @@ class ServerRoom extends RoomStateView implements Room {
     return { all: false, members }
   }
 
-  /** @internal Renews each stub's view after its previous write; the caller reports a failure. */
-  _renewViews(): Promise<void>[] {
-    return [...this._views].map(([stub, previous]) => {
-      const renewed = previous.then(() => holdView(this.id, this._inc, stub.id))
-      this._views.set(
-        stub,
-        renewed.catch(() => {}),
-      )
-      return renewed
-    })
+  /** @internal Renews every stub's view in one write, after each one's earlier write; the caller reports a failure. */
+  _renewViews(): Promise<void> {
+    const stubs = [...this._views.keys()]
+    if (stubs.length === 0) return Promise.resolve()
+    const previous = Promise.all(this._views.values())
+    const renewed = previous.then(() =>
+      holdViews(
+        this.id,
+        this._inc,
+        stubs.map((stub) => stub.id),
+      ),
+    )
+    const settled = renewed.catch(() => {})
+    for (const stub of stubs) this._views.set(stub, settled)
+    return renewed
   }
 
   /** @internal */

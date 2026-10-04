@@ -1,6 +1,6 @@
 export {
   createHold,
-  holdView,
+  holdViews,
   removeView,
   createMember,
   updateMemberRecord,
@@ -91,15 +91,17 @@ async function createMember(roomId: string, inc: string, id: string, record: Roo
   afterHoldChange(roomId, inc, hold)
 }
 
-/** Writes or renews a page's view, which holds the room; a room without a hold record keeps none. A renewal also
- *  restores a view whose write failed or that was reaped while its page held on. */
-async function holdView(roomId: string, inc: string, id: string): Promise<void> {
-  const key = viewCellKey(id)
-  const hold = await mutateCells(roomId, inc, { keys: [key, HOLD_CELL_KEY] }, (cells) => {
-    const hold = countHold(cells, 1)
+/** Writes or renews pages' views in one write; each holds the room, and a room without a hold record keeps none. A
+ *  renewal also restores a view whose write failed or that was reaped while its page held on. */
+async function holdViews(roomId: string, inc: string, ids: string[]): Promise<void> {
+  const keys = ids.map(viewCellKey)
+  const hold = await mutateCells(roomId, inc, { keys: [...keys, HOLD_CELL_KEY] }, (cells) => {
+    const added = keys.filter((key) => !cells.has(key)).length
+    const hold = countHold(cells, added)
     if (hold === null) return { value: null, mutations: [] }
-    const view = { key, bytes: encodeRoomRecord({ seenAt: Date.now() } satisfies ViewRecord) }
-    return cells.has(key) ? { value: null, mutations: [view] } : { value: hold, mutations: [view, hold.mutation] }
+    const view = encodeRoomRecord({ seenAt: Date.now() } satisfies ViewRecord)
+    const views = keys.map((key) => ({ key, bytes: view }))
+    return added === 0 ? { value: null, mutations: views } : { value: hold, mutations: [...views, hold.mutation] }
   })
   afterHoldChange(roomId, inc, hold)
 }

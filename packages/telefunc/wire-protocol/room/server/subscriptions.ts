@@ -47,7 +47,7 @@ type SubscriptionHost = {
   _wantsBinary(member: string, track: string): boolean
   /** A pending admission owns its inbox, but its record is renewed only once it commits. */
   _ownedMembers(): { all: string[]; renewable: string[] }
-  _renewViews(): Promise<void>[]
+  _renewViews(): Promise<void>
   _onCtrlMessage(serialized: string, info: WirePublishInfo): void
   _onTextData(serialized: string, info: WirePublishInfo): void
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
@@ -304,16 +304,17 @@ class RoomSubscriptions {
       // No cell I/O, so member-cell latency never delays demand renewal.
       this._demand.heartbeat()
       let renewalFailure: { error: unknown } | null = null
-      const renewals = [
-        ...host._ownedMembers().renewable.map((id) => () => renewMemberLease(host.id, host._inc, id)),
-        ...host._renewViews().map((renewed) => () => renewed),
-      ]
-      for (const renew of renewals) {
+      for (const id of host._ownedMembers().renewable) {
         try {
-          await renew()
+          await renewMemberLease(host.id, host._inc, id)
         } catch (error) {
           renewalFailure ??= { error }
         }
+      }
+      try {
+        await host._renewViews()
+      } catch (error) {
+        renewalFailure ??= { error }
       }
       this.replan() // bounded retry trigger for still-wanted terminal lanes
       await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views

@@ -37,8 +37,8 @@ function newHoldRecord(emptyTimeout: number, departureTimeout: number): HoldReco
   return closingIfUnheld({ emptyTimeout, departureTimeout, holds: 0, joined: false })
 }
 
-/** The hold record with one hold more or less, or null for a room without one. */
-function countHold(cells: ReadonlyMap<string, Uint8Array>, delta: 1 | -1, joining = false): HoldChange | null {
+/** The hold record with `delta` holds more, or null for a room without one. */
+function countHold(cells: ReadonlyMap<string, Uint8Array>, delta: number, joining = false): HoldChange | null {
   const raw = cells.get(HOLD_CELL_KEY)
   if (raw === undefined) return null
   const before = decodeRoomRecord<HoldRecord>(raw)
