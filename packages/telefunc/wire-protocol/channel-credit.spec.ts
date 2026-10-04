@@ -792,6 +792,7 @@ test('a wire that stops delivering in the middle of a stream is taken for dead o
   const feed = loop.open<never, string>()
   consume(feed.page)
   await run(100)
+  loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
   produce(feed.server, { message: () => 'x'.repeat(16 * KIB) })
   await run(7_000)
   loop.socket.toPage.hold()
