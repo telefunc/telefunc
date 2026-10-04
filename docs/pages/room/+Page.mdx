@@ -274,7 +274,7 @@ The receipt is `{ seq, timestamp }` in the same room-global order as participant
 
 ```js
 // When the match is created, on the node that will run it:
-const room = await Room.create(matchId)
+const room = await Room.create(matchId, { emptyTimeout: Infinity, departureTimeout: Infinity }) // until Room.close()
 const authority = await room.join({ identity: 'authority', hidden: true }) // identity is trusted, not spoofable
 authority.listen((cmd) => world.apply(cmd)) // commands arrive as DMs; the return is the ack reply
 startGameLoop(matchId, authority)           // each tick: authority.publishBinary(worldState)
@@ -286,7 +286,7 @@ A hidden participant is a full `LocalParticipant`: `publishBinary()`, `listen()`
 room.onEmpty(() => stopGameLoop(matchId)) // last player gone; the hidden authority doesn't hold the room open
 ```
 
-So the room then closes `departureTimeout` later, 20 seconds by default, and the authority leaves with `'closed'`; create the match with `Room.create(matchId, { departureTimeout: Infinity })` to keep it until `Room.close()` (see <Link href="#when-a-room-closes">When a room closes</Link>).
+That is why the match turns both timeouts off: with the defaults, it would close 5 minutes after it was created if no player joined, or 20 seconds after its last player left, and the authority would leave with `'closed'` (see <Link href="#when-a-room-closes">When a room closes</Link>). Close it with `Room.close(matchId)` when the match ends.
 
 Join as many as you need (a game authority, a moderation bot, a metrics sink), each with its own trusted `identity`. They are server-side only (a client `join({ hidden: true })` throws) and out of every client's presence, though what they publish room-wide still reaches every room-wide subscriber, with `from` (for binary, `from.id` only: see <Link href="#senders">Senders</Link>). Read them back on the server with `getParticipants({ hidden: true })`, keyed by `identity` (never `meta.role`). Hand a client the one it should talk to by returning it from the telefunction:
 
