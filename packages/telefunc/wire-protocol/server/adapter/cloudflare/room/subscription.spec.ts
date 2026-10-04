@@ -1,4 +1,4 @@
-import { expect, test, vi } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import type { CloudflareRoomAuthorityStub } from './backend.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { ROUTE_RENEW_EVERY_MS } from './routes.js'
@@ -36,6 +36,9 @@ function endOf(attempt: CloudflareRoomSubscriptionAttempt): Promise<Error | unde
   return new Promise((resolve) => attempt.onStateChange((state, reason) => state === 'closed' && resolve(reason)))
 }
 
+afterEach(() => {
+  vi.useRealTimers()
+})
 test('a session delivers a frame for the lease its subscription holds, and drops one for another lease', async () => {
   const manager = new CloudflareRoomSessionManager('session')
   const received: number[] = []
@@ -89,32 +92,28 @@ test("a session's route calls to a room share one ordered stub, so a released at
 
 test('a route call after a failed call to its room opens a fresh stub, as a stub that rejected may be broken', async () => {
   vi.useFakeTimers()
-  try {
-    const manager = new CloudflareRoomSessionManager('session')
-    const renewedThrough: number[] = []
-    let opened = 0
-    const openAuthority = () => {
-      const stub = opened++
-      return {
-        registerRoute: async () => ({ ok: true }),
-        renewRoute: async () => {
-          renewedThrough.push(stub)
-          return true
-        },
-        unsubscribeRoute: async () => {},
-      } as unknown as CloudflareRoomAuthorityStub
-    }
-    const attempt = manager.openSubscription(source, openAuthority, () => {})
-    await vi.advanceTimersByTimeAsync(0)
-    expect(attempt.state()).toBe('ready')
-    // A commit to the room through its own stub (the second) fails, so that stub may be broken.
-    await manager.callAuthority('room', openAuthority, () => Promise.reject(new Error('reset'))).catch(() => {})
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    expect(renewedThrough).toEqual([2])
-    await attempt.unsubscribe()
-  } finally {
-    vi.useRealTimers()
+  const manager = new CloudflareRoomSessionManager('session')
+  const renewedThrough: number[] = []
+  let opened = 0
+  const openAuthority = () => {
+    const stub = opened++
+    return {
+      registerRoute: async () => ({ ok: true }),
+      renewRoute: async () => {
+        renewedThrough.push(stub)
+        return true
+      },
+      unsubscribeRoute: async () => {},
+    } as unknown as CloudflareRoomAuthorityStub
   }
+  const attempt = manager.openSubscription(source, openAuthority, () => {})
+  await vi.advanceTimersByTimeAsync(0)
+  expect(attempt.state()).toBe('ready')
+  // A commit to the room through its own stub (the second) fails, so that stub may be broken.
+  await manager.callAuthority('room', openAuthority, () => Promise.reject(new Error('reset'))).catch(() => {})
+  await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+  expect(renewedThrough).toEqual([2])
+  await attempt.unsubscribe()
 })
 
 test.each([
@@ -139,92 +138,72 @@ test.each([
   ['ends when its route lapsed or its generation was dropped', async () => false, 'closed'],
 ])('a ready attempt %s', async (_name, renewRoute, state) => {
   vi.useFakeTimers()
-  try {
-    let released = 0
-    const attempt = openAttempt({ renewRoute, unsubscribeRoute: async () => void released++ })
-    await vi.advanceTimersByTimeAsync(0)
-    expect(attempt.state()).toBe('ready')
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    expect(attempt.state()).toBe(state)
-    expect(released).toBe(0)
-    await attempt.unsubscribe()
-  } finally {
-    vi.useRealTimers()
-  }
+  let released = 0
+  const attempt = openAttempt({ renewRoute, unsubscribeRoute: async () => void released++ })
+  await vi.advanceTimersByTimeAsync(0)
+  expect(attempt.state()).toBe('ready')
+  await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+  expect(attempt.state()).toBe(state)
+  expect(released).toBe(0)
+  await attempt.unsubscribe()
 })
 
 test('an attempt whose renewal throws ends with that error as its reason', async () => {
   vi.useFakeTimers()
-  try {
-    const unreachable = new Error('authority unreachable')
-    const attempt = openAttempt({
-      renewRoute: async () => {
-        throw unreachable
-      },
-    })
-    const ended = endOf(attempt)
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    await expect(ended).resolves.toBe(unreachable)
-  } finally {
-    vi.useRealTimers()
-  }
+  const unreachable = new Error('authority unreachable')
+  const attempt = openAttempt({
+    renewRoute: async () => {
+      throw unreachable
+    },
+  })
+  const ended = endOf(attempt)
+  await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+  await expect(ended).resolves.toBe(unreachable)
 })
 
 test('a session drops a delivery to an attempt that ended at renewal, and its route is released once', async () => {
   vi.useFakeTimers()
-  try {
-    let released = 0
-    const received: number[] = []
-    const manager = new CloudflareRoomSessionManager('session')
-    const attempt = openAttempt(
-      { renewRoute: async () => false, unsubscribeRoute: async () => void released++ },
-      received,
-      manager,
-    )
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    expect(attempt.state()).toBe('closed')
-    manager.deliver(frame(1, attempt.leaseId))
-    expect(received).toEqual([])
-    await attempt.unsubscribe()
-    expect(released).toBe(1)
-  } finally {
-    vi.useRealTimers()
-  }
+  let released = 0
+  const received: number[] = []
+  const manager = new CloudflareRoomSessionManager('session')
+  const attempt = openAttempt(
+    { renewRoute: async () => false, unsubscribeRoute: async () => void released++ },
+    received,
+    manager,
+  )
+  await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+  expect(attempt.state()).toBe('closed')
+  manager.deliver(frame(1, attempt.leaseId))
+  expect(received).toEqual([])
+  await attempt.unsubscribe()
+  expect(released).toBe(1)
 })
 
 test('an attempt unsubscribed while its registration is in flight renews nothing', async () => {
   vi.useFakeTimers()
-  try {
-    const registered = Promise.withResolvers<{ ok: true }>()
-    const renewals: unknown[] = []
-    const attempt = openAttempt({
-      registerRoute: () => registered.promise,
-      renewRoute: async () => renewals.push('renew') > 0,
-    })
-    const unsubscribed = attempt.unsubscribe()
-    registered.resolve({ ok: true })
-    await unsubscribed
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS * 2)
-    expect({ state: attempt.state(), renewals }).toEqual({ state: 'closed', renewals: [] })
-  } finally {
-    vi.useRealTimers()
-  }
+  const registered = Promise.withResolvers<{ ok: true }>()
+  const renewals: unknown[] = []
+  const attempt = openAttempt({
+    registerRoute: () => registered.promise,
+    renewRoute: async () => renewals.push('renew') > 0,
+  })
+  const unsubscribed = attempt.unsubscribe()
+  registered.resolve({ ok: true })
+  await unsubscribed
+  await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS * 2)
+  expect({ state: attempt.state(), renewals }).toEqual({ state: 'closed', renewals: [] })
 })
 
 test('an attempt that ended while a renewal was in flight renews no more', async () => {
   vi.useFakeTimers()
-  try {
-    const renewals: Array<() => void> = []
-    const attempt = openAttempt({
-      renewRoute: () => new Promise((resolve) => renewals.push(() => resolve(true))),
-    })
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    void attempt.unsubscribe()
-    renewals[0]!()
-    await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
-    expect(attempt.state()).toBe('closed')
-    expect(renewals).toHaveLength(1)
-  } finally {
-    vi.useRealTimers()
-  }
+  const renewals: Array<() => void> = []
+  const attempt = openAttempt({
+    renewRoute: () => new Promise((resolve) => renewals.push(() => resolve(true))),
+  })
+  await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+  void attempt.unsubscribe()
+  renewals[0]!()
+  await vi.advanceTimersByTimeAsync(ROUTE_RENEW_EVERY_MS)
+  expect(attempt.state()).toBe('closed')
+  expect(renewals).toHaveLength(1)
 })
