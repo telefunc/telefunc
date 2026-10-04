@@ -189,11 +189,12 @@ test('what joins the outbox while a batch POST is out goes into the next body as
   answer()
   await first
   await vi.waitFor(() => expect(bodies).toHaveLength(2))
-  const sent = new Uint8Array(await bodies[1]!.arrayBuffer())
-  const expected = new Uint8Array(
+  const sent = Buffer.from(await bodies[1]!.arrayBuffer())
+  const expected = Buffer.from(
     await encodeSseRequest({ connId: transport.connId }, encodeLengthPrefixedFrames(frames)).arrayBuffer(),
   )
-  expect(sent).toEqual(expected)
+  // Byte for byte, without a deep comparison of 2.6 MB element by element.
+  expect(sent.equals(expected)).toBe(true)
   connection.dispose()
 })
 
