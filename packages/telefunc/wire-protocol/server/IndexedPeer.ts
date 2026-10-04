@@ -11,7 +11,7 @@ interface PeerSender {
   bufferedAmount(): number | undefined
 }
 
-/** Wraps a crossws peer, encodes frames with a fixed channel index.
+/** Wraps a `PeerSender`, encodes frames with a fixed channel index.
  *  Assigns sequence numbers. Frames are added to the replay buffer only once
  *  they are committed to a transport send path. */
 class IndexedPeer {
@@ -55,85 +55,53 @@ class IndexedPeer {
    *  ACK_RES frames use the normal sequenced send path and are replayable on reconnect. */
   sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const seq = this.replay.nextSeq()
-    const frame = encode.ackRes(this.index, seq, ackedSeq, result, status)
-    try {
-      this.sender.send(frame, () => this.replay.push(seq, frame))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendSequenced(seq, encode.ackRes(this.index, seq, ackedSeq, result, status))
   }
 
   /** Returns its seq. */
   sendCloseRequest(timeoutMs: number): number {
-    return this.sendClosing((seq) => encode.close(this.index, timeoutMs, seq))
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.close(this.index, timeoutMs, seq))
+    return seq
   }
 
   sendCloseAck(): void {
-    this.sendClosing((seq) => encode.closeAck(this.index, seq))
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.closeAck(this.index, seq))
   }
 
   sendAbort(abortValue: string): void {
-    this.sendClosing((seq) => encode.abort(this.index, abortValue, seq))
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.abort(this.index, abortValue, seq))
   }
 
   sendError(reason: ErrorReason): void {
-    this.sendClosing((seq) => encode.error(this.index, reason, seq))
-  }
-
-  /** Sequenced as data is, so a closing frame a dead wire lost replays. */
-  private sendClosing(buildFrame: (seq: number) => Uint8Array<ArrayBuffer>): number {
     const seq = this.replay.nextSeq()
-    const frame = buildFrame(seq)
-    try {
-      this.sender.send(frame, () => this.replay.push(seq, frame))
-    } catch {
-      /* transport may already be closed */
-    }
-    return seq
+    this.sendSequenced(seq, encode.error(this.index, reason, seq))
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
   sendByteWindowUpdate(limit: number, lastSeq: number): void {
-    try {
-      this.sender.send(encode.window(this.index, limit, lastSeq))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendCtrl(encode.window(this.index, limit, lastSeq))
   }
 
   sendMsgWindowUpdate(limit: number): void {
-    try {
-      this.sender.send(encode.msgWindow(this.index, limit))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendCtrl(encode.msgWindow(this.index, limit))
   }
 
   sendBdpPing(probe: number): void {
-    try {
-      this.sender.send(encode.bdpPing(this.index, probe))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendCtrl(encode.bdpPing(this.index, probe))
   }
 
   sendBdpPingAck(probe: number, starved: boolean, pathRtt: number): void {
-    try {
-      this.sender.send(encode.bdpPingAck(this.index, probe, starved, pathRtt))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendCtrl(encode.bdpPingAck(this.index, probe, starved, pathRtt))
   }
 
   /** Returns the frame's payload byte count. */
   sendPublish(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publish(this.index, data, seq)
-    try {
-      this.sender.send(frame, () => this.replay.push(seq, frame))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendSequenced(seq, frame)
     return payloadBytes(frame)
   }
 
@@ -141,11 +109,24 @@ class IndexedPeer {
   sendPublishBinary(data: Uint8Array): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publishBinary(this.index, data, seq)
+    this.sendSequenced(seq, frame)
+    return payloadBytes(frame)
+  }
+
+  /** Replayed once committed, so a frame a dead wire lost goes again. */
+  private sendSequenced(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     try {
       this.sender.send(frame, () => this.replay.push(seq, frame))
     } catch {
       /* transport may already be closed */
     }
-    return payloadBytes(frame)
+  }
+
+  private sendCtrl(frame: Uint8Array<ArrayBuffer>): void {
+    try {
+      this.sender.send(frame)
+    } catch {
+      /* transport may already be closed */
+    }
   }
 }
