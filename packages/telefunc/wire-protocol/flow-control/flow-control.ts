@@ -163,7 +163,7 @@ class FlowControl {
 
   /** Sender-side: count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    this._countSentBytes(bytes)
+    this.countSentBytes(bytes)
     this._sentMessages += 1
   }
 
@@ -312,7 +312,9 @@ class FlowControl {
   // nothing waits on.
 
   countSentBytes(bytes: number): void {
-    this._countSentBytes(bytes)
+    const hadCredit = !this.isPastByteCredit
+    this._sentBytes += bytes
+    if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
   onReceivedBytes(): void {
@@ -354,12 +356,6 @@ class FlowControl {
   private _advertiseMessages(): void {
     this._advertisedMessages = this._consumedMessages
     this._emit.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0)
-  }
-
-  private _countSentBytes(bytes: number): void {
-    const hadCredit = !this.isPastByteCredit
-    this._sentBytes += bytes
-    if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
   private _noteStarved(): void {
