@@ -130,7 +130,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  burst fits in: past it and a quarter more, that page is behind by more than what it read and hasn't reported,
    *  which it reports sooner than that. */
   private readonly _pastCreditAllowance: number
-  private readonly _letsBehindGo: boolean
+  private readonly _closesWhenBehind: boolean
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
@@ -166,7 +166,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     id,
     bufferLimit,
     publishes = false,
-    letsBehindGo = false,
+    closesWhenBehind = false,
   }: {
     ack?: boolean
     id?: string
@@ -176,7 +176,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     publishes?: boolean
     /** Nothing that sends on it can be refused: a page a send finds behind, or one offline whose buffer drops a send, is
      *  let go, on both ends, as for a publish. */
-    letsBehindGo?: boolean
+    closesWhenBehind?: boolean
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
@@ -195,7 +195,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
     if (publishes) this._flow.onPeerByteWindow(this._flow.peerByteWindowMax)
     this._pastCreditAllowance = publishes ? this._flow.peerByteWindowMax >> 2 : CREDIT_WINDOW_MAX_BYTES
-    this._letsBehindGo = letsBehindGo
+    this._closesWhenBehind = closesWhenBehind
     this._bufferLimit = bufferLimit ?? c.bufferLimit
     this._bufferLimitBinary = c.bufferLimitBinary
     this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
@@ -241,7 +241,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data)
     if (!this._peer) {
-      const gap = this._letsBehindGo && opts?.resentOnAttach !== true
+      const gap = this._closesWhenBehind && opts?.resentOnAttach !== true
       const buffered = needsAck
         ? this._trackAck(
             new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
@@ -288,7 +288,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) throw new ChannelClosedError()
     const needsAck = opts?.ack === true
     if (!this._peer) {
-      const gap = this._letsBehindGo
+      const gap = this._closesWhenBehind
       const buffered = needsAck
         ? new Promise<unknown>((resolve, reject) => {
             this._prePeerBuffer.pushBinaryAck(data, resolve, reject, gap)
@@ -335,7 +335,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** A send that finds its page behind rejects with ChannelOverflowError without going out, and the channel stays open,
    *  unless nothing that sends on it can be refused. */
   private _refuseBehind(): Promise<never> {
-    if (this._letsBehindGo) this._closeBehind()
+    if (this._closesWhenBehind) this._closeBehind()
     return rejectOverflow()
   }
 

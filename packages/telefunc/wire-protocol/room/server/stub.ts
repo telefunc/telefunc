@@ -377,7 +377,7 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
 
   constructor(participant: ServerLocalParticipant, publishShield?: ShieldValidator) {
     // A notice refused to a client too far behind would be lost, as nothing awaits it: the client leaves instead.
-    super({ letsBehindGo: true })
+    super({ closesWhenBehind: true })
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
       !participant._isBound,
