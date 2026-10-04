@@ -544,7 +544,7 @@ describe.each(WIRES)('over %s', (wire) => {
     expect(serverClosed.err).toBeUndefined()
   })
 
-  test("a channel returned while the page's wire is dead without a word opens on both ends once the page reconnects (#482)", async () => {
+  test("a channel returned while the page's wire is dead without a word opens on both ends once the page notices at its ping deadline and reconnects (#482)", async () => {
     const { net, channel } = page(wire)
     channel(register().id) // another channel on the page
     await advance(500)
@@ -555,7 +555,7 @@ describe.each(WIRES)('over %s', (wire) => {
     pageChannel.onOpen(() => (opened = true))
     const pageClosed = closedWith(pageChannel)
     const serverClosed = closedWith(server)
-    await advance(20_000)
+    await advance(5_000)
     expect(pageClosed.err).toBe('open')
     expect(serverClosed.err).toBe('open')
     expect(opened).toBe(true)
