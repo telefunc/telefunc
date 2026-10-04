@@ -1348,7 +1348,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFramesToWire(): void {
-    for (const frame of this.drainBufferedFrames(this.sendableChannels())) this.transport.sendFrame(frame)
+    for (const frame of this.drainBufferedFrames(this.isSendable)) this.transport.sendFrame(frame)
     this.startTtlIfIdle()
   }
 
@@ -1516,17 +1516,13 @@ class ClientConnection implements MuxConnection {
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     const sentBefore = [...this.replayBuffers.values()].some((replay) => replay.length > 0)
     if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
-    const sendable = this.sendableChannels()
     for (const { channelIx, seq } of this.sendBuffer)
-      if (seq !== undefined && sendable.has(channelIx) && !this.carriedFrom.has(channelIx))
+      if (seq !== undefined && this.isSendable(channelIx) && !this.carriedFrom.has(channelIx))
         this.carriedFrom.set(channelIx, seq)
-    return this.drainBufferedFrames(sendable)
+    return this.drainBufferedFrames(this.isSendable)
   }
 
-  private sendableChannels(): Set<number> | Map<number, ChannelEntry> {
-    if (this.awaitedIxes.size === 0) return this.channels
-    return new Set([...this.channels.keys()].filter((ix) => !this.awaitedIxes.has(ix)))
-  }
+  private readonly isSendable = (ix: number): boolean => !this.awaitedIxes.has(ix)
 
   stageReconcileBatch(isInitialBatch = false): ReconcileBatch {
     // This batch includes every channel, so it already covers any pending registration.
@@ -1614,7 +1610,7 @@ class ClientConnection implements MuxConnection {
       if (entry.state.tag !== 'closed') channelsToOpen.push(entry.channel)
     }
 
-    for (const frame of this.drainBufferedFrames(serverMap)) releaseFrames.push(frame)
+    for (const frame of this.drainBufferedFrames((ix) => serverMap.has(ix))) releaseFrames.push(frame)
 
     if (hasNewChannels && !this.upgradeReady) {
       const reconcileBatch = this.stageReconcileBatch()
@@ -1654,7 +1650,7 @@ class ClientConnection implements MuxConnection {
       else if (entry.state.tag === 'closed') this.serverHas(ix, entry.state, lastSeq)
       // As `applyReconciled` does: its replay, then what it queued.
       for (const frame of this.replayTo(ix, entry, lastSeq)) this.transport.sendFrame(frame)
-      for (const frame of this.drainBufferedFrames(new Set([ix]))) this.transport.sendFrame(frame)
+      for (const frame of this.drainBufferedFrames((i) => i === ix)) this.transport.sendFrame(frame)
       if (opened && entry.state.tag === 'open') entry.channel._onTransportOpen(this.transport.batched, this.wire)
     }
     this.startTtlIfIdle()
@@ -1709,9 +1705,9 @@ class ClientConnection implements MuxConnection {
     return 'accept'
   }
 
-  /** Takes out what the channels in `releasableChannels` queued, storing what replays in their replays. What the others
+  /** Takes out what the channels `releasable` accepts queued, storing what replays in their replays. What the others
    *  queued stays. */
-  private drainBufferedFrames(releasableChannels: Set<number> | Map<number, unknown>): OutboundFrame[] {
+  private drainBufferedFrames(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.sendBuffer
     let writeIx = 0
@@ -1720,7 +1716,7 @@ class ClientConnection implements MuxConnection {
       const frame = entry.frame
       const channelIx = entry.channelIx
       const seq = entry.seq
-      if (!releasableChannels.has(channelIx)) {
+      if (!releasable(channelIx)) {
         sendBuffer[writeIx++] = entry
         continue
       }
