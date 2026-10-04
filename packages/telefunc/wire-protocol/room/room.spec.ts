@@ -1709,6 +1709,26 @@ describe('Room public behavior', () => {
     await expect(acking).resolves.toMatchObject({ response: 'handled' })
     expect(victimInbox).toEqual([])
   })
+  it("forgets a stub's ack DM once its sender timed out, at the next ack DM, so a reply after that publishes nothing", async () => {
+    const room = (await Room.create('stub-ack-dm-expiry')) as ServerRoom
+    const { stub } = serve(room)
+    const publishDmAck = vi.spyOn(room, '_publishDmAck').mockResolvedValue()
+    vi.useFakeTimers()
+    const dm = (ackId: string) => ({
+      __r: 'dm' as const,
+      to: 'member',
+      from: 'sender',
+      fromMeta: null,
+      data: 'ping',
+      ackId,
+    })
+    stub._relayDm('{}', dm('a'))
+    await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS + 1)
+    stub._relayDm('{}', dm('b'))
+    declare(stub, { __r: 'dm-reply', ackId: 'a', reply: { ok: true, result: 'late' } })
+    declare(stub, { __r: 'dm-reply', ackId: 'b', reply: { ok: true, result: 'in time' } })
+    expect(publishDmAck.mock.calls.map(([, ackId]) => ackId)).toEqual(['b'])
+  })
   it('reports a client-held participant whose channel closed as disconnected', async () => {
     const room = (await Room.create('standalone-disconnect')) as ServerRoom
     const holder = (await room.join()) as ServerLocalParticipant
