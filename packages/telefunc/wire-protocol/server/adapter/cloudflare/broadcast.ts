@@ -84,7 +84,7 @@ class MemberRoute {
   readonly route: BroadcastRoute
   readonly #setup = createDeferred()
   readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
-  #refreshTimer: ReturnType<typeof setInterval> | null = null
+  #refreshTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(route: BroadcastRoute) {
     this.route = route
@@ -129,10 +129,7 @@ class MemberRoute {
   }
 
   stopRefresh(): void {
-    if (this.#refreshTimer) {
-      clearInterval(this.#refreshTimer)
-      this.#refreshTimer = null
-    }
+    clearInterval(this.#refreshTimer)
   }
 
   #notifyPresenceState(state: 'ready' | 'lost'): void {
