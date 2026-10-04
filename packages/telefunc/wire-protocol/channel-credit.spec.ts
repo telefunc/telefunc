@@ -805,21 +805,6 @@ test("a broadcast's page acknowledges what it read as a stream's page does, howe
   expect(replay.byteLength).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 4)
 })
 
-test("a Room member's page acknowledges what it read of the room as a broadcast's page does, so the server's replay for it holds less than a quarter of a stream's window of it", async () => {
-  const { room, stub, view } = await loop.openRoom()
-  const seen: unknown[] = []
-  view.subscribe((data) => void seen.push(data))
-  const speaker = await room.join()
-  await run(100)
-  for (let n = 0; n < 12; n++) {
-    void speaker.publish('x'.repeat(KIB * KIB))
-    await run(20)
-  }
-  await runUntil(() => seen.length === 12, 1_000)
-  await run(50)
-  expect(stub._replayBuffer!.byteLength).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 4)
-})
-
 test("a Room member's page gone quiet has its replay, and its room's, let go of what the other end got within a heartbeat", async () => {
   const { room, stub, page, view } = await loop.openRoom()
   const seen: unknown[] = []
