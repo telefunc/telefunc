@@ -16,7 +16,7 @@ import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH } from '
 import { config as serverConfig } from '../node/server/serverConfig.js'
 
 const LATENCY_MS = 25
-/** What one read of a request body hands the server, as a socket read does. */
+/** What one read of a request body hands the server, or of the event stream the page, as a socket read does. */
 const CHUNK_BYTES = 16 * 1024
 const KIB = 1024
 
@@ -53,8 +53,10 @@ function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; re
   const up = new Pipe()
   const down = new Pipe()
   const sse = getTelefuncSseChannelHooks()
+  let streams = 0
   const fetch = (async (url: string, init: RequestInit) => {
     const signal = init.signal!
+    if (new Headers(init.headers).get('Accept') === 'text/event-stream') streams++
     const aborted = new Promise<never>((_resolve, reject) =>
       signal.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError'))),
     )
@@ -103,7 +105,10 @@ function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; re
             for (;;) {
               const { done, value } = await events.read().catch(() => ({ done: true, value: undefined }))
               if (done) return down.push(0, () => signal.aborted || toPage.close())
-              down.push(value!.byteLength, () => signal.aborted || toPage.enqueue(value!))
+              for (let offset = 0; offset < value!.byteLength; offset += CHUNK_BYTES) {
+                const chunk = value!.slice(offset, offset + CHUNK_BYTES)
+                down.push(chunk.byteLength, () => signal.aborted || toPage.enqueue(chunk))
+              }
             }
           })()
         },
@@ -131,6 +136,10 @@ function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; re
       })
       pages.push(page as ClientChannel)
       return { server, page }
+    },
+    /** The event streams the page opened. */
+    get streams(): number {
+      return streams
     },
     /** Whether the page sends batch POSTs. */
     get batched(): boolean {
@@ -244,4 +253,19 @@ test("a page's window for a download starts at the batched initial window, thoug
   await run(1_000)
   expect(sse.batched).toBe(true)
   expect(flowOf(download.page).byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
+})
+
+// 100 KB/s, with a ping every second: each 512 KiB message takes 7 s to arrive, its event being base64, and the page's
+// PONG waits behind it, past the page's 2 s pong deadline.
+test('on a downlink slower than a message per pong deadline, the page keeps its wire while the message arrives', async () => {
+  serverConfig.channel.pingInterval = 1_000
+  const sse = (current = link({ batched: false }))
+  sse.down.bytesPerMs = 100
+  const download = sse.open<never, string>()
+  const got = received(download.page)
+  await run(100)
+  produce(download.server, 'x'.repeat(512 * KIB))
+  await run(30_000)
+  expect(sse.streams).toBe(1)
+  expect(got.bytes).toBeGreaterThanOrEqual(3 * 512 * KIB)
 })

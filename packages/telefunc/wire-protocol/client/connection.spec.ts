@@ -199,6 +199,58 @@ test('what joins the outbox while a batch POST is out goes into the next body as
   connection.dispose()
 })
 
+test('a PING that comes while a batch POST is out goes its heartbeat delay later, though that POST is answered within the delay', async () => {
+  vi.useFakeTimers()
+  const connection = ClientConnection.getOrCreate('http://ping.test', createChannel() as never, stalledOptions()) as any
+  try {
+    const transport = connection.transport
+    const posts: number[] = []
+    let answer!: () => void
+    transport.post = () => {
+      posts.push(Date.now())
+      return new Promise<Response>((resolve) => void (answer = () => resolve(new Response(''))))
+    }
+    transport.transportAbort = new AbortController()
+    transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
+    void transport.flushOutbox()
+    const pingAt = Date.now()
+    transport.sendFrame({ kind: 'heartbeat', frame: encode.ping() })
+    await vi.advanceTimersByTimeAsync(100)
+    answer()
+    await vi.advanceTimersByTimeAsync(CHANNEL_PING_INTERVAL_MS)
+    expect(posts.map((at) => at - pingAt)).toEqual([0, CHANNEL_PING_INTERVAL_MS / 2])
+  } finally {
+    connection.dispose()
+    vi.useRealTimers()
+  }
+})
+
+test('a PING that comes while a batch POST is out, still out at its heartbeat delay, goes on its own then, and only then', async () => {
+  vi.useFakeTimers()
+  const connection = ClientConnection.getOrCreate('http://held.test', createChannel() as never, stalledOptions()) as any
+  try {
+    const transport = connection.transport
+    const posts: number[] = []
+    let answer!: () => void
+    transport.post = () => {
+      posts.push(Date.now())
+      return new Promise<Response>((resolve) => void (answer = () => resolve(new Response(''))))
+    }
+    transport.transportAbort = new AbortController()
+    transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
+    void transport.flushOutbox()
+    const pingAt = Date.now()
+    transport.sendFrame({ kind: 'heartbeat', frame: encode.ping() })
+    await vi.advanceTimersByTimeAsync(CHANNEL_PING_INTERVAL_MS)
+    answer()
+    await vi.advanceTimersByTimeAsync(CHANNEL_PING_INTERVAL_MS)
+    expect(posts.map((at) => at - pingAt)).toEqual([0, CHANNEL_PING_INTERVAL_MS / 2])
+  } finally {
+    connection.dispose()
+    vi.useRealTimers()
+  }
+})
+
 test('a batch POST that fails after the next wire started puts back only its window refreshes', async () => {
   const channel = createChannel()
   const connection = ClientConnection.getOrCreate('http://late-post.test', channel as never, stalledOptions()) as any

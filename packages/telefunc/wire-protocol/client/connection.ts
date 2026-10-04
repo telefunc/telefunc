@@ -2123,10 +2123,6 @@ class SseTransport implements UpgradeSource {
   }
 
   sendFrame(frame: OutboundFrame): void {
-    if (this.flushing && frame.kind === 'heartbeat') {
-      this.schedulePingDuringFlush(frame)
-      return
-    }
     if (this.streamRequest.tag === 'active') {
       this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
       this.streamRequest.body.push(frame.frame)
@@ -2135,9 +2131,13 @@ class SseTransport implements UpgradeSource {
     }
     const now = Date.now()
     const deadline = this.getFrameDeadline(frame.kind, now)
-    this.outbox.push({ frame: frame.frame, deadline })
+    const entry = { frame: frame.frame, deadline }
+    this.outbox.push(entry)
     this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
-    if (this.flushing) this.foldOutbox()
+    if (this.flushing) {
+      this.foldOutbox()
+      if (frame.kind === 'heartbeat') this.unholdPing(entry)
+    }
     this.scheduleFlush()
     if (deadline <= now) void this.flushOutbox()
   }
@@ -2230,6 +2230,7 @@ class SseTransport implements UpgradeSource {
     const reader = createSseEventStreamReader(
       response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
+      () => this.heartbeat?.noteReceived(),
     )
 
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
@@ -2248,7 +2249,6 @@ class SseTransport implements UpgradeSource {
             continue
           }
           const frame = decode(raw)
-          this.heartbeat?.noteReceived()
           if (frame.tag === TAG.PONG) {
             this.heartbeat?.resetPong()
             this.owner._onTransportPong(frame.ended)
@@ -2373,16 +2373,18 @@ class SseTransport implements UpgradeSource {
     }
   }
 
-  /** Concurrent ping POST while a flush POST is in flight. */
-  private schedulePingDuringFlush(frame: OutboundFrame): void {
-    const delay = Math.max(0, this.getFrameDeadline(frame.kind) - Date.now())
-    setTimeout(() => {
-      if (this.flushing) {
-        void this.sendStandalonePost([frame.frame])
-      } else {
-        this.sendFrame(frame)
-      }
-    }, delay)
+  /** A PING still held behind the POST out at its deadline goes on its own: the next POST would bring it past the
+   *  server's ping deadline. */
+  private unholdPing(entry: OutboxEntry): void {
+    setTimeout(
+      () => {
+        const at = this.outbox.indexOf(entry)
+        if (!this.flushing || at === -1) return
+        this.outbox.splice(at, 1)
+        void this.sendStandalonePost([entry.frame])
+      },
+      Math.max(0, entry.deadline - Date.now()),
+    )
   }
 
   /** Every request this transport makes. The three senders differ only in what they send and what
@@ -2579,9 +2581,12 @@ function isWindowRefresh({ frame }: OutboxEntry): boolean {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW
 }
 
+/** `onChunk`: each read of the stream, so an event that takes longer than the pong deadline to arrive whole shows the
+ *  wire alive while it arrives. */
 function createSseEventStreamReader(
   reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
   abortController: AbortController,
+  onChunk: () => void,
 ): {
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
@@ -2651,6 +2656,7 @@ function createSseEventStreamReader(
         if (abortController.signal.aborted || cancelled) return null
         throw readError ?? new Error('Connection lost before all SSE frames were received.')
       }
+      onChunk()
       lineBuf += decoder.decode(value!, { stream: true })
       processBufferedLines()
     }
