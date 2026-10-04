@@ -284,6 +284,9 @@ type UpgradeTarget = ClientChannelTransport & {
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number }
 
+/** A POST body built ahead from the outbox's first `count` entries, `first` through `last`. */
+type OutboxFold = { blob: Blob; count: number; first: OutboxEntry; last: OutboxEntry }
+
 type SseInitialBatchStage = {
   initialFrames: OutboundFrame[]
   movedOutbox: OutboxEntry[]
@@ -2033,7 +2036,7 @@ class SseTransport implements UpgradeSource {
   /** Bytes pushed to the outbox since `foldOutbox` last folded: when to fold, not what. */
   private unfolded = 0
   /** The next POST's body, as far as `foldOutbox` built it. */
-  private folded: { blob: Blob; count: number; first: OutboxEntry; last: OutboxEntry } | null = null
+  private folded: OutboxFold | null = null
   private lastPostStartedAt = 0
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
@@ -2135,12 +2138,11 @@ class SseTransport implements UpgradeSource {
    *  answer copies only the rest. Held with the first and last entries it covers: the outbox only grows at its end, or
    *  is replaced or prepended to, which changes its first entry. */
   private foldOutbox(): void {
-    const folded = this.folded
-    const valid = folded !== null && this.outbox[0] === folded.first && this.outbox[folded.count - 1] === folded.last
     if (this.unfolded < SSE_FOLD_BYTES) return
     this.unfolded = 0
-    const from = valid ? folded.count : 0
-    const parts: (Blob | Uint8Array<ArrayBuffer>)[] = valid ? [folded.blob] : []
+    const folded = this.foldHeading(this.outbox)
+    const from = folded?.count ?? 0
+    const parts: (Blob | Uint8Array<ArrayBuffer>)[] = folded ? [folded.blob] : []
     for (let i = from; i < this.outbox.length; i++) {
       const { frame } = this.outbox[i]!
       parts.push(encodeU32(frame.byteLength), frame)
@@ -2151,6 +2153,12 @@ class SseTransport implements UpgradeSource {
       first: this.outbox[0]!,
       last: this.outbox[this.outbox.length - 1]!,
     }
+  }
+
+  /** The fold, if it still heads `entries`. */
+  private foldHeading(entries: OutboxEntry[]): OutboxFold | null {
+    const folded = this.folded
+    return folded !== null && entries[0] === folded.first && entries[folded.count - 1] === folded.last ? folded : null
   }
 
   private async openStream(): Promise<void> {
@@ -2319,10 +2327,8 @@ class SseTransport implements UpgradeSource {
     try {
       const now = Date.now()
       const queued = this.outbox.splice(0, this.outbox.length)
-      const folded = this.folded
+      const head = this.foldHeading(queued)
       this.folded = null
-      const head =
-        folded !== null && queued[0] === folded.first && queued[folded.count - 1] === folded.last ? folded : null
       this.lastPostStartedAt = now
       const wire = this.transportAbort
 
