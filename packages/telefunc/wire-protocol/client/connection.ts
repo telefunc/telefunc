@@ -85,7 +85,7 @@ type ProbeSession = {
 class Heartbeat {
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private pongTimer: ReturnType<typeof setTimeout> | null = null
-  /** When the wire last delivered a frame, or the pong deadline was last set. */
+  /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
   private lastReceivedAt = 0
 
   constructor(
@@ -112,7 +112,7 @@ class Heartbeat {
     this.lastReceivedAt = performance.now()
   }
 
-  /** How long the wire has delivered nothing, since the pong deadline was last set. */
+  /** How long the wire has delivered nothing, since the heartbeat started or got a PONG if later. */
   quietFor(): number {
     return performance.now() - this.lastReceivedAt
   }
