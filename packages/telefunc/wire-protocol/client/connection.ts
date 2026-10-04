@@ -2123,10 +2123,6 @@ class SseTransport implements UpgradeSource {
   }
 
   sendFrame(frame: OutboundFrame): void {
-    if (this.flushing && frame.kind === 'heartbeat') {
-      this.schedulePingDuringFlush(frame)
-      return
-    }
     if (this.streamRequest.tag === 'active') {
       this.streamRequest.body.push(encodeU32(frame.frame.byteLength))
       this.streamRequest.body.push(frame.frame)
@@ -2135,9 +2131,13 @@ class SseTransport implements UpgradeSource {
     }
     const now = Date.now()
     const deadline = this.getFrameDeadline(frame.kind, now)
-    this.outbox.push({ frame: frame.frame, deadline })
+    const entry = { frame: frame.frame, deadline }
+    this.outbox.push(entry)
     this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
-    if (this.flushing) this.foldOutbox()
+    if (this.flushing) {
+      this.foldOutbox()
+      if (frame.kind === 'heartbeat') this.unholdPing(entry)
+    }
     this.scheduleFlush()
     if (deadline <= now) void this.flushOutbox()
   }
@@ -2373,16 +2373,18 @@ class SseTransport implements UpgradeSource {
     }
   }
 
-  /** Concurrent ping POST while a flush POST is in flight. */
-  private schedulePingDuringFlush(frame: OutboundFrame): void {
-    const delay = Math.max(0, this.getFrameDeadline(frame.kind) - Date.now())
-    setTimeout(() => {
-      if (this.flushing) {
-        void this.sendStandalonePost([frame.frame])
-      } else {
-        this.sendFrame(frame)
-      }
-    }, delay)
+  /** A PING still held behind the POST out at its deadline goes on its own: the next POST would bring it past the
+   *  server's ping deadline. */
+  private unholdPing(entry: OutboxEntry): void {
+    setTimeout(
+      () => {
+        const at = this.outbox.indexOf(entry)
+        if (!this.flushing || at === -1) return
+        this.outbox.splice(at, 1)
+        void this.sendStandalonePost([entry.frame])
+      },
+      Math.max(0, entry.deadline - Date.now()),
+    )
   }
 
   /** Every request this transport makes. The three senders differ only in what they send and what
