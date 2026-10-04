@@ -138,12 +138,7 @@ function createBasicBinding(
 ) {
   return {
     idFromName(name: string) {
-      return {
-        name,
-        equals(other: { name: string }) {
-          return other.name === name
-        },
-      }
+      return { name }
     },
     idFromString(id: string) {
       return { name: id }
