@@ -13,10 +13,13 @@ declare module 'crossws' {
 
 /** `bufferedAmount` reads the socket's: Node's ws and Deno's WebSocket have it, and workerd's WebSocket has none, so a
  *  Durable Object's reads `undefined`. */
-function getTelefuncChannelHooks(
-  terminate: (peer: Peer) => void = (peer) => peer.terminate(),
-  bufferedAmount: (peer: Peer) => number | undefined = (peer) => peer.websocket.bufferedAmount,
-) {
+function getTelefuncChannelHooks({
+  terminate = (peer) => peer.terminate(),
+  bufferedAmount = (peer) => peer.websocket.bufferedAmount,
+}: {
+  terminate?: (peer: Peer) => void
+  bufferedAmount?: (peer: Peer) => number | undefined
+} = {}) {
   enableChannelTransports(['ws'])
   const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
