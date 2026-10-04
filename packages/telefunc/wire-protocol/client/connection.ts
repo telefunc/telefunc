@@ -125,7 +125,7 @@ class Heartbeat {
   // A PONG arrives behind what the server queued before it, as much as a window on a slow link: the wire is dead once it
   // has delivered nothing for the deadline.
   private readonly onPongDeadline = (): void => {
-    const quiet = performance.now() - this.lastReceivedAt
+    const quiet = this.quietFor()
     if (quiet < this.pongTimeoutMs) this.armPongDeadline(this.pongTimeoutMs - quiet)
     else this.onDead()
   }
