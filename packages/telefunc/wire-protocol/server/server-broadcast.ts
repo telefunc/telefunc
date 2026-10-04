@@ -147,17 +147,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       }
     }
     if (!this._peerSubscribedText) return
-    const wireText = encodePublishText(serialized, rawInfo)
-    if (this._peer) {
-      if (this._flow.isPastByteCredit && this._isPeerBehind()) {
-        this._closeBehind()
-        return
-      }
-      this._flow.countSentBytes(this._peer.sendPublish(wireText))
-      return
-    }
-    this._prePeerBuffer.pushPublish(wireText)
-    this._closeIfDroppedOffline()
+    this._forwardPublish(encodePublishText(serialized, rawInfo))
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -170,17 +160,18 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       }
     }
     if (!this._peerSubscribedBinary) return
-    const wireData = encodePublishBinary(data, rawInfo)
-    if (this._peer) {
-      if (this._flow.isPastByteCredit && this._isPeerBehind()) {
-        this._closeBehind()
-        return
-      }
-      this._flow.countSentBytes(this._peer.sendPublishBinary(wireData))
-      return
-    }
-    this._prePeerBuffer.pushPublishBinary(wireData)
-    this._closeIfDroppedOffline()
+    this._forwardPublish(encodePublishBinary(data, rawInfo))
+  }
+
+  /** A text (`string`) or binary publish to the page, buffered while it is away; a page behind is let go. */
+  private _forwardPublish(wire: string | Uint8Array): void {
+    const peer = this._peer
+    if (!peer) {
+      if (typeof wire === 'string') this._prePeerBuffer.pushPublish(wire)
+      else this._prePeerBuffer.pushPublishBinary(wire)
+      this._closeIfDroppedOffline()
+    } else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
+    else this._flow.countSentBytes(typeof wire === 'string' ? peer.sendPublish(wire) : peer.sendPublishBinary(wire))
   }
 
   /** A page that can't keep up with the broadcast has no send to reject: once behind, it leaves the group, on both
