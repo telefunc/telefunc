@@ -283,8 +283,8 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
   return () => subscription.close()
 }
 
-/** A route's subscription while wanted; one that ends on its own is reported and replaced once, as a Room lane's is, and
- *  a transport that replaces the plane gets it. */
+/** A route's subscription while wanted; one that ends on its own is reported and replaced once, and a transport that
+ *  replaces the plane gets it. */
 class RouteSubscription<Kind extends BroadcastKind> {
   private _current: BackendSubscription | null = null
 
