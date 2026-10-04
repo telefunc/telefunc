@@ -5,7 +5,7 @@ export {
   directoryDelete,
   directoryList,
   readLiveHead,
-  deleteLapsedTombstone,
+  deleteLapsedHead,
   listOrphanGenerations,
   compareExchangeHead,
   readCells,
@@ -125,9 +125,9 @@ function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   return head
 }
 
-/** A lapsed tombstone is reclaimed here: this backend has no native head TTL. */
-function deleteLapsedTombstone(sql: SqlStorage, now: number): void {
-  sql.exec("DELETE FROM head WHERE id = 1 AND state = 'closed' AND expires_at IS NOT NULL AND expires_at <= ?", now)
+/** A lapsed head is reclaimed here: this backend has no native head TTL. */
+function deleteLapsedHead(sql: SqlStorage, now: number): void {
+  sql.exec('DELETE FROM head WHERE id = 1 AND expires_at IS NOT NULL AND expires_at <= ?', now)
 }
 
 /** Installed incarnations other than `currentInc`. */
@@ -142,11 +142,11 @@ function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): stri
 function compareExchangeHead(sql: SqlStorage, cx: HeadCx, next: HeadNext, now: number): HeadCxOutcome {
   const current = readLiveHead(sql, now)
   if (!headCxMatches(cx, current, now)) return { conflict: true, current }
-  return { head: storeHead(sql, next, now) }
+  return { head: storeHead(sql, next, now, current) }
 }
 
-function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
-  const head = materializeHead(next, now, crypto.randomUUID())
+function storeHead(sql: SqlStorage, next: HeadNext, now: number, current: StoredHead | null): StoredHead {
+  const head = materializeHead(next, now, crypto.randomUUID(), current)
   sql.exec(
     'INSERT OR REPLACE INTO head (id, rev, inc, state, config, lease_id, lease_until, expires_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)',
     head.rev,

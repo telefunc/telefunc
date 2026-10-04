@@ -38,6 +38,8 @@ type RoomHead = {
   /** Closing only. CX mints `until` from authority time and returns the stored head; this lease alone
    * authorizes closing-control commit and finalization. */
   closeLease?: { id: string; until: number }
+  /** Authority time at which the head lapses and reads as absent. */
+  expiresAt?: number
 }
 
 /** Drivers compare-exchange; core is the only writer and decides every transition. */
@@ -56,7 +58,8 @@ type HeadNext = {
     config: Uint8Array
     closeLease?: { id: string; durationMs: number }
   }
-  ttlMs?: number
+  /** The head lapses `ttlMs` after this CX; `'keep'` keeps the current head's lapse. */
+  ttlMs?: number | 'keep'
 }
 
 type HeadCxResult = { head: RoomHead } | { conflict: true; current: RoomHead | null }

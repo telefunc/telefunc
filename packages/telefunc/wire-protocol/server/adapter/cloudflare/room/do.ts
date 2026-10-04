@@ -42,7 +42,7 @@ import {
   directoryPut,
   dropGenerationRows,
   initSchema,
-  deleteLapsedTombstone,
+  deleteLapsedHead,
   listOrphanGenerations,
   readCells,
   readLiveHead,
@@ -62,6 +62,7 @@ function headForRpc(head: StoredHead): RoomHead {
     state: head.state,
     config: head.config,
     ...(head.closeLease === undefined ? {} : { closeLease: { ...head.closeLease } }),
+    ...(head.expiresAt === null ? {} : { expiresAt: head.expiresAt }),
   }
 }
 
@@ -194,7 +195,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   #runSweep(now: number): void {
     this.#transaction((sql) => {
       const currentInc = readLiveHead(sql, now)?.currentInc ?? null
-      deleteLapsedTombstone(sql, now)
+      deleteLapsedHead(sql, now)
       deleteExpiredRoutes(sql, now)
       for (const inc of listOrphanGenerations(sql, currentInc)) dropGenerationRows(sql, inc)
     })

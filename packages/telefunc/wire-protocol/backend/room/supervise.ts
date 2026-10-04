@@ -81,9 +81,10 @@ function assertHeadNextWellFormed(next: HeadNext): void {
     assert(head.closeLease === undefined, `head CX: a '${head.state}' head must not carry a close lease`)
   }
   assert(
-    ttlMs === undefined || head.state === 'closed',
-    `head CX: ttlMs is only valid for a 'closed' tombstone, got '${head.state}'`,
+    ttlMs === undefined || head.state !== 'closing',
+    'head CX: a closing head lapses with its close lease, not a ttl',
   )
+  assert(ttlMs !== 'keep' || head.state === 'open', `head CX: only an open head keeps its lapse, got '${head.state}'`)
   assert(
     head.state !== 'closed' || head.currentInc === null,
     'head CX: a closed tombstone must clear currentInc to null',

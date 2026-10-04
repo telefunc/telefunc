@@ -6,28 +6,29 @@ import type { OrderingInfo } from '../../ordering-frame.js'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
 
-/** A head as an authority stores it; `expiresAt` is when a closed head's tombstone lapses. */
-type StoredHead = RoomHead & { expiresAt: number | null }
+/** A head as an authority stores it; `expiresAt` is when it lapses. */
+type StoredHead = Omit<RoomHead, 'expiresAt'> & { expiresAt: number | null }
 
 /** The CX's next head as stored: its expiry and close-lease deadline are minted here, from authority time, and never
  *  supplied by a caller. */
-function materializeHead(next: HeadNext, now: number, rev: string): StoredHead {
+function materializeHead(next: HeadNext, now: number, rev: string, current: StoredHead | null): StoredHead {
   const { currentInc, state, config, closeLease } = next.head
+  const { ttlMs } = next
   return {
     rev,
     currentInc,
     state,
     config,
-    expiresAt: next.ttlMs === undefined ? null : now + next.ttlMs,
+    expiresAt: ttlMs === undefined ? null : ttlMs === 'keep' ? (current?.expiresAt ?? null) : now + ttlMs,
     ...(closeLease === undefined ? {} : { closeLease: { id: closeLease.id, until: now + closeLease.durationMs } }),
   }
 }
 
-function isOpenIncarnation(head: RoomHead | null, inc: string): boolean {
+function isOpenIncarnation(head: Omit<RoomHead, 'expiresAt'> | null, inc: string): boolean {
   return head !== null && head.currentInc === inc && head.state === 'open'
 }
 
-function headCxMatches(cx: HeadCx, current: RoomHead | null, now: number): boolean {
+function headCxMatches(cx: HeadCx, current: Omit<RoomHead, 'expiresAt'> | null, now: number): boolean {
   if (cx.form === 'absent') return current === null
   if (current === null || current.rev !== cx.rev) return false
   switch (cx.form) {
@@ -42,7 +43,7 @@ function headCxMatches(cx: HeadCx, current: RoomHead | null, now: number): boole
 
 /** A lane commit needs its incarnation open; only the close's own control commit lands while it is closing. */
 function commitPreconditionHolds(
-  head: RoomHead | null,
+  head: Omit<RoomHead, 'expiresAt'> | null,
   inc: string,
   laneKind: LaneId['kind'],
   closingLease: string | undefined,
