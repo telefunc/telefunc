@@ -1,12 +1,15 @@
 export { pumpClientProducerToChannel }
+export type { PumpChannelOptions }
 
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
 import { concat, textEncoder } from '../../frame.js'
 import { ChannelClosedError } from '../../channel-errors.js'
 import { ClientChannel } from '../channel.js'
-import type { ChannelTransports } from '../../constants.js'
 import type { StreamingProducer } from '../../types.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
+
+/** What the pump's channel shares with the call's other channels. */
+type PumpChannelOptions = Omit<ConstructorParameters<typeof ClientChannel>[0], 'channelId' | 'ack' | 'key'>
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
@@ -24,22 +27,8 @@ const TAG_END = new Uint8Array([CHANNEL_PUMP_TAG_END])
  * On abort: the abort error propagates through the race (reject, not resolve),
  * so the catch block sees it. On clean close: resolves with `{ done: true }`.
  */
-function pumpClientProducerToChannel(
-  createProducer: () => StreamingProducer,
-  channelTransports: ChannelTransports,
-  telefuncUrl: string,
-  connectionKey?: string,
-  headers?: Record<string, string>,
-  idleTimeout?: number,
-) {
-  const channel = new ClientChannel({
-    channelId: randomUuid(),
-    transports: channelTransports,
-    connectionKey,
-    headers,
-    telefuncUrl,
-    idleTimeout,
-  })
+function pumpClientProducerToChannel(createProducer: () => StreamingProducer, opts: PumpChannelOptions) {
+  const channel = new ClientChannel({ channelId: randomUuid(), ...opts })
 
   const producer = createProducer()
 
@@ -78,7 +67,8 @@ function pumpClientProducerToChannel(
       // or from sendBinary (closed mid-send, e.g. by abort(res)).
       // Abort semantics propagate through doCancel(err) → producer.cancel(err) →
       // reader.cancel(err), not through this catch.
-      // Anything else is the source failing: the server's stream errors rather than end as if complete.
+      // Anything else is the source failing: the server's stream errors rather than end as if complete. No detail of the
+      // page's error crosses to the server.
       if (!(err instanceof ChannelClosedError) && !channel.isClosed)
         channel._sendBinary(concat(TAG_ERROR, textEncoder.encode('{}')))
     } finally {

@@ -6,7 +6,10 @@ import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
 import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
-import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/pumpToChannel.js'
+import {
+  pumpClientProducerToChannel,
+  type PumpChannelOptions,
+} from '../../wire-protocol/client/request/pumpToChannel.js'
 import { ClientChannel } from '../../wire-protocol/client/channel.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
@@ -57,11 +60,13 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     dataMain.extensions = callContext.extensions
   }
 
-  const channelTransports = callContext.channel.transports
-  const connectionKey = callContext.connectionKey
-  const idleTimeout = callContext.channelIdleTimeout
-  const headers = callContext.headers ?? undefined
-  const telefuncUrl = callContext.telefuncUrl
+  const channelOptions: PumpChannelOptions = {
+    transports: callContext.channel.transports,
+    connectionKey: callContext.connectionKey,
+    headers: callContext.headers ?? undefined,
+    telefuncUrl: callContext.telefuncUrl,
+    idleTimeout: callContext.channelIdleTimeout,
+  }
   const abortSignal = callContext.abortController.signal
   const files: Blob[] = []
   const requestCloseHandlers: CloseHandler[] = []
@@ -74,25 +79,10 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
         return index
       },
       createChannel(opts) {
-        return new ClientChannel({
-          channelId: randomUuid(),
-          ack: opts?.ack,
-          transports: channelTransports,
-          connectionKey,
-          headers,
-          telefuncUrl,
-          idleTimeout,
-        })
+        return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, ...channelOptions })
       },
       sendStream(createProducer) {
-        return pumpClientProducerToChannel(
-          createProducer,
-          channelTransports,
-          telefuncUrl,
-          connectionKey,
-          headers,
-          idleTimeout,
-        )
+        return pumpClientProducerToChannel(createProducer, channelOptions)
       },
     },
     function onReplaced(replaced) {

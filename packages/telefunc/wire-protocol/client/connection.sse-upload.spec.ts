@@ -115,6 +115,10 @@ const createChannel = (id: string = crypto.randomUUID()) => ({
   _onTransportOpen() {},
   _dispatchFrame() {},
   _onTransportClose() {},
+  _onTransportBatched() {},
+  _reattachState: () => ({}),
+  _fitReplays() {},
+  _acknowledge() {},
 })
 
 test('a frame written into an upload POST the server refused before its open-ack is sent again', async () => {

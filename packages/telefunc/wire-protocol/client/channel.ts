@@ -93,8 +93,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
    *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
   protected _flow: FlowControl
-  /** The connection's wire at the last attach. */
-  private _attachedWire: number | null = null
 
   constructor({
     channelId,
@@ -221,16 +219,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   listen(callback: ChannelListener<ServerToClient>): () => void {
     this._listeners = [...this._listeners, callback]
     return () => {
-      const i = this._listeners.indexOf(callback)
-      if (i >= 0) this._listeners = this._listeners.filter((_, j) => j !== i)
+      this._listeners = withoutFirst(this._listeners, callback)
     }
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
     this._binaryListeners = [...this._binaryListeners, callback]
     return () => {
-      const i = this._binaryListeners.indexOf(callback)
-      if (i >= 0) this._binaryListeners = this._binaryListeners.filter((_, j) => j !== i)
+      this._binaryListeners = withoutFirst(this._binaryListeners, callback)
     }
   }
 
@@ -304,9 +300,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onTransportOpen(batched: boolean, wire: number): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
-    // The wire of the last attach lost nothing to repair, and still answers the probe in flight.
-    if (wire !== this._attachedWire) this._flow.reattach()
-    this._attachedWire = wire
+    this._flow.attach(wire)
     this._fireOpen()
   }
 
@@ -429,12 +423,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._connection.sendBdpPingAck(
-          this,
-          frame.probe,
-          this._flow.onPing(),
-          this._attachedWire === null ? Infinity : this._flow.pathRtt(this._attachedWire),
-        )
+        this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing(), this._flow.pathRtt())
         return
       case TAG.BDP_PING_ACK:
         this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
@@ -674,9 +663,10 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
     this._subscribers[kind] = [...this._subscribers[kind], callback] as BroadcastListeners<T>[K]
     return () => {
-      const index = (this._subscribers[kind] as Array<typeof callback>).indexOf(callback)
-      if (index >= 0)
-        this._subscribers[kind] = this._subscribers[kind].filter((_, j) => j !== index) as BroadcastListeners<T>[K]
+      this._subscribers[kind] = withoutFirst(
+        this._subscribers[kind] as Array<typeof callback>,
+        callback,
+      ) as BroadcastListeners<T>[K]
     }
   }
 
@@ -754,7 +744,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   // A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is.
-
   _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this._flow.onReceivedBytes(bytes)
     const parsed = parse(data) as ChannelData<T>
@@ -794,4 +783,11 @@ function normalizeCloseTimeout(timeout: number | undefined): number {
       `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
     )
   return timeout
+}
+
+/** A copy of `list` without its first `item`, or `list` itself without one: listeners are replaced, never mutated, so a
+ *  dispatch iterates the ones it started with. */
+function withoutFirst<T>(list: T[], item: T): T[] {
+  const i = list.indexOf(item)
+  return i < 0 ? list : list.filter((_, j) => j !== i)
 }

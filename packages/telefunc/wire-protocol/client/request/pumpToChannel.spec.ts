@@ -20,7 +20,10 @@ test('an upload whose source fails part-way ends the server stream with an error
     yield new Uint8Array([1]) as Uint8Array<ArrayBuffer>
     throw new Error('the file read failed')
   })()
-  pumpClientProducerToChannel(() => ({ chunks, cancel: () => {} }), ['sse'], 'http://pump.test/_telefunc')
+  pumpClientProducerToChannel(() => ({ chunks, cancel: () => {} }), {
+    transports: ['sse'],
+    telefuncUrl: 'http://pump.test/_telefunc',
+  })
   await new Promise((resolve) => setTimeout(resolve, 10))
   expect(sent).toEqual([CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_ERROR])
 })
@@ -35,7 +38,10 @@ test('an upload that ends while the server is away waits for it as long as the c
     const chunks = (async function* () {
       yield new Uint8Array([1]) as Uint8Array<ArrayBuffer>
     })()
-    pumpClientProducerToChannel(() => ({ chunks, cancel: () => {} }), ['sse'], 'http://pump-away.test/_telefunc')
+    pumpClientProducerToChannel(() => ({ chunks, cancel: () => {} }), {
+      transports: ['sse'],
+      telefuncUrl: 'http://pump-away.test/_telefunc',
+    })
     await vi.advanceTimersByTimeAsync(0)
     let settled = false
     void close.mock.results[0]!.value.then(() => (settled = true))

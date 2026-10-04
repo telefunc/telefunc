@@ -45,7 +45,7 @@ function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<numbe
   const traffic: Traffic = { requests: 0, toServer: [], toPage: [] }
   /** Ends a wire as a network drop does, the latest last. */
   const cuts: (() => void)[] = []
-  const failing: FailingPost = { next: null }
+  const failing: FailingPost = { next: null, holdEnd: null }
   const upload: Upload = { endAfterNextReconcile: false, refusedAfter }
   if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts, delays))
   if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts, delays, failing, upload)
@@ -58,6 +58,8 @@ function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<numbe
     wires: () => cuts.length,
     /** The next batch POST carrying a RECONCILE fails, before or after the server reads it. */
     failNextReconcilePost: (after: 'read' | 'unread') => void (failing.next = after),
+    /** The body of the next batch POST carrying a RECONCILE ends `ms` after its frames, which the server reads at once. */
+    holdNextReconcilePost: (ms: number) => void (failing.holdEnd = ms),
     /** The upload request loses what follows the next RECONCILE it carries, and ends 50 ms later. */
     endUploadAfterNextReconcile: () => void (upload.endAfterNextReconcile = true),
     /** A channel the page opens, such as a call's callback. */
@@ -101,7 +103,7 @@ async function searchBox(channel: ReturnType<typeof page>['channel'], keystrokes
   return { openedAfter, networkErrors }
 }
 
-type FailingPost = { next: 'read' | 'unread' | null }
+type FailingPost = { next: 'read' | 'unread' | null; holdEnd: number | null }
 type Upload = { endAfterNextReconcile: boolean; refusedAfter: number }
 
 function sseServer(
@@ -128,10 +130,22 @@ function sseServer(
       logged = new Uint8Array(await body.arrayBuffer())
       const frames = lengthPrefixed(logged)
       for (const frame of frames) traffic.toServer.push(frame[0]!)
-      if (failing.next && init.headers && !JSON.stringify(init.headers).includes('text/event-stream')) {
-        if (frames.some((frame) => frame[0] === TAG.RECONCILE)) [fails, failing.next] = [failing.next, null]
-      }
+      const reconcilePost =
+        !JSON.stringify(init.headers).includes('text/event-stream') &&
+        frames.some((frame) => frame[0] === TAG.RECONCILE)
+      if (failing.next && reconcilePost) [fails, failing.next] = [failing.next, null]
       if (fails === 'unread') throw new TypeError('fetch failed')
+      if (failing.holdEnd !== null && reconcilePost) {
+        const [bytes, ms] = [logged, failing.holdEnd]
+        failing.holdEnd = null
+        logged = new ReadableStream<Uint8Array>({
+          start: (controller) => controller.enqueue(bytes),
+          pull: async (controller) => {
+            await new Promise((resolve) => setTimeout(resolve, ms))
+            controller.close()
+          },
+        })
+      }
     } else {
       logged = body.pipeThrough(framesThrough((frame) => traffic.toServer.push(frame[0]!), upload))
     }
@@ -390,6 +404,58 @@ describe.each(WIRES)('over %s', (wire) => {
     await vi.advanceTimersByTimeAsync(200)
     expect(received).toEqual(['before the drop', 'after the drop'])
   })
+
+  test('a wire stays up while the server awaits a channel its first RECONCILE named, past the ping deadline', async () => {
+    serverConfig.channel = { connectTtl: 9_000, pingInterval: 2_000 }
+    const mux = getChannelMux() as unknown as { resolvedOptions: unknown }
+    mux.resolvedOptions = null
+    try {
+      const { channel, wires } = page(wire)
+      const callbackId = crypto.randomUUID()
+      let opened = false
+      channel(callbackId).onOpen(() => void (opened = true))
+      await vi.advanceTimersByTimeAsync(8_000) // twice the ping interval, the server's deadline, and more
+      register(callbackId)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(opened).toBe(true)
+      expect(wires()).toBe(1)
+    } finally {
+      serverConfig.channel = {}
+      mux.resolvedOptions = null
+    }
+  })
+
+  test("what a channel sends once its reconnect's wire dropped, while the server awaits a callback that reconnect named, reaches the page", async () => {
+    const { channel, cut } = page(wire)
+    const clock = register<string, string>()
+    const received: string[] = []
+    channel<string, string>(clock.id).listen((message) => void received.push(message))
+    await vi.advanceTimersByTimeAsync(200)
+    channel() // a callback whose call is lost in the cut
+    cut()
+    await vi.advanceTimersByTimeAsync(1_000) // the reconnect names the clock and the callback
+    cut()
+    await vi.advanceTimersByTimeAsync(10) // the server notices the drop
+    void clock.send('after the wire dropped', { ack: false })
+    await vi.advanceTimersByTimeAsync(3_000)
+    expect(received).toEqual(['after the wire dropped'])
+  })
+
+  test('a message the page queues in the tick it registers a channel goes to the server once', async () => {
+    const { channel, traffic } = page(wire)
+    const clock = register<string, string>()
+    const received: string[] = []
+    clock.listen((message) => void received.push(message))
+    const pageClock = channel<string, string>(clock.id)
+    await vi.advanceTimersByTimeAsync(500)
+    const texts = () => traffic.toServer.filter((tag) => tag === TAG.TEXT).length
+    const before = texts()
+    channel(register().id)
+    void pageClock.send('queued', { ack: false }) // goes behind the registration's RECONCILE
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(received).toEqual(['queued'])
+    expect(texts() - before).toBe(1)
+  })
 })
 
 describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
@@ -424,9 +490,7 @@ describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
     }
     expect(connection.transport.type).toBe('ws')
   })
-})
 
-describe.each(['sse', 'sse-batch'] as const)('over %s', (wire) => {
   test("a callback the page aborts while its upgrade waits for the old wire's FIN gets the abort after the handoff, not a NetworkError", async () => {
     // The WebSocket commits the upgrade, and the old wire's last frame takes 300 ms.
     const { channel } = page(wire, { upgrade: true, delays: { [TAG.READY]: 1_000, [TAG.FIN]: 300 } })
@@ -505,44 +569,6 @@ describe.each(['sse', 'sse-batch'] as const)('over %s, while an upgrade attempt 
   })
 })
 
-describe.each(WIRES)('over %s', (wire) => {
-  test('a wire stays up while the server awaits a channel its first RECONCILE named, past the ping deadline', async () => {
-    serverConfig.channel = { connectTtl: 9_000, pingInterval: 2_000 }
-    const mux = getChannelMux() as unknown as { resolvedOptions: unknown }
-    mux.resolvedOptions = null
-    try {
-      const { channel, wires } = page(wire)
-      const callbackId = crypto.randomUUID()
-      let opened = false
-      channel(callbackId).onOpen(() => void (opened = true))
-      await vi.advanceTimersByTimeAsync(8_000) // twice the ping interval, the server's deadline, and more
-      register(callbackId)
-      await vi.advanceTimersByTimeAsync(200)
-      expect(opened).toBe(true)
-      expect(wires()).toBe(1)
-    } finally {
-      serverConfig.channel = {}
-      mux.resolvedOptions = null
-    }
-  })
-
-  test("what a channel sends once its reconnect's wire dropped, while the server awaits a callback that reconnect named, reaches the page", async () => {
-    const { channel, cut } = page(wire)
-    const clock = register<string, string>()
-    const received: string[] = []
-    channel<string, string>(clock.id).listen((message) => void received.push(message))
-    await vi.advanceTimersByTimeAsync(200)
-    channel() // a callback whose call is lost in the cut
-    cut()
-    await vi.advanceTimersByTimeAsync(1_000) // the reconnect names the clock and the callback
-    cut()
-    await vi.advanceTimersByTimeAsync(10) // the server notices the drop
-    void clock.send('after the wire dropped', { ack: false })
-    await vi.advanceTimersByTimeAsync(3_000)
-    expect(received).toEqual(['after the wire dropped'])
-  })
-})
-
 test.each([
   ['before the server read it', 'unread'],
   ['after the server read it', 'read'],
@@ -564,22 +590,21 @@ test.each([
   },
 )
 
-describe.each(WIRES)('over %s', (wire) => {
-  test('a message the page queues in the tick it registers a channel goes to the server once', async () => {
-    const { channel, traffic } = page(wire)
-    const clock = register<string, string>()
-    const received: string[] = []
-    clock.listen((message) => void received.push(message))
-    const pageClock = channel<string, string>(clock.id)
-    await vi.advanceTimersByTimeAsync(500)
-    const texts = () => traffic.toServer.filter((tag) => tag === TAG.TEXT).length
-    const before = texts()
-    channel(register().id)
-    void pageClock.send('queued', { ack: false }) // goes behind the registration's RECONCILE
-    await vi.advanceTimersByTimeAsync(1_000)
-    expect(received).toEqual(['queued'])
-    expect(texts() - before).toBe(1)
-  })
+test('on SSE batch POSTs, a callback whose call registers it while the POST carrying its RECONCILE is still being read opens, its attach result ahead of that RECONCILED', async () => {
+  const { channel, traffic, holdNextReconcilePost } = page('sse-batch')
+  channel(register().id)
+  await vi.advanceTimersByTimeAsync(500)
+  holdNextReconcilePost(200)
+  const callbackId = crypto.randomUUID()
+  const callback = channel(callbackId)
+  let opened = false
+  callback.onOpen(() => (opened = true))
+  await vi.advanceTimersByTimeAsync(100) // the server has read the RECONCILE, and awaits the callback
+  register(callbackId)
+  await vi.advanceTimersByTimeAsync(1_000)
+  expect(opened).toBe(true)
+  const results = traffic.toPage.filter((tag) => tag === TAG.ATTACH_RESULT || tag === TAG.RECONCILED)
+  expect(results.slice(-2)).toEqual([TAG.ATTACH_RESULT, TAG.RECONCILED])
 })
 
 test('a message queued with a registration, lost with the upload request that carried that RECONCILE, reaches the server on the next wire', async () => {
@@ -651,12 +676,8 @@ describe('with every channel registered, a page sends each message once, and no 
 })
 
 const { RECONCILE, RECONCILED, TEXT, WINDOW, MSG_WINDOW, BDP_PING, BDP_PING_ACK, STREAM_REQUEST_OPEN_ACK } = TAG
-/** As recorded before initial channels the server hasn't registered were answered at once, less the TEXT an SSE page
- *  sent twice: with its first RECONCILE, and again as the replay that RECONCILE's RECONCILED asked for. SENT, which
- *  each attach to another wire sent then, is gone. With the server's BDP_PING_ACK to the probe a RECONCILE entry
- *  carries on a wire whose round trip its channel hasn't measured; an SSE page's first RECONCILE, sent before its
- *  upload request streams, carries none. With the WINDOW the server sends at the page's first heartbeat on SSE, which
- *  acknowledges the TEXT that RECONCILE carried: on a WebSocket, the TEXT follows that heartbeat. */
+/** Every frame each wire carries for two returned channels and one message each way, PING and PONG aside: no frame
+ *  or request more than needed. */
 const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   sse: {
     requests: 2,
