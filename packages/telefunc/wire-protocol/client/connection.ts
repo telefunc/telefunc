@@ -1362,13 +1362,9 @@ class ClientConnection implements MuxConnection {
       return
     }
     this.wire++
-    // The server stops awaiting channels when their wire goes; the next wire's RECONCILE lists them again.
-    this.awaitedIxes.clear()
-    this.earlyAttachResults.clear()
     // The wire is dying: the queued RECONCILE isn't sent, the reconnect's lists every channel.
     this.cancelRegisterReconcileTimer()
-    this.exitReconciling()
-    this.reconcileIxes.clear()
+    this.forgetWire()
     if (this.ttl) {
       clearTimeout(this.ttl)
       this.ttl = null
@@ -1417,6 +1413,15 @@ class ClientConnection implements MuxConnection {
     return count
   }
 
+  /** What the wire's RECONCILEs left pending goes with it: the server stops awaiting channels when their wire goes, and
+   *  the next wire's RECONCILE lists them again. */
+  private forgetWire(): void {
+    this.awaitedIxes.clear()
+    this.earlyAttachResults.clear()
+    this.reconcileIxes.clear()
+    this.exitReconciling()
+  }
+
   private dispose(): void {
     if (this.closed) return
     if (this.ttl) {
@@ -1439,10 +1444,7 @@ class ClientConnection implements MuxConnection {
     this.sendBuffer = []
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
-    this.reconcileIxes.clear()
-    this.awaitedIxes.clear()
-    this.earlyAttachResults.clear()
-    this.exitReconciling()
+    this.forgetWire()
     // A fresh connection replaces this one once its indexes run out.
     if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
   }
