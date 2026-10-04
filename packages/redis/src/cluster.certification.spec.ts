@@ -284,7 +284,31 @@ describe('Redis real three-master Cluster CI certification', () => {
   it('lets a room whose server is gone lapse by itself past its emptyTimeout, a meta write keeping that lapse', async () => {
     const prefix = uniquePrefix('auto-close-gone')
     const roomId = 'gone-room'
-    // A server that creates the room, writes its meta and exits before its close timer fires.
+    await createAndExit(prefix, roomId)
+    ownBackend(cluster, prefix)
+    expect((await getRoomBackend().readHead(roomId))?.state).toBe('open')
+    await waitFor(async () => (await getRoomBackend().readHead(roomId)) === null)
+    const master = owner(await slot(headKey(prefix, roomId))).client
+    expect(await master.exists(headKey(prefix, roomId))).toBe(0)
+    expect(await Room.list()).toEqual([])
+    // The listing's repair dropped what the room left behind.
+    expect(await master.keys(`${prefix}room:{${encodeURIComponent(roomId)}}*`)).toEqual([])
+  })
+  it('drops what a lapsed room left behind when its id is created again', async () => {
+    const prefix = uniquePrefix('auto-close-recreate')
+    const roomId = 'recreated-room'
+    await createAndExit(prefix, roomId)
+    ownBackend(cluster, prefix)
+    const [listed] = (await getRoomBackend().directoryList(roomId)).entries
+    await waitFor(async () => (await getRoomBackend().readHead(roomId)) === null)
+    const master = owner(await slot(headKey(prefix, roomId))).client
+    const generationOf = (inc: string) => master.keys(`${prefix}room:{${encodeURIComponent(roomId)}}:g:${inc}*`)
+    expect(await generationOf(listed!.incTag)).not.toEqual([])
+    await Room.create(roomId, { emptyTimeout: Infinity })
+    expect(await generationOf(listed!.incTag)).toEqual([])
+  })
+  /** A server that creates the room, writes its meta and exits before its close timer fires. */
+  async function createAndExit(prefix: string, roomId: string): Promise<void> {
     const server = spawnSync(
       process.execPath,
       [
@@ -306,15 +330,7 @@ process.exit(0)`,
       },
     )
     expect(server.status, server.stderr).toBe(0)
-    ownBackend(cluster, prefix)
-    expect((await getRoomBackend().readHead(roomId))?.state).toBe('open')
-    await waitFor(async () => (await getRoomBackend().readHead(roomId)) === null)
-    const master = owner(await slot(headKey(prefix, roomId))).client
-    expect(await master.exists(headKey(prefix, roomId))).toBe(0)
-    expect(await Room.list()).toEqual([])
-    // The listing's repair dropped what the room left behind.
-    expect(await master.keys(`${prefix}room:{${encodeURIComponent(roomId)}}*`)).toEqual([])
-  })
+  }
   it('round-trips MAX_SAFE seq through commit, retain and a fresh read', async () => {
     const { prefix, roomId, inc } = room('max-safe')
     const backend = ownBackend(cluster, prefix)

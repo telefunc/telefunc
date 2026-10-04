@@ -195,6 +195,9 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       await createHold(id, created.inc, hold)
       await lapseNewRoom(id, created.inc)
     }
+    // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
+    const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
+    if (lapsed !== undefined) await backend.dropGeneration(id, lapsed.incTag)
     await backend.directoryPut(id, created.inc)
     return { kind: 'created', room: new ServerRoom(id, created, { members: [] }) }
   })
