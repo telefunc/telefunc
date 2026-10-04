@@ -514,7 +514,6 @@ describe.each(WIRES)('over %s', (wire) => {
 
   test('a page close whose request goes down with a dying wire behind a message over the replay budget ends the channel with NetworkError on both ends after the reconnect', async () => {
     serverConfig.channel = { pingInterval: 1_000, clientReplayBuffer: 1_024 }
-    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
     const { net, channel } = page(wire)
     channel(register().id) // another channel on the page
     const server = register<string, never>()
@@ -695,7 +694,6 @@ test('over sse upgraded to a WebSocket, a page goes idle once its last channel c
 /** The server gives up on a channel it hasn't registered after 1 s, and a connection goes 300 ms after its last channel. */
 function idleWithAbortedCallback() {
   serverConfig.channel = { pingInterval: 1_000, connectTtl: 1_000, idleTimeout: 300 }
-  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
 }
 
 /** The page aborts a call's callback before the call reaches the server, which never registers it, then closes
@@ -1149,7 +1147,6 @@ const SLOW = 64 * 1_024
 
 function reconnectTimeout5s() {
   serverConfig.channel = { pingInterval: 1_000, reconnectTimeout: 5_000 }
-  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
 }
 
 describe.each(WIRES)(
@@ -1435,7 +1432,6 @@ describe.each(WIRES)('over %s, past the reconnect window,', (wire) => {
 describe.each(WIRES)("over %s, a stream that awaits its sends, begun before its page's first RECONCILED,", (wire) => {
   test("from the page, on a channel it passes to the server, resumes without loss when its wire drops with it in flight, however small the page's replay", async () => {
     serverConfig.channel = { pingInterval: 1_000, clientReplayBuffer: 64 * 1_024 }
-    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
     const { net, channel } = page(wire)
     // The first wire dies as its RECONCILED arrives, and the next as the server attaches the channel.
     net.whenPageGets(TAG.RECONCILED, () => net.die())
@@ -1462,7 +1458,6 @@ describe.each(WIRES)("over %s, a stream that awaits its sends, begun before its 
       serverReplayBuffer: 256 * 1_024,
       serverReplayBufferBinary: 256 * 1_024,
     }
-    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
     const { net, channel } = page(wire)
     const server = register<never, string>()
     void server.sendBinary(new Uint8Array(1_024 * 1_024)) // nobody awaits it: the page reads it as it attaches
@@ -1486,7 +1481,6 @@ describe.each(WIRES)("over %s, a stream that awaits its sends, begun before its 
 test("over ws, a stream that awaits its sends from the page on a channel the server returned, begun before the page's first RECONCILED, resumes without loss when its wire drops with it in flight, however small the page's replay", async () => {
   // The server waits for the page past the first wire's reconcile timeout.
   serverConfig.channel = { pingInterval: 1_000, connectTtl: 20_000, clientReplayBuffer: 64 * 1_024 }
-  ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
   const { net, channel } = page('ws')
   const server = register<string, never>()
   const got: number[] = []
@@ -1585,7 +1579,6 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
 
   test("a reconnect that needs messages the page's replay dropped ends the channel with NetworkError on both ends, and the server gets none after them", async () => {
     serverConfig.channel = { pingInterval: 1_000, clientReplayBuffer: 1_024 }
-    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
     const { net, channel } = page(wire)
     const server = register<string, never>()
     const got: string[] = []
@@ -1607,7 +1600,6 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
 
   test('a reconnect whose gap the replays fill resumes without loss, past a message larger than them that arrived before', async () => {
     serverConfig.channel = { pingInterval: 1_000, serverReplayBuffer: 1_024, clientReplayBuffer: 1_024 }
-    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
     const { net, channel } = page(wire)
     const server = register<string, string>()
     const serverGot: string[] = []
@@ -1676,7 +1668,6 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
 
   test("an upload over the 'channel' transport whose wire drops mid-stream completes after the reconnect, however small the page's replay", async () => {
     serverConfig.channel = { pingInterval: 1_000, clientReplayBufferBinary: 4_096 }
-    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
     const { net, resume, all, read } = upload(wire, 1_024)
     await advance(500)
     net.die()
@@ -1707,7 +1698,6 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
 
   test("an upload over the 'channel' transport that a reconnect needs a chunk of larger than the page's replay errors on the server rather than completing short", async () => {
     serverConfig.channel = { pingInterval: 1_000, clientReplayBufferBinary: 4_096 }
-    ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
     const { net, resume, read } = upload(wire, 8_192)
     await advance(500)
     net.die()
