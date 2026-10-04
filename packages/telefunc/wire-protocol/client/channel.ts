@@ -724,7 +724,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   // A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is.
   _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
-    this._flow.onReceivedBytes(bytes)
+    this._flow.onReceivedBytes()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastListeners) {
@@ -738,7 +738,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
-    this._flow.onReceivedBytes(bytes)
+    this._flow.onReceivedBytes()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners) {
       try {

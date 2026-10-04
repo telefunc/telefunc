@@ -69,8 +69,6 @@ class FlowControl {
   /** `_sentBytes` after the last frame sent while the byte limit was ahead of it. */
   private _sentWithCredit = 0
   // Receiver side: what arrived, what was consumed, and what had been consumed when each limit last went out.
-  private _receivedBytes = 0
-  private _receivedMessages = 0
   private _consumedBytes = 0
   private _consumedMessages = 0
   private _advertisedBytes = 0
@@ -200,8 +198,6 @@ class FlowControl {
   /** Receiver-side: account one received frame off the wire. Emits a
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
   onReceived(bytes: number): void {
-    this._receivedBytes += bytes
-    this._receivedMessages += 1
     this._arrived = true
     if (this._bdp.onReceive(bytes)) this._emit.bdpPing(this._bdp.probe)
   }
@@ -319,8 +315,7 @@ class FlowControl {
     this._countSentBytes(bytes)
   }
 
-  onReceivedBytes(bytes: number): void {
-    this._receivedBytes += bytes
+  onReceivedBytes(): void {
     this._arrived = true
   }
 
