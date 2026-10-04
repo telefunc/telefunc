@@ -418,7 +418,7 @@ export async function onJoinLobby(name) {
 
 A room closes on its own once nothing holds it. A member holds it, and so does every page a telefunction returned it to, for as long as that page keeps it, joined or not. A hidden participant and a server's `Room` handle don't.
 
-Once nothing holds it, it closes `departureTimeout` later if a member had joined it, and `emptyTimeout` later if none had: 20 seconds and 5 minutes by default. A room no page was returned to and nobody joined closes `emptyTimeout` after it's created. Anything that holds it again before then keeps it open.
+Once nothing holds it, it closes `departureTimeout` later if a member had joined it, and `emptyTimeout` later if none had: 20 seconds and 5 minutes by default. A room no page was returned to and nobody joined closes `emptyTimeout` after it's created. Anything that holds it again before then keeps it open; a join that lands just as it closes is admitted, then closed with it.
 
 ```js
 await Room.create('match-42', { emptyTimeout: 60_000, departureTimeout: Infinity }) // Infinity: until Room.close()
