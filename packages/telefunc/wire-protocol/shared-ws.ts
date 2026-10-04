@@ -434,9 +434,9 @@ function encodeBinaryFrame(tag: number, index: number, data: Uint8Array, seq: nu
   return frame
 }
 
-function encodeBareFrame(tag: number, index = 0): Uint8Array<ArrayBuffer> {
+function encodeBareFrame(tag: number, index = 0, seq = 0): Uint8Array<ArrayBuffer> {
   const frame = new Uint8Array(HEADER)
-  writeHeader(frame, tag, index, 0)
+  writeHeader(frame, tag, index, seq)
   return frame
 }
 
@@ -520,11 +520,7 @@ const encode = {
     writeU32(frame, HEADER, timeoutMs)
     return frame
   },
-  closeAck(index: number, seq = 0): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER)
-    writeHeader(frame, TAG.CLOSE_ACK, index, seq)
-    return frame
-  },
+  closeAck: (index: number, seq = 0) => encodeBareFrame(TAG.CLOSE_ACK, index, seq),
   abort(index: number, abortValue: string, seq = 0): Uint8Array<ArrayBuffer> {
     const payload = textEncoder.encode(abortValue)
     const frame = new Uint8Array(HEADER + payload.byteLength)
