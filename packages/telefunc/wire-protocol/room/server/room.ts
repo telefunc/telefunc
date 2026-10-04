@@ -865,6 +865,10 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
+    assertUsage(
+      options?.retain === undefined || typeof options.retain === 'boolean',
+      'publish() options.retain should be a boolean',
+    )
     return markHandled(this._publishText(ownMessage(data), options?.retain))
   }
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {

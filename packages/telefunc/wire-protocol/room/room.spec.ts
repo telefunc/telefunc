@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ChannelClosedError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
@@ -39,7 +39,7 @@ import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
 import { decodeBinaryWants } from './server/requests.js'
-import { config } from '../../node/server/serverConfig.js'
+import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
@@ -569,6 +569,46 @@ describe('Room public behavior', () => {
     end!(reason)
     await vi.waitFor(() => expect(bugs).toContainEqual(expect.objectContaining({ cause: reason })))
   })
+  it("reports a shared lane's terminal end once, however many Room instances observe it", async () => {
+    const room = await Room.create('terminal-shared')
+    const reason = new Error('generation invalidated')
+    let end: ((reason: Error) => void) | undefined
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    vi.spyOn(driver.subscriptions, 'bind').mockImplementation((source) => {
+      const binding = bind(source)
+      if (!('lane' in source) || source.lane.kind !== 'semantic' || end) return binding
+      return {
+        ...binding,
+        open: (receiver, localReceiverCount) => {
+          const inner = binding.open(receiver, localReceiverCount)
+          const listeners = new Set<(state: SubscriptionState, reason?: Error) => void>()
+          let ended = false
+          end = (error) => {
+            ended = true
+            for (const listener of listeners) listener('closed', error)
+          }
+          return {
+            state: () => (ended ? 'closed' : inner.state()),
+            onStateChange: (listener) => {
+              listeners.add(listener)
+              return inner.onStateChange(listener)
+            },
+            unsubscribe: () => inner.unsubscribe(),
+          }
+        },
+      }
+    })
+    const bugs: unknown[] = []
+    onBug((err) => bugs.push(err))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const observers = [room, await Room.get(room.id), await Room.get(room.id)] as ServerRoom[]
+    for (const observer of observers) observer.subscribe(() => {})
+    for (const observer of observers) await subsOf(observer)._semantic.ready
+    end!(reason)
+    await vi.waitFor(() => expect(bugs).toContainEqual(expect.objectContaining({ cause: reason })))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(bugs.filter((bug) => (bug as { cause?: unknown }).cause === reason)).toHaveLength(1)
+  })
   it('does not re-subscribe a recovered lane when its catch-up reconcile fails', async () => {
     const authority = await Room.create('recovered-reconcile-failure')
     const observer = (await Room.get(authority.id)) as ServerRoom
@@ -695,6 +735,26 @@ describe('Room public behavior', () => {
     release()
     await publishing
     await vi.waitFor(() => expect(received).toEqual(['first']))
+  })
+  it("refuses a publish held behind this instance's establishing lane past 1,024 of them, or past bufferLimit bytes, with ChannelOverflowError", async () => {
+    const room = (await Room.create('establishing-bound')) as ServerRoom
+    const member = await room.join()
+    const release = delayDriverLane((lane) => lane.kind === 'semantic')
+    room.subscribe(() => {})
+    const held = Array.from({ length: 1_024 }, (_, n) => member.publish(n))
+    const pastCount = captureOutcome(member.publish('one more'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(pastCount.value).toBeInstanceOf(ChannelOverflowError)
+    release()
+    await Promise.all(held)
+    const release2 = delayDriverLane((lane) => lane.kind === 'binary')
+    room.subscribeBinary(() => {})
+    const pastBytes = captureOutcome(
+      member.publishBinary(new Uint8Array(getServerConfig().channel.bufferLimitBinary + 1)),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(pastBytes.value).toBeInstanceOf(ChannelOverflowError)
+    release2()
   })
   it('reads authority while the control subscription is establishing', async () => {
     const authority = await Room.create('establishing-roster')
@@ -1630,6 +1690,7 @@ describe('Room public behavior', () => {
       [() => Room.removeParticipant(room.id, { identity: '\udc00' }), 'well-formed'],
       [() => room.join({ selfDelivery: 'false' } as never), 'join() options.selfDelivery should be a boolean'],
       [() => room.join({ selfDelivery: 0 } as never), 'join() options.selfDelivery should be a boolean'],
+      [() => me.publish('kept', { retain: 1 } as never), 'publish() options.retain should be a boolean'],
       [
         () => Room.removeParticipant(room.id, 'member-id' as never),
         'The participant ref should be { id } or { identity }',
@@ -1668,6 +1729,26 @@ describe('Room public behavior', () => {
     declare(stub, { __r: 'dm-reply', ackId, reply })
     await expect(acking).resolves.toMatchObject({ response: 'handled' })
     expect(victimInbox).toEqual([])
+  })
+  it("forgets a stub's ack DM once its sender timed out, at the next ack DM, so a reply after that publishes nothing", async () => {
+    const room = (await Room.create('stub-ack-dm-expiry')) as ServerRoom
+    const { stub } = serve(room)
+    const publishDmAck = vi.spyOn(room, '_publishDmAck').mockResolvedValue()
+    vi.useFakeTimers()
+    const dm = (ackId: string) => ({
+      __r: 'dm' as const,
+      to: 'member',
+      from: 'sender',
+      fromMeta: null,
+      data: 'ping',
+      ackId,
+    })
+    stub._relayDm('{}', dm('a'))
+    await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS + 1)
+    stub._relayDm('{}', dm('b'))
+    declare(stub, { __r: 'dm-reply', ackId: 'a', reply: { ok: true, result: 'late' } })
+    declare(stub, { __r: 'dm-reply', ackId: 'b', reply: { ok: true, result: 'in time' } })
+    expect(publishDmAck.mock.calls.map(([, ackId]) => ackId)).toEqual(['b'])
   })
   it('reports a client-held participant whose channel closed as disconnected', async () => {
     const room = (await Room.create('standalone-disconnect')) as ServerRoom

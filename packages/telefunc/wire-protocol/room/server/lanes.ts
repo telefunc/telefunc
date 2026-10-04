@@ -82,7 +82,7 @@ async function commitRoomLaneOrThrow(
   inc: string,
   lane: LaneId,
   payload: Uint8Array,
-  opts?: { retain?: boolean; requiredCellKeys?: string[] },
+  opts?: Omit<CommitOptions, 'closingLease'>,
 ): Promise<CommitAccepted> {
   const result = await commitRoomLane(id, inc, lane, payload, opts)
   if ('stale' in result) throw staleCommitError(id, result)

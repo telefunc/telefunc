@@ -1,4 +1,5 @@
-export { SubscriptionManager }
+export { SubscriptionManager, reportSubscriptionEnd }
+export type { HoldWeight }
 
 import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
@@ -15,6 +16,16 @@ import type {
 } from './subscription.js'
 
 type StateListener = (state: SubscriptionState) => void
+
+// Every consumer of a shared subscription gets its end as one failure object, reported once.
+const reportedEnds = new WeakSet<object>()
+function reportSubscriptionEnd(error: unknown, report: (error: unknown) => void): void {
+  if (typeof error === 'object' && error !== null) {
+    if (reportedEnds.has(error)) return
+    reportedEnds.add(error)
+  }
+  report(error)
+}
 
 /** Sends on one key waiting for this instance's establishing subscriptions, and the bytes they hold per class. */
 type Hold = { readonly established: Promise<void>; sends: number; readonly bytes: Map<string, number> }

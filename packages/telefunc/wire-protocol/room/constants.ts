@@ -20,7 +20,8 @@ const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
 // Three heartbeats tolerate two missed demand refreshes before expiring a crashed watcher.
 const ROOM_DEMAND_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 3
 const ROOM_DM_ACK_TIMEOUT_MS = 60_000
-/** The horizon: Room's one bound on waiting for a subscription or a delivery; driver attempts have none. */
+/** The horizon: how long Room waits for its lanes' readiness, a delivery handoff, or a lost lane's head read; driver
+ *  attempts have none. */
 const ROOM_HORIZON_MS = 60_000
 // Each named track opens a lane at every instance listening to it, so neither a subscriber nor a publisher can name
 // unbounded tracks.
