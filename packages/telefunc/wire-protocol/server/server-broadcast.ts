@@ -17,6 +17,7 @@ import { ServerChannel, reportServerChannelError } from './channel.js'
 import type { BroadcastPayload, BroadcastRoute, PublishResult } from '../backend/broadcast/contract.js'
 import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
+import { reportSubscriptionEnd } from '../backend/subscription-manager.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'
@@ -282,16 +283,6 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
   return () => subscription.close()
 }
 
-// Every consumer of a shared subscription gets its end as one failure object, reported once.
-const reportedEnds = new WeakSet<object>()
-function reportSubscriptionEnd(error: unknown): void {
-  if (typeof error === 'object' && error !== null) {
-    if (reportedEnds.has(error)) return
-    reportedEnds.add(error)
-  }
-  reportServerChannelError(error)
-}
-
 /** A route's subscription while wanted; one that ends on its own is reported and replaced once, as a Room lane's is, and
  *  a transport that replaces the plane gets it. */
 class RouteSubscription<Kind extends BroadcastKind> {
@@ -329,7 +320,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
     // Only a terminal end rejects `ready`, after the manager retired the subscription; an unsubscribe resolves it.
     const ended = () =>
       void subscription.ready.catch((error: unknown) => {
-        reportSubscriptionEnd(error)
+        reportSubscriptionEnd(error, reportServerChannelError)
         if (this._current !== subscription) return
         this._current = null
         if (!replacing || wasReady) this._subscribe(true)

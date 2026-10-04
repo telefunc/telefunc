@@ -6,6 +6,8 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
+import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
+import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { DEFAULT_TRACK, mergeTrackWants, wantsAnyBinary, type BinaryWants } from '../binary.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
@@ -231,7 +233,7 @@ class RoomSubscriptions {
   private _onTerminal(slot: LaneSubscription, failure?: unknown): void {
     // A replacement that ends is its recovery's failure, which the recovery reports.
     if (this._recovering.has(slot)) return
-    if (failure !== undefined) reportRoomError(failure)
+    if (failure !== undefined) reportSubscriptionEnd(failure, reportServerChannelError)
     this._recovering.add(slot)
     void this._recover(slot).catch(reportRoomError)
   }

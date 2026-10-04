@@ -569,6 +569,46 @@ describe('Room public behavior', () => {
     end!(reason)
     await vi.waitFor(() => expect(bugs).toContainEqual(expect.objectContaining({ cause: reason })))
   })
+  it("reports a shared lane's terminal end once, however many Room instances observe it", async () => {
+    const room = await Room.create('terminal-shared')
+    const reason = new Error('generation invalidated')
+    let end: ((reason: Error) => void) | undefined
+    const bind = driver.subscriptions.bind.bind(driver.subscriptions)
+    vi.spyOn(driver.subscriptions, 'bind').mockImplementation((source) => {
+      const binding = bind(source)
+      if (!('lane' in source) || source.lane.kind !== 'semantic' || end) return binding
+      return {
+        ...binding,
+        open: (receiver, localReceiverCount) => {
+          const inner = binding.open(receiver, localReceiverCount)
+          const listeners = new Set<(state: SubscriptionState, reason?: Error) => void>()
+          let ended = false
+          end = (error) => {
+            ended = true
+            for (const listener of listeners) listener('closed', error)
+          }
+          return {
+            state: () => (ended ? 'closed' : inner.state()),
+            onStateChange: (listener) => {
+              listeners.add(listener)
+              return inner.onStateChange(listener)
+            },
+            unsubscribe: () => inner.unsubscribe(),
+          }
+        },
+      }
+    })
+    const bugs: unknown[] = []
+    onBug((err) => bugs.push(err))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const observers = [room, await Room.get(room.id), await Room.get(room.id)] as ServerRoom[]
+    for (const observer of observers) observer.subscribe(() => {})
+    for (const observer of observers) await subsOf(observer)._semantic.ready
+    end!(reason)
+    await vi.waitFor(() => expect(bugs).toContainEqual(expect.objectContaining({ cause: reason })))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(bugs.filter((bug) => (bug as { cause?: unknown }).cause === reason)).toHaveLength(1)
+  })
   it('does not re-subscribe a recovered lane when its catch-up reconcile fails', async () => {
     const authority = await Room.create('recovered-reconcile-failure')
     const observer = (await Room.get(authority.id)) as ServerRoom
