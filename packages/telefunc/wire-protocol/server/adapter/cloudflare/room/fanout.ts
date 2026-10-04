@@ -17,7 +17,7 @@ type RoomSessionNamespace = {
 
 /** A room authority's deliveries. Each session DO's frames go through one ordered stub, so they arrive in commit order
  *  without waiting on each other. A lane has one route per subscribed session DO, at most the deployment's session
- *  shards (the sum of `scale`), so the authority calls each itself, well within an invocation's subrequest limit. */
+ *  shards, so the authority calls each itself, well within an invocation's subrequest limit. */
 class Fanout {
   readonly #sessions: RoomSessionNamespace
   readonly #calls = new OrderedStubs<RoomSessionStub>()
