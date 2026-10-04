@@ -32,12 +32,17 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS, CHANNEL_CLOSE_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import {
+  TIMER_DELAY_MAX_MS,
+  CHANNEL_CLOSE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
+  CREDIT_WINDOW_MAX_BYTES,
+} from '../constants.js'
 import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { getServerConfig, reconnectWindowOf } from '../../node/server/serverConfig.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import {
   ACK_STATUS,
@@ -1082,8 +1087,10 @@ function reportServerChannelError(err: unknown): void {
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
 
+/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
 function reconnectWindow(): number {
-  return reconnectWindowOf(getServerConfig().channel)
+  const c = getServerConfig().channel
+  return Math.min(TIMER_DELAY_MAX_MS, Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + c.reconnectTimeout)
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

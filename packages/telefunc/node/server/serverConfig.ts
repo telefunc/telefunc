@@ -3,7 +3,6 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
-export { reconnectWindowOf }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -33,7 +32,6 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
@@ -554,15 +552,6 @@ function applyChannelConfig(val: unknown): void {
     }
   }
   configState.channel = next
-}
-
-/** How long a gone client is still held, up to the longest a timer waits: until its drop is noticed at the ping
- *  deadline, then for `reconnectTimeout`. */
-function reconnectWindowOf({
-  pingInterval,
-  reconnectTimeout,
-}: Pick<ChannelConfigResolved, 'pingInterval' | 'reconnectTimeout'>): number {
-  return Math.min(TIMER_DELAY_MAX_MS, Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + reconnectTimeout)
 }
 
 function applyBroadcastConfig(val: unknown): void {
