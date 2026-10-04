@@ -733,9 +733,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         peer.sendBinary(msg)
         this._flow.countSent(msg.byteLength)
       },
-      sendTextAck: (data, cb) => peer.sendTextAckReq(data, (seq, bytes) => cb && this._addPendingAck(seq, bytes, cb)),
+      sendTextAck: (data, cb) =>
+        peer.sendTextAckReq(data, (seq, bytes) => {
+          if (cb) this._addPendingAck(seq, bytes, cb)
+        }),
       sendBinaryAck: (data, cb) =>
-        peer.sendBinaryAckReq(data, (seq, bytes) => cb && this._addPendingAck(seq, bytes, cb)),
+        peer.sendBinaryAckReq(data, (seq, bytes) => {
+          if (cb) this._addPendingAck(seq, bytes, cb)
+        }),
       sendPublishBinary: (msg) => this._flow.countSentBytes(peer.sendPublishBinary(msg)),
     })
   }
