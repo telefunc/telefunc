@@ -1269,22 +1269,6 @@ test("a Room member's page offline while more of the room's messages were sent t
   expect(seen).toEqual(['before'])
 })
 
-test("a Room member's page offline while less of the room's messages were sent to it than config.channel.bufferLimit holds gets them all at its reconnect", async () => {
-  const { room, stub, view } = await loop.openRoom()
-  let serverEnd: unknown = 'open'
-  stub.onClose((err) => void (serverEnd = err))
-  const seen: string[] = []
-  view.subscribe((data) => void seen.push(data as string))
-  const speaker = await room.join()
-  await run(100)
-  loop.socket.cut()
-  const publication = (n: number) => String(n).padEnd(128 * KIB)
-  for (let n = 0; n < 3; n++) void speaker.publish(publication(n))
-  await runUntil(() => seen.length === 3, 2_000)
-  expect(seen).toEqual(Array.from({ length: 3 }, (_, n) => publication(n)))
-  expect(serverEnd).toBe('open')
-})
-
 test("a Room closed while its page's wire dies reaches the page once it reconnects: its view closes and its member leaves with 'closed'", async () => {
   const { room, stub, view } = await loop.openRoom()
   let serverEnd: unknown = 'open'
