@@ -432,7 +432,9 @@ class CloudflareBroadcast {
     for (const [bucket, members] of presenceByBucket) {
       receivers += members.length
       const via = getScaleCountForBucket(this.scale, bucket) > 0 ? bucket : this.locationFallback
-      membersByCoordinatorBucket.set(via, [...(membersByCoordinatorBucket.get(via) ?? []), ...members])
+      const group = membersByCoordinatorBucket.get(via)
+      if (group) group.push(...members)
+      else membersByCoordinatorBucket.set(via, [...members])
     }
     const forwards = await Promise.allSettled(
       Array.from(membersByCoordinatorBucket, ([bucket, members]) =>
