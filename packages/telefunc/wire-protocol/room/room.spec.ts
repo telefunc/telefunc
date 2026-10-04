@@ -3725,6 +3725,28 @@ describe('a room nothing holds closes on its own', () => {
     await vi.advanceTimersByTimeAsync(4_000)
     await expectClosed(room.id, closed)
   })
+  it('keeps a room that never closes once joined open under a first join that lands while its new expiry is set', async () => {
+    const readCells = driver.readCells.bind(driver)
+    let holdReads = 0
+    let joined: Promise<unknown> = Promise.resolve()
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      const read = await readCells(roomId, inc, selector)
+      // The second read of the hold record alone is the one that sets the new room's expiry: a join commits after it.
+      if ('keys' in selector && selector.keys.join() === 'hold' && ++holdReads === 2) {
+        joined = Room.join(roomId)
+        await joined
+        await vi.advanceTimersByTimeAsync(0) // the join's own expiry write
+      }
+      return read
+    })
+    const creating = Room.create('first-join-races-expiry', { emptyTimeout: 1_000, departureTimeout: Infinity })
+    await vi.advanceTimersByTimeAsync(100) // a compare-exchange the join's write raced waits out its backoff
+    await creating
+    const { id } = (await joined) as { id: string }
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect((await getRoomBackend().readHead('first-join-races-expiry'))?.state).toBe('open')
+    expect((await Room.getParticipants('first-join-races-expiry')).map((member) => member.id)).toEqual([id])
+  })
   it('lets no hidden participant hold a room: alone it closes at emptyTimeout, after players at departureTimeout', async () => {
     const alone = await Room.create('hidden-alone')
     const aloneClosed = await observe(alone.id)
