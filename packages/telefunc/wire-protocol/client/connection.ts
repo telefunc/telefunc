@@ -425,6 +425,8 @@ class ClientConnection implements MuxConnection {
   private sessionId: string | null = null
   /** Advances each time the connection moves to another wire: what went out on the one before may not have arrived. */
   private wire = 0
+  /** The wire the last RECONCILED came on. */
+  private reconciledWire = -1
   private nextIndex = 0
   /** What the RECONCILE in flight lists, and whether as `initial`. */
   private reconcileIxes = new Map<number, boolean>()
@@ -1042,10 +1044,11 @@ class ClientConnection implements MuxConnection {
     this._onTransportClosed(transport)
   }
 
-  /** While a wire opens, its RECONCILE deadline bounds it: an SSE wire delivers once the server answers the request that
-   *  opens it. */
+  /** Until a wire's first RECONCILED, its RECONCILE deadline bounds it: that RECONCILED comes behind what the server
+   *  sends as it attaches, one message of which may take longer than the pong deadline to arrive, and an SSE wire
+   *  delivers once the server answers the request that opens it. */
   private handlePongTimeout(transport: ClientChannelTransport): void {
-    if (this.reconciling && !this.connected) return
+    if (this.reconciling && this.reconciledWire !== this.wire) return
     this.dropWire(transport)
   }
 
@@ -1157,6 +1160,7 @@ class ClientConnection implements MuxConnection {
       committing.committed = true
     }
     this.transport.applyReconciledSettings(ctrl)
+    this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
     this.installHeartbeat(this.transport, ctrl.pingInterval)
