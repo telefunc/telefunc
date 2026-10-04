@@ -2,7 +2,7 @@ import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { ServerChannel } from './channel.js'
 import { decode, encode, TAG, type DecodedFrame, type SeqReader } from '../shared-ws.js'
-import { config as serverConfig, getServerConfig } from '../../node/server/serverConfig.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,

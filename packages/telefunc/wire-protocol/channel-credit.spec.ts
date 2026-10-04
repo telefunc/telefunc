@@ -19,7 +19,7 @@ import {
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
-import { config as serverConfig } from '../node/server/serverConfig.js'
+import { config } from '../node/server/serverConfig.js'
 
 const LATENCY_MS = 5
 
@@ -294,7 +294,7 @@ afterEach(() => {
   expect(loop.errors).toEqual([])
   vi.unstubAllGlobals()
   vi.useRealTimers()
-  serverConfig.channel = {}
+  config.channel = {}
 })
 
 test('a stream the page consumes while the server awaits another channel its first reconcile named keeps flowing past 100 messages', async () => {
@@ -424,7 +424,7 @@ test('a stream whose window grew to 16 MiB, cut off with its window on the wire,
 })
 
 test("sends nobody awaits, past the page's window and more than the server's replay holds, end the channel with NetworkError on both ends at a reconnect, the page having got them in order up to there", async () => {
-  serverConfig.channel.serverReplayBuffer = 4 * KIB
+  config.channel.serverReplayBuffer = 4 * KIB
   const feed = loop.open<never, string>()
   const page = consume(feed.page)
   const closed = closedWith(feed)
@@ -440,7 +440,7 @@ test("sends nobody awaits, past the page's window and more than the server's rep
 })
 
 test("sends nobody awaits, past the server's window and more than the page's replay holds, end the channel with NetworkError on both ends at a reconnect, the server having got them in order up to there", async () => {
-  serverConfig.channel.clientReplayBuffer = 4 * KIB
+  config.channel.clientReplayBuffer = 4 * KIB
   const upload = loop.open<string, never>()
   const server = consume(upload.server)
   const closed = closedWith(upload)
@@ -456,7 +456,7 @@ test("sends nobody awaits, past the server's window and more than the page's rep
 })
 
 test("a page that opens another channel while more of what the server sent is on the wire than the server's replay buffer holds gets it all", async () => {
-  serverConfig.channel.serverReplayBuffer = 512
+  config.channel.serverReplayBuffer = 512
   const feed = loop.open<never, string>()
   const page = consume(feed.page)
   const closed = closedWith(feed)
@@ -475,7 +475,7 @@ test("a page that opens another channel while more of what the server sent is on
 })
 
 test("a broadcast whose page is cut off further behind than the server's replay buffer holds leaves it with ChannelOverflowError on both ends, having got what was published before it in order", async () => {
-  serverConfig.channel.serverReplayBuffer = 1_024
+  config.channel.serverReplayBuffer = 1_024
   const key = `room:${crypto.randomUUID()}`
   const room = loop.openBroadcast<string>(key)
   const closed = closedWith(room)
@@ -820,7 +820,7 @@ test("on an uplink slower than a window per ping deadline, the server doesn't cu
 // 100 KB/s, with a ping every second: the page's ping waits 20 s behind its 2 MiB window, and the server's refresh for a
 // quarter of it comes every 5 s, both past the page's 2 s pong deadline.
 test("on an uplink slower than a quarter window per pong deadline, an upload's page keeps its wire while the upload keeps arriving ahead of its ping", async () => {
-  serverConfig.channel.pingInterval = 1_000
+  config.channel.pingInterval = 1_000
   const feed = loop.open<string, never>()
   const server = consume(feed.server)
   await run(100)
@@ -847,7 +847,7 @@ test("on a slow uplink, the server's window for an upload stays at its initial s
 // 100 KB/s: the RECONCILE naming the new channel waits 20 s behind the 2 MiB window of the upload, twice the time a page
 // waits for its RECONCILED on a wire that delivers nothing. The server holds the new channel that long.
 test('a channel the page opens while its upload fills a slow uplink attaches on the same wire, however long its RECONCILE waits behind the upload', async () => {
-  serverConfig.channel.connectTtl = 60_000
+  config.channel.connectTtl = 60_000
   const upload = loop.open<string, never>()
   let uploaded = 0
   upload.server.listen(() => void uploaded++)
@@ -866,7 +866,7 @@ test('a channel the page opens while its upload fills a slow uplink attaches on 
 })
 
 test('a page whose downlink stops while its RECONCILE waits behind its upload takes the wire for dead once it has delivered nothing for the time a page waits for its RECONCILED', async () => {
-  serverConfig.channel.connectTtl = 60_000
+  config.channel.connectTtl = 60_000
   const upload = loop.open<string, never>()
   consume(upload.server)
   await run(100)
@@ -885,7 +885,7 @@ test('a page whose downlink stops while its RECONCILE waits behind its upload ta
 })
 
 test('a page whose uplink stops with its upload queued on it takes the wire for dead within a pong deadline', async () => {
-  serverConfig.channel.pingInterval = 1_000
+  config.channel.pingInterval = 1_000
   const feed = loop.open<string, never>()
   consume(feed.server)
   await run(100)
