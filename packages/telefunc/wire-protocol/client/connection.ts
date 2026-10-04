@@ -896,16 +896,7 @@ class ClientConnection implements MuxConnection {
         this.startTtlIfIdle()
         return
       case TAG.ERROR:
-        this.closeRemoteChannel(
-          frame.index,
-          frame.reason === ERROR_REASON.OVERFLOW
-            ? new ChannelOverflowError(
-                'Broadcast closed: this client fell further behind than the server holds for a client',
-              )
-            : frame.reason === ERROR_REASON.LOST
-              ? replayLossError('server')
-              : makeBugError(),
-        )
+        this.closeRemoteChannel(frame.index, channelErrorFor(frame.reason))
         this.startTtlIfIdle()
         return
     }
@@ -2553,6 +2544,20 @@ const UPGRADE_TARGET_REGISTRY: Record<
   (telefuncUrl: string, owner: ClientConnection) => UpgradeTarget
 > = {
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport(telefuncUrl, owner),
+}
+
+/** What a channel the server ended with an ERROR of `reason` closes with. */
+function channelErrorFor(reason: number): Error {
+  switch (reason) {
+    case ERROR_REASON.OVERFLOW:
+      return new ChannelOverflowError(
+        'Broadcast closed: this client fell further behind than the server holds for a client',
+      )
+    case ERROR_REASON.LOST:
+      return replayLossError('server')
+    default:
+      return makeBugError()
+  }
 }
 
 function isWindowRefresh({ frame }: OutboxEntry): boolean {
