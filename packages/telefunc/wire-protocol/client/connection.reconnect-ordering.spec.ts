@@ -27,7 +27,17 @@ const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 function createChannel(id = crypto.randomUUID()) {
-  return { id, isClosed: false, _onTransportOpen() {}, _dispatchFrame() {}, _onTransportClose() {} }
+  return {
+    id,
+    isClosed: false,
+    _onTransportOpen() {},
+    _dispatchFrame() {},
+    _onTransportClose() {},
+    _onTransportBatched() {},
+    _reattachState: () => ({}),
+    _fitReplays() {},
+    _acknowledge() {},
+  }
 }
 
 /** SSE downstream response stream the client reads (server→client). */

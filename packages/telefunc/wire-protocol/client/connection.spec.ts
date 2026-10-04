@@ -31,6 +31,10 @@ function createChannel(id = crypto.randomUUID()) {
     _onTransportOpen() {},
     _dispatchFrame() {},
     _onTransportClose() {},
+    _onTransportBatched() {},
+    _reattachState: () => ({}),
+    _fitReplays() {},
+    _acknowledge() {},
   }
 }
 

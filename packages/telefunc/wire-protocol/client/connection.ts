@@ -175,7 +175,7 @@ interface MuxChannel {
    *  nothing. */
   _onTransportOpen(batched: boolean, wire: number): void
   /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
-  _onTransportBatched?(): void
+  _onTransportBatched(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
@@ -184,12 +184,12 @@ interface MuxChannel {
   _onTransportClose(err?: Error): void
   /** What this channel declares in its RECONCILE entry on every (re)attach, on `wire`, whose flow-control frames wait
    *  for a batched POST when `batched`. */
-  _reattachState?(wire: number, batched: boolean): ReattachState
+  _reattachState(wire: number, batched: boolean): ReattachState
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
-  _fitReplays?(window: number, peerWindow: number): void
+  _fitReplays(window: number, peerWindow: number): void
   /** At each heartbeat: a WINDOW for what arrived since the last, so the server's replay lets it go while the channel is
    *  quiet. */
-  _acknowledge?(): void
+  _acknowledge(): void
 }
 
 interface MuxConnection {
@@ -624,7 +624,7 @@ class ClientConnection implements MuxConnection {
    *  `ReplayBuffer.setLimits`), and advertises no byte limit (see `FlowControl`). */
   private fitReplays(channel: MuxChannel): void {
     if (this.replayWindows === null) return
-    channel._fitReplays?.(this.replayWindows.window, this.replayWindows.peerWindow)
+    channel._fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
@@ -862,7 +862,7 @@ class ClientConnection implements MuxConnection {
    *  `batched`. */
   _onTransportBatched(transport: ClientChannelTransport): void {
     if (transport !== this.transport) return
-    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._onTransportBatched?.()
+    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._onTransportBatched()
   }
 
   _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): void {
@@ -992,7 +992,7 @@ class ClientConnection implements MuxConnection {
 
   /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */
   private beat(transport: ClientChannelTransport): void {
-    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._acknowledge?.()
+    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._acknowledge()
     transport.sendPing(this.buildPing())
   }
 
@@ -1493,7 +1493,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState?.(wire, batched)
+      const state = entry.channel._reattachState(wire, batched)
       Object.assign(payloadEntry, state)
       // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
       if (state?.broadcast)
