@@ -53,6 +53,8 @@ function replayWindow(text: number, binary: number): number {
  */
 class FlowControl {
   private _bdp = new BdpEstimator()
+  /** The connection's wire at the last `attach`. */
+  private _wire: number | null = null
   // Sender side: what this side has sent, and the peer's limits.
   private _sentBytes = 0
   private _sentMessages = 0
@@ -117,10 +119,10 @@ class FlowControl {
     return this._peerByteWindowMax
   }
 
-  /** The round trip of the path an attach's probe on `wire` measured, `Infinity` where none did: what this side's answer
-   *  to a `BDP_PING` says, for a receiver with no attach of its own to probe. */
-  pathRtt(wire: number): number {
-    return this._bdp.pathRtt(wire)
+  /** The round trip of the path the probe of the last `attach` measured, `Infinity` where none did: what this side's
+   *  answer to a `BDP_PING` says, for a receiver with no attach of its own to probe. */
+  pathRtt(): number {
+    return this._wire === null ? Infinity : this._bdp.pathRtt(this._wire)
   }
 
   /** Keeps what credit lets be in flight within the replay buffers (see `replayWindow`): this side grants its peer
@@ -286,6 +288,13 @@ class FlowControl {
     this._prevBucket = 0
     this._curBucket = 0
     this._curBucketStart = now
+  }
+
+  /** Attach on the connection's `wire`. The wire of the last attach lost nothing to repair, and still answers the probe
+   *  in flight. */
+  attach(wire: number): void {
+    if (wire !== this._wire) this.reattach()
+    this._wire = wire
   }
 
   /** Attach on another wire than the last. The probe in flight rode the prior wire, and the limits go out again,

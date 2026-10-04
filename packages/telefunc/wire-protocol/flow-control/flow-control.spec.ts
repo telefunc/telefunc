@@ -566,6 +566,7 @@ async function runPath({
   let now = 0
   const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
   const sender = fitted(new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes))
+  sender.attach(0)
   const answer = (probe: number, starved: boolean, pathRtt: number) =>
     wire.push(decode(encode.bdpPingAck(0, probe, starved, pathRtt), wireSeqs) as Ack)
   const receiver = fitted(
@@ -573,7 +574,7 @@ async function runPath({
       {
         byteWindowUpdate: (limit) => upstream(() => sender.onPeerByteWindow(limit)),
         msgWindowUpdate: (limit) => upstream(() => sender.onPeerMessageWindow(limit)),
-        bdpPing: (probe) => upstream(() => answer(probe, sender.onPing(), sender.pathRtt(0))),
+        bdpPing: (probe) => upstream(() => answer(probe, sender.onPing(), sender.pathRtt())),
       },
       () => 0,
     ),

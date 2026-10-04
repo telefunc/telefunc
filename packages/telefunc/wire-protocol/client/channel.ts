@@ -89,8 +89,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
    *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
   protected _flow: FlowControl
-  /** The connection's wire at the last attach. */
-  private _attachedWire: number | null = null
 
   constructor({
     channelId,
@@ -300,9 +298,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onTransportOpen(batched: boolean, wire: number): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
-    // The wire of the last attach lost nothing to repair, and still answers the probe in flight.
-    if (wire !== this._attachedWire) this._flow.reattach()
-    this._attachedWire = wire
+    this._flow.attach(wire)
     this._fireOpen()
   }
 
@@ -425,12 +421,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._connection.sendBdpPingAck(
-          this,
-          frame.probe,
-          this._flow.onPing(),
-          this._attachedWire === null ? Infinity : this._flow.pathRtt(this._attachedWire),
-        )
+        this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing(), this._flow.pathRtt())
         return
       case TAG.BDP_PING_ACK:
         this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
