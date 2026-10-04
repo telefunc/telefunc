@@ -46,6 +46,7 @@ import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
+import { heldSendWeight } from '../backend/held-send-weight.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { TailHold } from './server/tail.js'
 import { RoomDemand } from './demand.js'
@@ -2029,6 +2030,14 @@ describe('Room public behavior', () => {
     expect(report).not.toHaveBeenCalled()
     reportRoomError(new Error('a real bug'))
     expect(report).toHaveBeenCalled()
+  })
+  it('reports a background Room write that a held-send bound refused loudly, not as a bug', () => {
+    const bugs: unknown[] = []
+    onBug((err) => bugs.push(err))
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const refused = heldSendWeight('text', () => 0, 'Room').overflow()
+    reportRoomError(refused)
+    expect({ bugs, report: report.mock.calls }).toEqual({ bugs: [], report: [[refused]] })
   })
   it('keeps RoomError precedence when an error also matches ShieldValidationError', () => {
     const error = Object.assign(new ShieldValidationError('overlap'), {
