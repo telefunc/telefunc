@@ -215,16 +215,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   listen(callback: ChannelListener<ServerToClient>): () => void {
     this._listeners = [...this._listeners, callback]
     return () => {
-      const i = this._listeners.indexOf(callback)
-      if (i >= 0) this._listeners = this._listeners.filter((_, j) => j !== i)
+      this._listeners = withoutFirst(this._listeners, callback)
     }
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
     this._binaryListeners = [...this._binaryListeners, callback]
     return () => {
-      const i = this._binaryListeners.indexOf(callback)
-      if (i >= 0) this._binaryListeners = this._binaryListeners.filter((_, j) => j !== i)
+      this._binaryListeners = withoutFirst(this._binaryListeners, callback)
     }
   }
 
@@ -672,8 +670,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     if (this._broadcastListeners.length === 0) this._setWireSubscribed('text', true)
     this._broadcastListeners = [...this._broadcastListeners, callback]
     return () => {
-      const index = this._broadcastListeners.indexOf(callback)
-      if (index >= 0) this._broadcastListeners = this._broadcastListeners.filter((_, j) => j !== index)
+      this._broadcastListeners = withoutFirst(this._broadcastListeners, callback)
       if (this._broadcastListeners.length === 0) this._setWireSubscribed('text', false)
     }
   }
@@ -695,8 +692,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     if (this._broadcastBinaryListeners.length === 0) this._setWireSubscribed('binary', true)
     this._broadcastBinaryListeners = [...this._broadcastBinaryListeners, callback]
     return () => {
-      const index = this._broadcastBinaryListeners.indexOf(callback)
-      if (index >= 0) this._broadcastBinaryListeners = this._broadcastBinaryListeners.filter((_, j) => j !== index)
+      this._broadcastBinaryListeners = withoutFirst(this._broadcastBinaryListeners, callback)
       if (this._broadcastBinaryListeners.length === 0) this._setWireSubscribed('binary', false)
     }
   }
@@ -766,4 +762,11 @@ function normalizeCloseTimeout(timeout: number | undefined): number {
       `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
     )
   return timeout
+}
+
+/** A copy of `list` without its first `item`, or `list` itself without one: listeners are replaced, never mutated, so a
+ *  dispatch iterates the ones it started with. */
+function withoutFirst<T>(list: T[], item: T): T[] {
+  const i = list.indexOf(item)
+  return i < 0 ? list : list.filter((_, j) => j !== i)
 }
