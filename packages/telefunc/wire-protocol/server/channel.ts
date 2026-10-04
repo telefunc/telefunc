@@ -141,7 +141,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Wire state — channel-owned, persistent across attach-mode transitions ────
   /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
-   *  Allocated in `_registerChannel`; disposed in `_shutdown`. Null only between
+   *  Allocated in `_registerChannel`; disposed in `_release`. Null only between
    *  construction and registration (no peer can attach before registration). */
   /** @internal */ _replayBuffer: ReplayBuffer | null = null
   /** Highest client→server seq the channel has received and dispatched. Used for
