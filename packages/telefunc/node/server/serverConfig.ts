@@ -3,6 +3,7 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
+export { pingDeadlineOf }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -32,6 +33,7 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
@@ -355,6 +357,11 @@ function getServerConfig(): ConfigResolved {
     },
     extensions: configState.extensions,
   }
+}
+
+/** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
+function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
+  return Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.
