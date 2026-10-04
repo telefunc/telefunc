@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { ClientConnection } from './connection.js'
 import { decode, encode, TAG, type SeqReader } from '../shared-ws.js'
-import type { DecodedFrame } from '../shared-ws.js'
+import type { DecodedFrame, ReconciledPayload } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 
@@ -78,10 +78,9 @@ class FakeWebSocket {
   }
 }
 
-function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string }) {
+function reconciled({ ix, ...overrides }: { ix: number; sessionId: string } & Partial<ReconciledPayload>) {
   return encode.reconciled({
-    sessionId: extra.sessionId,
-    open: [{ ix: extra.ix, lastSeq: 0 }],
+    open: [{ ix, lastSeq: 0 }],
     reconnectTimeout: 60_000,
     idleTimeout: 60_000,
     pingInterval: 100_000,
@@ -92,7 +91,7 @@ function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string }
     sseFlushThrottle: 300,
     ssePostIdleFlushDelay: 50,
     transports: ['sse', 'ws'],
-    ...(extra.upgradeId === undefined ? {} : { upgradeId: extra.upgradeId }),
+    ...overrides,
   })
 }
 
@@ -301,20 +300,7 @@ describe('flow control across an upgrade attempt', () => {
         const ix = reconcile.tag === TAG.RECONCILE ? reconcile.payload.open[0]!.ix : 0
         downstream.open()
         downstream.push(
-          encode.reconciled({
-            sessionId: crypto.randomUUID(),
-            open: [{ ix, lastSeq: 0 }],
-            reconnectTimeout: 60_000,
-            idleTimeout: 60_000,
-            pingInterval: 100_000,
-            serverReplayBuffer: 1_000_000,
-            serverReplayBufferBinary: 2_000_000,
-            clientReplayBuffer: 1_000_000,
-            clientReplayBufferBinary: 2_000_000,
-            sseFlushThrottle: 0,
-            ssePostIdleFlushDelay: 0,
-            transports: ['sse', 'ws'],
-          }),
+          reconciled({ ix, sessionId: crypto.randomUUID(), sseFlushThrottle: 0, ssePostIdleFlushDelay: 0 }),
         )
         return new Response(downstream.stream as BodyInit, {
           status: 200,
