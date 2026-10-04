@@ -146,6 +146,12 @@ let current: ReturnType<typeof link> | null = null
 
 const run = (ms: number) => vi.advanceTimersByTimeAsync(ms)
 
+/** Runs until `done`, `ms` at most: an unshaped link carries as much as its windows let, and each simulated ms of it
+ *  costs real time. */
+async function runUntil(done: () => boolean, ms: number): Promise<void> {
+  for (let at = 0; at < ms && !done(); at += 50) await run(50)
+}
+
 /** `for (;;) await channel.send(next)`, the channel page's backpressure loop. */
 function produce(channel: { send(data: string): Promise<void>; isClosed: boolean }, message: string) {
   void (async () => {
@@ -213,7 +219,7 @@ describe.each([
     const upload = sse.open<string, never>()
     received(upload.server)
     produce(upload.page, 'x'.repeat(64 * KIB))
-    await run(1_500)
+    await runUntil(() => flowOf(upload.server).byteWindow > CREDIT_WINDOW_INITIAL_BYTES, 1_500)
     expect(sse.batched).toBe(batched)
     expect(flowOf(upload.server).byteWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
   })
@@ -223,7 +229,7 @@ describe.each([
     const download = sse.open<never, string>()
     received(download.page)
     produce(download.server, 'x'.repeat(64 * KIB))
-    await run(1_500)
+    await runUntil(() => flowOf(download.page).byteWindow > pageWindow, 1_500)
     expect(sse.batched).toBe(batched)
     expect(flowOf(download.page).byteWindow).toBeGreaterThan(pageWindow)
   })
