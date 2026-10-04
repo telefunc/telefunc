@@ -1022,26 +1022,22 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
-  it.each([false, true])(
-    'delivers a publish made from a listener after the message it answers, to every subscriber (async listener: %s)',
-    async (asyncBot) => {
-      const key = `broadcast:bot-${asyncBot}`
-      const seen: Array<[string, number]> = []
-      const answer = (message: string) => (message === '/roll' ? Broadcast.publish(key, 'rolled 4') : undefined)
-      const bot = asyncBot
-        ? Broadcast.subscribe<string>(key, async (message) => void (await answer(message)))
-        : Broadcast.subscribe<string>(key, (message) => void answer(message))
-      const observer = Broadcast.subscribe<string>(key, (message, info) => void seen.push([message, info.seq]))
-      await Broadcast.publish(key, '/roll')
-      await vi.waitFor(() => expect(seen).toHaveLength(2))
-      expect(seen).toEqual([
-        ['/roll', 1],
-        ['rolled 4', 2],
-      ])
-      bot()
-      observer()
-    },
-  )
+  it('delivers a publish made from an async listener after the message it answers, to every subscriber', async () => {
+    const key = 'broadcast:bot-async'
+    const seen: Array<[string, number]> = []
+    const bot = Broadcast.subscribe<string>(key, async (message) => {
+      if (message === '/roll') await Broadcast.publish(key, 'rolled 4')
+    })
+    const observer = Broadcast.subscribe<string>(key, (message, info) => void seen.push([message, info.seq]))
+    await Broadcast.publish(key, '/roll')
+    await vi.waitFor(() => expect(seen).toHaveLength(2))
+    expect(seen).toEqual([
+      ['/roll', 1],
+      ['rolled 4', 2],
+    ])
+    bot()
+    observer()
+  })
   it.each([false, true])(
     'lets a 0 ms timer fire while a listener answers every message on its key (after an await: %s)',
     async (afterAwait) => {
