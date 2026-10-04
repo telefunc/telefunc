@@ -550,7 +550,7 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 
 | Method | Description |
 |---|---|
-| `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst on the client; `retain` keeps it as the room's last message for late subscribers. |
+| `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst on the client; `retain: true` keeps it as the room's last message for late subscribers (`retain` is a boolean). |
 | `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. When present, `receivers` counts backend delivery routes; `0` proves nobody anywhere, while Redis Cluster omits the field. |
 | `send(to, data)` | Private message to one participant (or their id). Resolves with the receipt `{ seq, timestamp }` (best-effort). |
 | `send(to, data, { ack: true })` | Confirmed send: waits up to 60 seconds for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting on timeout, the sender's or recipient's leave, pre-listener inbox overflow, or a recipient that removed every `listen` handler — or with the handler's `Abort` (a plain throw is hidden as a bug). |

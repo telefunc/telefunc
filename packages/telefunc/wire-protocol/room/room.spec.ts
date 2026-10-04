@@ -1670,6 +1670,7 @@ describe('Room public behavior', () => {
       [() => Room.removeParticipant(room.id, { identity: '\udc00' }), 'well-formed'],
       [() => room.join({ selfDelivery: 'false' } as never), 'join() options.selfDelivery should be a boolean'],
       [() => room.join({ selfDelivery: 0 } as never), 'join() options.selfDelivery should be a boolean'],
+      [() => me.publish('kept', { retain: 1 } as never), 'publish() options.retain should be a boolean'],
       [
         () => Room.removeParticipant(room.id, 'member-id' as never),
         'The participant ref should be { id } or { identity }',
