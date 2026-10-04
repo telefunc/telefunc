@@ -902,6 +902,26 @@ describe('Room public behavior', () => {
     expect({ empty, count: room.count }).toEqual({ empty: 1, count: 0 })
     await expect(authority.publish('tick')).resolves.toMatchObject({ seq: expect.any(Number) })
   })
+  it("resolves the last member's leave() and kick when onEmpty closes the room under them", async () => {
+    const room = await Room.create('closed-on-empty')
+    room.onEmpty(() => Room.close(room.id))
+    await expect((await room.join({ identity: 'leaver' })).leave()).resolves.toBeUndefined()
+    const reopened = await Room.create('closed-on-empty')
+    reopened.onEmpty(() => Room.close(reopened.id))
+    await reopened.join({ identity: 'kicked' })
+    await expect(Room.removeParticipant(reopened.id, { identity: 'kicked' })).resolves.toBeUndefined()
+    expect(await Room.list({ prefix: 'closed-on-empty' })).toEqual([])
+  })
+  it('removes nobody by { identity } from a room that is missing or closed, and still throws for an exact { id }', async () => {
+    await expect(
+      Room.removeParticipant('never-created', { identity: 'alice', reason: 'revoked' }),
+    ).resolves.toBeUndefined()
+    await Room.create('closed-revoke')
+    await Room.close('closed-revoke')
+    await expect(Room.removeParticipant('closed-revoke', { identity: 'alice' })).resolves.toBeUndefined()
+    await expect(Room.removeParticipant('never-created', { id: 'member' })).rejects.toThrow('Room not found')
+    await expect(Room.removeParticipant('never-created', { identity: '\udc00' })).rejects.toThrow('well-formed')
+  })
   it('rejects exact sends to an expired member and excludes it from static presence', async () => {
     const room = (await Room.create('expired-static-presence')) as ServerRoom
     const member = await room.join()

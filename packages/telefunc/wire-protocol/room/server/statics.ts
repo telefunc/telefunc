@@ -127,11 +127,20 @@ function assertRoomId(id: unknown): asserts id is string {
   assertUsage(id.isWellFormed(), 'The room ID should be a well-formed string')
 }
 
-async function requireRoom(id: string): Promise<RoomConfigRecord> {
+/** The room's config, or null if the room is missing or closed. */
+async function findRoom(id: string): Promise<RoomConfigRecord | null> {
   assertRoomId(id)
-  const config = openConfig(await getRoomBackend().readHead(id))
-  if (config === null) throw new RoomError(`Room not found: ${id}`)
+  return openConfig(await getRoomBackend().readHead(id))
+}
+
+async function requireRoom(id: string): Promise<RoomConfigRecord> {
+  const config = await findRoom(id)
+  if (config === null) throw roomNotFoundError(id)
   return config
+}
+
+function roomNotFoundError(id: string): RoomError {
+  return new RoomError(`Room not found: ${id}`)
 }
 
 /** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
@@ -403,7 +412,13 @@ async function resolveParticipantRef(roomId: string, inc: string, target: Partic
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
-  const config = await requireRoom(id)
+  const config = await findRoom(id)
+  if (config === null) {
+    // An `{ identity }` matches nobody in a room that is missing or closed; an `{ id }` names one who isn't there.
+    if (!isObject(target) || !('identity' in target)) throw roomNotFoundError(id)
+    assertParticipantIdentity(target.identity, 'The participant ref { identity }')
+    return
+  }
   const members = await resolveParticipantRef(id, config.inc, target)
   const cause = removedCause(target.reason)
   for (const member of members) await evictMember(id, config.inc, member.id, member.identity ?? null, cause)

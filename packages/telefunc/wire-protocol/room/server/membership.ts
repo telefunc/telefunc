@@ -113,6 +113,24 @@ async function evictMember(
   cause: LeaveCause,
   opts?: { onlyIfLapsed: true },
 ): Promise<RoomMemberRecord | null> {
+  try {
+    return await removeMemberCells(roomId, inc, id, identity, cause, opts)
+  } catch (error) {
+    // A room that closed under the eviction ended the member with everyone else.
+    const head = await getRoomBackend().readHead(roomId)
+    if (head?.state !== 'open' || head.currentInc !== inc) return null
+    throw error
+  }
+}
+
+async function removeMemberCells(
+  roomId: string,
+  inc: string,
+  id: string,
+  identity: string | null,
+  cause: LeaveCause,
+  opts?: { onlyIfLapsed: true },
+): Promise<RoomMemberRecord | null> {
   const memberKey = memberCellKey(id)
   const cleanupKey = cleanupCellKey(id)
   const removedKeys = identity === null ? [memberKey] : [memberKey, identityCellKey(identity, id)]
