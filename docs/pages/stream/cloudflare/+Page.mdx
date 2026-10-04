@@ -185,7 +185,7 @@ Each key's authority records which Durable Objects have subscribers, in its own 
 | TTL | 90 seconds |
 | Refresh | every 30 seconds |
 
-A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe. A subscription is ready once the authority has recorded it, so every publish sequenced after that reaches it. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it.
+A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe, once for text and once for binary. A subscription is ready once the authority has recorded it, so every publish sequenced after that reaches it. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it.
 
 
 ## Delivery guarantees
