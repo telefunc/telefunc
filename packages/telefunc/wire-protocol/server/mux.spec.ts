@@ -558,7 +558,7 @@ function drainingWires(mux: ChannelMux) {
     bufferedAmount: (wire) => pending.get(wire) ?? 0,
     terminateConnection: (wire) => {
       terminated.add(wire)
-      mux.onConnectionClosed(wire, { permanent: mux.readPermanentTermination(wire) === true })
+      mux.onConnectionClosed(wire, { permanent: mux.readPermanentTermination(wire) })
     },
   }
   const open = () => {
