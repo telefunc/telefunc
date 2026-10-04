@@ -616,3 +616,25 @@ test("what a channel's onOpen sends in one turn, within the largest window past 
   expect(terminated.has(wire)).toBe(false)
   expect(sent.get(wire) ?? 0).toBeGreaterThan(65 * MIB)
 })
+
+test("a page's PING acknowledges a channel it closed whole past 2^32, so the server's replay lets go of all it sent", async () => {
+  const mux = new ChannelMux()
+  const channel = new ServerChannel<unknown, string>({ id: 'closed-past-2-32' })
+  mux.registerChannel(channel)
+  const { open } = wires(mux)
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  // The channel has sent 2^32 frames its page acknowledged.
+  const replay = channel._replayBuffer as unknown as { _seq: number; pushedSeq: number }
+  replay._seq += 2 ** 32
+  replay.pushedSeq += 2 ** 32
+  for (let n = 0; n < 3; n++) void channel.send(String(n))
+  await turn()
+  const seq = channel._replayBuffer!.seq
+  expect(seq).toBeGreaterThan(2 ** 32)
+  await mux.onConnectionRawMessage(wire, encode.ping([{ ix: 0, lastSeq: seq }]))
+  expect(channel._replayBuffer!.byteLength).toBe(0)
+})
