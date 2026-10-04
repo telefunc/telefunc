@@ -469,6 +469,14 @@ function applyStreamConfig(val: unknown): void {
   configState.stream = next
 }
 
+/** Milliseconds a timer waits, at most `max`, which `bound` explains. */
+function assertDuration(value: unknown, configPath: string, max: number, bound: string): asserts value is number {
+  assertUsage(
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max,
+    `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${max}, ${bound}`,
+  )
+}
+
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
@@ -479,23 +487,21 @@ function applyChannelConfig(val: unknown): void {
         next.transports = validateChannelTransports(value, configPath)
         break
       case 'pingInterval':
-        // Its deadline, twice it, is a timer too.
-        assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS >> 1,
-          `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS >> 1}, as its deadline, twice it, is at most the longest a timer waits`,
+        assertDuration(
+          value,
+          configPath,
+          TIMER_DELAY_MAX_MS >> 1,
+          'as its deadline, twice it, is at most the longest a timer waits',
         )
-        ;(next as Record<string, unknown>)[key] = value
+        next[key] = value
         break
       case 'reconnectTimeout':
       case 'idleTimeout':
       case 'connectTtl':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
-        assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS,
-          `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest a timer waits`,
-        )
-        ;(next as Record<string, unknown>)[key] = value
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
+        next[key] = value
         break
       case 'serverReplayBuffer':
       case 'serverReplayBufferBinary':
