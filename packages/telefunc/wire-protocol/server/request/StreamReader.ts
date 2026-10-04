@@ -39,6 +39,8 @@ class StreamReader {
   private nextFileIndex = 0
   private queue: Promise<void> = Promise.resolve()
   private disconnected = false
+  /** Called for each chunk the source yields. */
+  onChunk?: () => void
 
   constructor(source: ReadableStream<Uint8Array> | Readable) {
     // Both shapes expose `Symbol.asyncIterator` directly: Web `ReadableStream` does
@@ -161,6 +163,7 @@ class StreamReader {
         this.disconnected = true
         return null
       }
+      this.onChunk?.()
       return value
     } catch {
       this.disconnected = true

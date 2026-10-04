@@ -383,10 +383,23 @@ class ChannelMux {
     const tag = peekTag(rawFrame)
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (tag === TAG.PING) return exec()
-    // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose frames keep arriving
-    // is answered all the same, once a ping interval, so the page knows they arrive.
-    if (performance.now() - state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
+    this.answerArrival(entry, connection)
     return this.chainRecv(entry, exec)
+  }
+
+  /** Bytes reached `connection`: a frame that takes longer than the ping deadline to arrive whole shows the
+   *  wire alive while it arrives. */
+  onConnectionBytes(connection: Wire): void {
+    const entry = this.connectionEntries.get(connection)
+    if (!entry) return
+    entry.state.lastReceivedAt = performance.now()
+    this.answerArrival(entry, connection)
+  }
+
+  // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose bytes keep arriving
+  // is answered all the same, once a ping interval, so the page knows they arrive.
+  private answerArrival(entry: ConnectionEntry, connection: Wire): void {
+    if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
   }
 
   /** Control frames are bounded by what the protocol itself can describe; only the data plane

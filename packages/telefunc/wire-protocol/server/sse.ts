@@ -153,6 +153,7 @@ class SseConnectionTransport {
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
+    reader.onChunk = () => this.mux.onConnectionBytes(connection)
     // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
     // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
@@ -181,6 +182,7 @@ class SseConnectionTransport {
   private async handleBatchPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
+    reader.onChunk = () => this.mux.onConnectionBytes(connection)
     if (!(await this.waitReady(connection))) return badRequest()
     const drain = this.drainDeferred(connection, reader)
     connection.pendingDispatches.add(drain)
