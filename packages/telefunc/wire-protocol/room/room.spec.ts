@@ -3694,6 +3694,14 @@ describe('a room nothing holds closes on its own', () => {
     expect((await getRoomBackend().readHead(room.id))?.state).toBe('open')
     expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
   })
+  it("keeps a room's lapse through a meta write", async () => {
+    const room = await Room.create('meta-keeps-lapse', { emptyTimeout: 60_000 })
+    const { expiresAt } = (await getRoomBackend().readHead(room.id))!
+    expect(expiresAt).toBeGreaterThan(Date.now())
+    await vi.advanceTimersByTimeAsync(10_000)
+    await Room.setMeta(room.id, { topic: 'kept' })
+    expect((await getRoomBackend().readHead(room.id))?.expiresAt).toBe(expiresAt)
+  })
   it('lets no hidden participant hold a room: alone it closes at emptyTimeout, after players at departureTimeout', async () => {
     const alone = await Room.create('hidden-alone')
     const aloneClosed = await observe(alone.id)
