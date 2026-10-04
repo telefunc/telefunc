@@ -1,4 +1,4 @@
-export { newHoldRecord, countHold, afterHoldChange, scheduleClose, maintainHold, creationLapseMs }
+export { newHoldRecord, countHold, afterHoldChange, scheduleClose, maintainHold, lapseNewRoom }
 export type { HoldRecord, HoldChange }
 
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
@@ -61,7 +61,8 @@ function afterHoldChange(roomId: string, inc: string, change: HoldChange | null)
   if (change === null) return
   const { before, after } = change
   if (after.closesAt !== undefined) return scheduleClose(roomId, inc, after.closesAt)
-  if (before.holds === 0 || before.joined !== after.joined) void extendLapse(roomId, inc, after).catch(reportRoomError)
+  if (before.holds === 0 || before.joined !== after.joined)
+    void extendLapse(roomId, inc, after, before.holds === 0).catch(reportRoomError)
 }
 
 /** Each heartbeat, after its roster read reaped lapsed holds: keeps a held room's lapse ahead, or arms the close of
@@ -75,14 +76,33 @@ async function maintainHold(roomId: string, inc: string): Promise<void> {
   else await extendLapse(roomId, inc, record)
 }
 
-/** A new room's head lapses just past its close, or never for a room nobody's absence closes. */
-function creationLapseMs(record: HoldRecord | null): number | undefined {
-  return record?.closesAt === undefined ? undefined : record.closesAt - Date.now() + ROOM_LAPSE_AFTER_CLOSE_MS
+/** Once its hold record is written, a new room nothing holds yet lapses just past its close. The record is read under
+ *  the head's revision, which a first hold's lapse write moves, so that hold's lapse wins. */
+async function lapseNewRoom(roomId: string, inc: string): Promise<void> {
+  const backend = getRoomBackend()
+  await retryCompareExchange(roomId, async () => {
+    const head = await backend.readHead(roomId)
+    if (head?.state !== 'open' || head.currentInc !== inc) return
+    const read = await backend.readCells(roomId, inc, { keys: [HOLD_CELL_KEY] })
+    const raw = 'staleInc' in read ? undefined : read.cells.get(HOLD_CELL_KEY)
+    const closesAt = raw === undefined ? undefined : decodeRoomRecord<HoldRecord>(raw).closesAt
+    if (closesAt === undefined) return
+    const result = await backend.compareExchangeHead(
+      roomId,
+      { form: 'rev', rev: head.rev },
+      {
+        head: { currentInc: inc, state: 'open', config: head.config },
+        ttlMs: closesAt - Date.now() + ROOM_LAPSE_AFTER_CLOSE_MS,
+      },
+    )
+    return 'conflict' in result ? CX_CONFLICT : undefined
+  })
 }
 
 /** A held room's head lapses once its holders' records would have lapsed and its timeout passed, with a heartbeat to
- *  spare: pushed out whenever less than that is left, so a holder's every heartbeat keeps it ahead. */
-async function extendLapse(roomId: string, inc: string, record: HoldRecord): Promise<void> {
+ *  spare: pushed out whenever less than that is left, so a holder's every heartbeat keeps it ahead. A first hold
+ *  always writes, which fences a new room's lapse (`lapseNewRoom`) it raced. */
+async function extendLapse(roomId: string, inc: string, record: HoldRecord, firstHold = false): Promise<void> {
   const timeout = unheldTimeout(record)
   const ttlMs = timeout === Infinity ? undefined : ROOM_MEMBER_TTL_MS + timeout + 2 * ROOM_HEARTBEAT_INTERVAL_MS
   const backend = getRoomBackend()
@@ -94,7 +114,7 @@ async function extendLapse(roomId: string, inc: string, record: HoldRecord): Pro
       ttlMs === undefined
         ? expiresAt === undefined
         : expiresAt !== undefined && expiresAt >= Date.now() + ttlMs - ROOM_HEARTBEAT_INTERVAL_MS
-    if (ahead) return
+    if (ahead && !firstHold) return
     const result = await backend.compareExchangeHead(
       roomId,
       { form: 'rev', rev: head.rev },

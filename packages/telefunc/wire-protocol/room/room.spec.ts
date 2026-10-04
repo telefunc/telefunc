@@ -3652,6 +3652,16 @@ describe('a room nothing holds closes on its own', () => {
     await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)
     await expectClosed(room.id, closed)
   })
+  it('keeps a room whose hold record failed to write open under its members, never closing it on its own', async () => {
+    vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(new Error('transient'))
+    await expect(Room.create('hold-write-failed')).rejects.toThrow('transient')
+    const room = await Room.getOrCreate('hold-write-failed')
+    const member = await room.join()
+    member.onLeave(() => {})
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+    expect((await getRoomBackend().readHead(room.id))?.state).toBe('open')
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
+  })
   it('lets no hidden participant hold a room: alone it closes at emptyTimeout, after players at departureTimeout', async () => {
     const alone = await Room.create('hidden-alone')
     const aloneClosed = await observe(alone.id)

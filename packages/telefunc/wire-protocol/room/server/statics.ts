@@ -57,7 +57,7 @@ import {
 import { ServerRoom } from './room.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
-import { creationLapseMs, newHoldRecord } from './lifecycle.js'
+import { lapseNewRoom, newHoldRecord } from './lifecycle.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
@@ -178,15 +178,10 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       by: writerId(),
       inc: crypto.randomUUID(),
     }
-    const hold = newHoldRecord(emptyTimeout, departureTimeout)
-    const ttlMs = creationLapseMs(hold)
     const result = await backend.compareExchangeHead(
       id,
       current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
-      {
-        head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) },
-        ...(ttlMs === undefined ? {} : { ttlMs }),
-      },
+      { head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) } },
     )
     if ('conflict' in result) {
       // A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again.
@@ -194,7 +189,12 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
     }
     assert('head' in result)
-    if (hold !== null) await createHold(id, created.inc, hold)
+    // The head lapses only once the hold record that keeps it ahead is written.
+    const hold = newHoldRecord(emptyTimeout, departureTimeout)
+    if (hold !== null) {
+      await createHold(id, created.inc, hold)
+      await lapseNewRoom(id, created.inc)
+    }
     await backend.directoryPut(id, created.inc)
     return { kind: 'created', room: new ServerRoom(id, created, { members: [] }) }
   })
