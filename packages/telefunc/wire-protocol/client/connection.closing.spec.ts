@@ -1646,11 +1646,10 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
   function upload(wire: Wire, size: number) {
     const { net } = page(wire)
     const { producer, resume, all } = chunks(size)
-    const upload = pumpClientProducerToChannel(
-      () => producer,
-      wire === 'ws' ? ['ws'] : ['sse'],
-      `http://${crypto.randomUUID()}.test/_telefunc`,
-    )
+    const upload = pumpClientProducerToChannel(() => producer, {
+      transports: wire === 'ws' ? ['ws'] : ['sse'],
+      telefuncUrl: `http://${crypto.randomUUID()}.test/_telefunc`,
+    })
     const server = new ServerChannel({ id: upload.metadata.channelId })
     getChannelMux().registerChannel(server)
     return { net, resume, all, read: settled(ChannelStreamSource.create(server).bytes()) }
