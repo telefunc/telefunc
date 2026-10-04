@@ -2230,6 +2230,7 @@ class SseTransport implements UpgradeSource {
     const reader = createSseEventStreamReader(
       response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
       abortController,
+      () => this.heartbeat?.noteReceived(),
     )
 
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
@@ -2248,7 +2249,6 @@ class SseTransport implements UpgradeSource {
             continue
           }
           const frame = decode(raw)
-          this.heartbeat?.noteReceived()
           if (frame.tag === TAG.PONG) {
             this.heartbeat?.resetPong()
             this.owner._onTransportPong(frame.ended)
@@ -2579,9 +2579,12 @@ function isWindowRefresh({ frame }: OutboxEntry): boolean {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW
 }
 
+/** `onChunk`: each read of the stream, so an event that takes longer than the pong deadline to arrive whole shows the
+ *  wire alive while it arrives. */
 function createSseEventStreamReader(
   reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
   abortController: AbortController,
+  onChunk: () => void,
 ): {
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
@@ -2651,6 +2654,7 @@ function createSseEventStreamReader(
         if (abortController.signal.aborted || cancelled) return null
         throw readError ?? new Error('Connection lost before all SSE frames were received.')
       }
+      onChunk()
       lineBuf += decoder.decode(value!, { stream: true })
       processBufferedLines()
     }
