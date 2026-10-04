@@ -32,17 +32,12 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
-import {
-  TIMER_DELAY_MAX_MS,
-  CHANNEL_CLOSE_TIMEOUT_MS,
-  CHANNEL_PING_INTERVAL_MIN_MS,
-  CREDIT_WINDOW_MAX_BYTES,
-} from '../constants.js'
+import { TIMER_DELAY_MAX_MS, CHANNEL_CLOSE_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
-import { getServerConfig } from '../../node/server/serverConfig.js'
+import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import {
   ACK_STATUS,
@@ -53,6 +48,8 @@ import {
   countsCredit,
   isChannelCtrlTag,
   isSequencedFrame,
+  seqNear,
+  seqThrough,
 } from '../shared-ws.js'
 import type {
   AckResultStatus,
@@ -72,6 +69,10 @@ function parsePeerText(text: string): unknown {
     throw new ProtocolViolationError('peer payload is not parsable')
   }
 }
+
+/** The closing frames made while no peer was attached, sent to the next. */
+type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
+const NO_PENDING_END: PendingEnd = Object.freeze({ closeAck: false, closeRequest: false, abort: null, error: null })
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements Channel<ClientToServer, ServerToClient>
@@ -133,11 +134,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
   private _shutdownCallback: ((keep: boolean, pageAttached: boolean) => void) | null = null
-  // The closing frames made while no peer was attached, sent to the next.
-  private _pendingCloseAck = false
-  private _pendingCloseRequest = false
-  private _pendingAbort: string | null = null
-  private _pendingError: ErrorReason | null = null
+  private _pendingEnd: PendingEnd = NO_PENDING_END
   private _closeRequestSeq = 0
   /** How far the page is known to have what this channel sent it. */
   private _pageLastSeq = 0
@@ -146,7 +143,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Wire state — channel-owned, persistent across attach-mode transitions ────
   /** Buffer of outgoing wire frames, used to replay missed frames on reconnect.
-   *  Allocated in `_registerChannel`; disposed in `_shutdown`. Null only between
+   *  Allocated in `_registerChannel`; disposed in `_release`. Null only between
    *  construction and registration (no peer can attach before registration). */
   /** @internal */ _replayBuffer: ReplayBuffer | null = null
   /** Highest client→server seq the channel has received and dispatched. Used for
@@ -389,7 +386,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._isClosed = true
     const serializedAbortValue = stringify(abortValue)
     if (this._peer) this._peer.sendAbort(serializedAbortValue)
-    else this._pendingAbort = serializedAbortValue
+    else this._pendingEnd = { ...this._pendingEnd, abort: serializedAbortValue }
     this._shutdown(createAbortError(abortValue, message))
   }
 
@@ -401,7 +398,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._awaitingCloseAck = true
     this._startClose()
     if (this._peer) this._closeRequestSeq = this._peer.sendCloseRequest(timeout)
-    else this._pendingCloseRequest = true
+    else this._pendingEnd = { ...this._pendingEnd, closeRequest: true }
     this._closePromise = this._runFinalizationLoop()
     return this._closePromise
   }
@@ -461,10 +458,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
    *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
   _dispatchFrame(frame: ChannelFrame): void {
-    // The page's closing frames are sequenced with its data, so a replay repeats none of them.
-    if (isSequencedFrame(frame) && frame.seq) {
-      if (frame.seq <= this._lastClientSeq) return
-      this._lastClientSeq = frame.seq
+    // The page's closing frames are sequenced with its data, so a replay repeats none of them. The wire carries a seq's
+    // low 32 bits, read here as the whole from the next one this channel expects.
+    if (isSequencedFrame(frame)) {
+      frame.seq = seqNear(frame.seq, this._lastClientSeq + 1)
+      if (frame.seq) {
+        if (frame.seq <= this._lastClientSeq) return
+        this._lastClientSeq = frame.seq
+      }
     }
     // An ended channel keeps only how far the page's frames reached it.
     if (this._didShutdown) return
@@ -526,7 +527,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this._flow.onPeerByteWindow(frame.bytes)
-        this._onPageHas(frame.lastSeq)
+        this._onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
@@ -675,7 +676,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const peerDeadline = Date.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
-    else this._pendingCloseAck = true
+    else this._pendingEnd = { ...this._pendingEnd, closeAck: true }
     if (this._isClosed) {
       this._notifyCloseProgress()
       return
@@ -753,10 +754,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         (this._pageLastSeq >= this._replayBuffer.seq &&
           this._prePeerBuffer.size === 0 &&
           this._pendingAckRes.length === 0 &&
-          !this._pendingCloseAck &&
-          !this._pendingCloseRequest &&
-          this._pendingAbort === null &&
-          this._pendingError === null))
+          this._pendingEnd === NO_PENDING_END))
     )
   }
 
@@ -770,9 +768,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         peer.sendBinary(msg)
         this._flow.countSent(msg.byteLength)
       },
-      sendTextAck: (data, cb) => peer.sendTextAckReq(data, (seq, bytes) => cb && this._addPendingAck(seq, bytes, cb)),
+      sendTextAck: (data, cb) =>
+        peer.sendTextAckReq(data, (seq, bytes) => {
+          if (cb) this._addPendingAck(seq, bytes, cb)
+        }),
       sendBinaryAck: (data, cb) =>
-        peer.sendBinaryAckReq(data, (seq, bytes) => cb && this._addPendingAck(seq, bytes, cb)),
+        peer.sendBinaryAckReq(data, (seq, bytes) => {
+          if (cb) this._addPendingAck(seq, bytes, cb)
+        }),
       sendPublishBinary: (msg) => this._flow.countSentBytes(peer.sendPublishBinary(msg)),
     })
   }
@@ -783,15 +786,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private _sendPendingEnd(peer: IndexedPeer): void {
-    if (this._pendingCloseAck) peer.sendCloseAck()
-    if (this._pendingCloseRequest)
-      this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
-    if (this._pendingAbort !== null) peer.sendAbort(this._pendingAbort)
-    if (this._pendingError !== null) peer.sendError(this._pendingError)
-    this._pendingCloseAck = false
-    this._pendingCloseRequest = false
-    this._pendingAbort = null
-    this._pendingError = null
+    const { closeAck, closeRequest, abort, error } = this._pendingEnd
+    if (closeAck) peer.sendCloseAck()
+    if (closeRequest) this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
+    if (abort !== null) peer.sendAbort(abort)
+    if (error !== null) peer.sendError(error)
+    this._pendingEnd = NO_PENDING_END
   }
 
   /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach, in place
@@ -800,29 +800,31 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._prePeerBuffer.clear(err)
     if (this._peer) this._peer.sendError(reason)
-    else this._pendingError = reason
+    else this._pendingEnd = { ...this._pendingEnd, error: reason }
     this._shutdown(err)
   }
 
   /** @internal A PUBLISH frame to the peer, buffered until it attaches. The buffer may drop one `resentOnAttach`, which
    *  its page gets again at each attach, without leaving it a gap. */
   _sendPublish(wireText: string, resentOnAttach = false): void {
-    const peer = this._peer
-    if (peer === null) {
-      this._prePeerBuffer.pushPublish(wireText, !resentOnAttach)
-      this._closeIfDroppedOffline()
-    } else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
-    else this._flow.countSentBytes(peer.sendPublish(wireText))
+    this._forwardPublish(wireText, !resentOnAttach)
   }
 
   /** @internal A binary PUBLISH frame to the peer, buffered until it attaches. */
   _sendPublishBinary(wireData: Uint8Array): void {
+    this._forwardPublish(wireData, true)
+  }
+
+  /** A text (`string`) or binary publish to the page, buffered while it is away, where dropping it leaves a `gap`; a page
+   *  behind is let go. */
+  private _forwardPublish(wire: string | Uint8Array, gap: boolean): void {
     const peer = this._peer
     if (peer === null) {
-      this._prePeerBuffer.pushPublishBinary(wireData, true)
+      if (typeof wire === 'string') this._prePeerBuffer.pushPublish(wire, gap)
+      else this._prePeerBuffer.pushPublishBinary(wire, gap)
       this._closeIfDroppedOffline()
     } else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
-    else this._flow.countSentBytes(peer.sendPublishBinary(wireData))
+    else this._flow.countSentBytes(typeof wire === 'string' ? peer.sendPublish(wire) : peer.sendPublishBinary(wire))
   }
 
   /** A page that can't keep up, where no sender can be refused: once behind, it leaves, on both ends, rather than be
@@ -1001,10 +1003,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _dropPending(err: Error): void {
     this._prePeerBuffer.clear(err)
     this._pendingAckRes.length = 0
-    this._pendingCloseAck = false
-    this._pendingCloseRequest = false
-    this._pendingAbort = null
-    this._pendingError = null
+    this._pendingEnd = NO_PENDING_END
   }
 
   private _fireClose(err?: Error): void {
@@ -1088,7 +1087,7 @@ function reportServerChannelError(err: unknown): void {
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
 function reconnectWindow(): number {
   const c = getServerConfig().channel
-  return Math.min(TIMER_DELAY_MAX_MS, Math.max(c.pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2 + c.reconnectTimeout)
+  return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
 }
 
 function normalizeCloseTimeout(timeout: number | undefined): number {

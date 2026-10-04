@@ -14,7 +14,8 @@ import {
   type BarrierPayload,
   type ReconcilePayload,
   type ReconciledPayload,
-  type SeqReader,
+  seqNear,
+  seqThrough,
 } from './shared-ws.js'
 import {
   CHANNEL_TRANSPORT,
@@ -23,10 +24,7 @@ import {
   WIRE_MAX_CONN_CTRL_FRAME_BYTES,
 } from './constants.js'
 
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
-
-const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024, wireSeqs)
+const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024)
 const hostile = (build: (payload: never) => Uint8Array<ArrayBuffer>, payload: unknown) => build(payload as never)
 const goodOpen = [{ id: 'A', ix: 0, lastSeq: 1 }]
 const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload => ({
@@ -48,8 +46,8 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
 describe('upgrade wire vocabulary', () => {
   test('PREPARE and READY round-trip', () => {
     const prepare = { upgradeId: 'upg-1', sessionId: 'sess-0' }
-    expect(decode(encode.prepare(prepare), wireSeqs)).toEqual({ tag: TAG.PREPARE, payload: prepare })
-    expect(decode(encode.ready({ upgradeId: 'upg-9' }), wireSeqs)).toEqual({
+    expect(decode(encode.prepare(prepare))).toEqual({ tag: TAG.PREPARE, payload: prepare })
+    expect(decode(encode.ready({ upgradeId: 'upg-9' }))).toEqual({
       tag: TAG.READY,
       payload: { upgradeId: 'upg-9' },
     })
@@ -63,7 +61,7 @@ describe('upgrade wire vocabulary', () => {
     expect([TAG.PREPARE, TAG.READY, TAG.BARRIER]).toEqual([0x07, 0x08, 0x09])
     const reserved = new Uint8Array(7)
     reserved[0] = 0x0a
-    expect(() => decode(reserved, wireSeqs)).toThrow()
+    expect(() => decode(reserved)).toThrow()
   })
 
   test('every tag names one frame', () => {
@@ -74,17 +72,17 @@ describe('upgrade wire vocabulary', () => {
   test("ATTACH_RESULT is a channel ctrl at 0x3b, and round-trips an attach's lastSeq or its absence", () => {
     expect(TAG.ATTACH_RESULT).toBe(0x3b)
     expect(isChannelCtrlTag(TAG.ATTACH_RESULT)).toBe(true)
-    expect(decode(encode.attachResult(3, 7), wireSeqs)).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: 7 })
-    expect(decode(encode.attachResult(3, null), wireSeqs)).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
+    expect(decode(encode.attachResult(3, 7))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: 7 })
+    expect(decode(encode.attachResult(3, null))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
   })
 
   test("BDP_PING round-trips its probe, and BDP_PING_ACK the probe, whether the window starved its sender, and the path's round trip it measured", () => {
-    expect(decode(encode.bdpPing(3, 0xffff_ffff), wireSeqs)).toEqual({
+    expect(decode(encode.bdpPing(3, 0xffff_ffff))).toEqual({
       tag: TAG.BDP_PING,
       index: 3,
       probe: 0xffff_ffff,
     })
-    expect(decode(encode.bdpPingAck(3, 7, true, 42.5), wireSeqs)).toEqual({
+    expect(decode(encode.bdpPingAck(3, 7, true, 42.5))).toEqual({
       tag: TAG.BDP_PING_ACK,
       index: 3,
       probe: 7,
@@ -92,7 +90,7 @@ describe('upgrade wire vocabulary', () => {
       pathRtt: 42.5,
     })
     // Where it measured none.
-    expect(decode(encode.bdpPingAck(3, 7, false, Infinity), wireSeqs)).toEqual({
+    expect(decode(encode.bdpPingAck(3, 7, false, Infinity))).toEqual({
       tag: TAG.BDP_PING_ACK,
       index: 3,
       probe: 7,
@@ -100,11 +98,11 @@ describe('upgrade wire vocabulary', () => {
       pathRtt: Infinity,
     })
     // Under a microsecond, as on loopback, it still says it measured one.
-    expect(decode(encode.bdpPingAck(3, 7, false, 0.0001), wireSeqs)).toMatchObject({ pathRtt: 0.001 })
+    expect(decode(encode.bdpPingAck(3, 7, false, 0.0001))).toMatchObject({ pathRtt: 0.001 })
   })
 
   test('WINDOW round-trips its limit and the last seq its receiver has', () => {
-    expect(decode(encode.window(3, 1_024, 0xffff_fffe), wireSeqs)).toEqual({
+    expect(decode(encode.window(3, 1_024, 0xffff_fffe))).toEqual({
       tag: TAG.WINDOW,
       index: 3,
       bytes: 1_024,
@@ -114,7 +112,7 @@ describe('upgrade wire vocabulary', () => {
 
   test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
     const one: BarrierPayload = { sessionId: 'sess-0', upgradeId: 'upg-1', open: goodOpen }
-    expect(decode(encode.barrier(one), wireSeqs)).toEqual({ tag: TAG.BARRIER, payload: one })
+    expect(decode(encode.barrier(one))).toEqual({ tag: TAG.BARRIER, payload: one })
     const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
       id: String(ix).padStart(UPGRADE_MAX_ID_BYTES, 'x'),
       ix: 0xffff - ix,
@@ -129,7 +127,7 @@ describe('upgrade wire vocabulary', () => {
     // that refuses the largest legal barrier would fail every client that hit the entry cap.
     expect(encoded.byteLength).toBeGreaterThan(MAX_CHANNELS_PER_CONNECTION * UPGRADE_MAX_ID_BYTES)
     expect(encoded.byteLength).toBeLessThanOrEqual(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
-    expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES, wireSeqs)).toEqual({
+    expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toEqual({
       tag: TAG.BARRIER,
       payload: max,
     })
@@ -137,7 +135,7 @@ describe('upgrade wire vocabulary', () => {
 
   test('a RECONCILED round-trips the commit upgradeId', () => {
     const payload = reconciled({ open: [{ ix: 0, lastSeq: 3 }], upgradeId: 'upg-1' })
-    expect(decode(encode.reconciled(payload), wireSeqs)).toEqual({ tag: TAG.RECONCILED, payload })
+    expect(decode(encode.reconciled(payload))).toEqual({ tag: TAG.RECONCILED, payload })
   })
 })
 
@@ -195,12 +193,10 @@ describe('decodeClientFrame — hostile schemas', () => {
     // be the parser's ('payload is not JSON'); naming the cap proves nothing parsed it.
     const oversize = new Uint8Array(WIRE_MAX_CONN_CTRL_FRAME_BYTES + 1) as Uint8Array<ArrayBuffer>
     oversize[0] = TAG.BARRIER
-    expect(() => decodeClientFrame(oversize, WIRE_MAX_CONN_CTRL_FRAME_BYTES, wireSeqs)).toThrow(
-      'upgrade frame over byte cap',
-    )
+    expect(() => decodeClientFrame(oversize, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toThrow('upgrade frame over byte cap')
 
     const legal = encode.barrier({ sessionId: 's', upgradeId: 'u', open: goodOpen })
-    expect(decodeClientFrame(legal, WIRE_MAX_CONN_CTRL_FRAME_BYTES, wireSeqs).tag).toBe(TAG.BARRIER)
+    expect(decodeClientFrame(legal, WIRE_MAX_CONN_CTRL_FRAME_BYTES).tag).toBe(TAG.BARRIER)
   })
 
   const nonObjects: [string, unknown][] = [
@@ -250,7 +246,7 @@ describe('heartbeat', () => {
       { ix: 3, lastSeq: 5 },
       { ix: 4, lastSeq: null },
     ]
-    expect(decode(encode.pong(answers), wireSeqs)).toEqual({ tag: TAG.PONG, ended: answers })
+    expect(decode(encode.pong(answers))).toEqual({ tag: TAG.PONG, ended: answers })
   })
 
   test('a PING whose payload splits an entry is a violation', () => {
@@ -309,8 +305,6 @@ describe('decodeClientFrame — direction', () => {
 })
 
 describe('seqs past 32 bits', () => {
-  /** A receiver whose highest seq of what its peer sent is `received`, and whose last seq sent is `sent`. */
-  const standing = (received: number, sent: number): SeqReader => ({ received: () => received, sent: () => sent })
   const around = (boundary: number) => Array.from({ length: 7 }, (_, n) => boundary - 3 + n)
   const boundaries = [2 ** 31, 2 ** 32, 5 * 2 ** 32, 2 ** 40]
 
@@ -334,29 +328,29 @@ describe('seqs past 32 bits', () => {
   ]
   test.each(sequenced)("a %s's seq reads whole across 2^31 and 2^32, from the highest its receiver has", (_, build) => {
     for (const seq of boundaries.flatMap(around)) {
+      const { seq: bits } = decode(build(seq)) as { seq: number }
       // The next it expects, one a replay repeats, and one past a gap a lost replay leaves.
-      const received = [seq - 1, seq + 1_000, seq - 1_000_000]
-      for (const highest of received) expect(decode(build(seq), standing(highest, 0))).toMatchObject({ seq })
+      for (const highest of [seq - 1, seq + 1_000, seq - 1_000_000]) expect(seqNear(bits, highest + 1)).toBe(seq)
     }
   })
 
   test('an acknowledgement reads whole across 2^31 and 2^32, from the last seq its receiver sent', () => {
     for (const lastSeq of boundaries.flatMap(around)) {
       // All that was sent, or all but what a wire or a replay holds.
-      for (const sent of [lastSeq, lastSeq + 1_000_000]) {
-        const seqs = standing(0, sent)
-        expect(decode(encode.window(3, 1_024, lastSeq), seqs)).toMatchObject({ lastSeq })
-        expect(decode(encode.attachResult(3, lastSeq), seqs)).toMatchObject({ lastSeq })
-        expect(decode(encode.ping([{ ix: 3, lastSeq }]), seqs)).toMatchObject({ ended: [{ ix: 3, lastSeq }] })
-        expect(decode(encode.pong([{ ix: 3, lastSeq }]), seqs)).toMatchObject({ ended: [{ ix: 3, lastSeq }] })
-      }
+      const window = decode(encode.window(3, 1_024, lastSeq)) as { lastSeq: number }
+      const attached = decode(encode.attachResult(3, lastSeq)) as { lastSeq: number }
+      const ping = decode(encode.ping([{ ix: 3, lastSeq }])) as { ended: { lastSeq: number }[] }
+      const pong = decode(encode.pong([{ ix: 3, lastSeq }])) as { ended: { lastSeq: number }[] }
+      const carried = [window.lastSeq, attached.lastSeq, ping.ended[0]!.lastSeq, pong.ended[0]!.lastSeq]
+      // All that was sent, or all but what a wire or a replay holds.
+      for (const sent of [lastSeq, lastSeq + 1_000_000])
+        expect(carried.map((bits) => seqThrough(bits, sent))).toEqual([lastSeq, lastSeq, lastSeq, lastSeq])
     }
   })
 
-  test('an ACK_RES carries the seq it answers whole, however many seqs its receiver sent since', () => {
+  test('an ACK_RES carries the seq it answers whole, past 2^32', () => {
     for (const ackedSeq of [0, 1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER])
-      for (const sent of [ackedSeq, ackedSeq + 2 ** 32 + 5, Number.MAX_SAFE_INTEGER])
-        expect(decode(encode.ackRes(3, 1, ackedSeq, '"x"'), standing(0, sent))).toMatchObject({ ackedSeq })
+      expect(decode(encode.ackRes(3, 1, ackedSeq, '"x"'))).toMatchObject({ ackedSeq })
   })
 
   test("a binary publish carries its key's seq as a text publish does, past 2^32", () => {
@@ -365,17 +359,16 @@ describe('seqs past 32 bits', () => {
       const info = { seq, timestamp: 1_700_000_000_000 }
       const binary = encode.publishBinary(3, encodePublishBinary(new Uint8Array([7]), info), 1)
       const text = encode.publish(3, encodePublishText('"x"', info), 1)
-      expect(decode(binary, wireSeqs)).toMatchObject({ info, data: new Uint8Array([7]) })
-      expect(decode(text, wireSeqs)).toMatchObject({ info, text: '"x"' })
+      expect(decode(binary)).toMatchObject({ info, data: new Uint8Array([7]) })
+      expect(decode(text)).toMatchObject({ info, text: '"x"' })
     }
   })
 
   test('a seq never reads below 0, whatever its bits', () => {
     for (const bits of [0, 1, 2 ** 31 - 1, 2 ** 31, 2 ** 31 + 1, 2 ** 32 - 1])
       for (const at of [0, 1, 7]) {
-        const seqs = standing(at, at)
-        expect((decode(encode.text(3, '"x"', bits), seqs) as { seq: number }).seq).toBeGreaterThanOrEqual(0)
-        expect((decode(encode.window(3, 1_024, bits), seqs) as { lastSeq: number }).lastSeq).toBeGreaterThanOrEqual(0)
+        expect(seqNear(bits, at + 1)).toBeGreaterThanOrEqual(0)
+        expect(seqThrough(bits, at)).toBeGreaterThanOrEqual(0)
       }
   })
 

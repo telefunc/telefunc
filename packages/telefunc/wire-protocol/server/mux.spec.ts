@@ -1,17 +1,14 @@
 import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { decode, encode, TAG, type DecodedFrame, type SeqReader } from '../shared-ws.js'
-import { config as serverConfig, getServerConfig } from '../../node/server/serverConfig.js'
+import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
+import { getServerConfig } from '../../node/server/serverConfig.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   WIRE_SEND_BACKLOG_BASE_BYTES,
 } from '../constants.js'
-
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 /** Wires the test opens on `mux`, each recording what the server sends on it. */
 function wires(mux: ChannelMux) {
@@ -22,7 +19,7 @@ function wires(mux: ChannelMux) {
     getSessionId: (wire) => sessions.get(wire),
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
-    sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame, wireSeqs)),
+    sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
     bufferedAmount: () => 0,
     terminateConnection: (wire) => void terminated.add(wire),
   }
@@ -558,7 +555,7 @@ function drainingWires(mux: ChannelMux) {
     bufferedAmount: (wire) => pending.get(wire) ?? 0,
     terminateConnection: (wire) => {
       terminated.add(wire)
-      mux.onConnectionClosed(wire, { permanent: mux.readPermanentTermination(wire) === true })
+      mux.onConnectionClosed(wire, { permanent: mux.readPermanentTermination(wire) })
     },
   }
   const open = () => {
@@ -573,38 +570,33 @@ const MIB = 1024 * 1024
 const turn = () => new Promise((resolve) => setTimeout(resolve, 10))
 
 test('a reconnect replays what each channel sent within the largest window past its credit, however much the channels sent together', async () => {
-  serverConfig.channel = { serverReplayBuffer: 128 * MIB, serverReplayBufferBinary: 128 * MIB }
-  try {
-    const mux = new ChannelMux()
-    const channels = ['a', 'b'].map((id) => new ServerChannel<unknown, unknown>({ id }))
-    for (const channel of channels) mux.registerChannel(channel)
-    const { open, sent, terminated, sessions } = drainingWires(mux)
-    const first = open()
-    await mux.onConnectionRawMessage(
-      first,
-      encode.reconcile({ open: channels.map((c, ix) => ({ id: c.id, ix, lastSeq: 0, initial: true })) }),
-    )
-    await turn()
-    const refused: unknown[] = []
-    // 40 MiB each, nobody awaiting: within the 64 MiB a channel may be sent past its page's room.
-    for (const channel of channels)
-      for (let i = 0; i < 80; i++) channel.sendBinary(new Uint8Array(512 * 1024)).catch((err) => refused.push(err))
-    await turn()
-    expect(refused).toEqual([])
-    // The wire drops before the page got any of it, and the page reconnects.
-    const sessionId = sessions.get(first)
-    mux.onConnectionClosed(first, { permanent: false })
-    const second = open()
-    await mux.onConnectionRawMessage(
-      second,
-      encode.reconcile({ sessionId, open: channels.map((c, ix) => ({ id: c.id, ix, lastSeq: 0 })) }),
-    )
-    await turn()
-    expect(terminated.has(second)).toBe(false)
-    expect(sent.get(second) ?? 0).toBeGreaterThan(80 * MIB)
-  } finally {
-    serverConfig.channel = {}
-  }
+  const mux = new ChannelMux()
+  const channels = ['a', 'b'].map((id) => new ServerChannel<unknown, unknown>({ id }))
+  for (const channel of channels) mux.registerChannel(channel)
+  const { open, sent, terminated, sessions } = drainingWires(mux)
+  const first = open()
+  await mux.onConnectionRawMessage(
+    first,
+    encode.reconcile({ open: channels.map((c, ix) => ({ id: c.id, ix, lastSeq: 0, initial: true })) }),
+  )
+  await turn()
+  const refused: unknown[] = []
+  // 40 MiB each, nobody awaiting: within the 64 MiB a channel may be sent past its page's room.
+  for (const channel of channels)
+    for (let i = 0; i < 80; i++) channel.sendBinary(new Uint8Array(512 * 1024)).catch((err) => refused.push(err))
+  await turn()
+  expect(refused).toEqual([])
+  // The wire drops before the page got any of it, and the page reconnects.
+  const sessionId = sessions.get(first)
+  mux.onConnectionClosed(first, { permanent: false })
+  const second = open()
+  await mux.onConnectionRawMessage(
+    second,
+    encode.reconcile({ sessionId, open: channels.map((c, ix) => ({ id: c.id, ix, lastSeq: 0 })) }),
+  )
+  await turn()
+  expect(terminated.has(second)).toBe(false)
+  expect(sent.get(second) ?? 0).toBeGreaterThan(80 * MIB)
 })
 
 test("what a channel's onOpen sends in one turn, within the largest window past its credit, goes out on its first attach", async () => {

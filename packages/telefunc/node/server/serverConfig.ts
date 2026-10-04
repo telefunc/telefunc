@@ -3,6 +3,7 @@ export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
+export { pingDeadlineOf }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -32,6 +33,7 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
@@ -393,6 +395,11 @@ function getServerConfig(): ConfigResolved {
   }
 }
 
+/** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
+function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
+  return Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2
+}
+
 /** Extension wire types are consumed after user modules may have registered more extensions.
  * Keep them out of the request-start config snapshot and resolve only at the operation that uses them. */
 function getServerExtensionTypes() {
@@ -507,6 +514,14 @@ function applyStreamConfig(val: unknown): void {
   configState.stream = next
 }
 
+/** Milliseconds a timer waits, at most `max`, which `bound` explains. */
+function assertDuration(value: unknown, configPath: string, max: number, bound: string): asserts value is number {
+  assertUsage(
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max,
+    `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${max}, ${bound}`,
+  )
+}
+
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
@@ -517,23 +532,21 @@ function applyChannelConfig(val: unknown): void {
         next.transports = validateChannelTransports(value, configPath)
         break
       case 'pingInterval':
-        // Its deadline, twice it, is a timer too.
-        assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS >> 1,
-          `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS >> 1}, as its deadline, twice it, is at most the longest a timer waits`,
+        assertDuration(
+          value,
+          configPath,
+          TIMER_DELAY_MAX_MS >> 1,
+          'as its deadline, twice it, is at most the longest a timer waits',
         )
-        ;(next as Record<string, unknown>)[key] = value
+        next[key] = value
         break
       case 'reconnectTimeout':
       case 'idleTimeout':
       case 'connectTtl':
       case 'sseFlushThrottle':
       case 'ssePostIdleFlushDelay':
-        assertUsage(
-          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= TIMER_DELAY_MAX_MS,
-          `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest a timer waits`,
-        )
-        ;(next as Record<string, unknown>)[key] = value
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
+        next[key] = value
         break
       case 'serverReplayBuffer':
       case 'serverReplayBufferBinary':

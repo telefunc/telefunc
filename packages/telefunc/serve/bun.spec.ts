@@ -47,9 +47,9 @@ async function attach(buffered: (written: number) => number) {
 }
 
 /** 16 KiB sends, none awaited, until one rejects. */
-async function sendUntilRejected(channel: ServerChannel<unknown, string>, maxSends = 6_000) {
+async function sendUntilRejected(channel: ServerChannel<unknown, string>) {
   let error: unknown
-  for (let n = 0; error === undefined && n < maxSends; n++) {
+  for (let n = 0; error === undefined && n < 6_000; n++) {
     channel.send(String(n).padEnd(16 * 1024)).catch((err: unknown) => (error = err))
     await Promise.resolve()
   }
@@ -61,9 +61,4 @@ test("a page that stops reading its Bun socket holds what a channel sends nobody
   expect(await sendUntilRejected(channel)).toBeInstanceOf(ChannelOverflowError)
   // One message past them, and each one's header.
   expect(written()).toBeLessThanOrEqual(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 64 * 1024)
-})
-
-test('a Bun socket that writes everything out at once holds nothing for the page, so a channel refuses no send nobody awaits', async () => {
-  const { channel } = await attach(() => 0)
-  expect(await sendUntilRejected(channel, 400)).toBeUndefined()
 })

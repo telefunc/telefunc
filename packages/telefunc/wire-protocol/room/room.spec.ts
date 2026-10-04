@@ -4,14 +4,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
 import { CHANNEL_PING_INTERVAL_MS, CHANNEL_RECONNECT_TIMEOUT_MS, CHANNEL_TRANSPORT } from '../constants.js'
-import {
-  ACK_STATUS,
-  ProtocolViolationError,
-  TAG,
-  decode,
-  type BroadcastSubscriptions,
-  type SeqReader,
-} from '../shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort } from '../../shared/Abort.js'
 import { createDeferred } from '../../utils/createDeferred.js'
@@ -3590,8 +3583,6 @@ describe('room protocol validation', () => {
   })
 })
 type Peer = ReturnType<typeof attachPeer>
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 describe('a room nothing holds closes on its own', () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -3833,7 +3824,7 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
     replay,
   )
   stub._attachPeer(peer, { broadcast })
-  return { peer, decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>, wireSeqs)) }
+  return { peer, decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
 function subsOf(room: Room | ServerRoom): {
   _control: LaneSubscription

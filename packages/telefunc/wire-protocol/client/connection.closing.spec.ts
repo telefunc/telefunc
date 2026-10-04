@@ -19,7 +19,7 @@ import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { getTelefuncChannelHooks } from '../server/ws.js'
 import { ChannelStreamSource } from '../ChannelStreamSource.js'
 import type { ReplayBuffer } from '../replay-buffer.js'
-import { TAG, decode, type ReconcilePayload, type SeqReader } from '../shared-ws.js'
+import { TAG, decode, type ReconcilePayload } from '../shared-ws.js'
 import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
@@ -29,9 +29,6 @@ import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { createRequestContext } from '../../node/server/context/requestContext.js'
 import { parseResponse } from './response/parse.js'
-
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 /** `sse-late-upload`: SSE whose upload request reaches the server 500 ms after the request that opens the wire, as one
  *  that opens a connection of its own may. */
@@ -929,7 +926,7 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     expect(servers.filter((server) => getChannelMux()['channels'].has(server.id))).toEqual([])
     let listed: unknown[] = []
     net.whenPageSends(TAG.RECONCILE, (frame) => {
-      listed = (decode(frame, wireSeqs) as { payload: ReconcilePayload }).payload.open.map(({ id }) => id)
+      listed = (decode(frame) as { payload: ReconcilePayload }).payload.open.map(({ id }) => id)
     })
     net.die()
     await advance(5_000)
@@ -1007,7 +1004,7 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     await advance(100)
     let listed: number[] = []
     net.whenPageSends(TAG.RECONCILE, (frame) => {
-      const reconcile = decode(frame as Uint8Array<ArrayBuffer>, wireSeqs)
+      const reconcile = decode(frame as Uint8Array<ArrayBuffer>)
       if (reconcile.tag === TAG.RECONCILE) listed = reconcile.payload.open.map((entry) => entry.ix)
     })
     // The PONG that tells the page the server has all of the closed channel, then a registration before the next PING.

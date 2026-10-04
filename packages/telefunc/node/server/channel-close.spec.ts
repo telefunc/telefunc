@@ -1,21 +1,11 @@
 import { describe, expect, test } from 'vitest'
 
 import { ReplayBuffer } from '../../wire-protocol/replay-buffer.js'
-import {
-  ACK_STATUS,
-  ProtocolViolationError,
-  TAG,
-  decode,
-  encode,
-  type SeqReader,
-} from '../../wire-protocol/shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, decode, encode } from '../../wire-protocol/shared-ws.js'
 import type { ChannelFrame } from '../../wire-protocol/shared-ws.js'
 import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
 import { ServerChannel, reconnectWindow } from '../../wire-protocol/server/channel.js'
 import { config } from './serverConfig.js'
-
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 /** Records what the channel sends, but for the flow-control limits every attach sends. */
 function createPeer(frames: Uint8Array[]) {
@@ -33,14 +23,14 @@ function createPeer(frames: Uint8Array[]) {
 }
 
 function expectCloseFrame(frame: Uint8Array) {
-  const decoded = decode(frame, wireSeqs)
+  const decoded = decode(frame)
   expect(decoded.tag).toBe(TAG.CLOSE)
   if (decoded.tag !== TAG.CLOSE) throw new Error('Expected CLOSE frame')
   return decoded
 }
 
 function expectCloseAckFrame(frame: Uint8Array) {
-  const decoded = decode(frame, wireSeqs)
+  const decoded = decode(frame)
   expect(decoded.tag).toBe(TAG.CLOSE_ACK)
   if (decoded.tag !== TAG.CLOSE_ACK) throw new Error('Expected CLOSE_ACK frame')
   expect(decoded.index).toBe(7)
@@ -79,7 +69,7 @@ describe('self-initiated close', () => {
     const frames: Uint8Array[] = []
     channel._attachPeer(createPeer(frames))
     const pending = channel.send('hello', { ack: true })
-    const frame = decode(frames[0]!, wireSeqs)
+    const frame = decode(frames[0]!)
     if (frame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
 
     expect(() => channel._onPeerAckRes(frame.seq, '{', status)).toThrow(ProtocolViolationError)
@@ -190,7 +180,7 @@ describe('self-initiated close', () => {
     expect(channel._didShutdown).toBe(false)
 
     // Ack arrives → close resolves
-    const ackReqFrame = decode(frames[0]!, wireSeqs)
+    const ackReqFrame = decode(frames[0]!)
     if (ackReqFrame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
     channel._onPeerAckRes(ackReqFrame.seq, '"received"')
 
@@ -236,7 +226,7 @@ describe('self-initiated close', () => {
     await Promise.resolve()
 
     expect(frames).toHaveLength(2)
-    const dataFrame = decode(frames[0]!, wireSeqs)
+    const dataFrame = decode(frames[0]!)
     expect(dataFrame.tag).toBe(TAG.TEXT)
     if (dataFrame.tag !== TAG.TEXT) throw new Error('Expected TEXT frame')
     expect(dataFrame.text).toBe('1')
@@ -255,7 +245,7 @@ describe('self-initiated close', () => {
     const sendPromise = channel.send('hello', { ack: true })
     const closePromise = channel.close({ timeout: 100 })
 
-    const ackReqFrame = decode(frames[0]!, wireSeqs)
+    const ackReqFrame = decode(frames[0]!)
     if (ackReqFrame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
     channel._onPeerAckRes(ackReqFrame.seq, '"ok"')
     channel._onPeerCloseAck()
@@ -280,7 +270,7 @@ describe('self-initiated close', () => {
     // Timeout fires, shutdown happens, ack arrives too late
     await new Promise((resolve) => setTimeout(resolve, 20))
 
-    const ackReqFrame = decode(frames[0]!, wireSeqs)
+    const ackReqFrame = decode(frames[0]!)
     if (ackReqFrame.tag !== TAG.TEXT_ACK_REQ) throw new Error('Expected TEXT_ACK_REQ')
     channel._onPeerAckRes(ackReqFrame.seq, '"received"')
 
@@ -442,8 +432,8 @@ describe("a page's closing frames", () => {
       channel._attachPeer(createPeer(frames))
       void channel.send('question', { ack: true }).catch(() => {}) // the close waits for its answer
       if (raw[0] === TAG.CLOSE_ACK) void channel.close({ timeout: 1_000 })
-      channel._dispatchFrame(decode(encode.text(7, '1', 1), wireSeqs) as ChannelFrame)
-      const frame = decode(raw, wireSeqs) as ChannelFrame
+      channel._dispatchFrame(decode(encode.text(7, '1', 1)) as ChannelFrame)
+      const frame = decode(raw) as ChannelFrame
       channel._dispatchFrame(frame)
       channel._dispatchFrame(frame)
       expect(channel._lastClientSeq).toBe(2)

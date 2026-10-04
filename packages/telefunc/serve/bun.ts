@@ -36,7 +36,7 @@ function telefunc(): TelefuncServe {
   // A peer's `websocket` is a Proxy, and Bun's methods refuse one as `this`: the socket itself answers.
   const sockets = new WeakMap<Peer, BunSocket>()
   const ws = crossws({
-    hooks: getTelefuncChannelHooks(undefined, (peer) => sockets.get(peer)!.getBufferedAmount()),
+    hooks: getTelefuncChannelHooks({ bufferedAmount: (peer) => sockets.get(peer)!.getBufferedAmount() }),
   })
 
   return {

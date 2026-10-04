@@ -4,7 +4,7 @@ export type { ReconcileOutcome, ServerTransport }
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { getRawContext } from '../../node/server/context/context.js'
-import { getServerConfig } from '../../node/server/serverConfig.js'
+import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { GcRegistry } from '../gcRegistry.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -32,6 +32,7 @@ import {
   encode,
   isConnCtrlTag,
   peekTag,
+  seqThrough,
 } from '../shared-ws.js'
 import type {
   BarrierPayload,
@@ -41,7 +42,6 @@ import type {
   PreparePayload,
   ReconcileOpenEntry,
   ReconcilePayload,
-  SeqReader,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import type { ServerChannel } from './channel.js'
@@ -167,8 +167,6 @@ type ConnectionEntry = {
   transport: ServerTransport<unknown>
   /** One per wire: the peers of every reconcile on this wire share it. */
   sender: PeerSender
-  /** Where the server stands on each channel of the wire's session, from which a frame's seqs are read. */
-  seqs: SeqReader
 }
 
 /** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
@@ -267,10 +265,6 @@ class ChannelMux {
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
-    const channelOn = (ix: number): ServerChannel | undefined => {
-      const sessionId = transport.getSessionId(connection)
-      return sessionId === undefined ? undefined : this.sessions.get(sessionId, ix)?.channel
-    }
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
@@ -292,10 +286,6 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         bufferedAmount: () => this.bufferedAmount(connection),
-      },
-      seqs: {
-        received: (ix) => channelOn(ix)?._lastClientSeq ?? 0,
-        sent: (ix) => channelOn(ix)?._replayBuffer?.seq ?? 0,
       },
     })
     const connId = transport.getConnId(connection)
@@ -463,7 +453,7 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): null | Promise<ReconcileOutcome | null> {
-    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES, entry.seqs)
+    const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
@@ -484,9 +474,7 @@ class ChannelMux {
     // One for a channel the wire awaits is held for after its attach, and stays in the recv backlog until then.
     const awaited = entry.state.awaited.get(channelFrame.index)
     if (awaited && awaited.phase !== 'expired') {
-      awaited.held.push({ frame: channelFrame, bytes: rawFrame.byteLength })
-      entry.state.recvBacklogBytes += rawFrame.byteLength
-      entry.state.recvBacklogFrames++
+      this.hold(awaited, channelFrame, rawFrame.byteLength)
       return null
     }
     this.dispatchChannelFrame(sessionId, channelFrame)
@@ -504,7 +492,7 @@ class ChannelMux {
     return ended.map(({ ix, lastSeq }) => {
       const channel = this.sessions.get(sessionId, ix)?.channel
       if (channel === undefined) return { ix, lastSeq: null }
-      channel._onPageClosed(lastSeq)
+      channel._onPageClosed(seqThrough(lastSeq, channel._replayBuffer?.seq ?? 0))
       if (!this.endedChannels.has(channel)) return { ix, lastSeq: channel._lastClientSeq }
       this.releaseEnded(channel)
       return { ix, lastSeq: null }
@@ -812,16 +800,14 @@ class ChannelMux {
       this.terminateWire(wire)
       return false
     } finally {
-      this.chargeHeld(awaited, -1)
-      awaited.held = []
+      this.dropHeld(awaited)
     }
   }
 
   /** Not registered within `connectTtl`, or shut down as it registered. */
   private expireAwaited(awaited: AwaitedChannel): void {
     awaited.phase = 'expired'
-    this.chargeHeld(awaited, -1)
-    awaited.held = []
+    this.dropHeld(awaited)
     this.send(awaited.wire, encode.attachResult(awaited.entry.ix, null))
   }
 
@@ -829,17 +815,23 @@ class ChannelMux {
    *  session, which ended it. */
   private forgetAwaited(state: ConnectionState, ix: number, awaited: AwaitedChannel): void {
     awaited.stopWaiting()
-    this.chargeHeld(awaited, -1)
-    awaited.held = []
+    this.dropHeld(awaited)
     state.awaited.delete(ix)
   }
 
   /** What a wire holds counts against its recv backlog. */
-  private chargeHeld(awaited: AwaitedChannel, sign: 1 | -1): void {
+  private hold(awaited: AwaitedChannel, frame: ChannelFrame, bytes: number): void {
+    awaited.held.push({ frame, bytes })
+    awaited.conn.state.recvBacklogBytes += bytes
+    awaited.conn.state.recvBacklogFrames++
+  }
+
+  private dropHeld(awaited: AwaitedChannel): void {
     for (const { bytes } of awaited.held) {
-      awaited.conn.state.recvBacklogBytes += sign * bytes
-      awaited.conn.state.recvBacklogFrames += sign
+      awaited.conn.state.recvBacklogBytes -= bytes
+      awaited.conn.state.recvBacklogFrames--
     }
+    awaited.held = []
   }
 
   /** A channel the old wire awaits moves with the barrier listing it, so the WebSocket awaits it from then on. One
@@ -858,10 +850,11 @@ class ChannelMux {
         continue
       }
       oldEntry.state.awaited.delete(entry.ix)
-      this.chargeHeld(awaited, -1)
+      const { held } = awaited
+      this.dropHeld(awaited)
       awaited.conn = wsEntry
       awaited.wire = wsConnection
-      this.chargeHeld(awaited, 1)
+      for (const { frame, bytes } of held) this.hold(awaited, frame, bytes)
       wsEntry.state.awaited.set(entry.ix, awaited)
     }
   }
@@ -1117,7 +1110,7 @@ function resolveMuxServerOptions(): MuxServerOptions {
     reconnectTimeout: c.reconnectTimeout,
     idleTimeout: c.idleTimeout,
     pingInterval,
-    pingDeadline: pingInterval * 2,
+    pingDeadline: pingDeadlineOf(c),
     serverReplayBuffer: c.serverReplayBuffer,
     serverReplayBufferBinary: c.serverReplayBufferBinary,
     clientReplayBuffer: c.clientReplayBuffer,

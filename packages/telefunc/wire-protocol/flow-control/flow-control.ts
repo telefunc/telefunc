@@ -69,8 +69,6 @@ class FlowControl {
   /** `_sentBytes` after the last frame sent while the byte limit was ahead of it. */
   private _sentWithCredit = 0
   // Receiver side: what arrived, what was consumed, and what had been consumed when each limit last went out.
-  private _receivedBytes = 0
-  private _receivedMessages = 0
   private _consumedBytes = 0
   private _consumedMessages = 0
   private _advertisedBytes = 0
@@ -165,7 +163,7 @@ class FlowControl {
 
   /** Sender-side: count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    this._countSentBytes(bytes)
+    this.countSentBytes(bytes)
     this._sentMessages += 1
   }
 
@@ -200,8 +198,6 @@ class FlowControl {
   /** Receiver-side: account one received frame off the wire. Emits a
    *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
   onReceived(bytes: number): void {
-    this._receivedBytes += bytes
-    this._receivedMessages += 1
     this._arrived = true
     if (this._bdp.onReceive(bytes)) this._emit.bdpPing(this._bdp.probe)
   }
@@ -315,11 +311,12 @@ class FlowControl {
   // A frame counted in bytes only takes no message credit and starts no BDP probe: a publish, which nothing waits on.
 
   countSentBytes(bytes: number): void {
-    this._countSentBytes(bytes)
+    const hadCredit = !this.isPastByteCredit
+    this._sentBytes += bytes
+    if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
-  onReceivedBytes(bytes: number): void {
-    this._receivedBytes += bytes
+  onReceivedBytes(): void {
     this._arrived = true
   }
 
@@ -358,12 +355,6 @@ class FlowControl {
   private _advertiseMessages(): void {
     this._advertisedMessages = this._consumedMessages
     this._emit.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0)
-  }
-
-  private _countSentBytes(bytes: number): void {
-    const hadCredit = !this.isPastByteCredit
-    this._sentBytes += bytes
-    if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
   private _noteStarved(): void {

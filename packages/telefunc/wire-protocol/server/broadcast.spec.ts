@@ -10,7 +10,6 @@ import {
   encodePublishText,
   type BroadcastKind,
   type DecodedFrame,
-  type SeqReader,
 } from '../shared-ws.js'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { IndexedPeer } from './IndexedPeer.js'
@@ -23,9 +22,6 @@ import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
 import { config } from '../../node/server/serverConfig.js'
-
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 let memoryState: MemoryBackendState
 beforeEach(async () => {
@@ -98,7 +94,7 @@ function muxWires() {
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
     sendNow: (_wire, frame) => {
-      const decoded = decode(frame, wireSeqs)
+      const decoded = decode(frame)
       if (decoded.tag === TAG.PUBLISH) published.push(decoded.text)
     },
     bufferedAmount: () => 0,
@@ -272,9 +268,7 @@ describe('keyed in-process broadcast', () => {
     const channel = new Announcing()
     channel._registerChannel()
     const publishes = (frames: Uint8Array[]) =>
-      frames
-        .map((frame) => decode(frame as Uint8Array<ArrayBuffer>, wireSeqs))
-        .filter((frame) => frame.tag === TAG.PUBLISH)
+      frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)).filter((frame) => frame.tag === TAG.PUBLISH)
     const previous: Uint8Array[] = []
     const next: Uint8Array[] = []
     channel._attachPeer(peer((frame) => previous.push(frame)))
@@ -317,7 +311,7 @@ describe('keyed in-process broadcast', () => {
     const sent: DecodedFrame[] = []
     const replay = new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)
     broadcast._attachPeer(
-      new IndexedPeer({ send: (frame) => void sent.push(decode(frame, wireSeqs)), bufferedAmount: () => 0 }, 7, replay),
+      new IndexedPeer({ send: (frame) => void sent.push(decode(frame)), bufferedAmount: () => 0 }, 7, replay),
     )
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })
     await broadcast.publish('on')
@@ -578,7 +572,7 @@ describe('binary in-process broadcast', () => {
     receiver._attachPeer(peer((frame) => frames.push(frame)))
     const receipt = await sender.publishBinary(new Uint8Array([7]))
     const publish = frames
-      .map((frame) => decode(frame as Uint8Array<ArrayBuffer>, wireSeqs))
+      .map((frame) => decode(frame as Uint8Array<ArrayBuffer>))
       .find((frame) => frame.tag === TAG.PUBLISH_BINARY)
     expect(receipt.seq).toBe(0x1_0000_0000)
     expect(publish?.tag).toBe(TAG.PUBLISH_BINARY)
@@ -712,7 +706,7 @@ describe('Broadcast client publish acks', () => {
       JSON.stringify(outcome === 'overflow' ? 'x'.repeat(600 * 1024) : 'x'),
       1,
     )
-    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>, wireSeqs)).find((d) => d.tag === TAG.ACK_RES)
+    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
     if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
     expect(ack.status).toBe(status)
     expect(report).toHaveBeenCalledTimes(outcome === 'bug' ? 1 : 0)
@@ -751,7 +745,7 @@ describe('Broadcast shield validation', () => {
 
     void broadcast._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
 
-    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>, wireSeqs)).find((d) => d.tag === TAG.ACK_RES)
+    const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
     expect(ack).toBeDefined()
     if (ack?.tag !== TAG.ACK_RES) throw new Error('Expected ACK_RES')
     expect(ack.status).toBe(ACK_STATUS.SHIELD_ERROR)

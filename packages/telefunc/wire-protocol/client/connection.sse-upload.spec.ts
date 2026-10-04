@@ -8,12 +8,9 @@ import { ServerChannel } from '../server/channel.js'
 import { ServerBroadcast } from '../server/server-broadcast.js'
 import { getChannelMux } from '../server/mux.js'
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
-import { decode, encode, TAG, type SeqReader } from '../shared-ws.js'
+import { decode, encode, TAG } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
-
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 afterEach(() => {
   delete config.fetch
@@ -87,12 +84,12 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
       }
       const { metadata, frames } = await parseBlobBody(body)
       if (!metadata.streamResponse) {
-        for (const raw of frames) onBatchFrame(decode(raw as never, wireSeqs))
+        for (const raw of frames) onBatchFrame(decode(raw as never))
         return new Response('', { status: 200 })
       }
       server.wires++
       for (const raw of frames) {
-        const frame = decode(raw as never, wireSeqs)
+        const frame = decode(raw as never)
         if (frame.tag === TAG.RECONCILE) server.ix = frame.payload.open[0]?.ix ?? 0
       }
       const stream = new ReadableStream<Uint8Array>({

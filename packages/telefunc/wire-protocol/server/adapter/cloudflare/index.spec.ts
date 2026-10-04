@@ -503,11 +503,12 @@ describe('cloudflare adapter entrypoint', () => {
 })
 
 describe("the session Durable Object's pin", () => {
+  /** The request doesn't await its pin's KV write: a macrotask lets it settle. */
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
   function sessionObject(kv: KVNamespace) {
     const { binding } = createBinding()
     const tf = new Telefunc()
-    const waitUntil: Array<Promise<unknown>> = []
-    const ctx = { id: { name: 'telefunc-shard-weur-0' }, waitUntil: (p: Promise<unknown>) => void waitUntil.push(p) }
+    const ctx = { id: { name: 'telefunc-shard-weur-0' } }
     const env = { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env
     // The Worker's env, which `cloudflare:workers` gives its Durable Objects too.
     Object.assign(mocks.workerEnv, env)
@@ -524,16 +525,16 @@ describe("the session Durable Object's pin", () => {
           },
         }),
       )
-    return { request, settled: () => Promise.all(waitUntil) }
+    return { request }
   }
 
   it('writes a token once for its first requests, then again only as the pin nears its TTL', async () => {
     const kv = createMockKV()
     const put = vi.spyOn(kv, 'put')
-    const { request, settled } = sessionObject(kv)
+    const { request } = sessionObject(kv)
     await Promise.all([request('token-a'), request('token-a')])
     await request('token-a')
-    await settled()
+    await flush()
     expect(put).toHaveBeenCalledTimes(1)
     expect(await kv.get('session:token-a', 'json')).toEqual({ s: 'telefunc-shard-weur-0', b: 'weur' })
     vi.useFakeTimers({ now: Date.now() + 13 * 60 * 60 * 1000 })
@@ -542,14 +543,14 @@ describe("the session Durable Object's pin", () => {
     } finally {
       vi.useRealTimers()
     }
-    await settled()
+    await flush()
     expect(put).toHaveBeenCalledTimes(2)
   })
 
   it("renews a page's pin as the WebSocket it opened keeps carrying its messages, with no request in between", async () => {
     const kv = createMockKV()
     const put = vi.spyOn(kv, 'put')
-    const { request, settled } = sessionObject(kv)
+    const { request } = sessionObject(kv)
     const hooks = (mocks.crosswsFactory.mock.calls.at(-1) as unknown as [{ hooks: Record<string, Function> }])[0].hooks
     // The request the page's WebSocket was opened with, as the socket's peer keeps it.
     const upgrade = new Request('https://telefunc.test/_telefunc?session=token-c', {
@@ -560,7 +561,7 @@ describe("the session Durable Object's pin", () => {
       },
     })
     await request('token-c')
-    await settled()
+    await flush()
     expect(put).toHaveBeenCalledTimes(1)
     vi.useFakeTimers({ now: Date.now() + 13 * 60 * 60 * 1000 })
     try {
@@ -568,7 +569,7 @@ describe("the session Durable Object's pin", () => {
     } finally {
       vi.useRealTimers()
     }
-    await settled()
+    await flush()
     expect(put).toHaveBeenCalledTimes(2)
   })
 
@@ -576,12 +577,12 @@ describe("the session Durable Object's pin", () => {
     const kv = createMockKV()
     const put = vi.spyOn(kv, 'put').mockRejectedValueOnce(new Error('KV is down'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { request, settled } = sessionObject(kv)
+    const { request } = sessionObject(kv)
     await request('token-b')
-    await settled()
+    await flush()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('KV is down'))
     await request('token-b')
-    await settled()
+    await flush()
     expect(put).toHaveBeenCalledTimes(2)
     warn.mockRestore()
   })

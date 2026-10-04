@@ -38,7 +38,17 @@ import { createPushReadableStream, type PushReadableStream } from '../push-reada
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import { ACK_STATUS, ERROR_REASON, TAG, decode, encode, isSequencedFrame, payloadBytes } from '../shared-ws.js'
+import {
+  ACK_STATUS,
+  ERROR_REASON,
+  TAG,
+  decode,
+  encode,
+  isSequencedFrame,
+  payloadBytes,
+  seqNear,
+  seqThrough,
+} from '../shared-ws.js'
 import type {
   AckResultStatus,
   ChannelFrame,
@@ -50,7 +60,6 @@ import type {
   ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
-  SeqReader,
 } from '../shared-ws.js'
 import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
@@ -448,11 +457,6 @@ class ClientConnection implements MuxConnection {
   private sendBuffer: BufferedFrame[] = []
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
-  /** Where the page stands on each channel, from which a frame's seqs are read. */
-  readonly seqs: SeqReader = {
-    received: (ix) => this.lastSeqByChannel.get(ix) ?? 0,
-    sent: (ix) => this.replayBuffers.get(ix)?.seq ?? 0,
-  }
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
@@ -876,8 +880,11 @@ class ClientConnection implements MuxConnection {
 
   private dispatchFrame(frame: DecodedFrame): void {
     // Track seq for ALL sequenced frames, ACK_RES and the closing ones too; otherwise reconciles under-report lastSeq.
-    if (isSequencedFrame(frame) && this.trackSeq(frame.index, frame.seq) === 'dup') return
-    if (frame.tag === TAG.WINDOW) this.serverHasThrough(frame.index, frame.lastSeq)
+    if (isSequencedFrame(frame)) {
+      frame.seq = seqNear(frame.seq, (this.lastSeqByChannel.get(frame.index) ?? 0) + 1)
+      if (this.trackSeq(frame.index, frame.seq) === 'dup') return
+    }
+    if (frame.tag === TAG.WINDOW) this.serverHasThrough(frame.index, this.sentThrough(frame.index, frame.lastSeq))
     // Connection-level + channel-termination ctrls and ATTACH_RESULT stay here; they involve connection
     // bookkeeping (upgrade state, channel release, TTL). Everything else is per-channel and goes through
     // `channel._dispatchFrame`.
@@ -889,7 +896,10 @@ class ClientConnection implements MuxConnection {
         this.handleReconciled(frame.payload)
         return
       case TAG.ATTACH_RESULT:
-        this.handleAttachResult(frame.index, frame.lastSeq)
+        this.handleAttachResult(
+          frame.index,
+          frame.lastSeq === null ? null : this.sentThrough(frame.index, frame.lastSeq),
+        )
         return
       case TAG.ABORT:
         this.closeRemoteChannel(frame.index, makeAbortError(parse(frame.abortValue)))
@@ -1016,8 +1026,13 @@ class ClientConnection implements MuxConnection {
       const entry = this.channels.get(ix)
       if (entry === undefined || entry.state.tag !== 'closed') continue
       if (lastSeq === null) this.releaseChannel(ix, entry.channel)
-      else this.serverHas(ix, entry.state, lastSeq)
+      else this.serverHas(ix, entry.state, this.sentThrough(ix, lastSeq))
     }
+  }
+
+  /** The wire carries a seq's low 32 bits: the server's acknowledgement is the latest seq with them the page sent. */
+  private sentThrough(ix: number, lastSeq: number): number {
+    return seqThrough(lastSeq, this.replayBuffers.get(ix)?.seq ?? 0)
   }
 
   /** A closed channel the server attached has what the page sent on it through `lastSeq`. */
@@ -1777,7 +1792,7 @@ class WsTransport implements UpgradeTarget {
       const raw = new Uint8Array(data as ArrayBuffer)
       let frame: DecodedFrame
       try {
-        frame = decode(raw, this.owner.seqs)
+        frame = decode(raw)
       } catch {
         ws.close()
         return
@@ -1915,7 +1930,7 @@ class WsTransport implements UpgradeTarget {
       const raw = new Uint8Array(data as ArrayBuffer)
       let frame: DecodedFrame
       try {
-        frame = decode(raw, this.owner.seqs)
+        frame = decode(raw)
       } catch {
         ws.close()
         return
@@ -2232,7 +2247,7 @@ class SseTransport implements UpgradeSource {
             resolveHandshakeOk()
             continue
           }
-          const frame = decode(raw, this.owner.seqs)
+          const frame = decode(raw)
           this.heartbeat?.noteReceived()
           if (frame.tag === TAG.PONG) {
             this.heartbeat?.resetPong()

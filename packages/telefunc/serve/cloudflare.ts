@@ -67,7 +67,8 @@ type StoredShardToken = {
 type ServeInput = {
   request: Request
   env: Cloudflare.Env
-  ctx: ExecutionContext
+  /** Accepted, but not read: serve() keeps no work running past its response. */
+  ctx?: ExecutionContext
 }
 
 interface TelefuncServe {

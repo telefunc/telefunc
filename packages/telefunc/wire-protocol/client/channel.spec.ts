@@ -12,13 +12,9 @@ import {
   encodePublishText,
   type AckResultStatus,
   type ChannelFrame,
-  type SeqReader,
 } from '../shared-ws.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { getSessionUrl } from './session-registry.js'
-
-/** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
-const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
 const broadcasts: ClientBroadcast[] = []
 const channels: ClientChannel<never, string>[] = []
@@ -209,7 +205,7 @@ test('a broadcast delivers each publish with the seq its key was given, to text 
       n % 2 === 0
         ? encode.publish(0, encodePublishText('"x"', info), n + 1)
         : encode.publishBinary(0, encodePublishBinary(new Uint8Array([1]), info), n + 1)
-    broadcast._dispatchFrame(decode(frame, wireSeqs) as ChannelFrame)
+    broadcast._dispatchFrame(decode(frame) as ChannelFrame)
   }
   expect(seen).toEqual(seqs)
 })
@@ -238,9 +234,7 @@ test("a broadcast's toggles after close() send nothing, so none can hold its cha
 test('a broadcast subscribes the page to a kind with its first listener, and unsubscribes it with the last', () => {
   const broadcast = stalledBroadcast()
   broadcast.subscribeBinary(() => {})()
-  const frames = (broadcast as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) =>
-    decode(frame, wireSeqs),
-  )
+  const frames = (broadcast as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) => decode(frame))
   expect(frames).toMatchObject([
     { tag: TAG.BROADCAST_SUB, binary: true },
     { tag: TAG.BROADCAST_UNSUB, binary: true },
