@@ -476,9 +476,7 @@ class ChannelMux {
     // One for a channel the wire awaits is held for after its attach, and stays in the recv backlog until then.
     const awaited = entry.state.awaited.get(channelFrame.index)
     if (awaited && awaited.phase !== 'expired') {
-      awaited.held.push({ frame: channelFrame, bytes: rawFrame.byteLength })
-      entry.state.recvBacklogBytes += rawFrame.byteLength
-      entry.state.recvBacklogFrames++
+      this.hold(awaited, channelFrame, rawFrame.byteLength)
       return null
     }
     this.dispatchChannelFrame(sessionId, channelFrame)
@@ -804,16 +802,14 @@ class ChannelMux {
       this.terminateWire(wire)
       return false
     } finally {
-      this.chargeHeld(awaited, -1)
-      awaited.held = []
+      this.dropHeld(awaited)
     }
   }
 
   /** Not registered within `connectTtl`, or shut down as it registered. */
   private expireAwaited(awaited: AwaitedChannel): void {
     awaited.phase = 'expired'
-    this.chargeHeld(awaited, -1)
-    awaited.held = []
+    this.dropHeld(awaited)
     this.send(awaited.wire, encode.attachResult(awaited.entry.ix, null))
   }
 
@@ -821,17 +817,23 @@ class ChannelMux {
    *  session, which ended it. */
   private forgetAwaited(state: ConnectionState, ix: number, awaited: AwaitedChannel): void {
     awaited.stopWaiting()
-    this.chargeHeld(awaited, -1)
-    awaited.held = []
+    this.dropHeld(awaited)
     state.awaited.delete(ix)
   }
 
   /** What a wire holds counts against its recv backlog. */
-  private chargeHeld(awaited: AwaitedChannel, sign: 1 | -1): void {
+  private hold(awaited: AwaitedChannel, frame: ChannelFrame, bytes: number): void {
+    awaited.held.push({ frame, bytes })
+    awaited.conn.state.recvBacklogBytes += bytes
+    awaited.conn.state.recvBacklogFrames++
+  }
+
+  private dropHeld(awaited: AwaitedChannel): void {
     for (const { bytes } of awaited.held) {
-      awaited.conn.state.recvBacklogBytes += sign * bytes
-      awaited.conn.state.recvBacklogFrames += sign
+      awaited.conn.state.recvBacklogBytes -= bytes
+      awaited.conn.state.recvBacklogFrames--
     }
+    awaited.held = []
   }
 
   /** A channel the old wire awaits moves with the barrier listing it, so the WebSocket awaits it from then on. One
@@ -850,10 +852,11 @@ class ChannelMux {
         continue
       }
       oldEntry.state.awaited.delete(entry.ix)
-      this.chargeHeld(awaited, -1)
+      const { held } = awaited
+      this.dropHeld(awaited)
       awaited.conn = wsEntry
       awaited.wire = wsConnection
-      this.chargeHeld(awaited, 1)
+      for (const { frame, bytes } of held) this.hold(awaited, frame, bytes)
       wsEntry.state.awaited.set(entry.ix, awaited)
     }
   }
