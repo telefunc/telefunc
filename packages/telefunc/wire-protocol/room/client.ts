@@ -353,6 +353,10 @@ abstract class ClientParticipantBase extends ParticipantBase {
   // Messaging is often fire-and-forget: a usage error throws, and a failure is a rejection left handled.
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
+    assertUsage(
+      options?.retain === undefined || typeof options.retain === 'boolean',
+      'publish() options.retain should be a boolean',
+    )
     const key = options?.coalesce
     if (key === undefined) return markHandled(this._sendPublish(data, options?.retain))
     return markHandled(

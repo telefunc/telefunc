@@ -60,6 +60,10 @@ const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
 function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
   assertKnownOptions(opts, ['track', 'meta', 'retain'], 'publishBinary()')
+  assertUsage(
+    opts?.retain === undefined || typeof opts.retain === 'boolean',
+    'publishBinary() options.retain should be a boolean',
+  )
   const idBytes = uuidToBytes(memberId)
   let flags = opts?.retain === true ? FRAME_FLAG_RETAIN : 0
   let trackBytes: Uint8Array | null = null

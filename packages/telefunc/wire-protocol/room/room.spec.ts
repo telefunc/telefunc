@@ -1695,6 +1695,10 @@ describe('Room public behavior', () => {
       [() => room.join({ selfDelivery: 0 } as never), 'join() options.selfDelivery should be a boolean'],
       [() => me.publish('kept', { retain: 1 } as never), 'publish() options.retain should be a boolean'],
       [
+        () => me.publishBinary(new Uint8Array([1]), { retain: 'yes' } as never),
+        'publishBinary() options.retain should be a boolean',
+      ],
+      [
         () => Room.removeParticipant(room.id, 'member-id' as never),
         'The participant ref should be { id } or { identity }',
       ],
@@ -3072,6 +3076,11 @@ describe('client Room lifecycle', () => {
       [() => client.getParticipants({ all: true } as never), 'Unknown getParticipants() option: all'],
       [() => me.publish('x', { persist: true } as never), 'Unknown publish() option: persist'],
       [() => me.send(id, 'x', { confirm: true } as never), 'Unknown send() option: confirm'],
+      [() => me.publish('x', { retain: 1 } as never), 'publish() options.retain should be a boolean'],
+      [
+        () => me.publishBinary(new Uint8Array([1]), { retain: 1 } as never),
+        'publishBinary() options.retain should be a boolean',
+      ],
     ]
     for (const [call, message] of calls) await expect(Promise.resolve().then(call)).rejects.toThrow(message)
     await me.send(id, 'fire and forget')
