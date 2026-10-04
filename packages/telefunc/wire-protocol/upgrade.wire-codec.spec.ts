@@ -26,7 +26,7 @@ import {
 /** A receiver with nothing of any channel: each seq reads as its low 32 bits. */
 const wireSeqs: SeqReader = { received: () => 0, sent: () => 0 }
 
-const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024, wireSeqs)
+const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024)
 const hostile = (build: (payload: never) => Uint8Array<ArrayBuffer>, payload: unknown) => build(payload as never)
 const goodOpen = [{ id: 'A', ix: 0, lastSeq: 1 }]
 const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload => ({
@@ -129,7 +129,7 @@ describe('upgrade wire vocabulary', () => {
     // that refuses the largest legal barrier would fail every client that hit the entry cap.
     expect(encoded.byteLength).toBeGreaterThan(MAX_CHANNELS_PER_CONNECTION * UPGRADE_MAX_ID_BYTES)
     expect(encoded.byteLength).toBeLessThanOrEqual(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
-    expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES, wireSeqs)).toEqual({
+    expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toEqual({
       tag: TAG.BARRIER,
       payload: max,
     })
@@ -195,12 +195,10 @@ describe('decodeClientFrame — hostile schemas', () => {
     // be the parser's ('payload is not JSON'); naming the cap proves nothing parsed it.
     const oversize = new Uint8Array(WIRE_MAX_CONN_CTRL_FRAME_BYTES + 1) as Uint8Array<ArrayBuffer>
     oversize[0] = TAG.BARRIER
-    expect(() => decodeClientFrame(oversize, WIRE_MAX_CONN_CTRL_FRAME_BYTES, wireSeqs)).toThrow(
-      'upgrade frame over byte cap',
-    )
+    expect(() => decodeClientFrame(oversize, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toThrow('upgrade frame over byte cap')
 
     const legal = encode.barrier({ sessionId: 's', upgradeId: 'u', open: goodOpen })
-    expect(decodeClientFrame(legal, WIRE_MAX_CONN_CTRL_FRAME_BYTES, wireSeqs).tag).toBe(TAG.BARRIER)
+    expect(decodeClientFrame(legal, WIRE_MAX_CONN_CTRL_FRAME_BYTES).tag).toBe(TAG.BARRIER)
   })
 
   const nonObjects: [string, unknown][] = [

@@ -48,6 +48,8 @@ import {
   countsCredit,
   isChannelCtrlTag,
   isSequencedFrame,
+  seqNear,
+  seqThrough,
 } from '../shared-ws.js'
 import type {
   AckResultStatus,
@@ -433,10 +435,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
    *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
   _dispatchFrame(frame: ChannelFrame): void {
-    // The page's closing frames are sequenced with its data, so a replay repeats none of them.
-    if (isSequencedFrame(frame) && frame.seq) {
-      if (frame.seq <= this._lastClientSeq) return
-      this._lastClientSeq = frame.seq
+    // The page's closing frames are sequenced with its data, so a replay repeats none of them. The wire carries a seq's
+    // low 32 bits, read here as the whole from the next one this channel expects.
+    if (isSequencedFrame(frame)) {
+      frame.seq = seqNear(frame.seq, this._lastClientSeq + 1)
+      if (frame.seq) {
+        if (frame.seq <= this._lastClientSeq) return
+        this._lastClientSeq = frame.seq
+      }
     }
     // An ended channel keeps only how far the page's frames reached it.
     if (this._didShutdown) return
@@ -493,7 +499,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       case TAG.WINDOW:
         this._flow.onPeerByteWindow(frame.bytes)
-        this._onPageHas(frame.lastSeq)
+        this._onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
         return
       case TAG.MSG_WINDOW:
         this._flow.onPeerMessageWindow(frame.count)
