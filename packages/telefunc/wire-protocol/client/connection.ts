@@ -52,7 +52,7 @@ import type {
   ReconciledPayload,
   SeqReader,
 } from '../shared-ws.js'
-import { encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
+import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 
@@ -174,6 +174,8 @@ interface MuxChannel {
   /** `wire` numbers the connection's wire: the number of the channel's last attach means that same wire, which lost
    *  nothing. */
   _onTransportOpen(batched: boolean, wire: number): void
+  /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
+  _onTransportBatched?(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
@@ -851,6 +853,13 @@ class ClientConnection implements MuxConnection {
       this.drainBufferedFramesToWire()
     }
     this.maybeStartUpgrade()
+  }
+
+  /** The wire's upload falls back to batch POSTs, which a channel may have opened before: see `_onTransportOpen`'s
+   *  `batched`. */
+  _onTransportBatched(transport: ClientChannelTransport): void {
+    if (transport !== this.transport) return
+    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._onTransportBatched?.()
   }
 
   _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): void {
@@ -2001,6 +2010,9 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
+/** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
+const SSE_FOLD_BYTES = 1024 * 1024
+
 class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
@@ -2022,6 +2034,10 @@ class SseTransport implements UpgradeSource {
     void this.flushOutbox()
   })
   private flushing = false
+  /** Bytes pushed to the outbox since `foldOutbox` last folded: when to fold, not what. */
+  private unfolded = 0
+  /** The next POST's body, as far as `foldOutbox` built it. */
+  private folded: { blob: Blob; count: number; first: OutboxEntry; last: OutboxEntry } | null = null
   private lastPostStartedAt = 0
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
@@ -2113,8 +2129,32 @@ class SseTransport implements UpgradeSource {
     const now = Date.now()
     const deadline = this.getFrameDeadline(frame.kind, now)
     this.outbox.push({ frame: frame.frame, deadline })
+    this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
+    if (this.flushing) this.foldOutbox()
     this.scheduleFlush()
     if (deadline <= now) void this.flushOutbox()
+  }
+
+  /** While a POST is out, what joins the outbox goes into the next one's body a MiB at a time, so the flush after the
+   *  answer copies only the rest. Held with the first and last entries it covers: the outbox only grows at its end, or
+   *  is replaced or prepended to, which changes its first entry. */
+  private foldOutbox(): void {
+    const folded = this.folded
+    const valid = folded !== null && this.outbox[0] === folded.first && this.outbox[folded.count - 1] === folded.last
+    if (this.unfolded < SSE_FOLD_BYTES) return
+    this.unfolded = 0
+    const from = valid ? folded.count : 0
+    const parts: (Blob | Uint8Array<ArrayBuffer>)[] = valid ? [folded.blob] : []
+    for (let i = from; i < this.outbox.length; i++) {
+      const { frame } = this.outbox[i]!
+      parts.push(encodeU32(frame.byteLength), frame)
+    }
+    this.folded = {
+      blob: new Blob(parts),
+      count: this.outbox.length,
+      first: this.outbox[0]!,
+      last: this.outbox[this.outbox.length - 1]!,
+    }
   }
 
   private async openStream(): Promise<void> {
@@ -2240,6 +2280,7 @@ class SseTransport implements UpgradeSource {
         this.closeStreamRequest()
         this.streamRequest = { tag: 'failed' }
         if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
+        this.owner._onTransportBatched(this)
       }
     }
 
@@ -2282,14 +2323,19 @@ class SseTransport implements UpgradeSource {
     try {
       const now = Date.now()
       const queued = this.outbox.splice(0, this.outbox.length)
+      const folded = this.folded
+      this.folded = null
+      const head =
+        folded !== null && queued[0] === folded.first && queued[folded.count - 1] === folded.last ? folded : null
       this.lastPostStartedAt = now
       const wire = this.transportAbort
 
       try {
         const response = await this.post(
-          encodeSseRequest(
+          encodeSseBatch(
             { connId: this.connId },
-            encodeLengthPrefixedFrames(queued, (entry) => entry.frame),
+            queued.slice(head?.count ?? 0).map((entry) => entry.frame),
+            head?.blob,
           ),
           wire.signal,
         )
@@ -2386,10 +2432,9 @@ class SseTransport implements UpgradeSource {
       case 'flow-control':
       case 'ack':
       case 'data':
-        return (
-          now +
-          (now - this.lastPostStartedAt >= this.flushThrottleMs ? this.postIdleFlushDelayMs : this.flushThrottleMs)
-        )
+        // A throttle after the last POST started, not after this frame: a frame that comes as that POST's credit
+        // returns would otherwise hold the next POST a throttle past it.
+        return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
     }
   }
 
@@ -2454,6 +2499,7 @@ class SseTransport implements UpgradeSource {
     }
     this.flushScheduler.cancel()
     this.outbox = []
+    this.folded = null
     this.closeStreamRequest()
     this.transportAbort?.abort()
     this.transportAbort = null
