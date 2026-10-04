@@ -973,8 +973,8 @@ class ClientConnection implements MuxConnection {
     else this.installHeartbeat(transport, CHANNEL_PING_INTERVAL_MIN_MS, true)
   }
 
-  /** Idempotent. Detaches first either way so a fresh install can never leak the prior. A provisional one leaves the
-   *  server's interval unknown, and the next install replaces it. */
+  /** Idempotent once a RECONCILED set the interval. Detaches first either way so a fresh install can never leak the
+   *  prior. A provisional one leaves the server's interval unknown, and the next install replaces it. */
   private installHeartbeat(transport: ClientChannelTransport, intervalMs: number, provisional = false): void {
     if (transport.hasHeartbeat() && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs) return
     transport.detachHeartbeat()
