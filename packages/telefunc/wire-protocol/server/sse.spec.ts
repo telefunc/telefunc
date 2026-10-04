@@ -133,6 +133,31 @@ test.each([
   },
 )
 
+test('a POST for a wire the server has closed is refused at once, so the page reconnects rather than wait out connectTtl', async () => {
+  vi.useFakeTimers()
+  try {
+    const sse = getTelefuncSseChannelHooks()
+    const connId = crypto.randomUUID()
+    const downstream = openPost({ connId, streamResponse: true })
+    const response = await sse.handleRequest(downstream.request)
+    downstream.push(encode.reconcile({ open: [] }))
+    downstream.end()
+    await vi.advanceTimersByTimeAsync(10)
+    // The page's event stream ends, as when the server cut the wire.
+    await (response!.body as ReadableStream<Uint8Array>).cancel()
+    expect(getChannelMux().getConnectionByConnId(connId)).toBeUndefined()
+    const batch = openPost({ connId })
+    batch.push(encode.ping())
+    batch.end()
+    let answered: number | undefined
+    void sse.handleRequest(batch.request).then((answer) => void (answered = answer!.statusCode))
+    await vi.advanceTimersByTimeAsync(10)
+    expect(answered).toBe(400)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
 /** An SSE wire whose page has one channel attached, which counts what reaches its listener. */
 async function reconciledSseWire() {
   const sse = getTelefuncSseChannelHooks()

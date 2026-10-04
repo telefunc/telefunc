@@ -44,6 +44,9 @@ type SseConnection = {
 
 const sseOpenComment = textEncoder.encode(': open\n\n')
 
+/** The most wires closed within `connectTtl` whose POSTs are refused at once (see `closedAt`). */
+const CLOSED_CONN_IDS_MAX = 10_000
+
 const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
   defaultHooks: null as ReturnType<typeof getTelefuncSseChannelHooks> | null,
 })
@@ -53,6 +56,9 @@ class SseConnectionTransport {
    *  connection — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
+  /** When each wire closed, oldest first, for `connectTtl`: a page opens each wire under a new connId, so a POST for
+   *  one of these comes from a page that hasn't seen its wire end yet, and is refused rather than held. */
+  private readonly closedAt = new Map<string, number>()
   /** Per use: a Cloudflare session DO hosts its own channels, and this transport serves every one in the isolate. */
   private get mux(): ChannelMux {
     return getChannelMux()
@@ -250,7 +256,19 @@ class SseConnectionTransport {
   }
 
   private async resolveConnection(connId: string): Promise<SseConnection | null> {
-    return this.mux.getConnectionByConnId<SseConnection>(connId) ?? (await this.waitForConnection(connId))
+    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
+    if (connection) return connection
+    if (this.closedAt.has(connId)) return null
+    return await this.waitForConnection(connId)
+  }
+
+  private rememberClosed(connId: string): void {
+    const now = performance.now()
+    for (const [closed, at] of this.closedAt) {
+      if (now - at < this.mux.connectTtl && this.closedAt.size < CLOSED_CONN_IDS_MAX) break
+      this.closedAt.delete(closed)
+    }
+    this.closedAt.set(connId, now)
   }
 
   /** Mirrors `ChannelMux.waitForChannelRegistration`: the timeout path must remove the
@@ -311,6 +329,7 @@ class SseConnectionTransport {
   private closeConnection(connection: SseConnection, { permanent }: { permanent: boolean }): void {
     if (connection.closed) return
     connection.closed = true
+    this.rememberClosed(connection.connId)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
     connection.resolveReady()
     this.mux.onConnectionClosed(connection, { permanent })
