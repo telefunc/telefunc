@@ -972,17 +972,42 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     expect(held()).toEqual([])
   })
 
+  test("a page's RECONCILE leaves out a closed channel the server has all of, before a PING lets it go", async () => {
+    const { net, channel } = page(wire)
+    const server = register()
+    server.onClose(() => new Promise<void>(() => {})) // its end stays, so it answers a PING about the page's end
+    const pageChannel = channel(server.id)
+    channel(register().id) // another channel on the page
+    const connection = (pageChannel as any)._connection
+    await advance(500)
+    const ix = connection.channelIndex.get(pageChannel)
+    void pageChannel.close()
+    await advance(100)
+    let listed: number[] = []
+    net.whenPageSends(TAG.RECONCILE, (frame) => {
+      const reconcile = decode(frame as Uint8Array<ArrayBuffer>, wireSeqs)
+      if (reconcile.tag === TAG.RECONCILE) listed = reconcile.payload.open.map((entry) => entry.ix)
+    })
+    // The PONG that tells the page the server has all of the closed channel, then a registration before the next PING.
+    net.whenPageGets(TAG.PONG, () => void setTimeout(() => channel(register().id), 0))
+    await advance(1_000)
+    expect(listed.length).toBeGreaterThan(0)
+    expect(listed).not.toContain(ix)
+  })
+
   test('a page whose last channel closed goes away with its wire once the server has all it sent, and reconnects for it before', async () => {
     const { net, channel } = page(wire)
     const server = register()
+    server.onClose(() => new Promise<void>(() => {})) // its end stays, so it answers a PING about the page's end
     const pageChannel = channel(server.id)
-    const connection = (pageChannel as unknown as { _connection: { closed: boolean } })._connection
+    const connection = (pageChannel as any)._connection
     await advance(500)
     void pageChannel.close()
-    await advance(1_500) // a ping round trip
+    await advance(100)
+    // The PONG that tells the page the server has all of the closed channel, then its wire ends before the next PING.
+    net.whenPageGets(TAG.PONG, () => void setTimeout(() => connection.dropWire(connection.transport), 0))
     let reconciles = 0
     net.whenPageSends(TAG.RECONCILE, () => reconciles++)
-    net.die()
     await advance(5_000)
     expect(reconciles).toBe(0)
     expect(connection.closed).toBe(true)
