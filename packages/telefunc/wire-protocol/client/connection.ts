@@ -1513,9 +1513,9 @@ class ClientConnection implements MuxConnection {
     // replay buffers. Every other reconcile is on a live wire: a first attempt has sent nothing yet, and a
     // reconcile on an established wire (new-channel registration, chained reconcile) has no
     // in-transit replay frame to jump ahead of — so eager-batch, it saves a round-trip.
-    // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     const sentBefore = [...this.replayBuffers.values()].some((replay) => replay.length > 0)
     if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
+    // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     for (const { channelIx, seq } of this.sendBuffer)
       if (seq !== undefined && this.isSendable(channelIx) && !this.carriedFrom.has(channelIx))
         this.carriedFrom.set(channelIx, seq)
