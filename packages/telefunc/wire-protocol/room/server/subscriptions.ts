@@ -19,7 +19,7 @@ import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey } from './replay.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
-import { reapAndReadRoster, renewMemberLease, renewView } from './membership.js'
+import { reapAndReadRoster, renewMemberLease } from './membership.js'
 import { maintainHold } from './lifecycle.js'
 assertIsNotBrowser()
 
@@ -47,7 +47,7 @@ type SubscriptionHost = {
   _wantsBinary(member: string, track: string): boolean
   /** A pending admission owns its inbox, but its record is renewed only once it commits. */
   _ownedMembers(): { all: string[]; renewable: string[] }
-  _ownedViews(): string[]
+  _renewViews(): Promise<void>[]
   _onCtrlMessage(serialized: string, info: WirePublishInfo): void
   _onTextData(serialized: string, info: WirePublishInfo): void
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
@@ -306,7 +306,7 @@ class RoomSubscriptions {
       let renewalFailure: { error: unknown } | null = null
       const renewals = [
         ...host._ownedMembers().renewable.map((id) => () => renewMemberLease(host.id, host._inc, id)),
-        ...host._ownedViews().map((id) => () => renewView(host.id, host._inc, id)),
+        ...host._renewViews().map((renewed) => () => renewed),
       ]
       for (const renew of renewals) {
         try {

@@ -84,8 +84,8 @@ import { reportRoomError } from './errors.js'
 import { reconnectWindow, reportServerChannelError } from '../../server/channel.js'
 import {
   createMember,
-  createView,
   evictMember,
+  holdView,
   reapAndReadMembersById,
   removeView,
   updateMemberRecord,
@@ -140,7 +140,7 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal */ readonly _state: RoomState
   private readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
-  /** Each stub's view record, written as it attaches; its removal waits for it. */
+  /** Each stub's latest view write, from its attach or a renewal; its removal comes after it. */
   private readonly _views = new Map<RoomStubChannel, Promise<void>>()
   /** Stubs whose first roster read failed: the next successful refresh sends them one. */
   private readonly _rosterOwed = new Set<RoomStubChannel>()
@@ -712,7 +712,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
-    this._views.set(stub, createView(this.id, this._inc, stub.id).catch(reportRoomError))
+    this._views.set(stub, holdView(this.id, this._inc, stub.id).catch(reportRoomError))
     if (this._tail !== null) {
       stub._beginTail(this._tail.take(), () => this._subs.replan())
       this._tail = null
@@ -841,9 +841,16 @@ class ServerRoom extends RoomStateView implements Room {
     return { all: false, members }
   }
 
-  /** @internal The views of this instance's stubs. */
-  _ownedViews(): string[] {
-    return [...this._stubs].map((stub) => stub.id)
+  /** @internal Renews each stub's view after its previous write; the caller reports a failure. */
+  _renewViews(): Promise<void>[] {
+    return [...this._views].map(([stub, previous]) => {
+      const renewed = previous.then(() => holdView(this.id, this._inc, stub.id))
+      this._views.set(
+        stub,
+        renewed.catch(() => {}),
+      )
+      return renewed
+    })
   }
 
   /** @internal */

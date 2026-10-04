@@ -1,7 +1,6 @@
 export {
   createHold,
-  createView,
-  renewView,
+  holdView,
   removeView,
   createMember,
   updateMemberRecord,
@@ -92,25 +91,17 @@ async function createMember(roomId: string, inc: string, id: string, record: Roo
   afterHoldChange(roomId, inc, hold)
 }
 
-/** A page's view holds the room; a room without a hold record keeps none. */
-async function createView(roomId: string, inc: string, id: string): Promise<void> {
+/** Writes or renews a page's view, which holds the room; a room without a hold record keeps none. A renewal also
+ *  restores a view whose write failed or that was reaped while its page held on. */
+async function holdView(roomId: string, inc: string, id: string): Promise<void> {
   const key = viewCellKey(id)
   const hold = await mutateCells(roomId, inc, { keys: [key, HOLD_CELL_KEY] }, (cells) => {
-    const hold = cells.has(key) ? null : countHold(cells, 1)
+    const hold = countHold(cells, 1)
     if (hold === null) return { value: null, mutations: [] }
-    const view: ViewRecord = { seenAt: Date.now() }
-    return { value: hold, mutations: [{ key, bytes: encodeRoomRecord(view) }, hold.mutation] }
+    const view = { key, bytes: encodeRoomRecord({ seenAt: Date.now() } satisfies ViewRecord) }
+    return cells.has(key) ? { value: null, mutations: [view] } : { value: hold, mutations: [view, hold.mutation] }
   })
   afterHoldChange(roomId, inc, hold)
-}
-
-async function renewView(roomId: string, inc: string, id: string): Promise<void> {
-  const key = viewCellKey(id)
-  const view: ViewRecord = { seenAt: Date.now() }
-  await mutateCells(roomId, inc, { keys: [key] }, (cells) => ({
-    value: undefined,
-    mutations: cells.has(key) ? [{ key, bytes: encodeRoomRecord(view) }] : [],
-  }))
 }
 
 /** With `onlyIfLapsed`, a view renewed meanwhile stays. */

@@ -57,7 +57,7 @@ import {
 import { ServerRoom } from './room.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
-import { creationBackstopMs, newHoldRecord } from './lifecycle.js'
+import { creationLapseMs, newHoldRecord } from './lifecycle.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
@@ -179,7 +179,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       inc: crypto.randomUUID(),
     }
     const hold = newHoldRecord(emptyTimeout, departureTimeout)
-    const ttlMs = creationBackstopMs(hold)
+    const ttlMs = creationLapseMs(hold)
     const result = await backend.compareExchangeHead(
       id,
       current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },

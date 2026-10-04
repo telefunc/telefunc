@@ -1,8 +1,8 @@
-export { newHoldRecord, countHold, afterHoldChange, scheduleClose, maintainHold, creationBackstopMs }
+export { newHoldRecord, countHold, afterHoldChange, scheduleClose, maintainHold, creationLapseMs }
 export type { HoldRecord, HoldChange }
 
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
-// which every holder keeps ahead, removes it if that server is gone.
+// which every heartbeat on the room keeps ahead, removes it if no server is left to.
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
@@ -76,7 +76,7 @@ async function maintainHold(roomId: string, inc: string): Promise<void> {
 }
 
 /** A new room's head lapses just past its close, or never for a room nobody's absence closes. */
-function creationBackstopMs(record: HoldRecord | null): number | undefined {
+function creationLapseMs(record: HoldRecord | null): number | undefined {
   return record?.closesAt === undefined ? undefined : record.closesAt - Date.now() + ROOM_LAPSE_AFTER_CLOSE_MS
 }
 
