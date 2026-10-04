@@ -1,7 +1,7 @@
 export { superviseBroadcastDriver }
 
-import { ChannelOverflowError } from '../../channel-errors.js'
 import { SubscriptionManager } from '../subscription-manager.js'
+import { heldSendWeight } from '../held-send-weight.js'
 import type { BroadcastBackend, BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from './contract.js'
 import type { BackendPayload, BackendReceiver } from '../subscription.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
@@ -10,19 +10,10 @@ import { assertDriverPosition } from '../driver-position.js'
 import { assert } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
-import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 function checked(result: PublishResult): PublishResult {
   assertDriverPosition(result)
   return result
-}
-
-const PENDING_PUBLISH_LIMIT = 1024
-
-/** A held publish is bounded like a channel's buffered sends; read only then, as resolving the config is costly. */
-function heldByteLimit(kind: BroadcastRoute['kind']): number {
-  const { channel } = getServerConfig()
-  return kind === 'binary' ? channel.bufferLimitBinary : channel.bufferLimit
 }
 
 /** A text route carries a string, a binary route bytes. */
@@ -57,12 +48,11 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
           { key, kind: 'text' },
           { key, kind: 'binary' },
         ],
-        weight: {
-          class: kind,
-          bytes: () => (typeof owned === 'string' ? utf8ByteLength(owned) : owned.byteLength),
-          fits: (sends, bytes) => sends <= PENDING_PUBLISH_LIMIT && bytes <= heldByteLimit(kind),
-          overflow: () => new ChannelOverflowError('Broadcast readiness buffer overflow'),
-        },
+        weight: heldSendWeight(
+          kind,
+          () => (typeof owned === 'string' ? utf8ByteLength(owned) : owned.byteLength),
+          'Broadcast',
+        ),
       }),
     )
   }

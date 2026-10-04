@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ChannelClosedError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
@@ -39,7 +39,7 @@ import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
 import { decodeBinaryWants } from './server/requests.js'
-import { config } from '../../node/server/serverConfig.js'
+import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
@@ -735,6 +735,26 @@ describe('Room public behavior', () => {
     release()
     await publishing
     await vi.waitFor(() => expect(received).toEqual(['first']))
+  })
+  it("refuses a publish held behind this instance's establishing lane past 1,024 of them, or past bufferLimit bytes, with ChannelOverflowError", async () => {
+    const room = (await Room.create('establishing-bound')) as ServerRoom
+    const member = await room.join()
+    const release = delayDriverLane((lane) => lane.kind === 'semantic')
+    room.subscribe(() => {})
+    const held = Array.from({ length: 1_024 }, (_, n) => member.publish(n))
+    const pastCount = captureOutcome(member.publish('one more'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(pastCount.value).toBeInstanceOf(ChannelOverflowError)
+    release()
+    await Promise.all(held)
+    const release2 = delayDriverLane((lane) => lane.kind === 'binary')
+    room.subscribeBinary(() => {})
+    const pastBytes = captureOutcome(
+      member.publishBinary(new Uint8Array(getServerConfig().channel.bufferLimitBinary + 1)),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(pastBytes.value).toBeInstanceOf(ChannelOverflowError)
+    release2()
   })
   it('reads authority while the control subscription is establishing', async () => {
     const authority = await Room.create('establishing-roster')

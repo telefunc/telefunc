@@ -1,6 +1,7 @@
 export { superviseRoomDriver }
 
 import { SubscriptionManager } from '../subscription-manager.js'
+import { heldSendWeight } from '../held-send-weight.js'
 import type { HeadNext, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import type { BackendPayload, BackendReceiver } from '../subscription.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
@@ -39,7 +40,11 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
       const commit = () => driver.commitLane(roomId, inc, lane, payload, opts)
       // A close commits under its lease, which would lapse before the hold ends.
       const result = await (opts?.closingLease === undefined
-        ? subscriptions.afterEstablished(commit, () => ({ key: roomSubscriptionSourceKey(source), sources: [source] }))
+        ? subscriptions.afterEstablished(commit, () => ({
+            key: roomSubscriptionSourceKey(source),
+            sources: [source],
+            weight: heldSendWeight(lane.kind === 'binary' ? 'binary' : 'text', () => payload.byteLength, 'Room'),
+          }))
         : commit())
       if ('accepted' in result) assertDriverPosition(result)
       return result
