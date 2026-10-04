@@ -307,9 +307,28 @@ async function alarmScheduling(env: Env, suffix: string) {
   // A head naming another incarnation leaves the first one's generation orphaned.
   const next = { head: { currentInc: `${probe.inc}-next`, state: 'open' as const, config: head.config } }
   expectHead(await probe.authority.compareExchangeHead({ form: 'rev', rev: head.rev }, next), 'alarm reopen')
-  const afterReopen = (await probe.scheduledAlarm()) === null ? 'idle' : 'armed'
+  const retry = await probe.scheduledAlarm()
+  const afterReopen = retry === null ? 'idle' : 'armed'
+  // The orphan's sweep is due: a later route registration doesn't push its retry out.
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  const registration = await probe.authority.registerRoute({
+    roomId: probe.roomId,
+    inc: `${probe.inc}-next`,
+    laneKey: 'semantic',
+    sessionDoId: sessionId.toString(),
+    leaseId: `alarm-next-lease-${suffix}`,
+  })
+  if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
+  const retryKept = (await probe.scheduledAlarm()) === retry
+  await probe.authority.unsubscribeRoute({
+    roomId: probe.roomId,
+    inc: `${probe.inc}-next`,
+    laneKey: 'semantic',
+    sessionDoId: sessionId.toString(),
+    leaseId: `alarm-next-lease-${suffix}`,
+  })
   await probe.authority.fireAlarm()
-  return { idle, afterRoute, afterUnsubscribe, afterReopen, afterAlarm: await probe.scheduledAlarm() }
+  return { idle, afterRoute, afterUnsubscribe, afterReopen, retryKept, afterAlarm: await probe.scheduledAlarm() }
 }
 async function routeRenewal(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)

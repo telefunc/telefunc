@@ -41,12 +41,13 @@ test("a session's Room frames leave the authority without waiting on each other,
   })
 })
 
-test('a room authority arms its alarm while it holds a route or an orphaned generation, and clears it once they are gone', async () => {
+test('a room authority arms its alarm while it holds a route or an orphaned generation, keeps a due retry where a later call would push it, and clears it once they are gone', async () => {
   expect(await probe('/alarm-policy')).toEqual({
     idle: null,
     afterRoute: 'armed',
     afterUnsubscribe: null,
     afterReopen: 'armed',
+    retryKept: true,
     afterAlarm: null,
   })
 })
