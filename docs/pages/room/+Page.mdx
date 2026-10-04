@@ -286,6 +286,8 @@ A hidden participant is a full `LocalParticipant`: `publishBinary()`, `listen()`
 room.onEmpty(() => stopGameLoop(matchId)) // last player gone; the hidden authority doesn't hold the room open
 ```
 
+So the room then closes `departureTimeout` later, 20 seconds by default, and the authority leaves with `'closed'`; create the match with `Room.create(matchId, { departureTimeout: Infinity })` to keep it until `Room.close()` (see <Link href="#when-a-room-closes">When a room closes</Link>).
+
 Join as many as you need (a game authority, a moderation bot, a metrics sink), each with its own trusted `identity`. They are server-side only (a client `join({ hidden: true })` throws) and out of every client's presence, though what they publish room-wide still reaches every room-wide subscriber, with `from` (for binary, `from.id` only: see <Link href="#senders">Senders</Link>). Read them back on the server with `getParticipants({ hidden: true })`, keyed by `identity` (never `meta.role`). Hand a client the one it should talk to by returning it from the telefunction:
 
 ```js
