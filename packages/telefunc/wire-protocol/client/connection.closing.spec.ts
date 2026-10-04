@@ -972,6 +972,28 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     expect(held()).toEqual([])
   })
 
+  test('the server lets go of a channel its page closed with all the page sent acknowledged before the page named it in a PING', async () => {
+    const { net, channel } = page(wire)
+    net.rate.down = 1_024 // the server's frames take a few ms each to reach the page
+    const server = register<string, never>()
+    // Its end ends 1.5 s after the page's close, still attached when the page's next heartbeat acknowledges.
+    server.onClose(() => new Promise<void>((resolve) => setTimeout(resolve, 1_500)))
+    const pageChannel = channel<string, never>(server.id)
+    await advance(500)
+    // A last message and the close go 10 ms before a PING, which goes out before the close's acknowledgement reaches the
+    // page, and whose WINDOW tells the page the server has both before the page's next PING.
+    net.whenPageSends(
+      TAG.PING,
+      () =>
+        void setTimeout(() => {
+          void pageChannel.send('last', { ack: false })
+          void pageChannel.close()
+        }, 990),
+    )
+    await advance(4_000)
+    expect(getChannelMux()['channels'].has(server.id)).toBe(false)
+  })
+
   test("a page's RECONCILE leaves out a closed channel the server has all of, before a PING lets it go", async () => {
     const { net, channel } = page(wire)
     const server = register()
