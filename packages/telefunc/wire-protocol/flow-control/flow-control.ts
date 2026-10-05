@@ -38,7 +38,7 @@ function replayWindow(text: number, binary: number): number {
  *   3. **Self-utilisation gate**: `_recordSelfTime(ms)` accumulates this channel's
  *      sync work into a two-bucket rolling sum. Above `FC_SELF_UTIL_THRESHOLD`,
  *      `onPingAck` refuses to grow either window and `decrement` yields a
- *      macrotask before returning.
+ *      macrotask before returning, as it does once per `yieldBytes` sent.
  *
  * Limits are cumulative, as QUIC's MAX_DATA: the receiver advertises what it has consumed plus its window, and the
  * sender's credit is that limit minus what it has sent, so what is still in flight counts against it. Totals are exact
@@ -84,6 +84,8 @@ class FlowControl {
   /** A waiter was handed the credit and no send was counted since. */
   private _released = false
   private _releases = 0
+  /** Bytes sent since this side's sender last yielded or waited. */
+  private _unyieldedBytes = 0
   private _shutdown = false
   /** Since this side last answered a `BDP_PING`: whether its credit ran out, as more came or as the ping did, while its
    *  wire held nothing. */
@@ -95,10 +97,14 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  /** `backlog`: bytes the channel's wire holds that haven't gone out, `undefined` where the runtime can't tell. */
+  /** `backlog`: bytes the channel's wire holds that haven't gone out, `undefined` where the runtime can't tell.
+   *  `yieldBytes`: the sender yields a macrotask once it sent that many bytes since it last yielded or waited. A page
+   *  sets it: Chromium takes what a page queued on a WebSocket or an upload stream only between tasks, and woken by
+   *  credit, a page would send all of it in one. */
   constructor(
     private readonly _emit: FlowControlEmit,
     private readonly _backlog: () => number | undefined,
+    private readonly _yieldBytes = Infinity,
   ) {
     macrotaskYield.assertSupported()
   }
@@ -145,9 +151,9 @@ class FlowControl {
   }
 
   /** Sender-side: count one frame of `bytes` against credit. Returns `void` when
-   *  both credit axes have headroom, no other sender waits, AND our loop utilisation is below the gate.
-   *  Otherwise a Promise that resolves at the sender's turn with credit (credit-gated) or one
-   *  macrotask later (util-gated — single yield, no re-check). */
+   *  both credit axes have headroom, no other sender waits, AND our loop utilisation is below the gate, nor did the
+   *  sender send `yieldBytes` since it last yielded or waited. Otherwise a Promise that resolves at the
+   *  sender's turn with credit (credit-gated) or one macrotask later (util- or byte-gated — single yield, no re-check). */
   decrement(bytes: number): void | Promise<void> {
     this.countSent(bytes)
     this._released = false
@@ -156,7 +162,9 @@ class FlowControl {
       this._releaseOne()
       return this._waitForCredit()
     }
-    if (this._selfUtilisation() > FC_SELF_UTIL_THRESHOLD) {
+    this._unyieldedBytes += bytes
+    if (this._selfUtilisation() > FC_SELF_UTIL_THRESHOLD || this._unyieldedBytes >= this._yieldBytes) {
+      this._unyieldedBytes = 0
       return macrotaskYield.yield()
     }
   }
@@ -393,6 +401,7 @@ class FlowControl {
 
   private _waitForCredit(): Promise<void> {
     if (this._shutdown) return resolvedPromise
+    this._unyieldedBytes = 0
     return new Promise<void>((resolve) => this._waiters.push(resolve))
   }
 }

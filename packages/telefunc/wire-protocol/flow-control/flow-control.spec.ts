@@ -152,6 +152,33 @@ describe('FlowControl — sender-side credit', () => {
     expect(resolved).toEqual([true, true])
   })
 
+  it('a page yields a macrotask once per yieldBytes it sends, counted again from a yield or a wait for credit', async () => {
+    const flow = fitted(new FlowControl(makeEmit(), () => 0, 1000))
+    expect(flow.decrement(400)).toBeUndefined()
+    expect(flow.decrement(400)).toBeUndefined()
+    const resolved = watch([flow.decrement(400)])
+    await flushMicrotasks()
+    expect(resolved).toEqual([false])
+    await nextMacrotask()
+    await flushMicrotasks()
+    expect(resolved).toEqual([true])
+    expect(flow.decrement(400)).toBeUndefined()
+    expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)).toBeInstanceOf(Promise)
+    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
+    await flushMicrotasks()
+    expect(flow.decrement(400)).toBeUndefined()
+    expect(flow.decrement(400)).toBeUndefined()
+  })
+
+  // The server's sender writes to its socket as it sends: yielding cost its downloads.
+  it('a sender with no yieldBytes, a server, sends on without yielding, also after a wait for credit', async () => {
+    const { flow } = makeFlow()
+    expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)).toBeInstanceOf(Promise)
+    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
+    await flushMicrotasks()
+    for (let n = 0; n < 50; n++) expect(flow.decrement(64 * 1024)).toBeUndefined()
+  })
+
   it('a send within credit resolves at once while no other sender waits', () => {
     const { flow } = makeFlow()
     for (let n = 0; n < 10; n++) expect(flow.decrement(1024)).toBeUndefined()

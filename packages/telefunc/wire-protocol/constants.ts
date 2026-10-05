@@ -315,6 +315,9 @@ export const BDP_PING_MAX_INTERVAL_MS = 10_000
  *  pressure without lingering on stale history. */
 export const FC_SELF_TIME_WINDOW_MS = 1000
 
+/** How much a page's channel sends between macrotask yields, so its browser keeps the wire fed (see `FlowControl`). */
+export const FC_PAGE_YIELD_BYTES = 64 * 1024
+
 /** Self-utilisation threshold above which the flow-control sender yields a
  *  macrotask before its next send, and above which the receiver-side BDP gate
  *  refuses to grow either window. Half the loop reserved for everything else

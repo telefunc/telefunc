@@ -43,6 +43,7 @@ import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_CLOSE_TIMEOUT_MS,
   CREDIT_WINDOW_MAX_BYTES,
+  FC_PAGE_YIELD_BYTES,
   CHANNEL_TRANSPORT,
   WIRE_MAX_RAW_FRAME_BYTES,
   type ChannelTransports,
@@ -130,6 +131,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
       },
       () => this._connection.bufferedAmount(),
+      FC_PAGE_YIELD_BYTES,
     )
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
