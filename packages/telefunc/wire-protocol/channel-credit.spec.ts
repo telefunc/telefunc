@@ -917,8 +917,8 @@ test('the server holds nothing for empty pieces, and cuts a wire whose pieces ar
   for (let i = 0; i < 10_000; i++) socket.send(encode.piece(1_000_000, new Uint8Array(0)))
   await run(1_000)
   const held = (
-    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieceAssembler: unknown } }> }
-  ).connectionEntries.get(socket)?.state.pieceAssembler as { pieces: unknown[] } | undefined
+    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { assembler: unknown } } }> }
+  ).connectionEntries.get(socket)?.state.pieces.assembler as { pieces: unknown[] } | undefined
   expect(held?.pieces).toHaveLength(0)
   socket.send(encode.piece(1_000_000, new Uint8Array(1)))
   await run(100)
