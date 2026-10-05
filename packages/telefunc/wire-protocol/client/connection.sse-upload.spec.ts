@@ -60,9 +60,8 @@ const reconciled = (ixes: number[]) =>
 function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = () => {}) {
   const encoder = new TextEncoder()
   let write: ((frame: Uint8Array) => void) | null = null
-  /** Each wire's `write`, in the order the page opened them. */
-  const writes: ((frame: Uint8Array) => void)[] = []
-  const connIds: string[] = []
+  /** Each wire, in the order the page opened them. */
+  const opened: { connId: string; write: (frame: Uint8Array) => void }[] = []
   const cut = new Set<string>()
   const unwritten: (() => Uint8Array)[] = []
   const emit = (frame: () => Uint8Array) => (write ? write(frame()) : void unwritten.push(frame))
@@ -74,9 +73,9 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
     wires: 0,
     send: (frame: Uint8Array) => emit(() => frame),
     /** Sends on the `wire`-th wire the page opened, from 0, which it may have given up. */
-    sendOnWire: (wire: number, frame: Uint8Array) => writes[wire]!(frame),
+    sendOnWire: (wire: number, frame: Uint8Array) => opened[wire]!.write(frame),
     /** The latest wire's POSTs are answered 400 from now on, as the server does once it cut the wire. */
-    cutWire: () => void cut.add(connIds.at(-1)!),
+    cutWire: () => void cut.add(opened.at(-1)!.connId),
     reconcile: () => emit(() => reconciled([server.ix])),
     // A browser that can't stream a request body (Firefox) sends it as "[object ReadableStream]", and the server
     // answers 400 without reading a frame or sending the open-ack.
@@ -99,7 +98,6 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
         return new Response('', { status: cut.has(metadata.connId) ? 400 : 200 })
       }
       server.wires++
-      connIds.push(metadata.connId)
       for (const raw of frames) {
         const frame = decode(raw as never)
         if (frame.tag === TAG.RECONCILE) server.ix = frame.payload.open[0]?.ix ?? 0
@@ -108,7 +106,7 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
         start(controller) {
           controller.enqueue(encoder.encode(': open\n\n'))
           write = (frame) => controller.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame as never)}\n\n`))
-          writes.push(write)
+          opened.push({ connId: metadata.connId, write })
           for (const frame of unwritten.splice(0)) write(frame())
         },
       })
