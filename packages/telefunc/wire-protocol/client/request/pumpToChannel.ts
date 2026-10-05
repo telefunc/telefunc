@@ -14,8 +14,8 @@ type PumpChannelOptions = Omit<ConstructorParameters<typeof ClientChannel>[0], '
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
 const TAG_END = new Uint8Array([CHANNEL_PUMP_TAG_END])
-// A larger chunk goes in pieces, each a message every server accepts (Bun's and Cloudflare's limits included).
-const PIECE_BYTES = 8 * 1024 * 1024
+// A larger chunk goes in parts, each a message under every channel's frame limit (32 MiB on Cloudflare).
+const CHUNK_PART_BYTES = 8 * 1024 * 1024
 
 /**
  * Pump a single producer's chunks to the server through a dedicated ClientChannel.
@@ -61,8 +61,8 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, op
           channel.sendBinary(TAG_END)
           break
         }
-        for (let at = 0; at < value.byteLength; at += PIECE_BYTES) {
-          const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + PIECE_BYTES)))
+        for (let at = 0; at < value.byteLength; at += CHUNK_PART_BYTES) {
+          const pending = channel._sendBinary(concat(TAG_DATA, value.subarray(at, at + CHUNK_PART_BYTES)))
           if (pending) await pending
         }
       }

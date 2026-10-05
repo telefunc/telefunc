@@ -53,7 +53,7 @@ test('an upload that ends while the server is away waits for it as long as the c
   }
 })
 
-test("an upload's chunk over 8 MiB goes in pieces the server accepts", async () => {
+test("an upload's chunk over 8 MiB goes in parts the server accepts", async () => {
   config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
   vi.spyOn(ClientChannel.prototype, 'onOpen').mockImplementation((callback: () => void) => callback())
   const sent: number[] = []
@@ -65,7 +65,7 @@ test("an upload's chunk over 8 MiB goes in pieces the server accepts", async () 
   })()
   pumpClientProducerToChannel(() => ({ chunks, cancel: () => {} }), {
     transports: ['sse'],
-    telefuncUrl: 'http://pump-pieces.test/_telefunc',
+    telefuncUrl: 'http://pump-parts.test/_telefunc',
   })
   await new Promise((resolve) => setTimeout(resolve, 10))
   expect(sent).toEqual([8 * 1024 * 1024, 1])
