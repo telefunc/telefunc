@@ -327,6 +327,78 @@ describe('SSE→WS handoff join', () => {
   })
 })
 
+describe('an upgrade attempt behind an upload', () => {
+  test('a barrier that finds a batch POST still out puts the upgrade off until it is out, and keeps the old wire', async () => {
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'],
+    })
+    try {
+      const channel = createChannel([])
+      const downstream = makeDownstream()
+      let streams = 0
+      let releasePost: (() => void) | null = null
+      let holdNextPost = false
+      const fetchImpl = (async (_url: string, init: RequestInit) => {
+        const body = init.body as unknown
+        // No upload stream: every client→server frame goes in a batch POST.
+        if (!(body instanceof Blob)) throw new TypeError('upload streams are not supported')
+        const [metadata, ...frames] = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
+        const decoded = frames.map((raw) => decode(bytes(raw)))
+        if (JSON.parse(new TextDecoder().decode(metadata)).streamResponse) {
+          streams++
+          const reconcile = decoded.find((frame) => frame.tag === TAG.RECONCILE)!
+          const ix = reconcile.tag === TAG.RECONCILE ? reconcile.payload.open[0]!.ix : 0
+          downstream.open()
+          downstream.push(
+            reconciled({ ix, sessionId: crypto.randomUUID(), sseFlushThrottle: 0, ssePostIdleFlushDelay: 0 }),
+          )
+          return new Response(downstream.stream as BodyInit, {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          })
+        }
+        if (!holdNextPost) return new Response('', { status: 200 })
+        holdNextPost = false
+        return await new Promise<Response>((resolve) => {
+          releasePost = () => resolve(new Response('', { status: 200 }))
+        })
+      }) as unknown as typeof fetch
+
+      const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+        transports: ['sse', 'ws'],
+        fetchImpl,
+        connectionKey: crypto.randomUUID(),
+      })
+      await settle()
+      const probe = FakeWebSocket.last!
+      probe.answer((frame) => {
+        if (frame.tag === TAG.PING) probe.deliver(encode.pong())
+      })
+      probe.deliver(encode.pong())
+      await settle()
+      const prepare = probe.sent.find((frame) => frame.tag === TAG.PREPARE)
+      expect(prepare, 'the client should have staged its upgrade').toBeDefined()
+
+      // An upload is out when the barrier is due, and stays out past the attempt's 10 s.
+      holdNextPost = true
+      connection.send(channel as never, '"upload"')
+      await settle()
+      probe.deliver(encode.ready({ upgradeId: prepare!.tag === TAG.PREPARE ? prepare!.payload.upgradeId : '' }))
+      await vi.advanceTimersByTimeAsync(12_000)
+      expect(streams, 'the page kept its SSE wire').toBe(1)
+      expect(probe.readyState, 'the attempt was given up').toBe(3)
+
+      releasePost!()
+      await settle()
+      expect(FakeWebSocket.last, 'the upgrade went again once the upload was out').not.toBe(probe)
+      expect(streams).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('flow control across an upgrade attempt', () => {
   // Sends are held from the barrier's emission until its COMMITTED. An attempt that ends without emitting its barrier
   // releases the hold with no reattach, so no limit advertised again on attach repairs a refresh dropped meanwhile.

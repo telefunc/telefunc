@@ -86,7 +86,8 @@ export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 // ===== SSE -> WS upgrade =====
 
 /** Batch mode only: how long the barrier waits for a natural outbox drain before flushing it
- *  itself. On a duplex upstream the barrier is just the last frame pushed onto the open body. */
+ *  itself, or, with a POST still out, putting the upgrade off until the outbox drained. On a duplex upstream the
+ *  barrier is just the last frame pushed onto the open body. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
 /** Post-flip wait for the join limbs. FIN on the old wire: 2 s from the flip or from the last bytes it delivered,

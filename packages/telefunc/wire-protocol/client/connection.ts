@@ -165,10 +165,10 @@ function settledOrAborted(promise: Promise<unknown>, signal: AbortSignal): Promi
   })
 }
 
-/** The verdict IS the recovery decision, so the three cases must stay distinct: `emitted` may have
+/** The verdict IS the recovery decision, so the two cases must stay distinct: `emitted` may have
  *  reached the server (trust no wire, reconcile afresh, upgrades sticky-disabled), `not-emitted`
- *  leaves the wire usable, `wedged` wrote nothing but a never-settling POST owns the flush gate. */
-type BarrierEmission = 'emitted' | 'not-emitted' | 'wedged'
+ *  leaves the wire usable. */
+type BarrierEmission = 'emitted' | 'not-emitted'
 
 type OutboundFrameKind = 'reconcile' | 'control' | 'flow-control' | 'ack' | 'data' | 'heartbeat'
 
@@ -1321,14 +1321,11 @@ class ClientConnection implements MuxConnection {
     this.enterUpgradeCommitting(from, to, session, attempt)
     const emission = await from.emitBarrier(() => this.buildBarrierFrame(sessionId, session.upgradeId), attempt.signal)
 
-    if (emission === 'wedged') {
-      attempt.abort()
-      this.recoverWedgedOldWire(new NetworkError('Upgrade aborted with the old wire stalled', true))
-      return
-    }
     if (emission === 'not-emitted') {
       attempt.abort()
       if (this.registerReconcileTimer === null) this.drainBufferedFramesToWire()
+      // An attempt that ended without its barrier goes again once the outbox drained.
+      void from.drained().then(() => this.maybeStartUpgrade())
       return
     }
     if (attempt.signal.aborted) {
@@ -1356,14 +1353,6 @@ class ClientConnection implements MuxConnection {
     for (const { frame, byteLength } of held) if (!isJoinLimb(frame)) u.buffer.new.push({ frame, byteLength })
     for (const { frame } of held) if (isJoinLimb(frame)) this.applyJoinLimb(frame)
     this.tryCompleteUpgrade()
-  }
-
-  private recoverWedgedOldWire(err: Error): void {
-    const wedged = this.transport
-    this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
-    wedged.abandonActiveTransport()
-    wedged.dispose()
-    this.handleTransportLoss(err)
   }
 
   private drainBufferedFramesToWire(): void {
@@ -2097,12 +2086,8 @@ class SseTransport implements UpgradeSource {
       const drained = new Promise<void>((resolve) => this.drainCallbacks.push(resolve))
       await Promise.race([drained, new Promise<void>((resolve) => setTimeout(resolve, UPGRADE_DRAIN_TIMEOUT_MS))])
     }
-    while (this.flushing) {
-      if (!this.hasWire()) return 'not-emitted'
-      if (signal.aborted) return 'wedged'
-      await settledOrAborted(new Promise<void>((resolve) => this.drainCallbacks.push(resolve)), signal)
-    }
-    if (!this.hasWire() || signal.aborted) return 'not-emitted'
+    // A POST still out then is an upload, which the barrier would wait behind as long as it takes.
+    if (this.flushing || !this.hasWire() || signal.aborted) return 'not-emitted'
     this.flushScheduler.cancel()
     const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
     queued.push(buildFrame().frame)
