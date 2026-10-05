@@ -11,13 +11,8 @@ import { serializeTelefunctionResult } from '../node/server/runTelefunc/serializ
 import { parseHttpRequest } from '../node/server/runTelefunc/parseHttpRequest.js'
 import { createRequestContext } from '../node/server/context/requestContext.js'
 import { parseResponse } from './client/response/parse.js'
-import {
-  STREAM_TRANSPORT,
-  WIRE_MAX_RAW_FRAME_BYTES,
-  type ChannelTransports,
-  type StreamTransport,
-} from './constants.js'
-import { config, getServerConfig, lowerMaxFrameBytes } from '../node/server/serverConfig.js'
+import { STREAM_TRANSPORT, type ChannelTransports, type StreamTransport } from './constants.js'
+import { config, getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { Room } from './room/server/statics.js'
 import type { LocalParticipant, Room as RoomType } from './room/types.js'
 import { config as clientConfig } from '../client/clientConfig.js'
@@ -926,7 +921,7 @@ describe('extension wire types registered while a telefunc module loads', () => 
 
 test("a runtime's lower frame limit reaches each channel, broadcast and function a page that may use a WebSocket revives", async () => {
   clientConfig.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
-  lowerMaxFrameBytes(1024)
+  setAdapterMaxFrameBytes(1024)
   try {
     const returned = () => ({
       channel: new ServerChannel(),
@@ -956,7 +951,7 @@ test("a runtime's lower frame limit reaches each channel, broadcast and function
       )
     }
   } finally {
-    lowerMaxFrameBytes(WIRE_MAX_RAW_FRAME_BYTES)
+    setAdapterMaxFrameBytes(undefined)
     delete clientConfig.fetch
   }
 })

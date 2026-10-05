@@ -9,7 +9,7 @@ import '../node/server/async_hooks.js'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { ChannelMux } from '../wire-protocol/server/mux.js'
-import { getServerConfig, enableChannelTransports, lowerMaxFrameBytes } from '../node/server/serverConfig.js'
+import { getServerConfig, enableChannelTransports, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
 import {
@@ -86,7 +86,7 @@ class Telefunc {
 function telefunc(options?: CloudflareOptions): TelefuncServe {
   enableChannelTransports([CHANNEL_TRANSPORT.WS])
   // workerd closes a WebSocket that receives a larger message (1009).
-  lowerMaxFrameBytes(32 * 1024 * 1024)
+  setAdapterMaxFrameBytes(32 * 1024 * 1024)
   const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
   const kvBindingName = options?.kvBindingName ?? 'TelefuncKV'
   const baseInstanceName = options?.instanceName ?? 'telefunc'

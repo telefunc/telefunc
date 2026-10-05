@@ -675,71 +675,56 @@ class ClientConnection implements MuxConnection {
   }
 
   send(channel: MuxChannel, data: string): number {
+    const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.text(ix, data, seq))
+    return frame ? payloadBytes(frame) : 0
+  }
+
+  sendBinary(channel: MuxChannel, data: Uint8Array): void {
+    this.sendSequenced(channel, 'data', (ix, seq) => encode.binary(ix, data, seq))
+  }
+
+  sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
+    this.sendSequenced(channel, 'ack', (ix, seq) => encode.publishAckReq(ix, data, seq), onQueued)
+  }
+
+  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
+    this.sendSequenced(channel, 'ack', (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), onQueued)
+  }
+
+  sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
+    this.sendSequenced(channel, 'ack', (ix, seq) => encode.textAckReq(ix, data, seq), onQueued)
+  }
+
+  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
+    this.sendSequenced(channel, 'ack', (ix, seq) => encode.binaryAckReq(ix, data, seq), onQueued)
+  }
+
+  /** Encodes at the seq it then takes, so a frame the server would refuse throws and takes none. `onQueued(seq)` runs
+   *  before the frame hits the wire, so an immediate `ACK_RES` finds its pending ack. */
+  private sendSequenced(
+    channel: MuxChannel,
+    kind: 'data' | 'ack',
+    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
+    onQueued?: (seq: number) => void,
+  ): Uint8Array<ArrayBuffer> | undefined {
     const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return 0
+    if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(encode.text(ix, data, replay.seq + 1), channel)
+    const frame = buildFrame(ix, replay.seq + 1)
+    // The server ends the wire a larger frame arrives on, and the one its replay arrives on next.
+    assertUsage(
+      frame.byteLength <= channel._maxFrameBytes,
+      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${channel._maxFrameBytes} at most`,
+    )
     const seq = replay.nextSeq()
+    onQueued?.(seq)
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
     } else {
       replay.push(seq, frame)
-      this.transport.sendFrame({ kind: 'data', frame })
+      this.transport.sendFrame({ kind, frame })
     }
-    return payloadBytes(frame)
-  }
-
-  sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.publishAckReq(ix, data, seq), onQueued)
-  }
-
-  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), onQueued)
-  }
-
-  sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.textAckReq(ix, data, seq), onQueued)
-  }
-
-  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.binaryAckReq(ix, data, seq), onQueued)
-  }
-
-  /** Shared ack-req issuance — encodes via `buildFrame`, invokes `onQueued(seq)` so the
-   *  channel registers the pending ack *before* the frame hits the wire (so an
-   *  immediate `ACK_RES` can't be lost), then ships or buffers the frame. Mirrors
-   *  `IndexedPeer.sendTextAckReq` on the server side. */
-  private sendAckReq(
-    channel: MuxChannel,
-    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
-    onQueued: (seq: number) => void,
-  ): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(buildFrame(ix, replay.seq + 1), channel)
-    const seq = replay.nextSeq()
-    onQueued(seq)
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return
-    }
-    replay.push(seq, frame)
-    this.transport.sendFrame({ kind: 'ack', frame })
-  }
-
-  sendBinary(channel: MuxChannel, data: Uint8Array): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(encode.binary(ix, data, replay.seq + 1), channel)
-    const seq = replay.nextSeq()
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return
-    }
-    replay.push(seq, frame)
-    this.transport.sendFrame({ kind: 'data', frame })
+    return frame
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -1758,15 +1743,14 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   private heartbeat: Heartbeat | null = null
-  private probedWs: WebSocket | null = null
+  /** The probe's socket, with the assembler it keeps as the transport adopts it. */
+  private probed: { ws: WebSocket; pieces: PieceAssembler } | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
   private connecting = false
   private everOpened = false
-  /** The live wire's. */
-  private pieceSender = new PieceSender()
-  /** The probe's, which it keeps as the transport adopts it. */
-  private probedPieces = new PieceAssembler()
+  /** The live wire's, set with it by `setupHandlers`. */
+  private pieceSender!: PieceSender
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
@@ -1796,7 +1780,7 @@ class WsTransport implements UpgradeTarget {
     let onClose: (() => void) | null = null
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     ws.onmessage = ({ data }: MessageEvent) => {
-      const message = readMessage(ws, pieces, data)
+      const message = receiveMessage(ws, pieces, data)
       if (message === null) return
       if (message.frame.tag === TAG.PONG) {
         onPong?.()
@@ -1805,7 +1789,7 @@ class WsTransport implements UpgradeTarget {
       onFrame?.(message.frame, message.byteLength)
     }
     ws.onclose = () => {
-      if (this.probedWs === ws) this.probedWs = null
+      if (this.probed?.ws === ws) this.probed = null
       onClose?.()
     }
     ws.onerror = () => {}
@@ -1830,8 +1814,7 @@ class WsTransport implements UpgradeTarget {
       return null
     }
 
-    this.probedWs = ws
-    this.probedPieces = pieces
+    this.probed = { ws, pieces }
     return {
       ping: () => {
         try {
@@ -1855,7 +1838,7 @@ class WsTransport implements UpgradeTarget {
         onFrame = cb
       },
       close: () => {
-        if (this.probedWs === ws) this.probedWs = null
+        if (this.probed?.ws === ws) this.probed = null
         try {
           ws.close()
         } catch {}
@@ -1864,13 +1847,13 @@ class WsTransport implements UpgradeTarget {
   }
 
   adoptProbe(): void {
-    const ws = this.probedWs
-    assert(ws !== null)
-    this.probedWs = null
-    this.ws = ws
+    const probed = this.probed
+    assert(probed !== null)
+    this.probed = null
+    this.ws = probed.ws
     this.everOpened = true
     this.connecting = false
-    this.setupHandlers(ws, this.probedPieces)
+    this.setupHandlers(probed.ws, probed.pieces)
   }
 
   start(): void {
@@ -1932,7 +1915,7 @@ class WsTransport implements UpgradeTarget {
     this.pieceSender = sender
     ws.onmessage = ({ data }: MessageEvent) => {
       this.heartbeat?.noteReceived()
-      const message = readMessage(ws, pieces, data)
+      const message = receiveMessage(ws, pieces, data)
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
@@ -2004,8 +1987,8 @@ class WsTransport implements UpgradeTarget {
 
   dispose(): void {
     this.connecting = false
-    const wsProbed = this.probedWs
-    this.probedWs = null
+    const wsProbed = this.probed?.ws
+    this.probed = null
     if (wsProbed) {
       wsProbed.onopen = wsProbed.onmessage = wsProbed.onerror = wsProbed.onclose = null
       try {
@@ -2024,8 +2007,9 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** The frame a WebSocket message completes, or null: a piece before its frame's last, or bytes that close `ws`. */
-function readMessage(
+/** The frame a WebSocket message completes, acknowledged if it came in pieces, or null: a piece before its frame's last,
+ *  or bytes that close `ws`. */
+function receiveMessage(
   ws: WebSocket,
   pieces: PieceAssembler,
   data: unknown,
@@ -2601,15 +2585,6 @@ function channelErrorFor(reason: number): Error {
     default:
       return makeBugError()
   }
-}
-
-/** The server ends the wire a larger frame arrives on, and the one its replay arrives on next: the send is refused. */
-function assertFrameFits(frame: Uint8Array<ArrayBuffer>, { _maxFrameBytes }: MuxChannel): Uint8Array<ArrayBuffer> {
-  assertUsage(
-    frame.byteLength <= _maxFrameBytes,
-    `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${_maxFrameBytes} at most`,
-  )
-  return frame
 }
 
 function isWindowRefresh({ frame }: OutboxEntry): boolean {

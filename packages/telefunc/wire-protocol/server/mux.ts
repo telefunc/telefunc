@@ -145,8 +145,7 @@ type ConnectionState = {
   lastReceivedAt: number
   /** When the last PONG went out. */
   pongedAt: number
-  pieceSender: PieceSender
-  pieceAssembler: PieceAssembler
+  pieces: { sender: PieceSender; assembler: PieceAssembler } | null
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -275,8 +274,7 @@ class ChannelMux {
         pingTimer: null,
         lastReceivedAt: 0,
         pongedAt: performance.now(),
-        pieceSender: new PieceSender(),
-        pieceAssembler: new PieceAssembler(),
+        pieces: transport.wholeMessages ? { sender: new PieceSender(), assembler: new PieceAssembler() } : null,
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -403,24 +401,25 @@ class ChannelMux {
     entry.state.lastReceivedAt = performance.now()
     this.pong(entry, connection, [])
     const { state } = entry
-    const heldBefore = state.pieceAssembler.held
     let frame: Uint8Array<ArrayBuffer> | null
     try {
       const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
       assert(piece.tag === TAG.PIECE)
+      assertProtocol(state.pieces, 'PIECE on a wire that takes no pieces')
       // As large as the runtime takes in one message: its pieces get past what it would refuse whole.
       const cap = getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES
       assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
-      frame = state.pieceAssembler.add(piece.total, piece.piece)
+      const { assembler } = state.pieces
+      const heldBefore = assembler.held
+      frame = assembler.add(piece.total, piece.piece)
+      // What it holds of a frame counts in the recv backlog as the frame does once whole.
+      state.recvBacklogBytes += assembler.held - heldBefore
+      state.recvBacklogFrames += Number(assembler.held > 0) - Number(heldBefore > 0)
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(connection)
       return Promise.resolve(null)
     }
-    // What it holds of a frame counts in the recv backlog as the frame does once whole.
-    const held = state.pieceAssembler.held
-    state.recvBacklogBytes += held - heldBefore
-    state.recvBacklogFrames += Number(held > 0) - Number(heldBefore > 0)
     if (frame === null) return Promise.resolve(null)
     this.send(connection, encode.piecesAck())
     return this.dispatchInbound(connection, frame)
@@ -503,7 +502,7 @@ class ChannelMux {
     }
     if (frame.tag === TAG.PIECES_ACK) {
       assertProtocol(
-        entry.state.pieceSender.acknowledged(this.options.pingInterval),
+        entry.state.pieces?.sender.acknowledged(this.options.pingInterval),
         'PIECES_ACK for nothing sent in pieces',
       )
       return null
@@ -1017,7 +1016,7 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
-    const pieces = entry.transport.wholeMessages && state.pieceSender.pieces(frame)
+    const pieces = state.pieces?.sender.pieces(frame)
     if (!pieces) return entry.transport.sendNow(connection, frame)
     for (const piece of pieces) entry.transport.sendNow(connection, piece)
   }

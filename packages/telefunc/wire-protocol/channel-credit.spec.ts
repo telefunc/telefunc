@@ -15,12 +15,11 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   RECONCILE_TIMEOUT_MS,
-  WIRE_MAX_RAW_FRAME_BYTES,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG, encode } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
-import { config, lowerMaxFrameBytes } from '../node/server/serverConfig.js'
+import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { Room } from './room/server/statics.js'
 import type { ServerLocalParticipant, ServerRoom } from './room/server/room.js'
 import { RoomParticipantStubChannel } from './room/server/stub.js'
@@ -1061,8 +1060,8 @@ test('the server holds nothing for empty pieces, and cuts a wire whose pieces ar
   for (let i = 0; i < 10_000; i++) socket.send(encode.piece(1_000_000, new Uint8Array(0)))
   await run(1_000)
   const held = (
-    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieceAssembler: unknown } }> }
-  ).connectionEntries.get(socket)?.state.pieceAssembler as { pieces: unknown[] } | undefined
+    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { assembler: unknown } } }> }
+  ).connectionEntries.get(socket)?.state.pieces.assembler as { pieces: unknown[] } | undefined
   expect(held?.pieces).toHaveLength(0)
   socket.send(encode.piece(1_000_000, new Uint8Array(1)))
   await run(100)
@@ -1070,7 +1069,7 @@ test('the server holds nothing for empty pieces, and cuts a wire whose pieces ar
 })
 
 test('pieces of a frame larger than the runtime takes in one message cut the wire, as that message would', async () => {
-  lowerMaxFrameBytes(1024 * KIB)
+  setAdapterMaxFrameBytes(1024 * KIB)
   try {
     loop.open<Uint8Array, Uint8Array>()
     await run(100)
@@ -1079,7 +1078,7 @@ test('pieces of a frame larger than the runtime takes in one message cut the wir
     await run(100)
     expect(socket.readyState).toBe(3)
   } finally {
-    lowerMaxFrameBytes(WIRE_MAX_RAW_FRAME_BYTES)
+    setAdapterMaxFrameBytes(undefined)
   }
 })
 
