@@ -16,6 +16,7 @@ import { describe, expect, test } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
+import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { ServerChannel } from '../server/channel.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import { decodeU32, concat } from '../frame.js'
@@ -27,6 +28,7 @@ function createChannel(id = crypto.randomUUID()) {
   return {
     id,
     isClosed: false,
+    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
     _onTransportOpen() {},
     _dispatchFrame() {},
     _onTransportClose() {},

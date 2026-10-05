@@ -3,6 +3,7 @@ export { functionReplacer }
 import type { FunctionContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_FUNCTION, FN_SHIELD_ERROR_KEY } from '../../constants.js'
 
+import { getAdapterMaxFrameBytes } from '../../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -13,6 +14,7 @@ const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = 
   },
   replace(fn, { createChannel, validators }) {
     const channel = createChannel<readonly unknown[], unknown>({ ack: true })
+    const maxFrameBytes = getAdapterMaxFrameBytes()
     const validateArgs = validators.get('args')
     channel.listen((args) => {
       if (validateArgs) {
@@ -23,7 +25,7 @@ const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = 
       return fn(...args)
     })
     return {
-      metadata: { channelId: channel.id },
+      metadata: { channelId: channel.id, ...(maxFrameBytes && { maxFrameBytes }) },
       async close() {
         await channel.close()
       },

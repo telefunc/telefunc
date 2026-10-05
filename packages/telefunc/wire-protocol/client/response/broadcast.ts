@@ -9,6 +9,7 @@ const broadcastReviver: ReviverType<BroadcastContract, ClientReviverContext> = {
     const channel = context.createBroadcast({
       channelId: metadata.channelId,
       key: metadata.key,
+      maxFrameBytes: metadata.maxFrameBytes,
     })
     return {
       value: channel,

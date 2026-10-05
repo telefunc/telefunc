@@ -70,6 +70,7 @@ type RoomSnapshotMetadata = {
   count: number
   /** The config's last-writer-wins stamp, which orders later updates. */
   stamp: { at: number; by: string }
+  maxFrameBytes?: number
 }
 /** Serializer metadata of a `RemoteParticipant` crossing the wire: its room, revived first, and the member snapshot. */
 type RemoteParticipantMetadata = MemberSnapshot & { room: unknown; identity: string | null }
@@ -80,6 +81,7 @@ type ParticipantStubMetadata = {
   meta: ParticipantMeta
   selfDelivery: boolean
   identity: string | null
+  maxFrameBytes?: number
 }
 /** Control-lane events. The origin applies its own event and later absorbs the echo: `join`/`leave`/`closed` are
  *  idempotent, `p-meta` orders by `seq` and `update` by its stamp, so every instance converges. */

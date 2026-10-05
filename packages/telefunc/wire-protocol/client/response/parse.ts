@@ -121,6 +121,7 @@ async function reviveResponse(
       return new ClientChannel({
         channelId: opts.channelId,
         ack: opts.ack,
+        maxFrameBytes: opts.maxFrameBytes,
         transports,
         connectionKey,
         headers,
@@ -132,6 +133,7 @@ async function reviveResponse(
       return new ClientBroadcast({
         channelId: opts.channelId,
         key: opts.key,
+        maxFrameBytes: opts.maxFrameBytes,
         transports,
         connectionKey,
         headers,

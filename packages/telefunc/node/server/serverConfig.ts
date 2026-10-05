@@ -2,6 +2,8 @@ export { configUser as config }
 export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
+export { lowerMaxFrameBytes }
+export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { pingDeadlineOf }
 export type {
@@ -242,6 +244,8 @@ const globalObject = getGlobalObject('serverConfig.ts', {
   config: { stream: {}, channel: {}, broadcast: {}, room: {}, extensions: [] } as ConfigUser,
   /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
+  /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
+  adapterMaxFrameBytes: undefined as number | undefined,
 })
 const configState = globalObject.config
 
@@ -412,6 +416,15 @@ function getServerExtensionTypes() {
 /** @internal Adds transports to the defaults, which apply while the user sets none. */
 function enableChannelTransports(transports: ChannelTransports): void {
   for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
+}
+
+/** @internal The runtime ends a WebSocket on a larger message: each channel tells its page, which refuses one. */
+function lowerMaxFrameBytes(bytes: number): void {
+  globalObject.adapterMaxFrameBytes = bytes
+}
+
+function getAdapterMaxFrameBytes(): number | undefined {
+  return globalObject.adapterMaxFrameBytes
 }
 
 function applyUserConfig(prop: string | symbol, val: unknown) {

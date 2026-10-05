@@ -32,7 +32,6 @@ import {
   type ChannelTransport,
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
-  WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
@@ -181,6 +180,8 @@ type OutboundFrame = {
 interface MuxChannel {
   readonly id: string
   readonly isClosed: boolean
+  /** The largest frame its server takes. */
+  readonly _maxFrameBytes: number
   /** `wire` numbers the connection's wire: the number of the channel's last attach means that same wire, which lost
    *  nothing. */
   _onTransportOpen(batched: boolean, wire: number): void
@@ -676,7 +677,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return 0
     const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(encode.text(ix, data, replay.seq + 1))
+    const frame = assertFrameFits(encode.text(ix, data, replay.seq + 1), channel)
     const seq = replay.nextSeq()
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
@@ -715,7 +716,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(buildFrame(ix, replay.seq + 1))
+    const frame = assertFrameFits(buildFrame(ix, replay.seq + 1), channel)
     const seq = replay.nextSeq()
     onQueued(seq)
     if (!this.canSendImmediately(ix)) {
@@ -730,7 +731,7 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(encode.binary(ix, data, replay.seq + 1))
+    const frame = assertFrameFits(encode.binary(ix, data, replay.seq + 1), channel)
     const seq = replay.nextSeq()
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
@@ -2581,10 +2582,10 @@ function channelErrorFor(reason: number): Error {
 }
 
 /** The server ends the wire a larger frame arrives on, and the one its replay arrives on next: the send is refused. */
-function assertFrameFits(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+function assertFrameFits(frame: Uint8Array<ArrayBuffer>, { _maxFrameBytes }: MuxChannel): Uint8Array<ArrayBuffer> {
   assertUsage(
-    frame.byteLength <= WIRE_MAX_RAW_FRAME_BYTES,
-    `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${WIRE_MAX_RAW_FRAME_BYTES} at most`,
+    frame.byteLength <= _maxFrameBytes,
+    `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${_maxFrameBytes} at most`,
   )
   return frame
 }

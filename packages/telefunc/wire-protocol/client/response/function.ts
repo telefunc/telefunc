@@ -20,6 +20,7 @@ const functionReviver: ReviverType<FunctionContract, ClientReviverContext> = {
     const channel = context.createChannel({
       channelId: metadata.channelId,
       ack: true,
+      maxFrameBytes: metadata.maxFrameBytes,
     })
     return {
       value: async (...args: unknown[]) => {

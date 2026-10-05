@@ -11,8 +11,17 @@ import { serializeTelefunctionResult } from '../node/server/runTelefunc/serializ
 import { parseHttpRequest } from '../node/server/runTelefunc/parseHttpRequest.js'
 import { createRequestContext } from '../node/server/context/requestContext.js'
 import { parseResponse } from './client/response/parse.js'
-import { STREAM_TRANSPORT, type StreamTransport } from './constants.js'
-import { config, getServerConfig } from '../node/server/serverConfig.js'
+import {
+  STREAM_TRANSPORT,
+  WIRE_MAX_RAW_FRAME_BYTES,
+  type ChannelTransports,
+  type StreamTransport,
+} from './constants.js'
+import { config, getServerConfig, lowerMaxFrameBytes } from '../node/server/serverConfig.js'
+import { Room } from './room/server/statics.js'
+import type { LocalParticipant, Room as RoomType } from './room/types.js'
+import { config as clientConfig } from '../client/clientConfig.js'
+import type { ClientBroadcast, ClientChannel } from './client/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 import type {
   ClientReviverContext,
@@ -425,6 +434,7 @@ async function roundTrip(
     serverExtensions?: ReplacerType<TypeContract, ServerReplacerContext>[]
     clientExtensions?: ReviverType<TypeContract, ClientReviverContext>[]
     streamTransport?: StreamTransport
+    transports?: ChannelTransports
     /** The network between the server's body and the client's. */
     network?: TransformStream<Uint8Array<ArrayBuffer>, Uint8Array<ArrayBuffer>>
   } = {},
@@ -467,7 +477,7 @@ async function roundTrip(
         telefunctionName: 'testFn',
         telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
         abortController,
-        channel: { transports: ['sse'] },
+        channel: { transports: opts.transports ?? ['sse'] },
         requestCloseHandlers: [],
         extensionResponseTypes: opts.clientExtensions ?? [],
         headers: null,
@@ -912,4 +922,41 @@ describe('extension wire types registered while a telefunc module loads', () => 
       unregisterExtension()
     }
   })
+})
+
+test("a runtime's lower frame limit reaches each channel, broadcast and function a page that may use a WebSocket revives", async () => {
+  clientConfig.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  lowerMaxFrameBytes(1024)
+  try {
+    const returned = () => ({
+      channel: new ServerChannel(),
+      broadcast: new ServerBroadcast({ key: 'frame-limit' }),
+      fn: (text: string) => text.length,
+    })
+    type Revived = { channel: ClientChannel; broadcast: ClientBroadcast; fn: (text: string) => Promise<number> }
+    const { channel, broadcast, fn } = (await roundTrip(returned(), { transports: ['sse', 'ws'] })).ret as Revived
+    const tooLarge = new Uint8Array(1024)
+    expect(() => channel.sendBinary(tooLarge)).toThrow('the server accepts 1024 at most')
+    expect(() => broadcast.publishBinary(tooLarge)).toThrow('the server accepts 1024 at most')
+    await expect(fn('x'.repeat(1024))).rejects.toThrow('the server accepts 1024 at most')
+    const sseOnly = (await roundTrip(returned(), { transports: ['sse'] })).ret as Revived
+    expect(() => sseOnly.channel.sendBinary(tooLarge)).not.toThrow()
+    for (const revived of [channel, broadcast, sseOnly.channel, sseOnly.broadcast]) revived.abort()
+    const room = await Room.create('frame-limit')
+    const roomed = { room, member: await room.join(), solo: await (await Room.create('frame-limit-solo')).join() }
+    type RevivedRoom = { room: RoomType; member: LocalParticipant; solo: LocalParticipant }
+    const revivedRoom = (await roundTrip(roomed, { transports: ['sse', 'ws'] })).ret as RevivedRoom
+    const { member, solo } = revivedRoom
+    await expect(revivedRoom.room.join({ meta: { name: 'x'.repeat(1024) } })).rejects.toThrow(
+      'the server accepts 1024 at most',
+    )
+    for (const participant of [member, solo]) {
+      await expect(Promise.resolve().then(() => participant.publishBinary(tooLarge))).rejects.toThrow(
+        'the server accepts 1024 at most',
+      )
+    }
+  } finally {
+    lowerMaxFrameBytes(WIRE_MAX_RAW_FRAME_BYTES)
+    delete clientConfig.fetch
+  }
 })

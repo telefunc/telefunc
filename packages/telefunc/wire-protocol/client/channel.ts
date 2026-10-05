@@ -43,6 +43,8 @@ import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_CLOSE_TIMEOUT_MS,
   CREDIT_WINDOW_MAX_BYTES,
+  CHANNEL_TRANSPORT,
+  WIRE_MAX_RAW_FRAME_BYTES,
   type ChannelTransports,
 } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
@@ -65,6 +67,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly id: string
   readonly ack: boolean
   readonly key: string | undefined
+  readonly _maxFrameBytes: number
   protected _connection: MuxConnection
   private _listeners: Array<ChannelListener<ServerToClient>> = []
   private _binaryListeners: Array<ChannelBinaryListener> = []
@@ -98,6 +101,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     channelId,
     ack = false,
     key,
+    maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES,
     transports,
     connectionKey,
     headers,
@@ -107,6 +111,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     channelId: string
     ack?: boolean
     key?: string
+    maxFrameBytes?: number
     transports: ChannelTransports
     connectionKey?: string
     headers?: Record<string, string>
@@ -116,6 +121,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = channelId
     this.ack = ack
     this.key = key
+    // A runtime's lower limit is its WebSocket's.
+    this._maxFrameBytes = transports.includes(CHANNEL_TRANSPORT.WS) ? maxFrameBytes : WIRE_MAX_RAW_FRAME_BYTES
     this._flow = new FlowControl(
       {
         byteWindowUpdate: (limit) => this._connection.sendByteWindowUpdate(this, limit),

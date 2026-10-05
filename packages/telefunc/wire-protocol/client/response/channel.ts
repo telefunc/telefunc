@@ -9,6 +9,7 @@ const channelReviver: ReviverType<ChannelContract, ClientReviverContext> = {
     const channel = context.createChannel({
       channelId: metadata.channelId,
       ack: metadata.ack,
+      maxFrameBytes: metadata.maxFrameBytes,
     })
     return {
       value: channel,

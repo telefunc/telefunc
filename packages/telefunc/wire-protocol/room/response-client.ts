@@ -22,6 +22,7 @@ const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext
     const stub = context.createBroadcast({
       channelId: metadata.channelId,
       key: metadata.roomId,
+      maxFrameBytes: metadata.maxFrameBytes,
     })
     return {
       value: new ClientRoom(stub, metadata),
@@ -37,7 +38,7 @@ const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext
 const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, InternalClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   revive(metadata, context) {
-    const channel = context.createChannel({ channelId: metadata.channelId })
+    const channel = context.createChannel({ channelId: metadata.channelId, maxFrameBytes: metadata.maxFrameBytes })
     return {
       value: new ClientStandaloneParticipant(channel, metadata),
       async close() {
