@@ -165,12 +165,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
-      return this._trackAck(
-        new Promise<ChannelAck<ClientToServer>>((resolve, reject) => {
-          this._connection.sendTextAckReq(this, serialized, (seq) => {
-            this._pendingAcks.set(seq, { resolve, reject })
-          })
-        }),
+      return this._sendAckReq<ChannelAck<ClientToServer>>((onQueued) =>
+        this._connection.sendTextAckReq(this, serialized, onQueued),
       )
     }
     return this._waitForWindow(this._connection.send(this, serialized))
@@ -194,13 +190,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) throw new ChannelClosedError()
     // Ack-bearing path bypasses credit; see `_send` for rationale.
     if (opts?.ack === true) {
-      return this._trackAck(
-        new Promise<unknown>((resolve, reject) => {
-          this._connection.sendBinaryAckReq(this, data, (seq) => {
-            this._pendingAcks.set(seq, { resolve, reject })
-          })
-        }),
-      )
+      return this._sendAckReq((onQueued) => this._connection.sendBinaryAckReq(this, data, onQueued))
     }
     this._connection.sendBinary(this, data)
     return this._waitForWindow(data.byteLength)
@@ -592,6 +582,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._connection.sendAckRes(this, seq, stringify(lastResult))
   }
 
+  /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */
+  protected _sendAckReq<T>(send: (onQueued: (seq: number) => void) => void): Promise<T> {
+    let pending!: { resolve: (v: T) => void; reject: (err: Error) => void }
+    const ack = new Promise<T>((resolve, reject) => (pending = { resolve, reject }))
+    send((seq) => this._pendingAcks.set(seq, pending))
+    return this._trackAck(ack)
+  }
+
   protected _trackAck<T>(promise: Promise<T>): Promise<T> {
     this._inflightAcks++
     return promise.finally(() => {
@@ -692,7 +690,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
     const serialized = stringify(data)
-    return this._awaitPublishAck((register) => this._connection.sendPublishAckReq(this, serialized, register))
+    return this._sendAckReq((onQueued) => this._connection.sendPublishAckReq(this, serialized, onQueued))
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
@@ -706,15 +704,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
-    return this._awaitPublishAck((register) => this._connection.sendPublishBinaryAckReq(this, data, register))
-  }
-
-  private _awaitPublishAck(send: (register: (seq: number) => void) => void): Promise<ChannelPublishAck> {
-    return this._trackAck(
-      new Promise<ChannelPublishAck>((resolve, reject) =>
-        send((seq) => this._pendingAcks.set(seq, { resolve, reject })),
-      ),
-    )
+    return this._sendAckReq((onQueued) => this._connection.sendPublishBinaryAckReq(this, data, onQueued))
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {

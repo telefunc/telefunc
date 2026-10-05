@@ -219,6 +219,8 @@ channel.listenBinary((data) => {
 const ack = await channel.sendBinary(frame, { ack: true })
 ```
 
+A message the client sends can be at most 64 MiB, serialized and with its 7-byte header: a larger `send()`, `sendBinary()` or `publish()` throws without sending it, and the channel stays open.
+
 ### Backpressure
 
 Both `send()` and `sendBinary()` return a `Promise` that resolves when the receiver has capacity for more data. Await them in a loop to apply [backpressure](https://en.wikipedia.org/wiki/Backpressure_routing):

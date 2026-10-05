@@ -32,6 +32,7 @@ import {
   type ChannelTransport,
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
+  WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
@@ -675,8 +676,8 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return 0
     const replay = this.replayBuffers.get(ix)!
+    const frame = assertFrameFits(encode.text(ix, data, replay.seq + 1))
     const seq = replay.nextSeq()
-    const frame = encode.text(ix, data, seq)
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
     } else {
@@ -714,8 +715,8 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
+    const frame = assertFrameFits(buildFrame(ix, replay.seq + 1))
     const seq = replay.nextSeq()
-    const frame = buildFrame(ix, seq)
     onQueued(seq)
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
@@ -729,8 +730,8 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
+    const frame = assertFrameFits(encode.binary(ix, data, replay.seq + 1))
     const seq = replay.nextSeq()
-    const frame = encode.binary(ix, data, seq)
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
       return
@@ -2577,6 +2578,15 @@ function channelErrorFor(reason: number): Error {
     default:
       return makeBugError()
   }
+}
+
+/** The server ends the wire a larger frame arrives on, and the one its replay arrives on next: the send is refused. */
+function assertFrameFits(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  assertUsage(
+    frame.byteLength <= WIRE_MAX_RAW_FRAME_BYTES,
+    `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${WIRE_MAX_RAW_FRAME_BYTES} at most`,
+  )
+  return frame
 }
 
 function isWindowRefresh({ frame }: OutboxEntry): boolean {
