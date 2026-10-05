@@ -1743,15 +1743,14 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   private heartbeat: Heartbeat | null = null
-  private probedWs: WebSocket | null = null
+  /** The probe's socket, with the assembler it keeps as the transport adopts it. */
+  private probed: { ws: WebSocket; pieces: PieceAssembler } | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
   private connecting = false
   private everOpened = false
-  /** The live wire's. */
-  private pieceSender = new PieceSender()
-  /** The probe's, which it keeps as the transport adopts it. */
-  private probedPieces = new PieceAssembler()
+  /** The live wire's, set with it by `setupHandlers`. */
+  private pieceSender!: PieceSender
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
@@ -1790,7 +1789,7 @@ class WsTransport implements UpgradeTarget {
       onFrame?.(message.frame, message.byteLength)
     }
     ws.onclose = () => {
-      if (this.probedWs === ws) this.probedWs = null
+      if (this.probed?.ws === ws) this.probed = null
       onClose?.()
     }
     ws.onerror = () => {}
@@ -1815,8 +1814,7 @@ class WsTransport implements UpgradeTarget {
       return null
     }
 
-    this.probedWs = ws
-    this.probedPieces = pieces
+    this.probed = { ws, pieces }
     return {
       ping: () => {
         try {
@@ -1840,7 +1838,7 @@ class WsTransport implements UpgradeTarget {
         onFrame = cb
       },
       close: () => {
-        if (this.probedWs === ws) this.probedWs = null
+        if (this.probed?.ws === ws) this.probed = null
         try {
           ws.close()
         } catch {}
@@ -1849,13 +1847,13 @@ class WsTransport implements UpgradeTarget {
   }
 
   adoptProbe(): void {
-    const ws = this.probedWs
-    assert(ws !== null)
-    this.probedWs = null
-    this.ws = ws
+    const probed = this.probed
+    assert(probed !== null)
+    this.probed = null
+    this.ws = probed.ws
     this.everOpened = true
     this.connecting = false
-    this.setupHandlers(ws, this.probedPieces)
+    this.setupHandlers(probed.ws, probed.pieces)
   }
 
   start(): void {
@@ -1989,8 +1987,8 @@ class WsTransport implements UpgradeTarget {
 
   dispose(): void {
     this.connecting = false
-    const wsProbed = this.probedWs
-    this.probedWs = null
+    const wsProbed = this.probed?.ws
+    this.probed = null
     if (wsProbed) {
       wsProbed.onopen = wsProbed.onmessage = wsProbed.onerror = wsProbed.onclose = null
       try {
