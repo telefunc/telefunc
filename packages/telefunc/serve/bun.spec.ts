@@ -59,6 +59,6 @@ async function sendUntilRejected(channel: ServerChannel<unknown, string>) {
 test("a page that stops reading its Bun socket holds what a channel sends nobody awaits to the page's window and the largest window a page grants: the next send rejects with ChannelOverflowError", async () => {
   const { channel, written } = await attach((written) => written)
   expect(await sendUntilRejected(channel)).toBeInstanceOf(ChannelOverflowError)
-  // One message past them, and each one's header.
-  expect(written()).toBeLessThanOrEqual(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 64 * 1024)
+  // One message past them, and the headers of each one and of its pieces.
+  expect(written()).toBeLessThanOrEqual(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 192 * 1024)
 })

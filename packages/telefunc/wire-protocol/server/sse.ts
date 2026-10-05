@@ -67,6 +67,7 @@ class SseConnectionTransport {
     },
     getConnId: (connection) => connection.connId,
     sendNow: (connection, frame) => this.sendNow(connection, frame),
+    wholeMessages: false,
     // An event carries its frame in base64, 4 bytes for every 3 and framing on top: three quarters of what waits is
     // never fewer bytes than the frames it carries.
     bufferedAmount: (connection) => Math.floor((connection.stream.bufferedAmount * 3) / 4),

@@ -3,7 +3,7 @@ export type { ReconcileOutcome, ServerTransport }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
@@ -42,6 +42,7 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
+import { PieceAssembler, PieceSender } from '../pieces.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -59,6 +60,8 @@ type ServerTransport<TConnection> = {
    *  traffic across requests (WebSocket: every frame already lands on the same socket). */
   getConnId(connection: TConnection): string | null
   sendNow(connection: TConnection, frame: Uint8Array<ArrayBuffer>): void
+  /** Its peer gets no part of a message until all of it arrived, as on a WebSocket (see `pieces.ts`). */
+  wholeMessages: boolean
   /** Bytes of the frames sent that still wait in the connection, never fewer than there are, or `undefined` where the
    *  runtime doesn't report them. */
   bufferedAmount(connection: TConnection): number | undefined
@@ -140,6 +143,8 @@ type ConnectionState = {
   lastReceivedAt: number
   /** When the last PONG went out. */
   pongedAt: number
+  pieceSender: PieceSender
+  pieceAssembler: PieceAssembler
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -262,6 +267,8 @@ class ChannelMux {
         pingTimer: null,
         lastReceivedAt: 0,
         pongedAt: performance.now(),
+        pieceSender: new PieceSender(),
+        pieceAssembler: new PieceAssembler(),
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -367,14 +374,48 @@ class ChannelMux {
       this.terminateWire(connection)
       return Promise.resolve(null)
     }
+    const tag = peekTag(rawFrame)
+    if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
     state.lastReceivedAt = performance.now()
-    const tag = peekTag(rawFrame)
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
-    if (tag === TAG.PING) return exec()
+    if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
     this.answerArrival(entry, connection)
     return this.chainRecv(entry, exec)
+  }
+
+  /** The frame a piece completes is dispatched as one that came whole. */
+  private receivePiece(
+    entry: ConnectionEntry,
+    connection: Wire,
+    rawFrame: Uint8Array<ArrayBuffer>,
+  ): Promise<ReconcileOutcome | null> {
+    // Each piece answered: the page's PINGs wait behind the rest of its frame.
+    entry.state.lastReceivedAt = performance.now()
+    this.pong(entry, connection, [])
+    const { state } = entry
+    const heldBefore = state.pieceAssembler.held
+    let frame: Uint8Array<ArrayBuffer> | null
+    try {
+      const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+      assert(piece.tag === TAG.PIECE)
+      // As large as the runtime takes in one message: its pieces get past what it would refuse whole.
+      const cap = getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES
+      assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
+      frame = state.pieceAssembler.add(piece.total, piece.piece)
+    } catch (err) {
+      if (!(err instanceof ProtocolViolationError)) throw err
+      this.terminateWire(connection)
+      return Promise.resolve(null)
+    }
+    // What it holds of a frame counts in the recv backlog as the frame does once whole.
+    const held = state.pieceAssembler.held
+    state.recvBacklogBytes += held - heldBefore
+    state.recvBacklogFrames += Number(held > 0) - Number(heldBefore > 0)
+    if (frame === null) return Promise.resolve(null)
+    this.send(connection, encode.piecesAck())
+    return this.dispatchInbound(connection, frame)
   }
 
   /** Bytes reached `connection`: a frame that takes longer than the ping deadline to arrive whole shows the
@@ -450,6 +491,13 @@ class ChannelMux {
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
       this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
+      return null
+    }
+    if (frame.tag === TAG.PIECES_ACK) {
+      assertProtocol(
+        entry.state.pieceSender.acknowledged(this.options.pingInterval),
+        'PIECES_ACK for nothing sent in pieces',
+      )
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -961,7 +1009,9 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
-    entry.transport.sendNow(connection, frame)
+    const pieces = entry.transport.wholeMessages && state.pieceSender.pieces(frame)
+    if (!pieces) return entry.transport.sendNow(connection, frame)
+    for (const piece of pieces) entry.transport.sendNow(connection, piece)
   }
 
   /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't

@@ -15,6 +15,7 @@ function createHarness() {
       getSessionId: () => sessionId,
       setSessionId: (_conn, id) => (sessionId = id),
       getConnId: () => null,
+      wholeMessages: false,
       sendNow: (_conn, frame) => sent.push(decode(frame)),
       bufferedAmount: () => 0,
       terminateConnection: () => (terminated = true),

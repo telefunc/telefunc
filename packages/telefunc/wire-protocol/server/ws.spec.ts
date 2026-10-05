@@ -63,8 +63,9 @@ async function sendUntilRejected(channel: ServerChannel<unknown, string>, maxSen
   return { error, sends }
 }
 
-/** One message past the page's window and the largest window a page grants, and each message's header. */
-const BOUND = CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 64 * 1024
+/** One message past the page's window and the largest window a page grants, and the headers of each message and of
+ *  its pieces. */
+const BOUND = CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 192 * 1024
 
 test("a page that stops reading its Node or Deno socket holds what a channel sends nobody awaits to the page's window and the largest window a page grants: the next send rejects with ChannelOverflowError", async () => {
   // What is written stays in the socket.

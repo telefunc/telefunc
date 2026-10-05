@@ -34,6 +34,7 @@ import {
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
+import { PieceAssembler, PieceSender } from '../pieces.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
@@ -914,7 +915,7 @@ class ClientConnection implements MuxConnection {
         this.startTtlIfIdle()
         return
     }
-    // PING/PONG/RECONCILE/STREAM_REQUEST_OPEN_ACK never reach `dispatchFrame` —
+    // PING/PONG/PIECE/PIECES_ACK/RECONCILE/STREAM_REQUEST_OPEN_ACK never reach `dispatchFrame` —
     // transports peel them off in their own receive paths. Everything that lands
     // here is per-channel and carries `index`.
     const channelFrame = frame as ChannelFrame
@@ -1762,6 +1763,12 @@ class WsTransport implements UpgradeTarget {
   private abandonedWs: WebSocket | null = null
   private connecting = false
   private everOpened = false
+  /** The live wire's. */
+  private pieceSender = new PieceSender()
+  /** The probe's, which it keeps as the transport adopts it. */
+  private probedPieces = new PieceAssembler()
+  /** The server's, once a RECONCILED said it. */
+  private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
   private readonly wsUrl: string
 
@@ -1783,24 +1790,19 @@ class WsTransport implements UpgradeTarget {
       return null
     }
     ws.binaryType = 'arraybuffer'
+    const pieces = new PieceAssembler()
 
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     ws.onmessage = ({ data }: MessageEvent) => {
-      const raw = new Uint8Array(data as ArrayBuffer)
-      let frame: DecodedFrame
-      try {
-        frame = decode(raw)
-      } catch {
-        ws.close()
-        return
-      }
-      if (frame.tag === TAG.PONG) {
+      const message = readMessage(ws, pieces, data)
+      if (message === null) return
+      if (message.frame.tag === TAG.PONG) {
         onPong?.()
         return
       }
-      onFrame?.(frame, raw.byteLength)
+      onFrame?.(message.frame, message.byteLength)
     }
     ws.onclose = () => {
       if (this.probedWs === ws) this.probedWs = null
@@ -1829,6 +1831,7 @@ class WsTransport implements UpgradeTarget {
     }
 
     this.probedWs = ws
+    this.probedPieces = pieces
     return {
       ping: () => {
         try {
@@ -1867,7 +1870,7 @@ class WsTransport implements UpgradeTarget {
     this.ws = ws
     this.everOpened = true
     this.connecting = false
-    this.setupHandlers(ws)
+    this.setupHandlers(ws, this.probedPieces)
   }
 
   start(): void {
@@ -1892,7 +1895,7 @@ class WsTransport implements UpgradeTarget {
       this.handleOpen(ws)
     }
 
-    this.setupHandlers(ws)
+    this.setupHandlers(ws, new PieceAssembler())
   }
 
   private handleOpen(ws: WebSocket): void {
@@ -1924,23 +1927,24 @@ class WsTransport implements UpgradeTarget {
     return Promise.resolve()
   }
 
-  private setupHandlers(ws: WebSocket): void {
+  private setupHandlers(ws: WebSocket, pieces: PieceAssembler): void {
+    const sender = new PieceSender()
+    this.pieceSender = sender
     ws.onmessage = ({ data }: MessageEvent) => {
-      const raw = new Uint8Array(data as ArrayBuffer)
-      let frame: DecodedFrame
-      try {
-        frame = decode(raw)
-      } catch {
-        ws.close()
+      this.heartbeat?.noteReceived()
+      const message = readMessage(ws, pieces, data)
+      if (message === null) return
+      const { frame } = message
+      if (frame.tag === TAG.PIECES_ACK) {
+        sender.acknowledged(this.pingInterval)
         return
       }
-      this.heartbeat?.noteReceived()
       if (frame.tag === TAG.PONG) {
         this.heartbeat?.resetPong()
         this.owner._onTransportPong(frame.ended)
         return
       }
-      this.owner._onTransportFrame(frame, this, raw.byteLength, ws === this.abandonedWs)
+      this.owner._onTransportFrame(frame, this, message.byteLength, ws === this.abandonedWs)
     }
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
@@ -1961,7 +1965,9 @@ class WsTransport implements UpgradeTarget {
   sendFrame(frame: OutboundFrame): void {
     const ws = this.ws
     assert(ws)
-    ws.send(frame.frame)
+    const pieces = this.pieceSender.pieces(frame.frame)
+    if (pieces === null) return ws.send(frame.frame)
+    for (const piece of pieces) ws.send(piece)
   }
 
   bufferedAmount(): number {
@@ -1987,7 +1993,9 @@ class WsTransport implements UpgradeTarget {
     } catch {}
   }
 
-  applyReconciledSettings(): void {}
+  applyReconciledSettings(ctrl: ReconciledPayload): void {
+    this.pingInterval = ctrl.pingInterval
+  }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
@@ -2013,6 +2021,29 @@ class WsTransport implements UpgradeTarget {
       } catch {}
     }
     this.closeAbandonedTransport()
+  }
+}
+
+/** The frame a WebSocket message completes, or null: a piece before its frame's last, or bytes that close `ws`. */
+function readMessage(
+  ws: WebSocket,
+  pieces: PieceAssembler,
+  data: unknown,
+): { frame: DecodedFrame; byteLength: number } | null {
+  try {
+    let raw = new Uint8Array(data as ArrayBuffer)
+    let frame = decode(raw)
+    if (frame.tag === TAG.PIECE) {
+      const whole = pieces.add(frame.total, frame.piece)
+      if (whole === null) return null
+      ws.send(encode.piecesAck())
+      raw = whole
+      frame = decode(raw)
+    }
+    return { frame, byteLength: raw.byteLength }
+  } catch {
+    ws.close()
+    return null
   }
 }
 
