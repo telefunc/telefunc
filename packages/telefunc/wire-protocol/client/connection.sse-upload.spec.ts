@@ -18,7 +18,9 @@ afterEach(() => {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
-async function parseBlobBody(blob: Blob): Promise<{ metadata: { streamResponse?: boolean }; frames: Uint8Array[] }> {
+async function parseBlobBody(
+  blob: Blob,
+): Promise<{ metadata: { connId: string; streamResponse?: boolean }; frames: Uint8Array[] }> {
   const bytes = new Uint8Array(await blob.arrayBuffer())
   let offset = 0
   const next = (): Uint8Array => {
@@ -34,6 +36,23 @@ async function parseBlobBody(blob: Blob): Promise<{ metadata: { streamResponse?:
   return { metadata, frames }
 }
 
+/** The server's RECONCILED, attaching `ixes`. */
+const reconciled = (ixes: number[]) =>
+  encode.reconciled({
+    sessionId: crypto.randomUUID(),
+    open: ixes.map((ix) => ({ ix, lastSeq: 0 })),
+    reconnectTimeout: 60_000,
+    idleTimeout: 60_000,
+    pingInterval: 100_000,
+    serverReplayBuffer: 1_000_000,
+    serverReplayBufferBinary: 2_000_000,
+    clientReplayBuffer: 1_000_000,
+    clientReplayBufferBinary: 2_000_000,
+    sseFlushThrottle: 0,
+    ssePostIdleFlushDelay: 0,
+    transports: ['sse'],
+  })
+
 /** A server the test drives: it streams what the test sends down the latest SSE wire, hands each frame of a batch
  *  POST to `onBatchFrame`, and leaves the upload POST unsettled until the test settles it. What the test sends before
  *  the page's first SSE request reaches it goes out once it does, and an upload the test settles before the page's
@@ -41,6 +60,9 @@ async function parseBlobBody(blob: Blob): Promise<{ metadata: { streamResponse?:
 function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = () => {}) {
   const encoder = new TextEncoder()
   let write: ((frame: Uint8Array) => void) | null = null
+  /** Each wire, in the order the page opened them. */
+  const opened: { connId: string; write: (frame: Uint8Array) => void }[] = []
+  const cut = new Set<string>()
   const unwritten: (() => Uint8Array)[] = []
   const emit = (frame: () => Uint8Array) => (write ? write(frame()) : void unwritten.push(frame))
   let pendingUpload: ((response: Response) => void) | null = null
@@ -50,23 +72,11 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
     ix: 0,
     wires: 0,
     send: (frame: Uint8Array) => emit(() => frame),
-    reconcile: () =>
-      emit(() =>
-        encode.reconciled({
-          sessionId: crypto.randomUUID(),
-          open: [{ ix: server.ix, lastSeq: 0 }],
-          reconnectTimeout: 60_000,
-          idleTimeout: 60_000,
-          pingInterval: 100_000,
-          serverReplayBuffer: 1_000_000,
-          serverReplayBufferBinary: 2_000_000,
-          clientReplayBuffer: 1_000_000,
-          clientReplayBufferBinary: 2_000_000,
-          sseFlushThrottle: 0,
-          ssePostIdleFlushDelay: 0,
-          transports: ['sse'],
-        }),
-      ),
+    /** Sends on the `wire`-th wire the page opened, from 0, which it may have given up. */
+    sendOnWire: (wire: number, frame: Uint8Array) => opened[wire]!.write(frame),
+    /** The latest wire's POSTs are answered 400 from now on, as the server does once it cut the wire. */
+    cutWire: () => void cut.add(opened.at(-1)!.connId),
+    reconcile: () => emit(() => reconciled([server.ix])),
     // A browser that can't stream a request body (Firefox) sends it as "[object ReadableStream]", and the server
     // answers 400 without reading a frame or sending the open-ack.
     refuseUpload: () => server.settleUpload(new Response('bad request', { status: 400 })),
@@ -85,7 +95,7 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
       const { metadata, frames } = await parseBlobBody(body)
       if (!metadata.streamResponse) {
         for (const raw of frames) onBatchFrame(decode(raw as never))
-        return new Response('', { status: 200 })
+        return new Response('', { status: cut.has(metadata.connId) ? 400 : 200 })
       }
       server.wires++
       for (const raw of frames) {
@@ -96,6 +106,7 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
         start(controller) {
           controller.enqueue(encoder.encode(': open\n\n'))
           write = (frame) => controller.enqueue(encoder.encode(`data: ${uint8ArrayToBase64url(frame as never)}\n\n`))
+          opened.push({ connId: metadata.connId, write })
           for (const frame of unwritten.splice(0)) write(frame())
         },
       })
@@ -375,5 +386,35 @@ test("an upload request the server ends after its open-ack, as Node's requestTim
   server.settleUpload(new Response('', { status: 408 }))
   await delay(1_500)
   expect(server.wires).toBe(2)
+  connection.dispose()
+})
+
+test("a RECONCILED that comes on an SSE wire the page gave up doesn't settle the next wire's RECONCILE", async () => {
+  const server = fakeServer()
+  const connectionKey = crypto.randomUUID()
+  const register = () =>
+    ClientConnection.getOrCreate('http://abandoned-reconciled.test/_telefunc', createChannel() as never, {
+      transports: ['sse'],
+      fetchImpl: server.fetch,
+      connectionKey,
+    }) as any
+  const connection = register()
+  await delay(20)
+  server.refuseUpload()
+  server.reconcile()
+  await delay(20)
+  register() // its RECONCILE goes in a batch POST
+  await delay(20)
+  register() // waits for that RECONCILE's RECONCILED
+  await delay(20)
+  // The server cut the wire: it refuses the page's next POST, a PING, while the wire's event stream still delivers.
+  server.cutWire()
+  connection.transport.sendPing(encode.ping())
+  void connection.transport.flushOutbox() // its heartbeat delay passed
+  await vi.waitFor(() => expect(server.wires).toBe(2), { timeout: 2_000 })
+  server.sendOnWire(0, reconciled([0, 1]))
+  server.sendOnWire(1, reconciled([0, 1, 2]))
+  await delay(20)
+  expect([...connection.channels.values()].map((entry) => entry.state.tag)).toEqual(['open', 'open', 'open'])
   connection.dispose()
 })
