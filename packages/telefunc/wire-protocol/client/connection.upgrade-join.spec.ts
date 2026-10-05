@@ -7,7 +7,7 @@
 // orderings. This spec drives the REAL ClientConnection against a scripted SSE server and a fake
 // WebSocket, so each interleaving is chosen rather than raced.
 
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection } from './connection.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
@@ -265,6 +265,54 @@ describe('SSE→WS handoff join', () => {
     h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
     await settle()
     expect(h.dispatched.map((f) => (f as { text: string }).text)).toEqual(['"old-1"', '"new-1"'])
+  })
+
+  test('the join waits past its timeout for a FIN the old wire is still delivering frames ahead of', async () => {
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'],
+    })
+    try {
+      const h = await upgradeToBarrier()
+      const { upgradeId } = await h.barrierSent
+      h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+      // What the old wire still carries takes 6 s to arrive, and its FIN comes behind it.
+      const texts = Array.from({ length: 12 }, (_, i) => `"old-${i + 1}"`)
+      for (const [i, text] of texts.entries()) {
+        expect(h.probe.readyState, `the page kept the WebSocket ${i * 500} ms in`).toBe(1)
+        h.pushOld(encode.text(h.ix, text, i + 1))
+        await vi.advanceTimersByTimeAsync(500)
+      }
+      h.pushOld(encode.fin())
+      await vi.advanceTimersByTimeAsync(100)
+      expect(h.probe.readyState, 'the page kept the WebSocket').toBe(1)
+      expect(h.dispatched.map((f) => (f as { text: string }).text)).toEqual(texts)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('the join falls back 2 s after the old wire, its FIN still out, delivered its last bytes', async () => {
+    vi.useFakeTimers({
+      shouldAdvanceTime: true,
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'],
+    })
+    try {
+      const h = await upgradeToBarrier()
+      const { upgradeId } = await h.barrierSent
+      h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+      for (let i = 1; i <= 6; i++) {
+        h.pushOld(encode.text(h.ix, `"old-${i}"`, i))
+        await vi.advanceTimersByTimeAsync(500)
+      }
+      // The old wire stalls: its last bytes came 500 ms ago, and no FIN follows.
+      await vi.advanceTimersByTimeAsync(1_400)
+      expect(h.probe.readyState, 'the page kept the WebSocket 1.9 s after the last bytes').toBe(1)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(h.probe.readyState, 'the page fell back 2 s after the last bytes').toBe(3)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test("a RECONCILED for another upgrade's id does not settle this one", async () => {

@@ -958,6 +958,12 @@ class ClientConnection implements MuxConnection {
     const u = this.committing
     if (u === null) return
     u.joinTimer = null
+    // The FIN comes behind what the old wire still delivers: given up on once that wire went quiet for the timeout.
+    const quiet = u.finReceived ? Infinity : u.from.quietFor()
+    if (quiet < UPGRADE_HANDOFF_JOIN_TIMEOUT_MS) {
+      u.joinTimer = setTimeout(() => this.onJoinTimeout(), UPGRADE_HANDOFF_JOIN_TIMEOUT_MS - quiet)
+      return
+    }
     const waitingFor = u.finReceived ? 'RECONCILED' : 'FIN'
     this.fallbackToSse(new NetworkError(`Upgrade handoff timed out waiting for ${waitingFor}`, true))
   }

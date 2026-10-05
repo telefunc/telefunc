@@ -89,7 +89,8 @@ export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
  *  itself. On a duplex upstream the barrier is just the last frame pushed onto the open body. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** Post-flip wait for both join limbs — FIN on the old wire, RECONCILED on the new one. */
+/** Post-flip wait for the join limbs. FIN on the old wire: 2 s from the flip or from the last bytes it delivered,
+ *  whichever is later. RECONCILED on the new: 2 s from the flip. */
 export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 
 /** Past either bound the upgrade is abandoned rather than letting a stalled join buffer forever. */
