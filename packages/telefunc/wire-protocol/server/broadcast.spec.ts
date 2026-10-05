@@ -93,6 +93,7 @@ function muxWires() {
     getSessionId: (wire) => sessions.get(wire),
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
+    wholeMessages: false,
     sendNow: (_wire, frame) => {
       const decoded = decode(frame)
       if (decoded.tag === TAG.PUBLISH) published.push(decoded.text)

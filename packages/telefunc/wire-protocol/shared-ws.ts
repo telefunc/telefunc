@@ -58,7 +58,7 @@ import { assert } from '../utils/assert.js'
 // as they are: the frame's owner reads the whole seq from where it stands on the channel (`seqNear`, `seqThrough`).
 //
 // Tag layout — sparse ranges so range checks classify:
-//   0x01–0x09  connection-level control (no ix, no seq)
+//   0x01–0x0f  connection-level control (no ix, no seq)
 //   0x10–0x29  data plane (carries seq, payload varies)
 //   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 //
@@ -107,6 +107,11 @@ const TAG = {
   /** Client → server on the OLD wire as its final frame: the same cursors as a RECONCILE, but
    *  addressed to the staged probe. Its own tag so the size cap lands on the raw bytes. */
   BARRIER: 0x09 as const,
+  /** Either way on a WebSocket, which delivers no part of a message: a piece of a frame sent in pieces (see
+   *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece. */
+  PIECE: 0x0a as const,
+  /** Back once all of a frame's pieces arrived. */
+  PIECES_ACK: 0x0b as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -351,6 +356,8 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.STREAM_REQUEST_OPEN_ACK }
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
+  | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
+  | { tag: typeof TAG.PIECES_ACK }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -514,6 +521,14 @@ const encode = {
   streamRequestOpenAck: () => encodeBareFrame(TAG.STREAM_REQUEST_OPEN_ACK),
   prepare: (payload: PreparePayload) => encodeJsonFrame(TAG.PREPARE, payload),
   ready: (payload: ReadyPayload) => encodeJsonFrame(TAG.READY, payload),
+  piece(total: number, piece: Uint8Array): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 4 + piece.byteLength)
+    writeHeader(frame, TAG.PIECE, 0, 0)
+    writeU32(frame, HEADER, total)
+    frame.set(piece, HEADER + 4)
+    return frame
+  },
+  piecesAck: () => encodeBareFrame(TAG.PIECES_ACK),
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {
@@ -696,6 +711,11 @@ function decode(frame: Uint8Array): DecodedFrame {
       return { tag: TAG.PREPARE, payload: parsePreparePayload(parseJsonPayload(payload)) }
     case TAG.READY:
       return { tag: TAG.READY, payload: parseJsonPayload(payload) as ReadyPayload }
+    case TAG.PIECE:
+      assertProtocol(payload.length >= 4, 'PIECE payload too short')
+      return { tag: TAG.PIECE, total: readU32(payload, 0), piece: payload.subarray(4) }
+    case TAG.PIECES_ACK:
+      return { tag: TAG.PIECES_ACK }
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
@@ -751,6 +771,8 @@ function decode(frame: Uint8Array): DecodedFrame {
 
 const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PING,
+  TAG.PIECE,
+  TAG.PIECES_ACK,
   TAG.RECONCILE,
   TAG.BARRIER,
   TAG.PREPARE,

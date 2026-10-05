@@ -19,6 +19,7 @@ function wires(mux: ChannelMux) {
     getSessionId: (wire) => sessions.get(wire),
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
+    wholeMessages: false,
     sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
     bufferedAmount: () => 0,
     terminateConnection: (wire) => void terminated.add(wire),
@@ -514,6 +515,7 @@ test("a page that grants credit it doesn't have and doesn't read has its wire te
     getSessionId: (w) => sessions.get(w),
     setSessionId: (w, id) => void sessions.set(w, id),
     getConnId: () => null,
+    wholeMessages: false,
     sendNow: (_, frame) => void (held += frame.byteLength),
     bufferedAmount: () => held,
     terminateConnection: (w) => {
@@ -547,6 +549,7 @@ function drainingWires(mux: ChannelMux) {
     getSessionId: (wire) => sessions.get(wire),
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
+    wholeMessages: false,
     sendNow: (wire, frame) => {
       sent.set(wire, (sent.get(wire) ?? 0) + frame.byteLength)
       if (!pending.get(wire)) setImmediate(() => pending.set(wire, 0))

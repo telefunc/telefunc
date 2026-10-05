@@ -32,6 +32,7 @@ function getTelefuncChannelHooks({
     sendNow: (peer, frame) => {
       peer.send(frame)
     },
+    wholeMessages: true,
     bufferedAmount,
     // Closed at once, as an SSE wire is: a Durable Object peer's terminate() is a close handshake a vanished client
     // never answers, so its close hook would run late, if at all.

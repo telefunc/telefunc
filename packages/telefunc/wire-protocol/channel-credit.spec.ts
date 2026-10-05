@@ -15,11 +15,12 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   RECONCILE_TIMEOUT_MS,
+  WIRE_MAX_RAW_FRAME_BYTES,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
-import { TAG } from './shared-ws.js'
+import { TAG, encode } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
-import { config } from '../node/server/serverConfig.js'
+import { config, lowerMaxFrameBytes } from '../node/server/serverConfig.js'
 import { Room } from './room/server/statics.js'
 import type { ServerLocalParticipant, ServerRoom } from './room/server/room.js'
 import { RoomParticipantStubChannel } from './room/server/stub.js'
@@ -132,6 +133,7 @@ class Loopback {
     getSessionId: (socket) => this.sessions.get(socket),
     setSessionId: (socket, id) => void this.sessions.set(socket, id),
     getConnId: () => null,
+    wholeMessages: true,
     sendNow: (socket, frame) => {
       this.sends('server', frame)
       socket.toPage.push(frame.slice())
@@ -604,8 +606,10 @@ test("a page that stops reading holds a channel's sends nobody awaits to its win
   const { error, sends } = await sendUntilRejected((n) => feed.server.send(message(n)))
   expect(error).toBeInstanceOf(ChannelOverflowError)
   expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES)
-  // One message past them, and each one's header.
-  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 64 * KIB)
+  // One message past them, and the headers of each one and of its pieces.
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(
+    CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 192 * KIB,
+  )
 
   // Once the page reads again it gets every message but the refused one, and what is sent after it caught up.
   loop.socket.toPage.release()
@@ -628,7 +632,7 @@ test("a page that stops reading holds a channel's ack requests nobody awaits to 
   })
   expect(error).toBeInstanceOf(ChannelOverflowError)
   expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES)
-  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_MAX_BYTES + 64 * KIB)
+  expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_MAX_BYTES + 192 * KIB)
 
   loop.socket.toPage.release()
   await run(5_000)
@@ -739,7 +743,7 @@ test('a page that stops reading a broadcast leaves it with ChannelOverflowError 
 
   // Once the page reads again it gets every publish sent before the one that found it behind, then the close.
   loop.socket.toPage.release()
-  await runUntil(() => errors.page !== undefined, 1_000)
+  await runUntil(() => errors.page !== undefined, 2_000)
   expect(errors.page).toBeInstanceOf(ChannelOverflowError)
   expect(seen).toEqual(Array.from({ length: published - 1 }, (_, n) => publication(n)))
 })
@@ -1028,6 +1032,57 @@ test('a page whose downlink stops while its RECONCILE waits behind its upload ta
   expect(Date.now() - stoppedAt).toBeLessThanOrEqual(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100)
 })
 
+test('a message that takes longer than the ping deadline to cross arrives on the wire it left on, either way', async () => {
+  config.channel.pingInterval = 1_000
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  const atServer: number[] = []
+  const atPage: number[] = []
+  server.listenBinary((data) => void atServer.push(data.byteLength))
+  page.listenBinary((data) => void atPage.push(data.byteLength))
+  await run(100)
+  // 100 KB/s: a megabyte takes 10 s, five pong deadlines.
+  loop.socket.toServer.bytesPerMs = 100
+  loop.socket.toPage.bytesPerMs = 100
+  void page.sendBinary(new Uint8Array(1_000_000))
+  await runUntil(() => atServer.length === 1, 30_000)
+  void server.sendBinary(new Uint8Array(1_000_000))
+  await runUntil(() => atPage.length === 1, 30_000)
+  expect(atServer).toEqual([1_000_000])
+  expect(atPage).toEqual([1_000_000])
+  expect(loop.sockets).toHaveLength(1)
+})
+
+test('the server holds nothing for empty pieces, and cuts a wire whose pieces are not cut as its frame is', async () => {
+  loop.open<Uint8Array, Uint8Array>()
+  await run(100)
+  const socket = loop.socket
+  // The page never reads the PONG each piece gets.
+  socket.toPage.hold()
+  for (let i = 0; i < 10_000; i++) socket.send(encode.piece(1_000_000, new Uint8Array(0)))
+  await run(1_000)
+  const held = (
+    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieceAssembler: unknown } }> }
+  ).connectionEntries.get(socket)?.state.pieceAssembler as { pieces: unknown[] } | undefined
+  expect(held?.pieces).toHaveLength(0)
+  socket.send(encode.piece(1_000_000, new Uint8Array(1)))
+  await run(100)
+  expect(socket.readyState).toBe(3)
+})
+
+test('pieces of a frame larger than the runtime takes in one message cut the wire, as that message would', async () => {
+  lowerMaxFrameBytes(1024 * KIB)
+  try {
+    loop.open<Uint8Array, Uint8Array>()
+    await run(100)
+    const socket = loop.socket
+    socket.send(encode.piece(1024 * KIB + 1, new Uint8Array(0)))
+    await run(100)
+    expect(socket.readyState).toBe(3)
+  } finally {
+    lowerMaxFrameBytes(WIRE_MAX_RAW_FRAME_BYTES)
+  }
+})
+
 test('a page whose uplink stops with its upload queued on it takes the wire for dead within a pong deadline', async () => {
   config.channel.pingInterval = 1_000
   const feed = loop.open<string, never>()
@@ -1124,7 +1179,7 @@ test.each([
     // Once the page reads again it gets, in order, every message the server sent before the one that found it behind,
     // then the end.
     loop.socket.toPage.release()
-    await runUntil(() => viewClosed, 1_000)
+    await runUntil(() => viewClosed, 2_000)
     expect(left).toEqual([{ type: 'disconnected' }])
     expect(await inFlight).toBeInstanceOf(ChannelOverflowError)
     expect(seen.length).toBeGreaterThan((CREDIT_WINDOW_MAX_BYTES * 1.25) / (256 * KIB) - 1)
@@ -1223,7 +1278,7 @@ test("a Room member's page cut off further behind than the server's replay buffe
   for (let n = 0; n < 8; n++) void speaker.publish(publication(n))
   await run(50)
   loop.socket.cut()
-  await runUntil(() => viewClosed, 1_000)
+  await runUntil(() => viewClosed, 2_000)
   expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
   expect(left).toEqual([{ type: 'disconnected' }])
   expect(seen).toEqual(['before', ...seen.slice(1).map((_, n) => publication(n))])
@@ -1336,7 +1391,7 @@ test.each([
     // Once the page reads again it gets, in order, every message the server sent before the one that found it behind,
     // then the end.
     loop.socket.toPage.release()
-    await runUntil(() => left.length > 0, 1_000)
+    await runUntil(() => left.length > 0, 2_000)
     expect(left).toEqual([{ type: 'disconnected' }])
     expect(inbox.length).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES / (256 * KIB))
     expect(inbox).toEqual(Array.from({ length: inbox.length }, (_, n) => message(n)))
