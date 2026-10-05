@@ -869,7 +869,9 @@ class ClientConnection implements MuxConnection {
     for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._onTransportBatched()
   }
 
-  _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number): void {
+  _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
+    // A wire the page gave up still delivers, but its RECONCILED answers a RECONCILE the next wire's replaces.
+    if (abandoned && frame.tag === TAG.RECONCILED) return
     const u = this.committing
     if (u !== null && this.transport === u.to) {
       this.ingestDuringHandoff(frame, source === u.from ? 'old' : 'new', byteLength)
@@ -1941,7 +1943,7 @@ class WsTransport implements UpgradeTarget {
         this.owner._onTransportPong(frame.ended)
         return
       }
-      this.owner._onTransportFrame(frame, this, raw.byteLength)
+      this.owner._onTransportFrame(frame, this, raw.byteLength, ws === this.abandonedWs)
     }
     ws.onclose = () => {
       if (this.ws === ws) this.ws = null
@@ -2254,7 +2256,7 @@ class SseTransport implements UpgradeSource {
             this.owner._onTransportPong(frame.ended)
             continue
           }
-          this.owner._onTransportFrame(frame, this, raw.byteLength)
+          this.owner._onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
         }
       } catch {
         if (abortController.signal.aborted) return
