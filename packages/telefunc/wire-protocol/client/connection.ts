@@ -1780,7 +1780,7 @@ class WsTransport implements UpgradeTarget {
     let onClose: (() => void) | null = null
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     ws.onmessage = ({ data }: MessageEvent) => {
-      const message = readMessage(ws, pieces, data)
+      const message = receiveMessage(ws, pieces, data)
       if (message === null) return
       if (message.frame.tag === TAG.PONG) {
         onPong?.()
@@ -1915,7 +1915,7 @@ class WsTransport implements UpgradeTarget {
     this.pieceSender = sender
     ws.onmessage = ({ data }: MessageEvent) => {
       this.heartbeat?.noteReceived()
-      const message = readMessage(ws, pieces, data)
+      const message = receiveMessage(ws, pieces, data)
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
@@ -2007,8 +2007,9 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** The frame a WebSocket message completes, or null: a piece before its frame's last, or bytes that close `ws`. */
-function readMessage(
+/** The frame a WebSocket message completes, acknowledged if it came in pieces, or null: a piece before its frame's last,
+ *  or bytes that close `ws`. */
+function receiveMessage(
   ws: WebSocket,
   pieces: PieceAssembler,
   data: unknown,
