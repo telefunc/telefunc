@@ -5,7 +5,7 @@ import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
-import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
+import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
 type BunWs = ReturnType<typeof crossws>
@@ -34,7 +34,8 @@ function telefunc(): TelefuncServe {
   const ws = crossws({ hooks: getTelefuncChannelHooks() })
 
   return {
-    websocket: ws.websocket,
+    // Bun closes the socket on a message over 16 MiB by default, below the frames telefunc accepts.
+    websocket: { ...ws.websocket, maxPayloadLength: WIRE_MAX_RAW_FRAME_BYTES },
     async serve({ request, server, context }: ServeInput): Promise<Response | undefined> {
       const url = new URL(request.url)
       const config = getServerConfig()
