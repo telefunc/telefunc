@@ -34,6 +34,16 @@ test('close() refuses a timeout longer than a timer waits, which would fire at o
   expect(channel.isClosed).toBe(false)
 })
 
+test('a message whose frame the server would refuse throws at once, ack or not, and queues nothing', () => {
+  const channel = stalledChannel()
+  const tooLarge = new Uint8Array(64 * 1024 * 1024)
+  expect(() => channel.sendBinary(tooLarge)).toThrow('67108871 bytes encoded, the server accepts 67108864 at most')
+  expect(() => channel.sendBinary(tooLarge, { ack: true })).toThrow('67108871 bytes encoded')
+  void channel.sendBinary(new Uint8Array(1))
+  const queued = (channel as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) => decode(frame))
+  expect(queued).toMatchObject([{ tag: TAG.BINARY, seq: 1 }])
+})
+
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = stalledChannel()
   const seen: string[] = []
