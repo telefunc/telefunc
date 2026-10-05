@@ -2,7 +2,7 @@ export { configUser as config }
 export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
-export { lowerMaxFrameBytes }
+export { setAdapterMaxFrameBytes }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { pingDeadlineOf }
@@ -383,7 +383,7 @@ function enableChannelTransports(transports: ChannelTransports): void {
 }
 
 /** @internal The runtime ends a WebSocket on a larger message: each channel tells its page, which refuses one. */
-function lowerMaxFrameBytes(bytes: number): void {
+function setAdapterMaxFrameBytes(bytes: number | undefined): void {
   globalObject.adapterMaxFrameBytes = bytes
 }
 

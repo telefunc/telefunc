@@ -15,12 +15,11 @@ import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   RECONCILE_TIMEOUT_MS,
-  WIRE_MAX_RAW_FRAME_BYTES,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG, encode } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
-import { config, lowerMaxFrameBytes } from '../node/server/serverConfig.js'
+import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 
 const LATENCY_MS = 5
 
@@ -926,7 +925,7 @@ test('the server holds nothing for empty pieces, and cuts a wire whose pieces ar
 })
 
 test('pieces of a frame larger than the runtime takes in one message cut the wire, as that message would', async () => {
-  lowerMaxFrameBytes(1024 * KIB)
+  setAdapterMaxFrameBytes(1024 * KIB)
   try {
     loop.open<Uint8Array, Uint8Array>()
     await run(100)
@@ -935,7 +934,7 @@ test('pieces of a frame larger than the runtime takes in one message cut the wir
     await run(100)
     expect(socket.readyState).toBe(3)
   } finally {
-    lowerMaxFrameBytes(WIRE_MAX_RAW_FRAME_BYTES)
+    setAdapterMaxFrameBytes(undefined)
   }
 })
 
