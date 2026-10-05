@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { ClientConnection } from './connection.js'
+import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import type { DecodedFrame, ReconciledPayload } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
@@ -28,6 +29,7 @@ function createChannel(dispatched: DecodedFrame[]) {
   return {
     id: crypto.randomUUID(),
     isClosed: false,
+    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
     _onTransportOpen() {},
     _dispatchFrame(frame: DecodedFrame) {
       dispatched.push(frame)

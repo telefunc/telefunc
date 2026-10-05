@@ -14,6 +14,7 @@ import {
   RECONCILE_TIMEOUT_MS,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
+  WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
 import { encodeSseRequest } from '../sse-request.js'
@@ -25,6 +26,7 @@ function createChannel(id = crypto.randomUUID()) {
   return {
     id,
     isClosed: false,
+    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
     _onTransportOpen() {},
     _dispatchFrame() {},
     _onTransportClose() {},

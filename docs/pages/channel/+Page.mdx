@@ -217,7 +217,7 @@ channel.listenBinary((data) => {
 const ack = await channel.sendBinary(frame, { ack: true })
 ```
 
-A message the client sends can be at most 64 MiB, serialized and with its 7-byte header: a larger `send()`, `sendBinary()` or `publish()` throws without sending it, and the channel stays open.
+A message the client sends can be at most 64 MiB (on Cloudflare, 32 MiB when the channel's transports include `'ws'`, as they do by default), serialized and with its 7-byte header: a larger `send()`, `sendBinary()` or `publish()` throws without sending it, and the channel stays open.
 
 ### Backpressure
 

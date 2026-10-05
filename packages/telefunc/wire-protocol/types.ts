@@ -139,8 +139,9 @@ type ClientReviverContext = {
   createChannel<ClientToServer = unknown, ServerToClient = unknown>(opts: {
     channelId: string
     ack?: boolean
+    maxFrameBytes?: number
   }): ClientChannel<ClientToServer, ServerToClient>
-  createBroadcast<T = unknown>(opts: { channelId: string; key: string }): ClientBroadcast<T>
+  createBroadcast<T = unknown>(opts: { channelId: string; key: string; maxFrameBytes?: number }): ClientBroadcast<T>
   receiveStream(metadata: StreamingMetadata): StreamSource
 }
 
@@ -237,12 +238,20 @@ type BlobDownloadResponseContract = TypeContract<BlobDownload, BlobDownload, Blo
 
 type DownloadProgress = (loaded: number, total: number | undefined) => void
 
-type ChannelContract = TypeContract<ServerChannel, ClientChannel, { channelId: string; ack?: true }>
+type ChannelContract = TypeContract<
+  ServerChannel,
+  ClientChannel,
+  { channelId: string; ack?: true; maxFrameBytes?: number }
+>
 
-type BroadcastContract = TypeContract<ServerBroadcast, ClientBroadcast, { channelId: string; key: string }>
+type BroadcastContract = TypeContract<
+  ServerBroadcast,
+  ClientBroadcast,
+  { channelId: string; key: string; maxFrameBytes?: number }
+>
 
 type FunctionContract = TypeContract<
   (...args: readonly unknown[]) => unknown,
   (...args: readonly unknown[]) => Promise<unknown>,
-  { channelId: string }
+  { channelId: string; maxFrameBytes?: number }
 >

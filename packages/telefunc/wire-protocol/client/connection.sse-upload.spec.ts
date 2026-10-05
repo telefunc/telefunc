@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
+import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
@@ -120,6 +121,7 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
 const createChannel = (id: string = crypto.randomUUID()) => ({
   id,
   isClosed: false,
+  _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
   _onTransportOpen() {},
   _dispatchFrame() {},
   _onTransportClose() {},

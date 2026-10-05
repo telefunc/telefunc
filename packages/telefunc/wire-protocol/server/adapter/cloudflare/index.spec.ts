@@ -74,6 +74,7 @@ vi.mock('../../ws.js', () => ({
 vi.mock('../../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
   enableChannelTransports: mocks.enableChannelTransports,
+  lowerMaxFrameBytes: vi.fn(),
 }))
 
 vi.mock('../../../../node/server/telefunc.js', () => ({
