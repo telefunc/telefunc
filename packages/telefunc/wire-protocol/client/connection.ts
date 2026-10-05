@@ -675,71 +675,56 @@ class ClientConnection implements MuxConnection {
   }
 
   send(channel: MuxChannel, data: string): number {
+    const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.text(ix, data, seq))
+    return frame ? payloadBytes(frame) : 0
+  }
+
+  sendBinary(channel: MuxChannel, data: Uint8Array): void {
+    this.sendSequenced(channel, 'data', (ix, seq) => encode.binary(ix, data, seq))
+  }
+
+  sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
+    this.sendSequenced(channel, 'ack', (ix, seq) => encode.publishAckReq(ix, data, seq), onQueued)
+  }
+
+  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
+    this.sendSequenced(channel, 'ack', (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), onQueued)
+  }
+
+  sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
+    this.sendSequenced(channel, 'ack', (ix, seq) => encode.textAckReq(ix, data, seq), onQueued)
+  }
+
+  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
+    this.sendSequenced(channel, 'ack', (ix, seq) => encode.binaryAckReq(ix, data, seq), onQueued)
+  }
+
+  /** Encodes at the seq it then takes, so a frame the server would refuse throws and takes none. `onQueued(seq)` runs
+   *  before the frame hits the wire, so an immediate `ACK_RES` finds its pending ack. */
+  private sendSequenced(
+    channel: MuxChannel,
+    kind: 'data' | 'ack',
+    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
+    onQueued?: (seq: number) => void,
+  ): Uint8Array<ArrayBuffer> | undefined {
     const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return 0
+    if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(encode.text(ix, data, replay.seq + 1), channel)
+    const frame = buildFrame(ix, replay.seq + 1)
+    // The server ends the wire a larger frame arrives on, and the one its replay arrives on next.
+    assertUsage(
+      frame.byteLength <= channel._maxFrameBytes,
+      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${channel._maxFrameBytes} at most`,
+    )
     const seq = replay.nextSeq()
+    onQueued?.(seq)
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
     } else {
       replay.push(seq, frame)
-      this.transport.sendFrame({ kind: 'data', frame })
+      this.transport.sendFrame({ kind, frame })
     }
-    return payloadBytes(frame)
-  }
-
-  sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.publishAckReq(ix, data, seq), onQueued)
-  }
-
-  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), onQueued)
-  }
-
-  sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.textAckReq(ix, data, seq), onQueued)
-  }
-
-  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendAckReq(channel, (ix, seq) => encode.binaryAckReq(ix, data, seq), onQueued)
-  }
-
-  /** Shared ack-req issuance — encodes via `buildFrame`, invokes `onQueued(seq)` so the
-   *  channel registers the pending ack *before* the frame hits the wire (so an
-   *  immediate `ACK_RES` can't be lost), then ships or buffers the frame. Mirrors
-   *  `IndexedPeer.sendTextAckReq` on the server side. */
-  private sendAckReq(
-    channel: MuxChannel,
-    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
-    onQueued: (seq: number) => void,
-  ): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(buildFrame(ix, replay.seq + 1), channel)
-    const seq = replay.nextSeq()
-    onQueued(seq)
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return
-    }
-    replay.push(seq, frame)
-    this.transport.sendFrame({ kind: 'ack', frame })
-  }
-
-  sendBinary(channel: MuxChannel, data: Uint8Array): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const replay = this.replayBuffers.get(ix)!
-    const frame = assertFrameFits(encode.binary(ix, data, replay.seq + 1), channel)
-    const seq = replay.nextSeq()
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return
-    }
-    replay.push(seq, frame)
-    this.transport.sendFrame({ kind: 'data', frame })
+    return frame
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -2601,15 +2586,6 @@ function channelErrorFor(reason: number): Error {
     default:
       return makeBugError()
   }
-}
-
-/** The server ends the wire a larger frame arrives on, and the one its replay arrives on next: the send is refused. */
-function assertFrameFits(frame: Uint8Array<ArrayBuffer>, { _maxFrameBytes }: MuxChannel): Uint8Array<ArrayBuffer> {
-  assertUsage(
-    frame.byteLength <= _maxFrameBytes,
-    `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${_maxFrameBytes} at most`,
-  )
-  return frame
 }
 
 function isWindowRefresh({ frame }: OutboxEntry): boolean {
