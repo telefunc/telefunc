@@ -52,3 +52,21 @@ test('an upload that ends while the server is away waits for it as long as the c
     vi.useRealTimers()
   }
 })
+
+test("an upload's chunk over 8 MiB goes in pieces the server accepts", async () => {
+  config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  vi.spyOn(ClientChannel.prototype, 'onOpen').mockImplementation((callback: () => void) => callback())
+  const sent: number[] = []
+  vi.spyOn(ClientChannel.prototype, '_sendBinary').mockImplementation(((data: Uint8Array) => {
+    if (data[0] === CHANNEL_PUMP_TAG_DATA) sent.push(data.byteLength - 1)
+  }) as never)
+  const chunks = (async function* () {
+    yield new Uint8Array(8 * 1024 * 1024 + 1) as Uint8Array<ArrayBuffer>
+  })()
+  pumpClientProducerToChannel(() => ({ chunks, cancel: () => {} }), {
+    transports: ['sse'],
+    telefuncUrl: 'http://pump-pieces.test/_telefunc',
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  expect(sent).toEqual([8 * 1024 * 1024, 1])
+})
