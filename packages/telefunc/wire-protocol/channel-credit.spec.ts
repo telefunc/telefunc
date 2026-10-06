@@ -907,6 +907,31 @@ test('a message that takes longer than the ping deadline to cross arrives on the
   expect(loop.sockets).toHaveLength(1)
 })
 
+test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last covers all of it', async () => {
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  const at = { server: 0, page: 0 }
+  server.listenBinary(() => void at.server++)
+  page.listenBinary(() => void at.page++)
+  await run(100)
+  const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
+  for (let i = 0; i < 100; i++) {
+    void page.sendBinary(new Uint8Array(32_000))
+    void server.sendBinary(new Uint8Array(32_000))
+  }
+  await runUntil(() => at.server === 100 && at.page === 100, 5_000)
+  await run(100)
+  for (const side of ['page', 'server'] as const) {
+    const acks = loop.sent[side].slice(marks[side]).filter(([tag]) => tag === TAG.PIECES_ACK)
+    expect(acks.length).toBeGreaterThan(0)
+    expect(acks.length).toBeLessThan(5)
+  }
+  const sender = (
+    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { sender: unknown } } }> }
+  ).connectionEntries.get(loop.socket)?.state.pieces.sender as { unacknowledged: unknown[] }
+  expect(sender.unacknowledged).toHaveLength(0)
+  expect(loop.sockets).toHaveLength(1)
+})
+
 test('on a fresh fast wire, frames of 32 KB and 128 KB go whole, either way', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   const atServer: number[] = []
@@ -986,8 +1011,8 @@ test('the server holds nothing for empty pieces, and cuts a wire whose pieces ar
   for (let i = 0; i < 10_000; i++) socket.send(encode.piece(1_000_000, new Uint8Array(0)))
   await run(1_000)
   const held = (
-    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { assembler: unknown } } }> }
-  ).connectionEntries.get(socket)?.state.pieces.assembler as { pieces: unknown[] } | undefined
+    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { receiver: unknown } } }> }
+  ).connectionEntries.get(socket)?.state.pieces.receiver as { pieces: unknown[] } | undefined
   expect(held?.pieces).toHaveLength(0)
   socket.send(encode.piece(1_000_000, new Uint8Array(1)))
   await run(100)

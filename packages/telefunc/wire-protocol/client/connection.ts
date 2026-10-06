@@ -34,7 +34,7 @@ import {
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
-import { acknowledges, PieceAssembler, PieceSender } from '../pieces.js'
+import { PieceReceiver, PieceSender } from '../pieces.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
@@ -1762,8 +1762,8 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   private heartbeat: Heartbeat | null = null
-  /** The probe's socket, with the assembler it keeps as the transport adopts it. */
-  private probed: { ws: WebSocket; pieces: PieceAssembler } | null = null
+  /** The probe's socket, with the piece receiver it keeps as the transport adopts it. */
+  private probed: { ws: WebSocket; pieces: PieceReceiver } | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
   private connecting = false
@@ -1793,7 +1793,7 @@ class WsTransport implements UpgradeTarget {
       return null
     }
     ws.binaryType = 'arraybuffer'
-    const pieces = new PieceAssembler()
+    const pieces = new PieceReceiver((frame) => ws.send(frame))
 
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
@@ -1897,7 +1897,7 @@ class WsTransport implements UpgradeTarget {
       this.handleOpen(ws)
     }
 
-    this.setupHandlers(ws, new PieceAssembler())
+    this.setupHandlers(ws, new PieceReceiver((frame) => ws.send(frame)))
   }
 
   private handleOpen(ws: WebSocket): void {
@@ -1929,7 +1929,7 @@ class WsTransport implements UpgradeTarget {
     return Promise.resolve()
   }
 
-  private setupHandlers(ws: WebSocket, pieces: PieceAssembler): void {
+  private setupHandlers(ws: WebSocket, pieces: PieceReceiver): void {
     const sender = new PieceSender()
     if (this.owner._slowLink) sender.markSlow()
     this.pieceSender = sender
@@ -1939,7 +1939,7 @@ class WsTransport implements UpgradeTarget {
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
-        sender.acknowledged(this.pingInterval)
+        sender.acknowledged(frame.count, frame.heldMs, this.pingInterval)
         return
       }
       if (frame.tag === TAG.PONG) {
@@ -2035,11 +2035,11 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** The frame a WebSocket message completes, acknowledged if it came in pieces, or null: a piece before its frame's last,
- *  or bytes that close `ws`. */
+/** The frame a WebSocket message completes, or null: a piece before its frame's last, or bytes that close `ws`. Its
+ *  receiver acknowledges a large one (`PieceReceiver.arrived`). */
 function receiveMessage(
   ws: WebSocket,
-  pieces: PieceAssembler,
+  pieces: PieceReceiver,
   data: unknown,
 ): { frame: DecodedFrame; byteLength: number } | null {
   try {
@@ -2051,7 +2051,7 @@ function receiveMessage(
       raw = whole
       frame = decode(raw)
     }
-    if (acknowledges(raw.byteLength)) ws.send(encode.piecesAck())
+    pieces.arrived(raw.byteLength)
     return { frame, byteLength: raw.byteLength }
   } catch {
     ws.close()

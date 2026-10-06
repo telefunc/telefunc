@@ -352,7 +352,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
-  | { tag: typeof TAG.PIECES_ACK }
+  | { tag: typeof TAG.PIECES_ACK; count: number; heldMs: number }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -523,7 +523,13 @@ const encode = {
     frame.set(piece, HEADER + 4)
     return frame
   },
-  piecesAck: () => encodeBareFrame(TAG.PIECES_ACK),
+  piecesAck(count: number, heldMs: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 8)
+    writeHeader(frame, TAG.PIECES_ACK, 0, 0)
+    writeU32(frame, HEADER, count)
+    writeU32(frame, HEADER + 4, heldMs)
+    return frame
+  },
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {
@@ -709,7 +715,8 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 4, 'PIECE payload too short')
       return { tag: TAG.PIECE, total: readU32(payload, 0), piece: payload.subarray(4) }
     case TAG.PIECES_ACK:
-      return { tag: TAG.PIECES_ACK }
+      assertProtocol(payload.length >= 8, 'PIECES_ACK payload too short')
+      return { tag: TAG.PIECES_ACK, count: readU32(payload, 0), heldMs: readU32(payload, 4) }
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
