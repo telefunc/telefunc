@@ -196,6 +196,21 @@ class Loopback {
 
 const run = (ms: number) => vi.advanceTimersByTimeAsync(ms)
 
+/** The server's piece sender and receiver of a socket, which the specs read into. */
+const piecesOf = (socket: LoopbackSocket) =>
+  (
+    loop.mux as unknown as {
+      connectionEntries: Map<unknown, { state: { pieces: { sender: unknown; receiver: unknown } } }>
+    }
+  ).connectionEntries.get(socket)?.state.pieces
+
+/** Whether a side's first frame over 16 KiB since `mark` went in pieces, not whole. */
+const firstSplit = (side: 'page' | 'server', mark: number) =>
+  loop.sent[side]
+    .slice(mark)
+    .map(([tag]) => tag)
+    .find((tag) => tag === TAG.PIECE || tag === TAG.BINARY) === TAG.PIECE
+
 /** Runs until `done`, in steps of `LATENCY_MS`. A page's window doubles about every 50 ms of a saturated stream,
  *  so runs stay short. */
 async function runUntil(done: () => boolean, maxMs: number): Promise<void> {
@@ -944,9 +959,7 @@ test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last
     expect(acks.length).toBeGreaterThan(0)
     expect(acks.length).toBeLessThan(5)
   }
-  const sender = (
-    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { sender: unknown } } }> }
-  ).connectionEntries.get(loop.socket)?.state.pieces.sender as { unacknowledged: unknown[] }
+  const sender = piecesOf(loop.socket)?.sender as { unacknowledged: unknown[] }
   expect(sender.unacknowledged).toHaveLength(0)
   expect(loop.sockets).toHaveLength(1)
 })
@@ -1009,8 +1022,7 @@ test.each(['page', 'server'] as const)(
     void server.sendBinary(new Uint8Array(100_000))
     await runUntil(() => atServer.length > 0 && atPage.length > 0, 5_000)
     for (const side of ['page', 'server'] as const) {
-      const tags = loop.sent[side].slice(marks[side]).map(([tag]) => tag)
-      expect(tags.find((tag) => tag === TAG.PIECE || tag === TAG.BINARY)).toBe(TAG.PIECE)
+      expect(firstSplit(side, marks[side])).toBe(true)
     }
     expect(loop.sockets).toHaveLength(2)
   },
@@ -1032,8 +1044,7 @@ test("after a page drops a wire the server still holds open, with a frame of the
   void page.sendBinary(new Uint8Array(100_000))
   await runUntil(() => atServer.length > 0, 5_000)
   for (const side of ['page', 'server'] as const) {
-    const tags = loop.sent[side].slice(marks[side]).map(([tag]) => tag)
-    expect(tags.find((tag) => tag === TAG.PIECE || tag === TAG.BINARY)).toBe(TAG.PIECE)
+    expect(firstSplit(side, marks[side])).toBe(true)
   }
 })
 
@@ -1045,9 +1056,7 @@ test('the server holds nothing for empty pieces, and cuts a wire whose pieces ar
   socket.toPage.hold()
   for (let i = 0; i < 10_000; i++) socket.send(encode.piece(1_000_000, new Uint8Array(0)))
   await run(1_000)
-  const held = (
-    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { receiver: unknown } } }> }
-  ).connectionEntries.get(socket)?.state.pieces.receiver as { pieces: unknown[] } | undefined
+  const held = piecesOf(socket)?.receiver as { pieces: unknown[] } | undefined
   expect(held?.pieces).toHaveLength(0)
   socket.send(encode.piece(1_000_000, new Uint8Array(1)))
   await run(100)
