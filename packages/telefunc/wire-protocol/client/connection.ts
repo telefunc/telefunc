@@ -1768,8 +1768,8 @@ class WsTransport implements UpgradeTarget {
   private abandonedWs: WebSocket | null = null
   private connecting = false
   private everOpened = false
-  /** The live wire's, set with it by `setupHandlers`. */
-  private pieceSender!: PieceSender
+  /** The live wire's, set with it by `setupHandlers`; before the first, a fresh one: nothing was sent yet. */
+  private pieceSender = new PieceSender()
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
