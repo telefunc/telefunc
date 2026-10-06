@@ -289,7 +289,8 @@ describe('Redis real three-master Cluster CI certification', () => {
     expect((await getRoomBackend().readHead(roomId))?.state).toBe('open')
     await waitFor(async () => (await getRoomBackend().readHead(roomId)) === null)
     const master = owner(await slot(headKey(prefix, roomId))).client
-    expect(await master.exists(headKey(prefix, roomId))).toBe(0)
+    // The head reads as lapsed from its `exp` on, while Redis expires its key only after `exp`.
+    await waitFor(async () => (await master.exists(headKey(prefix, roomId))) === 0)
     expect(await Room.list()).toEqual([])
     // The listing's repair dropped what the room left behind.
     expect(await master.keys(`${prefix}room:{${encodeURIComponent(roomId)}}*`)).toEqual([])
