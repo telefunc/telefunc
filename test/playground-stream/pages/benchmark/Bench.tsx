@@ -266,7 +266,6 @@ function openWith<F extends (...args: never[]) => unknown>(
     channel: {
       transports: [scenario.transport],
       connectionKey: `bench-${scenario.id}-${bytes}b-ch${slot}`,
-      idleTimeout: 0,
     },
   }) as F
 }
