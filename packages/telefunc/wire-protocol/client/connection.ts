@@ -264,8 +264,6 @@ type ClientChannelTransport = {
   isConnecting(): boolean
   /** Whether its last wire held a frame its receiver never acknowledged, before it measured a rate. */
   stalled(): boolean
-  /** Its live wire splits what it sends over `WIRE_PIECE_BYTES`, until it measures a rate. */
-  markSlow(): void
   /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
   sendPing(frame: Uint8Array<ArrayBuffer>): void
   sendFrame(frame: OutboundFrame): void
@@ -1176,10 +1174,7 @@ class ClientConnection implements MuxConnection {
       committing.committed = true
     }
     this.transport.applyReconciledSettings(ctrl)
-    if (ctrl.slow) {
-      this.slowLink = true
-      this.transport.markSlow()
-    }
+    if (ctrl.slow) this.slowLink = true
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
@@ -1768,8 +1763,8 @@ class WsTransport implements UpgradeTarget {
   private abandonedWs: WebSocket | null = null
   private connecting = false
   private everOpened = false
-  /** The live wire's, set with it by `setupHandlers`; before the first, a fresh one: nothing was sent yet. */
-  private pieceSender = new PieceSender()
+  /** The live wire's, set with it by `setupHandlers`: none before the first. */
+  private pieceSender: PieceSender | null = null
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
@@ -1930,7 +1925,10 @@ class WsTransport implements UpgradeTarget {
   }
 
   private setupHandlers(ws: WebSocket, pieces: PieceReceiver): void {
-    const sender = new PieceSender()
+    const sender = new PieceSender(
+      (message) => ws.send(message),
+      () => ws.bufferedAmount,
+    )
     if (this.owner._slowLink) sender.markSlow()
     this.pieceSender = sender
     ws.onmessage = ({ data }: MessageEvent) => {
@@ -1939,7 +1937,7 @@ class WsTransport implements UpgradeTarget {
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
-        sender.acknowledged(frame.count, frame.heldMs, this.pingInterval)
+        sender.acknowledged(frame.count, frame.heldMs)
         return
       }
       if (frame.tag === TAG.PONG) {
@@ -1962,11 +1960,7 @@ class WsTransport implements UpgradeTarget {
   }
 
   stalled(): boolean {
-    return this.pieceSender.stalled
-  }
-
-  markSlow(): void {
-    this.pieceSender.markSlow()
+    return this.pieceSender?.stalled === true
   }
 
   isConnecting(): boolean {
@@ -1974,11 +1968,8 @@ class WsTransport implements UpgradeTarget {
   }
 
   sendFrame(frame: OutboundFrame): void {
-    const ws = this.ws
-    assert(ws)
-    const pieces = this.pieceSender.pieces(frame.frame, ws.bufferedAmount)
-    if (pieces === null) return ws.send(frame.frame)
-    for (const piece of pieces) ws.send(piece)
+    assert(this.ws && this.pieceSender)
+    this.pieceSender.send(frame.frame, this.pingInterval)
   }
 
   bufferedAmount(): number {
@@ -2006,6 +1997,10 @@ class WsTransport implements UpgradeTarget {
 
   applyReconciledSettings(ctrl: ReconciledPayload): void {
     this.pingInterval = ctrl.pingInterval
+    if (ctrl.slow) {
+      assert(this.pieceSender) // a RECONCILED came on its wire
+      this.pieceSender.markSlow()
+    }
   }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
@@ -2152,14 +2147,12 @@ class SseTransport implements UpgradeSource {
     }, SSE_RECONCILE_DEADLINE_MS)
   }
 
-  stalled(): boolean {
-    return false
-  }
-
-  markSlow(): void {}
-
   hasWire(): boolean {
     return this.transportAbort !== null
+  }
+
+  stalled(): boolean {
+    return false
   }
 
   isConnecting(): boolean {

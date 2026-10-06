@@ -269,7 +269,13 @@ class ChannelMux {
         lastReceivedAt: 0,
         pongedAt: performance.now(),
         pieces: transport.wholeMessages
-          ? { sender: new PieceSender(), receiver: new PieceReceiver((frame) => this.send(connection, frame)) }
+          ? {
+              sender: new PieceSender(
+                (message) => transport.sendNow(connection, message),
+                () => transport.bufferedAmount(connection) ?? 0,
+              ),
+              receiver: new PieceReceiver((frame) => this.send(connection, frame)),
+            }
           : null,
         terminatePermanently: false,
         recvChain: null,
@@ -504,10 +510,7 @@ class ChannelMux {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      assertProtocol(
-        entry.state.pieces?.sender.acknowledged(frame.count, frame.heldMs, this.options.pingInterval),
-        'PIECES_ACK for nothing sent',
-      )
+      assertProtocol(entry.state.pieces?.sender.acknowledged(frame.count, frame.heldMs), 'PIECES_ACK for nothing sent')
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -1028,9 +1031,8 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
-    const pieces = state.pieces?.sender.pieces(frame, entry.transport.bufferedAmount(connection) ?? 0)
-    if (!pieces) return entry.transport.sendNow(connection, frame)
-    for (const piece of pieces) entry.transport.sendNow(connection, piece)
+    if (state.pieces) state.pieces.sender.send(frame, this.options.pingInterval)
+    else entry.transport.sendNow(connection, frame)
   }
 
   /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't
