@@ -1028,6 +1028,21 @@ test.each(['page', 'server'] as const)(
   },
 )
 
+test('after a page gives up a wire whose pongs stopped, with a frame of its own in flight before it measured a rate, the next wire splits frames over 16 KiB', async () => {
+  config.channel.pingInterval = 1_000
+  const { page } = loop.open<Uint8Array, Uint8Array>()
+  await run(100)
+  // Nothing the server sends reaches the page: its pongs stop, and so does the PIECES_ACK for its frame.
+  loop.socket.toPage.hold()
+  void page.sendBinary(new Uint8Array(128_000))
+  await runUntil(() => loop.sockets.length === 2, 10_000)
+  const mark = loop.sent.page.length
+  await run(1_000)
+  void page.sendBinary(new Uint8Array(100_000))
+  await run(1_000)
+  expect(firstSplit('page', mark)).toBe(true)
+})
+
 test("after a page drops a wire the server still holds open, with a frame of the server's in flight on it, the next wire splits frames over 16 KiB", async () => {
   config.channel.pingInterval = 1_000
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
