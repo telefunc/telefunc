@@ -366,6 +366,21 @@ class ChannelMux {
     if (entry.state.pieces?.sender.stalled) this.sessions.markSlow(sessionId)
   }
 
+  /** Whether the link is slow, by the page's RECONCILE or by a wire of its session lost with a frame in flight; its new
+   *  wire then starts splitting. */
+  private settleSlowLink(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): boolean {
+    let slow = ctrl.slow === true
+    if (ctrl.sessionId !== undefined) {
+      // A page that found its wire dead first reconnects while the server still holds it open.
+      const prior = this.sessionWires.get(ctrl.sessionId)
+      const priorEntry = prior === connection ? undefined : this.connectionEntries.get(prior)
+      if (priorEntry !== undefined) this.markSlowIfStalled(priorEntry, ctrl.sessionId)
+      if (this.sessions.takeSlow(ctrl.sessionId)) slow = true
+    }
+    if (slow) entry.state.pieces?.sender.markSlow()
+    return slow
+  }
+
   readPermanentTermination(connection: Wire): boolean {
     return this.connectionEntries.get(connection)?.state.terminatePermanently ?? false
   }
@@ -710,15 +725,7 @@ class ChannelMux {
     isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    let slow = ctrl.slow === true
-    if (ctrl.sessionId !== undefined) {
-      // A page that found its wire dead first reconnects while the server still holds it open.
-      const prior = this.sessionWires.get(ctrl.sessionId)
-      const priorEntry = prior === connection ? undefined : this.connectionEntries.get(prior)
-      if (priorEntry !== undefined) this.markSlowIfStalled(priorEntry, ctrl.sessionId)
-      if (this.sessions.takeSlow(ctrl.sessionId)) slow = true
-    }
-    if (slow) state.pieces?.sender.markSlow()
+    const slow = this.settleSlowLink(ctrl, entry, connection)
     const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
     const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
     this.resetPingTimer(connection)
