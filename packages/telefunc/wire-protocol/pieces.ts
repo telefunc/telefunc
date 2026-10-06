@@ -101,7 +101,6 @@ class PieceReceiver {
   private total = 0
   private size = 0
   private took = 0
-  private ackedUpTo = 0
   private newestAt = 0
   private ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
@@ -121,9 +120,7 @@ class PieceReceiver {
   private acknowledge(): void {
     if (this.ackTimer !== null) clearTimeout(this.ackTimer)
     this.ackTimer = null
-    if (this.ackedUpTo === this.took) return
     this.ackedAt = performance.now()
-    this.ackedUpTo = this.took
     // Rounded down: its sender then dates the arrival no earlier than it was, so the rate it takes is never higher
     this.send(encode.piecesAck(this.took, Math.floor(this.ackedAt - this.newestAt)))
   }
