@@ -107,7 +107,7 @@ const TAG = {
   /** Either way on a WebSocket, which delivers no part of a message: a piece of a frame sent in pieces (see
    *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece. */
   PIECE: 0x0a as const,
-  /** Back once all of a frame's pieces arrived. */
+  /** Back once a frame over `WIRE_PIECE_BYTES` arrived, whole or in pieces. */
   PIECES_ACK: 0x0b as const,
 
   // ─── Data plane ───
@@ -227,6 +227,8 @@ type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 type ReconcilePayload = {
   sessionId?: string
   open: ReconcileOpenEntry[]
+  /** A wire of the page's was lost with a frame in flight and no rate measured: the link is too slow for big frames. */
+  slow?: true
 }
 
 /** A barrier names the session it retires and the upgrade it commits — both mandatory, where a
@@ -268,6 +270,8 @@ type ReconciledPayload = {
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
   upgradeId?: string
+  /** As `ReconcilePayload.slow`, for a wire of the server's. */
+  slow?: true
 }
 
 /** Ack result outcome on the wire — same byte value in memory and on the wire.
@@ -851,6 +855,7 @@ function parseReconcilePayload(value: unknown): ReconcilePayload {
   const payload = asObject(value)
   parseOpenList(payload)
   assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
+  assertProtocol(payload.slow === undefined || payload.slow === true, 'RECONCILE slow')
   return payload as ReconcilePayload
 }
 

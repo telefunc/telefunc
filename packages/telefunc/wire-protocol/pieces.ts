@@ -1,23 +1,36 @@
-export { PieceSender, PieceAssembler }
+export { PieceSender, PieceAssembler, acknowledges }
 
-import { WIRE_PIECE_BYTES, WIRE_PIECE_RATE_MARGIN, WIRE_PIECE_RATE_WINDOW_MS } from './constants.js'
+import {
+  WIRE_PIECE_BYTES,
+  WIRE_PIECE_RATE_MARGIN,
+  WIRE_PIECE_RATE_WINDOW_MS,
+  WIRE_UNMEASURED_WHOLE_BYTES,
+} from './constants.js'
 import { assertProtocol, encode } from './shared-ws.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
+
+/** Whether its receiver answers a frame of this size with a PIECES_ACK. */
+function acknowledges(bytes: number): boolean {
+  return bytes > WIRE_PIECE_BYTES
+}
 
 /** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. */
 class PieceSender {
   /** A frame this size or smaller goes whole. */
-  private wholeUpTo = WIRE_PIECE_BYTES
+  private wholeUpTo = WIRE_UNMEASURED_WHOLE_BYTES
+  /** The link is known to be too slow for big whole frames. */
+  private slow = false
   private readonly unacknowledged: { bytes: number; at: number }[] = []
-  /** In bytes per ms, from a frame's first piece sent to its acknowledgement: never faster than the frame crossed. */
+  /** In bytes per ms, from a frame sent to its acknowledgement: never faster than the frame crossed. */
   private fastest = 0
   private forget: ReturnType<typeof setTimeout> | null = null
 
   /** The pieces to send instead of `frame`, or null to send it whole. */
   pieces(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] | null {
     const bytes = frame.byteLength
-    if (bytes <= this.wholeUpTo) return null
+    if (!acknowledges(bytes)) return null
     this.unacknowledged.push({ bytes, at: performance.now() })
+    if (bytes <= this.wholeUpTo) return null
     // The first is empty: its receiver hears of the frame at once, before the first piece of it can cross.
     const pieces = [encode.piece(bytes, frame.subarray(0, 0))]
     for (let offset = 0; offset < bytes; offset += WIRE_PIECE_BYTES) {
@@ -26,7 +39,18 @@ class PieceSender {
     return pieces
   }
 
-  /** Returns false if it sent nothing in pieces left to acknowledge. */
+  /** Starts every frame over `WIRE_PIECE_BYTES` in pieces, until a measured rate says otherwise. */
+  markSlow(): void {
+    this.slow = true
+    if (this.fastest === 0) this.wholeUpTo = WIRE_PIECE_BYTES
+  }
+
+  /** Whether the wire, which never measured a rate, holds a frame its receiver hasn't acknowledged. */
+  get stalled(): boolean {
+    return this.fastest === 0 && this.unacknowledged.length > 0
+  }
+
+  /** Returns false if it sent nothing left to acknowledge. */
   acknowledged(pingInterval: number): boolean {
     const sent = this.unacknowledged.shift()
     if (sent === undefined) return false
@@ -38,7 +62,7 @@ class PieceSender {
     this.forget = unrefTimer(
       setTimeout(() => {
         this.fastest = 0
-        this.wholeUpTo = WIRE_PIECE_BYTES
+        this.wholeUpTo = this.slow ? WIRE_PIECE_BYTES : WIRE_UNMEASURED_WHOLE_BYTES
       }, WIRE_PIECE_RATE_WINDOW_MS),
     )
     return true
