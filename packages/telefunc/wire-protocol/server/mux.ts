@@ -277,7 +277,13 @@ class ChannelMux {
         lastReceivedAt: 0,
         pongedAt: performance.now(),
         pieces: transport.wholeMessages
-          ? { sender: new PieceSender(), receiver: new PieceReceiver((frame) => this.send(connection, frame)) }
+          ? {
+              sender: new PieceSender(
+                (message) => transport.sendNow(connection, message),
+                () => transport.bufferedAmount(connection) ?? 0,
+              ),
+              receiver: new PieceReceiver((frame) => this.send(connection, frame)),
+            }
           : null,
         terminatePermanently: false,
         recvChain: null,
@@ -366,6 +372,21 @@ class ChannelMux {
   /** A session whose wire holds a frame its page never acknowledged, with no rate measured, is on a slow link. */
   private markSlowIfStalled(entry: ConnectionEntry, sessionId: string): void {
     if (entry.state.pieces?.sender.stalled) this.sessions.markSlow(sessionId)
+  }
+
+  /** Whether the link is slow, by the page's RECONCILE or by a wire of its session lost with a frame in flight; its new
+   *  wire then starts splitting. */
+  private settleSlowLink(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): boolean {
+    let slow = ctrl.slow === true
+    if (ctrl.sessionId !== undefined) {
+      // A page that found its wire dead first reconnects while the server still holds it open.
+      const prior = this.sessionWires.get(ctrl.sessionId)
+      const priorEntry = prior === connection ? undefined : this.connectionEntries.get(prior)
+      if (priorEntry !== undefined) this.markSlowIfStalled(priorEntry, ctrl.sessionId)
+      if (this.sessions.takeSlow(ctrl.sessionId)) slow = true
+    }
+    if (slow) entry.state.pieces?.sender.markSlow()
+    return slow
   }
 
   readPermanentTermination(connection: Wire): boolean {
@@ -512,10 +533,7 @@ class ChannelMux {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      assertProtocol(
-        entry.state.pieces?.sender.acknowledged(frame.count, frame.heldMs, this.options.pingInterval),
-        'PIECES_ACK for nothing sent',
-      )
+      assertProtocol(entry.state.pieces?.sender.acknowledged(frame.count, frame.heldMs), 'PIECES_ACK for nothing sent')
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -715,15 +733,7 @@ class ChannelMux {
     isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    let slow = ctrl.slow === true
-    if (ctrl.sessionId !== undefined) {
-      // A page that found its wire dead first reconnects while the server still holds it open.
-      const prior = this.sessionWires.get(ctrl.sessionId)
-      const priorEntry = prior === connection ? undefined : this.connectionEntries.get(prior)
-      if (priorEntry !== undefined) this.markSlowIfStalled(priorEntry, ctrl.sessionId)
-      if (this.sessions.takeSlow(ctrl.sessionId)) slow = true
-    }
-    if (slow) state.pieces?.sender.markSlow()
+    const slow = this.settleSlowLink(ctrl, entry, connection)
     const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
     const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
     this.resetPingTimer(connection)
@@ -1036,9 +1046,8 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
-    const pieces = state.pieces?.sender.pieces(frame, entry.transport.bufferedAmount(connection) ?? 0)
-    if (!pieces) return entry.transport.sendNow(connection, frame)
-    for (const piece of pieces) entry.transport.sendNow(connection, piece)
+    if (state.pieces) state.pieces.sender.send(frame, this.options.pingInterval)
+    else entry.transport.sendNow(connection, frame)
   }
 
   /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't

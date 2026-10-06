@@ -15,51 +15,59 @@ function acknowledges(bytes: number): boolean {
   return bytes > WIRE_PIECE_BYTES
 }
 
-/** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive.
- *  None of its messages is over `wholeUpTo`. */
+/** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. No
+ *  frame or piece it sends carries more than `wholeUpTo` bytes of the frame. */
 class PieceSender {
-  /** A frame this size or smaller goes whole, a larger one in pieces this size: what the fastest measured rate carries
-   *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, `WIRE_UNMEASURED_WHOLE_BYTES`, or `WIRE_PIECE_BYTES`
-   *  on a link known slow. */
-  private wholeUpTo = WIRE_UNMEASURED_WHOLE_BYTES
   /** The link is known to be too slow for big whole frames. */
   private slow = false
-  /** The frames over `WIRE_PIECE_BYTES` sent and not yet acknowledged, each with the bytes that crossed before it
-   *  arrived, and how many were acknowledged before them. */
+  /** The frames over `WIRE_PIECE_BYTES` sent and not yet acknowledged: the bytes that crossed before each arrived, and
+   *  when it was sent. */
   private readonly unacknowledged: { crossing: number; at: number }[] = []
+  /** How many frames over `WIRE_PIECE_BYTES` the receiver has acknowledged in all. */
   private acknowledgedCount = 0
+  /** The largest frame sent: a browser may count a message in full while sending it. */
   private largest = 0
   /** In bytes per ms, from a frame sent to its arrival: never faster than it and what was queued ahead of it crossed. */
   private fastest = 0
   private roseAt = 0
 
-  /** The pieces to send instead of `frame`, or null to send it whole. `queued`: the bytes its socket holds unsent. */
-  pieces(frame: Uint8Array<ArrayBuffer>, queued: number): Uint8Array<ArrayBuffer>[] | null {
+  constructor(
+    private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
+    /** The bytes its socket holds unsent. */
+    private readonly queued: () => number,
+  ) {}
+
+  /** Sends `frame`, whole or in pieces. */
+  send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
     const bytes = frame.byteLength
     if (bytes > this.largest) this.largest = bytes
-    if (!acknowledges(bytes)) return null
+    if (!acknowledges(bytes)) return this.transmit(frame)
     const now = performance.now()
-    if (this.fastest > 0 && now - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS) {
-      this.fastest = 0
-      this.wholeUpTo = this.slow ? WIRE_PIECE_BYTES : WIRE_UNMEASURED_WHOLE_BYTES
-    }
+    if (now - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS) this.fastest = 0
     // What its socket holds unsent crosses before it; a browser may count the message it is sending in full, so less the
-    // largest frame
-    this.unacknowledged.push({ crossing: Math.max(0, queued - this.largest) + bytes, at: now })
-    if (bytes <= this.wholeUpTo) return null
-    const size = Math.floor(this.wholeUpTo)
+    // largest frame.
+    this.unacknowledged.push({ crossing: Math.max(0, this.queued() - this.largest) + bytes, at: now })
+    const wholeUpTo = this.wholeUpTo(pingInterval)
+    if (bytes <= wholeUpTo) return this.transmit(frame)
+    const size = Math.floor(wholeUpTo)
     // The first is empty: its receiver hears of the frame at once, before the first piece of it can cross.
-    const pieces = [encode.piece(bytes, frame.subarray(0, 0))]
+    this.transmit(encode.piece(bytes, frame.subarray(0, 0)))
     for (let offset = 0; offset < bytes; offset += size) {
-      pieces.push(encode.piece(bytes, frame.subarray(offset, offset + size)))
+      this.transmit(encode.piece(bytes, frame.subarray(offset, offset + size)))
     }
-    return pieces
+  }
+
+  /** A frame this size or smaller goes whole, a larger one in pieces this size: what the fastest measured rate carries
+   *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, `WIRE_UNMEASURED_WHOLE_BYTES`, or `WIRE_PIECE_BYTES`
+   *  on a link known slow. */
+  private wholeUpTo(pingInterval: number): number {
+    if (this.fastest === 0) return this.slow ? WIRE_PIECE_BYTES : WIRE_UNMEASURED_WHOLE_BYTES
+    return Math.max(WIRE_PIECE_BYTES, (this.fastest * pingInterval) / WIRE_PIECE_RATE_MARGIN)
   }
 
   /** Starts every frame over `WIRE_PIECE_BYTES` in pieces, until a measured rate says otherwise. */
   markSlow(): void {
     this.slow = true
-    if (this.fastest === 0) this.wholeUpTo = WIRE_PIECE_BYTES
   }
 
   /** Whether the wire, which never measured a rate, holds a frame its receiver hasn't acknowledged. */
@@ -69,7 +77,7 @@ class PieceSender {
 
   /** Takes a PIECES_ACK: its receiver took `count` frames in all, the newest `heldMs` before it sent the ack. Returns
    *  false if that acknowledges nothing sent, or more than was sent. */
-  acknowledged(count: number, heldMs: number, pingInterval: number): boolean {
+  acknowledged(count: number, heldMs: number): boolean {
     const newly = count - this.acknowledgedCount
     if (newly < 1 || newly > this.unacknowledged.length) return false
     this.acknowledgedCount = count
@@ -79,7 +87,6 @@ class PieceSender {
       if (!(rate > this.fastest)) continue
       this.fastest = rate
       this.roseAt = arrived
-      this.wholeUpTo = Math.max(WIRE_PIECE_BYTES, (rate * pingInterval) / WIRE_PIECE_RATE_MARGIN)
     }
     return true
   }
@@ -94,7 +101,6 @@ class PieceReceiver {
   private total = 0
   private size = 0
   private took = 0
-  private ackedUpTo = 0
   private newestAt = 0
   private ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
@@ -114,9 +120,7 @@ class PieceReceiver {
   private acknowledge(): void {
     if (this.ackTimer !== null) clearTimeout(this.ackTimer)
     this.ackTimer = null
-    if (this.ackedUpTo === this.took) return
     this.ackedAt = performance.now()
-    this.ackedUpTo = this.took
     // Rounded down: its sender then dates the arrival no earlier than it was, so the rate it takes is never higher
     this.send(encode.piecesAck(this.took, Math.floor(this.ackedAt - this.newestAt)))
   }

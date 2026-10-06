@@ -110,7 +110,8 @@ const TAG = {
   /** Either way on a WebSocket, which delivers no part of a message: a piece of a frame sent in pieces (see
    *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece. */
   PIECE: 0x0a as const,
-  /** Back once a frame over `WIRE_PIECE_BYTES` arrived, whole or in pieces. */
+  /** Back, at most every `WIRE_PIECES_ACK_GAP_MS`, for the frames over `WIRE_PIECE_BYTES` that arrived, whole or in
+   *  pieces. Payload: u32, how many it took in all, then u32, the ms it held the newest. */
   PIECES_ACK: 0x0b as const,
 
   // ─── Data plane ───
@@ -276,7 +277,7 @@ type ReconciledPayload = {
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
   upgradeId?: string
-  /** As `ReconcilePayload.slow`, for a wire of the server's. */
+  /** The link is slow: as `ReconcilePayload.slow` for a wire of the server's, or because the RECONCILE said it. */
   slow?: true
 }
 
