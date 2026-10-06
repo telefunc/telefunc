@@ -1976,7 +1976,7 @@ class WsTransport implements UpgradeTarget {
   sendFrame(frame: OutboundFrame): void {
     const ws = this.ws
     assert(ws)
-    const pieces = this.pieceSender.pieces(frame.frame)
+    const pieces = this.pieceSender.pieces(frame.frame, ws.bufferedAmount)
     if (pieces === null) return ws.send(frame.frame)
     for (const piece of pieces) ws.send(piece)
   }

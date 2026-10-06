@@ -189,7 +189,8 @@ export const TIMER_DELAY_MAX_MS = 2 ** 31 - 1
 
 /** A link that carries a piece per ping deadline keeps its wire, until it measured a faster rate (see below). */
 export const WIRE_PIECE_BYTES = 16 * 1024
-/** A frame up to this size goes whole until the wire has a measured rate, or the link is known slow. */
+/** Until the wire has a measured rate, or the link is known slow, a frame up to this size goes whole, a larger one in
+ *  pieces this size. */
 export const WIRE_UNMEASURED_WHOLE_BYTES = 256 * 1024
 /** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */
 export const WIRE_PIECE_RATE_MARGIN = 8

@@ -15,34 +15,40 @@ function acknowledged(bytes: number): boolean {
   return bytes > WIRE_PIECE_BYTES
 }
 
-/** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. */
+/** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. No
+ *  message is larger than a measured rate carries in time; with none measured, than `WIRE_UNMEASURED_WHOLE_BYTES`. */
 class PieceSender {
-  /** A frame this size or smaller goes whole. */
+  /** A frame this size or smaller goes whole, a larger one in pieces this size. */
   private wholeUpTo = WIRE_UNMEASURED_WHOLE_BYTES
   /** The link is known to be too slow for big whole frames. */
   private slow = false
-  /** The frames over `WIRE_PIECE_BYTES` sent and not yet acknowledged, and how many were acknowledged before them. */
-  private readonly unacknowledged: { bytes: number; at: number }[] = []
+  /** The frames over `WIRE_PIECE_BYTES` sent and not yet acknowledged, each with the bytes that crossed before it
+   *  arrived, and how many were acknowledged before them. */
+  private readonly unacknowledged: { crossing: number; at: number }[] = []
   private acknowledgedCount = 0
-  /** In bytes per ms, from a frame sent to its arrival: never faster than the frame crossed. */
+  private largest = 0
+  /** In bytes per ms, from a frame sent to its arrival: never faster than it and what was queued ahead of it crossed. */
   private fastest = 0
   private roseAt = 0
 
-  /** The pieces to send instead of `frame`, or null to send it whole. */
-  pieces(frame: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] | null {
+  /** The pieces to send instead of `frame`, or null to send it whole. `queued`: the bytes its socket holds unsent. */
+  pieces(frame: Uint8Array<ArrayBuffer>, queued: number): Uint8Array<ArrayBuffer>[] | null {
     const bytes = frame.byteLength
+    if (bytes > this.largest) this.largest = bytes
     if (!acknowledged(bytes)) return null
     const now = performance.now()
     if (this.fastest > 0 && now - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS) {
       this.fastest = 0
       this.wholeUpTo = this.slow ? WIRE_PIECE_BYTES : WIRE_UNMEASURED_WHOLE_BYTES
     }
-    this.unacknowledged.push({ bytes, at: now })
+    // A browser may count the message it is sending in full: less the largest frame, what's queued cross before this
+    this.unacknowledged.push({ crossing: Math.max(0, queued - this.largest) + bytes, at: now })
     if (bytes <= this.wholeUpTo) return null
+    const size = Math.floor(this.wholeUpTo)
     // The first is empty: its receiver hears of the frame at once, before the first piece of it can cross.
     const pieces = [encode.piece(bytes, frame.subarray(0, 0))]
-    for (let offset = 0; offset < bytes; offset += WIRE_PIECE_BYTES) {
-      pieces.push(encode.piece(bytes, frame.subarray(offset, offset + WIRE_PIECE_BYTES)))
+    for (let offset = 0; offset < bytes; offset += size) {
+      pieces.push(encode.piece(bytes, frame.subarray(offset, offset + size)))
     }
     return pieces
   }
@@ -66,7 +72,7 @@ class PieceSender {
     this.acknowledgedCount = count
     const arrived = performance.now() - heldMs
     for (const sent of this.unacknowledged.splice(0, newly)) {
-      const rate = sent.bytes / (arrived - sent.at)
+      const rate = sent.crossing / (arrived - sent.at)
       if (!(rate > this.fastest)) continue
       this.fastest = rate
       this.roseAt = arrived
@@ -76,12 +82,14 @@ class PieceSender {
   }
 }
 
-/** One WebSocket's: puts a frame sent in pieces back together, taking pieces only as `PieceSender` cuts them, and
+/** One WebSocket's: puts a frame sent in pieces back together, taking pieces only as `PieceSender` cuts them (all as
+ *  large as the first, at least `WIRE_PIECE_BYTES` or the whole frame, but the last), and
  *  acknowledges the frames over `WIRE_PIECE_BYTES` it took, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS`. */
 class PieceReceiver {
   private pieces: Uint8Array[] = []
   private received = 0
   private total = 0
+  private size = 0
   private took = 0
   private ackedUpTo = 0
   private newestAt = 0
@@ -120,9 +128,12 @@ class PieceReceiver {
     if (this.received === 0) {
       this.total = total
       if (piece.byteLength === 0) return null
+      this.size = piece.byteLength
     }
     assertProtocol(
-      total === this.total && piece.byteLength === Math.min(WIRE_PIECE_BYTES, total - this.received),
+      total === this.total &&
+        this.size >= Math.min(WIRE_PIECE_BYTES, total) &&
+        piece.byteLength === Math.min(this.size, total - this.received),
       'PIECE not cut as its frame is',
     )
     this.pieces.push(piece)

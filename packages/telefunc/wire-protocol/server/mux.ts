@@ -1028,7 +1028,7 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
-    const pieces = state.pieces?.sender.pieces(frame)
+    const pieces = state.pieces?.sender.pieces(frame, entry.transport.bufferedAmount(connection) ?? 0)
     if (!pieces) return entry.transport.sendNow(connection, frame)
     for (const piece of pieces) entry.transport.sendNow(connection, piece)
   }
