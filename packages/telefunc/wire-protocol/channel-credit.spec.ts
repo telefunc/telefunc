@@ -913,6 +913,19 @@ test('on a link too slow for 256 KiB in a ping deadline, a megabyte sent at conn
   expect(loop.sockets).toHaveLength(wires)
 })
 
+test('a WebSocket that cannot be constructed sends the channel to its reconnect loop, it does not throw', async () => {
+  config.channel.transports = ['ws']
+  vi.stubGlobal('WebSocket', undefined)
+  let thrown: unknown
+  try {
+    loop.open<Uint8Array, Uint8Array>()
+    await run(3_000)
+  } catch (err) {
+    thrown = err
+  }
+  expect(thrown).toBeUndefined()
+})
+
 test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last covers all of it', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   const at = { server: 0, page: 0 }
