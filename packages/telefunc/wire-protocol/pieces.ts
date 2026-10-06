@@ -11,14 +11,16 @@ import { assertProtocol, encode } from './shared-ws.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 
 /** Whether its receiver acknowledges a frame of this size. */
-function acknowledged(bytes: number): boolean {
+function acknowledges(bytes: number): boolean {
   return bytes > WIRE_PIECE_BYTES
 }
 
-/** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. No
- *  message is larger than a measured rate carries in time; with none measured, than `WIRE_UNMEASURED_WHOLE_BYTES`. */
+/** One WebSocket's: a frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive.
+ *  None of its messages is over `wholeUpTo`. */
 class PieceSender {
-  /** A frame this size or smaller goes whole, a larger one in pieces this size. */
+  /** A frame this size or smaller goes whole, a larger one in pieces this size: what the fastest measured rate carries
+   *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, `WIRE_UNMEASURED_WHOLE_BYTES`, or `WIRE_PIECE_BYTES`
+   *  on a link known slow. */
   private wholeUpTo = WIRE_UNMEASURED_WHOLE_BYTES
   /** The link is known to be too slow for big whole frames. */
   private slow = false
@@ -35,13 +37,14 @@ class PieceSender {
   pieces(frame: Uint8Array<ArrayBuffer>, queued: number): Uint8Array<ArrayBuffer>[] | null {
     const bytes = frame.byteLength
     if (bytes > this.largest) this.largest = bytes
-    if (!acknowledged(bytes)) return null
+    if (!acknowledges(bytes)) return null
     const now = performance.now()
     if (this.fastest > 0 && now - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS) {
       this.fastest = 0
       this.wholeUpTo = this.slow ? WIRE_PIECE_BYTES : WIRE_UNMEASURED_WHOLE_BYTES
     }
-    // A browser may count the message it is sending in full: less the largest frame, what's queued cross before this
+    // What its socket holds unsent crosses before it; a browser may count the message it is sending in full, so less the
+    // largest frame
     this.unacknowledged.push({ crossing: Math.max(0, queued - this.largest) + bytes, at: now })
     if (bytes <= this.wholeUpTo) return null
     const size = Math.floor(this.wholeUpTo)
@@ -100,7 +103,7 @@ class PieceReceiver {
 
   /** After a whole frame of `bytes` arrived, in one message or in pieces. */
   arrived(bytes: number): void {
-    if (!acknowledged(bytes)) return
+    if (!acknowledges(bytes)) return
     this.took++
     this.newestAt = performance.now()
     const wait = this.ackedAt + WIRE_PIECES_ACK_GAP_MS - this.newestAt
