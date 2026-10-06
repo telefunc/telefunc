@@ -44,7 +44,7 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceAssembler, PieceSender } from '../pieces.js'
+import { PieceReceiver, PieceSender } from '../pieces.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -79,6 +79,8 @@ type ReconcileOutcome = {
    *  when the transport sends it after that batch. */
   attached: ChannelHandle[]
   finalizeUpgrade: (() => void) | null
+  /** The link is slow, by the page's RECONCILE or by a wire of the session lost with a frame in flight. */
+  slow: boolean
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
   upgradeId?: string
@@ -145,7 +147,7 @@ type ConnectionState = {
   lastReceivedAt: number
   /** When the last PONG went out. */
   pongedAt: number
-  pieces: { sender: PieceSender; assembler: PieceAssembler } | null
+  pieces: { sender: PieceSender; receiver: PieceReceiver } | null
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -274,7 +276,9 @@ class ChannelMux {
         pingTimer: null,
         lastReceivedAt: 0,
         pongedAt: performance.now(),
-        pieces: transport.wholeMessages ? { sender: new PieceSender(), assembler: new PieceAssembler() } : null,
+        pieces: transport.wholeMessages
+          ? { sender: new PieceSender(), receiver: new PieceReceiver((frame) => this.send(connection, frame)) }
+          : null,
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -320,6 +324,7 @@ class ChannelMux {
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
+        ...(outcome.slow ? { slow: true as const } : {}),
         serverReplayBuffer: this.options.serverReplayBuffer,
         serverReplayBufferBinary: this.options.serverReplayBufferBinary,
         clientReplayBuffer: this.options.clientReplayBuffer,
@@ -351,10 +356,16 @@ class ChannelMux {
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
     const stagedWs = this.stagedByPrevSession.get(sessionId)
     if (stagedWs !== undefined) this.abandonStage(stagedWs)
+    this.markSlowIfStalled(entry, sessionId)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down.
     this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
     if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
+  }
+
+  /** A session whose wire holds a frame its page never acknowledged, with no rate measured, is on a slow link. */
+  private markSlowIfStalled(entry: ConnectionEntry, sessionId: string): void {
+    if (entry.state.pieces?.sender.stalled) this.sessions.markSlow(sessionId)
   }
 
   readPermanentTermination(connection: Wire): boolean {
@@ -382,6 +393,7 @@ class ChannelMux {
     }
     const tag = peekTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
+    state.pieces?.receiver.arrived(byteLength)
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
     state.lastReceivedAt = performance.now()
@@ -409,19 +421,18 @@ class ChannelMux {
       // As large as the runtime takes in one message: its pieces get past what it would refuse whole.
       const cap = getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES
       assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
-      const { assembler } = state.pieces
-      const heldBefore = assembler.held
-      frame = assembler.add(piece.total, piece.piece)
+      const { receiver } = state.pieces
+      const heldBefore = receiver.held
+      frame = receiver.add(piece.total, piece.piece)
       // What it holds of a frame counts in the recv backlog as the frame does once whole.
-      state.recvBacklogBytes += assembler.held - heldBefore
-      state.recvBacklogFrames += Number(assembler.held > 0) - Number(heldBefore > 0)
+      state.recvBacklogBytes += receiver.held - heldBefore
+      state.recvBacklogFrames += Number(receiver.held > 0) - Number(heldBefore > 0)
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(connection)
       return Promise.resolve(null)
     }
     if (frame === null) return Promise.resolve(null)
-    this.send(connection, encode.piecesAck())
     return this.dispatchInbound(connection, frame)
   }
 
@@ -502,8 +513,8 @@ class ChannelMux {
     }
     if (frame.tag === TAG.PIECES_ACK) {
       assertProtocol(
-        entry.state.pieces?.sender.acknowledged(this.options.pingInterval),
-        'PIECES_ACK for nothing sent in pieces',
+        entry.state.pieces?.sender.acknowledged(frame.count, frame.heldMs, this.options.pingInterval),
+        'PIECES_ACK for nothing sent',
       )
       return null
     }
@@ -704,6 +715,15 @@ class ChannelMux {
     isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
+    let slow = ctrl.slow === true
+    if (ctrl.sessionId !== undefined) {
+      // A page that found its wire dead first reconnects while the server still holds it open.
+      const prior = this.sessionWires.get(ctrl.sessionId)
+      const priorEntry = prior === connection ? undefined : this.connectionEntries.get(prior)
+      if (priorEntry !== undefined) this.markSlowIfStalled(priorEntry, ctrl.sessionId)
+      if (this.sessions.takeSlow(ctrl.sessionId)) slow = true
+    }
+    if (slow) state.pieces?.sender.markSlow()
     const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
     const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
     this.resetPingTimer(connection)
@@ -739,7 +759,7 @@ class ChannelMux {
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
     state.attaching.clear()
-    return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
+    return { sessionId: newSessionId, attached, finalizeUpgrade, slow, deliverTo: connection }
   }
 
   private reconcileSession(
@@ -1016,7 +1036,7 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
-    const pieces = state.pieces?.sender.pieces(frame)
+    const pieces = state.pieces?.sender.pieces(frame, entry.transport.bufferedAmount(connection) ?? 0)
     if (!pieces) return entry.transport.sendNow(connection, frame)
     for (const piece of pieces) entry.transport.sendNow(connection, piece)
   }
@@ -1089,6 +1109,8 @@ class ChannelMux {
 class SessionRegistry {
   private readonly bySession = new Map<string, Map<number, ChannelHandle>>()
   private readonly byChannel = new Map<string, Map<string, number>>()
+  /** Sessions whose last wire was lost with a frame in flight, before it measured a rate. */
+  private readonly slow = new Set<string>()
 
   get(sessionId: string, ix: number): ChannelHandle | undefined {
     return this.bySession.get(sessionId)?.get(ix)
@@ -1123,11 +1145,20 @@ class SessionRegistry {
     bindings.set(sessionId, h.ix)
   }
 
+  markSlow(sessionId: string): void {
+    if (this.bySession.has(sessionId)) this.slow.add(sessionId)
+  }
+
+  takeSlow(sessionId: string): boolean {
+    return this.slow.delete(sessionId)
+  }
+
   /** Returns the removed session so callers can drive per-handle lifecycle side effects. */
   removeSession(sessionId: string): Map<number, ChannelHandle> | undefined {
     const session = this.bySession.get(sessionId)
     if (!session) return undefined
     this.bySession.delete(sessionId)
+    this.slow.delete(sessionId)
     for (const handle of session.values()) {
       const bindings = this.byChannel.get(handle.channel.id)
       if (!bindings) continue
@@ -1147,7 +1178,10 @@ class SessionRegistry {
       session.delete(ix)
       // Last channel gone: drop the session, or it outlives every reconcile that could
       // ever name it (transient-closed sessions are otherwise only removed by reconcile).
-      if (session.size === 0) this.bySession.delete(sessionId)
+      if (session.size === 0) {
+        this.bySession.delete(sessionId)
+        this.slow.delete(sessionId)
+      }
     }
   }
 }

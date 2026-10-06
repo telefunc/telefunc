@@ -97,6 +97,7 @@ class LoopbackSocket {
   readonly toServer = new Pipe((frame) => loop.receive(this, frame))
   readonly toPage = new Pipe((frame) => this.onmessage?.({ data: frame.buffer }))
   constructor(_url: string) {
+    this.toServer.bytesPerMs = this.toPage.bytesPerMs = loop.linkBytesPerMs
     loop.sockets.push(this)
     setTimeout(() => {
       if (this.readyState !== 0) return
@@ -124,6 +125,8 @@ class LoopbackSocket {
 }
 
 class Loopback {
+  /** The speed each socket's link starts at, both ways. */
+  linkBytesPerMs = Infinity
   readonly mux = new ChannelMux()
   readonly sockets: LoopbackSocket[] = []
   readonly errors: unknown[] = []
@@ -1031,7 +1034,120 @@ test('a page whose downlink stops while its RECONCILE waits behind its upload ta
   expect(Date.now() - stoppedAt).toBeLessThanOrEqual(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100)
 })
 
-test('a message that takes longer than the ping deadline to cross arrives on the wire it left on, either way', async () => {
+test('on a link too slow for 256 KiB in a ping deadline, a megabyte sent at connect arrives after at most one reconnect, and the next crosses on the same wire, either way', async () => {
+  config.channel.pingInterval = 1_000
+  // 100 KB/s: a megabyte takes 10 s, five pong deadlines; 256 KiB takes 2.6 s, more than one.
+  loop.linkBytesPerMs = 100
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  const atServer: number[] = []
+  const atPage: number[] = []
+  server.listenBinary((data) => void atServer.push(data.byteLength))
+  page.listenBinary((data) => void atPage.push(data.byteLength))
+  await run(1_000)
+  void page.sendBinary(new Uint8Array(1_000_000))
+  void server.sendBinary(new Uint8Array(1_000_000))
+  await runUntil(() => atServer.length === 1 && atPage.length === 1, 60_000)
+  expect(loop.sockets.length).toBeLessThanOrEqual(2)
+  const wires = loop.sockets.length
+  void page.sendBinary(new Uint8Array(1_000_000))
+  void server.sendBinary(new Uint8Array(1_000_000))
+  await runUntil(() => atServer.length === 2 && atPage.length === 2, 60_000)
+  expect(atServer).toEqual([1_000_000, 1_000_000])
+  expect(atPage).toEqual([1_000_000, 1_000_000])
+  expect(loop.sockets).toHaveLength(wires)
+})
+
+test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last covers all of it', async () => {
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  const at = { server: 0, page: 0 }
+  server.listenBinary(() => void at.server++)
+  page.listenBinary(() => void at.page++)
+  await run(100)
+  const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
+  for (let i = 0; i < 100; i++) {
+    void page.sendBinary(new Uint8Array(32_000))
+    void server.sendBinary(new Uint8Array(32_000))
+  }
+  await runUntil(() => at.server === 100 && at.page === 100, 5_000)
+  await run(100)
+  for (const side of ['page', 'server'] as const) {
+    const acks = loop.sent[side].slice(marks[side]).filter(([tag]) => tag === TAG.PIECES_ACK)
+    expect(acks.length).toBeGreaterThan(0)
+    expect(acks.length).toBeLessThan(5)
+  }
+  const sender = (
+    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { sender: unknown } } }> }
+  ).connectionEntries.get(loop.socket)?.state.pieces.sender as { unacknowledged: unknown[] }
+  expect(sender.unacknowledged).toHaveLength(0)
+  expect(loop.sockets).toHaveLength(1)
+})
+
+test('a server pushing 512 KB frames on a fast wire sends them whole once it measured, however many it queues', async () => {
+  config.channel.pingInterval = 1_000
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  let got = 0
+  page.listenBinary(() => void got++)
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 100_000 // 100 MB/s
+  const mark = loop.sent.server.length
+  void (async () => {
+    for (let i = 0; i < 100; i++) await server.sendBinary(new Uint8Array(512_000))
+  })()
+  await runUntil(() => got === 100, 10_000)
+  const tags = loop.sent.server.slice(mark).map(([tag]) => tag)
+  expect(tags.filter((tag) => tag === TAG.BINARY).length).toBeGreaterThan(90)
+})
+
+test('on a fresh fast wire, frames of 32 KB and 128 KB go whole, either way', async () => {
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  const atServer: number[] = []
+  const atPage: number[] = []
+  server.listenBinary((data) => void atServer.push(data.byteLength))
+  page.listenBinary((data) => void atPage.push(data.byteLength))
+  await run(100)
+  for (const size of [32_000, 128_000]) {
+    void page.sendBinary(new Uint8Array(size))
+    void server.sendBinary(new Uint8Array(size))
+  }
+  await runUntil(() => atServer.length === 2 && atPage.length === 2, 1_000)
+  expect(atServer).toEqual([32_000, 128_000])
+  expect(atPage).toEqual([32_000, 128_000])
+  expect(loop.sent.page.map(([tag]) => tag)).not.toContain(TAG.PIECE)
+  expect(loop.sent.server.map(([tag]) => tag)).not.toContain(TAG.PIECE)
+  expect(loop.sockets).toHaveLength(1)
+})
+
+test.each(['page', 'server'] as const)(
+  "after a wire is lost with a frame of the %s's in flight before it measured a rate, the next wire splits frames over 16 KiB from its first",
+  async (sender) => {
+    const { server, page } = loop.open<Uint8Array, Uint8Array>()
+    const atServer: number[] = []
+    const atPage: number[] = []
+    server.listenBinary((data) => void atServer.push(data.byteLength))
+    page.listenBinary((data) => void atPage.push(data.byteLength))
+    await run(100)
+    const lost = loop.socket
+    ;(sender === 'page' ? lost.toServer : lost.toPage).bytesPerMs = 1
+    const before = loop.sent[sender].length
+    void (sender === 'page' ? page : server).sendBinary(new Uint8Array(128_000))
+    await run(100)
+    expect(loop.sent[sender].slice(before).map(([tag]) => tag)).toEqual([TAG.BINARY])
+    lost.cut()
+    await runUntil(() => loop.sockets.length === 2, 5_000)
+    const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
+    await run(1_000)
+    void page.sendBinary(new Uint8Array(100_000))
+    void server.sendBinary(new Uint8Array(100_000))
+    await runUntil(() => atServer.length > 0 && atPage.length > 0, 5_000)
+    for (const side of ['page', 'server'] as const) {
+      const tags = loop.sent[side].slice(marks[side]).map(([tag]) => tag)
+      expect(tags.find((tag) => tag === TAG.PIECE || tag === TAG.BINARY)).toBe(TAG.PIECE)
+    }
+    expect(loop.sockets).toHaveLength(2)
+  },
+)
+
+test("after a page drops a wire the server still holds open, with a frame of the server's in flight on it, the next wire splits frames over 16 KiB", async () => {
   config.channel.pingInterval = 1_000
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   const atServer: number[] = []
@@ -1039,16 +1155,17 @@ test('a message that takes longer than the ping deadline to cross arrives on the
   server.listenBinary((data) => void atServer.push(data.byteLength))
   page.listenBinary((data) => void atPage.push(data.byteLength))
   await run(100)
-  // 100 KB/s: a megabyte takes 10 s, five pong deadlines.
-  loop.socket.toServer.bytesPerMs = 100
-  loop.socket.toPage.bytesPerMs = 100
-  void page.sendBinary(new Uint8Array(1_000_000))
-  await runUntil(() => atServer.length === 1, 30_000)
-  void server.sendBinary(new Uint8Array(1_000_000))
-  await runUntil(() => atPage.length === 1, 30_000)
-  expect(atServer).toEqual([1_000_000])
-  expect(atPage).toEqual([1_000_000])
-  expect(loop.sockets).toHaveLength(1)
+  loop.socket.toPage.bytesPerMs = 1
+  void server.sendBinary(new Uint8Array(128_000))
+  await runUntil(() => loop.sockets.length === 2, 10_000)
+  const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
+  await run(1_000)
+  void page.sendBinary(new Uint8Array(100_000))
+  await runUntil(() => atServer.length > 0, 5_000)
+  for (const side of ['page', 'server'] as const) {
+    const tags = loop.sent[side].slice(marks[side]).map(([tag]) => tag)
+    expect(tags.find((tag) => tag === TAG.PIECE || tag === TAG.BINARY)).toBe(TAG.PIECE)
+  }
 })
 
 test('the server holds nothing for empty pieces, and cuts a wire whose pieces are not cut as its frame is', async () => {
@@ -1060,8 +1177,8 @@ test('the server holds nothing for empty pieces, and cuts a wire whose pieces ar
   for (let i = 0; i < 10_000; i++) socket.send(encode.piece(1_000_000, new Uint8Array(0)))
   await run(1_000)
   const held = (
-    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { assembler: unknown } } }> }
-  ).connectionEntries.get(socket)?.state.pieces.assembler as { pieces: unknown[] } | undefined
+    loop.mux as unknown as { connectionEntries: Map<unknown, { state: { pieces: { receiver: unknown } } }> }
+  ).connectionEntries.get(socket)?.state.pieces.receiver as { pieces: unknown[] } | undefined
   expect(held?.pieces).toHaveLength(0)
   socket.send(encode.piece(1_000_000, new Uint8Array(1)))
   await run(100)

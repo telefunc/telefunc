@@ -34,7 +34,7 @@ import {
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
-import { PieceAssembler, PieceSender } from '../pieces.js'
+import { PieceReceiver, PieceSender } from '../pieces.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
@@ -262,6 +262,10 @@ type ClientChannelTransport = {
   start(): void
   hasWire(): boolean
   isConnecting(): boolean
+  /** Whether its last wire held a frame its receiver never acknowledged, before it measured a rate. */
+  stalled(): boolean
+  /** Its live wire splits what it sends over `WIRE_PIECE_BYTES`, until it measures a rate. */
+  markSlow(): void
   /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
   sendPing(frame: Uint8Array<ArrayBuffer>): void
   sendFrame(frame: OutboundFrame): void
@@ -463,6 +467,8 @@ class ClientConnection implements MuxConnection {
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
+  /** For the page's life, once a wire was lost, here or the server's word, with a frame in flight and no rate measured. */
+  private slowLink = false
   /** The heartbeat last installed is the provisional one before a first RECONCILED (see `beatFromReconcile`). */
   private provisionalHeartbeat = false
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
@@ -1136,6 +1142,10 @@ class ClientConnection implements MuxConnection {
     transport.dispose()
   }
 
+  get _slowLink(): boolean {
+    return this.slowLink
+  }
+
   _onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
     if (this.closed) return
     transport.detachHeartbeat()
@@ -1145,6 +1155,7 @@ class ClientConnection implements MuxConnection {
       }
       return
     }
+    if (transport.stalled()) this.slowLink = true
     if (this.state.tag === 'open' && this.state.upgrade.tag !== 'none' && !this.flipped) {
       this.state.upgrade.attempt.abort()
     }
@@ -1165,6 +1176,10 @@ class ClientConnection implements MuxConnection {
       committing.committed = true
     }
     this.transport.applyReconciledSettings(ctrl)
+    if (ctrl.slow) {
+      this.slowLink = true
+      this.transport.markSlow()
+    }
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
@@ -1444,7 +1459,11 @@ class ClientConnection implements MuxConnection {
 
   buildReconcileFrame(): OutboundFrame {
     const open = this.declareOpenEntries({ skipUnnamed: false, wire: this.wire, batched: this.transport.batched })
-    const reconcile: ReconcilePayload = { open, ...(this.sessionId ? { sessionId: this.sessionId } : {}) }
+    const reconcile: ReconcilePayload = {
+      open,
+      ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+      ...(this.slowLink ? { slow: true as const } : {}),
+    }
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
@@ -1743,8 +1762,8 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   private heartbeat: Heartbeat | null = null
-  /** The probe's socket, with the assembler it keeps as the transport adopts it. */
-  private probed: { ws: WebSocket; pieces: PieceAssembler } | null = null
+  /** The probe's socket, with the piece receiver it keeps as the transport adopts it. */
+  private probed: { ws: WebSocket; pieces: PieceReceiver } | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
   private connecting = false
@@ -1774,7 +1793,7 @@ class WsTransport implements UpgradeTarget {
       return null
     }
     ws.binaryType = 'arraybuffer'
-    const pieces = new PieceAssembler()
+    const pieces = new PieceReceiver((frame) => ws.send(frame))
 
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
@@ -1878,7 +1897,7 @@ class WsTransport implements UpgradeTarget {
       this.handleOpen(ws)
     }
 
-    this.setupHandlers(ws, new PieceAssembler())
+    this.setupHandlers(ws, new PieceReceiver((frame) => ws.send(frame)))
   }
 
   private handleOpen(ws: WebSocket): void {
@@ -1910,8 +1929,9 @@ class WsTransport implements UpgradeTarget {
     return Promise.resolve()
   }
 
-  private setupHandlers(ws: WebSocket, pieces: PieceAssembler): void {
+  private setupHandlers(ws: WebSocket, pieces: PieceReceiver): void {
     const sender = new PieceSender()
+    if (this.owner._slowLink) sender.markSlow()
     this.pieceSender = sender
     ws.onmessage = ({ data }: MessageEvent) => {
       this.heartbeat?.noteReceived()
@@ -1919,7 +1939,7 @@ class WsTransport implements UpgradeTarget {
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
-        sender.acknowledged(this.pingInterval)
+        sender.acknowledged(frame.count, frame.heldMs, this.pingInterval)
         return
       }
       if (frame.tag === TAG.PONG) {
@@ -1941,6 +1961,14 @@ class WsTransport implements UpgradeTarget {
     return this.ws !== null
   }
 
+  stalled(): boolean {
+    return this.pieceSender.stalled
+  }
+
+  markSlow(): void {
+    this.pieceSender.markSlow()
+  }
+
   isConnecting(): boolean {
     return this.connecting
   }
@@ -1948,7 +1976,7 @@ class WsTransport implements UpgradeTarget {
   sendFrame(frame: OutboundFrame): void {
     const ws = this.ws
     assert(ws)
-    const pieces = this.pieceSender.pieces(frame.frame)
+    const pieces = this.pieceSender.pieces(frame.frame, ws.bufferedAmount)
     if (pieces === null) return ws.send(frame.frame)
     for (const piece of pieces) ws.send(piece)
   }
@@ -2007,11 +2035,11 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** The frame a WebSocket message completes, acknowledged if it came in pieces, or null: a piece before its frame's last,
- *  or bytes that close `ws`. */
+/** The frame a WebSocket message completes, or null: a piece before its frame's last, or bytes that close `ws`. Its
+ *  receiver acknowledges a large one (`PieceReceiver.arrived`). */
 function receiveMessage(
   ws: WebSocket,
-  pieces: PieceAssembler,
+  pieces: PieceReceiver,
   data: unknown,
 ): { frame: DecodedFrame; byteLength: number } | null {
   try {
@@ -2020,10 +2048,10 @@ function receiveMessage(
     if (frame.tag === TAG.PIECE) {
       const whole = pieces.add(frame.total, frame.piece)
       if (whole === null) return null
-      ws.send(encode.piecesAck())
       raw = whole
       frame = decode(raw)
     }
+    pieces.arrived(raw.byteLength)
     return { frame, byteLength: raw.byteLength }
   } catch {
     ws.close()
@@ -2123,6 +2151,12 @@ class SseTransport implements UpgradeSource {
       void this.openStream()
     }, SSE_RECONCILE_DEADLINE_MS)
   }
+
+  stalled(): boolean {
+    return false
+  }
+
+  markSlow(): void {}
 
   hasWire(): boolean {
     return this.transportAbort !== null

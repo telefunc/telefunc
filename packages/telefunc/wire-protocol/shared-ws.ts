@@ -110,7 +110,7 @@ const TAG = {
   /** Either way on a WebSocket, which delivers no part of a message: a piece of a frame sent in pieces (see
    *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece. */
   PIECE: 0x0a as const,
-  /** Back once all of a frame's pieces arrived. */
+  /** Back once a frame over `WIRE_PIECE_BYTES` arrived, whole or in pieces. */
   PIECES_ACK: 0x0b as const,
 
   // ─── Data plane ───
@@ -233,6 +233,8 @@ type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 type ReconcilePayload = {
   sessionId?: string
   open: ReconcileOpenEntry[]
+  /** A wire of the page's was lost with a frame in flight and no rate measured: the link is too slow for big frames. */
+  slow?: true
 }
 
 /** A barrier names the session it retires and the upgrade it commits — both mandatory, where a
@@ -274,6 +276,8 @@ type ReconciledPayload = {
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
   upgradeId?: string
+  /** As `ReconcilePayload.slow`, for a wire of the server's. */
+  slow?: true
 }
 
 /** Ack result outcome on the wire — same byte value in memory and on the wire.
@@ -357,7 +361,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
-  | { tag: typeof TAG.PIECES_ACK }
+  | { tag: typeof TAG.PIECES_ACK; count: number; heldMs: number }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -528,7 +532,13 @@ const encode = {
     frame.set(piece, HEADER + 4)
     return frame
   },
-  piecesAck: () => encodeBareFrame(TAG.PIECES_ACK),
+  piecesAck(count: number, heldMs: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 8)
+    writeHeader(frame, TAG.PIECES_ACK, 0, 0)
+    writeU32(frame, HEADER, count)
+    writeU32(frame, HEADER + 4, heldMs)
+    return frame
+  },
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {
@@ -715,7 +725,8 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 4, 'PIECE payload too short')
       return { tag: TAG.PIECE, total: readU32(payload, 0), piece: payload.subarray(4) }
     case TAG.PIECES_ACK:
-      return { tag: TAG.PIECES_ACK }
+      assertProtocol(payload.length >= 8, 'PIECES_ACK payload too short')
+      return { tag: TAG.PIECES_ACK, count: readU32(payload, 0), heldMs: readU32(payload, 4) }
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
@@ -860,6 +871,7 @@ function parseReconcilePayload(value: unknown): ReconcilePayload {
   const payload = asObject(value)
   parseOpenList(payload)
   assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
+  assertProtocol(payload.slow === undefined || payload.slow === true, 'RECONCILE slow')
   return payload as ReconcilePayload
 }
 

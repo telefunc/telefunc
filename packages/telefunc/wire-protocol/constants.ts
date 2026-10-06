@@ -192,10 +192,15 @@ export const TIMER_DELAY_MAX_MS = 2 ** 31 - 1
 
 /** A link that carries a piece per ping deadline keeps its wire, until it measured a faster rate (see below). */
 export const WIRE_PIECE_BYTES = 16 * 1024
+/** Until the wire has a measured rate, or the link is known slow, a frame up to this size goes whole, a larger one in
+ *  pieces this size. */
+export const WIRE_UNMEASURED_WHOLE_BYTES = 256 * 1024
 /** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */
 export const WIRE_PIECE_RATE_MARGIN = 8
 /** How long a measured rate stands after it last rose. */
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
+/** A receiver sends at most one PIECES_ACK this often, covering every frame over `WIRE_PIECE_BYTES` it took since the last. */
+export const WIRE_PIECES_ACK_GAP_MS = 50
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the
