@@ -13,6 +13,7 @@ import {
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
+  CREDIT_WINDOW_MAX_BYTES,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
@@ -2057,6 +2058,9 @@ function receiveMessage(
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
 const SSE_FOLD_BYTES = 1024 * 1024
 
+/** Held for the next POST, this much goes without waiting out the throttle, which would cap an upload at a window per throttle. */
+const SSE_EAGER_FLUSH_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
+
 class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
@@ -2176,7 +2180,7 @@ class SseTransport implements UpgradeSource {
       if (frame.kind === 'heartbeat') this.unholdPing(entry)
     }
     this.scheduleFlush()
-    if (deadline <= now) void this.flushOutbox()
+    if (deadline <= now || this.pendingBytes() >= SSE_EAGER_FLUSH_BYTES) void this.flushOutbox()
   }
 
   /** While a POST is out, what joins the outbox goes into the next one's body a MiB at a time, so the flush after the
@@ -2198,6 +2202,11 @@ class SseTransport implements UpgradeSource {
       first: this.outbox[0]!,
       last: this.outbox[this.outbox.length - 1]!,
     }
+  }
+
+  /** What the outbox holds: the fold and what joined it since. */
+  private pendingBytes(): number {
+    return (this.foldHeading(this.outbox)?.blob.size ?? 0) + this.unfolded
   }
 
   /** The fold, if it still heads `entries`. */
@@ -2402,7 +2411,8 @@ class SseTransport implements UpgradeSource {
     } finally {
       this.flushing = false
       if (this.outbox.length > 0) {
-        this.scheduleFlush()
+        if (this.pendingBytes() >= SSE_EAGER_FLUSH_BYTES) void this.flushOutbox()
+        else this.scheduleFlush()
       } else {
         const cbs = this.drainCallbacks.splice(0)
         for (const cb of cbs) cb()

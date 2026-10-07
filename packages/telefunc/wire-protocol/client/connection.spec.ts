@@ -202,6 +202,57 @@ test('what joins the outbox while a batch POST is out goes into the next body as
 })
 
 test.each([
+  { mib: 31, next: 'waits for its flush throttle' },
+  { mib: 33, next: 'goes as the one before it is answered' },
+])('a batch POST holding $mib MiB $next', async ({ mib, next }) => {
+  const connection = ClientConnection.getOrCreate(
+    'http://eager.test',
+    createChannel() as never,
+    stalledOptions(),
+  ) as any
+  const transport = connection.transport
+  let posts = 0
+  let answer!: () => void
+  transport.post = () => {
+    posts++
+    return new Promise<Response>((resolve) => void (answer = () => resolve(new Response(''))))
+  }
+  transport.transportAbort = new AbortController()
+  transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
+  const first = transport.flushOutbox()
+  for (let i = 0; i < mib; i++)
+    transport.sendFrame({ kind: 'data', frame: encode.text(0, '"' + 'x'.repeat(2 ** 20) + '"', i + 1) })
+  answer()
+  await first
+  expect(posts).toBe(next.startsWith('goes') ? 2 : 1)
+  connection.dispose()
+})
+
+test.each([
+  { mib: 31, posts: 0, next: 'waits for its flush throttle' },
+  { mib: 33, posts: 1, next: 'goes at once' },
+])('with no POST out, a batch holding $mib MiB $next', async ({ mib, posts: expected }) => {
+  const connection = ClientConnection.getOrCreate(
+    'http://eager-idle.test',
+    createChannel() as never,
+    stalledOptions(),
+  ) as any
+  const transport = connection.transport
+  let posts = 0
+  transport.post = () => {
+    posts++
+    return new Promise<Response>(() => {})
+  }
+  transport.transportAbort = new AbortController()
+  transport.lastPostStartedAt = Date.now()
+  for (let i = 0; i < mib; i++)
+    transport.sendFrame({ kind: 'data', frame: encode.text(0, '"' + 'x'.repeat(2 ** 20) + '"', i + 1) })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(posts).toBe(expected)
+  connection.dispose()
+})
+
+test.each([
   { answeredAfter: 100, post: 'answered within that delay' },
   { answeredAfter: CHANNEL_PING_INTERVAL_MS, post: 'still out at that delay' },
 ])(
