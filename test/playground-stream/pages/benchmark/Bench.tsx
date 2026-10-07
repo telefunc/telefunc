@@ -266,6 +266,8 @@ function openWith<F extends (...args: never[]) => unknown>(
     channel: {
       transports: [scenario.transport],
       connectionKey: `bench-${scenario.id}-${bytes}b-ch${slot}`,
+      // An idle SSE connection holds one of the six sockets HTTP/1.1 gives a page per origin, and every cell has its own.
+      ...(scenario.transport === 'sse' ? { idleTimeout: 0 } : {}),
     },
   }) as F
 }
