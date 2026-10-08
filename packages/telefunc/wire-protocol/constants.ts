@@ -172,6 +172,12 @@ export const SSE_POST_IDLE_FLUSH_DELAY_MS = 50
 /** Idle window used to decide whether the next upstream SSE batch is post-idle. */
 export const SSE_FLUSH_THROTTLE_MS = 300
 
+/** A batch POST out longer than this, plus its bytes at `SSE_POST_MIN_BYTES_PER_S`, is lost with its wire. Only the page
+ *  can tell, and nothing it observes separates a lost POST from one a proxy that buffers request bodies holds back from
+ *  the server, so a wire is held to the slowest rate it takes an upload at. */
+export const SSE_POST_FLOOR_MS = 30_000
+export const SSE_POST_MIN_BYTES_PER_S = 16 * 1024
+
 /** Latest-send deadline for SSE reconcile batches so immediate channel activity can coalesce into one POST. */
 export const SSE_RECONCILE_DEADLINE_MS = 10
 

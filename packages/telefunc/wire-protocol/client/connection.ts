@@ -20,7 +20,9 @@ import {
   CHANNEL_TRANSPORT,
   RECONCILE_TIMEOUT_MS,
   SSE_FLUSH_THROTTLE_MS,
+  SSE_POST_FLOOR_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
+  SSE_POST_MIN_BYTES_PER_S,
   SSE_RECONCILE_DEADLINE_MS,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   MAX_CHANNELS_PER_CONNECTION,
@@ -1052,6 +1054,11 @@ class ClientConnection implements MuxConnection {
     transport.detachHeartbeat()
     transport.abandonActiveTransport()
     this._onTransportClosed(transport)
+  }
+
+  /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
+  _onTransportPostLate(transport: ClientChannelTransport): void {
+    this.handlePongTimeout(transport)
   }
 
   /** Until a wire's first RECONCILED, its RECONCILE deadline bounds it: that RECONCILED comes behind what the server
@@ -2087,6 +2094,8 @@ class SseTransport implements UpgradeSource {
   /** The next POST's body, as far as `foldOutbox` built it. */
   private folded: OutboxFold | null = null
   private lastPostStartedAt = 0
+  /** The batch POST out is lost if this passes. */
+  private postWatch: ReturnType<typeof setTimeout> | null = null
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
   private postIdleFlushDelayMs = SSE_POST_IDLE_FLUSH_DELAY_MS
   private heartbeatFlushDelayMs = Math.floor(CHANNEL_PING_INTERVAL_MS / 2)
@@ -2387,14 +2396,13 @@ class SseTransport implements UpgradeSource {
       const wire = this.transportAbort
 
       try {
-        const response = await this.post(
-          encodeSseBatch(
-            { connId: this.connId },
-            queued.slice(head?.count ?? 0).map((entry) => entry.frame),
-            head?.blob,
-          ),
-          wire.signal,
+        const body = encodeSseBatch(
+          { connId: this.connId },
+          queued.slice(head?.count ?? 0).map((entry) => entry.frame),
+          head?.blob,
         )
+        this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
+        const response = await this.post(body, wire.signal)
         if (!response.ok) throw new Error('POST failed')
       } catch {
         // Its wire has ended already: what the POST carried goes the way of that wire's outbox (stageInitialBatch),
@@ -2409,9 +2417,19 @@ class SseTransport implements UpgradeSource {
         return
       }
     } finally {
+      if (this.postWatch) clearTimeout(this.postWatch)
+      this.postWatch = null
       this.flushing = false
       this.flushNextOrDrain()
     }
+  }
+
+  /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
+  private watchPost(wire: AbortController, ms: number): void {
+    this.postWatch = setTimeout(() => {
+      this.owner._onTransportPostLate(this)
+      if (this.transportAbort === wire) this.watchPost(wire, SSE_POST_FLOOR_MS)
+    }, ms)
   }
 
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */
