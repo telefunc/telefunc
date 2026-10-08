@@ -10,8 +10,8 @@ import {
   WIRE_SEND_BACKLOG_BASE_BYTES,
 } from '../constants.js'
 
-/** Wires the test opens on `mux`, each recording what the server sends on it. */
-function wires(mux: ChannelMux) {
+/** Wires the test opens on `mux`, each recording what the server sends on it; `wholeMessages` makes them WebSockets. */
+function wires(mux: ChannelMux, wholeMessages = false) {
   const sessions = new Map<object, string>()
   const sent = new Map<object, DecodedFrame[]>()
   const terminated = new Set<object>()
@@ -19,7 +19,7 @@ function wires(mux: ChannelMux) {
     getSessionId: (wire) => sessions.get(wire),
     setSessionId: (wire, id) => void sessions.set(wire, id),
     getConnId: () => null,
-    wholeMessages: false,
+    wholeMessages,
     sendNow: (wire, frame) => void sent.get(wire)!.push(decode(frame)),
     bufferedAmount: () => 0,
     terminateConnection: (wire) => void terminated.add(wire),
@@ -56,6 +56,16 @@ async function attachedWire() {
     Promise.all(frames.map((frame) => mux.onConnectionRawMessage(wire, frame)))
   return { deliver, received, terminated: () => terminated.has(wire) }
 }
+
+test("a page's piece of a large message, cut for its fast uplink's rate, is taken past the control frames' cap", async () => {
+  const mux = new ChannelMux()
+  const { open, terminated } = wires(mux, true)
+  const wire = open()
+  await mux.onConnectionRawMessage(wire, encode.reconcile({ open: [] }))
+  // A 16 MiB message cut for an uplink measured at 10 MB/s, at the default ping interval: 10 kB/ms × 5000 ms / 8.
+  await mux.onConnectionRawMessage(wire, encode.piece(16 * 1024 * 1024, new Uint8Array(6_250_000)))
+  expect(terminated.has(wire)).toBe(false)
+})
 
 test("a reconnect waiting for a new channel keeps the channels it moved when the previous wire's close lands", async () => {
   const mux = new ChannelMux()

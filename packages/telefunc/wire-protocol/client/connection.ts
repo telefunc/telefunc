@@ -2180,7 +2180,7 @@ class SseTransport implements UpgradeSource {
       if (frame.kind === 'heartbeat') this.unholdPing(entry)
     }
     this.scheduleFlush()
-    if (deadline <= now || this.pendingBytes() >= SSE_EAGER_FLUSH_BYTES) void this.flushOutbox()
+    if (deadline <= now || this.holdsEagerFlushBytes()) void this.flushOutbox()
   }
 
   /** While a POST is out, what joins the outbox goes into the next one's body a MiB at a time, so the flush after the
@@ -2204,9 +2204,9 @@ class SseTransport implements UpgradeSource {
     }
   }
 
-  /** What the outbox holds: the fold and what joined it since. */
-  private pendingBytes(): number {
-    return (this.foldHeading(this.outbox)?.blob.size ?? 0) + this.unfolded
+  /** The fold and what joined it since are enough to go without waiting out the throttle. */
+  private holdsEagerFlushBytes(): boolean {
+    return (this.foldHeading(this.outbox)?.blob.size ?? 0) + this.unfolded >= SSE_EAGER_FLUSH_BYTES
   }
 
   /** The fold, if it still heads `entries`. */
@@ -2410,14 +2410,19 @@ class SseTransport implements UpgradeSource {
       }
     } finally {
       this.flushing = false
-      if (this.outbox.length > 0) {
-        if (this.pendingBytes() >= SSE_EAGER_FLUSH_BYTES) void this.flushOutbox()
-        else this.scheduleFlush()
-      } else {
-        const cbs = this.drainCallbacks.splice(0)
-        for (const cb of cbs) cb()
-      }
+      this.flushNextOrDrain()
     }
+  }
+
+  /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */
+  private flushNextOrDrain(): void {
+    if (this.outbox.length > 0) {
+      if (this.holdsEagerFlushBytes()) void this.flushOutbox()
+      else this.scheduleFlush()
+      return
+    }
+    const cbs = this.drainCallbacks.splice(0)
+    for (const cb of cbs) cb()
   }
 
   /** A PING still held behind the POST out at its deadline goes on its own: the next POST would bring it past the
