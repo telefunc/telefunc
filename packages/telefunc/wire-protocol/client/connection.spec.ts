@@ -253,6 +253,53 @@ test.each([
 })
 
 test.each([
+  { kind: 'flow-control', posts: 0, next: 'waits for its flush throttle' },
+  { kind: 'urgent-flow-control', posts: 1, next: 'goes at once' },
+])('with no POST out, a $kind frame $next', async ({ kind, posts: expected }) => {
+  const connection = ClientConnection.getOrCreate(
+    'http://urgent-window.test',
+    createChannel() as never,
+    stalledOptions(),
+  ) as any
+  const transport = connection.transport
+  let posts = 0
+  transport.post = () => {
+    posts++
+    return new Promise<Response>(() => {})
+  }
+  transport.transportAbort = new AbortController()
+  transport.lastPostStartedAt = Date.now()
+  transport.sendFrame({ kind, frame: encode.window(0, 65_536, 0) })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(posts).toBe(expected)
+  connection.dispose()
+})
+
+test('an urgent window refresh made while a batch POST is out goes as that POST is answered', async () => {
+  const connection = ClientConnection.getOrCreate(
+    'http://urgent-window-out.test',
+    createChannel() as never,
+    stalledOptions(),
+  ) as any
+  const transport = connection.transport
+  let posts = 0
+  let answer!: () => void
+  transport.post = () => {
+    posts++
+    return new Promise<Response>((resolve) => void (answer = () => resolve(new Response(''))))
+  }
+  transport.transportAbort = new AbortController()
+  transport.outbox = [{ frame: encode.text(0, '"x"', 1), deadline: 0 }]
+  const first = transport.flushOutbox()
+  transport.sendFrame({ kind: 'urgent-flow-control', frame: encode.window(0, 65_536, 0) })
+  expect(posts).toBe(1)
+  answer()
+  await first
+  await vi.waitFor(() => expect(posts).toBe(2))
+  connection.dispose()
+})
+
+test.each([
   { answeredAfter: 100, post: 'answered within that delay' },
   { answeredAfter: CHANNEL_PING_INTERVAL_MS, post: 'still out at that delay' },
 ])(

@@ -47,6 +47,9 @@ function watch(promises: (void | Promise<void>)[]): boolean[] {
 type Emit = FlowControlEmit & {
   windowCalls: number[]
   msgWindowCalls: number[]
+  /** `urgent` of each `windowCalls` / `msgWindowCalls` entry. */
+  windowUrgent: boolean[]
+  msgWindowUrgent: boolean[]
   bdpPingCalls: number
   /** The number of the last probe sent. */
   probe: number
@@ -55,13 +58,17 @@ function makeEmit(): Emit {
   const e: Emit = {
     windowCalls: [],
     msgWindowCalls: [],
+    windowUrgent: [],
+    msgWindowUrgent: [],
     bdpPingCalls: 0,
     probe: 0,
-    byteWindowUpdate(b) {
+    byteWindowUpdate(b, urgent) {
       e.windowCalls.push(b)
+      e.windowUrgent.push(urgent)
     },
-    msgWindowUpdate(c) {
+    msgWindowUpdate(c, urgent) {
       e.msgWindowCalls.push(c)
+      e.msgWindowUrgent.push(urgent)
     },
     bdpPing(probe) {
       e.bdpPingCalls++
@@ -231,6 +238,20 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
     expect(emit.windowCalls).toEqual([quarter + CREDIT_WINDOW_INITIAL_BYTES])
     flow.onConsumed(1)
     expect(emit.windowCalls).toEqual([quarter + CREDIT_WINDOW_INITIAL_BYTES, 2 * quarter + CREDIT_WINDOW_INITIAL_BYTES])
+  })
+
+  // A refresh is urgent once more than half a window was consumed since the last urgent one.
+  it('marks a WINDOW urgent once more than half a window was consumed since the last urgent one', () => {
+    const { flow, emit } = makeFlow()
+    const quarter = Math.floor(CREDIT_WINDOW_INITIAL_BYTES / 4)
+    for (let i = 0; i < 6; i++) flow.onConsumedBytes(quarter)
+    expect(emit.windowUrgent).toEqual([false, false, true, false, false, true])
+  })
+
+  it('marks a MSG_WINDOW urgent once more than half a window was consumed since the last urgent one', () => {
+    const { flow, emit } = makeFlow()
+    for (let i = 0; i < 75; i++) flow.onConsumed(0)
+    expect(emit.msgWindowUrgent).toEqual([false, false, true])
   })
 
   // Consumption accumulates across calls.

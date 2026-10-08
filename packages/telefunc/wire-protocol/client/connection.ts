@@ -172,7 +172,7 @@ function settledOrAborted(promise: Promise<unknown>, signal: AbortSignal): Promi
  *  leaves the wire usable. */
 type BarrierEmission = 'emitted' | 'not-emitted'
 
-type OutboundFrameKind = 'reconcile' | 'control' | 'flow-control' | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'control' | 'flow-control' | 'urgent-flow-control' | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind
@@ -216,8 +216,8 @@ interface MuxConnection {
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendByteWindowUpdate(channel: MuxChannel, limit: number): void
-  sendMsgWindowUpdate(channel: MuxChannel, limit: number): void
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
+  sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
   sendBdpPingAck(channel: MuxChannel, probe: number, starved: boolean, pathRtt: number): void
@@ -776,16 +776,16 @@ class ClientConnection implements MuxConnection {
     this.transport.sendFrame({ kind: 'control', frame })
   }
 
-  sendByteWindowUpdate(channel: MuxChannel, limit: number): void {
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0))
+    this.sendFlowControl(ix, encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0), urgent)
   }
 
-  sendMsgWindowUpdate(channel: MuxChannel, limit: number): void {
+  sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    this.sendFlowControl(ix, encode.msgWindow(ix, limit))
+    this.sendFlowControl(ix, encode.msgWindow(ix, limit), urgent)
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {
@@ -807,12 +807,12 @@ class ClientConnection implements MuxConnection {
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
    *  dropped one could stall the peer: an upgrade attempt that ends without its barrier lifts the hold with no reattach
    *  to advertise it again. */
-  private sendFlowControl(ix: number, frame: Uint8Array<ArrayBuffer>): void {
+  private sendFlowControl(ix: number, frame: Uint8Array<ArrayBuffer>, urgent = false): void {
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq: undefined })
       return
     }
-    this.transport.sendFrame({ kind: 'flow-control', frame })
+    this.transport.sendFrame({ kind: urgent ? 'urgent-flow-control' : 'flow-control', frame })
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
@@ -2485,6 +2485,7 @@ class SseTransport implements UpgradeSource {
       case 'reconcile':
         return now + SSE_RECONCILE_DEADLINE_MS
       case 'control':
+      case 'urgent-flow-control':
         return now
       case 'heartbeat':
         return now + this.heartbeatFlushDelayMs

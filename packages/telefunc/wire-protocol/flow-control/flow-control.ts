@@ -15,8 +15,10 @@ import {
 /** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
  *  arrived (see `constants.ts`). */
 interface FlowControlEmit {
-  byteWindowUpdate(limit: number): void
-  msgWindowUpdate(limit: number): void
+  /** `urgent`: past half its window has been consumed since the last urgent limit, so the peer may be close to
+   *  blocking: a transport that batches should send it at once. */
+  byteWindowUpdate(limit: number, urgent: boolean): void
+  msgWindowUpdate(limit: number, urgent: boolean): void
   bdpPing(probe: number): void
 }
 
@@ -73,6 +75,9 @@ class FlowControl {
   private _consumedMessages = 0
   private _advertisedBytes = 0
   private _advertisedMessages = 0
+  /** What had been consumed when the last urgent limit was emitted. */
+  private _urgentBytes = 0
+  private _urgentMessages = 0
   /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
   private _uncountedBytes = 0
   /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
@@ -357,12 +362,16 @@ class FlowControl {
     this._advertisedBytes = this._consumedBytes
     this._uncountedBytes = 0
     this._arrived = false
-    this._emit.byteWindowUpdate((this._consumedBytes + this.byteWindow) >>> 0)
+    const urgent = (this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow
+    if (urgent) this._urgentBytes = this._consumedBytes
+    this._emit.byteWindowUpdate((this._consumedBytes + this.byteWindow) >>> 0, urgent)
   }
 
   private _advertiseMessages(): void {
     this._advertisedMessages = this._consumedMessages
-    this._emit.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0)
+    const urgent = (this._consumedMessages - this._urgentMessages) * 2 > this._bdp.msgWindow
+    if (urgent) this._urgentMessages = this._consumedMessages
+    this._emit.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, urgent)
   }
 
   private _noteStarved(): void {
