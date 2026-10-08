@@ -17,7 +17,7 @@
     "// Build website for production": "",
     "docs:build": "cd docs/ && pnpm run build",
     "// Lint the docs (static checks)": "",
-    "docs:lint": "node docs/check-docs.mjs",
+    "docs:lint": "cd docs/ && pnpm run lint",
     "// Test website (CI)": "",
     "docs:test": "pnpm run docs:lint && cd docs/ && test-e2e",
     "========= Release": "",
