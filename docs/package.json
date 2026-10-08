@@ -3,11 +3,12 @@
     "dev": "vike dev",
     "build": "vike build",
     "preview": "vike build && vike preview",
+    "lint": "docpress lint",
     "typecheck": "tsc --noEmit --watch"
   },
   "========= The telefunc dependency is a trick for triggering the docs to rebuild upon releasing a new Telefunc version (so that the Telefunc version shown on telefunc.com is up-to-date)": "",
   "dependencies": {
-    "@brillout/docpress": "^0.17.6",
+    "@brillout/docpress": "^0.17.8",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
