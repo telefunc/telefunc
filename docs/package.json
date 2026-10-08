@@ -3,6 +3,7 @@
     "dev": "vike dev",
     "build": "vike build",
     "preview": "vike build && vike preview",
+    "lint": "docpress lint",
     "typecheck": "tsc --noEmit --watch"
   },
   "========= The telefunc dependency is a trick for triggering the docs to rebuild upon releasing a new Telefunc version (so that the Telefunc version shown on telefunc.com is up-to-date)": "",

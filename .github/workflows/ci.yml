@@ -9,10 +9,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node docs/check-docs.mjs
+          cache: "pnpm"
+      - run: pnpm install --filter ./docs
+      - run: pnpm run docs:lint
 
   prepare:
     # Prevent workflow being run twice, https://github.com/orgs/community/discussions/57827#discussioncomment-6579237
