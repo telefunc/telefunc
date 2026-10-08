@@ -201,77 +201,59 @@ test('what joins the outbox while a batch POST is out goes into the next body as
   connection.dispose()
 })
 
+/** A connection whose batch POSTs are counted and stay out until `answer()`. */
+function connectionCountingPosts(url: string) {
+  const connection = ClientConnection.getOrCreate(url, createChannel() as never, stalledOptions()) as any
+  const transport = connection.transport
+  const out = { posts: 0, answer: () => {} }
+  transport.post = () => {
+    out.posts++
+    return new Promise<Response>((resolve) => void (out.answer = () => resolve(new Response(''))))
+  }
+  transport.transportAbort = new AbortController()
+  return { connection, transport, out }
+}
+
+const sendMiB = (transport: any, mib: number) => {
+  for (let i = 0; i < mib; i++)
+    transport.sendFrame({ kind: 'data', frame: encode.text(0, '"' + 'x'.repeat(2 ** 20) + '"', i + 1) })
+}
+
 test.each([
   { mib: 31, next: 'waits for its flush throttle' },
   { mib: 33, next: 'goes as the one before it is answered' },
 ])('a batch POST holding $mib MiB $next', async ({ mib, next }) => {
-  const connection = ClientConnection.getOrCreate(
-    'http://eager.test',
-    createChannel() as never,
-    stalledOptions(),
-  ) as any
-  const transport = connection.transport
-  let posts = 0
-  let answer!: () => void
-  transport.post = () => {
-    posts++
-    return new Promise<Response>((resolve) => void (answer = () => resolve(new Response(''))))
-  }
-  transport.transportAbort = new AbortController()
+  const { connection, transport, out } = connectionCountingPosts('http://eager.test')
   transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
   const first = transport.flushOutbox()
-  for (let i = 0; i < mib; i++)
-    transport.sendFrame({ kind: 'data', frame: encode.text(0, '"' + 'x'.repeat(2 ** 20) + '"', i + 1) })
-  answer()
+  sendMiB(transport, mib)
+  out.answer()
   await first
-  expect(posts).toBe(next.startsWith('goes') ? 2 : 1)
+  expect(out.posts).toBe(next.startsWith('goes') ? 2 : 1)
   connection.dispose()
 })
 
 test.each([
   { mib: 31, posts: 0, next: 'waits for its flush throttle' },
   { mib: 33, posts: 1, next: 'goes at once' },
-])('with no POST out, a batch holding $mib MiB $next', async ({ mib, posts: expected }) => {
-  const connection = ClientConnection.getOrCreate(
-    'http://eager-idle.test',
-    createChannel() as never,
-    stalledOptions(),
-  ) as any
-  const transport = connection.transport
-  let posts = 0
-  transport.post = () => {
-    posts++
-    return new Promise<Response>(() => {})
-  }
-  transport.transportAbort = new AbortController()
+])('with no POST out, a batch holding $mib MiB $next', async ({ mib, posts }) => {
+  const { connection, transport, out } = connectionCountingPosts('http://eager-idle.test')
   transport.lastPostStartedAt = Date.now()
-  for (let i = 0; i < mib; i++)
-    transport.sendFrame({ kind: 'data', frame: encode.text(0, '"' + 'x'.repeat(2 ** 20) + '"', i + 1) })
+  sendMiB(transport, mib)
   await new Promise((resolve) => setTimeout(resolve, 0))
-  expect(posts).toBe(expected)
+  expect(out.posts).toBe(posts)
   connection.dispose()
 })
 
 test.each([
   { kind: 'flow-control', posts: 0, next: 'waits for its flush throttle' },
   { kind: 'urgent-flow-control', posts: 1, next: 'goes at once' },
-])('with no POST out, a $kind frame $next', async ({ kind, posts: expected }) => {
-  const connection = ClientConnection.getOrCreate(
-    'http://urgent-window.test',
-    createChannel() as never,
-    stalledOptions(),
-  ) as any
-  const transport = connection.transport
-  let posts = 0
-  transport.post = () => {
-    posts++
-    return new Promise<Response>(() => {})
-  }
-  transport.transportAbort = new AbortController()
+])('with no POST out, a $kind frame $next', async ({ kind, posts }) => {
+  const { connection, transport, out } = connectionCountingPosts('http://urgent-window.test')
   transport.lastPostStartedAt = Date.now()
   transport.sendFrame({ kind, frame: encode.window(0, 65_536, 0) })
   await new Promise((resolve) => setTimeout(resolve, 0))
-  expect(posts).toBe(expected)
+  expect(out.posts).toBe(posts)
   connection.dispose()
 })
 
@@ -290,27 +272,15 @@ test.each([
 })
 
 test('an urgent window refresh made while a batch POST is out goes as that POST is answered', async () => {
-  const connection = ClientConnection.getOrCreate(
-    'http://urgent-window-out.test',
-    createChannel() as never,
-    stalledOptions(),
-  ) as any
-  const transport = connection.transport
-  let posts = 0
-  let answer!: () => void
-  transport.post = () => {
-    posts++
-    return new Promise<Response>((resolve) => void (answer = () => resolve(new Response(''))))
-  }
-  transport.transportAbort = new AbortController()
+  const { connection, transport, out } = connectionCountingPosts('http://urgent-window-out.test')
   transport.outbox = [{ frame: encode.text(0, '"x"', 1), deadline: 0 }]
   const first = transport.flushOutbox()
   transport.sendFrame({ kind: 'urgent-flow-control', frame: encode.window(0, 65_536, 0) })
-  expect(posts).toBe(1)
-  answer()
+  expect(out.posts).toBe(1)
+  out.answer()
   await first
   await new Promise((resolve) => setTimeout(resolve, 50))
-  expect(posts).toBe(2)
+  expect(out.posts).toBe(2)
   connection.dispose()
 })
 
