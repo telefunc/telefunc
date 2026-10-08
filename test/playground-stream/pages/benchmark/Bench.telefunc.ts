@@ -41,7 +41,7 @@ async function onBenchBinaryEchoLatency() {
   return { channel: ch.client, instance: INSTANCE_ID }
 }
 
-/** Counts received messages and, from the first one, samples the running total every `sampleMs` on the server's clock. */
+/** Counts received messages and samples the running total on the server's clock: as the first arrives, then every `sampleMs`. */
 function countReceived(sampleMs: number) {
   let total = 0
   let timer: ReturnType<typeof setInterval> | undefined
@@ -50,8 +50,11 @@ function countReceived(sampleMs: number) {
     samples,
     total: () => total,
     count() {
+      if (timer === undefined) {
+        samples.push({ at: performance.now(), total })
+        timer = setInterval(() => samples.push({ at: performance.now(), total }), sampleMs)
+      }
       total++
-      timer ??= setInterval(() => samples.push({ at: performance.now(), total }), sampleMs)
     },
     stop: () => clearInterval(timer),
   }
