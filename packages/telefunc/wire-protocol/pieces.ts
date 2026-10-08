@@ -20,11 +20,12 @@ function acknowledges(bytes: number): boolean {
 class PieceSender {
   /** The link is known to be too slow for big whole frames. */
   private slow = false
-  /** The frames over `WIRE_PIECE_BYTES` sent and not yet acknowledged: the bytes that crossed before each arrived, and
-   *  when it was sent. */
-  private readonly unacknowledged: { crossing: number; at: number }[] = []
-  /** How many frames over `WIRE_PIECE_BYTES` the receiver has acknowledged in all. */
-  private acknowledgedCount = 0
+  /** The frames over `WIRE_PIECE_BYTES` sent and not yet acknowledged: the bytes that crossed before each arrived, when
+   *  it was sent, and the bytes sent through it. */
+  private readonly unacknowledged: { crossing: number; at: number; end: number }[] = []
+  /** The bytes of the frames sent in all, and those the receiver has acknowledged. */
+  private sentBytes = 0
+  private acknowledgedBytes = 0
   /** The largest frame sent: a browser may count a message in full while sending it. */
   private largest = 0
   /** In bytes per ms, from a frame sent to its arrival: never faster than it and what was queued ahead of it crossed. */
@@ -40,13 +41,18 @@ class PieceSender {
   /** Sends `frame`, whole or in pieces. */
   send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
     const bytes = frame.byteLength
+    this.sentBytes += bytes
     if (bytes > this.largest) this.largest = bytes
     if (!acknowledges(bytes)) return this.transmit(frame)
     const now = performance.now()
     if (now - this.roseAt > WIRE_PIECE_RATE_WINDOW_MS) this.fastest = 0
     // What its socket holds unsent crosses before it; a browser may count the message it is sending in full, so less the
     // largest frame.
-    this.unacknowledged.push({ crossing: Math.max(0, this.queued() - this.largest) + bytes, at: now })
+    this.unacknowledged.push({
+      crossing: Math.max(0, this.queued() - this.largest) + bytes,
+      at: now,
+      end: this.sentBytes,
+    })
     const wholeUpTo = this.wholeUpTo(pingInterval)
     if (bytes <= wholeUpTo) return this.transmit(frame)
     const size = Math.floor(wholeUpTo)
@@ -75,14 +81,17 @@ class PieceSender {
     return this.fastest === 0 && this.unacknowledged.length > 0
   }
 
-  /** Takes a PIECES_ACK: its receiver took `count` frames in all, the newest `heldMs` before it sent the ack. Returns
-   *  false if that acknowledges nothing sent, or more than was sent. */
-  acknowledged(count: number, heldMs: number): boolean {
-    const newly = count - this.acknowledgedCount
-    if (newly < 1 || newly > this.unacknowledged.length) return false
-    this.acknowledgedCount = count
+  /** Takes a PIECES_ACK: its receiver took `bytes` of the frames in all (mod 2^32), the newest `heldMs` before it sent
+   *  the ack. Returns false if that acknowledges nothing sent, or more than was sent. */
+  acknowledged(bytes: number, heldMs: number): boolean {
+    const newly = (bytes - this.acknowledgedBytes) >>> 0
+    if (newly < 1 || newly > this.sentBytes - this.acknowledgedBytes) return false
+    this.acknowledgedBytes += newly
     const arrived = performance.now() - heldMs
-    for (const sent of this.unacknowledged.splice(0, newly)) {
+    let covered = 0
+    while (covered < this.unacknowledged.length && this.unacknowledged[covered]!.end <= this.acknowledgedBytes)
+      covered++
+    for (const sent of this.unacknowledged.splice(0, covered)) {
       // Within one tick of a coarsened clock a sample says nothing of the rate.
       if (!(arrived > sent.at)) continue
       const rate = sent.crossing / (arrived - sent.at)
@@ -96,12 +105,13 @@ class PieceSender {
 
 /** One WebSocket's: puts a frame sent in pieces back together, taking pieces only as `PieceSender` cuts them (all as
  *  large as the first, at least `WIRE_PIECE_BYTES` or the whole frame, but the last), and
- *  acknowledges the frames over `WIRE_PIECE_BYTES` it took, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS`. */
+ *  acknowledges the bytes it took once one is over `WIRE_PIECE_BYTES`, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS`. */
 class PieceReceiver {
   private pieces: Uint8Array[] = []
   private received = 0
   private total = 0
   private size = 0
+  /** The bytes of the frames it took in all. */
   private took = 0
   private newestAt = 0
   private ackedAt = Number.NEGATIVE_INFINITY
@@ -111,8 +121,8 @@ class PieceReceiver {
 
   /** After a whole frame of `bytes` arrived, in one message or in pieces. */
   arrived(bytes: number): void {
+    this.took += bytes
     if (!acknowledges(bytes)) return
-    this.took++
     this.newestAt = performance.now()
     const wait = this.ackedAt + WIRE_PIECES_ACK_GAP_MS - this.newestAt
     if (wait <= 0) this.acknowledge()

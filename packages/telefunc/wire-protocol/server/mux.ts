@@ -527,7 +527,7 @@ class ChannelMux {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      assertProtocol(entry.state.pieces?.sender.acknowledged(frame.count, frame.heldMs), 'PIECES_ACK for nothing sent')
+      assertProtocol(entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs), 'PIECES_ACK for nothing sent')
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')

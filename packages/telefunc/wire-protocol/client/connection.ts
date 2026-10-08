@@ -1765,8 +1765,9 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   private heartbeat: Heartbeat | null = null
-  /** The probe's socket, with the piece receiver it keeps as the transport adopts it. */
-  private probed: { ws: WebSocket; pieces: PieceReceiver } | null = null
+  /** The probe's socket, with the piece sender and receiver it keeps as the transport adopts it: the server counts every
+   *  frame the socket carries. */
+  private probed: { ws: WebSocket; sender: PieceSender; pieces: PieceReceiver } | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
   private connecting = false
@@ -1796,7 +1797,7 @@ class WsTransport implements UpgradeTarget {
       return null
     }
     ws.binaryType = 'arraybuffer'
-    const pieces = new PieceReceiver((frame) => ws.send(frame))
+    const { sender, pieces } = this.pieceEnds(ws)
 
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
@@ -1815,7 +1816,7 @@ class WsTransport implements UpgradeTarget {
       onClose?.()
     }
     ws.onerror = () => {}
-    ws.onopen = () => ws.send(encode.ping())
+    ws.onopen = () => sender.send(encode.ping(), this.pingInterval)
 
     // First pong proves the wire is alive — consumer reassigns onPong/onClose after the await.
     const ready = await new Promise<boolean>((resolve) => {
@@ -1836,11 +1837,11 @@ class WsTransport implements UpgradeTarget {
       return null
     }
 
-    this.probed = { ws, pieces }
+    this.probed = { ws, sender, pieces }
     return {
       ping: () => {
         try {
-          ws.send(encode.ping())
+          sender.send(encode.ping(), this.pingInterval)
         } catch {}
       },
       onPong: (cb) => {
@@ -1851,7 +1852,7 @@ class WsTransport implements UpgradeTarget {
       },
       send: (frame) => {
         try {
-          ws.send(frame)
+          sender.send(frame, this.pingInterval)
         } catch {
           // Socket died between the open event and this send — `onClose` aborts the attempt.
         }
@@ -1875,7 +1876,7 @@ class WsTransport implements UpgradeTarget {
     this.ws = probed.ws
     this.everOpened = true
     this.connecting = false
-    this.setupHandlers(probed.ws, probed.pieces)
+    this.setupHandlers(probed.ws, probed.sender, probed.pieces)
   }
 
   start(): void {
@@ -1900,7 +1901,8 @@ class WsTransport implements UpgradeTarget {
       this.handleOpen(ws)
     }
 
-    this.setupHandlers(ws, new PieceReceiver((frame) => ws.send(frame)))
+    const { sender, pieces } = this.pieceEnds(ws)
+    this.setupHandlers(ws, sender, pieces)
   }
 
   private handleOpen(ws: WebSocket): void {
@@ -1932,11 +1934,16 @@ class WsTransport implements UpgradeTarget {
     return Promise.resolve()
   }
 
-  private setupHandlers(ws: WebSocket, pieces: PieceReceiver): void {
+  /** Every frame `ws` carries goes through its sender, which counts the bytes its receiver acknowledges. */
+  private pieceEnds(ws: WebSocket): { sender: PieceSender; pieces: PieceReceiver } {
     const sender = new PieceSender(
       (message) => ws.send(message),
       () => ws.bufferedAmount,
     )
+    return { sender, pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval)) }
+  }
+
+  private setupHandlers(ws: WebSocket, sender: PieceSender, pieces: PieceReceiver): void {
     if (this.owner._slowLink) sender.markSlow()
     this.pieceSender = sender
     ws.onmessage = ({ data }: MessageEvent) => {
@@ -1945,7 +1952,7 @@ class WsTransport implements UpgradeTarget {
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
-        sender.acknowledged(frame.count, frame.heldMs)
+        sender.acknowledged(frame.bytes, frame.heldMs)
         return
       }
       if (frame.tag === TAG.PONG) {
@@ -2013,7 +2020,8 @@ class WsTransport implements UpgradeTarget {
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
-    this.ws.send(frame)
+    assert(this.pieceSender)
+    this.pieceSender.send(frame, this.pingInterval)
   }
 
   dispose(): void {
