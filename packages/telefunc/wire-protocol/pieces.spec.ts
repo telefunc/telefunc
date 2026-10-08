@@ -1,5 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { PieceSender } from './pieces.js'
+import { PieceReceiver, PieceSender } from './pieces.js'
+import { decode, TAG } from './shared-ws.js'
 
 afterEach(() => void vi.restoreAllMocks())
 
@@ -41,4 +42,29 @@ test('an acknowledgement is read modulo 2^32', () => {
     sender.send(frame, 5_000)
     expect(sender.acknowledged((sent + frame.byteLength) % 2 ** 32, 0)).toBe(true)
   }
+})
+
+test('a receiver acknowledges frames of any size once more than 16 KiB of them are unacknowledged, with the span between arrivals', () => {
+  vi.useFakeTimers()
+  vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
+  const sent: Uint8Array[] = []
+  const receiver = new PieceReceiver((frame) => void sent.push(frame))
+  receiver.arrived(8_000, true)
+  receiver.arrived(8_000, true)
+  expect(sent).toHaveLength(0)
+  vi.advanceTimersByTime(20)
+  receiver.arrived(1_000, true)
+  expect(sent.map((frame) => decode(frame))).toEqual([{ tag: TAG.PIECES_ACK, bytes: 17_000, heldMs: 0, spanUs: 0 }])
+  // 100 ms on, 10 KB arrive, and 30 ms later 10 KB more: the second ack covers both.
+  vi.advanceTimersByTime(100)
+  receiver.arrived(10_000, true)
+  vi.advanceTimersByTime(30)
+  receiver.arrived(10_000, true)
+  expect(sent.map((frame) => decode(frame))[1]).toEqual({
+    tag: TAG.PIECES_ACK,
+    bytes: 37_000,
+    heldMs: 0,
+    spanUs: 130_000,
+  })
+  vi.useRealTimers()
 })

@@ -957,7 +957,7 @@ test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last
   for (const side of ['page', 'server'] as const) {
     const acks = loop.sent[side].slice(marks[side]).filter(([tag]) => tag === TAG.PIECES_ACK)
     expect(acks.length).toBeGreaterThan(0)
-    expect(acks.length).toBeLessThan(5)
+    expect(acks.length).toBeLessThan(20)
   }
   const sender = piecesOf(loop.socket)?.sender as { unacknowledged: unknown[] }
   expect(sender.unacknowledged).toHaveLength(0)

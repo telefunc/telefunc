@@ -29,6 +29,7 @@ import {
   decodeClientFrame,
   encode,
   isConnCtrlTag,
+  isSequencedTag,
   peekTag,
   seqThrough,
 } from '../shared-ws.js'
@@ -406,7 +407,7 @@ class ChannelMux {
     }
     const tag = peekTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
-    state.pieces?.receiver.arrived(byteLength)
+    state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number))
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
     state.lastReceivedAt = performance.now()

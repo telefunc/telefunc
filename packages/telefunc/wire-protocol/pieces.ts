@@ -24,8 +24,8 @@ class PieceSender {
    *  it was sent, and the bytes sent through it. */
   private readonly unacknowledged: { crossing: number; at: number; end: number }[] = []
   /** The bytes of the frames sent in all, and those the receiver has acknowledged. */
-  private sentBytes = 0
-  private acknowledgedBytes = 0
+  sentBytes = 0
+  acknowledgedBytes = 0
   /** The largest frame sent: a browser may count a message in full while sending it. */
   private largest = 0
   /** In bytes per ms, from a frame sent to its arrival: never faster than it and what was queued ahead of it crossed. */
@@ -104,26 +104,32 @@ class PieceSender {
 }
 
 /** One WebSocket's: puts a frame sent in pieces back together, taking pieces only as `PieceSender` cuts them (all as
- *  large as the first, at least `WIRE_PIECE_BYTES` or the whole frame, but the last), and
- *  acknowledges the bytes it took once one is over `WIRE_PIECE_BYTES`, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS`. */
+ *  large as the first, at least `WIRE_PIECE_BYTES` or the whole frame, but the last), and acknowledges the bytes it took
+ *  once more than `WIRE_PIECE_BYTES` are unacknowledged, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS`. */
 class PieceReceiver {
   private pieces: Uint8Array[] = []
   private received = 0
   private total = 0
   private size = 0
-  /** The bytes of the frames it took in all. */
+  /** The bytes of the frames it took in all, and when it last acknowledged. */
   private took = 0
+  private acknowledgedTook = 0
   private newestAt = 0
+  /** When the newest data frame arrived, and when the newest the last acknowledgement covered did. */
+  private newestDataAt: number | null = null
+  private acknowledgedDataAt: number | null = null
   private ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor(private readonly send: (frame: Uint8Array<ArrayBuffer>) => void) {}
 
-  /** After a whole frame of `bytes` arrived, in one message or in pieces. */
-  arrived(bytes: number): void {
+  /** After a whole frame of `bytes` arrived, in one message or in pieces. A data frame dates the ack's span: it takes the
+   *  queues an upload fills, where the frames that go at once pass them. */
+  arrived(bytes: number, data: boolean): void {
     this.took += bytes
-    if (!acknowledges(bytes)) return
     this.newestAt = performance.now()
+    if (data) this.newestDataAt = this.newestAt
+    if (this.took - this.acknowledgedTook <= WIRE_PIECE_BYTES) return
     const wait = this.ackedAt + WIRE_PIECES_ACK_GAP_MS - this.newestAt
     if (wait <= 0) this.acknowledge()
     else this.ackTimer ??= unrefTimer(setTimeout(() => this.acknowledge(), wait))
@@ -133,8 +139,14 @@ class PieceReceiver {
     if (this.ackTimer !== null) clearTimeout(this.ackTimer)
     this.ackTimer = null
     this.ackedAt = performance.now()
+    this.acknowledgedTook = this.took
+    const span =
+      this.acknowledgedDataAt === null || this.newestDataAt === this.acknowledgedDataAt
+        ? 0
+        : Math.round((this.newestDataAt! - this.acknowledgedDataAt) * 1000)
+    this.acknowledgedDataAt = this.newestDataAt
     // Rounded down: its sender then dates the arrival no earlier than it was, so the rate it takes is never higher
-    this.send(encode.piecesAck(this.took, Math.floor(this.ackedAt - this.newestAt)))
+    this.send(encode.piecesAck(this.took, Math.floor(this.ackedAt - this.newestAt), span))
   }
 
   /** Bytes it holds of a frame not yet whole. */

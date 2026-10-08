@@ -202,8 +202,8 @@ export const WIRE_UNMEASURED_WHOLE_BYTES = 256 * 1024
 export const WIRE_PIECE_RATE_MARGIN = 8
 /** How long a measured rate stands after it last rose. */
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
-/** A receiver sends at most one PIECES_ACK this often, covering every frame over `WIRE_PIECE_BYTES` it took since the last. */
-export const WIRE_PIECES_ACK_GAP_MS = 50
+/** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
+export const WIRE_PIECES_ACK_GAP_MS = 10
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the

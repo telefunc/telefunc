@@ -49,6 +49,7 @@ import {
   decode,
   encode,
   isSequencedFrame,
+  isSequencedTag,
   payloadBytes,
   seqNear,
   seqThrough,
@@ -2055,7 +2056,7 @@ function receiveMessage(
       raw = whole
       frame = decode(raw)
     }
-    pieces.arrived(raw.byteLength)
+    pieces.arrived(raw.byteLength, isSequencedTag(frame.tag))
     return { frame, byteLength: raw.byteLength }
   } catch {
     ws.close()
