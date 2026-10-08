@@ -725,13 +725,18 @@ class ClientConnection implements MuxConnection {
     )
     const seq = replay.nextSeq()
     onQueued?.(seq)
+    this.sendOrQueue(ix, seq, frame, kind)
+    return frame
+  }
+
+  /** Sends a sequenced frame, or queues it where sends are held. */
+  private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(ix)) {
       this.sendBuffer.push({ frame, channelIx: ix, seq })
-    } else {
-      replay.push(seq, frame)
-      this.transport.sendFrame({ kind, frame })
+      return
     }
-    return frame
+    this.replayBuffers.get(ix)!.push(seq, frame)
+    this.transport.sendFrame({ kind, frame })
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -739,13 +744,7 @@ class ClientConnection implements MuxConnection {
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
-    const frame = encode.ackRes(ix, seq, ackedSeq, result, status)
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return
-    }
-    replay.push(seq, frame)
-    this.transport.sendFrame({ kind: 'ack', frame })
+    this.sendOrQueue(ix, seq, encode.ackRes(ix, seq, ackedSeq, result, status), 'ack')
   }
 
   sendAbort(channel: MuxChannel, abortValue: string): void {
@@ -769,13 +768,7 @@ class ClientConnection implements MuxConnection {
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
     const seq = replay.nextSeq()
-    const frame = buildFrame(ix, seq)
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
-      return
-    }
-    replay.push(seq, frame)
-    this.transport.sendFrame({ kind: 'control', frame })
+    this.sendOrQueue(ix, seq, buildFrame(ix, seq), 'control')
   }
 
   sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
