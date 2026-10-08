@@ -26,7 +26,7 @@ const readableStreamReplacer: StreamingReplacerType<ReadableStreamRequestContrac
     return {
       chunks,
       cancel: (reason) => {
-        // Nothing awaits these: they reject with an error the read already threw, or with the source's cancel() failure.
+        // Nothing awaits these: they reject with the source's error, or its cancel() failure.
         chunks.return(undefined).catch(() => {})
         reader.cancel(reason).catch(() => {})
       },

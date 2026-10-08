@@ -464,9 +464,9 @@ class ChannelMux {
     if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
   }
 
-  /** Control frames are bounded by what the protocol itself can describe; only the data plane, a piece of a data frame
-   *  included, carries user payloads, and only it gets the multi-megabyte allowance. The backlog allows a full
-   *  window per channel attached to the wire, on top of the base (see `WIRE_RECV_BACKLOG_BASE_BYTES`). */
+  /** Control frames are bounded by what the protocol itself can describe; only the data plane carries user payloads and
+   *  gets the multi-megabyte allowance, as does a piece of any frame, whose whole is bounded by its own tag once complete.
+   *  The backlog allows a full window per channel attached to the wire, on top of the base (see `WIRE_RECV_BACKLOG_BASE_BYTES`). */
   private isOverBudget(entry: ConnectionEntry, connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): boolean {
     const tag = peekTag(rawFrame)
     const maxFrameBytes =
