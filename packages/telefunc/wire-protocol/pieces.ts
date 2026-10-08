@@ -83,6 +83,8 @@ class PieceSender {
     this.acknowledgedCount = count
     const arrived = performance.now() - heldMs
     for (const sent of this.unacknowledged.splice(0, newly)) {
+      // Within one tick of a coarsened clock (Firefox: up to 100 ms) a sample says nothing of the rate.
+      if (!(arrived > sent.at)) continue
       const rate = sent.crossing / (arrived - sent.at)
       if (!(rate > this.fastest)) continue
       this.fastest = rate
