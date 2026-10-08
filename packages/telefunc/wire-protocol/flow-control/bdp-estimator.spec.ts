@@ -393,6 +393,38 @@ describe('BdpEstimator', () => {
     expect(bdp.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES) // untouched
   })
 
+  function msgCycleOf(bdp: BdpEstimator, msgs: number, starved: boolean) {
+    vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
+    bdp.onReceive(1)
+    for (let i = 0; i < msgs; i++) bdp.onReceive(1)
+    const dec = bdp.onPingAck(bdp.probe, starved, Infinity)
+    if (dec.msgs === 'grow') bdp.growMsgs()
+    return dec.msgs
+  }
+
+  // The sender answers a ping that went out after a growth on the credit the smaller window granted, so its sample
+  // can't saturate the larger one. It counts against the window before, and only for a sender whose credit ran out on an
+  // empty wire: a wire that held a backlog filled its sample with what the byte window let queue.
+  it('judges a ping that went out after a message window growth by the window before it, for a starved sender', () => {
+    const bdp = new BdpEstimator()
+    const msgCycle = (msgs: number, starved: boolean) => msgCycleOf(bdp, msgs, starved)
+    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, true)).toBe('grow')
+    expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 2)
+    // The sample saturates the window before the growth: a starved sender's ping counts.
+    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, true)).toBe('grow')
+    expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 4)
+    // A sample of the window before doesn't pass the one it grew to.
+    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, true)).toBe('sample-too-small')
+  })
+
+  it('judges a ping that went out after a message window growth by the grown window, for a sender whose wire held a backlog', () => {
+    const bdp = new BdpEstimator()
+    const msgCycle = (msgs: number, starved: boolean) => msgCycleOf(bdp, msgs, starved)
+    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, false)).toBe('grow')
+    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL * 2, false)).toBe('grow')
+    expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 4)
+  })
+
   // Cap clamping is independent per axis.
   it('clamps msgWindow growth at CREDIT_MSG_WINDOW_MAX', () => {
     const bdp = new BdpEstimator()

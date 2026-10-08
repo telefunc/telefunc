@@ -84,6 +84,8 @@ class BdpEstimator {
   private _msgWindow: number = CREDIT_MSG_WINDOW_INITIAL
   private _msgsAtPingSent = 0
   private _msgsReceived = 0
+  /** The message window before its last growth, until the next ping is settled. */
+  private _msgWindowBeforeGrowth = 0
   // Shared probe
   /** Probes started, attach probes included: each takes the next number. */
   private _probes = 0
@@ -209,12 +211,10 @@ class BdpEstimator {
               : starved
                 ? 'grow'
                 : 'wire-busy'
+    const msgWindow = (starved && this._msgWindowBeforeGrowth) || this._msgWindow
+    this._msgWindowBeforeGrowth = 0
     const msgs: AxisDecision =
-      this._msgWindow >= CREDIT_MSG_WINDOW_MAX
-        ? 'at-cap'
-        : msgSample * 3 < this._msgWindow * 2
-          ? 'sample-too-small'
-          : 'grow'
+      this._msgWindow >= CREDIT_MSG_WINDOW_MAX ? 'at-cap' : msgSample * 3 < msgWindow * 2 ? 'sample-too-small' : 'grow'
     // Cadence: snap to MIN on grow (more headroom may exist), exponential
     // backoff on a verdict against growing (converged or temporarily quiet).
     if (bytes === 'grow' || msgs === 'grow') {
@@ -247,6 +247,7 @@ class BdpEstimator {
 
   /** Commit a message-window doubling. Idempotent at the cap. */
   growMsgs(): void {
+    this._msgWindowBeforeGrowth = this._msgWindow
     this._msgWindow = Math.min(CREDIT_MSG_WINDOW_MAX, this._msgWindow * 2)
     this._grewSincePing = true
   }
@@ -255,6 +256,7 @@ class BdpEstimator {
    *  cadence — both are link properties; a real rate change rediscovers. */
   reset(): void {
     this._pingInFlight = false
+    this._msgWindowBeforeGrowth = 0
     this._bytesAtPingSent = this._bytesReceived
     this._msgsAtPingSent = this._msgsReceived
   }
