@@ -275,6 +275,20 @@ test.each([
   connection.dispose()
 })
 
+test.each([
+  { urgent: true, kind: 'urgent-flow-control' },
+  { urgent: false, kind: 'flow-control' },
+])('a window update made with urgent $urgent reaches the transport as a $kind frame', ({ urgent, kind }) => {
+  const channel = createChannel()
+  const connection = ClientConnection.getOrCreate('http://urgent-kind.test', channel as never, stalledOptions()) as any
+  connection.canSendImmediately = () => true
+  const sent: string[] = []
+  connection.transport.sendFrame = (frame: { kind: string }) => void sent.push(frame.kind)
+  connection.sendByteWindowUpdate(channel, 65_536, urgent)
+  expect(sent).toEqual([kind])
+  connection.dispose()
+})
+
 test('an urgent window refresh made while a batch POST is out goes as that POST is answered', async () => {
   const connection = ClientConnection.getOrCreate(
     'http://urgent-window-out.test',
@@ -295,7 +309,8 @@ test('an urgent window refresh made while a batch POST is out goes as that POST 
   expect(posts).toBe(1)
   answer()
   await first
-  await vi.waitFor(() => expect(posts).toBe(2))
+  await new Promise((resolve) => setTimeout(resolve, 50))
+  expect(posts).toBe(2)
   connection.dispose()
 })
 

@@ -84,7 +84,7 @@ class BdpEstimator {
   private _msgWindow: number = CREDIT_MSG_WINDOW_INITIAL
   private _msgsAtPingSent = 0
   private _msgsReceived = 0
-  /** The message window before its last growth, until the next ping is settled. */
+  /** The message window before its last growth, until the next ping settles or the wire is replaced. */
   private _msgWindowBeforeGrowth = 0
   // Shared probe
   /** Probes started, attach probes included: each takes the next number. */

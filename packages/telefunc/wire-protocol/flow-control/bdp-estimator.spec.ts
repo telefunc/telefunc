@@ -421,8 +421,24 @@ describe('BdpEstimator', () => {
     const bdp = new BdpEstimator()
     const msgCycle = (msgs: number, starved: boolean) => msgCycleOf(bdp, msgs, starved)
     expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, false)).toBe('grow')
-    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL * 2, false)).toBe('grow')
-    expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 4)
+    // A sample of the window before doesn't pass the one it grew to.
+    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, false)).toBe('sample-too-small')
+    expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 2)
+  })
+
+  it('judges a ping on a replaced wire by the grown message window', () => {
+    const bdp = new BdpEstimator()
+    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, true)).toBe('grow')
+    bdp.reset()
+    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, true)).toBe('sample-too-small')
+  })
+
+  it('judges only the ping that follows a message window growth by the window before it', () => {
+    const bdp = new BdpEstimator()
+    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, true)).toBe('grow')
+    expect(msgCycleOf(bdp, 0, true)).toBe('sample-too-small')
+    vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
+    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, true)).toBe('sample-too-small')
   })
 
   it('judges the byte window by a ping that went out after a message window growth', () => {
