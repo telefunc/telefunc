@@ -28,8 +28,9 @@ const asyncGeneratorReplacer: StreamingReplacerType<AsyncGeneratorContract, Serv
     return {
       chunks,
       cancel: () => {
-        chunks.return(undefined)
-        value.return(undefined)
+        // Nothing awaits these: they reject with the generator's own error, from its body or its finally.
+        chunks.return(undefined).catch(() => {})
+        value.return(undefined).catch(() => {})
       },
     }
   },
