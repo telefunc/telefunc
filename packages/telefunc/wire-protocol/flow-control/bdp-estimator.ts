@@ -100,9 +100,9 @@ class BdpEstimator {
   private _pathRtt = Infinity
   private _pathWire = -1
   private _lastPingAt = 0
-  /** A window grew since the last ping went out. */
+  /** The byte window grew since the last ping went out. */
   private _grewSincePing = false
-  /** The ping in flight went out after a window grew. The sender answers on the credit it had since it answered the
+  /** The ping in flight went out after the byte window grew. The sender answers on the credit it had since it answered the
    *  one before, which the smaller window granted. */
   private _pingFollowsGrowth = false
   /** Adaptive probe interval: snaps to `MIN` on grow, doubles up to `MAX` on
@@ -249,7 +249,6 @@ class BdpEstimator {
   growMsgs(): void {
     this._msgWindowBeforeGrowth = this._msgWindow
     this._msgWindow = Math.min(CREDIT_MSG_WINDOW_MAX, this._msgWindow * 2)
-    this._grewSincePing = true
   }
 
   /** Drop the ping in flight (its ack rode the prior wire). Preserves window AND

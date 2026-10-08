@@ -425,6 +425,15 @@ describe('BdpEstimator', () => {
     expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 4)
   })
 
+  it('judges the byte window by a ping that went out after a message window growth', () => {
+    const bdp = new BdpEstimator()
+    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, true)).toBe('grow')
+    vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
+    bdp.onReceive(1)
+    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(bdp.onPingAck(bdp.probe, true, Infinity).bytes).toBe('grow')
+  })
+
   // Cap clamping is independent per axis.
   it('clamps msgWindow growth at CREDIT_MSG_WINDOW_MAX', () => {
     const bdp = new BdpEstimator()
