@@ -122,8 +122,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._maxFrameBytes = transports.includes(CHANNEL_TRANSPORT.WS) ? maxFrameBytes : WIRE_MAX_RAW_FRAME_BYTES
     this._flow = new FlowControl(
       {
-        byteWindowUpdate: (limit) => this._connection.sendByteWindowUpdate(this, limit),
-        msgWindowUpdate: (limit) => this._connection.sendMsgWindowUpdate(this, limit),
+        byteWindowUpdate: (limit, urgent) => this._connection.sendByteWindowUpdate(this, limit, urgent),
+        msgWindowUpdate: (limit, urgent) => this._connection.sendMsgWindowUpdate(this, limit, urgent),
         bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
       },
       () => this._connection.bufferedAmount(),

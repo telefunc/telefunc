@@ -420,7 +420,7 @@ describe('flow control across an upgrade attempt', () => {
     expect(upgrade.releasePost).not.toBeNull()
     upgrade.ready()
     await settle()
-    upgrade.connection.sendMsgWindowUpdate(upgrade.channel as never, 2_000)
+    upgrade.connection.sendMsgWindowUpdate(upgrade.channel as never, 2_000, false)
 
     // The attempt ends before the barrier could go: the probe dies, then the POST it waited for settles.
     upgrade.probe.close()
