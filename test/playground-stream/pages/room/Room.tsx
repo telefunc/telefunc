@@ -393,6 +393,8 @@ function Room() {
           result: { cam },
           done: cam.includes(true) && cam[cam.length - 1] === false,
         }))
+        // A GC pass would close `pubRoom`, and Pub leaving with it ends the demand this waits on.
+        void pubRoom
       })}
 
       {scenario('tail', 'Tail (single-call history)', 'Tail holds pre-subscribe messages', async () => {
@@ -467,6 +469,8 @@ function Room() {
           result: { xText, xBin, all: [...all].sort() },
           done: all.includes('x1') && all.includes('y1') && xBin.includes(7),
         }))
+        // A GC pass would close `room`, and X leaving with it drops the observer's subscription to X's frames.
+        void room
       })}
 
       {scenario('dm-hold', 'DM pre-listen hold', 'Send before listen', async () => {
