@@ -270,6 +270,10 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     return !this._selfSuppressed.has(memberId) && binaryWantsCovers(this._binary, memberId, track)
   }
 
+  _suppressedMembers(): Iterable<string> {
+    return this._selfSuppressed
+  }
+
   // Relays
 
   /** An event this instance originates for this client alone: state each attach sends again. */

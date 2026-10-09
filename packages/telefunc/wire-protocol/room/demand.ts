@@ -9,7 +9,7 @@ type Tracks<V> = Map<string, Map<string, V>>
 /** Aggregates binary-track demand across instances: each gossips its local 0↔>0 transitions, and a member's owner pushes one `wanted` boolean. */
 class RoomDemand {
   private readonly _instanceId = crypto.randomUUID()
-  private _local: Tracks<true> = new Map()
+  private readonly _local: Tracks<true> = new Map()
   /** Owner side: each reporting instance's lease. A reporter re-gossips every heartbeat, so a crashed one lapses. */
   private readonly _remote: Tracks<Map<string, number>> = new Map()
   /** Owner side: what was last pushed, so only changes are pushed. */
@@ -21,15 +21,12 @@ class RoomDemand {
     private readonly _deliver: (member: string, track: string, wanted: boolean) => void,
   ) {}
 
-  sync(localPairs: ReadonlyArray<readonly [string, string]>): void {
-    const prev = this._local
-    const next: Tracks<true> = new Map()
-    for (const [member, track] of localPairs) setTrack(next, member, track, true)
-    this._local = next
-    for (const [member, track] of pairsOf(next))
-      if (!hasTrack(prev, member, track)) this._transition(member, track, true)
-    for (const [member, track] of pairsOf(prev))
-      if (!hasTrack(next, member, track)) this._transition(member, track, false)
+  /** Whether this instance receives the pair: each change is gossiped once. */
+  setLocal(member: string, track: string, on: boolean): void {
+    if (on === hasTrack(this._local, member, track)) return
+    if (on) setTrack(this._local, member, track, true)
+    else deleteTrack(this._local, member, track)
+    this._transition(member, track, on)
   }
 
   /** Only a member's owner aggregates its demand; ownership is fixed from before the member exists anywhere. */

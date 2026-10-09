@@ -230,6 +230,9 @@ class RoomState {
     const entry = this._members.get(id)
     return entry ? { meta: entry.meta, seq: entry.metaSeq } : null
   }
+  hasMember(id: string): boolean {
+    return this._members.has(id)
+  }
   /** Named tracks the member is known to publish (`[]` for unknown members). */
   memberTracks(id: string): string[] {
     const entry = this._members.get(id)

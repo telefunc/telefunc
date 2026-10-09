@@ -61,6 +61,8 @@ interface LaneHolder {
   _textDemand(): MemberWants
   _wantsTextFrom(member: string): boolean
   _wantsBinary(member: string, track: string): boolean
+  /** The members whose own frames the holder doesn't get back. */
+  _suppressedMembers(): Iterable<string>
   // A retained frame decoded, then in its wire form, which only a holder that forwards it takes.
   _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void
@@ -74,7 +76,7 @@ class LocalHolder implements LaneHolder {
 
   constructor(
     private readonly _state: RoomState,
-    private readonly _suppress: (member: string) => boolean,
+    private readonly _suppressed: ReadonlySet<string>,
   ) {}
 
   /** Re-derives the listeners' wants. */
@@ -97,12 +99,16 @@ class LocalHolder implements LaneHolder {
     return this._textWants
   }
 
+  _suppressedMembers(): Iterable<string> {
+    return this._suppressed
+  }
+
   _wantsTextFrom(member: string): boolean {
-    return !this._suppress(member) && (this._textWants.all || this._textWants.members.has(member))
+    return !this._suppressed.has(member) && (this._textWants.all || this._textWants.members.has(member))
   }
 
   _wantsBinary(member: string, track: string): boolean {
-    return !this._suppress(member) && binaryWantsCovers(this._binaryWants, member, track)
+    return !this._suppressed.has(member) && binaryWantsCovers(this._binaryWants, member, track)
   }
 
   relayText(event: RoomDataEnvelope, info: WirePublishInfo): void {
