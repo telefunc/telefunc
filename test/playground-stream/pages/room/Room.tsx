@@ -136,6 +136,8 @@ function Room() {
         late.subscribe((data) => received.push((data as { text: string }).text))
 
         await pollUntil(() => ({ result: { received }, done: received.length >= 1 }))
+        // A GC pass would close `pubView`, and Author leaving with it deletes the message it retained.
+        void pubView
       })}
 
       {scenario('participant', 'Server-Joined Participant', 'Server-side join + publish', async () => {
