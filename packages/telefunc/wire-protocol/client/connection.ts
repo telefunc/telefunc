@@ -1747,6 +1747,8 @@ class ClientConnection implements MuxConnection {
       const seq = entry.seq
       if (!releasable(channelIx)) {
         sendBuffer[writeIx++] = entry
+        // What a channel that may send still holds goes before what it sends next.
+        if (seq !== undefined && this.isSendable(channelIx)) heldForRoom = true
         continue
       }
       if (seq !== undefined) {

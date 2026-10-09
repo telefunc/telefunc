@@ -1228,3 +1228,37 @@ test('a channel the page closes right after sends its slow uplink held back deli
   expect(got).toEqual([...got.keys()].map((n) => new DataView(counted(n).buffer).getUint32(0)))
   expect(closed).toEqual({ page: undefined, server: undefined })
 })
+
+const counted = (n: number) => {
+  const message = new Uint8Array(64 * KIB)
+  new DataView(message.buffer).setUint32(0, n)
+  return message
+}
+const countOf = (message: Uint8Array) => new DataView(message.buffer, message.byteOffset).getUint32(0)
+
+test.each([
+  ['every send was queued before', false],
+  ['a producer keeps sending while', true],
+])(
+  'a page whose slow uplink holds its sends back delivers them all, in order, when %s a channel it opened meanwhile attaches',
+  async (_, producer) => {
+    const { server, page } = loop.open<Uint8Array, never>()
+    const got: number[] = []
+    server.listenBinary((data) => void got.push(countOf(data)))
+    await run(100)
+    loop.socket.toServer.bytesPerMs = 600
+    const count = producer ? 60 : 28
+    let sent = 0
+    if (producer)
+      void (async () => {
+        while (sent < count) await page.sendBinary(counted(sent++))
+      })().catch(() => {})
+    else for (; sent < count; sent++) void page.sendBinary(counted(sent))
+    await run(producer ? 1_000 : 300)
+    const late = loop.open<never, number>({ registered: false })
+    await run(producer ? 1_500 : 1_000)
+    late.register()
+    await run(120_000)
+    expect(got).toEqual(Array.from({ length: count }, (_, n) => n))
+  },
+)
