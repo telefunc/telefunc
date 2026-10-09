@@ -173,8 +173,10 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
         .toArray()[0]
       return row === undefined ? [] : [{ key, ...row }]
     })
-  const query = 'SELECT key, bytes FROM cell WHERE inc = ? AND substr(key, 1, length(?)) = ?'
-  return sql.exec<CellRow>(query, inc, sel.prefix, sel.prefix).toArray()
+  // A key range, so the read seeks the primary key instead of scanning every cell of the incarnation.
+  const end = prefixEnd(sel.prefix)
+  const query = `SELECT key, bytes FROM cell WHERE inc = ? AND key >= ?${end === null ? '' : ' AND key < ?'}`
+  return sql.exec<CellRow>(query, inc, sel.prefix, ...(end === null ? [] : [end])).toArray()
 }
 
 // Reads stay available while closing; staleInc means the head is absent or names another incarnation.
