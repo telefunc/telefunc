@@ -140,6 +140,8 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal */ readonly _state: RoomState
   private readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
+  /** The attached stub holding each member a client joined through. */
+  private readonly _stubOf = new Map<string, RoomStubChannel>()
   /** Each stub's latest view write, from its attach or a renewal; its removal comes after it. */
   private readonly _views = new Map<RoomStubChannel, Promise<void>>()
   /** Stubs whose first roster read failed: the next successful refresh sends them one. */
@@ -639,7 +641,8 @@ class ServerRoom extends RoomStateView implements Room {
         ...leaveCauseToWire(cause),
         ...(hidden ? { hidden: true } : {}),
       })
-    for (const stub of this._stubs) stub._forgetMember(id)
+    this._stubOf.get(id)?._forgetMember(id)
+    this._stubOf.delete(id)
     this._local.forgetMember(id)
     this._demand.forgetMember(id)
     this._subs.replan()
@@ -748,6 +751,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._rosterOwed.delete(stub)
     stub._endTail()
     for (const id of stub._heldMembers()) {
+      this._stubOf.delete(id)
       if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
       void this._removeDepartedMember(id).catch(reportRoomError)
     }
@@ -761,7 +765,10 @@ class ServerRoom extends RoomStateView implements Room {
       joinedAt: Date.now(),
       hidden: false,
     }
-    await this._admit(admission, () => stub._addMember(admission.id, req.selfDelivery))
+    await this._admit(admission, () => {
+      stub._addMember(admission.id, req.selfDelivery)
+      if (this._stubs.has(stub)) this._stubOf.set(admission.id, stub)
+    })
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
   async _replayRetainedText(holder: LaneHolder, previous: MemberWants): Promise<void> {
@@ -866,7 +873,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {
-    return this._localParticipants.get(id) ?? [...this._stubs].find((stub) => stub._holds(id))
+    return this._localParticipants.get(id) ?? this._stubOf.get(id)
   }
   private _deliverDemand(member: string, track: string, wanted: boolean): void {
     const trackOut = publicTrack(track)
