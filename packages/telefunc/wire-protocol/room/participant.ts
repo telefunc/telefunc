@@ -2,6 +2,7 @@ export { ParticipantBase }
 
 import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
 import { makeDisposer } from './disposer.js'
+import { ListenerList } from './listener-list.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
@@ -27,9 +28,9 @@ abstract class ParticipantBase implements LocalParticipant {
   private _meta: ParticipantMeta
   private _metaSeq = 0
   private _leftCause: LeaveCause | null = null
-  private _leaveCbs: Array<(cause: LeaveCause) => unknown> = []
-  private readonly _messageCbs: Array<(data: unknown, from: Sender | null) => unknown> = []
-  private readonly _demandCbs: Array<(track: string | null, wanted: boolean) => unknown> = []
+  private _leaveCbs = new ListenerList<(cause: LeaveCause) => unknown>()
+  private readonly _messageCbs = new ListenerList<(data: unknown, from: Sender | null) => unknown>()
+  private readonly _demandCbs = new ListenerList<(track: string | null, wanted: boolean) => unknown>()
   private readonly _wantedTracks = new Set<string | null>()
   private readonly _listenerCleanups = new Set<() => void>()
   private _inboxAttached = false
@@ -85,7 +86,7 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal A DM for this member: to its remote holder if bound, else its listeners (held until the first `listen()`). */
   _deliverMessage(msg: InboxMessage): void {
     if (this._forwarder) return this._forwarder.deliver(msg)
-    if (this._messageCbs.length === 0) {
+    if (this._messageCbs.size === 0) {
       if (this._left || this._inboxAttached) return
       this._hold(msg)
       return
@@ -95,7 +96,7 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
     if (this._forwarder) return this._forwarder.deliverAck(msg)
-    if (this._messageCbs.length === 0) {
+    if (this._messageCbs.size === 0) {
       if (this._left) return Promise.resolve(DM_FAILURE.left)
       if (this._inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
       return new Promise<DmReply>((resolve) => this._hold(msg, resolve))
@@ -189,12 +190,9 @@ abstract class ParticipantBase implements LocalParticipant {
   protected _assertActive(): void {
     if (this._left) throw participantLeftError()
   }
-  private _register<T>(list: T[], cb: T): () => void {
-    list.push(cb)
-    return makeDisposer(() => {
-      const i = list.indexOf(cb)
-      if (i >= 0) list.splice(i, 1)
-    }, this._listenerCleanups)
+  private _register<T>(list: ListenerList<T>, cb: T): () => void {
+    const remove = list.add(cb)
+    return makeDisposer(() => void remove(), this._listenerCleanups)
   }
   private _invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
     invokeChannelListener(cb, args, (err) => this._reportError(err))

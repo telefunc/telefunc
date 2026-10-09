@@ -965,6 +965,20 @@ describe('Room public behavior', () => {
     expect({ empty, count: room.count }).toEqual({ empty: 1, count: 0 })
     await expect(authority.publish('tick')).resolves.toMatchObject({ seq: expect.any(Number) })
   })
+  it('calls a callback once per registration in registration order, and each unlisten removes only its own', async () => {
+    const room = await Room.create('listener-registrations')
+    const calls: string[] = []
+    const a = () => void calls.push('a')
+    const offFirst = room.onJoin(a)
+    room.onJoin(() => void calls.push('b'))
+    const offSecond = room.onJoin(a)
+    await room.join()
+    offFirst()
+    await room.join()
+    offSecond()
+    await room.join()
+    expect(calls).toEqual(['a', 'b', 'a', 'b', 'a', 'b'])
+  })
   it('counts only visible members as hidden ones leave and when the room closes', async () => {
     const room = await Room.create('count-beside-hidden')
     const bot = await room.join({ hidden: true })
