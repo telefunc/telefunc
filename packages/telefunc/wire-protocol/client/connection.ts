@@ -71,6 +71,7 @@ import type {
 } from '../shared-ws.js'
 import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
+import { SSELineSplitter } from './SSELineSplitter.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 
 type BufferedFrame = {
@@ -469,6 +470,8 @@ class ClientConnection implements MuxConnection {
   private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
   private sendBuffer: BufferedFrame[] = []
+  /** Channels whose frames in sendBuffer go, all in one pass when it's next read (see `queued`). */
+  private droppedQueues = new Set<number>()
   /** A channel that may send has a sequenced frame waiting in sendBuffer: what it sends next waits behind it. */
   private holdsSendable = false
   private lastSeqByChannel = new Map<number, number>()
@@ -814,8 +817,7 @@ class ClientConnection implements MuxConnection {
 
   bufferedAmount(): number {
     let held = 0
-    if (this.holdsSendable)
-      for (const { frame, seq } of this.sendBuffer) if (seq !== undefined) held += frame.byteLength
+    if (this.holdsSendable) for (const { frame, seq } of this.queued()) if (seq !== undefined) held += frame.byteLength
     return this.transport.bufferedAmount() + held
   }
 
@@ -1018,13 +1020,14 @@ class ClientConnection implements MuxConnection {
    *  before, with nothing left to replay or to send, is let go instead: nothing it holds can reach the server now. */
   private buildPing(): Uint8Array<ArrayBuffer> {
     const ended: PingEntry[] = []
+    let queuedIxes: Set<number> | undefined
     for (const [ix, entry] of this.channels) {
       const state = entry.state
       if (state.tag !== 'closed' || state.initial) continue
       if (
         state.reported &&
         this.replayBuffers.get(ix)!.length === 0 &&
-        !this.sendBuffer.some(({ channelIx }) => channelIx === ix)
+        !(queuedIxes ??= new Set(this.queued().map(({ channelIx }) => channelIx))).has(ix)
       ) {
         this.releaseChannel(ix, entry.channel)
         continue
@@ -1422,7 +1425,7 @@ class ClientConnection implements MuxConnection {
   /** On a live wire once no channel is open and nothing is queued: a closed one's frames went out, and what the
    *  transport holds leaves before the wire does. */
   private startTtlIfIdle(): void {
-    if (!this.connected || this.ttl || this.sendBuffer.length > 0 || this.openChannelCount() > 0) return
+    if (!this.connected || this.ttl || this.queued().length > 0 || this.openChannelCount() > 0) return
     const ttl = setTimeout(() => {
       void this.transport.drained().then(() => {
         if (this.ttl === ttl && this.openChannelCount() === 0) this.dispose()
@@ -1466,6 +1469,7 @@ class ClientConnection implements MuxConnection {
     this.channels.clear()
     this.channelIndex.clear()
     this.sendBuffer = []
+    this.droppedQueues.clear()
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
     this.forgetWire()
@@ -1506,6 +1510,7 @@ class ClientConnection implements MuxConnection {
     this.reconcileIxes = new Map()
     this.carriedFrom = new Map()
     const open: ReconcileOpenEntry[] = []
+    const subscribing = new Set<number>()
     for (const [ix, entry] of this.channels) {
       // The server has all a delivered one sent it, or ended it: leaving it out lets it go there too.
       if (entry.state.tag === 'closed' && entry.state.delivered) {
@@ -1523,14 +1528,15 @@ class ClientConnection implements MuxConnection {
       if (isInitial) payloadEntry.initial = true
       const state = entry.channel._reattachState(wire, batched)
       Object.assign(payloadEntry, state)
-      // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
-      if (state.broadcast)
-        this.sendBuffer = this.sendBuffer.filter(
-          ({ channelIx, frame }) =>
-            channelIx !== ix || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
-        )
+      if (state.broadcast) subscribing.add(ix)
       open.push(payloadEntry)
     }
+    // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
+    if (subscribing.size > 0)
+      this.sendBuffer = this.queued().filter(
+        ({ channelIx, frame }) =>
+          !subscribing.has(channelIx) || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
+      )
     return open
   }
 
@@ -1549,7 +1555,7 @@ class ClientConnection implements MuxConnection {
     const sentBefore = [...this.replayBuffers.values()].some((replay) => replay.length > 0)
     if (isInitialBatch && (this.sessionId !== null || sentBefore)) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
-    for (const { channelIx, seq } of this.sendBuffer)
+    for (const { channelIx, seq } of this.queued())
       if (seq !== undefined && this.isSendable(channelIx) && !this.carriedFrom.has(channelIx))
         this.carriedFrom.set(channelIx, seq)
     return this.drainBufferedFrames(this.isSendable)
@@ -1704,7 +1710,7 @@ class ClientConnection implements MuxConnection {
   /** Ends the channel on both ends. What it queued is dropped, as it would reach the server past the hole. The ERROR
    *  isn't kept in the replay: a later reconcile finds the same hole and sends another. */
   private loseChannel(ix: number, entry: ChannelEntry): OutboundFrame {
-    this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => channelIx !== ix)
+    this.droppedQueues.add(ix)
     const frame = encode.error(ix, ERROR_REASON.LOST, this.replayBuffers.get(ix)!.nextSeq())
     entry.channel._onTransportClose(replayLossError('client'))
     return { kind: 'control', frame }
@@ -1742,7 +1748,7 @@ class ClientConnection implements MuxConnection {
    *  queued stays. */
   private drainBufferedFrames(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
-    const sendBuffer = this.sendBuffer
+    const sendBuffer = this.queued()
     let room = this.transport.sendRoom()
     let holdsSendable = false
     let writeIx = 0
@@ -1784,7 +1790,15 @@ class ClientConnection implements MuxConnection {
     const replayBuffer = this.replayBuffers.get(ix)
     replayBuffer?.dispose()
     this.replayBuffers.delete(ix)
-    if (this.sendBuffer.length > 0) this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => channelIx !== ix)
+    if (this.sendBuffer.length > 0) this.droppedQueues.add(ix)
+  }
+
+  private queued(): BufferedFrame[] {
+    if (this.droppedQueues.size > 0) {
+      this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => !this.droppedQueues.has(channelIx))
+      this.droppedQueues.clear()
+    }
+    return this.sendBuffer
   }
 }
 
@@ -2296,13 +2310,15 @@ class SseTransport implements UpgradeSource {
     // `fetchEndedP` catches its rejection eagerly so it's always handled even if openStream exits early.
     let fetchEndedP: Promise<'fetch-ended'> | undefined
     let uploadBody: PushReadableStream<Uint8Array<ArrayBuffer>> | undefined
+    const uploadAbort = new AbortController()
+    abortController.signal.addEventListener('abort', () => uploadAbort.abort(), { once: true })
     if (this.streamRequest.tag !== 'failed') {
       const body = createPushReadableStream<Uint8Array<ArrayBuffer>>()
       uploadBody = body
       // Metadata header first — the server classifies the POST by it; `streamRequest: true`
       // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
       body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
-      const fetch = this.openStreamRequest(body, abortController.signal)
+      const fetch = this.openStreamRequest(body, uploadAbort.signal)
       this.streamRequest = { tag: 'active', body, unconfirmed: [] }
       fetchEndedP = (async (): Promise<'fetch-ended'> => {
         try {
@@ -2394,10 +2410,10 @@ class SseTransport implements UpgradeSource {
           if (this.streamRequest.tag === 'active' && this.streamRequest.body === uploadBody) abortController.abort()
         })
       } else {
-        // It ended without the open-ack, so the server may not have read what went into its body: resend it, first.
-        const unsent =
-          result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
-        this.closeStreamRequest()
+        // The server may not have read a body it never acknowledged: resend it, first; it drops a seq it already has.
+        const unsent = this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
+        // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
+        uploadAbort.abort()
         this.streamRequest = { tag: 'failed' }
         if (unsent) {
           this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
@@ -2751,13 +2767,7 @@ function createSseEventStreamReader(
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
 } {
-  const decoder = new TextDecoder()
-  // Cursor-based incremental parser. `lineBuf` accumulates decoded text; `cursor` is
-  // the offset of the first unparsed byte. We walk it line-by-line via `indexOf('\n')`
-  // and queue completed events as we go — no full-buffer splits, no re-joins. The
-  // prefix gets trimmed amortised once the consumed region exceeds half the buffer.
-  let lineBuf = ''
-  let cursor = 0
+  const lines = new SSELineSplitter()
   let pendingData = ''
   const ready: Array<Uint8Array<ArrayBuffer>> = []
   let cancelled = false
@@ -2777,25 +2787,14 @@ function createSseEventStreamReader(
     }
   }
 
-  const processBufferedLines = () => {
-    while (cursor < lineBuf.length) {
-      const nl = lineBuf.indexOf('\n', cursor)
-      if (nl === -1) break // incomplete tail line — wait for more bytes
-      const line = lineBuf.slice(cursor, nl)
-      cursor = nl + 1
-      if (line.length === 0) {
-        flushEvent()
-        continue
-      }
-      if (line.charCodeAt(0) === 58 /* ':' */) continue
-      if (line.startsWith('data: ')) {
-        pendingData = line.slice(6)
-      }
+  const onLine = (line: string) => {
+    if (line.length === 0) {
+      flushEvent()
+      return
     }
-    // Amortised compaction — discard the consumed prefix once it dominates the buffer.
-    if (cursor > 16384 && cursor * 2 >= lineBuf.length) {
-      lineBuf = lineBuf.slice(cursor)
-      cursor = 0
+    if (line.charCodeAt(0) === 58 /* ':' */) return
+    if (line.startsWith('data: ')) {
+      pendingData = line.slice(6)
     }
   }
 
@@ -2817,8 +2816,7 @@ function createSseEventStreamReader(
         throw readError ?? new Error('Connection lost before all SSE frames were received.')
       }
       onChunk()
-      lineBuf += decoder.decode(value!, { stream: true })
-      processBufferedLines()
+      lines.push(value!, onLine)
     }
   }
 

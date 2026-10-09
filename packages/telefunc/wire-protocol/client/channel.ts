@@ -12,6 +12,7 @@ import type {
   ChannelPublishAck,
   BroadcastBinaryListener,
   BroadcastListener,
+  BroadcastListenerByKind,
   BroadcastListeners,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
@@ -35,7 +36,7 @@ import {
   type WirePublishInfo,
 } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
-import { withoutFirst } from '../../utils/withoutFirst.js'
+import { Listeners } from '../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
@@ -71,8 +72,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly key: string | undefined
   readonly _maxFrameBytes: number
   protected _connection: MuxConnection
-  private _listeners: Array<ChannelListener<ServerToClient>> = []
-  private _binaryListeners: Array<ChannelBinaryListener> = []
+  private readonly _listeners = new Listeners<ChannelListener<ServerToClient>>()
+  private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
@@ -217,17 +218,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   listen(callback: ChannelListener<ServerToClient>): () => void {
-    this._listeners = [...this._listeners, callback]
-    return () => {
-      this._listeners = withoutFirst(this._listeners, callback)
-    }
+    return this._listeners.add(callback)
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
-    this._binaryListeners = [...this._binaryListeners, callback]
-    return () => {
-      this._binaryListeners = withoutFirst(this._binaryListeners, callback)
-    }
+    return this._binaryListeners.add(callback)
   }
 
   onClose(callback: ChannelCloseCallback): void {
@@ -310,7 +305,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._flow.onReceived(bytes)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners) {
+      for (const cb of this._listeners.list()) {
         try {
           const result = cb(parsed)
           if (isPromise(result)) {
@@ -344,7 +339,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners) {
+      for (const cb of this._binaryListeners.list()) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -556,13 +551,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchAckReq(data: string, seq: number): Promise<void> {
-    if (this._listeners.length === 0) {
+    if (this._listeners.size === 0) {
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     const parsed = parse(data) as ChannelData<ServerToClient>
     let lastResult: unknown
-    for (const cb of this._listeners) {
+    for (const cb of this._listeners.list()) {
       try {
         lastResult = await cb(parsed)
       } catch (err) {
@@ -575,12 +570,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
-    if (this._binaryListeners.length === 0) {
+    if (this._binaryListeners.size === 0) {
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     let lastResult: unknown
-    for (const cb of this._binaryListeners) {
+    for (const cb of this._binaryListeners.list()) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -652,8 +647,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
-  /** Each kind's array is replaced, never mutated, so a delivery iterates the listeners it started with. */
-  private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
+  private readonly _subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   private readonly _onListenerError = (error: unknown) => this._handleCallbackError(error)
   private readonly _wire: BroadcastSubscriptions = { text: false, binary: false }
 
@@ -668,14 +662,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal Register a local listener without changing wire intent. */
-  _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
-    this._subscribers[kind] = [...this._subscribers[kind], callback] as BroadcastListeners<T>[K]
-    return () => {
-      this._subscribers[kind] = withoutFirst(
-        this._subscribers[kind] as Array<typeof callback>,
-        callback,
-      ) as BroadcastListeners<T>[K]
-    }
+  _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
+    return this._subscribers[kind].add(callback)
   }
 
   /** @internal Declare wire intent; a reconnect carries it in the RECONCILE entry. */
@@ -722,12 +710,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** The first listener of a kind subscribes the wire, and the last one unsubscribes it. */
-  private _subscribeWired<K extends BroadcastKind>(kind: K, callback: BroadcastListeners<T>[K][number]): () => void {
-    if (this._subscribers[kind].length === 0) this._setWireSubscribed(kind, true)
+  private _subscribeWired<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
+    if (this._subscribers[kind].size === 0) this._setWireSubscribed(kind, true)
     const unsubscribe = this._subscribeLocal(kind, callback)
     return () => {
       unsubscribe()
-      if (this._subscribers[kind].length === 0) this._setWireSubscribed(kind, false)
+      if (this._subscribers[kind].size === 0) this._setWireSubscribed(kind, false)
     }
   }
 
@@ -748,7 +736,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._flow.onArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._subscribers.text) {
+    for (const cb of this._subscribers.text.list()) {
       if (invokeChannelListener(cb, [parsed, info], this._onListenerError)) return
     }
     this._flow.onConsumedBytes(bytes)
@@ -757,7 +745,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this._flow.onArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._subscribers.binary) {
+    for (const cb of this._subscribers.binary.list()) {
       if (invokeChannelListener(cb, [data, info], this._onListenerError)) return
     }
     this._flow.onConsumedBytes(bytes)

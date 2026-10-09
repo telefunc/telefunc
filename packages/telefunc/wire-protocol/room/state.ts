@@ -5,7 +5,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
 import { untether } from '../wrapProxy.js'
 import { makeDisposer } from './disposer.js'
-import { ListenerList } from './listener-list.js'
+import { Listeners } from '../../utils/Listeners.js'
 import {
   emptyTrackWants,
   isNamedTrack,
@@ -45,14 +45,14 @@ type MemberEntry = {
   remote: RemoteParticipant | null
   left: boolean
   leaveCause?: LeaveCause
-  dataCbs: ListenerList<(data: unknown, info: ChannelPublishInfo) => unknown>
-  binaryCbs: ListenerList<{
+  dataCbs: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown>
+  binaryCbs: Listeners<{
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
     track: TrackFilter
   }>
   binaryTracks: TrackCounts
-  updateCbs: ListenerList<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
-  leaveCbs: ListenerList<(cause: LeaveCause) => void>
+  updateCbs: Listeners<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
+  leaveCbs: Listeners<(cause: LeaveCause) => void>
 }
 type RoomStateOptions = {
   owner: RoomStateView
@@ -149,31 +149,31 @@ class RoomState {
   private _stateVersion = 0
   private _snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   private readonly _listenerCleanups = new Map<object, Set<() => void>>()
-  private readonly _changeCbs: ListenerList<() => void> = new ListenerList()
+  private readonly _changeCbs: Listeners<() => void> = new Listeners()
   private readonly _members = new Map<string, MemberEntry>()
   private _hiddenMembers = 0
   private readonly _onListenersChanged: (member: string | null) => void
   private readonly _onCallbackError: (err: unknown) => void
   private readonly _onLeave: RoomStateOptions['onLeave']
-  private readonly _roomDataCbs: ListenerList<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> =
-    new ListenerList()
-  private readonly _roomBinaryCbs: ListenerList<{
+  private readonly _roomDataCbs: Listeners<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> =
+    new Listeners()
+  private readonly _roomBinaryCbs: Listeners<{
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown
     track: TrackFilter
-  }> = new ListenerList()
+  }> = new Listeners()
   private readonly _roomBinaryTracks: TrackCounts = newTrackCounts()
   /** The members with a `subscribe()` listener, and the binary wants of those with a `subscribeBinary()` one. */
   private readonly _textWanted = new Set<string>()
   private readonly _binaryWanted: Record<string, TrackWants> = Object.create(null)
-  private readonly _joinCbs: ListenerList<(member: RemoteParticipant) => void> = new ListenerList()
-  private readonly _leaveCbs: ListenerList<(member: RemoteParticipant, cause: LeaveCause) => void> = new ListenerList()
-  private readonly _participantUpdateCbs: ListenerList<
+  private readonly _joinCbs: Listeners<(member: RemoteParticipant) => void> = new Listeners()
+  private readonly _leaveCbs: Listeners<(member: RemoteParticipant, cause: LeaveCause) => void> = new Listeners()
+  private readonly _participantUpdateCbs: Listeners<
     (member: RemoteParticipant, meta: ParticipantMeta, prev: ParticipantMeta) => void
-  > = new ListenerList()
-  private readonly _updateCbs: ListenerList<(meta: RoomMeta, prev: RoomMeta) => void> = new ListenerList()
-  private readonly _emptyCbs: ListenerList<() => void> = new ListenerList()
-  private readonly _closeCbs: ListenerList<() => void> = new ListenerList()
-  private readonly _announceCbs: ListenerList<(data: unknown, info: ChannelPublishInfo) => void> = new ListenerList()
+  > = new Listeners()
+  private readonly _updateCbs: Listeners<(meta: RoomMeta, prev: RoomMeta) => void> = new Listeners()
+  private readonly _emptyCbs: Listeners<() => void> = new Listeners()
+  private readonly _closeCbs: Listeners<() => void> = new Listeners()
+  private readonly _announceCbs: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
   private _listenerCount = 0
   private _updateStamp: { at: number; by: string }
   private _rosterKnown: boolean
@@ -484,11 +484,11 @@ class RoomState {
   }
   /** Fire the listeners whose track filter admits `track` (`undefined` = every track). */
   private _fireTrackFiltered<CB>(
-    cbs: ListenerList<{ cb: CB; track: TrackFilter }>,
+    cbs: Listeners<{ cb: CB; track: TrackFilter }>,
     track: string | null,
     invoke: (cb: CB) => unknown,
   ): void {
-    for (const { cb, track: want } of [...cbs]) {
+    for (const { cb, track: want } of cbs.list()) {
       if (want !== undefined && want !== track) continue
       invokeChannelListener(invoke, [cb], this._onCallbackError)
     }
@@ -580,11 +580,11 @@ class RoomState {
       hidden: entrySeed.hidden === true,
       remote: null,
       left: false,
-      dataCbs: new ListenerList(),
-      binaryCbs: new ListenerList(),
+      dataCbs: new Listeners(),
+      binaryCbs: new Listeners(),
       binaryTracks: newTrackCounts(),
-      updateCbs: new ListenerList(),
-      leaveCbs: new ListenerList(),
+      updateCbs: new Listeners(),
+      leaveCbs: new Listeners(),
     }
     return entry
   }
@@ -624,17 +624,12 @@ class RoomState {
     return remote
   }
   /** A departed member's listeners were released at its leave, so one added after it is never held. */
-  private _registerLive<T>(entry: MemberEntry, list: ListenerList<T>, cb: T, filter?: CountedTrack): () => void {
+  private _registerLive<T>(entry: MemberEntry, list: Listeners<T>, cb: T, filter?: CountedTrack): () => void {
     if (entry.left) return makeDisposer()
     return this._register(list, cb, entry, filter)
   }
   /** `entry` owns the list (`null`: the room); a binary listener's `filter` is counted in its list's counts. */
-  private _register<T>(
-    list: ListenerList<T>,
-    cb: T,
-    entry: MemberEntry | null = null,
-    filter?: CountedTrack,
-  ): () => void {
+  private _register<T>(list: Listeners<T>, cb: T, entry: MemberEntry | null = null, filter?: CountedTrack): () => void {
     const remove = list.add(cb)
     if (filter) countTrack(filter.counts, filter.track, 1)
     this._bumpListenerCount(1, entry)
@@ -668,8 +663,8 @@ class RoomState {
     }
     this._onListenersChanged(entry?.id ?? null)
   }
-  private _fireAll<Args extends unknown[]>(cbs: ListenerList<(...args: Args) => unknown>, ...args: Args): void {
-    for (const cb of [...cbs]) invokeChannelListener(cb, args, this._onCallbackError)
+  private _fireAll<Args extends unknown[]>(cbs: Listeners<(...args: Args) => unknown>, ...args: Args): void {
+    for (const cb of cbs.list()) invokeChannelListener(cb, args, this._onCallbackError)
   }
 }
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */

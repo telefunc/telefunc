@@ -11,6 +11,7 @@ import {
   FC_SELF_TIME_WINDOW_MS,
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
+import { Fifo } from '../../utils/Fifo.js'
 
 /** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
  *  arrived (see `constants.ts`). */
@@ -85,7 +86,7 @@ class FlowControl {
   /** The least byte window granted, past the estimator's (see `widenByteWindow`). */
   private _byteWindowFloor = 0
   /** Senders waiting on credit, oldest first. */
-  private _waiters: Array<() => void> = []
+  private readonly _waiters = new Fifo<() => void>()
   /** A waiter was handed the credit and no send was counted since. */
   private _released = false
   private _releases = 0
@@ -386,7 +387,7 @@ class FlowControl {
 
   private _tryWakeCreditWaiters(): void {
     if (this._shutdown) {
-      for (const resolve of this._waiters.splice(0)) resolve()
+      for (let resolve = this._waiters.shift(); resolve; resolve = this._waiters.shift()) resolve()
       return
     }
     if (this._released || this._isOutOfCredit()) return

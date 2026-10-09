@@ -2,6 +2,7 @@ export {
   encodeU32,
   decodeU32,
   concat,
+  concatAll,
   encodeLengthPrefixedFrames,
   encodeLengthPrefixedString,
   readLengthPrefixedString,
@@ -40,6 +41,11 @@ function concat(...parts: Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> {
     result.set(b, a.length)
     return result
   }
+  return concatAll(parts)
+}
+
+/** `concat` for a list a spread call can't pass: past about 100k parts it overflows the stack. */
+function concatAll(parts: readonly Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayBuffer> {
   let total = 0
   for (const p of parts) total += p.length
   const result = new Uint8Array(total)

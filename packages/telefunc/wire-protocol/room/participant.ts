@@ -2,7 +2,7 @@ export { ParticipantBase }
 
 import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
 import { makeDisposer } from './disposer.js'
-import { ListenerList } from './listener-list.js'
+import { Listeners } from '../../utils/Listeners.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
@@ -28,9 +28,9 @@ abstract class ParticipantBase implements LocalParticipant {
   private _meta: ParticipantMeta
   private _metaSeq = 0
   private _leftCause: LeaveCause | null = null
-  private _leaveCbs = new ListenerList<(cause: LeaveCause) => unknown>()
-  private readonly _messageCbs = new ListenerList<(data: unknown, from: Sender | null) => unknown>()
-  private readonly _demandCbs = new ListenerList<(track: string | null, wanted: boolean) => unknown>()
+  private _leaveCbs = new Listeners<(cause: LeaveCause) => unknown>()
+  private readonly _messageCbs = new Listeners<(data: unknown, from: Sender | null) => unknown>()
+  private readonly _demandCbs = new Listeners<(track: string | null, wanted: boolean) => unknown>()
   private readonly _wantedTracks = new Set<string | null>()
   private readonly _listenerCleanups = new Set<() => void>()
   private _inboxAttached = false
@@ -127,13 +127,13 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   private _fireInbox(msg: InboxMessage): void {
     const sender = this._senderOf(msg)
-    for (const cb of [...this._messageCbs]) this._invoke(cb, msg.data, sender)
+    for (const cb of this._messageCbs.list()) this._invoke(cb, msg.data, sender)
   }
   /** The last listener's return is the reply; a throw is the failure reply (`Abort(value)` reaches the sender, anything else is a bug reported here). */
   private async _fireInboxAck(msg: InboxMessage): Promise<DmReply> {
     const sender = this._senderOf(msg)
     let result: unknown
-    for (const cb of [...this._messageCbs]) {
+    for (const cb of this._messageCbs.list()) {
       try {
         result = await cb(msg.data, sender)
       } catch (err) {
@@ -165,7 +165,7 @@ abstract class ParticipantBase implements LocalParticipant {
   _onDemand(track: string | null, wanted: boolean): void {
     if (wanted) this._wantedTracks.add(track)
     else this._wantedTracks.delete(track)
-    for (const cb of [...this._demandCbs]) this._invoke(cb, track, wanted)
+    for (const cb of this._demandCbs.list()) this._invoke(cb, track, wanted)
   }
   onLeave(callback: (cause: LeaveCause) => void): () => void {
     if (this._leftCause) {
@@ -182,7 +182,7 @@ abstract class ParticipantBase implements LocalParticipant {
     const held = this._pendingInbox
     this._pendingInbox = null
     if (held) for (const entry of held) entry.ackResolve?.(DM_FAILURE.left)
-    const cbs = [...this._leaveCbs]
+    const cbs = this._leaveCbs.list()
     for (const unlisten of [...this._listenerCleanups]) unlisten()
     for (const cb of cbs) this._invoke(cb, ownedCause)
     this._wantedTracks.clear()
@@ -190,7 +190,7 @@ abstract class ParticipantBase implements LocalParticipant {
   protected _assertActive(): void {
     if (this._left) throw participantLeftError()
   }
-  private _register<T>(list: ListenerList<T>, cb: T): () => void {
+  private _register<T>(list: Listeners<T>, cb: T): () => void {
     const remove = list.add(cb)
     return makeDisposer(() => void remove(), this._listenerCleanups)
   }

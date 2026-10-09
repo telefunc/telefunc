@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
-import { SSE_POST_TARGET_MS, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { SSE_POST_TARGET_MS, STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
@@ -160,6 +160,157 @@ test('a frame written into an upload POST the server refused before its open-ack
   await delay(100)
   expect(received).toEqual([7])
   connection.dispose()
+})
+
+describe('an upload POST whose open-ack never comes', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** A page whose upload POST gets no open-ack: it writes 7 into the upload's body, gives the upload up, then sends 8. */
+  async function pageGivingUpItsUpload(name: string) {
+    const received: number[] = []
+    const serverChannel = new ServerChannel<number, never>()
+    serverChannel.listen((n) => void received.push(n))
+    const server = fakeServer((frame) => {
+      if (frame.tag === TAG.TEXT) serverChannel._dispatchFrame(frame)
+    })
+    const uploaded: Uint8Array[] = []
+    const fetchImpl = ((url: string, init: RequestInit) => {
+      if (!(init.body instanceof Blob))
+        void (async () => {
+          for await (const chunk of init.body as ReadableStream<Uint8Array>) uploaded.push(chunk)
+        })()
+      return server.fetch(url, init)
+    }) as typeof fetch
+    const channel = createChannel(serverChannel.id)
+    const connection = ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel as never, {
+      transports: ['sse'],
+      fetchImpl,
+      connectionKey: crypto.randomUUID(),
+    }) as any
+    await vi.advanceTimersByTimeAsync(20)
+    connection.send(channel, stringify(7)) // before RECONCILED: released into the upload body once it arrives
+    server.reconcile()
+    await vi.advanceTimersByTimeAsync(STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS)
+    connection.send(channel, stringify(8))
+    await vi.advanceTimersByTimeAsync(100)
+    /** The server runs what reached it of the upload only now, as one whose open-ack the page got too late. */
+    const readUploadLate = async () => {
+      const { frames } = await parseBlobBody(new Blob(uploaded as BlobPart[]))
+      const texts = frames.map((raw) => decode(raw as never)).filter((frame) => frame.tag === TAG.TEXT)
+      for (const frame of texts) serverChannel._dispatchFrame(frame)
+      return texts.length
+    }
+    return { received, connection, readUploadLate }
+  }
+
+  test("a frame written into it reaches the server, before the page's next one", async () => {
+    const { received, connection } = await pageGivingUpItsUpload('upload-no-ack')
+    expect(received).toEqual([7, 8])
+    connection.dispose()
+  })
+
+  test('a frame written into it that the server reads late reaches the server once, in order', async () => {
+    const { received, connection, readUploadLate } = await pageGivingUpItsUpload('upload-ack-late')
+    expect(await readUploadLate()).toBe(1)
+    expect(received).toEqual([7, 8])
+    connection.dispose()
+  })
+})
+
+describe('an upload POST a proxy holds until its body ends', () => {
+  /** A page whose upload POST gets no open-ack: the proxy forwards it only once its body ended, when `forwardUpload` is
+   *  called, and never once the page aborted it. Its first SSE request reaches the server once `connect` is called, so
+   *  what the page queues before is released into the upload by the RECONCILED; everything else as the page sends it. */
+  async function pageBehindABufferingProxy(name: string) {
+    const sse = getTelefuncSseChannelHooks()
+    const toServer = async (body: BodyInit): Promise<Response> => {
+      const response = (await sse.handleRequest(new Request('http://localhost/_telefunc', { method: 'POST', body })))!
+      return new Response(response.body as never, {
+        status: response.statusCode,
+        headers: { 'Content-Type': response.contentType },
+      })
+    }
+    let upload: { ended: Promise<ArrayBuffer>; signal: AbortSignal } | null = null
+    let connect!: () => void
+    const connected = new Promise<void>((resolve) => (connect = resolve))
+    config.fetch = (async (_url: string, init: RequestInit) => {
+      const body = init.body as unknown
+      if (body instanceof Blob) {
+        if ((await parseBlobBody(body)).metadata.streamResponse) await connected
+        return await toServer(body)
+      }
+      upload = { ended: new Response(body as ReadableStream).arrayBuffer(), signal: init.signal! }
+      return await new Promise<Response>((_resolve, reject) =>
+        init.signal!.addEventListener('abort', () => reject(init.signal!.reason)),
+      )
+    }) as unknown as typeof fetch
+    const key = `chat:${name}`
+    const server = new ServerBroadcast<string>({ key })
+    getChannelMux().registerChannel(server)
+    const page = new ClientBroadcast<string>({
+      channelId: server.id,
+      key,
+      transports: ['sse'],
+      telefuncUrl: `http://${name}.test/_telefunc`,
+      connectionKey: crypto.randomUUID(),
+    })
+    const transport = () => (page as any)._connection.transport
+    await vi.waitFor(() => expect(upload).not.toBeNull())
+    const forwardUpload = async () => {
+      const { ended, signal } = upload!
+      if (signal.aborted) return
+      await toServer(new Blob([await ended]))
+    }
+    const uploadGivenUp = () =>
+      vi.waitFor(() => expect(transport().streamRequest.tag).toBe('failed'), {
+        timeout: STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS + 2_000,
+      })
+    /** The page has nothing queued or in flight, so the server has taken all it sent. */
+    const allSent = () =>
+      vi.waitFor(() =>
+        expect({ queued: transport().outbox.length, flushing: transport().flushing }).toEqual({
+          queued: 0,
+          flushing: false,
+        }),
+      )
+    return { server, page, connect, forwardUpload, uploadGivenUp, allSent }
+  }
+
+  test("a subscription the page wrote into it and then dropped doesn't come back when the server reads it late", async () => {
+    const { server, page, connect, forwardUpload, uploadGivenUp, allSent } =
+      await pageBehindABufferingProxy('upload-late-sub')
+    const unsubscribe = page.subscribe(() => {})
+    connect()
+    await uploadGivenUp()
+    unsubscribe()
+    await allSent()
+    expect((server as any)._peerSubscriptions.text).toBe(false)
+    await forwardUpload()
+    expect((server as any)._peerSubscriptions.text).toBe(false)
+    page.abort()
+  })
+
+  test('a listener the page subscribes after dropping the one it wrote into it gets what is published, though the server reads it late', async () => {
+    const { server, page, connect, forwardUpload, uploadGivenUp, allSent } =
+      await pageBehindABufferingProxy('upload-late-unsub')
+    page.subscribe(() => {})()
+    connect()
+    await uploadGivenUp()
+    const received: string[] = []
+    page.subscribe((message) => void received.push(message))
+    await allSent()
+    expect((server as any)._peerSubscriptions.text).toBe(true)
+    await forwardUpload()
+    await server.publish('after')
+    await vi.waitFor(() => expect(received).toEqual(['after']))
+    page.abort()
+  })
 })
 
 test("a batch POST still in flight for a dead wire can't unsubscribe the listener the page swapped in across the reconnect", async () => {

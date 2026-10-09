@@ -2,7 +2,7 @@ export { StreamReader, OversizeFrameError, StreamTruncatedError }
 
 import type { Readable } from 'node:stream'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
-import { decodeU32 } from '../../frame.js'
+import { concatAll, decodeU32 } from '../../frame.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)
@@ -187,11 +187,16 @@ class StreamReader {
 
   /** Read exactly `n` bytes. Throws on disconnect. */
   private async readExact(n: number) {
-    while (this.buffer.length < n) {
+    let parts: Uint8Array<ArrayBuffer>[] | undefined
+    let length = this.buffer.length
+    while (length < n) {
       const chunk = await this.pullChunk()
       if (!chunk) throw new StreamTruncatedError(DISCONNECT_MSG)
-      this.buffer = this.buffer.length === 0 ? chunk : concat(this.buffer, chunk)
+      parts ??= this.buffer.length > 0 ? [this.buffer] : []
+      parts.push(chunk)
+      length += chunk.length
     }
+    if (parts) this.buffer = parts.length === 1 ? parts[0]! : concatAll(parts)
     const result = this.buffer.subarray(0, n)
     this.buffer = n < this.buffer.length ? this.buffer.subarray(n) : EMPTY
     return result
@@ -219,11 +224,4 @@ class StreamReader {
       if (remaining < 0) this.buffer = chunk.subarray(chunk.length + remaining)
     }
   }
-}
-
-function concat(a: Uint8Array<ArrayBuffer>, b: Uint8Array<ArrayBuffer>) {
-  const result = new Uint8Array(a.length + b.length)
-  result.set(a, 0)
-  result.set(b, a.length)
-  return result
 }

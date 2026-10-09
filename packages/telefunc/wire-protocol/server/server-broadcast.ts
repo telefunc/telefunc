@@ -5,6 +5,7 @@ import type {
   ChannelPublishAck,
   BroadcastBinaryListener,
   BroadcastListener,
+  BroadcastListenerByKind,
   BroadcastListeners,
   ChannelCloseCallback,
   ChannelCloseOptions,
@@ -23,7 +24,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { markHandled } from '../../utils/markHandled.js'
-import { withoutFirst } from '../../utils/withoutFirst.js'
+import { Listeners } from '../../utils/Listeners.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
@@ -45,8 +46,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
   readonly key: string
 
-  /** Each kind's array is replaced, never mutated, so a delivery iterates the listeners it started with. */
-  private readonly _subscribers: BroadcastListeners<T> = { text: [], binary: [] }
+  private readonly _subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   private readonly _routes: { [Kind in BroadcastKind]: RouteSubscription<Kind> }
   private readonly _peerSubscriptions: Record<BroadcastKind, boolean> = { text: false, binary: false }
 
@@ -110,13 +110,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const data = parse(serialized) as ChannelData<T>
-    if (!this._callListeners(this._subscribers.text, data, rawInfo)) return
+    if (!this._callListeners(this._subscribers.text.list(), data, rawInfo)) return
     if (!this._peerSubscriptions.text) return
     this._sendPublish(encodePublishText(serialized, rawInfo))
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
-    if (!this._callListeners(this._subscribers.binary, data, rawInfo)) return
+    if (!this._callListeners(this._subscribers.binary.list(), data, rawInfo)) return
     if (!this._peerSubscriptions.binary) return
     this._sendPublishBinary(encodePublishBinary(data, rawInfo))
   }
@@ -124,7 +124,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once a
    *  listener's error ended the channel. */
   private _callListeners<Data>(
-    listeners: Array<(data: Data, info: ChannelPublishInfo) => unknown>,
+    listeners: readonly ((data: Data, info: ChannelPublishInfo) => unknown)[],
     data: Data,
     rawInfo: WirePublishInfo,
   ): boolean {
@@ -152,23 +152,16 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   // --- Internal broadcast helpers ---
 
-  private _subscribe<K extends BroadcastKind>(
-    kind: K,
-    callback: BroadcastListeners<T>[K][number],
-  ): BroadcastUnsubscribe {
+  private _subscribe<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): BroadcastUnsubscribe {
     if (!this._isClosed) this._routes[kind].open()
-    this._subscribers[kind] = [...this._subscribers[kind], callback] as BroadcastListeners<T>[K]
+    const remove = this._subscribers[kind].add(callback)
     return () => {
-      const subscribers = this._subscribers[kind] as Array<typeof callback>
-      const remaining = withoutFirst(subscribers, callback)
-      if (remaining === subscribers) return
-      this._subscribers[kind] = remaining as BroadcastListeners<T>[K]
-      this._syncSubscription(kind)
+      if (remove()) this._syncSubscription(kind)
     }
   }
 
   private _syncSubscription(kind: BroadcastKind): void {
-    if (this._isClosed || (!this._peerSubscriptions[kind] && this._subscribers[kind].length === 0)) {
+    if (this._isClosed || (!this._peerSubscriptions[kind] && this._subscribers[kind].size === 0)) {
       this._routes[kind].close()
       return
     }
