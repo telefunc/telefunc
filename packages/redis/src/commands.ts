@@ -20,6 +20,7 @@ import { assert } from './assert.js'
 import {
   broadcastChannel,
   broadcastSequenceKey,
+  cellIndexKey,
   cellKey,
   cellKeyPrefix,
   channelKey,
@@ -137,15 +138,16 @@ return '{"head":' .. cjson.encode(head) .. '}'
 `
 
 // The generation's cells under a prefix, with the revision that fences reading them.
-//   KEYS: [1]=head [2]=revision [3]=generation-keys
+//   KEYS: [1]=head [2]=revision [3]=cell-index
 //   ARGV: [1]=inc [2]=cell-key prefix [3]=cell prefix
+// No UTF-8 text holds the byte 0xFF, so the range ends past every key under the prefix.
 const FIND_CELLS_LUA = `${HEAD_PRELUDE}
 local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
 local reply = {'found', redis.call('GET', KEYS[2]) or '0'}
 local wanted = ARGV[2] .. ARGV[3]
-for _, key in ipairs(redis.call('SMEMBERS', KEYS[3])) do
-  if string.sub(key, 1, #wanted) == wanted then reply[#reply + 1] = string.sub(key, #ARGV[2] + 1) end
+for _, key in ipairs(redis.call('ZRANGEBYLEX', KEYS[3], '[' .. wanted, '(' .. wanted .. '\\255')) do
+  reply[#reply + 1] = string.sub(key, #ARGV[2] + 1)
 end
 return reply
 `
@@ -187,31 +189,33 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 
 // CELLS CX: all mutations or none; success implies the head precondition (open + inc) held at apply
 // time; the revision is the coarse per-generation counter, allowed to over-conflict but never mislead.
-//   KEYS: [1]=head [2]=rev [3]=generation-keys [4..]=cell keys (one per mutation, in order)
+//   KEYS: [1]=head [2]=rev [3]=generation-keys [4]=cell-index [5..]=cell keys (one per mutation, in order)
 //   ARGV: [1]=inc [2]=expectedRev, then per mutation: op('set'|'del'), value
 const CELLS_CX_LUA = `${HEAD_PRELUDE}
-local head_key, rev_key, generation_keys_key = KEYS[1], KEYS[2], KEYS[3]
+local head_key, rev_key, generation_keys_key, cell_index_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 local now = tf_now()
 local head = tf_live_head(head_key, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return 'stale-inc' end
 local cur = redis.call('GET', rev_key)
 if not cur then cur = '0' end
 if cur ~= ARGV[2] then return 'conflict' end
-local n = #KEYS - 3
+local n = #KEYS - 4
 for i = 1, n do
-  local key = KEYS[3 + i]
+  local key = KEYS[4 + i]
   local base = 2 + (i - 1) * 2
   local op = ARGV[base + 1]
   if op == 'del' then
     redis.call('DEL', key)
     redis.call('SREM', generation_keys_key, key)
+    redis.call('ZREM', cell_index_key, key)
   else
     redis.call('SET', key, ARGV[base + 2])
     redis.call('SADD', generation_keys_key, key)
+    redis.call('ZADD', cell_index_key, 0, key)
   end
 end
 redis.call('INCR', rev_key)
-redis.call('SADD', generation_keys_key, rev_key)
+redis.call('SADD', generation_keys_key, rev_key, cell_index_key)
 return 'committed'
 `
 
@@ -374,7 +378,7 @@ const REDIS_COMMANDS = {
     lua: FIND_CELLS_LUA,
     numberOfKeys: 3,
     invoke: (prefix, { roomId, inc, cellPrefix }: RoomInc & { cellPrefix: string }) => ({
-      keys: [headKey(prefix, roomId), revKey(prefix, roomId, inc), generationKeysKey(prefix, roomId, inc)],
+      keys: [headKey(prefix, roomId), revKey(prefix, roomId, inc), cellIndexKey(prefix, roomId, inc)],
       argv: [inc, cellKeyPrefix(prefix, roomId, inc), cellPrefix],
     }),
     parse: (reply): { staleInc: true } | { revision: string; keys: string[] } => {
@@ -441,6 +445,7 @@ const REDIS_COMMANDS = {
         headKey(prefix, input.roomId),
         revKey(prefix, input.roomId, input.inc),
         generationKeysKey(prefix, input.roomId, input.inc),
+        cellIndexKey(prefix, input.roomId, input.inc),
         ...input.mutations.map(({ key }) => cellKey(prefix, input.roomId, input.inc, key)),
       ],
       argv: [

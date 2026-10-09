@@ -8,6 +8,7 @@ export {
   revKey,
   cellKeyPrefix,
   cellKey,
+  cellIndexKey,
   orderKey,
   retainedKeyPrefix,
   retainedKey,
@@ -61,6 +62,10 @@ function cellKeyPrefix(prefix: string, roomId: string, inc: string): string {
 }
 function cellKey(prefix: string, roomId: string, inc: string, key: string): string {
   return `${cellKeyPrefix(prefix, roomId, inc)}${key}`
+}
+/** The generation's cell keys, all at score 0, so a prefix read is a lexicographic range. */
+function cellIndexKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:cells`
 }
 function orderKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${genPrefix(prefix, roomId, inc)}:o:${laneKey}`
