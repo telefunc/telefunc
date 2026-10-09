@@ -289,13 +289,16 @@ describe('Room public behavior', () => {
     const causes: unknown[] = []
     member.onLeave((cause) => causes.push(cause))
     room.onLeave((_, cause) => causes.push(cause))
-    const listRetained = driver.listRetained.bind(driver)
-    // The eviction's first retained read: its member delete committed, its leave isn't published.
-    vi.spyOn(driver, 'listRetained').mockImplementationOnce(async (roomId, inc) => {
+    const deleteRetained = driver.deleteRetained.bind(driver)
+    const ticked = createDeferred()
+    // The eviction's first retained delete: its member delete committed, its leave isn't published.
+    vi.spyOn(driver, 'deleteRetained').mockImplementationOnce(async (...args) => {
       await subsOf(room)._heartbeatTick()
-      return listRetained(roomId, inc)
+      ticked.resolve()
+      return deleteRetained(...args)
     })
     await member.leave()
+    await ticked.promise
     expect(causes).toEqual([{ type: 'left' }, { type: 'left' }])
   })
   it("reports a leave as 'left' on another instance whose roster read overlaps the eviction", async () => {
@@ -318,13 +321,13 @@ describe('Room public behavior', () => {
       }
       return readCells(roomId, inc, selector)
     })
-    const listRetained = driver.listRetained.bind(driver)
+    const deleteRetained = driver.deleteRetained.bind(driver)
     const committed = createDeferred()
     const publish = createDeferred()
-    vi.spyOn(driver, 'listRetained').mockImplementationOnce(async (roomId, inc) => {
+    vi.spyOn(driver, 'deleteRetained').mockImplementationOnce(async (...args) => {
       committed.resolve()
       await publish.promise
-      return listRetained(roomId, inc)
+      return deleteRetained(...args)
     })
     const refresh = subsOf(observer).reconcileAuthority()
     await memberRead.started.promise
@@ -2567,6 +2570,18 @@ describe('Room public behavior', () => {
     } finally {
       roster.release()
     }
+  })
+  it("drops a leaving member's retained binary lanes without listing the room's", async () => {
+    const room = (await Room.create('retained-leave-unlisted')) as ServerRoom
+    const member = await room.join()
+    const other = await room.join()
+    await member.publishBinary(new Uint8Array([1]), { retain: true })
+    await member.publishBinary(new Uint8Array([2]), { track: 'screen', retain: true })
+    await other.publishBinary(new Uint8Array([3]), { retain: true })
+    const listRetained = vi.spyOn(driver, 'listRetained')
+    await member.leave()
+    expect(listRetained).not.toHaveBeenCalled()
+    expect(await driver.listRetained(room.id, room._inc)).toEqual([{ kind: 'binary', member: other.id, track: '' }])
   })
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
     vi.useFakeTimers()
