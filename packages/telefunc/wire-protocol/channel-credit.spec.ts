@@ -22,7 +22,7 @@ import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { Room } from './room/server/statics.js'
 import type { ServerLocalParticipant, ServerRoom } from './room/server/room.js'
-import { RoomParticipantStubChannel } from './room/server/stub.js'
+import { ResponseRoomGrants, RoomParticipantStubChannel } from './room/server/stub.js'
 import { ClientRoom, ClientStandaloneParticipant } from './room/client.js'
 
 const LATENCY_MS = 5
@@ -208,7 +208,7 @@ class Loopback {
   /** A room's stub the server has registered, and `openPage`, which opens the page's view of the room through it. */
   async roomStub() {
     const room = (await Room.create(`room:${crypto.randomUUID()}`)) as ServerRoom
-    const { stub, metadata } = room._openStub({ grants: { selfSuppressed: new Set(), hidden: new Set() } })
+    const { stub, metadata } = room._openStub({ grants: new ResponseRoomGrants() })
     this.mux.registerChannel(stub)
     const openPage = () => {
       const page = new ClientBroadcast({

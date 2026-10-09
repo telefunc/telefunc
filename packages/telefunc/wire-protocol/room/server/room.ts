@@ -743,6 +743,10 @@ class ServerRoom extends RoomStateView implements Room {
       void this._removeDepartedMember(id).catch(reportRoomError)
     }
   }
+  /** @internal A response serialized a participant whose own frames the stub's client doesn't get back. */
+  _onStubSuppressed(stub: RoomStubChannel, member: string): void {
+    if (this._stubs.has(stub)) this._subs.memberChanged(member)
+  }
   async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
     const admission = {
       id: crypto.randomUUID(),

@@ -1,5 +1,4 @@
-export { RoomStubChannel, RoomParticipantStubChannel, unorderedEventText }
-export type { ResponseRoomGrants }
+export { RoomStubChannel, RoomParticipantStubChannel, ResponseRoomGrants, unorderedEventText }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -59,8 +58,24 @@ import {
 } from '../protocol.js'
 assertIsNotBrowser()
 
-/** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it returned. */
-type ResponseRoomGrants = { selfSuppressed: Set<string>; hidden: Set<string> }
+/** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it
+ *  returned. A streamed response can serialize a participant after its room's stub attached, so the stubs holding the
+ *  grants hear each new echo drop. */
+class ResponseRoomGrants {
+  readonly selfSuppressed = new Set<string>()
+  readonly hidden = new Set<string>()
+  private readonly _onSuppressed: Array<(member: string) => void> = []
+
+  suppress(member: string): void {
+    if (this.selfSuppressed.has(member)) return
+    this.selfSuppressed.add(member)
+    for (const listener of this._onSuppressed) listener(member)
+  }
+
+  onSuppressed(listener: (member: string) => void): void {
+    this._onSuppressed.push(listener)
+  }
+}
 
 /** A Room stub answers each client request through its channel ack, under the Room error contract. */
 abstract class RoomRequestChannel extends ServerChannel {
@@ -124,6 +139,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._publishShield = publishShield
     this._selfSuppressed = grants.selfSuppressed
     this._grantedHidden = grants.hidden
+    grants.onSuppressed((member) => this._room._onStubSuppressed(this, member))
   }
 
   protected override _onAttached(): void {

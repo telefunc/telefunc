@@ -40,7 +40,7 @@ import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
 import { heldSendWeight } from '../backend/held-send-weight.js'
-import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
+import { ResponseRoomGrants, RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { TailHold } from './server/tail.js'
 import { WantsIndex } from './server/wants-index.js'
 import { RoomDemand } from './demand.js'
@@ -253,7 +253,9 @@ describe('Room public behavior', () => {
     const holder = await Room.get(room.id)
     const bot = await holder.join({ hidden: true, meta: { mood: 'old' } })
     const control = loseLaneFrames((lane) => lane.kind === 'control')
-    const handed = new RoomStubChannel(room, { grants: { selfSuppressed: new Set(), hidden: new Set([bot.id]) } })
+    const grants = new ResponseRoomGrants()
+    grants.hidden.add(bot.id)
+    const handed = new RoomStubChannel(room, { grants })
     handed._registerChannel()
     room._attachStub(handed)
     const peer = attachPeer(handed)
@@ -2091,6 +2093,28 @@ describe('Room public behavior', () => {
     expect(subsOf(room)._binary.size).toBe(0)
     declare(register(room), { __r: 'sub-binary', wants: EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
+  })
+  it("drops the lane of a co-returned participant a streamed response serializes after its room's stub declared", async () => {
+    await Room.create('suppressed-mid-stream')
+    const me = (await Room.join('suppressed-mid-stream', { selfDelivery: false })) as ServerLocalParticipant
+    const demand: Array<[string | null, boolean]> = []
+    me.onDemand((track, wanted) => demand.push([track, wanted]))
+    const room = (await Room.get('suppressed-mid-stream')) as ServerRoom
+    await room.getParticipants()
+    const channels: ServerChannel[] = []
+    const context = replacerContext(channels)
+    roomReplacer.replace(room, context)
+    const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
+    declare(stub, { __r: 'sub-binary', wants: EVERY_TRACK })
+    await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
+    roomParticipantReplacer.replace(me, context)
+    expect(subsOf(room)._binary.size).toBe(0)
+    await vi.waitFor(() =>
+      expect(demand).toEqual([
+        [null, true],
+        [null, false],
+      ]),
+    )
   })
   it("closes a member's inbox when it leaves, when its stub closes, and opens none under a closed stub", async () => {
     const room = (await Room.create('incremental-inboxes')) as ServerRoom
@@ -4064,7 +4088,7 @@ function declare(stub: RoomStubChannel, declaration: unknown): void {
   stub._onPeerMessage(stringify(declaration), 0)
 }
 function register(room: ServerRoom): RoomStubChannel {
-  const stub = new RoomStubChannel(room, { grants: { selfSuppressed: new Set(), hidden: new Set() } })
+  const stub = new RoomStubChannel(room, { grants: new ResponseRoomGrants() })
   stub._registerChannel()
   room._attachStub(stub)
   return stub

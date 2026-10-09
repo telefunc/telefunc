@@ -9,7 +9,7 @@ import {
 import { ServerLocalParticipant, ServerRoom } from './server/room.js'
 import type { RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from './protocol.js'
-import { RoomParticipantStubChannel, type ResponseRoomGrants } from './server/stub.js'
+import { RoomParticipantStubChannel, ResponseRoomGrants } from './server/stub.js'
 import { remoteBacking } from './state.js'
 import { getAdapterMaxFrameBytes } from '../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
@@ -24,7 +24,7 @@ const ROOM_GRANTS = Symbol('telefunc.RoomResponseGrants')
 function responseRoomGrants(context: InternalServerReplacerContext, roomId: string): ResponseRoomGrants {
   const byRoom = context.responseState(ROOM_GRANTS, () => new Map<string, ResponseRoomGrants>())
   let grants = byRoom.get(roomId)
-  if (!grants) byRoom.set(roomId, (grants = { selfSuppressed: new Set(), hidden: new Set() }))
+  if (!grants) byRoom.set(roomId, (grants = new ResponseRoomGrants()))
   return grants
 }
 const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerContext> = {
@@ -86,7 +86,7 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Int
     const channel = new RoomParticipantStubChannel(participant, context.validators.get('data'))
     context.registerChannel(channel)
     // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
-    if (!participant.selfDelivery) responseRoomGrants(context, participant._room.id).selfSuppressed.add(participant.id)
+    if (!participant.selfDelivery) responseRoomGrants(context, participant._room.id).suppress(participant.id)
     const maxFrameBytes = getAdapterMaxFrameBytes()
     return {
       metadata: {
