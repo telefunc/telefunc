@@ -32,6 +32,7 @@ import {
   type WirePublishInfo,
 } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
+import { withoutFirst } from '../../utils/withoutFirst.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
@@ -761,11 +762,4 @@ function normalizeCloseTimeout(timeout: number | undefined): number {
       `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
     )
   return timeout
-}
-
-/** A copy of `list` without its first `item`, or `list` itself without one: listeners are replaced, never mutated, so a
- *  dispatch iterates the ones it started with. */
-function withoutFirst<T>(list: T[], item: T): T[] {
-  const i = list.indexOf(item)
-  return i < 0 ? list : list.filter((_, j) => j !== i)
 }

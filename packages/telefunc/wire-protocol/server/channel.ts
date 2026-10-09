@@ -39,6 +39,7 @@ import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
+import { withoutFirst } from '../../utils/withoutFirst.js'
 import {
   ACK_STATUS,
   ERROR_REASON,
@@ -324,16 +325,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   listen(callback: ChannelListener<ClientToServer>): () => void {
     this._listeners = [...this._listeners, callback]
     return () => {
-      const i = this._listeners.indexOf(callback)
-      if (i >= 0) this._listeners = this._listeners.filter((_, j) => j !== i)
+      this._listeners = withoutFirst(this._listeners, callback)
     }
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
     this._binaryListeners = [...this._binaryListeners, callback]
     return () => {
-      const i = this._binaryListeners.indexOf(callback)
-      if (i >= 0) this._binaryListeners = this._binaryListeners.filter((_, j) => j !== i)
+      this._binaryListeners = withoutFirst(this._binaryListeners, callback)
     }
   }
 

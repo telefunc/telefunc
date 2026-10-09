@@ -18,6 +18,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
+import { withoutFirst } from '../../utils/withoutFirst.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, ERROR_REASON, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
 import type { ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
@@ -91,8 +92,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._subscribeBroadcast()
     this._broadcastListeners = [...this._broadcastListeners, callback]
     return () => {
-      const index = this._broadcastListeners.indexOf(callback)
-      if (index >= 0) this._broadcastListeners = this._broadcastListeners.filter((_, j) => j !== index)
+      this._broadcastListeners = withoutFirst(this._broadcastListeners, callback)
     }
   }
 
@@ -109,8 +109,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._subscribeBinaryBroadcast()
     this._broadcastBinaryListeners = [...this._broadcastBinaryListeners, callback]
     return () => {
-      const index = this._broadcastBinaryListeners.indexOf(callback)
-      if (index >= 0) this._broadcastBinaryListeners = this._broadcastBinaryListeners.filter((_, j) => j !== index)
+      this._broadcastBinaryListeners = withoutFirst(this._broadcastBinaryListeners, callback)
     }
   }
 
