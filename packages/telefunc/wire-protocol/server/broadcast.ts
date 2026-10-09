@@ -10,6 +10,7 @@ export type {
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
+import { Fifo } from '../../utils/Fifo.js'
 import type { WirePublishInfo } from '../shared-ws.js'
 
 /** Most in-memory deliveries that run before the event loop gets a turn, so listeners answering each other can't starve it. */
@@ -68,8 +69,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   /** Per-key seq counter for in-memory mode. */
   private readonly keySeqs = new Map<string, number>()
   /** In-memory publishes waiting for the ones before them, in publish order. */
-  private queued: Array<(() => void) | undefined> = []
-  private queuedHead = 0
+  private readonly queued = new Fifo<() => void>()
   private delivering = false
   /** Reset by a macrotask scheduled once half the burst has run. */
   private deliveredInBurst = 0
@@ -164,7 +164,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const timestamp = Date.now()
     // A publish made from a listener reaches every subscriber after the message it answers, as through a transport, and
     // one past the burst after the event loop's turn.
-    if (this.delivering || this.queuedHead < this.queued.length || this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST) {
+    if (this.delivering || this.queued.length > 0 || this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST) {
       return new Promise((resolve, reject) => {
         this.queued.push(() => {
           try {
@@ -180,7 +180,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       return this._deliverInMemory(subs, key, data, seq, timestamp)
     } finally {
       this.delivering = false
-      if (this.queuedHead < this.queued.length) this._drainQueued()
+      if (this.queued.length > 0) this._drainQueued()
     }
   }
 
@@ -210,16 +210,11 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   private _drainQueued(): void {
-    while (this.queuedHead < this.queued.length && this.deliveredInBurst < IN_MEMORY_DELIVERY_BURST) {
-      const deliver = this.queued[this.queuedHead]!
-      this.queued[this.queuedHead++] = undefined
+    while (this.queued.length > 0 && this.deliveredInBurst < IN_MEMORY_DELIVERY_BURST) {
+      const deliver = this.queued.shift()!
       this.delivering = true
       deliver()
       this.delivering = false
-    }
-    if (this.queuedHead > 16 && this.queuedHead >= this.queued.length >>> 1) {
-      this.queued = this.queued.slice(this.queuedHead)
-      this.queuedHead = 0
     }
   }
 
