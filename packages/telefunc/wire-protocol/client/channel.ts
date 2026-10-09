@@ -32,7 +32,7 @@ import {
   type WirePublishInfo,
 } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
-import { withoutFirst } from '../../utils/withoutFirst.js'
+import { Listeners } from '../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
@@ -67,8 +67,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly key: string | undefined
   readonly _maxFrameBytes: number
   protected _connection: MuxConnection
-  private _listeners: Array<ChannelListener<ServerToClient>> = []
-  private _binaryListeners: Array<ChannelBinaryListener> = []
+  private readonly _listeners = new Listeners<ChannelListener<ServerToClient>>()
+  private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
@@ -213,17 +213,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   listen(callback: ChannelListener<ServerToClient>): () => void {
-    this._listeners = [...this._listeners, callback]
-    return () => {
-      this._listeners = withoutFirst(this._listeners, callback)
-    }
+    return this._listeners.add(callback)
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
-    this._binaryListeners = [...this._binaryListeners, callback]
-    return () => {
-      this._binaryListeners = withoutFirst(this._binaryListeners, callback)
-    }
+    return this._binaryListeners.add(callback)
   }
 
   onClose(callback: ChannelCloseCallback): void {
@@ -306,7 +300,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._flow.onReceived(bytes)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners) {
+      for (const cb of this._listeners.list()) {
         try {
           const result = cb(parsed)
           if (isPromise(result)) {
@@ -340,7 +334,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners) {
+      for (const cb of this._binaryListeners.list()) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -549,13 +543,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchAckReq(data: string, seq: number): Promise<void> {
-    if (this._listeners.length === 0) {
+    if (this._listeners.size === 0) {
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     const parsed = parse(data) as ChannelData<ServerToClient>
     let lastResult: unknown
-    for (const cb of this._listeners) {
+    for (const cb of this._listeners.list()) {
       try {
         lastResult = await cb(parsed)
       } catch (err) {
@@ -568,12 +562,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
-    if (this._binaryListeners.length === 0) {
+    if (this._binaryListeners.size === 0) {
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     let lastResult: unknown
-    for (const cb of this._binaryListeners) {
+    for (const cb of this._binaryListeners.list()) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -645,8 +639,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
-  private _broadcastListeners: Array<BroadcastListener<T>> = []
-  private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
+  private readonly _broadcastListeners = new Listeners<BroadcastListener<T>>()
+  private readonly _broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   /** The subscriptions this page asks the server for. */
   private readonly _wire = { text: false, binary: false }
 
@@ -671,11 +665,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    if (this._broadcastListeners.length === 0) this._setWireSubscribed('text', true)
-    this._broadcastListeners = [...this._broadcastListeners, callback]
+    if (this._broadcastListeners.size === 0) this._setWireSubscribed('text', true)
+    const remove = this._broadcastListeners.add(callback)
     return () => {
-      this._broadcastListeners = withoutFirst(this._broadcastListeners, callback)
-      if (this._broadcastListeners.length === 0) this._setWireSubscribed('text', false)
+      remove()
+      if (this._broadcastListeners.size === 0) this._setWireSubscribed('text', false)
     }
   }
 
@@ -689,11 +683,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this._broadcastBinaryListeners.length === 0) this._setWireSubscribed('binary', true)
-    this._broadcastBinaryListeners = [...this._broadcastBinaryListeners, callback]
+    if (this._broadcastBinaryListeners.size === 0) this._setWireSubscribed('binary', true)
+    const remove = this._broadcastBinaryListeners.add(callback)
     return () => {
-      this._broadcastBinaryListeners = withoutFirst(this._broadcastBinaryListeners, callback)
-      if (this._broadcastBinaryListeners.length === 0) this._setWireSubscribed('binary', false)
+      remove()
+      if (this._broadcastBinaryListeners.size === 0) this._setWireSubscribed('binary', false)
     }
   }
 
@@ -727,7 +721,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._flow.onArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._broadcastListeners) {
+    for (const cb of this._broadcastListeners.list()) {
       try {
         cb(parsed, info)
       } catch (err) {
@@ -740,7 +734,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this._flow.onArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._broadcastBinaryListeners) {
+    for (const cb of this._broadcastBinaryListeners.list()) {
       try {
         cb(data, info)
       } catch (err) {

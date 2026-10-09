@@ -39,7 +39,7 @@ import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
-import { withoutFirst } from '../../utils/withoutFirst.js'
+import { Listeners } from '../../utils/Listeners.js'
 import {
   ACK_STATUS,
   ERROR_REASON,
@@ -98,8 +98,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */ _didShutdown = false
   private _didRegister = false
   protected _peer: IndexedPeer | null = null
-  private _listeners: Array<ChannelListener<ClientToServer>> = []
-  private _binaryListeners: Array<ChannelBinaryListener> = []
+  private readonly _listeners = new Listeners<ChannelListener<ClientToServer>>()
+  private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
   protected _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   protected _pendingAcks = new Map<
     number,
@@ -323,17 +323,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   listen(callback: ChannelListener<ClientToServer>): () => void {
-    this._listeners = [...this._listeners, callback]
-    return () => {
-      this._listeners = withoutFirst(this._listeners, callback)
-    }
+    return this._listeners.add(callback)
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
-    this._binaryListeners = [...this._binaryListeners, callback]
-    return () => {
-      this._binaryListeners = withoutFirst(this._binaryListeners, callback)
-    }
+    return this._binaryListeners.add(callback)
   }
 
   onClose(callback: ChannelCloseCallback): void {
@@ -536,7 +530,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       }
       const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners) {
+      for (const cb of this._listeners.list()) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -572,7 +566,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners) {
+      for (const cb of this._binaryListeners.list()) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -833,7 +827,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchAckReq(data: ChannelData<ClientToServer>, seq: number): Promise<void> {
-    if (this._listeners.length === 0) {
+    if (this._listeners.size === 0) {
       this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
@@ -848,7 +842,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
     }
     let lastResult: unknown
-    for (const cb of this._listeners) {
+    for (const cb of this._listeners.list()) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -861,12 +855,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
-    if (this._binaryListeners.length === 0) {
+    if (this._binaryListeners.size === 0) {
       this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     let lastResult: unknown
-    for (const cb of this._binaryListeners) {
+    for (const cb of this._binaryListeners.list()) {
       try {
         lastResult = await cb(data)
       } catch (err) {

@@ -18,7 +18,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { withoutFirst } from '../../utils/withoutFirst.js'
+import { Listeners } from '../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, ERROR_REASON, encodePublishText, encodePublishBinary, TAG } from '../shared-ws.js'
 import type { ChannelDataFrame, WirePublishInfo } from '../shared-ws.js'
@@ -39,8 +39,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
   readonly key: string
 
-  private _broadcastListeners: Array<BroadcastListener<T>> = []
-  private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
+  private readonly _broadcastListeners = new Listeners<BroadcastListener<T>>()
+  private readonly _broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   private _adapter: BroadcastAdapter | null = null
   private _unsubBroadcast: BroadcastUnsubscribe | null = null
   private _unsubBinaryBroadcast: BroadcastUnsubscribe | null = null
@@ -90,10 +90,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   subscribe(callback: BroadcastListener<T>): () => void {
     this._ensureBroadcast()
     this._subscribeBroadcast()
-    this._broadcastListeners = [...this._broadcastListeners, callback]
-    return () => {
-      this._broadcastListeners = withoutFirst(this._broadcastListeners, callback)
-    }
+    return this._broadcastListeners.add(callback)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -107,10 +104,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
     this._ensureBroadcast()
     this._subscribeBinaryBroadcast()
-    this._broadcastBinaryListeners = [...this._broadcastBinaryListeners, callback]
-    return () => {
-      this._broadcastBinaryListeners = withoutFirst(this._broadcastBinaryListeners, callback)
-    }
+    return this._broadcastBinaryListeners.add(callback)
   }
 
   // --- Transport callbacks ---
@@ -138,7 +132,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const cb of this._broadcastListeners) {
+    for (const cb of this._broadcastListeners.list()) {
       try {
         cb(data, info)
       } catch (err) {
@@ -151,7 +145,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of this._broadcastBinaryListeners) {
+    for (const cb of this._broadcastBinaryListeners.list()) {
       try {
         cb(data, info)
       } catch (err) {
@@ -212,12 +206,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   _onPeerBroadcastUnsubscribe(binary: boolean): void {
     if (binary) {
       this._peerSubscribedBinary = false
-      if (this._broadcastBinaryListeners.length > 0) return
+      if (this._broadcastBinaryListeners.size > 0) return
       this._unsubBinaryBroadcast?.()
       this._unsubBinaryBroadcast = null
     } else {
       this._peerSubscribedText = false
-      if (this._broadcastListeners.length > 0) return
+      if (this._broadcastListeners.size > 0) return
       this._unsubBroadcast?.()
       this._unsubBroadcast = null
     }
