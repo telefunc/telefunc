@@ -1972,6 +1972,109 @@ describe('Room public behavior', () => {
     expect(isRoomError(await joining)).toBe(true)
     expect(sizes).toEqual([0])
   })
+  it("keeps a member's binary lane while an attached stub wants it, through toggles, attaches and closes", async () => {
+    const room = (await Room.create('incremental-binary-wants')) as ServerRoom
+    const me = await room.join()
+    const demand: Array<[string | null, boolean]> = []
+    me.onDemand((track, wanted) => demand.push([track, wanted]))
+    const a = register(room)
+    const b = register(room)
+    declare(a, { __r: 'sub-binary', wants: EVERY_TRACK })
+    await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
+    declare(a, { __r: 'sub-binary', wants: NO_TRACK })
+    expect(demand).toEqual([
+      [null, true],
+      [null, false],
+    ])
+    declare(a, { __r: 'sub-binary', wants: EVERY_TRACK })
+    declare(b, { __r: 'sub-binary', wants: { ...NO_TRACK, members: { [me.id]: { all: false, tracks: [''] } } } })
+    a.abort()
+    await subsOf(room).binaryReady()
+    expect(demand).toEqual([
+      [null, true],
+      [null, false],
+      [null, true],
+    ])
+    b.abort()
+    expect(demand.at(-1)).toEqual([null, false])
+    declare(b, { __r: 'sub-binary', wants: EVERY_TRACK }) // a closed stub's late declaration
+    await subsOf(room).binaryReady()
+    expect(subsOf(room)._binary.size).toBe(0)
+  })
+  it("drops a member's binary lane when it leaves", async () => {
+    const room = (await Room.create('incremental-binary-leave')) as ServerRoom
+    const me = await room.join()
+    declare(register(room), { __r: 'sub-binary', wants: EVERY_TRACK })
+    await subsOf(room).binaryReady()
+    expect(subsOf(room)._binary.size).toBe(1)
+    await me.leave()
+    expect(subsOf(room)._binary.size).toBe(0)
+  })
+  it("plans a selfDelivery: false member's lane from the holders that get its frames back", async () => {
+    const room = (await Room.create('incremental-binary-suppressed')) as ServerRoom
+    const me = await room.join({ selfDelivery: false })
+    const demand: Array<[string | null, boolean]> = []
+    me.onDemand((track, wanted) => demand.push([track, wanted]))
+    room.subscribeBinary(() => {}) // this instance's own listener suppresses `me`
+    const stub = register(room)
+    declare(stub, { __r: 'sub-binary', wants: EVERY_TRACK })
+    await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
+    declare(stub, { __r: 'sub-binary', wants: NO_TRACK })
+    expect(demand).toEqual([
+      [null, true],
+      [null, false],
+    ])
+  })
+  it('wants no lane for a co-returned participant serialized after its room stub attached', async () => {
+    await Room.create('suppressed-after-attach')
+    const me = (await Room.join('suppressed-after-attach', { selfDelivery: false })) as ServerLocalParticipant
+    const demand: Array<[string | null, boolean]> = []
+    me.onDemand((track, wanted) => demand.push([track, wanted]))
+    const room = (await Room.get('suppressed-after-attach')) as ServerRoom
+    await room.getParticipants()
+    const channels: ServerChannel[] = []
+    const context = replacerContext(channels)
+    roomReplacer.replace(room, context)
+    roomParticipantReplacer.replace(me, context)
+    const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
+    declare(stub, { __r: 'sub-binary', wants: EVERY_TRACK })
+    await subsOf(room).binaryReady()
+    expect(subsOf(room)._binary.size).toBe(0)
+    declare(register(room), { __r: 'sub-binary', wants: EVERY_TRACK })
+    await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
+  })
+  it("closes a member's inbox when it leaves, when its stub closes, and opens none under a closed stub", async () => {
+    const room = (await Room.create('incremental-inboxes')) as ServerRoom
+    const stub = register(room)
+    await stub._handleRequest({ __r: 'req-leave', id: await joinThrough(stub) })
+    expect(subsOf(room)._inbox.size).toBe(0)
+    await joinThrough(stub)
+    stub.abort()
+    expect(subsOf(room)._inbox.size).toBe(0) // before the departed member's eviction settles
+    const closing = register(room)
+    const entered = createDeferred()
+    const release = createDeferred()
+    Room.guard(room, {
+      onBeforeJoin: async () => {
+        entered.resolve()
+        await release.promise
+      },
+    })
+    const sizes: number[] = []
+    const abandon = (room as unknown as { _abandonAdmission(id: string): void })._abandonAdmission.bind(room)
+    vi.spyOn(room as unknown as { _abandonAdmission(id: string): void }, '_abandonAdmission').mockImplementation(
+      (id) => {
+        sizes.push(subsOf(room)._inbox.size)
+        abandon(id)
+      },
+    )
+    const joining = joinThrough(closing).catch((error: unknown) => error)
+    await entered.promise
+    closing.abort()
+    release.resolve()
+    expect(isRoomError(await joining)).toBe(true)
+    expect(sizes).toEqual([0])
+  })
   it('does not evict a client-held participant again once it left', async () => {
     vi.useFakeTimers()
     const room = (await Room.create('standalone-leave-once')) as ServerRoom
@@ -2702,6 +2805,7 @@ describe('Room public behavior', () => {
     await member.publish('expired')
     const { stub, peer } = serve(tail)
     await vi.advanceTimersByTimeAsync(ROOM_TAIL_ATTACH_TIMEOUT_MS + 1)
+    expect(subsOf(tail)._semantic.wanted).toBe(false)
     stub._onPeerSubscription('text', true)
     expect(semanticFrames(peer, 'data')).toEqual([])
   })
@@ -3861,9 +3965,13 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
   stub._attachPeer(peer, { broadcast })
   return { peer, decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }
+const EVERY_TRACK = { everyMember: { all: true, tracks: [] }, members: {} }
+const NO_TRACK = { everyMember: { all: false, tracks: [] }, members: {} }
 function subsOf(room: Room | ServerRoom): {
   _control: LaneSubscription
   _semantic: LaneSubscription
+  _binary: Map<string, LaneSubscription>
+  _inbox: Map<string, LaneSubscription>
   _refreshMembers(): Promise<void>
   _heartbeatTick(): Promise<void>
   binaryReady(): Promise<void>
