@@ -965,6 +965,18 @@ describe('Room public behavior', () => {
     expect({ empty, count: room.count }).toEqual({ empty: 1, count: 0 })
     await expect(authority.publish('tick')).resolves.toMatchObject({ seq: expect.any(Number) })
   })
+  it('counts only visible members as hidden ones leave and when the room closes', async () => {
+    const room = await Room.create('count-beside-hidden')
+    const bot = await room.join({ hidden: true })
+    await room.join({ hidden: true })
+    await room.join()
+    expect(room.count).toBe(1)
+    await bot.leave()
+    expect(room.count).toBe(1)
+    await Room.close(room.id)
+    await vi.waitFor(() => expect(room.isClosed).toBe(true))
+    expect(room.count).toBe(0)
+  })
   it("resolves the last member's leave() and kick when onEmpty closes the room under them", async () => {
     const room = await Room.create('closed-on-empty')
     room.onEmpty(() => Room.close(room.id))

@@ -150,6 +150,7 @@ class RoomState {
   private readonly _listenerCleanups = new Map<object, Set<() => void>>()
   private readonly _changeCbs: Array<() => void> = []
   private readonly _members = new Map<string, MemberEntry>()
+  private _hiddenMembers = 0
   private readonly _onListenersChanged: (member: string | null) => void
   private readonly _onCallbackError: (err: unknown) => void
   private readonly _onLeave: RoomStateOptions['onLeave']
@@ -199,16 +200,11 @@ class RoomState {
   /** Before the roster is known: the seed count (which excludes hidden members) adjusted by the events since. */
   get count(): number {
     if (!this._rosterKnown) return this._seedCount
-    return this._members.size - this._hiddenCount()
+    return this._members.size - this._hiddenMembers
   }
   /** `join({ hidden: true })` members: routable, excluded from every presence read. */
   listHidden(): RemoteParticipant[] {
     return [...this._members.values()].filter((entry) => entry.hidden).map((entry) => this._remote(entry))
-  }
-  private _hiddenCount(): number {
-    let n = 0
-    for (const entry of this._members.values()) if (entry.hidden) n++
-    return n
   }
   /** How the room closed for this view; `null` while it is open. */
   get closedCause(): LeaveCause | null {
@@ -399,6 +395,7 @@ class RoomState {
     entry.leaveCause = cause
     const remote = this._remote(entry)
     this._members.delete(entry.id)
+    if (entry.hidden) this._hiddenMembers--
     // A hidden participant's leave is no presence event either; its own handlers and listener release still run.
     if (!entry.hidden && !this._rosterKnown) this._seedCount = Math.max(0, this._seedCount - 1)
     this._bumpMembership()
@@ -452,6 +449,7 @@ class RoomState {
     this.closed = true
     this._rosterKnown = true // authoritatively empty
     this._members.clear()
+    this._hiddenMembers = 0
     this._bumpMembership()
     // State and snapshot are already closed-and-empty when cleanup callbacks run.
     for (const entry of departed) {
@@ -565,6 +563,7 @@ class RoomState {
   private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
     const entry = this._newEntry(entrySeed)
     this._members.set(entry.id, entry)
+    if (entry.hidden) this._hiddenMembers++
     return entry
   }
   private _newEntry(entrySeed: MemberSnapshot): MemberEntry {
