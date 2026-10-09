@@ -469,8 +469,8 @@ class ClientConnection implements MuxConnection {
   private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
   private sendBuffer: BufferedFrame[] = []
-  /** A sequenced frame of a channel that may send waits in `sendBuffer` for the transport to have room for data. */
-  private heldForRoom = false
+  /** A channel that may send has a sequenced frame waiting in sendBuffer: what it sends next waits behind it. */
+  private holdsSendable = false
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
@@ -648,9 +648,9 @@ class ClientConnection implements MuxConnection {
     channel._fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
-  /** The transport's server acknowledged data: what waited for room goes. */
+  /** The transport may have room for data again: what waited for it goes. */
   _onTransportRoom(transport: ClientChannelTransport): void {
-    if (transport === this.transport && this.heldForRoom && this.sendsOpen) this.drainBufferedFramesToWire()
+    if (transport === this.transport && this.holdsSendable && this.sendsOpen) this.drainBufferedFramesToWire()
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
@@ -746,14 +746,14 @@ class ClientConnection implements MuxConnection {
   private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     const open = this.canSendImmediately(ix)
     // What it held goes first, once it has room.
-    if (open && this.heldForRoom && this.transport.sendRoom() > 0) this.drainBufferedFramesToWire()
-    if (open && !this.heldForRoom && this.transport.sendRoom() > 0) {
+    if (open && this.holdsSendable && this.transport.sendRoom() > 0) this.drainBufferedFramesToWire()
+    if (open && !this.holdsSendable && this.transport.sendRoom() > 0) {
       this.replayBuffers.get(ix)!.push(seq, frame)
       this.transport.sendFrame({ kind, frame })
       return
     }
     this.sendBuffer.push({ frame, channelIx: ix, seq })
-    if (open) this.heldForRoom = true
+    if (open) this.holdsSendable = true
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -814,7 +814,8 @@ class ClientConnection implements MuxConnection {
 
   bufferedAmount(): number {
     let held = 0
-    if (this.heldForRoom) for (const { frame, seq } of this.sendBuffer) if (seq !== undefined) held += frame.byteLength
+    if (this.holdsSendable)
+      for (const { frame, seq } of this.sendBuffer) if (seq !== undefined) held += frame.byteLength
     return this.transport.bufferedAmount() + held
   }
 
@@ -1743,7 +1744,7 @@ class ClientConnection implements MuxConnection {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.sendBuffer
     let room = this.transport.sendRoom()
-    let heldForRoom = false
+    let holdsSendable = false
     let writeIx = 0
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
@@ -1753,14 +1754,14 @@ class ClientConnection implements MuxConnection {
       if (!releasable(channelIx)) {
         sendBuffer[writeIx++] = entry
         // What a channel that may send still holds goes before what it sends next.
-        if (seq !== undefined && this.isSendable(channelIx)) heldForRoom = true
+        if (seq !== undefined && this.isSendable(channelIx)) holdsSendable = true
         continue
       }
       if (seq !== undefined) {
         // Once the room is used, it is for the frames after: a channel's stay in order.
         if (room <= 0) {
           sendBuffer[writeIx++] = entry
-          heldForRoom = true
+          holdsSendable = true
           continue
         }
         room -= frame.byteLength
@@ -1769,7 +1770,7 @@ class ClientConnection implements MuxConnection {
       frames.push({ kind: 'reconcile', frame })
     }
     sendBuffer.length = writeIx
-    this.heldForRoom = heldForRoom
+    this.holdsSendable = holdsSendable
     return frames
   }
 
@@ -2248,7 +2249,8 @@ class SseTransport implements UpgradeSource {
     // A timer pending is for the earliest deadline queued before this frame: only this frame's can come earlier.
     if (this.flushScheduler.pending && this.hasWire()) this.flushScheduler.schedule(deadline)
     else this.scheduleFlush()
-    if (deadline <= now || this.holdsEagerFlushBytes()) void this.flushOutbox()
+    // A whole POST is held: it goes without waiting out the throttle, which would cap an upload at a POST per throttle.
+    if (deadline <= now || this.sendRoom() <= 0) void this.flushOutbox()
   }
 
   /** While a POST is out, what joins the outbox goes into the next one's body a MiB at a time, so the flush after the
@@ -2270,11 +2272,6 @@ class SseTransport implements UpgradeSource {
       first: this.outbox[0]!,
       last: this.outbox[this.outbox.length - 1]!,
     }
-  }
-
-  /** A whole POST is held: it goes without waiting out the throttle, which would cap an upload at a POST per throttle. */
-  private holdsEagerFlushBytes(): boolean {
-    return this.sendRoom() <= 0
   }
 
   /** The fold, if it still heads `entries`. */
@@ -2521,7 +2518,7 @@ class SseTransport implements UpgradeSource {
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */
   private flushNextOrDrain(): void {
     if (this.outbox.length > 0) {
-      if (this.holdsEagerFlushBytes()) void this.flushOutbox()
+      if (this.sendRoom() <= 0) void this.flushOutbox()
       else this.scheduleFlush()
       return
     }
