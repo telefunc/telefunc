@@ -138,8 +138,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
   private readonly _state: MemoryBackendState
-  /** Deliveries in seq order: the running one stays first, so a publish made inside it is delivered after. */
+  /** Deliveries in seq order from `_next`: the running one stays queued, so a publish made inside it is delivered after. */
   private readonly _deliveries: Array<() => void> = []
+  private _next = 0
   private _deliveredThisTurn = 0
   constructor(options: MemoryBackendOptions = {}) {
     this._state = options.state ?? new MemoryBackendState()
@@ -167,19 +168,23 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
   private _deliver(delivery: () => void): void {
     this._deliveries.push(delivery)
-    if (this._deliveries.length === 1) this._drain()
+    if (this._deliveries.length - this._next === 1) this._drain()
   }
 
   private _drain(): void {
-    for (; this._deliveries.length > 0; this._deliveries.shift()) {
+    for (; this._next < this._deliveries.length; this._next++) {
       if (this._deliveredThisTurn === DELIVERIES_PER_TURN) return
       if (this._deliveredThisTurn++ === 0) nextTurn(() => this._nextTurn())
-      this._deliveries[0]!()
+      this._deliveries[this._next]!()
     }
+    this._deliveries.length = 0
+    this._next = 0
   }
 
   private _nextTurn(): void {
     this._deliveredThisTurn = 0
+    this._deliveries.splice(0, this._next)
+    this._next = 0
     if (this._deliveries.length > 0) this._drain()
   }
 
