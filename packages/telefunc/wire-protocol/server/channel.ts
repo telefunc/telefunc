@@ -396,7 +396,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._ttlTimer = null
         this._shutdown(
           new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
-          true,
+          { pageGone: true },
         )
       }, c.connectTtl),
     )
@@ -666,7 +666,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {
         this._reconnectTimer = null
-        this._shutdown(new NetworkError('Channel timed out: client did not reconnect within grace period', true), true)
+        this._shutdown(new NetworkError('Channel timed out: client did not reconnect within grace period', true), {
+          pageGone: true,
+        })
       }, reconnectTimeout),
     )
   }
@@ -674,13 +676,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerRecoveryFailure(): void {
     if (this._didShutdown) return
     this._peer = null
-    this._shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true), true)
+    this._shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true), { pageGone: true })
   }
 
   _onPeerClose(): void {
     if (this._didShutdown) return
     this._peer = null
-    this._shutdown(undefined, true)
+    this._shutdown(undefined, { pageGone: true })
   }
 
   /** @internal Its replay no longer holds what its page lacks of it: the channel ends on both ends, `peer` telling its
@@ -885,7 +887,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** `pageGone`: its page left it, or never came, so nothing it lacks of the channel can reach it. */
-  protected _shutdown(err?: Error, pageGone = false): void {
+  protected _shutdown(err?: Error, { pageGone = false } = {}): void {
     if (this._didShutdown) return
     this._didShutdown = true
     this._isClosed = true

@@ -223,12 +223,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     }
   }
 
-  protected override _shutdown(err?: Error, pageGone?: boolean): void {
+  protected override _shutdown(err?: Error, options?: { pageGone?: boolean }): void {
     this._unsubBroadcast?.()
     this._unsubBroadcast = null
     this._unsubBinaryBroadcast?.()
     this._unsubBinaryBroadcast = null
-    super._shutdown(err, pageGone)
+    super._shutdown(err, options)
   }
 
   // --- Internal broadcast helpers ---
