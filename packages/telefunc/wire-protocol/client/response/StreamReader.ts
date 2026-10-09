@@ -1,7 +1,7 @@
 export { StreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { concat } from '../../frame.js'
+import { concatAll } from '../../frame.js'
 import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)
@@ -37,7 +37,9 @@ class StreamReader extends BaseStreamReader {
   }
 
   async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
-    while (this.buffer.length < n) {
+    let parts: Uint8Array<ArrayBuffer>[] | undefined
+    let length = this.buffer.length
+    while (length < n) {
       let done: boolean
       let value: Uint8Array<ArrayBuffer> | undefined
       let readError: unknown
@@ -54,8 +56,11 @@ class StreamReader extends BaseStreamReader {
         if (this.cancelled) return EMPTY
         throw readError ?? new Error('Connection lost — the server closed the stream before all data was received.')
       }
-      this.buffer = this.buffer.length === 0 ? value! : concat(this.buffer, value!)
+      parts ??= this.buffer.length > 0 ? [this.buffer] : []
+      parts.push(value!)
+      length += value!.length
     }
+    if (parts) this.buffer = parts.length === 1 ? parts[0]! : concatAll(parts)
     const result = this.buffer.subarray(0, n)
     this.buffer = n < this.buffer.length ? this.buffer.subarray(n) : EMPTY
     return result

@@ -2,7 +2,7 @@ export { SSEStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { SSELineSplitter } from '../SSELineSplitter.js'
-import { concat } from '../../frame.js'
+import { concatAll } from '../../frame.js'
 import { base64urlToUint8Array } from '../../base64url.js'
 import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 
@@ -19,6 +19,9 @@ const EMPTY = new Uint8Array(0)
 class SSEStreamReader extends BaseStreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
   private binary: Uint8Array<ArrayBuffer> = EMPTY
+  /** Events decoded since `binary`, joined once `readExact` has its bytes. */
+  private events: Uint8Array<ArrayBuffer>[] = []
+  private eventBytes = 0
   private lines = new SSELineSplitter()
   private pendingData = ''
 
@@ -42,7 +45,7 @@ class SSEStreamReader extends BaseStreamReader {
   }
 
   async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
-    while (this.binary.length < n) {
+    while (this.binary.length + this.eventBytes < n) {
       let done: boolean
       let value: Uint8Array<ArrayBuffer> | undefined
       let readError: unknown
@@ -61,6 +64,12 @@ class SSEStreamReader extends BaseStreamReader {
       }
       this.lines.push(value!, this.onLine)
     }
+    if (this.events.length > 0) {
+      const parts = this.binary.length > 0 ? [this.binary, ...this.events] : this.events
+      this.binary = parts.length === 1 ? parts[0]! : concatAll(parts)
+      this.events = []
+      this.eventBytes = 0
+    }
     const result = this.binary.subarray(0, n)
     this.binary = n < this.binary.length ? this.binary.subarray(n) : EMPTY
     return result
@@ -70,7 +79,9 @@ class SSEStreamReader extends BaseStreamReader {
     if (line.startsWith('data: ')) {
       this.pendingData = line.slice(6)
     } else if (line === '' && this.pendingData !== '') {
-      this.binary = concat(this.binary, base64urlToUint8Array(this.pendingData))
+      const event = base64urlToUint8Array(this.pendingData)
+      this.events.push(event)
+      this.eventBytes += event.length
       this.pendingData = ''
     }
   }
