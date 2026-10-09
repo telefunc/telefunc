@@ -1,0 +1,185 @@
+export { captureMismatch, captureOrCoarse, captureBothOrCoarse, changesFromRows, coarse }
+export { emitSafely } from '../bus/dbRuntime.js'
+export type { CaptureSink } from '../bus/dbRuntime.js'
+export type { CaptureMismatch, Images }
+
+import { report } from '../bus/captureReport.js'
+import type { Op, Plan, PrecisePlan, SubstitutionPlan } from './writePlan.js'
+import type { Row, TableChange } from '../bus/router/events.js'
+
+// Turning what a write statement returned into the `TableChange`s the graphs read. Everything here runs
+// AFTER the database has applied the write, so nothing in this module may fail the caller: a row set that
+// cannot be trusted becomes ONE coarse marker for the table, never a fabricated row.
+//
+// What a captured change carries:
+//   INSERT  → { kind:'insert', new: full row }
+//   DELETE  → { kind:'delete', key: PK }        (retraction by old PK)
+//   UPDATE  → { kind:'update', new: full row, key: PK }   (key = old PK = new PK; non-PK-changing only)
+//
+// …and, where the connection returned BOTH images of a changed row in the write statement itself:
+//   DELETE  → { kind:'delete', old: full row, key: PK }
+//   UPDATE  → { kind:'update', old: full row, new: full row, key: OLD PK }
+// which makes two previously-coarse classes exact: an update that MOVES the primary key (the old key is
+// right there), and any update a STATELESS live query must decide membership for (it can compare the two
+// images instead of assuming the row may have entered or left).
+
+/** A row's two images, as the write statement returned them. */
+type Images = { old: Row; new: Row }
+
+/** Why a captured row set cannot be trusted as a full, identifiable image. `undefined` = it can. */
+type CaptureMismatch = { rowIndex: number; reason: 'missing-columns' | 'missing-key'; detail: string } | undefined
+
+/** THE CAPTURE OBSERVATION SEAM — the last check between a captured row set and precise change events.
+ *
+ *  Exported so the mismatch decision is independently observable: it is the one place a shape/identity
+ *  disagreement is caught, and it has to be assertable without contriving a driver that returns malformed
+ *  rows. A mismatch fails CLOSED (one coarse marker) — never a fabricated row or a key of `undefined`s.
+ *
+ *  Checks EVERY row, not just the first: a partial projection or a driver quirk can widen the first row and
+ *  narrow a later one, and `changesOf` would then emit a change whose `new` silently lacks columns.
+ *
+ *  `requireKey` is whether a retraction will be keyed off these rows: an absent or NULL key value would key
+ *  it to nothing. Callers whose rows carry the whole fact and retract nothing pass `false` — an insert
+ *  (`captureOrCoarse` derives it from the op), and a both-images NEW image, whose retraction key is the OLD
+ *  image's to provide.
+ *
+ *  What is deliberately NOT claimed here: a row-COUNT cross-check. On both RETURNING paths the only
+ *  affected-row count available (`reconstruct`'s `affectedRows`) is DERIVED from these same rows, so there
+ *  is no independent oracle to disagree with — a "count check" against it could never fail. Where an
+ *  independent count does exist (a SQLite direct terminal's `changes`) the write already fails closed to
+ *  coarse for other reasons. Asserting a check that cannot fail would be verification theatre. */
+function captureMismatch(rows: Row[], columns: string[], pk: string[], requireKey: boolean): CaptureMismatch {
+  for (const [rowIndex, row] of rows.entries()) {
+    const missing = columns.filter((column) => !(column in row))
+    if (missing.length > 0) return { rowIndex, reason: 'missing-columns', detail: missing.join(', ') }
+    if (!requireKey) continue
+    const unkeyed = unkeyedBy(row, pk)
+    if (unkeyed) return { rowIndex, ...unkeyed }
+  }
+  return undefined
+}
+
+/** The KEY half alone, for rows whose SHAPE is already settled by construction — `ImageLayout.split`'s, whose
+ *  every field key exists whatever the statement returned (see its note). Asking those rows for their shape
+ *  would be asking a question with one possible answer; asking them for a usable retraction key is not. */
+function captureUnkeyed(rows: Row[], pk: string[]): CaptureMismatch {
+  for (const [rowIndex, row] of rows.entries()) {
+    const unkeyed = unkeyedBy(row, pk)
+    if (unkeyed) return { rowIndex, ...unkeyed }
+  }
+  return undefined
+}
+
+/** The PK fields this row cannot be addressed by — absent, or NULL. One implementation, so both callers
+ *  report the same thing. */
+function unkeyedBy(row: Row, pk: string[]): { reason: 'missing-key'; detail: string } | undefined {
+  const unkeyed = pk.filter((field) => row[field] === undefined || row[field] === null)
+  return unkeyed.length > 0 ? { reason: 'missing-key', detail: unkeyed.join(', ') } : undefined
+}
+
+/** Precise changes when the captured rows are a trustworthy full image, else ONE coarse marker. */
+function captureOrCoarse(op: Op, relationId: string, rows: Row[], plan: PrecisePlan): TableChange[] {
+  const mismatch = captureMismatch(rows, plan.columns, plan.pk, op !== 'insert')
+  if (!mismatch) return changesOf(op, relationId, rows, plan)
+  report('capture-mismatch', { relation: relationId, mismatch })
+  return [coarse(relationId)]
+}
+
+/** Precise changes from BOTH images, else one coarse marker.
+ *
+ *  One KEY check, on the OLD image — which is the whole of what this path can be asked. Its rows come from
+ *  `ImageLayout.split`, which is total in the fields, so a shape check over them cannot disagree; only
+ *  whether the retraction key is usable can. The change is built from the OLD image (it carries that key),
+ *  and a key that is absent or NULL coarsens rather than addressing nothing. */
+function captureBothOrCoarse(
+  op: Op,
+  relationId: string,
+  pairs: Images[],
+  plan: Extract<SubstitutionPlan, { strategy: 'bothImages' }>,
+): TableChange[] {
+  const emitted = (row: Row) => physicalRow(row, plan.physical)
+  // op is never 'insert' on this path, so a retraction key is always required.
+  const mismatch = captureUnkeyed(
+    pairs.map((pair) => pair.old),
+    plan.pk,
+  )
+  if (mismatch) {
+    report('capture-mismatch', { relation: relationId, mismatch })
+    return [coarse(relationId)]
+  }
+  return pairs.map(({ old, new: fresh }) =>
+    op === 'delete'
+      ? { table: relationId, kind: 'delete', old: emitted(old), key: keyOf(old, plan) }
+      : // The key is taken from the OLD image on purpose: it addresses the row as the graph knows it, which
+        // is what makes an update that MOVES the key describable rather than coarse.
+        { table: relationId, kind: 'update', old: emitted(old), new: emitted(fresh), key: keyOf(old, plan) },
+  )
+}
+
+function changesOf(op: Op, table: string, rows: Row[], plan: PrecisePlan): TableChange[] {
+  return rows.map((row) => {
+    const emitted = physicalRow(row, plan.physical)
+    if (op === 'insert') return { table, kind: 'insert', new: emitted }
+    if (op === 'delete') return { table, kind: 'delete', key: keyOf(row, plan) }
+    return { table, kind: 'update', new: emitted, key: keyOf(row, plan) }
+  })
+}
+
+// ── rows a terminal returned directly ───────────────────────────────
+
+/** Capture from rows a terminal returned DIRECTLY, without capture having chosen the statement's RETURNING.
+ *  Only a caller's own full `.returning()` qualifies: widening is not available here, because the caller's
+ *  result must come back with its exact shape and sync/async-ness and the statement runs as they wrote it. */
+function changesFromRows(result: unknown, plan: Plan, relationId: string, op: Op): TableChange[] {
+  if (plan.strategy !== 'callerReturning' || !Array.isArray(result)) return [coarse(relationId)]
+  return captureOrCoarse(op, relationId, namedRows(result, plan), plan)
+}
+
+/** Driver rows as NAMED rows. `.all()`/`.get()`/`await` already yield objects; SQLite's `.values()` terminal
+ *  yields POSITIONAL arrays. Naming those is not the forbidden guess it looks like: on a `callerReturning`
+ *  plan a non-empty `callerOrder` means the selection IS the full image, and the statement's RETURNING list
+ *  was BUILT from that ordered selection — so position i is its i-th column by construction (verified
+ *  against node:sqlite — a `.returning({ n: name, i: id })` comes back `["z", 9]`). A positional row of a
+ *  length the selection does not explain is left alone and fails closed downstream. */
+function namedRows(rows: unknown[], plan: PrecisePlan): Row[] {
+  const { callerOrder } = plan
+  return rows.map((row) => {
+    if (!Array.isArray(row) || callerOrder.length === 0 || row.length !== callerOrder.length) return row as Row
+    const named: Row = {}
+    callerOrder.forEach((field, index) => {
+      named[field] = row[index]
+    })
+    return named
+  })
+}
+
+// ── the row-key space a change is emitted in ────────────────────────
+//
+// A captured row arrives keyed by drizzle FIELD names (`teamId`), because that is what a `.returning()`
+// row is. The graph reads PHYSICAL column names (`team_id`) — `rowSpace.projectRaw` looks up the seed
+// descriptor's columns, which the compiler derived from SQL. Emitting field keys therefore fired changes
+// into a space the graphs do not read: a mapped column silently matched nothing.
+//
+// This translation is deliberately the LAST step and applies ONLY to what is emitted. Verification
+// (`captureMismatch`) and the caller's own result stay in field space, where the driver's rows live — the
+// two spaces are kept apart rather than one being converted into the other early and used for both.
+
+/** A captured row re-keyed by physical column name. A field with no known column is dropped rather than
+ *  passed through under a name the graph would misread. */
+function physicalRow(row: Row, physical: Record<string, string>): Row {
+  const out: Row = {}
+  for (const [field, value] of Object.entries(row)) {
+    const column = physical[field]
+    if (column !== undefined) out[column] = value
+  }
+  return out
+}
+
+/** The retraction key, in the same physical space as the row it addresses. */
+function keyOf(row: Row, plan: PrecisePlan): Row {
+  const key: Row = {}
+  for (const field of plan.pk) key[plan.physical[field] ?? field] = row[field]
+  return key
+}
+
+const coarse = (table: string): TableChange => ({ table, kind: 'coarse' })

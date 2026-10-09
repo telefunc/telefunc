@@ -1,0 +1,191 @@
+export { derived, LiveCell }
+export type { Live, LiveSubscription }
+
+import { addTap } from './taps.js'
+
+// Internal brand shared with the wire replacer without adding detection to the public Live surface.
+const LIVE_BRAND = Symbol.for('telefunc.Live')
+
+/**
+ * A live value: read `.data` for the current snapshot. A `Live` also signals when it goes stale — an
+ * adapter (e.g. `@telefunc/tanstack-query`) observes that and refetches, swapping in a fresh handle. The
+ * bare handle's own `.data` does not mutate in place; staleness drives a refetch, not an in-place update.
+ *
+ * Return one from a telefunction and the client receives a live handle:
+ * ```ts
+ * // server
+ * async function onGetTodos() { return db.select().from(todos).live() }
+ * // client
+ * const todos = await onGetTodos()
+ * todos.data // Todo[] — a snapshot; an adapter refetches when it goes stale
+ * ```
+ */
+type Live<T> = {
+  readonly data: T
+}
+
+/**
+ * Derive a live value from other live values. Reading a `Live`'s `.data` inside `compute` registers it as
+ * a dependency; the derived value goes stale when any dependency does.
+ * ```ts
+ * const count = derived(() => todos.data.length)
+ * ```
+ *
+ * The return type is annotated as `Live<R>` rather than inferred, so the emitted `.d.ts` pins the public
+ * surface to `{ readonly data: R }` instead of leaking the internal `LiveCell`.
+ */
+function derived<R>(compute: () => R): Live<R> {
+  return LiveCell.derived(compute)
+}
+
+/** @internal The consumer-side subscription behind a `Live<T>` — the seam the query adapter binds to
+ *  (invalidate → refetch). Deliberately NOT on the public `Live<T>`: a user reads `.data`, and only an
+ *  adapter needs the tap. Satisfied by the revived client handle.
+ *
+ *  Type-only so the browser adapter pulls no server runtime module. */
+type LiveSubscription = {
+  /** Observe stale signals. Returns an idempotent unsubscribe. */
+  onInvalidate(callback: () => void): () => void
+  close(): Promise<void>
+}
+
+/** A server-owned source of invalidations for one Live. Attached before serialization via
+ *  `attachSource`; the replacer subscribes it only when the handle crosses the wire, and releases it on
+ *  the last owning channel's close. */
+type LiveActivationSource = {
+  subscribe(onInvalidate: () => void): () => void
+}
+
+// Callback-scoped dependency tracking for `Live.derived`: each `Live.derived(fn)` pushes a frame, and
+// every `.data` getter read during `fn` records its cell on the top frame (the Solid/Vue computed
+// idiom — synchronous, nothing request-global). Popped in `finally`, so a throwing `fn` never poisons
+// a later derivation.
+const trackingStack: Array<Set<LiveCell<unknown>>> = []
+
+function track(cell: LiveCell<unknown>): void {
+  trackingStack[trackingStack.length - 1]?.add(cell)
+}
+
+/** @internal The in-memory cell behind every `Live<T>`: the producer end (construct around a snapshot,
+ *  drive it via `invalidate`) plus the serialize-time activation lifecycle. Not exported from the
+ *  package's public entry — that IS the boundary that keeps the producer verbs off the public API, so a
+ *  telefunction returns the handle directly and the wire replacer serializes it. */
+class LiveCell<T> {
+  readonly [LIVE_BRAND] = true
+  private currentData: T
+  private closed = false
+  private invalidateTaps: Array<() => void> = []
+  // One coalesced invalidation per microtask window — many `invalidate`s in one window deliver once.
+  private pendingInvalidate = false
+  private flushScheduled = false
+  // ── serialize-time activation (deferred, cell-local lease-refcounted) ──
+  /** Deps read during a `Live.derived` callback, held INERT — subscribed only at serialization. */
+  private pendingDeps: Array<LiveCell<unknown>> = []
+  /** Server-owned invalidation sources, subscribed on the first lease. */
+  private sources: LiveActivationSource[] = []
+  private sourceTeardowns: Array<() => void> = []
+  /** Teardowns for activated pending deps (unsubscribe + cascade release). */
+  private activationTeardowns: Array<() => void> = []
+  /** One lease per owning channel; the source + deps activate on 0→1 and tear down on 1→0. */
+  private lease = 0
+
+  constructor(data: T) {
+    this.currentData = data
+  }
+
+  get data(): T {
+    track(this) // reading `.data` inside a `Live.derived` callback registers this cell as a dependency
+    return this.currentData
+  }
+
+  /** Signal the value is stale — the consumer refetches. Coalesced per microtask. */
+  invalidate(): void {
+    if (this.closed) return
+    this.pendingInvalidate = true
+    this.scheduleFlush()
+  }
+
+  onInvalidate(callback: () => void): () => void {
+    return addTap(this.invalidateTaps, callback)
+  }
+
+  /** Stop invalidating. `closed` is read by `invalidate` (a closed cell never fires again); nothing
+   *  observes the transition, so there is no close-notification to deliver. */
+  close(): Promise<void> {
+    this.closed = true
+    return Promise.resolve()
+  }
+
+  /** Computed sugar: run `fn` once (tracking which deps' `.data` were read), snapshot the value, and
+   *  record the deps as INERT pending descriptors — NO subscriptions at call time. The replacer
+   *  activates them at serialization (cascade `activate`); a derived that never serializes subscribes
+   *  nothing. Invalidate-only forwarding (a dep's invalidation forwards to the derived; re-derivation
+   *  is the client's refetch re-running the telefunction). */
+  static derived<R>(fn: () => R): LiveCell<R> {
+    const frame = new Set<LiveCell<unknown>>()
+    trackingStack.push(frame)
+    let value: R
+    try {
+      value = fn()
+    } finally {
+      trackingStack.pop()
+    }
+    const derived = new LiveCell(value)
+    derived.pendingDeps = [...frame]
+    return derived
+  }
+
+  /** Attach a server-owned invalidation source. Inert until the first `activate`. */
+  attachSource(source: LiveActivationSource): void {
+    this.sources.push(source)
+  }
+
+  /** Serialize-time activation, refcounted by cell-local leases (one per owning channel). On the first
+   *  lease it subscribes this cell's sources and cascade-activates each pending dep — idempotent, so a
+   *  dep also returned elsewhere activates EXACTLY ONCE — wiring each dep's `onInvalidate` to this cell's
+   *  `invalidate` (invalidate-only forwarding). */
+  activate(): void {
+    this.lease++
+    if (this.lease !== 1) return
+    for (const source of this.sources) this.sourceTeardowns.push(source.subscribe(() => this.invalidate()))
+    for (const dep of this.pendingDeps) {
+      dep.activate()
+      const off = dep.onInvalidate(() => this.invalidate())
+      this.activationTeardowns.push(() => {
+        off()
+        dep.release()
+      })
+    }
+  }
+
+  /** Release one lease (an owning channel closed). On the LAST release it tears down the source
+   *  subscription and cascade-releases each pending dep — exactly once, order-independent. */
+  release(): void {
+    if (this.lease === 0) return
+    this.lease--
+    if (this.lease !== 0) return // a shared cell stays live while any owning channel remains
+    for (const teardown of this.sourceTeardowns) teardown()
+    this.sourceTeardowns = []
+    for (const teardown of this.activationTeardowns) teardown()
+    this.activationTeardowns = []
+    void this.close()
+  }
+
+  private scheduleFlush(): void {
+    if (this.flushScheduled) return
+    this.flushScheduled = true
+    queueMicrotask(() => this.flush())
+  }
+
+  private flush(): void {
+    this.flushScheduled = false
+    if (this.closed) {
+      this.pendingInvalidate = false
+      return
+    }
+    if (this.pendingInvalidate) {
+      this.pendingInvalidate = false
+      for (const tap of [...this.invalidateTaps]) tap()
+    }
+  }
+}

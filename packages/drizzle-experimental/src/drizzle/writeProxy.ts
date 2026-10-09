@@ -1,0 +1,183 @@
+export { isWriteOp, captureTransactions }
+
+import { report } from '../bus/captureReport.js'
+import { ingestLocal, ingestWrite, registryFor } from '../bus/dbRuntime.js'
+import { publishCoarseAll } from '../bus/changeRuntime.js'
+import { captureMutation, captureRawSql } from './writeCapture.js'
+import { isCoarseAllSurface } from './writeTerminals.js'
+import { type CaptureSink, emitSafely } from './writeChanges.js'
+import type { TableChange } from '../bus/router/events.js'
+
+// THE WRITE-SIDE PROXY MACHINERY: which db members are writes, which are raw execution surfaces, and the
+// whole of what a `db.transaction(cb)` has to do so that one committed transaction is one atomic graph tick.
+//
+// Kept out of the `reactiveDrizzle` entry because it is a different altitude: the entry routes a member
+// access to a strategy, while everything here is the strategy — buffering, savepoint scoping, commit-time
+// marker computation, and the rollback semantics that make each of those safe.
+
+function isWriteOp(prop: string | symbol): prop is 'insert' | 'update' | 'delete' {
+  return prop === 'insert' || prop === 'update' || prop === 'delete'
+}
+
+/** Everything ONE transaction scope needs to know about the world enclosing it.
+ *
+ *  Passing these to `wrapTransaction` positionally instead would put the concern one level too high: the
+ *  entry would have to build the announcement closure and the commit-marker closure itself, so a caller that
+ *  only wants "capture transactions on this db" would have to know how a savepoint differs from a top-level
+ *  commit. The scope is owned here, and the two shapes it can take are named below. */
+type TransactionScope = {
+  /** The session capture PLANS against and keys the registry to — always the top db, never a tx handle.
+   *  A tx db is not recognized as its own driver, and the graphs live on the db the reads acquired from. */
+  topDb: object
+  /** Where a committed buffer flushes, as ONE tick: the top db's graphs, or a parent tx's buffer for a
+   *  savepoint. `suppressRemote` is computed at commit — true when this commit's remote half is the single
+   *  coarse-all announcement (raw SQL ran), because also publishing the batch would make every remote
+   *  watcher pay twice for one commit. Only the remote hop is dropped; the local tick is identical. A
+   *  savepoint ignores the flag: it delivers into its parent's buffer, and the top level decides once. */
+  flush: (changes: TableChange[], suppressRemote: boolean) => void
+  /** How a committed raw statement reaches other instances. At the top level it publishes; a savepoint
+   *  promotes the intent into its parent instead.
+   *
+   *  The REMOTE half only, unlike `announceCoarse` (dbRuntime) which owns both: a transaction's local
+   *  coarsening cannot be its own tick, because it has to land atomically beside the captured rows this
+   *  commit is flushing — so `commitCoarseMarkers` + the remote-suppressed `flush` carry it, and this
+   *  carries the rest. */
+  announce: () => void
+  /** The coarse markers a committed raw statement owes THIS db's own graphs, computed AT COMMIT — the top
+   *  level supplies the real thing; a savepoint supplies nothing and promotes intent, so the markers are
+   *  computed exactly once, against the watch-set as it stands when the transaction actually lands. */
+  commitCoarseMarkers: () => TableChange[]
+  /** The ROOT of the physical transaction this scope belongs to — undefined at the top level, where the
+   *  transaction drizzle is about to open BECOMES the root. A nested scope is a SAVEPOINT inside the same
+   *  physical transaction, not a transaction of its own, so it inherits the root rather than starting one. */
+  root?: object
+}
+
+/** Capture every transaction opened on a reactive db. This is the whole seam the entry needs: hand it the
+ *  host and the top db, and the top-level scope — where a committed buffer lands, what a committed raw
+ *  statement announces and which markers it owes — is constructed here rather than at the call site. */
+function captureTransactions(txHost: object, topDb: object) {
+  return wrapTransaction(txHost, {
+    topDb,
+    flush: (changes, suppressRemote) =>
+      suppressRemote ? ingestLocal(topDb, { changes }) : ingestWrite(topDb, { changes }),
+    announce: () => publishCoarseAll(topDb),
+    commitCoarseMarkers: () =>
+      registryFor(topDb)
+        .router.watchedTables()
+        .map((table) => ({ table, kind: 'coarse' as const })),
+  })
+}
+
+/** Wrap `db.transaction(cb)`: the callback gets a proxied tx db whose writes BUFFER; on outer COMMIT the
+ *  whole buffer flushes as ONE `ChangeBatch` to the scope's sink (the top db's graphs, or a parent tx's
+ *  buffer for a savepoint), so a committed transaction is one atomic graph tick. A rollback rejects and
+ *  never flushes → its changes are discarded. */
+function wrapTransaction(txHost: object, scope: TransactionScope) {
+  return (callback: (tx: unknown) => unknown, config?: unknown) => {
+    const buffer: TableChange[] = []
+    const buffered: CaptureSink = (changes) => {
+      for (const change of changes) buffer.push(change)
+    }
+    // A raw statement inside the transaction cannot be published when it runs: the transaction may still roll
+    // back, and a coarse-all already broadcast would have told every other instance to refetch state that
+    // never existed. Record the intent and hand it to the enclosing scope only if we COMMIT.
+    let announcePending = false
+    const bufferedAnnounce = () => {
+      announcePending = true
+    }
+    const baseTransaction = (txHost as { transaction: (cb: unknown, c?: unknown) => unknown }).transaction.bind(txHost)
+    return Promise.resolve(
+      baseTransaction(
+        (tx: object) => callback(txProxy(tx, scope.topDb, buffered, bufferedAnnounce, scope.root ?? tx)),
+        config,
+      ),
+    ).then((result) => {
+      // Reached ONLY on COMMIT (a rollback / savepoint-rollback rejects and skips this) → flush once.
+      // Isolated: the transaction has COMMITTED, so a capture/publish fault must not reject it (it degrades
+      // to a coarse ingest and is reported) — the caller's result stays exactly plain Drizzle's.
+      //
+      // A transaction that ran raw SQL flushes LOCAL-ONLY: its remote announcement is the single coarse-all
+      // below, and publishing the batch as well would deliver two messages — and two refetches — for one
+      // commit. That second message is not the price of atomicity: the whole buffer still lands in ONE local
+      // tick here, so dropping the redundant remote copy costs nothing.
+      //
+      // The raw statement's coarse markers are computed HERE, at commit, not when the statement ran. The
+      // buffer only ever carried INTENT for raw SQL, because statement-time markers snapshot the watch-set
+      // of an earlier moment: a graph registering between the raw statement and this commit would be absent
+      // from them, unreachable by this local flush — and the remote coarse-all below is its own publisher's
+      // echo, origin-suppressed locally — so it would NEVER hear about the committed rows.
+      const suppressRemote = announcePending // the coarse-all below is this commit's remote half
+      const merged = announcePending ? [...buffer, ...scope.commitCoarseMarkers()] : buffer
+      if (merged.length > 0) emitSafely((changes) => scope.flush(changes, suppressRemote), merged)
+      // For a SAVEPOINT this promotes the intent into the parent's; at the top level it publishes.
+      if (announcePending) {
+        try {
+          scope.announce()
+        } catch (error) {
+          report('announce-failed', { cause: error })
+        }
+      }
+      return result
+    })
+  }
+}
+
+/** A SAVEPOINT's scope: it flushes into the PARENT's buffer (the remote decision is the top level's to make
+ *  once, so the flag is ignored here), promotes its raw-SQL intent rather than publishing, owes no markers
+ *  of its own — the top level computes those once — and stays on the ROOT's write queue, because a
+ *  savepoint shares one physical connection with its parent and giving it a queue of its own lets the two
+ *  interleave and destroy each other's savepoints. */
+function savepointScope(topDb: object, parentBuffer: CaptureSink, promote: () => void, root: object): TransactionScope {
+  return {
+    topDb,
+    flush: (changes) => parentBuffer(changes),
+    announce: promote,
+    commitCoarseMarkers: () => [],
+    root,
+  }
+}
+
+/** The proxy over a transaction db: writes buffer (via `sink`); a nested `transaction` is a SAVEPOINT whose
+ *  buffer flushes into THIS one on release (and is discarded on savepoint-rollback); reads + everything else
+ *  pass through as plain Drizzle (a live read inside a write transaction is out of scope). */
+function txProxy(txDb: object, topDb: object, sink: CaptureSink, announce: () => void, root: object): unknown {
+  return new Proxy(txDb, {
+    get(target, prop, receiver) {
+      if (isWriteOp(prop)) {
+        const base = Reflect.get(target, prop, receiver) as (...a: unknown[]) => unknown
+        // The context makes the two-identity rule structural: `target` (the RAW tx db, never the proxy) is
+        // ONLY the execution handle for the capture-recovery savepoint; planning and registry keying read
+        // `identityDb` — which is what keeps this apart from the separate question of which db owns session
+        // identity. The ROOT keys the write queue, so parent and savepoint serialize together.
+        return captureMutation(prop, base.bind(target), {
+          sinkMode: 'transaction',
+          identityDb: topDb,
+          sink,
+          executionHandle: target,
+          serializationKey: root,
+        })
+      }
+      if (prop === 'transaction') {
+        return wrapTransaction(target, savepointScope(topDb, sink, announce, root))
+      }
+      if (isCoarseAllSurface(prop)) {
+        // `tx.execute(sql`…`)` has to be intercepted here as well as at the top level: passing it straight
+        // through commits a raw write with NOTHING published.
+        //
+        // Inside a transaction, raw SQL records INTENT ONLY (`announce`); its coarse markers are NOT
+        // materialized here. Markers name the tables being watched, and the watch-set at statement time is
+        // the wrong one — a live read admitted between this statement and the outer COMMIT would be missing
+        // from them, unreachable by the commit flush, and origin-suppressed out of the remote coarse-all:
+        // it would never hear about the committed rows at all. The outer commit computes the markers
+        // against the watch-set that exists when the transaction actually lands, and flushes them with the
+        // ORM buffer in one atomic local tick; the single coarse-all carries the remote side.
+        const base = Reflect.get(target, prop, receiver)
+        if (typeof base === 'function') {
+          return captureRawSql((base as (...a: unknown[]) => unknown).bind(target), announce)
+        }
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+}
