@@ -1,18 +1,22 @@
 export { WantsIndex }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { DEFAULT_TRACK, emptyBinaryWants, type BinaryWants, type TrackWants } from '../binary.js'
+import { DEFAULT_TRACK, emptyTrackWants, sameTrackWants, type TrackWants } from '../binary.js'
 import type { LaneHolder } from './replay.js'
 assertIsNotBrowser()
 
-/** A holder's wants as last indexed. */
-type Indexed = { textAll: boolean; textMembers: ReadonlySet<string>; announce: boolean; binary: BinaryWants }
+/** A holder's wants as last indexed, owned here so a change is compared against them. */
+type Indexed = {
+  textAll: boolean
+  announce: boolean
+  textMembers: Set<string>
+  everyMember: TrackWants
+  members: Map<string, TrackWants>
+}
 /** The holders covering each track of a scope; the `null` key covers every track. */
 type TrackCover = Map<string | null, Set<LaneHolder>>
 
-const NOTHING: Indexed = { textAll: false, textMembers: new Set(), announce: false, binary: emptyBinaryWants() }
-
-/** Every holder's wants, aggregated as each one changes, so a change costs the size of that holder's wants. */
+/** Every holder's wants, aggregated as each one changes, so a change costs the size of what it changed. */
 class WantsIndex {
   private readonly _indexed = new Map<LaneHolder, Indexed>()
   private _textAll = 0
@@ -29,23 +33,56 @@ class WantsIndex {
     return this._everyMember.size > 0 || this._members.size > 0
   }
 
-  /** Indexes the holder's current wants (none once it is gone); returns the members whose binary pairs may change. */
-  update(holder: LaneHolder, gone = false): Set<string> | 'all' {
-    const prev = this._indexed.get(holder) ?? NOTHING
-    const next = gone ? NOTHING : indexedOf(holder)
+  /** Indexes the holder's current wants (none once it is gone): its room-wide ones, and those of `members`, or of
+   *  every member when omitted. Returns the members whose binary pairs may change. */
+  update(holder: LaneHolder, gone = false, members?: Iterable<string>): Set<string> | 'all' {
+    let indexed = this._indexed.get(holder)
+    if (!indexed) this._indexed.set(holder, (indexed = notIndexed()))
+    const text = gone ? null : holder._textDemand()
+    const binary = gone ? null : holder._binaryWants
+    const textAll = text?.all ?? false
+    if (textAll !== indexed.textAll) this._textAll += textAll ? 1 : -1
+    indexed.textAll = textAll
+    const announce = !gone && holder._wantsAnnounce
+    if (announce !== indexed.announce) this._announce += announce ? 1 : -1
+    indexed.announce = announce
     const affected = new Set<string>()
-    for (const id of new Set([...Object.keys(prev.binary.members), ...Object.keys(next.binary.members)]))
-      if (!sameTrackWants(prev.binary.members[id], next.binary.members[id])) affected.add(id)
-    const prevKeys = coverKeys(prev.binary.everyMember)
-    const nextKeys = coverKeys(next.binary.everyMember)
+    const ids =
+      members ??
+      new Set([
+        ...indexed.textMembers,
+        ...indexed.members.keys(),
+        ...(text?.members ?? []),
+        ...Object.keys(binary?.members ?? {}),
+      ])
+    for (const id of ids) {
+      const wantsText = text?.members.has(id) ?? false
+      if (wantsText !== indexed.textMembers.has(id)) {
+        addCount(this._textMembers, id, wantsText ? 1 : -1)
+        if (wantsText) indexed.textMembers.add(id)
+        else indexed.textMembers.delete(id)
+      }
+      const prev = indexed.members.get(id)
+      const next = binary?.members[id]
+      if (sameTrackWants(prev, next)) continue
+      affected.add(id)
+      let cover = this._members.get(id)
+      if (!cover) this._members.set(id, (cover = new Map()))
+      recover(cover, holder, prev, next)
+      if (cover.size === 0) this._members.delete(id)
+      if (next) indexed.members.set(id, next)
+      else indexed.members.delete(id)
+    }
+    const prevKeys = coverKeys(indexed.everyMember)
+    const next = binary?.everyMember ?? emptyTrackWants()
+    const nextKeys = coverKeys(next)
     // A pair a room-wide coverer adds or drops is one every other coverer suppresses, so any one of them names it.
     let all = false
     for (const key of nextKeys) if (!prevKeys.has(key)) all = !this._addSuppressedOfCoverer(key, affected) || all
-    this._apply(holder, prev, -1)
-    this._apply(holder, next, 1)
+    recover(this._everyMember, holder, indexed.everyMember, next)
     for (const key of prevKeys) if (!nextKeys.has(key)) all = !this._addSuppressedOfCoverer(key, affected) || all
+    indexed.everyMember = next
     if (gone) this._indexed.delete(holder)
-    else this._indexed.set(holder, next)
     return all ? 'all' : affected
   }
 
@@ -80,46 +117,36 @@ class WantsIndex {
     for (const id of coverer._suppressedMembers()) into.add(id)
     return true
   }
+}
 
-  private _apply(holder: LaneHolder, wants: Indexed, delta: 1 | -1): void {
-    if (wants.textAll) this._textAll += delta
-    if (wants.announce) this._announce += delta
-    for (const id of wants.textMembers) addCount(this._textMembers, id, delta)
-    applyCover(this._everyMember, wants.binary.everyMember, holder, delta)
-    for (const [id, trackWants] of Object.entries(wants.binary.members)) {
-      let cover = this._members.get(id)
-      if (!cover) this._members.set(id, (cover = new Map()))
-      applyCover(cover, trackWants, holder, delta)
-      if (cover.size === 0) this._members.delete(id)
-    }
+function notIndexed(): Indexed {
+  return { textAll: false, announce: false, textMembers: new Set(), everyMember: emptyTrackWants(), members: new Map() }
+}
+
+function coverKeys(wants: TrackWants | undefined): Set<string | null> {
+  return new Set(wants === undefined ? [] : wants.all ? [null] : wants.tracks)
+}
+
+/** Moves the holder from the keys only `prev` covers to the keys only `next` covers. */
+function recover(
+  cover: TrackCover,
+  holder: LaneHolder,
+  prev: TrackWants | undefined,
+  next: TrackWants | undefined,
+): void {
+  const prevKeys = coverKeys(prev)
+  const nextKeys = coverKeys(next)
+  for (const key of prevKeys) {
+    if (nextKeys.has(key)) continue
+    const holders = cover.get(key)
+    holders?.delete(holder)
+    if (holders?.size === 0) cover.delete(key)
   }
-}
-
-function indexedOf(holder: LaneHolder): Indexed {
-  const text = holder._textDemand()
-  return { textAll: text.all, textMembers: text.members, announce: holder._wantsAnnounce, binary: holder._binaryWants }
-}
-
-function coverKeys(wants: TrackWants): Set<string | null> {
-  return new Set(wants.all ? [null] : wants.tracks)
-}
-
-function sameTrackWants(a: TrackWants | undefined, b: TrackWants | undefined): boolean {
-  if (a === undefined || b === undefined) return a === b
-  const keys = coverKeys(a)
-  return a.all === b.all && keys.size === coverKeys(b).size && b.tracks.every((track) => keys.has(track))
-}
-
-function applyCover(cover: TrackCover, wants: TrackWants, holder: LaneHolder, delta: 1 | -1): void {
-  for (const key of coverKeys(wants)) {
+  for (const key of nextKeys) {
+    if (prevKeys.has(key)) continue
     let holders = cover.get(key)
-    if (delta === 1) {
-      if (!holders) cover.set(key, (holders = new Set()))
-      holders.add(holder)
-    } else if (holders) {
-      holders.delete(holder)
-      if (holders.size === 0) cover.delete(key)
-    }
+    if (!holders) cover.set(key, (holders = new Set()))
+    holders.add(holder)
   }
 }
 

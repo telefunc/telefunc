@@ -17,7 +17,7 @@ import {
   decodeBinaryFrame,
   laneTrack,
   publicTrack,
-  binaryWantsCovers,
+  wantsTrack,
   DEFAULT_TRACK,
   type BinaryFrame,
   type BinaryWants,
@@ -47,7 +47,6 @@ import {
   hasRoomTag,
   inboxMessageFromWire,
   joinedMember,
-  type MemberWants,
   type MemberSnapshot,
   type RoomConfigRecord,
   type RoomSnapshotMetadata,
@@ -167,7 +166,7 @@ class ServerRoom extends RoomStateView implements Room {
       meta: config.meta,
       seed,
       updateStamp: { at: config.at, by: config.by },
-      onListenersChanged: () => this._onHolderWantsChanged(this._local, this._local.refreshWants()),
+      onListenersChanged: (member) => this._onHolderWantsChanged(this._local, this._local.refreshWants(member)),
       onCallbackError: reportServerChannelError,
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
@@ -758,28 +757,33 @@ class ServerRoom extends RoomStateView implements Room {
     })
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
-  async _replayRetainedText(holder: LaneHolder, previous: MemberWants): Promise<void> {
-    if (previous.all) return
+  async _replayRetainedText(holder: LaneHolder, before: NonNullable<WantsChange['text']>): Promise<void> {
+    if (before.all) return
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._subs.semanticReady)
     const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
     const event = parse(serialized) as RoomDataEnvelope
-    if (previous.members.has(event.from) || !holder._wantsTextFrom(event.from)) return
+    // A member whose own want didn't change is wanted now only by the new room-wide want, if at all.
+    const had = before.members.get(event.from) ?? holder._textDemand().members.has(event.from)
+    if (had || !holder._wantsTextFrom(event.from)) return
     // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
-  async _replayRetainedBinary(holder: LaneHolder, prevWants: BinaryWants): Promise<void> {
+  async _replayRetainedBinary(holder: LaneHolder, before: NonNullable<WantsChange['binary']>): Promise<void> {
     const wants = holder._binaryWants
     // A binary lane is keyed by its frames' sender and track: a new room-wide want lists the room's retained lanes, a
     // new member want reads only that member's.
-    const roomWide = gainsTracks(prevWants.everyMember, wants.everyMember)
+    const roomWide = gainsTracks(before.everyMember, wants.everyMember)
     const gained = roomWide
       ? []
-      : Object.keys(wants.members).filter((id) => gainsTracks(prevWants.members[id], wants.members[id]!))
+      : [...before.members].flatMap(([member, prev]) => {
+          const next = wants.members[member]
+          return next !== undefined && gainsTracks(prev, next) ? [{ member, next }] : []
+        })
     if (!roomWide && gained.length === 0) return
-    if (roomWide || gained.some((id) => wants.members[id]!.all)) await this._subs.ensureRoster()
+    if (roomWide || gained.some(({ next }) => next.all)) await this._subs.ensureRoster()
     // Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane.
     await this._subs.binaryReady()
     const backend = getRoomBackend()
@@ -787,13 +791,17 @@ class ServerRoom extends RoomStateView implements Room {
       ? (await backend.listRetained(this.id, this._inc)).filter(
           (lane): lane is Extract<LaneId, { kind: 'binary' }> => lane.kind === 'binary',
         )
-      : gained.flatMap((member) => {
-          const memberWants = wants.members[member]!
-          const tracks = memberWants.all ? [DEFAULT_TRACK, ...this._state.memberTracks(member)] : memberWants.tracks
-          return tracks.map((track) => ({ member, track }))
-        })
+      : gained.flatMap(({ member, next }) =>
+          (next.all ? [DEFAULT_TRACK, ...this._state.memberTracks(member)] : next.tracks).map((track) => ({
+            member,
+            track,
+          })),
+        )
     for (const { member, track } of candidates) {
-      if (binaryWantsCovers(prevWants, member, track) || !holder._wantsBinary(member, track)) continue
+      // A member whose own want didn't change had the one it has now.
+      const prev = before.members.has(member) ? before.members.get(member) : wants.members[member]
+      if (wantsTrack(before.everyMember, track) || (prev !== undefined && wantsTrack(prev, track))) continue
+      if (!holder._wantsBinary(member, track)) continue
       const stored = await backend.readRetained(this.id, this._inc, { kind: 'binary', member, track })
       if (stored === null) continue
       const framed = stored.payload
@@ -804,11 +812,15 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal A holder's wants changed: replan, then replay the retained frames it now wants. */
-  _onHolderWantsChanged(holder: LaneHolder, previous: WantsChange): void {
+  _onHolderWantsChanged(holder: LaneHolder, before: WantsChange): void {
     // A stub that is not attached holds no lanes.
-    if (holder === this._local || this._stubs.has(holder as RoomStubChannel)) this._subs.holderChanged(holder)
-    if (previous.text) void this._replayRetainedText(holder, previous.text).catch(reportRoomError)
-    if (previous.binary) void this._replayRetainedBinary(holder, previous.binary).catch(reportRoomError)
+    if (holder === this._local || this._stubs.has(holder as RoomStubChannel))
+      this._subs.holderChanged(holder, false, [
+        ...(before.text?.members.keys() ?? []),
+        ...(before.binary?.members.keys() ?? []),
+      ])
+    if (before.text) void this._replayRetainedText(holder, before.text).catch(reportRoomError)
+    if (before.binary) void this._replayRetainedBinary(holder, before.binary).catch(reportRoomError)
   }
 
   /** @internal */

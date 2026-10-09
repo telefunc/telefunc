@@ -9,6 +9,8 @@ export {
   emptyTrackWants,
   emptyBinaryWants,
   mergeTrackWants,
+  wantsTrack,
+  sameTrackWants,
   wantsAnyBinary,
   binaryWantsCovers,
   isRoomTrack,
@@ -189,6 +191,10 @@ function mergeTrackWants(a: TrackWants, b: TrackWants): TrackWants {
 }
 function wantsTrack(wants: TrackWants, track: string): boolean {
   return wants.all || wants.tracks.includes(track)
+}
+function sameTrackWants(a: TrackWants | undefined, b: TrackWants | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b
+  return a.all === b.all && a.tracks.length === b.tracks.length && b.tracks.every((track) => a.tracks.includes(track))
 }
 function binaryWantsCovers(wants: BinaryWants, memberId: string, track: string): boolean {
   if (wantsTrack(wants.everyMember, track)) return true

@@ -42,6 +42,7 @@ import { reportRoomError } from './server/errors.js'
 import { heldSendWeight } from '../backend/held-send-weight.js'
 import { RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { TailHold } from './server/tail.js'
+import { WantsIndex } from './server/wants-index.js'
 import { RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
 import { roomRemoteReviver } from './response-client.js'
@@ -917,7 +918,7 @@ describe('Room public behavior', () => {
     const { stub } = serve(observer)
     const { started } = rejectLaneSubscriptions('semantic', 'persistent semantic subscription failure')
     stub._onPeerSubscription('text', true)
-    const outcome = captureOutcome(observer._replayRetainedText(stub, { all: false, members: new Set() }))
+    const outcome = captureOutcome(observer._replayRetainedText(stub, { all: false, members: new Map() }))
     await started
     await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 100)
     expect(outcome.value).toBeInstanceOf(RoomError)
@@ -2001,6 +2002,36 @@ describe('Room public behavior', () => {
     declare(b, { __r: 'sub-binary', wants: EVERY_TRACK }) // a closed stub's late declaration
     await subsOf(room).binaryReady()
     expect(subsOf(room)._binary.size).toBe(0)
+  })
+  it("keeps a member's lanes while one of its listeners remains, and indexes only that member per listener change", async () => {
+    const room = (await Room.create('counted-member-listeners')) as ServerRoom
+    const me = await room.join()
+    const other = await room.join()
+    ;(await room.getParticipant(other.id))!.subscribeBinary(() => {})
+    const remote = (await room.getParticipant(me.id))!
+    const update = vi.spyOn(WantsIndex.prototype, 'update')
+    const text = [remote.subscribe(() => {}), remote.subscribe(() => {})]
+    const screen = [
+      remote.subscribeBinary(() => {}, { track: 'screen' }),
+      remote.subscribeBinary(() => {}, { track: 'screen' }),
+    ]
+    expect(update.mock.calls.map(([, , members]) => (members === undefined ? 'every member' : [...members]))).toEqual([
+      [me.id],
+      [],
+      [me.id],
+      [],
+    ])
+    const lanes = () => ({
+      text: subsOf(room)._semantic.wanted,
+      binary: [...subsOf(room)._binary.keys()].filter((key) => key.startsWith(me.id)),
+    })
+    expect(lanes()).toEqual({ text: true, binary: [`${me.id}\0screen`] })
+    text[0]!()
+    screen[0]!()
+    expect(lanes()).toEqual({ text: true, binary: [`${me.id}\0screen`] })
+    text[1]!()
+    screen[1]!()
+    expect(lanes()).toEqual({ text: false, binary: [] })
   })
   it('waits for a binary lane that is still establishing before it reports binary readiness', async () => {
     const room = (await Room.create('binary-ready-establishing')) as ServerRoom

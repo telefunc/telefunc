@@ -4,7 +4,15 @@ export type { LaneHolder, WantsChange }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { makePublishInfo } from '../../channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
-import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
+import {
+  binaryWantsCovers,
+  emptyTrackWants,
+  laneTrack,
+  sameTrackWants,
+  type BinaryFrame,
+  type BinaryWants,
+  type TrackWants,
+} from '../binary.js'
 import type { MemberWants, RoomDataEnvelope } from '../protocol.js'
 import type { RoomState } from '../state.js'
 assertIsNotBrowser()
@@ -46,12 +54,12 @@ function admitInto(high: Map<string, number>, key: string, seq: number): boolean
   return true
 }
 
-function sameMemberWants(a: MemberWants, b: MemberWants): boolean {
-  return a.all === b.all && a.members.size === b.members.size && [...a.members].every((id) => b.members.has(id))
+/** A holder's wants before a change, holding only what changed: its room-wide want of each lane kind that changed, and
+ *  the own wants of each member whose own wants changed (`undefined`: none). */
+type WantsChange = {
+  text?: { all: boolean; members: Map<string, boolean> }
+  binary?: { everyMember: TrackWants; members: Map<string, TrackWants | undefined> }
 }
-
-/** The previous wants of each lane kind whose wants changed. */
-type WantsChange = { text?: MemberWants; binary?: BinaryWants }
 
 /** A consumer of a room's lanes that retained frames replay into: a client's stub, or this instance's own listeners. */
 interface LaneHolder {
@@ -71,24 +79,44 @@ interface LaneHolder {
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they differ, as a client declares them. */
 class LocalHolder implements LaneHolder {
   private readonly _replay = new ReplayGate()
-  private _textWants: MemberWants = { all: false, members: new Set() }
-  _binaryWants: BinaryWants = emptyBinaryWants()
+  private _textAll = false
+  private readonly _textMembers = new Set<string>()
+  readonly _binaryWants: BinaryWants = { everyMember: emptyTrackWants(), members: Object.create(null) }
 
   constructor(
     private readonly _state: RoomState,
     private readonly _suppressed: ReadonlySet<string>,
   ) {}
 
-  /** Re-derives the listeners' wants. */
-  refreshWants(): WantsChange {
-    const text = this._textWants
-    const binary = this._binaryWants
-    this._textWants = this._state.textWants()
-    this._binaryWants = this._state.binaryWants()
-    return {
-      ...(sameMemberWants(text, this._textWants) ? {} : { text }),
-      ...(JSON.stringify(binary) === JSON.stringify(this._binaryWants) ? {} : { binary }),
+  /** Re-derives the listeners' room-wide wants, and the own wants of `member` when its listeners changed. */
+  refreshWants(member: string | null): WantsChange {
+    const text = this._state.textWants()
+    const binary = this._state.binaryWants()
+    const textBefore = new Map<string, boolean>()
+    const binaryBefore = new Map<string, TrackWants | undefined>()
+    if (member !== null) {
+      const wantsText = text.members.has(member)
+      if (wantsText !== this._textMembers.has(member)) {
+        textBefore.set(member, !wantsText)
+        if (wantsText) this._textMembers.add(member)
+        else this._textMembers.delete(member)
+      }
+      const prev = this._binaryWants.members[member]
+      const next = binary.members[member]
+      if (!sameTrackWants(prev, next)) {
+        binaryBefore.set(member, prev)
+        if (next) this._binaryWants.members[member] = next
+        else delete this._binaryWants.members[member]
+      }
     }
+    const change: WantsChange = {}
+    if (text.all !== this._textAll || textBefore.size > 0) change.text = { all: this._textAll, members: textBefore }
+    this._textAll = text.all
+    const everyMember = this._binaryWants.everyMember
+    if (!sameTrackWants(everyMember, binary.everyMember) || binaryBefore.size > 0)
+      change.binary = { everyMember, members: binaryBefore }
+    this._binaryWants.everyMember = binary.everyMember
+    return change
   }
 
   get _wantsAnnounce(): boolean {
@@ -96,7 +124,7 @@ class LocalHolder implements LaneHolder {
   }
 
   _textDemand(): MemberWants {
-    return this._textWants
+    return { all: this._textAll, members: this._textMembers }
   }
 
   _suppressedMembers(): Iterable<string> {
@@ -104,7 +132,7 @@ class LocalHolder implements LaneHolder {
   }
 
   _wantsTextFrom(member: string): boolean {
-    return !this._suppressed.has(member) && (this._textWants.all || this._textWants.members.has(member))
+    return !this._suppressed.has(member) && (this._textAll || this._textMembers.has(member))
   }
 
   _wantsBinary(member: string, track: string): boolean {

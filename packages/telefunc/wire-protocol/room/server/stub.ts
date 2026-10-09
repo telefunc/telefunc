@@ -32,7 +32,15 @@ import {
 } from './requests.js'
 import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
-import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
+import {
+  binaryWantsCovers,
+  emptyBinaryWants,
+  laneTrack,
+  sameTrackWants,
+  type BinaryFrame,
+  type BinaryWants,
+  type TrackWants,
+} from '../binary.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import { leaveCauseToWire } from '../model.js'
 import {
@@ -174,7 +182,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
     if (kind === 'binary' || on === this._wantsText) return
-    const previous = on ? { text: this._memberWants() } : {}
+    const previous = on ? { text: { all: this._wantsText, members: new Map<string, boolean>() } } : {}
     this._wantsText = on
     // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
     if (on) this._flushTail()
@@ -193,21 +201,23 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   private _declareBinaryWants(wants: BinaryWants): void {
-    const binary = this._binary
+    const prev = this._binary
     this._binary = wants
-    this._room._onHolderWantsChanged(this, { binary })
+    const members = new Map<string, TrackWants | undefined>()
+    for (const id of new Set([...Object.keys(prev.members), ...Object.keys(wants.members)]))
+      if (!sameTrackWants(prev.members[id], wants.members[id])) members.set(id, prev.members[id])
+    this._room._onHolderWantsChanged(this, { binary: { everyMember: prev.everyMember, members } })
   }
 
-  private _declareTextWants(members: string[], announce: boolean): void {
-    const text = this._memberWants()
-    this._textMemberWants = new Set(members)
+  private _declareTextWants(declared: string[], announce: boolean): void {
+    const prev = this._textMemberWants
+    this._textMemberWants = new Set(declared)
     this._announce = announce
+    const members = new Map<string, boolean>()
+    for (const id of prev) if (!this._textMemberWants.has(id)) members.set(id, true)
+    for (const id of this._textMemberWants) if (!prev.has(id)) members.set(id, false)
     this._flushTail()
-    this._room._onHolderWantsChanged(this, { text })
-  }
-
-  private _memberWants(): MemberWants {
-    return { all: this._wantsText, members: this._textMemberWants }
+    this._room._onHolderWantsChanged(this, { text: { all: this._wantsText, members } })
   }
 
   private async _publishText(publish: RoomDataPublish): Promise<ChannelPublishAck> {

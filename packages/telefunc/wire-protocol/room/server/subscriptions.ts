@@ -100,9 +100,9 @@ class RoomSubscriptions {
     this._replanAround(() => {})
   }
 
-  /** A holder attached, changed its wants, or is gone. */
-  holderChanged(holder: LaneHolder, gone = false): void {
-    const affected = this._wants.update(holder, gone)
+  /** A holder attached, changed its wants (its room-wide ones, and those of `members` when given), or is gone. */
+  holderChanged(holder: LaneHolder, gone = false, members?: Iterable<string>): void {
+    const affected = this._wants.update(holder, gone, members)
     this._replanAround(() => {
       if (affected !== 'all') for (const member of affected) this._syncMemberBinary(member)
       else for (const member of this._host._state.listMemberIds()) this._syncMemberBinary(member)
