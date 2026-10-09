@@ -141,6 +141,26 @@ describe('shared subscription supervision', () => {
     expect(received).toEqual(['a:accepted', 'b:accepted'])
     await Promise.all(consumers.map((consumer) => consumer.unsubscribe()))
   })
+  it('hands a delivery to the consumers attached when it started, and none to one that left', async () => {
+    const raw = new ControlledDriver()
+    const manager = new SubscriptionManager(raw, vi.fn(), String, () => {})
+    const received: string[] = []
+    let late: ReturnType<typeof manager.subscribe> | undefined
+    const first = manager.subscribe('source', (payload) => {
+      received.push(`a:${payload}`)
+      if (late !== undefined) return
+      late = manager.subscribe('source', (payload) => void received.push(`c:${payload}`))
+      void second.unsubscribe()
+    })
+    const second = manager.subscribe('source', (payload) => void received.push(`b:${payload}`))
+    await first.ready
+    await raw.deliver(0, 'one')
+    await raw.deliver(0, 'two')
+    await late!.unsubscribe()
+    await raw.deliver(0, 'three')
+    expect(received).toEqual(['a:one', 'b:one', 'a:two', 'c:two', 'a:three'])
+    await first.unsubscribe()
+  })
   it('does not emit a stale nonterminal state after re-entrant unsubscribe', async () => {
     const raw = new ControlledDriver()
     const subscription = new SubscriptionManager(raw, vi.fn(), String, () => {}).subscribe(

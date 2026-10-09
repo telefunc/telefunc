@@ -154,8 +154,9 @@ class SubscriptionManager<Source> {
 }
 
 class SubscriptionSlot {
-  /** Replaced, never mutated, so a delivery iterates the attachments it started with. */
-  private _attachments = new Set<SlotAttachment>()
+  private readonly _attachments = new Set<SlotAttachment>()
+  /** Taken at a delivery or notify and dropped on a change, so each iterates the attachments it started with. */
+  private _snapshot: readonly SlotAttachment[] | null = null
   private _attempt: SubscriptionAttempt | null = null
   private _unobserve: (() => void) | null = null
   private _readiness: Deferred<void> = createReadiness()
@@ -185,16 +186,16 @@ class SubscriptionSlot {
   attach(receiver: BackendReceiver<BackendPayload>): BackendSubscription {
     assert(this._stopPromise === null) // the manager unmaps a slot before stopping it
     const attachment = new SlotAttachment(this, receiver)
-    this._attachments = new Set(this._attachments).add(attachment)
+    this._attachments.add(attachment)
+    this._snapshot = null
     if (this._attempt === null) this._start()
     return attachment
   }
 
   async detach(attachment: SlotAttachment): Promise<void> {
-    const attachments = new Set(this._attachments)
-    attachments.delete(attachment)
-    this._attachments = attachments
-    if (attachments.size > 0) return
+    this._attachments.delete(attachment)
+    this._snapshot = null
+    if (this._attachments.size > 0) return
     this._config.unmap()
     await this.stop()
   }
@@ -222,7 +223,7 @@ class SubscriptionSlot {
           } catch (error) {
             return this._config.reportError(error)
           }
-          for (const attachment of this._attachments) {
+          for (const attachment of this._targets()) {
             try {
               attachment.receiver(payload, info)
             } catch (error) {
@@ -279,7 +280,11 @@ class SubscriptionSlot {
   private _transition(state: SubscriptionState): void {
     if (this._state === state) return
     this._state = state
-    for (const attachment of this._attachments) attachment.notify(state)
+    for (const attachment of this._targets()) attachment.notify(state)
+  }
+
+  private _targets(): readonly SlotAttachment[] {
+    return (this._snapshot ??= [...this._attachments])
   }
 
   /** Unobserves the attempt first: its closing on cleanup is no end. */
