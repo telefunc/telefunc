@@ -142,20 +142,25 @@ class Loopback {
   private readonly connectionKey = crypto.randomUUID()
   private readonly pages: ClientChannel[] = []
   private watch: { from: 'page' | 'server'; tag: number; then: () => void } | null = null
-  /** Every frame each side sent, as `[tag, channel ix]`. */
+  /** Every frame each side sent, as `[tag, channel ix]`, and when. */
   readonly sent = { page: [] as [number, number][], server: [] as [number, number][] }
+  readonly sentAt = { page: [] as number[], server: [] as number[] }
+  /** The tag of each frame that reached the server, and when. */
+  readonly arrived: [number, number][] = []
   /** Runs `then` once, as `from` sends its next frame of `tag`. */
   onSend(from: 'page' | 'server', tag: number, then: () => void): void {
     this.watch = { from, tag, then }
   }
   sends(from: 'page' | 'server', frame: Uint8Array): void {
     this.sent[from].push([frame[0]!, frame[1]! | (frame[2]! << 8)])
+    this.sentAt[from].push(Date.now())
     const watch = this.watch
     if (!watch || watch.from !== from || watch.tag !== frame[0]) return
     this.watch = null
     watch.then()
   }
   receive(socket: LoopbackSocket, frame: Uint8Array<ArrayBuffer>): void {
+    this.arrived.push([frame[0]!, Date.now()])
     this.mux.onConnectionRawMessage(socket, frame).catch((err) => this.errors.push(err))
   }
   /** The wire the page uses now. */
@@ -1146,4 +1151,60 @@ test('on a slow link, a producer that awaits its sends is not refused for the cr
   await runUntil(() => page.received.at(-1) === message(1), 10_000)
   expect((await settled).map((result) => result.status)).toEqual(['fulfilled', 'fulfilled'])
   expect(page.received.at(-1)).toBe(message(1))
+})
+
+test("a window refresh, a BDP_PING_ACK and a RECONCILE the page sends while an upload fills its slow uplink reach the server within the wire's queue delay, not behind the upload's window, and the upload keeps the uplink full", async () => {
+  const upload = loop.open<Uint8Array, Uint8Array>()
+  const download = loop.open<Uint8Array, Uint8Array>()
+  let uploaded = 0
+  upload.server.listenBinary((data) => void (uploaded += data.byteLength))
+  download.page.listenBinary(() => {})
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 1_250 // a 1.25 MB/s uplink
+  const chunk = new Uint8Array(64 * 1024)
+  let messages = 0
+  void (async () => {
+    while (!upload.page.isClosed) {
+      messages++
+      await upload.page.sendBinary(chunk)
+    }
+  })().catch(() => {})
+  void (async () => {
+    while (!download.server.isClosed) await download.server.sendBinary(chunk)
+  })().catch(() => {})
+  await run(3_000)
+  const marks = { at: Date.now(), uploaded }
+  loop.open() // the page registers a channel: a RECONCILE
+  await run(4_000)
+  /** How long each frame of `tag` that the page sent after the mark took to reach the server. */
+  const waits = (tag: number) => {
+    const departures = loop.sent.page.flatMap(([sent], i) => (sent === tag ? [loop.sentAt.page[i]!] : []))
+    const arrivals = loop.arrived.flatMap(([arrived, at]) => (arrived === tag ? [at] : []))
+    return arrivals.flatMap((at, i) => (departures[i]! >= marks.at ? [at - departures[i]!] : []))
+  }
+  for (const tag of [TAG.WINDOW, TAG.BDP_PING_ACK, TAG.RECONCILE]) {
+    const delays = waits(tag)
+    expect(delays.length, `frames of tag ${tag}`).toBeGreaterThan(0)
+    expect(Math.max(...delays), `the longest wait of tag ${tag}`).toBeLessThan(600)
+  }
+  expect(uploaded - marks.uploaded).toBeGreaterThan(0.6 * 4_000 * 1_250)
+  // The RECONCILE's round trip didn't have the page send again what it still held back.
+  const sentTwice = loop.sent.page.filter(([tag]) => tag === TAG.BINARY).length - messages
+  expect(sentTwice).toBeLessThanOrEqual(0)
+})
+
+test('a channel the page closes right after sends its slow uplink held back delivers them all, in order, before it closes', async () => {
+  const { server, page } = loop.open<Uint8Array, never>()
+  const got: number[] = []
+  server.listenBinary((data) => void got.push(new DataView(data.buffer, data.byteOffset).getUint32(0)))
+  const closed = closedWith({ page, server })
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 600 // 600 KB/s
+  const counted = (n: number) => Object.assign(new Uint8Array(64 * 1024), { 0: n & 0xff, 1: n >> 8, 2: 0, 3: 0 })
+  for (let n = 0; n < 24; n++) void page.sendBinary(counted(n))
+  void page.close()
+  await runUntil(() => closed.page !== 'open' && closed.server !== 'open', 30_000)
+  expect(got.length).toBe(24)
+  expect(got).toEqual([...got.keys()].map((n) => new DataView(counted(n).buffer).getUint32(0)))
+  expect(closed).toEqual({ page: undefined, server: undefined })
 })

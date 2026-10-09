@@ -204,6 +204,12 @@ export const WIRE_PIECE_RATE_MARGIN = 8
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 10
+/** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
+ *  least (see `send-budget.ts`). */
+export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
+/** How long a data frame of the page's may wait in the queues of its wire, as its server's acknowledgements measure it,
+ *  before the page stops handing a WebSocket more (see `send-budget.ts`). */
+export const WIRE_QUEUE_DELAY_MS = 300
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the

@@ -38,6 +38,7 @@ import {
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { PieceReceiver, PieceSender } from '../pieces.js'
+import { SendBudget } from '../send-budget.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { replayWindow } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
@@ -271,6 +272,8 @@ type ClientChannelTransport = {
   /** Send a connection-level ping on this wire. Heartbeat's send callback calls this. */
   sendPing(frame: Uint8Array<ArrayBuffer>): void
   sendFrame(frame: OutboundFrame): void
+  /** The bytes of data frames it takes now, `Infinity` where nothing bounds them: the others go at once. */
+  sendRoom(): number
   /** Bytes of the frames it was handed that haven't gone out to the network. */
   bufferedAmount(): number
   abandonActiveTransport(): void
@@ -464,6 +467,8 @@ class ClientConnection implements MuxConnection {
   private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
   private sendBuffer: BufferedFrame[] = []
+  /** A sequenced frame of a channel that may send waits in `sendBuffer` for the transport to have room for data. */
+  private heldForRoom = false
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
@@ -578,14 +583,12 @@ class ClientConnection implements MuxConnection {
     return u
   }
 
+  private get sendsOpen(): boolean {
+    return this.connected && !this.reconciling && !this.upgradeGatesSends && this.registerReconcileTimer === null
+  }
+
   private canSendImmediately(ix: number): boolean {
-    return (
-      this.connected &&
-      !this.reconciling &&
-      !this.upgradeGatesSends &&
-      this.registerReconcileTimer === null &&
-      !this.awaitedIxes.has(ix)
-    )
+    return this.sendsOpen && !this.awaitedIxes.has(ix)
   }
 
   // ── Per-channel state transitions: every `entry.state =` write goes through these. ──
@@ -640,6 +643,11 @@ class ClientConnection implements MuxConnection {
   private fitReplays(channel: MuxChannel): void {
     if (this.replayWindows === null) return
     channel._fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
+  }
+
+  /** The transport's server acknowledged data: what waited for room goes. */
+  _onTransportRoom(transport: ClientChannelTransport): void {
+    if (transport === this.transport && this.heldForRoom && this.sendsOpen) this.drainBufferedFramesToWire()
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
@@ -730,14 +738,19 @@ class ClientConnection implements MuxConnection {
     return frame
   }
 
-  /** Sends a sequenced frame, or queues it where sends are held. */
+  /** Sends a sequenced frame, or queues it where sends are held, or the transport has no room for data until its server
+   *  acknowledges some (see `SendBudget`). The frames that go at once pass what waits. */
   private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
-    if (!this.canSendImmediately(ix)) {
-      this.sendBuffer.push({ frame, channelIx: ix, seq })
+    const open = this.canSendImmediately(ix)
+    // What it held goes first, once it has room.
+    if (open && this.heldForRoom && this.transport.sendRoom() > 0) this.drainBufferedFramesToWire()
+    if (open && !this.heldForRoom && this.transport.sendRoom() > 0) {
+      this.replayBuffers.get(ix)!.push(seq, frame)
+      this.transport.sendFrame({ kind, frame })
       return
     }
-    this.replayBuffers.get(ix)!.push(seq, frame)
-    this.transport.sendFrame({ kind, frame })
+    this.sendBuffer.push({ frame, channelIx: ix, seq })
+    if (open) this.heldForRoom = true
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -797,7 +810,9 @@ class ClientConnection implements MuxConnection {
   }
 
   bufferedAmount(): number {
-    return this.transport.bufferedAmount()
+    let held = 0
+    if (this.heldForRoom) for (const { frame, seq } of this.sendBuffer) if (seq !== undefined) held += frame.byteLength
+    return this.transport.bufferedAmount() + held
   }
 
   /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
@@ -1722,6 +1737,8 @@ class ClientConnection implements MuxConnection {
   private drainBufferedFrames(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.sendBuffer
+    let room = this.transport.sendRoom()
+    let heldForRoom = false
     let writeIx = 0
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
@@ -1732,10 +1749,20 @@ class ClientConnection implements MuxConnection {
         sendBuffer[writeIx++] = entry
         continue
       }
-      if (seq !== undefined) this.replayBuffers.get(channelIx)?.push(seq, frame)
+      if (seq !== undefined) {
+        // Once the room is used, it is for the frames after: a channel's stay in order.
+        if (room <= 0) {
+          sendBuffer[writeIx++] = entry
+          heldForRoom = true
+          continue
+        }
+        room -= frame.byteLength
+        this.replayBuffers.get(channelIx)?.push(seq, frame)
+      }
       frames.push({ kind: 'reconcile', frame })
     }
     sendBuffer.length = writeIx
+    this.heldForRoom = heldForRoom
     return frames
   }
 
@@ -1768,6 +1795,7 @@ class WsTransport implements UpgradeTarget {
   private everOpened = false
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private pieceSender: PieceSender | null = null
+  private budget: SendBudget | null = null
   /** The server's, once a RECONCILED said it. */
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
@@ -1940,13 +1968,15 @@ class WsTransport implements UpgradeTarget {
   private setupHandlers(ws: WebSocket, sender: PieceSender, pieces: PieceReceiver): void {
     if (this.owner._slowLink) sender.markSlow()
     this.pieceSender = sender
+    const budget = new SendBudget(sender)
+    this.budget = budget
     ws.onmessage = ({ data }: MessageEvent) => {
       this.heartbeat?.noteReceived()
       const message = receiveMessage(ws, pieces, data)
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
-        sender.acknowledged(frame.bytes, frame.heldMs)
+        if (budget.acknowledged(frame.bytes, frame.heldMs, frame.spanUs)) this.owner._onTransportRoom(this)
         return
       }
       if (frame.tag === TAG.PONG) {
@@ -1977,8 +2007,13 @@ class WsTransport implements UpgradeTarget {
   }
 
   sendFrame(frame: OutboundFrame): void {
-    assert(this.ws && this.pieceSender)
-    this.pieceSender.send(frame.frame, this.pingInterval)
+    assert(this.ws && this.budget)
+    this.budget.send(frame.frame, this.pingInterval)
+  }
+
+  sendRoom(): number {
+    assert(this.budget)
+    return this.budget.room
   }
 
   bufferedAmount(): number {
@@ -2488,6 +2523,10 @@ class SseTransport implements UpgradeSource {
         this.transportAbort.signal,
       )
     } catch {}
+  }
+
+  sendRoom(): number {
+    return Infinity
   }
 
   /** What a POST under way carries has gone out. */

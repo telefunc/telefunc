@@ -1371,9 +1371,12 @@ describe.each(WIRES)('over %s, past the reconnect window,', (wire) => {
     net.rate.up = 0
     net.cut()
     await advance(1_000)
-    expect(connection.replayBuffers.get(connection.channelIndex.get(pageChannel)).byteLength).toBeGreaterThan(
-      1_024 * 1_024,
-    ) // what the server lacks
+    const kept = connection.replayBuffers.get(connection.channelIndex.get(pageChannel)).byteLength
+    const queued = connection.sendBuffer.reduce(
+      (bytes: number, { frame }: { frame: Uint8Array }) => bytes + frame.byteLength,
+      0,
+    )
+    expect(kept + queued).toBeGreaterThan(1_024 * 1_024) // what the server lacks
     await advance(15_000)
     expect(pageClosed.err).toBeInstanceOf(NetworkError)
     expect(connection.replayBuffers.size).toBe(0)
