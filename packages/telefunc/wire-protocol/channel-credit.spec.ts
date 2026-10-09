@@ -962,11 +962,31 @@ test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last
   for (const side of ['page', 'server'] as const) {
     const acks = loop.sent[side].slice(marks[side]).filter(([tag]) => tag === TAG.PIECES_ACK)
     expect(acks.length).toBeGreaterThan(0)
-    expect(acks.length).toBeLessThan(20)
+    // The server acknowledges at most every `WIRE_SEND_ACK_GAP_MS`, the page every `WIRE_PIECES_ACK_GAP_MS`.
+    expect(acks.length).toBeLessThan(side === 'server' ? 20 : 5)
   }
   const sender = piecesOf(loop.socket)?.sender as { unacknowledged: unknown[] }
   expect(sender.unacknowledged).toHaveLength(0)
   expect(loop.sockets).toHaveLength(1)
+})
+
+test('a flood of small frames gets a PIECES_ACK from the server, which the page holds back by, and none from the page', async () => {
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  const at = { server: 0, page: 0 }
+  server.listenBinary(() => void at.server++)
+  page.listenBinary(() => void at.page++)
+  await run(100)
+  const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
+  for (let i = 0; i < 100; i++) {
+    void page.sendBinary(new Uint8Array(1_000))
+    void server.sendBinary(new Uint8Array(1_000))
+  }
+  await runUntil(() => at.server === 100 && at.page === 100, 5_000)
+  await run(100)
+  const acks = (side: 'page' | 'server') =>
+    loop.sent[side].slice(marks[side]).filter(([tag]) => tag === TAG.PIECES_ACK).length
+  expect(acks('server')).toBeGreaterThan(0)
+  expect(acks('page')).toBe(0)
 })
 
 test('a server pushing 512 KB frames on a fast wire sends them whole once it measured, however many it queues', async () => {

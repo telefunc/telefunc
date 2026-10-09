@@ -108,8 +108,7 @@ const TAG = {
   /** Either way on a WebSocket, which delivers no part of a message: a piece of a frame sent in pieces (see
    *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece. */
   PIECE: 0x0a as const,
-  /** Back, at most every `WIRE_PIECES_ACK_GAP_MS`, once more than `WIRE_PIECE_BYTES` of the frames that arrived, whole
-   *  or in pieces, are unacknowledged. Payload: u32, the bytes of the frames it took in all (mod 2^32), u32, the ms it
+  /** Back, as `PieceReceiver` says, for the frames that arrived, whole or in pieces. Payload: u32, the bytes of the frames it took in all (mod 2^32), u32, the ms it
    *  held the newest, then u32, the µs between the arrival of the newest data frame and of the newest the ack before
    *  covered, 0 for the first, or where it covers none. */
   PIECES_ACK: 0x0b as const,

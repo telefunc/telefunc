@@ -1962,7 +1962,10 @@ class WsTransport implements UpgradeTarget {
       (message) => ws.send(message),
       () => ws.bufferedAmount,
     )
-    return { sender, pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval)) }
+    return {
+      sender,
+      pieces: new PieceReceiver((frame) => sender.send(frame, this.pingInterval), { peerHoldsBack: false }),
+    }
   }
 
   private setupHandlers(ws: WebSocket, sender: PieceSender, pieces: PieceReceiver): void {

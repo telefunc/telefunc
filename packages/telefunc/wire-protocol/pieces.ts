@@ -5,6 +5,7 @@ import {
   WIRE_PIECE_RATE_MARGIN,
   WIRE_PIECE_RATE_WINDOW_MS,
   WIRE_PIECES_ACK_GAP_MS,
+  WIRE_SEND_ACK_GAP_MS,
   WIRE_UNMEASURED_WHOLE_BYTES,
 } from './constants.js'
 import { assertProtocol, encode } from './shared-ws.js'
@@ -104,8 +105,11 @@ class PieceSender {
 }
 
 /** One WebSocket's: puts a frame sent in pieces back together, taking pieces only as `PieceSender` cuts them (all as
- *  large as the first, at least `WIRE_PIECE_BYTES` or the whole frame, but the last), and acknowledges the bytes it took
- *  once more than `WIRE_PIECE_BYTES` are unacknowledged, at most one PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS`. */
+ *  large as the first, at least `WIRE_PIECE_BYTES` or the whole frame, but the last), and acknowledges the bytes it took.
+ *  A receiver whose peer holds data back by what it acknowledges (`peerHoldsBack`: the server's, see `SendBudget`)
+ *  acknowledges once more than `WIRE_PIECE_BYTES` of frames of any size are unacknowledged, at most one PIECES_ACK per
+ *  `WIRE_SEND_ACK_GAP_MS`. Any other acknowledges when a frame over `WIRE_PIECE_BYTES` arrived, at most one PIECES_ACK per
+ *  `WIRE_PIECES_ACK_GAP_MS`: all a sender needs that cuts its pieces by the rate it measures. */
 class PieceReceiver {
   private pieces: Uint8Array[] = []
   private received = 0
@@ -121,16 +125,21 @@ class PieceReceiver {
   private ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor(private readonly send: (frame: Uint8Array<ArrayBuffer>) => void) {}
+  constructor(
+    private readonly send: (frame: Uint8Array<ArrayBuffer>) => void,
+    private readonly options: { peerHoldsBack: boolean },
+  ) {}
 
   /** After a whole frame of `bytes` arrived at `at`, in one message or in pieces. A data frame dates the ack's span: it
    *  takes the queues an upload fills, where the frames that go at once pass them. */
   arrived(bytes: number, data: boolean, at: number): void {
     this.took += bytes
+    const { peerHoldsBack } = this.options
+    if (!peerHoldsBack && !acknowledges(bytes)) return
     this.newestAt = at
     if (data) this.newestDataAt = at
     if (this.took - this.acknowledgedTook <= WIRE_PIECE_BYTES) return
-    const wait = this.ackedAt + WIRE_PIECES_ACK_GAP_MS - this.newestAt
+    const wait = this.ackedAt + (peerHoldsBack ? WIRE_SEND_ACK_GAP_MS : WIRE_PIECES_ACK_GAP_MS) - this.newestAt
     if (wait <= 0) this.acknowledge()
     else this.ackTimer ??= unrefTimer(setTimeout(() => this.acknowledge(), wait))
   }

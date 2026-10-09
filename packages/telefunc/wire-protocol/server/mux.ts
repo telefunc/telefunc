@@ -275,7 +275,7 @@ class ChannelMux {
                 (message) => transport.sendNow(connection, message),
                 () => transport.bufferedAmount(connection) ?? 0,
               ),
-              receiver: new PieceReceiver((frame) => this.send(connection, frame)),
+              receiver: new PieceReceiver((frame) => this.send(connection, frame), { peerHoldsBack: true }),
             }
           : null,
         terminatePermanently: false,

@@ -203,7 +203,9 @@ export const WIRE_PIECE_RATE_MARGIN = 8
 /** How long a measured rate stands after it last rose. */
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
-export const WIRE_PIECES_ACK_GAP_MS = 10
+export const WIRE_PIECES_ACK_GAP_MS = 50
+/** The same where its peer holds data back by what it acknowledges (see `send-budget.ts`). */
+export const WIRE_SEND_ACK_GAP_MS = 10
 /** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
  *  least (see `send-budget.ts`). */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024

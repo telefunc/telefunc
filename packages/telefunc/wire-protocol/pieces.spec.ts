@@ -44,11 +44,11 @@ test('an acknowledgement is read modulo 2^32', () => {
   }
 })
 
-test('a receiver acknowledges frames of any size once more than 16 KiB of them are unacknowledged, with the span between arrivals', () => {
+test('a receiver whose peer holds data back acknowledges frames of any size once more than 16 KiB of them are unacknowledged, with the span between arrivals', () => {
   vi.useFakeTimers()
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
-  const receiver = new PieceReceiver((frame) => void sent.push(frame))
+  const receiver = new PieceReceiver((frame) => void sent.push(frame), { peerHoldsBack: true })
   receiver.arrived(8_000, true, Date.now())
   receiver.arrived(8_000, true, Date.now())
   expect(sent).toHaveLength(0)
@@ -66,5 +66,23 @@ test('a receiver acknowledges frames of any size once more than 16 KiB of them a
     heldMs: 0,
     spanUs: 130_000,
   })
+  vi.useRealTimers()
+})
+
+test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB, at most every 50 ms, and no small frames', () => {
+  vi.useFakeTimers()
+  vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
+  const sent: Uint8Array[] = []
+  const receiver = new PieceReceiver((frame) => void sent.push(frame), { peerHoldsBack: false })
+  for (let i = 0; i < 1_000; i++) receiver.arrived(64, true, Date.now())
+  vi.advanceTimersByTime(1_000)
+  expect(sent).toHaveLength(0)
+  receiver.arrived(20_000, true, Date.now())
+  expect(sent.map((frame) => decode(frame))).toEqual([{ tag: TAG.PIECES_ACK, bytes: 84_000, heldMs: 0, spanUs: 0 }])
+  vi.advanceTimersByTime(10)
+  receiver.arrived(20_000, true, Date.now())
+  expect(sent).toHaveLength(1)
+  vi.advanceTimersByTime(40)
+  expect(sent.map((frame) => decode(frame))[1]).toMatchObject({ bytes: 104_000, heldMs: 40 })
   vi.useRealTimers()
 })
