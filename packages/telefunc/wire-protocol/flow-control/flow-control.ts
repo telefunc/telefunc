@@ -102,7 +102,7 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  /** `backlog`: bytes the channel's wire holds that haven't gone out, `undefined` where the runtime can't tell.
+  /** `backlog`: bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell.
    *  `yieldBytes`: the sender yields a macrotask once it sent that many bytes since it last yielded or waited. A page
    *  sets it: Chromium takes what a page queued on a WebSocket or an upload stream only between tasks, and woken by
    *  credit, a page would send all of it in one. */

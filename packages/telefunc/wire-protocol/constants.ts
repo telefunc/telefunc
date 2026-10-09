@@ -181,6 +181,11 @@ export const SSE_FLUSH_THROTTLE_MS = 300
 export const SSE_POST_FLOOR_MS = 30_000
 export const SSE_POST_MIN_BYTES_PER_S = 16 * 1024
 
+/** A batch POST is sized to take about this long, so what waits behind it, a window refresh or a RECONCILE, waits as long. */
+export const SSE_POST_TARGET_MS = 1500
+/** The smallest a batch POST's allowance gets, however slow the uplink. */
+export const SSE_POST_MIN_BYTES = 64 * 1024
+
 /** Latest-send deadline for SSE reconcile batches so immediate channel activity can coalesce into one POST. */
 export const SSE_RECONCILE_DEADLINE_MS = 10
 
@@ -299,6 +304,9 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
 /** Hard cap on the adaptive credit window — bounds per-channel buffering worst case.
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
+
+/** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
+export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
 
 /** Each lane of a channel's replay buffer, text and binary, on the server and on the page: twice the largest window, so
  *  nothing but `CREDIT_WINDOW_MAX_BYTES` caps a window (see `replayWindow`). A replay holds what its peer hasn't

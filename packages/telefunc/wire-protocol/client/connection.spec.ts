@@ -14,6 +14,7 @@ import {
   RECONCILE_TIMEOUT_MS,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
+  SSE_POST_MAX_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
@@ -201,6 +202,22 @@ test('what joins the outbox while a batch POST is out goes into the next body as
   connection.dispose()
 })
 
+test('a frame queued with a flush timer pending does not rescan the outbox for the earliest deadline', () => {
+  const { connection, transport } = connectionCountingPosts('http://no-rescan.test')
+  let scans = 0
+  transport.outbox = new Proxy([], {
+    get: (target, key, receiver) => {
+      if (key === Symbol.iterator) scans++
+      return Reflect.get(target, key, receiver)
+    },
+  })
+  transport.lastPostStartedAt = Date.now()
+  for (let i = 0; i < 100; i++) transport.sendFrame({ kind: 'data', frame: encode.text(0, '"x"', i + 1) })
+  expect(transport.outbox).toHaveLength(100)
+  expect(scans).toBe(1)
+  connection.dispose()
+})
+
 /** A connection whose batch POSTs are counted and stay out until `answer()`. */
 function connectionCountingPosts(url: string) {
   const connection = ClientConnection.getOrCreate(url, createChannel() as never, stalledOptions()) as any
@@ -211,6 +228,7 @@ function connectionCountingPosts(url: string) {
     return new Promise<Response>((resolve) => void (out.answer = () => resolve(new Response(''))))
   }
   transport.transportAbort = new AbortController()
+  transport.postBytes = SSE_POST_MAX_BYTES
   return { connection, transport, out }
 }
 
@@ -219,16 +237,30 @@ const sendMiB = (transport: any, mib: number) => {
     transport.sendFrame({ kind: 'data', frame: encode.text(0, '"' + 'x'.repeat(2 ** 20) + '"', i + 1) })
 }
 
+test("the SSE transport's buffered amount counts the data frames waiting for a batch POST, not the control frames", () => {
+  const { connection, transport } = connectionCountingPosts('http://buffered.test')
+  const data = encode.text(0, '"' + 'x'.repeat(1000) + '"', 1)
+  transport.outbox = [
+    { frame: encode.window(0, 65_536, 0), deadline: 0 },
+    { frame: data, deadline: 0 },
+  ]
+  expect(transport.bufferedAmount()).toBe(data.byteLength)
+  connection.dispose()
+})
+
 test.each([
   { mib: 31, next: 'waits for its flush throttle' },
   { mib: 33, next: 'goes as the one before it is answered' },
 ])('a batch POST holding $mib MiB $next', async ({ mib, next }) => {
+  // Answered at once on any machine: a POST that took the page 1.5 s or more sizes the next ones down.
+  vi.useFakeTimers({ toFake: ['Date'] })
   const { connection, transport, out } = connectionCountingPosts('http://eager.test')
   transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
   const first = transport.flushOutbox()
   sendMiB(transport, mib)
   out.answer()
   await first
+  vi.useRealTimers()
   expect(out.posts).toBe(next.startsWith('goes') ? 2 : 1)
   connection.dispose()
 })

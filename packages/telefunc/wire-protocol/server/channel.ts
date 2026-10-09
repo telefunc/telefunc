@@ -39,6 +39,7 @@ import { ServerChannelBuffer } from './ServerChannelBuffer.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
+import { withoutFirst } from '../../utils/withoutFirst.js'
 import {
   ACK_STATUS,
   ERROR_REASON,
@@ -346,16 +347,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   listen(callback: ChannelListener<ClientToServer>): () => void {
     this._listeners = [...this._listeners, callback]
     return () => {
-      const i = this._listeners.indexOf(callback)
-      if (i >= 0) this._listeners = this._listeners.filter((_, j) => j !== i)
+      this._listeners = withoutFirst(this._listeners, callback)
     }
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
     this._binaryListeners = [...this._binaryListeners, callback]
     return () => {
-      const i = this._binaryListeners.indexOf(callback)
-      if (i >= 0) this._binaryListeners = this._binaryListeners.filter((_, j) => j !== i)
+      this._binaryListeners = withoutFirst(this._binaryListeners, callback)
     }
   }
 
@@ -419,7 +418,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._ttlTimer = null
         this._shutdown(
           new NetworkError('Channel timed out: no client connected within TTL after response was sent', true),
-          true,
+          { pageGone: true },
         )
       }, c.connectTtl),
     )
@@ -701,7 +700,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {
         this._reconnectTimer = null
-        this._shutdown(new NetworkError('Channel timed out: client did not reconnect within grace period', true), true)
+        this._shutdown(new NetworkError('Channel timed out: client did not reconnect within grace period', true), {
+          pageGone: true,
+        })
       }, reconnectTimeout),
     )
   }
@@ -709,13 +710,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerRecoveryFailure(): void {
     if (this._didShutdown) return
     this._peer = null
-    this._shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true), true)
+    this._shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true), { pageGone: true })
   }
 
   _onPeerClose(): void {
     if (this._didShutdown) return
     this._peer = null
-    this._shutdown(undefined, true)
+    this._shutdown(undefined, { pageGone: true })
   }
 
   /** @internal Its replay no longer holds what its page lacks of it: the channel ends on both ends, `peer` telling its
@@ -964,7 +965,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** `pageGone`: its page left it, or never came, so nothing it lacks of the channel can reach it. */
-  protected _shutdown(err?: Error, pageGone = false): void {
+  protected _shutdown(err?: Error, { pageGone = false } = {}): void {
     if (this._didShutdown) return
     this._didShutdown = true
     this._isClosed = true

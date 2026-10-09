@@ -13,7 +13,6 @@ import {
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
-  CREDIT_WINDOW_MAX_BYTES,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
@@ -22,7 +21,10 @@ import {
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_FLOOR_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
+  SSE_POST_MAX_BYTES,
+  SSE_POST_MIN_BYTES,
   SSE_POST_MIN_BYTES_PER_S,
+  SSE_POST_TARGET_MS,
   SSE_RECONCILE_DEADLINE_MS,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   MAX_CHANNELS_PER_CONNECTION,
@@ -467,14 +469,15 @@ class ClientConnection implements MuxConnection {
   private channels = new Map<number, ChannelEntry>()
   private channelIndex = new Map<MuxChannel, number>()
   private sendBuffer: BufferedFrame[] = []
-  /** A sequenced frame of a channel that may send waits in `sendBuffer` for the transport to have room for data. */
-  private heldForRoom = false
+  /** A channel that may send has a sequenced frame waiting in sendBuffer: what it sends next waits behind it. */
+  private holdsSendable = false
   private lastSeqByChannel = new Map<number, number>()
   private replayBuffers = new Map<number, ReplayBuffer>()
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
-  /** For the page's life, once a wire was lost, here or the server's word, with a frame in flight and no rate measured. */
+  /** For the page's life, once a wire was lost, here or the server's word, with a frame in flight and no rate measured,
+   *  or silent past its RECONCILE deadline. */
   private slowLink = false
   /** The heartbeat last installed is the provisional one before a first RECONCILED (see `beatFromReconcile`). */
   private provisionalHeartbeat = false
@@ -645,9 +648,9 @@ class ClientConnection implements MuxConnection {
     channel._fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
-  /** The transport's server acknowledged data: what waited for room goes. */
+  /** The transport may have room for data again: what waited for it goes. */
   _onTransportRoom(transport: ClientChannelTransport): void {
-    if (transport === this.transport && this.heldForRoom && this.sendsOpen) this.drainBufferedFramesToWire()
+    if (transport === this.transport && this.holdsSendable && this.sendsOpen) this.drainBufferedFramesToWire()
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
@@ -743,14 +746,14 @@ class ClientConnection implements MuxConnection {
   private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     const open = this.canSendImmediately(ix)
     // What it held goes first, once it has room.
-    if (open && this.heldForRoom && this.transport.sendRoom() > 0) this.drainBufferedFramesToWire()
-    if (open && !this.heldForRoom && this.transport.sendRoom() > 0) {
+    if (open && this.holdsSendable && this.transport.sendRoom() > 0) this.drainBufferedFramesToWire()
+    if (open && !this.holdsSendable && this.transport.sendRoom() > 0) {
       this.replayBuffers.get(ix)!.push(seq, frame)
       this.transport.sendFrame({ kind, frame })
       return
     }
     this.sendBuffer.push({ frame, channelIx: ix, seq })
-    if (open) this.heldForRoom = true
+    if (open) this.holdsSendable = true
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -811,7 +814,8 @@ class ClientConnection implements MuxConnection {
 
   bufferedAmount(): number {
     let held = 0
-    if (this.heldForRoom) for (const { frame, seq } of this.sendBuffer) if (seq !== undefined) held += frame.byteLength
+    if (this.holdsSendable)
+      for (const { frame, seq } of this.sendBuffer) if (seq !== undefined) held += frame.byteLength
     return this.transport.bufferedAmount() + held
   }
 
@@ -1113,6 +1117,8 @@ class ClientConnection implements MuxConnection {
     // delivered nothing for the deadline.
     const quiet = this.transport.quietFor()
     if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
+    // RECONCILED never came, so neither did the session by which the server would tell the next wire the link is slow.
+    this.slowLink = true
     this.dropWire(this.transport)
   }
 
@@ -1738,7 +1744,7 @@ class ClientConnection implements MuxConnection {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.sendBuffer
     let room = this.transport.sendRoom()
-    let heldForRoom = false
+    let holdsSendable = false
     let writeIx = 0
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
@@ -1747,13 +1753,15 @@ class ClientConnection implements MuxConnection {
       const seq = entry.seq
       if (!releasable(channelIx)) {
         sendBuffer[writeIx++] = entry
+        // What a channel that may send still holds goes before what it sends next.
+        if (seq !== undefined && this.isSendable(channelIx)) holdsSendable = true
         continue
       }
       if (seq !== undefined) {
         // Once the room is used, it is for the frames after: a channel's stay in order.
         if (room <= 0) {
           sendBuffer[writeIx++] = entry
-          heldForRoom = true
+          holdsSendable = true
           continue
         }
         room -= frame.byteLength
@@ -1762,7 +1770,7 @@ class ClientConnection implements MuxConnection {
       frames.push({ kind: 'reconcile', frame })
     }
     sendBuffer.length = writeIx
-    this.heldForRoom = heldForRoom
+    this.holdsSendable = holdsSendable
     return frames
   }
 
@@ -2107,9 +2115,6 @@ function receiveMessage(
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
 const SSE_FOLD_BYTES = 1024 * 1024
 
-/** Held for the next POST, this much goes without waiting out the throttle, which would cap an upload at a window per throttle. */
-const SSE_EAGER_FLUSH_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
-
 class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
@@ -2136,6 +2141,12 @@ class SseTransport implements UpgradeSource {
   /** The next POST's body, as far as `foldOutbox` built it. */
   private folded: OutboxFold | null = null
   private lastPostStartedAt = 0
+  /** What a batch POST is sized to carry: what its bytes take `SSE_POST_TARGET_MS` to cross at the rate the last ones did. */
+  private postBytes = SSE_POST_MIN_BYTES
+  /** The body of the batch POST out, 0 with none. */
+  private postOutBytes = 0
+  /** The frames in `outbox`. */
+  private outboxBytes = 0
   /** The batch POST out is lost if this passes. */
   private postWatch: ReturnType<typeof setTimeout> | null = null
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
@@ -2183,6 +2194,7 @@ class SseTransport implements UpgradeSource {
     if (this.flushing || !this.hasWire() || signal.aborted) return 'not-emitted'
     this.flushScheduler.cancel()
     const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
+    this.outboxBytes = 0
     queued.push(buildFrame().frame)
     // Not `flushOutbox`: it re-queues on failure, and a barrier must never be replayed onto the
     // next wire. `emitted` is already decided — this POST cannot report whether the server saw it,
@@ -2225,13 +2237,17 @@ class SseTransport implements UpgradeSource {
     const deadline = this.getFrameDeadline(frame.kind, now)
     const entry = { frame: frame.frame, deadline }
     this.outbox.push(entry)
+    this.outboxBytes += frame.frame.byteLength
     this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
     if (this.flushing) {
       this.foldOutbox()
       if (frame.kind === 'heartbeat') this.unholdPing(entry)
     }
-    this.scheduleFlush()
-    if (deadline <= now || this.holdsEagerFlushBytes()) void this.flushOutbox()
+    // A timer pending is for the earliest deadline queued before this frame: only this frame's can come earlier.
+    if (this.flushScheduler.pending && this.hasWire()) this.flushScheduler.schedule(deadline)
+    else this.scheduleFlush()
+    // A whole POST is held: it goes without waiting out the throttle, which would cap an upload at a POST per throttle.
+    if (deadline <= now || this.sendRoom() <= 0) void this.flushOutbox()
   }
 
   /** While a POST is out, what joins the outbox goes into the next one's body a MiB at a time, so the flush after the
@@ -2253,11 +2269,6 @@ class SseTransport implements UpgradeSource {
       first: this.outbox[0]!,
       last: this.outbox[this.outbox.length - 1]!,
     }
-  }
-
-  /** The fold and what joined it since are enough to go without waiting out the throttle. */
-  private holdsEagerFlushBytes(): boolean {
-    return (this.foldHeading(this.outbox)?.blob.size ?? 0) + this.unfolded >= SSE_EAGER_FLUSH_BYTES
   }
 
   /** The fold, if it still heads `entries`. */
@@ -2388,7 +2399,10 @@ class SseTransport implements UpgradeSource {
           result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
         this.closeStreamRequest()
         this.streamRequest = { tag: 'failed' }
-        if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
+        if (unsent) {
+          this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
+          for (const frame of unsent) this.outboxBytes += frame.byteLength
+        }
         this.owner._onTransportBatched(this)
       }
     }
@@ -2409,6 +2423,7 @@ class SseTransport implements UpgradeSource {
     // then drop as duplicates.
     const movedOutbox = this.outbox.filter(isWindowRefresh)
     this.outbox = []
+    this.outboxBytes = 0
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
     return { initialFrames, movedOutbox, movedBufferedFrames }
@@ -2422,6 +2437,7 @@ class SseTransport implements UpgradeSource {
       deadline: this.getFrameDeadline(entry.kind, now),
     }))
     this.outbox = stage.movedOutbox.concat(movedBuffered, this.outbox)
+    this.outboxBytes += bytesOf(stage.movedOutbox) + bytesOf(movedBuffered)
   }
 
   private async flushOutbox(): Promise<void> {
@@ -2432,6 +2448,7 @@ class SseTransport implements UpgradeSource {
     try {
       const now = Date.now()
       const queued = this.outbox.splice(0, this.outbox.length)
+      this.outboxBytes = 0
       const head = this.foldHeading(queued)
       this.folded = null
       this.lastPostStartedAt = now
@@ -2443,17 +2460,22 @@ class SseTransport implements UpgradeSource {
           queued.slice(head?.count ?? 0).map((entry) => entry.frame),
           head?.blob,
         )
+        this.postOutBytes = body.size
         this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
         const response = await this.post(body, wire.signal)
         if (!response.ok) throw new Error('POST failed')
+        this.sizePosts(body.size, Date.now() - now)
       } catch {
         // Its wire has ended already: what the POST carried goes the way of that wire's outbox (stageInitialBatch),
         // also when the next wire has reconciled already.
         if (wire !== this.transportAbort) {
-          this.outbox = queued.filter(isWindowRefresh).concat(this.outbox)
+          const refreshes = queued.filter(isWindowRefresh)
+          this.outbox = refreshes.concat(this.outbox)
+          this.outboxBytes += bytesOf(refreshes)
           return
         }
         this.outbox = queued.concat(this.outbox)
+        this.outboxBytes += bytesOf(queued)
         this.abandonActiveTransport()
         this.owner._onTransportClosed(this)
         return
@@ -2462,8 +2484,24 @@ class SseTransport implements UpgradeSource {
       if (this.postWatch) clearTimeout(this.postWatch)
       this.postWatch = null
       this.flushing = false
+      this.postOutBytes = 0
       this.flushNextOrDrain()
+      this.owner._onTransportRoom(this)
     }
+  }
+
+  /** A POST of `bytes` that took `ms` sizes the next ones to take `SSE_POST_TARGET_MS`: past it they shrink to what the
+   *  bytes took, and under it they grow once one was full. */
+  private sizePosts(bytes: number, ms: number): void {
+    if (ms < SSE_POST_TARGET_MS && bytes < this.postBytes) return
+    this.postBytes = Math.min(
+      SSE_POST_MAX_BYTES,
+      Math.max(SSE_POST_MIN_BYTES, (bytes * SSE_POST_TARGET_MS) / Math.max(1, ms)),
+    )
+  }
+
+  sendRoom(): number {
+    return this.batched ? this.postBytes - this.postOutBytes - this.outboxBytes : Infinity
   }
 
   /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
@@ -2477,7 +2515,7 @@ class SseTransport implements UpgradeSource {
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */
   private flushNextOrDrain(): void {
     if (this.outbox.length > 0) {
-      if (this.holdsEagerFlushBytes()) void this.flushOutbox()
+      if (this.sendRoom() <= 0) void this.flushOutbox()
       else this.scheduleFlush()
       return
     }
@@ -2493,6 +2531,7 @@ class SseTransport implements UpgradeSource {
         const at = this.outbox.indexOf(entry)
         if (!this.flushing || at === -1) return
         this.outbox.splice(at, 1)
+        this.outboxBytes -= entry.frame.byteLength
         void this.sendStandalonePost([entry.frame])
       },
       Math.max(0, entry.deadline - Date.now()),
@@ -2530,15 +2569,12 @@ class SseTransport implements UpgradeSource {
     } catch {}
   }
 
-  sendRoom(): number {
-    return Infinity
-  }
-
-  /** What a POST under way carries has gone out. */
+  /** What a POST under way carries has gone out. The control frames that wait for the next one aren't counted: a channel
+   *  out of credit with only those waiting was starved. */
   bufferedAmount(): number {
     if (this.streamRequest.tag === 'active') return this.streamRequest.body.bufferedAmount
     let bytes = 0
-    for (const entry of this.outbox) bytes += entry.frame.byteLength
+    for (const { frame } of this.outbox) if (isSequencedTag(frame[0]!)) bytes += frame.byteLength
     return bytes
   }
 
@@ -2628,6 +2664,7 @@ class SseTransport implements UpgradeSource {
     }
     this.flushScheduler.cancel()
     this.outbox = []
+    this.outboxBytes = 0
     this.folded = null
     this.closeStreamRequest()
     this.transportAbort?.abort()
@@ -2692,6 +2729,12 @@ function channelErrorFor(reason: number): Error {
     default:
       return makeBugError()
   }
+}
+
+function bytesOf(entries: readonly OutboxEntry[]): number {
+  let bytes = 0
+  for (const { frame } of entries) bytes += frame.byteLength
+  return bytes
 }
 
 function isWindowRefresh({ frame }: OutboxEntry): boolean {

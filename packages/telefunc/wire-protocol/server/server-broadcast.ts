@@ -23,6 +23,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { markHandled } from '../../utils/markHandled.js'
+import { withoutFirst } from '../../utils/withoutFirst.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../shared-ws.js'
 import type { BroadcastKind, WirePublishInfo } from '../shared-ws.js'
@@ -144,9 +145,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._syncSubscription(kind)
   }
 
-  protected override _shutdown(err?: Error, pageGone?: boolean): void {
+  protected override _shutdown(err?: Error, options?: { pageGone?: boolean }): void {
     for (const route of Object.values(this._routes)) route.close()
-    super._shutdown(err, pageGone)
+    super._shutdown(err, options)
   }
 
   // --- Internal broadcast helpers ---
@@ -158,9 +159,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!this._isClosed) this._routes[kind].open()
     this._subscribers[kind] = [...this._subscribers[kind], callback] as BroadcastListeners<T>[K]
     return () => {
-      const index = (this._subscribers[kind] as Array<typeof callback>).indexOf(callback)
-      if (index < 0) return
-      this._subscribers[kind] = this._subscribers[kind].filter((_, j) => j !== index) as BroadcastListeners<T>[K]
+      const subscribers = this._subscribers[kind] as Array<typeof callback>
+      const remaining = withoutFirst(subscribers, callback)
+      if (remaining === subscribers) return
+      this._subscribers[kind] = remaining as BroadcastListeners<T>[K]
       this._syncSubscription(kind)
     }
   }

@@ -24,7 +24,7 @@ import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
-import { SSE_FLUSH_THROTTLE_MS, STREAM_TRANSPORT } from '../constants.js'
+import { SSE_FLUSH_THROTTLE_MS, SSE_POST_MAX_BYTES, STREAM_TRANSPORT } from '../constants.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { createRequestContext } from '../../node/server/context/requestContext.js'
@@ -607,7 +607,8 @@ describe.each(WIRES)('over %s', (wire) => {
       serverConfig: { log: { shieldErrors: { dev: false, prod: false } } },
     })
     const abortController = new AbortController() // the call's, which its withContext signal aborts
-    await parseResponse(
+    // The page's end of the returned channel closes once collected: it stays referenced until the end.
+    const returned = await parseResponse(
       new Response(result.body as string),
       {
         telefunctionName: 'onChat',
@@ -625,6 +626,7 @@ describe.each(WIRES)('over %s', (wire) => {
     abortController.abort()
     await advance(1_000)
     expect(isAbort(serverClosed.err)).toBe(true)
+    expect(returned).toBeDefined()
   })
 
   test('an abort the page queues behind a registration reaches the server', async () => {
@@ -1073,6 +1075,12 @@ type End = {
 /** The sending end and the receiving end, the server's channel or the page's as `from` says which sends. */
 function endsFrom(from: 'server' | 'page', server: End, pageChannel: End): [End, End] {
   return from === 'server' ? [server, pageChannel] : [pageChannel, server]
+}
+
+/** Its batch POSTs are as large as they get, which a page on an unshaped link finds out within its first POSTs. */
+function settlePosts(channel: unknown) {
+  const transport = (channel as { _connection: { transport: { postBytes?: number } } })._connection.transport
+  if (transport.postBytes !== undefined) transport.postBytes = SSE_POST_MAX_BYTES
 }
 
 /** The wire dies once `sender` may send more than half of `receiver`'s window, which then goes into the dead wire. */
@@ -1841,6 +1849,7 @@ describe.each(WIRES)('over %s, a channel whose seqs pass 2^31 and 2^32', (wire) 
       const pageChannel = channel<string, never>(server.id)
       const closed = [closedWith(pageChannel), closedWith(server)]
       await advance(500)
+      settlePosts(pageChannel)
       skipSeqs(server, pageChannel, boundary - 100)
       produce((n) => pageChannel.send(text(n), { ack: false }), 400, 1)
       while (replayOf(pageChannel).seq < dieAt) await advance(1)
