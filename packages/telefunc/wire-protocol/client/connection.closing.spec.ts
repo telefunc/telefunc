@@ -607,7 +607,8 @@ describe.each(WIRES)('over %s', (wire) => {
       serverConfig: { log: { shieldErrors: { dev: false, prod: false } } },
     })
     const abortController = new AbortController() // the call's, which its withContext signal aborts
-    await parseResponse(
+    // The page's end of the returned channel closes once collected: it stays referenced until the end.
+    const returned = await parseResponse(
       new Response(result.body as string),
       {
         telefunctionName: 'onChat',
@@ -625,6 +626,7 @@ describe.each(WIRES)('over %s', (wire) => {
     abortController.abort()
     await advance(1_000)
     expect(isAbort(serverClosed.err)).toBe(true)
+    expect(returned).toBeDefined()
   })
 
   test('an abort the page queues behind a registration reaches the server', async () => {
