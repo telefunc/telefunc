@@ -252,12 +252,15 @@ test.each([
   { mib: 31, next: 'waits for its flush throttle' },
   { mib: 33, next: 'goes as the one before it is answered' },
 ])('a batch POST holding $mib MiB $next', async ({ mib, next }) => {
+  // Answered at once on any machine: a POST that took the page 1.5 s or more sizes the next ones down.
+  vi.useFakeTimers({ toFake: ['Date'] })
   const { connection, transport, out } = connectionCountingPosts('http://eager.test')
   transport.outbox = [{ frame: encode.window(0, 65_536, 0), deadline: 0 }]
   const first = transport.flushOutbox()
   sendMiB(transport, mib)
   out.answer()
   await first
+  vi.useRealTimers()
   expect(out.posts).toBe(next.startsWith('goes') ? 2 : 1)
   connection.dispose()
 })
