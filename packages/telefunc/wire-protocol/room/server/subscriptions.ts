@@ -60,6 +60,8 @@ class RoomSubscriptions {
   /** Keyed by (member, track); `_binaryTracks` lists each member's. */
   private readonly _binary = new Map<string, LaneSubscription>()
   private readonly _binaryTracks = new Map<string, Set<string>>()
+  /** The binary lanes not ready yet, so a readiness wait never visits the ready ones. */
+  private readonly _binaryPending = new Set<LaneSubscription>()
   private readonly _inbox = new Map<string, LaneSubscription>()
   private readonly _recovering = new Set<LaneSubscription>()
   private _pendingRefresh: Promise<void> | null = null
@@ -127,7 +129,7 @@ class RoomSubscriptions {
 
   binaryReady(): Promise<void> {
     const pending: Promise<void>[] = []
-    for (const subscription of this._binary.values()) pending.push(subscription.ready)
+    for (const subscription of this._binaryPending) pending.push(subscription.ready)
     return pending.length === 0 ? Promise.resolve() : withinRoomHorizon(Promise.all(pending)).then(() => undefined)
   }
 
@@ -194,7 +196,7 @@ class RoomSubscriptions {
       const key = binaryLaneKey(member, track)
       let slot = this._binary.get(key)
       const added = slot === undefined
-      if (!slot) this._binary.set(key, (slot = this._newLaneSubscription()))
+      if (!slot) this._binary.set(key, (slot = this._newLaneSubscription(this._binaryPending)))
       slot.sync(true, () =>
         getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary', member, track }, (framed, info) =>
           host._onBinary(framed, info),
@@ -228,10 +230,14 @@ class RoomSubscriptions {
     this._inbox.delete(member)
   }
 
-  private _newLaneSubscription(): LaneSubscription {
+  private _newLaneSubscription(pendingSlots?: Set<LaneSubscription>): LaneSubscription {
     return new LaneSubscription(
       (slot, error) => this._onTerminal(slot, error),
       () => void this.reconcileAuthority().catch(reportRoomError),
+      (slot, pending) => {
+        if (pending) pendingSlots?.add(slot)
+        else pendingSlots?.delete(slot)
+      },
     )
   }
 

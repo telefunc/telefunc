@@ -15,6 +15,7 @@ class LaneSubscription {
   constructor(
     private readonly _onTerminal: (slot: LaneSubscription, error?: unknown) => void,
     private readonly _onRecovered: () => void,
+    private readonly _onPending: (slot: LaneSubscription, pending: boolean) => void = () => {},
   ) {}
 
   get active(): boolean {
@@ -114,10 +115,13 @@ class LaneSubscription {
     this._readyPromise = new Promise<void>((resolve) => {
       this._resolveReady = resolve
     })
+    this._onPending(this, true)
   }
 
   private _settleReady(): void {
-    this._resolveReady?.()
+    if (this._resolveReady === null) return
+    this._resolveReady()
     this._resolveReady = null
+    this._onPending(this, false)
   }
 }
