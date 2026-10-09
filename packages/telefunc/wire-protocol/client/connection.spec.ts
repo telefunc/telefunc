@@ -10,6 +10,7 @@ import {
   CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
   CHANNEL_TRANSPORT,
+  CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
   RECONCILE_TIMEOUT_MS,
   SSE_FLUSH_THROTTLE_MS,
@@ -227,6 +228,7 @@ function connectionCountingPosts(url: string) {
     return new Promise<Response>((resolve) => void (out.answer = () => resolve(new Response(''))))
   }
   transport.transportAbort = new AbortController()
+  transport.postBytes = CREDIT_WINDOW_MAX_BYTES / 2
   return { connection, transport, out }
 }
 
@@ -234,6 +236,17 @@ const sendMiB = (transport: any, mib: number) => {
   for (let i = 0; i < mib; i++)
     transport.sendFrame({ kind: 'data', frame: encode.text(0, '"' + 'x'.repeat(2 ** 20) + '"', i + 1) })
 }
+
+test("the SSE transport's buffered amount counts the data frames waiting for a batch POST, not the control frames", () => {
+  const { connection, transport } = connectionCountingPosts('http://buffered.test')
+  const data = encode.text(0, '"' + 'x'.repeat(1000) + '"', 1)
+  transport.outbox = [
+    { frame: encode.window(0, 65_536, 0), deadline: 0 },
+    { frame: data, deadline: 0 },
+  ]
+  expect(transport.bufferedAmount()).toBe(data.byteLength)
+  connection.dispose()
+})
 
 test.each([
   { mib: 31, next: 'waits for its flush throttle' },

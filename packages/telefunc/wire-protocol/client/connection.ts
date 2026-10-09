@@ -22,7 +22,9 @@ import {
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_FLOOR_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
+  SSE_POST_MIN_BYTES,
   SSE_POST_MIN_BYTES_PER_S,
+  SSE_POST_TARGET_MS,
   SSE_RECONCILE_DEADLINE_MS,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   MAX_CHANNELS_PER_CONNECTION,
@@ -2109,8 +2111,8 @@ function receiveMessage(
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
 const SSE_FOLD_BYTES = 1024 * 1024
 
-/** Held for the next POST, this much goes without waiting out the throttle, which would cap an upload at a window per throttle. */
-const SSE_EAGER_FLUSH_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
+/** The most a batch POST is sized to carry. */
+const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
 
 class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE
@@ -2138,6 +2140,12 @@ class SseTransport implements UpgradeSource {
   /** The next POST's body, as far as `foldOutbox` built it. */
   private folded: OutboxFold | null = null
   private lastPostStartedAt = 0
+  /** What a batch POST is sized to carry: what its bytes take `SSE_POST_TARGET_MS` to cross at the rate the last ones did. */
+  private postBytes = SSE_POST_MIN_BYTES
+  /** The body of the batch POST out, 0 with none. */
+  private postOutBytes = 0
+  /** The frames in `outbox`. */
+  private outboxBytes = 0
   /** The batch POST out is lost if this passes. */
   private postWatch: ReturnType<typeof setTimeout> | null = null
   private flushThrottleMs = SSE_FLUSH_THROTTLE_MS
@@ -2185,6 +2193,7 @@ class SseTransport implements UpgradeSource {
     if (this.flushing || !this.hasWire() || signal.aborted) return 'not-emitted'
     this.flushScheduler.cancel()
     const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
+    this.outboxBytes = 0
     queued.push(buildFrame().frame)
     // Not `flushOutbox`: it re-queues on failure, and a barrier must never be replayed onto the
     // next wire. `emitted` is already decided — this POST cannot report whether the server saw it,
@@ -2227,6 +2236,7 @@ class SseTransport implements UpgradeSource {
     const deadline = this.getFrameDeadline(frame.kind, now)
     const entry = { frame: frame.frame, deadline }
     this.outbox.push(entry)
+    this.outboxBytes += frame.frame.byteLength
     this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
     if (this.flushing) {
       this.foldOutbox()
@@ -2259,9 +2269,9 @@ class SseTransport implements UpgradeSource {
     }
   }
 
-  /** The fold and what joined it since are enough to go without waiting out the throttle. */
+  /** A whole POST is held: it goes without waiting out the throttle, which would cap an upload at a POST per throttle. */
   private holdsEagerFlushBytes(): boolean {
-    return (this.foldHeading(this.outbox)?.blob.size ?? 0) + this.unfolded >= SSE_EAGER_FLUSH_BYTES
+    return this.sendRoom() <= 0
   }
 
   /** The fold, if it still heads `entries`. */
@@ -2392,7 +2402,10 @@ class SseTransport implements UpgradeSource {
           result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
         this.closeStreamRequest()
         this.streamRequest = { tag: 'failed' }
-        if (unsent) this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
+        if (unsent) {
+          this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
+          for (const frame of unsent) this.outboxBytes += frame.byteLength
+        }
         this.owner._onTransportBatched(this)
       }
     }
@@ -2413,6 +2426,7 @@ class SseTransport implements UpgradeSource {
     // then drop as duplicates.
     const movedOutbox = this.outbox.filter(isWindowRefresh)
     this.outbox = []
+    this.outboxBytes = 0
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
     return { initialFrames, movedOutbox, movedBufferedFrames }
@@ -2426,6 +2440,7 @@ class SseTransport implements UpgradeSource {
       deadline: this.getFrameDeadline(entry.kind, now),
     }))
     this.outbox = stage.movedOutbox.concat(movedBuffered, this.outbox)
+    this.outboxBytes += bytesOf(stage.movedOutbox) + bytesOf(movedBuffered)
   }
 
   private async flushOutbox(): Promise<void> {
@@ -2436,6 +2451,7 @@ class SseTransport implements UpgradeSource {
     try {
       const now = Date.now()
       const queued = this.outbox.splice(0, this.outbox.length)
+      this.outboxBytes = 0
       const head = this.foldHeading(queued)
       this.folded = null
       this.lastPostStartedAt = now
@@ -2447,17 +2463,22 @@ class SseTransport implements UpgradeSource {
           queued.slice(head?.count ?? 0).map((entry) => entry.frame),
           head?.blob,
         )
+        this.postOutBytes = body.size
         this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
         const response = await this.post(body, wire.signal)
         if (!response.ok) throw new Error('POST failed')
+        this.sizePosts(body.size, Date.now() - now)
       } catch {
         // Its wire has ended already: what the POST carried goes the way of that wire's outbox (stageInitialBatch),
         // also when the next wire has reconciled already.
         if (wire !== this.transportAbort) {
-          this.outbox = queued.filter(isWindowRefresh).concat(this.outbox)
+          const refreshes = queued.filter(isWindowRefresh)
+          this.outbox = refreshes.concat(this.outbox)
+          this.outboxBytes += bytesOf(refreshes)
           return
         }
         this.outbox = queued.concat(this.outbox)
+        this.outboxBytes += bytesOf(queued)
         this.abandonActiveTransport()
         this.owner._onTransportClosed(this)
         return
@@ -2466,8 +2487,24 @@ class SseTransport implements UpgradeSource {
       if (this.postWatch) clearTimeout(this.postWatch)
       this.postWatch = null
       this.flushing = false
+      this.postOutBytes = 0
       this.flushNextOrDrain()
+      this.owner._onTransportRoom(this)
     }
+  }
+
+  /** A POST of `bytes` that took `ms` sizes the next ones to take `SSE_POST_TARGET_MS`: past it they shrink to what the
+   *  bytes took, and under it they grow once one was full. */
+  private sizePosts(bytes: number, ms: number): void {
+    if (ms < SSE_POST_TARGET_MS && bytes < this.postBytes) return
+    this.postBytes = Math.min(
+      SSE_POST_MAX_BYTES,
+      Math.max(SSE_POST_MIN_BYTES, (bytes * SSE_POST_TARGET_MS) / Math.max(1, ms)),
+    )
+  }
+
+  sendRoom(): number {
+    return this.batched ? this.postBytes - this.postOutBytes - this.outboxBytes : Infinity
   }
 
   /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
@@ -2497,6 +2534,7 @@ class SseTransport implements UpgradeSource {
         const at = this.outbox.indexOf(entry)
         if (!this.flushing || at === -1) return
         this.outbox.splice(at, 1)
+        this.outboxBytes -= entry.frame.byteLength
         void this.sendStandalonePost([entry.frame])
       },
       Math.max(0, entry.deadline - Date.now()),
@@ -2534,15 +2572,12 @@ class SseTransport implements UpgradeSource {
     } catch {}
   }
 
-  sendRoom(): number {
-    return Infinity
-  }
-
-  /** What a POST under way carries has gone out. */
+  /** What a POST under way carries has gone out. The control frames that wait for the next one aren't counted: a channel
+   *  out of credit with only those waiting was starved. */
   bufferedAmount(): number {
     if (this.streamRequest.tag === 'active') return this.streamRequest.body.bufferedAmount
     let bytes = 0
-    for (const entry of this.outbox) bytes += entry.frame.byteLength
+    for (const { frame } of this.outbox) if (isSequencedTag(frame[0]!)) bytes += frame.byteLength
     return bytes
   }
 
@@ -2632,6 +2667,7 @@ class SseTransport implements UpgradeSource {
     }
     this.flushScheduler.cancel()
     this.outbox = []
+    this.outboxBytes = 0
     this.folded = null
     this.closeStreamRequest()
     this.transportAbort?.abort()
@@ -2696,6 +2732,12 @@ function channelErrorFor(reason: number): Error {
     default:
       return makeBugError()
   }
+}
+
+function bytesOf(entries: readonly OutboxEntry[]): number {
+  let bytes = 0
+  for (const { frame } of entries) bytes += frame.byteLength
+  return bytes
 }
 
 function isWindowRefresh({ frame }: OutboxEntry): boolean {
