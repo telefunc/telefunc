@@ -201,6 +201,22 @@ test('what joins the outbox while a batch POST is out goes into the next body as
   connection.dispose()
 })
 
+test('a frame queued with a flush timer pending does not rescan the outbox for the earliest deadline', () => {
+  const { connection, transport } = connectionCountingPosts('http://no-rescan.test')
+  let scans = 0
+  transport.outbox = new Proxy([], {
+    get: (target, key, receiver) => {
+      if (key === Symbol.iterator) scans++
+      return Reflect.get(target, key, receiver)
+    },
+  })
+  transport.lastPostStartedAt = Date.now()
+  for (let i = 0; i < 100; i++) transport.sendFrame({ kind: 'data', frame: encode.text(0, '"x"', i + 1) })
+  expect(transport.outbox).toHaveLength(100)
+  expect(scans).toBe(1)
+  connection.dispose()
+})
+
 /** A connection whose batch POSTs are counted and stay out until `answer()`. */
 function connectionCountingPosts(url: string) {
   const connection = ClientConnection.getOrCreate(url, createChannel() as never, stalledOptions()) as any

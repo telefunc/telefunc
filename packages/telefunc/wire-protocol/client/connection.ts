@@ -2230,7 +2230,9 @@ class SseTransport implements UpgradeSource {
       this.foldOutbox()
       if (frame.kind === 'heartbeat') this.unholdPing(entry)
     }
-    this.scheduleFlush()
+    // A timer pending is for the earliest deadline queued before this frame: only this frame's can come earlier.
+    if (this.flushScheduler.pending && this.hasWire()) this.flushScheduler.schedule(deadline)
+    else this.scheduleFlush()
     if (deadline <= now || this.holdsEagerFlushBytes()) void this.flushOutbox()
   }
 
