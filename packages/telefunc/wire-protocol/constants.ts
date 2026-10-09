@@ -300,6 +300,9 @@ export const CREDIT_WINDOW_INITIAL_BYTES_BATCH = 8 * 1024 * 1024
  *  Covers ~5 Gbit/s × 100 ms RTT or ~500 Mbit/s × 1 s RTT. */
 export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 
+/** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
+export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
+
 /** Each lane of a channel's replay buffer, text and binary, on the server and on the page: twice the largest window, so
  *  nothing but `CREDIT_WINDOW_MAX_BYTES` caps a window (see `replayWindow`). A replay holds what its peer hasn't
  *  acknowledged: for a stream that awaits its sends, its window and a message at most. */

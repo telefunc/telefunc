@@ -24,7 +24,7 @@ import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
-import { CREDIT_WINDOW_MAX_BYTES, SSE_FLUSH_THROTTLE_MS, STREAM_TRANSPORT } from '../constants.js'
+import { SSE_FLUSH_THROTTLE_MS, SSE_POST_MAX_BYTES, STREAM_TRANSPORT } from '../constants.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { createRequestContext } from '../../node/server/context/requestContext.js'
@@ -1080,7 +1080,7 @@ function endsFrom(from: 'server' | 'page', server: End, pageChannel: End): [End,
 /** Its batch POSTs are as large as they get, which a page on an unshaped link finds out within its first POSTs. */
 function settlePosts(channel: unknown) {
   const transport = (channel as { _connection: { transport: { postBytes?: number } } })._connection.transport
-  if (transport.postBytes !== undefined) transport.postBytes = CREDIT_WINDOW_MAX_BYTES / 2
+  if (transport.postBytes !== undefined) transport.postBytes = SSE_POST_MAX_BYTES
 }
 
 /** The wire dies once `sender` may send more than half of `receiver`'s window, which then goes into the dead wire. */

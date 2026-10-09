@@ -13,7 +13,6 @@ import {
   CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
-  CREDIT_WINDOW_MAX_BYTES,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
@@ -22,6 +21,7 @@ import {
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_FLOOR_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
+  SSE_POST_MAX_BYTES,
   SSE_POST_MIN_BYTES,
   SSE_POST_MIN_BYTES_PER_S,
   SSE_POST_TARGET_MS,
@@ -2114,9 +2114,6 @@ function receiveMessage(
 
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
 const SSE_FOLD_BYTES = 1024 * 1024
-
-/** The most a batch POST is sized to carry. */
-const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
 
 class SseTransport implements UpgradeSource {
   readonly type = CHANNEL_TRANSPORT.SSE

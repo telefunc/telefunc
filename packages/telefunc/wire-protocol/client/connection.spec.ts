@@ -10,11 +10,11 @@ import {
   CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
   CHANNEL_TRANSPORT,
-  CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
   RECONCILE_TIMEOUT_MS,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
+  SSE_POST_MAX_BYTES,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
@@ -228,7 +228,7 @@ function connectionCountingPosts(url: string) {
     return new Promise<Response>((resolve) => void (out.answer = () => resolve(new Response(''))))
   }
   transport.transportAbort = new AbortController()
-  transport.postBytes = CREDIT_WINDOW_MAX_BYTES / 2
+  transport.postBytes = SSE_POST_MAX_BYTES
   return { connection, transport, out }
 }
 
