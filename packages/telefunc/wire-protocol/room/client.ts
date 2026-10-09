@@ -7,7 +7,14 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
-import { decodeBinaryFrame, emptyBinaryWants, encodeBinaryFrame } from './binary.js'
+import {
+  decodeBinaryFrame,
+  emptyBinaryWants,
+  encodeBinaryFrame,
+  sameTrackWants,
+  type BinaryWants,
+  type TrackWants,
+} from './binary.js'
 import {
   assertKnownOptions,
   leaveCauseFromWire,
@@ -67,7 +74,6 @@ function heldMemberOf(event: RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | R
 /** One awaiter of a conflated publish, resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
-type WantsDeclaration = Extract<RoomStubRequest, { __r: 'sub-text' | 'sub-binary' }>
 
 /** A server room through one Broadcast stub: its frames carry events and data, its acked messages requests. */
 class ClientRoom extends RoomStateView implements Room {
@@ -80,10 +86,9 @@ class ClientRoom extends RoomStateView implements Room {
   private _pendingJoins = 0
   private _heldForJoins: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> = []
   /** The wants the server stub holds, as last declared; a fresh stub holds none. */
-  private readonly _declared: Record<WantsDeclaration['__r'], string> = {
-    'sub-text': JSON.stringify({ __r: 'sub-text', members: [], announce: false }),
-    'sub-binary': JSON.stringify({ __r: 'sub-binary', wants: emptyBinaryWants() }),
-  }
+  private _declaredAnnounce = false
+  private readonly _declaredText = new Set<string>()
+  private readonly _declaredBinary: BinaryWants = emptyBinaryWants()
   /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
   private readonly _roster = createDeferred()
 
@@ -97,7 +102,7 @@ class ClientRoom extends RoomStateView implements Room {
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
       updateStamp: snapshot.stamp,
       closed: snapshot.closed,
-      onListenersChanged: () => this._syncWants(),
+      onListenersChanged: (member) => this._syncWants(member),
       onCallbackError: reportClientCallbackError,
       onLeave: (id, cause) => this._onLeave(id, cause),
     })
@@ -304,23 +309,44 @@ class ClientRoom extends RoomStateView implements Room {
     this._localParticipants.clear()
   }
 
-  /** Room-wide text wants ride the Broadcast subscription, which reattaches before the stub's `onOpen`. */
-  private _syncWants(): void {
+  /** Room-wide text wants ride the Broadcast subscription, which reattaches before the stub's `onOpen`. Declarations
+   *  are replayed channel messages, so the server keeps them across reconnects: each one carries only what changed,
+   *  the room-wide wants and those of `member`, whose listeners changed. */
+  private _syncWants(member: string | null): void {
     const state = this._state
     if (state.closed) return this._stub._setWireSubscribed('text', false) // a closed room takes no declaration
     const text = state.textWants()
     this._stub._setWireSubscribed('text', text.all)
+    const binary = state.binaryWants()
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
-    this._declare({ __r: 'sub-text', members: [...text.members], announce: state.wantsAnnounce })
-    this._declare({ __r: 'sub-binary', wants: state.binaryWants() })
-  }
-
-  /** Declarations are replayed channel messages, so the server keeps them across reconnects: send only changes. */
-  private _declare(declaration: WantsDeclaration): void {
-    const serialized = JSON.stringify(declaration)
-    if (this._declared[declaration.__r] === serialized) return
-    this._declared[declaration.__r] = serialized
-    this._notify(declaration)
+    const textChanges: Record<string, boolean> = Object.create(null)
+    const binaryChanges: Record<string, TrackWants | null> = Object.create(null)
+    let memberText = false
+    let memberBinary = false
+    if (member !== null) {
+      const wanted = text.members.has(member)
+      if (wanted !== this._declaredText.has(member)) {
+        memberText = true
+        textChanges[member] = wanted
+        if (wanted) this._declaredText.add(member)
+        else this._declaredText.delete(member)
+      }
+      const next = binary.members[member]
+      if (!sameTrackWants(this._declaredBinary.members[member], next)) {
+        memberBinary = true
+        binaryChanges[member] = next ?? null
+        if (next) this._declaredBinary.members[member] = next
+        else delete this._declaredBinary.members[member]
+      }
+    }
+    if (memberText || state.wantsAnnounce !== this._declaredAnnounce) {
+      this._declaredAnnounce = state.wantsAnnounce
+      this._notify({ __r: 'sub-text', announce: state.wantsAnnounce, members: textChanges })
+    }
+    if (memberBinary || !sameTrackWants(this._declaredBinary.everyMember, binary.everyMember)) {
+      this._declaredBinary.everyMember = binary.everyMember
+      this._notify({ __r: 'sub-binary', everyMember: binary.everyMember, members: binaryChanges })
+    }
   }
 
   /** A closed stub's server side is gone with its wants, and a DM reply to it times out as any lost reply does. */

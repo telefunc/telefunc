@@ -183,7 +183,7 @@ function emptyTrackWants(): TrackWants {
   return { all: false, tracks: [] }
 }
 function emptyBinaryWants(): BinaryWants {
-  return { everyMember: emptyTrackWants(), members: {} }
+  return { everyMember: emptyTrackWants(), members: Object.create(null) }
 }
 function mergeTrackWants(a: TrackWants, b: TrackWants): TrackWants {
   if (a.all || b.all) return { all: true, tracks: [] }

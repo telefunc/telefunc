@@ -6,20 +6,13 @@ export {
   decodeParticipantRequest,
   decodeParticipantFrame,
   decodeDmReply,
-  decodeBinaryWants,
+  decodeBinaryWantsChange,
 }
 export type { RoomRequest, RoomDeclaration }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ProtocolViolationError } from '../../shared-ws.js'
-import {
-  decodeBinaryFrame,
-  isMemberId,
-  isRoomTrack,
-  type BinaryFrame,
-  type BinaryWants,
-  type TrackWants,
-} from '../binary.js'
+import { decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type TrackWants } from '../binary.js'
 import { ROOM_NAMED_TRACKS_MAX } from '../constants.js'
 import { isRecord } from '../model.js'
 import type { DmReply, ParticipantStubRequest, RoomDataPublish, RoomStubRequest } from '../protocol.js'
@@ -86,15 +79,13 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
         reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
       }
     case 'sub-binary':
-      return { __r: 'sub-binary', wants: decodeBinaryWants(decl.wants) }
-    case 'sub-text': {
-      if (!Array.isArray(decl.members)) malformed('text wants')
+      return { __r: 'sub-binary', ...decodeBinaryWantsChange(decl) }
+    case 'sub-text':
       return {
         __r: 'sub-text',
-        members: decl.members.map((member) => memberId(member, 'text wants')),
         announce: flag(decl.announce, 'text wants'),
+        members: decodeMemberChanges(decl.members, 'text wants', (wanted) => flag(wanted, 'text wants')),
       }
-    }
   }
   return malformed('declaration')
 }
@@ -108,17 +99,27 @@ function decodeDmReply(reply: unknown): DmReply | null {
   return typeof reply.err === 'string' ? { ok: false, err: reply.err } : null
 }
 
-/** A client-declared `sub-binary` want. */
-function decodeBinaryWants(wants: unknown): BinaryWants {
-  if (!isRecord(wants)) malformed('binary wants')
-  const everyMember = decodeTrackWants(wants.everyMember)
-  if (!isRecord(wants.members)) malformed('binary wants')
-  const members: Record<string, TrackWants> = Object.create(null)
-  for (const [memberId, trackWants] of Object.entries(wants.members)) {
-    if (!isMemberId(memberId)) malformed('binary wants')
-    members[memberId] = decodeTrackWants(trackWants)
+/** A client-declared `sub-binary` change. */
+function decodeBinaryWantsChange(change: Record<string, unknown>): {
+  everyMember: TrackWants
+  members: Record<string, TrackWants | null>
+} {
+  return {
+    everyMember: decodeTrackWants(change.everyMember),
+    members: decodeMemberChanges(change.members, 'binary wants', (wants) =>
+      wants === null ? null : decodeTrackWants(wants),
+    ),
   }
-  return { everyMember, members }
+}
+/** A declared change per member id, into a record no key can reach the prototype of. */
+function decodeMemberChanges<T>(changes: unknown, what: string, decode: (change: unknown) => T): Record<string, T> {
+  if (!isRecord(changes)) malformed(what)
+  const members: Record<string, T> = Object.create(null)
+  for (const [memberId, change] of Object.entries(changes)) {
+    if (!isMemberId(memberId)) malformed(what)
+    members[memberId] = decode(change)
+  }
+  return members
 }
 function decodeTrackWants(wants: unknown): TrackWants {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) malformed('binary wants')

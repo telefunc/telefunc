@@ -34,7 +34,7 @@ import { RoomState, type RoomStateView, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
-import { decodeBinaryWants } from './server/requests.js'
+import { decodeBinaryWantsChange } from './server/requests.js'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
@@ -1159,7 +1159,8 @@ describe('Room public behavior', () => {
     stub._onPeerSubscription('text', true)
     declare(stub, {
       __r: 'sub-binary',
-      wants: { everyMember: { all: true, tracks: [] }, members: {} },
+      everyMember: { all: true, tracks: [] },
+      members: {},
     })
     await Promise.all([...replayText.mock.results, ...replayBinary.mock.results].map(({ value }) => value))
     expect(semanticFrames(peer, 'data')).toEqual([])
@@ -1598,7 +1599,8 @@ describe('Room public behavior', () => {
     const stub = register(room)
     const subBinary = (wanted: string[]) => ({
       __r: 'sub-binary',
-      wants: { everyMember: emptyTrackWants(), members: { [member.id]: { all: false, tracks: wanted } } },
+      everyMember: emptyTrackWants(),
+      members: { [member.id]: { all: false, tracks: wanted } },
     })
     expect(() => declare(stub, subBinary(tracks.slice(0, 16)))).not.toThrow()
     expect(() => declare(stub, subBinary(tracks))).toThrow(ProtocolViolationError)
@@ -1610,10 +1612,19 @@ describe('Room public behavior', () => {
     const member = crypto.randomUUID()
     const text = (value: unknown) => stringify(value)
     const frames = [
-      [stub, { tag: TAG.TEXT, index: 7, seq: 1, text: text({ __r: 'sub-binary', wants: 5 }), bytes: 1 }],
       [
         stub,
-        { tag: TAG.TEXT, index: 7, seq: 2, text: text({ __r: 'sub-text', members: [1], announce: false }), bytes: 1 },
+        { tag: TAG.TEXT, index: 7, seq: 1, text: text({ __r: 'sub-binary', everyMember: 5, members: {} }), bytes: 1 },
+      ],
+      [
+        stub,
+        {
+          tag: TAG.TEXT,
+          index: 7,
+          seq: 2,
+          text: text({ __r: 'sub-text', members: { 'not-a-member-id': true }, announce: false }),
+          bytes: 1,
+        },
       ],
       [
         stub,
@@ -1655,7 +1666,7 @@ describe('Room public behavior', () => {
           tag: TAG.TEXT_ACK_REQ,
           index: 7,
           seq: 7,
-          text: text({ __r: 'sub-text', members: [], announce: false }),
+          text: text({ __r: 'sub-text', members: {}, announce: false }),
           bytes: 1,
         },
       ],
@@ -2011,15 +2022,15 @@ describe('Room public behavior', () => {
     me.onDemand((track, wanted) => demand.push([track, wanted]))
     const a = register(room)
     const b = register(room)
-    declare(a, { __r: 'sub-binary', wants: EVERY_TRACK })
+    declare(a, { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
-    declare(a, { __r: 'sub-binary', wants: NO_TRACK })
+    declare(a, { __r: 'sub-binary', ...NO_TRACK })
     expect(demand).toEqual([
       [null, true],
       [null, false],
     ])
-    declare(a, { __r: 'sub-binary', wants: EVERY_TRACK })
-    declare(b, { __r: 'sub-binary', wants: { ...NO_TRACK, members: { [me.id]: { all: false, tracks: [''] } } } })
+    declare(a, { __r: 'sub-binary', ...EVERY_TRACK })
+    declare(b, { __r: 'sub-binary', ...NO_TRACK, members: { [me.id]: { all: false, tracks: [''] } } })
     a.abort()
     await vi.waitFor(() =>
       expect(demand).toEqual([
@@ -2030,7 +2041,7 @@ describe('Room public behavior', () => {
     )
     b.abort()
     expect(demand.at(-1)).toEqual([null, false])
-    declare(b, { __r: 'sub-binary', wants: EVERY_TRACK }) // a closed stub's late declaration
+    declare(b, { __r: 'sub-binary', ...EVERY_TRACK }) // a closed stub's late declaration
     await subsOf(room).binaryReady()
     expect(subsOf(room)._binary.size).toBe(0)
   })
@@ -2084,7 +2095,7 @@ describe('Room public behavior', () => {
   it("drops a member's binary lane when it leaves", async () => {
     const room = (await Room.create('incremental-binary-leave')) as ServerRoom
     const me = await room.join()
-    declare(register(room), { __r: 'sub-binary', wants: EVERY_TRACK })
+    declare(register(room), { __r: 'sub-binary', ...EVERY_TRACK })
     await subsOf(room).binaryReady()
     expect(subsOf(room)._binary.size).toBe(1)
     await me.leave()
@@ -2097,9 +2108,9 @@ describe('Room public behavior', () => {
     me.onDemand((track, wanted) => demand.push([track, wanted]))
     room.subscribeBinary(() => {}) // this instance's own listener suppresses `me`
     const stub = register(room)
-    declare(stub, { __r: 'sub-binary', wants: EVERY_TRACK })
+    declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
-    declare(stub, { __r: 'sub-binary', wants: NO_TRACK })
+    declare(stub, { __r: 'sub-binary', ...NO_TRACK })
     expect(demand).toEqual([
       [null, true],
       [null, false],
@@ -2117,10 +2128,10 @@ describe('Room public behavior', () => {
     roomReplacer.replace(room, context)
     roomParticipantReplacer.replace(me, context)
     const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
-    declare(stub, { __r: 'sub-binary', wants: EVERY_TRACK })
+    declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await subsOf(room).binaryReady()
     expect(subsOf(room)._binary.size).toBe(0)
-    declare(register(room), { __r: 'sub-binary', wants: EVERY_TRACK })
+    declare(register(room), { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
   })
   it("drops the lane of a co-returned participant a streamed response serializes after its room's stub declared", async () => {
@@ -2134,7 +2145,7 @@ describe('Room public behavior', () => {
     const context = replacerContext(channels)
     roomReplacer.replace(room, context)
     const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
-    declare(stub, { __r: 'sub-binary', wants: EVERY_TRACK })
+    declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
     roomParticipantReplacer.replace(me, context)
     expect(subsOf(room)._binary.size).toBe(0)
@@ -2407,7 +2418,7 @@ describe('Room public behavior', () => {
     })
     const wanted = serve(room)
     const silent = serve(room)
-    declare(wanted.stub, { __r: 'sub-text', members: [], announce: true })
+    declare(wanted.stub, { __r: 'sub-text', members: {}, announce: true })
     await semanticReady.promise
     await Room.announce(room.id, 'wanted')
     await vi.waitFor(() => expect(semanticFrames(wanted.peer, 'announce')).toEqual(['wanted']))
@@ -2535,7 +2546,8 @@ describe('Room public behavior', () => {
     try {
       declare(stub, {
         __r: 'sub-binary',
-        wants: { everyMember: { all: true, tracks: [] }, members: {} },
+        everyMember: { all: true, tracks: [] },
+        members: {},
       })
       await roster.started
       expect(listRetained).not.toHaveBeenCalled()
@@ -2544,6 +2556,18 @@ describe('Room public behavior', () => {
     } finally {
       roster.release()
     }
+  })
+  it("keeps each member's declared binary want until a declaration names that member", async () => {
+    const room = (await Room.create('declared-changes')) as ServerRoom
+    const a = await room.join()
+    const b = await room.join()
+    const stub = register(room)
+    const lanes = () => [...subsOf(room)._binary.keys()].sort()
+    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [a.id]: { all: true, tracks: [] } } })
+    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [b.id]: { all: true, tracks: [] } } })
+    expect(lanes()).toEqual([`${a.id}\0`, `${b.id}\0`].sort())
+    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [a.id]: null } })
+    expect(lanes()).toEqual([`${b.id}\0`])
   })
   it('opens no backend lane for a declared want naming no member', async () => {
     const authority = await Room.create('declared-strangers')
@@ -2556,7 +2580,8 @@ describe('Room public behavior', () => {
     )
     declare(stub, {
       __r: 'sub-binary',
-      wants: { everyMember: { all: false, tracks: [] }, members },
+      everyMember: { all: false, tracks: [] },
+      members,
     })
     await observer.getParticipants()
     expect(subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary')).toEqual([])
@@ -2573,10 +2598,8 @@ describe('Room public behavior', () => {
     try {
       declare(stub, {
         __r: 'sub-binary',
-        wants: {
-          everyMember: { all: false, tracks: [] },
-          members: { [publisher.id]: { all: false, tracks: ['screen'] } },
-        },
+        everyMember: { all: false, tracks: [] },
+        members: { [publisher.id]: { all: false, tracks: ['screen'] } },
       })
       await roster.started
       expect(binaryLanes()).toBe(0)
@@ -2652,7 +2675,7 @@ describe('Room public behavior', () => {
   it('flushes held tail text after an announcement relayed before the first text subscription', async () => {
     const { member, tail } = await createTail('tail-announce')
     const { stub, peer } = serve(tail)
-    declare(stub, { __r: 'sub-text', members: [], announce: true })
+    declare(stub, { __r: 'sub-text', members: {}, announce: true })
     await member.publish('held')
     await Room.announce(tail.id, 'notice')
     await vi.waitFor(() => expect(semanticFrames(peer, 'announce')).toEqual(['notice']))
@@ -3029,7 +3052,7 @@ describe('Room public behavior', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(demand()).toEqual([])
     const { stub } = serve(room)
-    declare(stub, { __r: 'sub-binary', wants: { everyMember: { all: false, tracks: ['mic'] }, members: {} } })
+    declare(stub, { __r: 'sub-binary', everyMember: { all: false, tracks: ['mic'] }, members: {} })
     await vi.waitFor(() => expect(demand()).toEqual([{ __r: 'demand', track: 'mic', wanted: true }]))
   })
   it('replays already-true demand when the publisher attaches its handler', async () => {
@@ -3579,9 +3602,9 @@ describe('client Room lifecycle', () => {
     log.length = 0
     client._getRemote(member.id)!.subscribe(() => {})
     // Declared at once, so a stream stopped live or in a reattach's RECONCILE finds the member set in place.
-    expect(log).toEqual([[member.id]])
+    expect(log).toEqual([{ [member.id]: true }])
     stopRoomWide()
-    expect(log).toEqual([[member.id], false])
+    expect(log).toEqual([{ [member.id]: true }, false])
   })
   it('declares nothing while its stub is closing, so an unsubscribe during the close returns normally', () => {
     let closing = false
@@ -3608,8 +3631,37 @@ describe('client Room lifecycle', () => {
     client.subscribeBinary(() => {}, { track: null })
     expect(sent).toContainEqual({
       __r: 'sub-binary',
-      wants: { everyMember: { all: false, tracks: [DEFAULT_TRACK] }, members: {} },
+      everyMember: { all: false, tracks: [DEFAULT_TRACK] },
+      members: {},
     })
+  })
+  it('declares only the room-wide wants and those of the member whose listeners changed', () => {
+    const sent: unknown[] = []
+    const { client, emit } = fakeClient('declared-member-changes', {
+      send: async (message) => {
+        sent.push(message)
+        return undefined
+      },
+    })
+    const members = [0, 1, 2].map(() => ({
+      id: crypto.randomUUID(),
+      meta: {},
+      joinedAt: 1,
+      metaSeq: 0,
+      identity: null,
+    }))
+    emit({ __r: 'roster', members })
+    for (const { id } of members) client._getRemote(id)!.subscribeBinary(() => {})
+    client._getRemote(members[1]!.id)!.subscribe(() => {})()
+    expect(sent).toEqual([
+      ...members.map(({ id }) => ({
+        __r: 'sub-binary',
+        everyMember: { all: false, tracks: [] },
+        members: { [id]: { all: true, tracks: [] } },
+      })),
+      { __r: 'sub-text', announce: false, members: { [members[1]!.id]: true } },
+      { __r: 'sub-text', announce: false, members: { [members[1]!.id]: false } },
+    ])
   })
   it('declares wants only when they change, so listener churn sends nothing', () => {
     const sent: unknown[] = []
@@ -3627,8 +3679,8 @@ describe('client Room lifecycle', () => {
     client.onChange(() => {})()
     stop()
     expect(sent).toEqual([
-      { __r: 'sub-text', members: [], announce: true },
-      { __r: 'sub-text', members: [], announce: false },
+      { __r: 'sub-text', members: {}, announce: true },
+      { __r: 'sub-text', members: {}, announce: false },
     ])
     expect(wireDeclarations).toEqual([])
   })
@@ -3784,18 +3836,18 @@ describe('room protocol validation', () => {
     Object.defineProperty(attrs, '__proto__', { value: undefined, enumerable: true, configurable: true })
     expect(Object.hasOwn(mergeAttributes(merged, attrs), '__proto__')).toBe(false)
     const memberId = crypto.randomUUID()
-    const sanitized = decodeBinaryWants({
+    const sanitized = decodeBinaryWantsChange({
       everyMember: { all: false, tracks: [] },
       members: { [memberId]: { all: false, tracks: ['screen'] } },
     })
     expect(Object.getPrototypeOf(sanitized.members)).toBeNull()
     const hostileMembers = Object.create(null) as Record<string, unknown>
     hostileMembers.__proto__ = { all: true, tracks: [] }
-    expect(() => decodeBinaryWants({ everyMember: { all: false, tracks: [] }, members: hostileMembers })).toThrow(
+    expect(() => decodeBinaryWantsChange({ everyMember: { all: false, tracks: [] }, members: hostileMembers })).toThrow(
       ProtocolViolationError,
     )
     expect(() =>
-      decodeBinaryWants({
+      decodeBinaryWantsChange({
         everyMember: { all: false, tracks: [] },
         members: { 'not-a-member-id': { all: false, tracks: [] } },
       }),
@@ -3814,7 +3866,7 @@ describe('room protocol validation', () => {
       expect(() => encodeBinaryFrame(memberId, new Uint8Array(), { meta: meta as never })).toThrow(
         'meta should be an object',
       )
-      expect(() => decodeBinaryWants({ everyMember: { all: false, tracks: [] }, members: meta })).toThrow(
+      expect(() => decodeBinaryWantsChange({ everyMember: { all: false, tracks: [] }, members: meta })).toThrow(
         ProtocolViolationError,
       )
     }
@@ -3852,7 +3904,7 @@ describe('room protocol validation', () => {
       '65535 bytes',
     )
     const wantsTrack = (track: string) =>
-      decodeBinaryWants({ everyMember: { all: false, tracks: [track] }, members: {} })
+      decodeBinaryWantsChange({ everyMember: { all: false, tracks: [track] }, members: {} })
     expect(() => wantsTrack(`${'é'.repeat(127)}t`)).not.toThrow()
     expect(() => wantsTrack('é'.repeat(128))).toThrow(ProtocolViolationError)
   })
@@ -4214,12 +4266,12 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
     timestamp: 10,
   })
   if (!retain) {
-    declare(stub, { __r: 'sub-binary', wants: allBinary })
+    declare(stub, { __r: 'sub-binary', ...allBinary })
     await subsOf(serverRoom).binaryReady()
   }
   const receipt = await camera.publishBinary(new Uint8Array([byte]), retain ? { retain: true } : undefined)
   if (retain) {
-    declare(stub, { __r: 'sub-binary', wants: allBinary })
+    declare(stub, { __r: 'sub-binary', ...allBinary })
     await subsOf(serverRoom).binaryReady()
   }
   await vi.waitFor(() => expect(peer.decoded().some((candidate) => candidate.tag === TAG.PUBLISH_BINARY)).toBe(true))

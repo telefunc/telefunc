@@ -124,9 +124,9 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private readonly _pendingAckDms = new Map<string, { sender: string; expiresAt: number }>()
   private readonly _replay = new ReplayGate()
   private _wantsText = false
-  private _textMemberWants: ReadonlySet<string> = new Set()
+  private readonly _textMemberWants = new Set<string>()
   private _announce = false
-  private _binary: BinaryWants = emptyBinaryWants()
+  private readonly _binary: BinaryWants = emptyBinaryWants()
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private _tail: TailHold | null = null
 
@@ -208,7 +208,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _applyDeclaration(declaration: RoomDeclaration): void {
     switch (declaration.__r) {
       case 'sub-binary':
-        return this._declareBinaryWants(declaration.wants)
+        return this._declareBinaryWants(declaration.everyMember, declaration.members)
       case 'sub-text':
         return this._declareTextWants(declaration.members, declaration.announce)
       case 'dm-reply':
@@ -216,22 +216,30 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     }
   }
 
-  private _declareBinaryWants(wants: BinaryWants): void {
-    const prev = this._binary
-    this._binary = wants
+  private _declareBinaryWants(everyMember: TrackWants, changes: Record<string, TrackWants | null>): void {
+    const wants = this._binary
     const members = new Map<string, TrackWants | undefined>()
-    for (const id of new Set([...Object.keys(prev.members), ...Object.keys(wants.members)]))
-      if (!sameTrackWants(prev.members[id], wants.members[id])) members.set(id, prev.members[id])
-    this._room._onHolderWantsChanged(this, { binary: { everyMember: prev.everyMember, members } })
+    for (const [id, next] of Object.entries(changes)) {
+      const prev = wants.members[id]
+      if (sameTrackWants(prev, next ?? undefined)) continue
+      members.set(id, prev)
+      if (next === null) delete wants.members[id]
+      else wants.members[id] = next
+    }
+    const before = { everyMember: wants.everyMember, members }
+    wants.everyMember = everyMember
+    this._room._onHolderWantsChanged(this, { binary: before })
   }
 
-  private _declareTextWants(declared: string[], announce: boolean): void {
-    const prev = this._textMemberWants
-    this._textMemberWants = new Set(declared)
-    this._announce = announce
+  private _declareTextWants(changes: Record<string, boolean>, announce: boolean): void {
     const members = new Map<string, boolean>()
-    for (const id of prev) if (!this._textMemberWants.has(id)) members.set(id, true)
-    for (const id of this._textMemberWants) if (!prev.has(id)) members.set(id, false)
+    for (const [id, wanted] of Object.entries(changes)) {
+      if (wanted === this._textMemberWants.has(id)) continue
+      members.set(id, !wanted)
+      if (wanted) this._textMemberWants.add(id)
+      else this._textMemberWants.delete(id)
+    }
+    this._announce = announce
     this._flushTail()
     this._room._onHolderWantsChanged(this, { text: { all: this._wantsText, members } })
   }

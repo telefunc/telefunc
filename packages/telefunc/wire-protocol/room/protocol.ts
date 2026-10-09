@@ -27,7 +27,7 @@ export type {
 }
 
 import { isRecord } from './model.js'
-import type { BinaryWants } from './binary.js'
+import type { TrackWants } from './binary.js'
 import type { ParticipantMeta, RoomMeta } from './types.js'
 
 /** The head's config. `at`/`by` stamps the latest room meta write. `inc` is random, not a counter: a room recreated after its tombstone lapses can't reuse an id a stale handle holds. */
@@ -147,8 +147,10 @@ type RoomStubRequest =
   | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown; ack?: boolean }
   | { __r: 'dm-reply'; ackId: string; reply: DmReply }
-  | { __r: 'sub-binary'; wants: BinaryWants }
-  | { __r: 'sub-text'; members: string[]; announce: boolean }
+  /** Changes only: the room-wide want, and each member whose own want changed (`null`: it has none now). */
+  | { __r: 'sub-binary'; everyMember: TrackWants; members: Record<string, TrackWants | null> }
+  /** Changes only: announcements, and each member whose own want changed. */
+  | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
 
 /** Client→server requests on a participant stub; an ack DM is answered through the channel's own ack, so there's no `dm-reply`. */
 type ParticipantStubRequest =
