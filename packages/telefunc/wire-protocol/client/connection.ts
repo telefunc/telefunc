@@ -2394,9 +2394,8 @@ class SseTransport implements UpgradeSource {
           if (this.streamRequest.tag === 'active' && this.streamRequest.body === uploadBody) abortController.abort()
         })
       } else {
-        // It ended without the open-ack, so the server may not have read what went into its body: resend it, first.
-        const unsent =
-          result === 'fetch-ended' && this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
+        // The server may not have read a body it never acknowledged: resend it, first; it drops a seq it already has.
+        const unsent = this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
         this.closeStreamRequest()
         this.streamRequest = { tag: 'failed' }
         if (unsent) {

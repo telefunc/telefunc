@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
-import { SSE_POST_TARGET_MS, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { SSE_POST_TARGET_MS, STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
@@ -160,6 +160,64 @@ test('a frame written into an upload POST the server refused before its open-ack
   await delay(100)
   expect(received).toEqual([7])
   connection.dispose()
+})
+
+describe('an upload POST whose open-ack never comes', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** A page whose upload POST gets no open-ack: it writes 7 into the upload's body, gives the upload up, then sends 8. */
+  async function pageGivingUpItsUpload(name: string) {
+    const received: number[] = []
+    const serverChannel = new ServerChannel<number, never>()
+    serverChannel.listen((n) => void received.push(n))
+    const server = fakeServer((frame) => {
+      if (frame.tag === TAG.TEXT) serverChannel._dispatchFrame(frame)
+    })
+    let uploadBody: ReadableStream<Uint8Array> | null = null
+    const fetchImpl = ((url: string, init: RequestInit) => {
+      if (!(init.body instanceof Blob)) uploadBody = init.body as ReadableStream<Uint8Array>
+      return server.fetch(url, init)
+    }) as typeof fetch
+    const channel = createChannel(serverChannel.id)
+    const connection = ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel as never, {
+      transports: ['sse'],
+      fetchImpl,
+      connectionKey: crypto.randomUUID(),
+    }) as any
+    await vi.advanceTimersByTimeAsync(20)
+    connection.send(channel, stringify(7)) // before RECONCILED: released into the upload body once it arrives
+    server.reconcile()
+    await vi.advanceTimersByTimeAsync(STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS)
+    connection.send(channel, stringify(8))
+    await vi.advanceTimersByTimeAsync(100)
+    /** The server reads the upload's body only now, as a proxy that holds a request body until it ends lets it. */
+    const readUploadLate = async () => {
+      const { frames } = await parseBlobBody(await new Response(uploadBody).blob())
+      const texts = frames.map((raw) => decode(raw as never)).filter((frame) => frame.tag === TAG.TEXT)
+      for (const frame of texts) serverChannel._dispatchFrame(frame)
+      return texts.length
+    }
+    return { received, connection, readUploadLate }
+  }
+
+  test("a frame written into it reaches the server, before the page's next one", async () => {
+    const { received, connection } = await pageGivingUpItsUpload('upload-no-ack')
+    expect(received).toEqual([7, 8])
+    connection.dispose()
+  })
+
+  test('a frame written into it that the server reads late reaches the server once, in order', async () => {
+    const { received, connection, readUploadLate } = await pageGivingUpItsUpload('upload-ack-late')
+    expect(await readUploadLate()).toBe(1)
+    expect(received).toEqual([7, 8])
+    connection.dispose()
+  })
 })
 
 test("a batch POST still in flight for a dead wire can't unsubscribe the listener the page swapped in across the reconnect", async () => {
