@@ -1,0 +1,45 @@
+import { Link } from '@brillout/docpress'
+
+## Schemaless vs schema-full
+
+Comparing RPC to GraphQL or REST is a bit like comparing apples to oranges. They each make trade-offs to achieve different goals.
+
+| RPC                                       | REST + GraphQL               |
+| ----------------------------------------- | ---------------------------- |
+| Full-stack: client calls server functions | Separate front- and back-end |
+| Request tailored to caller's needs        | Consumer-agnostic            |
+
+REST and GraphQL establish stable (but rigid) long-term data contracts. This makes it easier for third-parties to predictably consume your API, but gets in the way of prototyping, and forces the server to respond generically to clients.
+
+> A schema-full approach works best if you **must fulfill a maximum number of data requirements**, or want to allow other apps to be built on your data.
+
+RPC creates unique data contracts between specific pieces of UI and the server-side logic they call. This  allows components to invoke server-side logic as if it was local.
+
+## RPC
+
+> A [remote procedure call](https://en.wikipedia.org/wiki/Remote_procedure_call) (RPC) is when a \[...] computer programmer writes essentially the same code whether the subroutine is local to the executing program, or remote.
+
+RPC is a pattern for calling a remote function as if it were colocated with the client. No adapters or injection needed.
+1. Create named Telefunctions to call the database or do other backend work.
+2. Import and call the function from your frontend, passing any required arguments (e.g., `await onNewTodo(text)`).
+3. Telefunc creates a lightweight HTTP client to call your Telefunction, which returns only what the caller needs.
+
+> The term RPC is often used loosely to denote RPC-like approaches, like creating JSON endpoints. _RPC-like describes an API that is schemaless — in contrast to RESTful and GraphQL APIs that always have a schema._
+
+## RPC vs GraphQL/REST
+
+> Premature optimization is the root of all evil.
+> - *Turing Award winner, Donald Knuth*
+
+In most cases you can start with RPC, and switch to REST or GraphQL as needed.
+- RPC enables you to stay lean, iterating faster and pivoting more flexibly.
+- Many apps will never need a public (or schema-full) API.
+- RPC functions are just functions; migrating to REST or GraphQL is fairly straightforward.
+
+There's a simple litmus test for whether RPC is the right solution:
+- If your goal is to enable third party developers to access your data, then you need a generic API and you'll have to use REST or GraphQL
+- If your goal is to seamlessly add data and interactivity to a front-end, then RPC can improve DX and enable security and performance optimizations.
+
+### Next
+
+<Link href="/how-it-works" />

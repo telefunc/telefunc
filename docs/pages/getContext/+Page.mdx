@@ -1,30 +1,26 @@
-import { Link, CodeBlockTransformer } from '@brillout/docpress'
-import { Tab, Tabs, TabList, TabPanel } from 'react-tabs'
-import '../../components/tabs.css'
+import { CodeBlockTransformer, Link } from '@brillout/docpress'
 
 **Environment**: server.
 
-Enables telefunctions to access contextual information.
+`getContext()` allows telefunctions to type-safely access the Telefunc request context.
+
+It's most commonly used for implementing permissions, see <Link href="/permissions" />.
 
 ```ts
 // TodoList.telefunc.ts
 // Environment: server
 
-import { getContext } from 'telefunc'
+import { Abort, getContext } from 'telefunc'
 
 export async function onLoad() {
-  const context = getContext()
-  const { user } = context
-  const todoItems = await Todo.findMany({ select: 'text', authorId: user.id })
-  return {
-    todoItems,
-    userName: user.name
+  const { userId } = getContext()
+  if (!userId) {
+    throw Abort()
   }
+
+  // ...
 }
 ```
-
-It's most commonly used for implementing permissions, see <Link href="/permissions" />.
-
 
 ## Provide
 
@@ -32,28 +28,55 @@ You can add `context` properties when calling `telefunc.serve()` — see <Link h
 
 > You can also provide `context` outside the server middleware (e.g. when <Link href="/testing">testing</Link>) via <Link href="/provideTelefuncContext"><code>provideTelefuncContext()</code></Link>.
 
+## Type safety{#typescript}
 
-## Access
+You can use a generic type argument to set the type locally...
 
-If you get this error:
+```ts ts-only
+// *.telefunc.ts
 
-<CodeBlockTransformer lineBreak="break-word">
-```
-[telefunc][Wrong Usage][getContext()] Cannot access context object, see https://telefunc.com/getContext#access
-```
-</CodeBlockTransformer>
+import { getContext } from 'telefunc'
 
-Then this means that `getContext()` was called after an `await` operator:
+type UserContext = { userId: string }
 
-```ts
-// TodoList.telefunc.ts
-
-export async function myTelefunction() {
-  await something()
-  // ❌ Wrong: getContext() must be called before `await something()`
-  const context = getContext()
+export async function someTelefunction() {
+  // TypeScript knows that `userId` is a `string`
+  const { userId } = getContext<UserContext>()
 }
 ```
+
+...or declare the `Telefunc.Context` type globally.
+
+```ts ts-only
+// TelefuncContext.d.ts
+
+declare global {
+  namespace Telefunc {
+    interface Context {
+      userId: null | string
+    }
+  }
+}
+
+// Add this line if TypeScript complains about `declare global` (it requires the file
+// to have at least one `import` or `export` so that TypeScript treats it as a module).
+// https://typescriptlang.org/docs/handbook/2/modules.html#how-javascript-modules-are-defined
+export {}
+```
+
+```ts ts-only
+// *.telefunc.ts
+
+import { getContext } from 'telefunc'
+
+export async function someTelefunction() {
+  // TypeScript still knows that `userId` is a `null | string`
+  const { userId } = getContext<UserContext>() // [!code --]
+  const { userId } = getContext() // [!code ++]
+}
+```
+
+## Call order{#access}
 
 Make sure to call `getContext()` before any `await` operators:
 
@@ -67,62 +90,25 @@ export async function myTelefunction() {
 }
 ```
 
+If you call `getContext()` after an `await` operator...
 
-## TypeScript
+```ts
+// TodoList.telefunc.ts
 
-You can use the `Telefunc.Context` interface to globally set the type of `const context = getContext()`:
-
-```ts ts-only
-// TelefuncContext.d.ts
-
-import type { User } from './User.ts'
-
-declare global {
-  namespace Telefunc {
-    interface Context {
-      user: null | User
-    }
-  }
-}
-
-// Add this line if TypeScript complains about `declare global` (it requires the file
-// to have at least one `import` or `export` so that TypeScript treats it as a module).
-// https://typescriptlang.org/docs/handbook/2/modules.html#how-javascript-modules-are-defined
-export {}
-```
-```ts ts-only
-// User.ts
-
-export type User = { id: number }
-```
-```ts ts-only
-// *.telefunc.ts
-
-import { getContext } from 'telefunc'
-
-export async function someTelefunction() {
-  // TypeScript knows that `user.id` is a `number`
-  const { user } = getContext()
+export async function myTelefunction() {
+  await something()
+  // ❌ Wrong: getContext() must be called before `await something()`
+  const context = getContext()
 }
 ```
 
-You can also directly set `const context = getContext<MyContext>()`:
+...you will see this error:
 
-```ts ts-only
-// *.telefunc.ts
-
-import { getContext } from 'telefunc'
-
-type Context = {
-  userId: number
-}
-
-export async function someTelefunction() {
-  // TypeScript knows that `userId` is a `number`
-  const { userId } = getContext<Context>()
-}
+<CodeBlockTransformer lineBreak="break-word">
 ```
-
+[telefunc][Wrong Usage][getContext()] Cannot access context object, see https://telefunc.com/getContext#access
+```
+</CodeBlockTransformer>
 
 ## `onClose()`
 
@@ -132,6 +118,9 @@ The context object includes `onClose()`, see <Link href="/onClose#context-onclos
 
 The context object includes a `signal` (an `AbortSignal`), see <Link href="/onClose#context-signal" />.
 
+### Next
+
+<Link href="/shield" />
 
 ## See also
 
