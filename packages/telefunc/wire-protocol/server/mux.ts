@@ -31,6 +31,7 @@ import {
   decodeClientFrame,
   encode,
   isConnCtrlTag,
+  isSequencedTag,
   peekTag,
   seqThrough,
 } from '../shared-ws.js'
@@ -282,7 +283,7 @@ class ChannelMux {
                 (message) => transport.sendNow(connection, message),
                 () => transport.bufferedAmount(connection) ?? 0,
               ),
-              receiver: new PieceReceiver((frame) => this.send(connection, frame)),
+              receiver: new PieceReceiver((frame) => this.send(connection, frame), { peerHoldsBack: true }),
             }
           : null,
         terminatePermanently: false,
@@ -414,10 +415,11 @@ class ChannelMux {
     }
     const tag = peekTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
-    state.pieces?.receiver.arrived(byteLength)
+    const now = performance.now()
+    state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
-    state.lastReceivedAt = performance.now()
+    state.lastReceivedAt = now
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
     this.answerArrival(entry, connection)
@@ -535,7 +537,7 @@ class ChannelMux {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      assertProtocol(entry.state.pieces?.sender.acknowledged(frame.count, frame.heldMs), 'PIECES_ACK for nothing sent')
+      assertProtocol(entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs), 'PIECES_ACK for nothing sent')
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')

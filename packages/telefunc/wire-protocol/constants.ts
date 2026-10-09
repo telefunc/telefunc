@@ -175,6 +175,12 @@ export const SSE_POST_IDLE_FLUSH_DELAY_MS = 50
 /** Idle window used to decide whether the next upstream SSE batch is post-idle. */
 export const SSE_FLUSH_THROTTLE_MS = 300
 
+/** A batch POST out longer than this, plus its bytes at `SSE_POST_MIN_BYTES_PER_S`, is lost with its wire. Only the page
+ *  can tell, and nothing it observes separates a lost POST from one a proxy that buffers request bodies holds back from
+ *  the server, so a wire is held to the slowest rate it takes an upload at. */
+export const SSE_POST_FLOOR_MS = 30_000
+export const SSE_POST_MIN_BYTES_PER_S = 16 * 1024
+
 /** Latest-send deadline for SSE reconcile batches so immediate channel activity can coalesce into one POST. */
 export const SSE_RECONCILE_DEADLINE_MS = 10
 
@@ -199,8 +205,16 @@ export const WIRE_UNMEASURED_WHOLE_BYTES = 256 * 1024
 export const WIRE_PIECE_RATE_MARGIN = 8
 /** How long a measured rate stands after it last rose. */
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
-/** A receiver sends at most one PIECES_ACK this often, covering every frame over `WIRE_PIECE_BYTES` it took since the last. */
+/** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
+/** The same where its peer holds data back by what it acknowledges (see `send-budget.ts`). */
+export const WIRE_SEND_ACK_GAP_MS = 10
+/** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
+ *  least (see `send-budget.ts`). */
+export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
+/** How long a data frame of the page's may wait in the queues of its wire, as its server's acknowledgements measure it,
+ *  before the page stops handing a WebSocket more (see `send-budget.ts`). */
+export const WIRE_QUEUE_DELAY_MS = 300
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
  * When the budget is exceeded the oldest entries are evicted (FIFO) so the

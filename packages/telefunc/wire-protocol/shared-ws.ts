@@ -11,6 +11,7 @@ export {
   isChannelCtrlTag,
   isChannelDataFrame,
   isSequencedFrame,
+  isSequencedTag,
   replayLaneOf,
   countsCredit,
   isConnCtrlTag,
@@ -110,8 +111,9 @@ const TAG = {
   /** Either way on a WebSocket, which delivers no part of a message: a piece of a frame sent in pieces (see
    *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece. */
   PIECE: 0x0a as const,
-  /** Back, at most every `WIRE_PIECES_ACK_GAP_MS`, for the frames over `WIRE_PIECE_BYTES` that arrived, whole or in
-   *  pieces. Payload: u32, how many it took in all, then u32, the ms it held the newest. */
+  /** Back, as `PieceReceiver` says, for the frames that arrived, whole or in pieces. Payload: u32, the bytes of the frames it took in all (mod 2^32), u32, the ms it
+   *  held the newest, then u32, the µs between the arrival of the newest data frame and of the newest the ack before
+   *  covered, 0 for the first, or where it covers none. */
   PIECES_ACK: 0x0b as const,
 
   // ─── Data plane ───
@@ -362,7 +364,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
-  | { tag: typeof TAG.PIECES_ACK; count: number; heldMs: number }
+  | { tag: typeof TAG.PIECES_ACK; bytes: number; heldMs: number; spanUs: number }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -533,11 +535,12 @@ const encode = {
     frame.set(piece, HEADER + 4)
     return frame
   },
-  piecesAck(count: number, heldMs: number): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 8)
+  piecesAck(bytes: number, heldMs: number, spanUs: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 12)
     writeHeader(frame, TAG.PIECES_ACK, 0, 0)
-    writeU32(frame, HEADER, count)
+    writeU32(frame, HEADER, bytes)
     writeU32(frame, HEADER + 4, heldMs)
+    writeU32(frame, HEADER + 8, spanUs)
     return frame
   },
 
@@ -726,8 +729,13 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 4, 'PIECE payload too short')
       return { tag: TAG.PIECE, total: readU32(payload, 0), piece: payload.subarray(4) }
     case TAG.PIECES_ACK:
-      assertProtocol(payload.length >= 8, 'PIECES_ACK payload too short')
-      return { tag: TAG.PIECES_ACK, count: readU32(payload, 0), heldMs: readU32(payload, 4) }
+      assertProtocol(payload.length >= 12, 'PIECES_ACK payload too short')
+      return {
+        tag: TAG.PIECES_ACK,
+        bytes: readU32(payload, 0),
+        heldMs: readU32(payload, 4),
+        spanUs: readU32(payload, 8),
+      }
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
