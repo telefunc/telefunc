@@ -2141,12 +2141,20 @@ describe('Room public behavior', () => {
         abandon(id)
       },
     )
+    // Checked as the admission takes ownership, before a roster refresh's full replan could close a stray inbox.
+    const subs = subsOf(room)
+    const memberOwned = subs.memberOwned.bind(subs)
+    const opened: boolean[] = []
+    vi.spyOn(subs, 'memberOwned').mockImplementation((id) => {
+      memberOwned(id)
+      opened.push(subs._inbox.has(id))
+    })
     const joining = joinThrough(closing).catch((error: unknown) => error)
     await entered.promise
     closing.abort()
     release.resolve()
     expect(isRoomError(await joining)).toBe(true)
-    expect(sizes).toEqual([0])
+    expect({ opened, sizes }).toEqual({ opened: [false], sizes: [0] })
   })
   it('does not evict a client-held participant again once it left', async () => {
     vi.useFakeTimers()
@@ -4059,6 +4067,7 @@ function subsOf(room: Room | ServerRoom): {
   _semantic: LaneSubscription
   _binary: Map<string, LaneSubscription>
   _inbox: Map<string, LaneSubscription>
+  memberOwned(member: string): void
   _refreshMembers(): Promise<void>
   _heartbeatTick(): Promise<void>
   binaryReady(): Promise<void>
