@@ -1989,17 +1989,35 @@ describe('Room public behavior', () => {
     declare(a, { __r: 'sub-binary', wants: EVERY_TRACK })
     declare(b, { __r: 'sub-binary', wants: { ...NO_TRACK, members: { [me.id]: { all: false, tracks: [''] } } } })
     a.abort()
-    await subsOf(room).binaryReady()
-    expect(demand).toEqual([
-      [null, true],
-      [null, false],
-      [null, true],
-    ])
+    await vi.waitFor(() =>
+      expect(demand).toEqual([
+        [null, true],
+        [null, false],
+        [null, true],
+      ]),
+    )
     b.abort()
     expect(demand.at(-1)).toEqual([null, false])
     declare(b, { __r: 'sub-binary', wants: EVERY_TRACK }) // a closed stub's late declaration
     await subsOf(room).binaryReady()
     expect(subsOf(room)._binary.size).toBe(0)
+  })
+  it('waits for a binary lane that is still establishing before it reports binary readiness', async () => {
+    const room = (await Room.create('binary-ready-establishing')) as ServerRoom
+    await room.join()
+    const binary = delayLaneSubscription((lane) => lane.kind === 'binary')
+    room.subscribeBinary(() => {})
+    await binary.started
+    let ready = false
+    const waiting = subsOf(room)
+      .binaryReady()
+      .then(() => {
+        ready = true
+      })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(ready).toBe(false)
+    await binary.release()
+    await waiting
   })
   it("drops a member's binary lane when it leaves", async () => {
     const room = (await Room.create('incremental-binary-leave')) as ServerRoom
