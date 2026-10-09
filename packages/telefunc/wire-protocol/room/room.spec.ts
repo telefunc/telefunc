@@ -1937,6 +1937,41 @@ describe('Room public behavior', () => {
     expect(await Room.getParticipants(room.id)).toEqual([])
     expect(departed).not.toHaveBeenCalled() // the admission rolls itself back
   })
+  it('keeps no stub index entry for a member that left, or whose stub closed', async () => {
+    const room = (await Room.create('stub-index-cleanup')) as ServerRoom
+    const stub = register(room)
+    for (let i = 0; i < 3; i++) await stub._handleRequest({ __r: 'req-leave', id: await joinThrough(stub) })
+    expect(stubIndexOf(room).size).toBe(0)
+    await joinThrough(stub)
+    stub.abort()
+    expect(stubIndexOf(room).size).toBe(0) // before the departed member's eviction settles
+  })
+  it('never indexes a member under a stub that closed before its join held it', async () => {
+    const room = (await Room.create('stub-index-closed-before-hold')) as ServerRoom
+    const stub = register(room)
+    const entered = createDeferred()
+    const release = createDeferred()
+    Room.guard(room, {
+      onBeforeJoin: async () => {
+        entered.resolve()
+        await release.promise
+      },
+    })
+    const sizes: number[] = []
+    const abandon = (room as unknown as { _abandonAdmission(id: string): void })._abandonAdmission.bind(room)
+    vi.spyOn(room as unknown as { _abandonAdmission(id: string): void }, '_abandonAdmission').mockImplementation(
+      (id) => {
+        sizes.push(stubIndexOf(room).size)
+        abandon(id)
+      },
+    )
+    const joining = joinThrough(stub).catch((error: unknown) => error)
+    await entered.promise
+    stub.abort()
+    release.resolve()
+    expect(isRoomError(await joining)).toBe(true)
+    expect(sizes).toEqual([0])
+  })
   it('does not evict a client-held participant again once it left', async () => {
     vi.useFakeTimers()
     const room = (await Room.create('standalone-leave-once')) as ServerRoom
@@ -3836,6 +3871,9 @@ function subsOf(room: Room | ServerRoom): {
   reconcileAuthority(): Promise<void>
 } {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+}
+function stubIndexOf(room: ServerRoom): Map<string, RoomStubChannel> {
+  return (room as unknown as { _stubOf: Map<string, RoomStubChannel> })._stubOf
 }
 function replacerContext(channels: ServerChannel[]): InternalServerReplacerContext {
   const states = new Map<symbol, unknown>()
