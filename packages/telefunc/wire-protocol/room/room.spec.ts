@@ -2379,6 +2379,20 @@ describe('Room public behavior', () => {
     await publisher.publishBinary(new Uint8Array([8]), { track: 'camera' })
     await vi.waitFor(() => expect({ texts, frames }).toEqual({ texts: ['state', 'live'], frames: [[7], [8]] }))
   })
+  it("replays a member's retained frames on each of its tracks to a want for that member, listing no lane", async () => {
+    const authority = await Room.create('retained-member-want')
+    const publisher = await authority.join()
+    const other = await authority.join()
+    await publisher.publishBinary(new Uint8Array([1]), { retain: true })
+    await publisher.publishBinary(new Uint8Array([2]), { track: 'screen', retain: true })
+    await other.publishBinary(new Uint8Array([3]), { retain: true })
+    const observer = await Room.get(authority.id)
+    const listRetained = vi.spyOn(driver, 'listRetained')
+    const frames: number[][] = []
+    ;(await observer.getParticipant(publisher.id))!.subscribeBinary((data) => void frames.push([...data]))
+    await vi.waitFor(() => expect(frames.sort()).toEqual([[1], [2]]))
+    expect(listRetained).not.toHaveBeenCalled()
+  })
   it('drops a live frame older than a retained frame that reached the subscriber first', async () => {
     const authority = await Room.create('retained-before-older-live')
     const publisher = await authority.join()

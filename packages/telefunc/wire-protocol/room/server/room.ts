@@ -18,9 +18,10 @@ import {
   laneTrack,
   publicTrack,
   binaryWantsCovers,
-  wantsAnyBinary,
+  DEFAULT_TRACK,
   type BinaryFrame,
   type BinaryWants,
+  type TrackWants,
 } from '../binary.js'
 import {
   DM_FAILURE,
@@ -770,21 +771,30 @@ class ServerRoom extends RoomStateView implements Room {
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
   async _replayRetainedBinary(holder: LaneHolder, prevWants: BinaryWants): Promise<void> {
-    if (!wantsAnyBinary(holder._binaryWants)) return
-    const roomWide = holder._binaryWants.everyMember
-    if (roomWide.all || roomWide.tracks.length > 0) await this._subs.ensureRoster()
+    const wants = holder._binaryWants
+    // A binary lane is keyed by its frames' sender and track: a new room-wide want lists the room's retained lanes, a
+    // new member want reads only that member's.
+    const roomWide = gainsTracks(prevWants.everyMember, wants.everyMember)
+    const gained = roomWide
+      ? []
+      : Object.keys(wants.members).filter((id) => gainsTracks(prevWants.members[id], wants.members[id]!))
+    if (!roomWide && gained.length === 0) return
+    if (roomWide || gained.some((id) => wants.members[id]!.all)) await this._subs.ensureRoster()
     // Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane.
     await this._subs.binaryReady()
     const backend = getRoomBackend()
-    // A binary lane is keyed by its frames' sender and track, so only newly wanted lanes are read.
-    const lanes = (await backend.listRetained(this.id, this._inc)).filter(
-      (lane): lane is Extract<LaneId, { kind: 'binary' }> =>
-        lane.kind === 'binary' &&
-        !binaryWantsCovers(prevWants, lane.member, lane.track) &&
-        holder._wantsBinary(lane.member, lane.track),
-    )
-    for (const lane of lanes) {
-      const stored = await backend.readRetained(this.id, this._inc, lane)
+    const candidates: Array<{ member: string; track: string }> = roomWide
+      ? (await backend.listRetained(this.id, this._inc)).filter(
+          (lane): lane is Extract<LaneId, { kind: 'binary' }> => lane.kind === 'binary',
+        )
+      : gained.flatMap((member) => {
+          const memberWants = wants.members[member]!
+          const tracks = memberWants.all ? [DEFAULT_TRACK, ...this._state.memberTracks(member)] : memberWants.tracks
+          return tracks.map((track) => ({ member, track }))
+        })
+    for (const { member, track } of candidates) {
+      if (binaryWantsCovers(prevWants, member, track) || !holder._wantsBinary(member, track)) continue
+      const stored = await backend.readRetained(this.id, this._inc, { kind: 'binary', member, track })
       if (stored === null) continue
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
@@ -939,6 +949,12 @@ class ServerLocalParticipant extends ParticipantBase {
   protected _reportError(err: unknown): void {
     reportServerChannelError(err)
   }
+}
+
+/** Whether `next` wants a track `prev` doesn't. */
+function gainsTracks(prev: TrackWants | undefined, next: TrackWants): boolean {
+  if (prev?.all) return false
+  return next.all || next.tracks.some((track) => !prev?.tracks.includes(track))
 }
 
 async function runAfterHook(hook: () => unknown): Promise<void> {
