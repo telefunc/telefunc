@@ -22,7 +22,6 @@ class SendBudget {
   private allowance = WIRE_SEND_AHEAD_MIN_BYTES
   /** The data frames sent and not covered by an acknowledgement: the bytes sent through each, and when. */
   private readonly sent: { end: number; at: number }[] = []
-  private acknowledgedBefore = 0
   /** In ms, the server's clock from the first data frame an acknowledgement covered. */
   private arrivedAt = 0
   /** The least one-way delay of a data frame, up to the offset between the clocks. */
@@ -49,10 +48,10 @@ class SendBudget {
 
   /** Takes a PIECES_ACK (see `PieceSender.acknowledged`). */
   acknowledged(bytes: number, heldMs: number, spanUs: number): boolean {
+    const before = this.sender.acknowledgedBytes
     if (!this.sender.acknowledged(bytes, heldMs)) return false
     const acknowledged = this.sender.acknowledgedBytes
-    const newly = acknowledged - this.acknowledgedBefore
-    this.acknowledgedBefore = acknowledged
+    const newly = acknowledged - before
     this.arrivedAt += spanUs / 1000
     let covered = 0
     while (covered < this.sent.length && this.sent[covered]!.end <= acknowledged) covered++
