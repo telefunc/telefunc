@@ -30,7 +30,7 @@ import {
   decodeStubBinaryFrame,
   type RoomDeclaration,
 } from './requests.js'
-import { ANNOUNCE_KEY, ReplayGate, binaryLaneKey, type LaneHolder } from './replay.js'
+import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import { binaryWantsCovers, emptyBinaryWants, laneTrack, type BinaryFrame, type BinaryWants } from '../binary.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
@@ -300,7 +300,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._wantsBinary(from, track) && this._replay.admit(binaryLaneKey(from, track), info.seq))
+    if (this._wantsBinary(from, track) && this._replay.admitBinary(from, track, info.seq))
       this._sendPublishBinary(wireData)
   }
 
@@ -314,7 +314,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void {
-    if (this._replay.admit(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq))
+    if (this._replay.admitBinary(frame.from, laneTrack(frame.track), info.seq))
       this._sendPublishBinary(encodePublishBinary(framed, info))
   }
 

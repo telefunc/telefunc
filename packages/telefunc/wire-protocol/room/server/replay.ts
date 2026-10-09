@@ -9,7 +9,7 @@ import type { MemberWants, RoomDataEnvelope } from '../protocol.js'
 import type { RoomState } from '../state.js'
 assertIsNotBrowser()
 
-// Gate keys: a member's text by its id, announcements by a key no id takes, a binary lane by id NUL track.
+// Text gate keys: a member's id, and for announcements a key no id takes. A binary lane's key is its id NUL track.
 const ANNOUNCE_KEY = '\0announce'
 function binaryLaneKey(member: string, track: string): string {
   return `${member}\0${track}`
@@ -21,18 +21,29 @@ function binaryLaneKey(member: string, track: string): string {
  *  older than the sender's live stream. Another sender's frames are never dropped by it. */
 class ReplayGate {
   private readonly _high = new Map<string, number>()
+  /** Binary lanes by sender, then track, so a sender's leave forgets only its own. */
+  private readonly _binaryHigh = new Map<string, Map<string, number>>()
 
   admit(key: string, seq: number): boolean {
-    if ((this._high.get(key) ?? 0) >= seq) return false
-    this._high.set(key, seq)
-    return true
+    return admitInto(this._high, key, seq)
+  }
+
+  admitBinary(member: string, track: string, seq: number): boolean {
+    let high = this._binaryHigh.get(member)
+    if (!high) this._binaryHigh.set(member, (high = new Map()))
+    return admitInto(high, track, seq)
   }
 
   forgetMember(member: string): void {
     this._high.delete(member)
-    const prefix = binaryLaneKey(member, '')
-    for (const key of this._high.keys()) if (key.startsWith(prefix)) this._high.delete(key)
+    this._binaryHigh.delete(member)
   }
+}
+
+function admitInto(high: Map<string, number>, key: string, seq: number): boolean {
+  if ((high.get(key) ?? 0) >= seq) return false
+  high.set(key, seq)
+  return true
 }
 
 function sameMemberWants(a: MemberWants, b: MemberWants): boolean {
@@ -105,7 +116,7 @@ class LocalHolder implements LaneHolder {
 
   relayBinary(frame: BinaryFrame, info: WirePublishInfo): void {
     const track = laneTrack(frame.track)
-    if (this._wantsBinary(frame.from, track) && this._replay.admit(binaryLaneKey(frame.from, track), info.seq))
+    if (this._wantsBinary(frame.from, track) && this._replay.admitBinary(frame.from, track, info.seq))
       this._applyBinary(frame, info)
   }
 
@@ -114,7 +125,7 @@ class LocalHolder implements LaneHolder {
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._replay.admit(binaryLaneKey(frame.from, laneTrack(frame.track)), info.seq)) this._applyBinary(frame, info)
+    if (this._replay.admitBinary(frame.from, laneTrack(frame.track), info.seq)) this._applyBinary(frame, info)
   }
 
   forgetMember(member: string): void {
