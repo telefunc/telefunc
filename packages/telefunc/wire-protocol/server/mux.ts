@@ -407,10 +407,11 @@ class ChannelMux {
     }
     const tag = peekTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
-    state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number))
+    const now = performance.now()
+    state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
-    state.lastReceivedAt = performance.now()
+    state.lastReceivedAt = now
     const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
     if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
     this.answerArrival(entry, connection)

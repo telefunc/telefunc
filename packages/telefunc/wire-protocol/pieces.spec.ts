@@ -49,17 +49,17 @@ test('a receiver acknowledges frames of any size once more than 16 KiB of them a
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
   const receiver = new PieceReceiver((frame) => void sent.push(frame))
-  receiver.arrived(8_000, true)
-  receiver.arrived(8_000, true)
+  receiver.arrived(8_000, true, Date.now())
+  receiver.arrived(8_000, true, Date.now())
   expect(sent).toHaveLength(0)
   vi.advanceTimersByTime(20)
-  receiver.arrived(1_000, true)
+  receiver.arrived(1_000, true, Date.now())
   expect(sent.map((frame) => decode(frame))).toEqual([{ tag: TAG.PIECES_ACK, bytes: 17_000, heldMs: 0, spanUs: 0 }])
   // 100 ms on, 10 KB arrive, and 30 ms later 10 KB more: the second ack covers both.
   vi.advanceTimersByTime(100)
-  receiver.arrived(10_000, true)
+  receiver.arrived(10_000, true, Date.now())
   vi.advanceTimersByTime(30)
-  receiver.arrived(10_000, true)
+  receiver.arrived(10_000, true, Date.now())
   expect(sent.map((frame) => decode(frame))[1]).toEqual({
     tag: TAG.PIECES_ACK,
     bytes: 37_000,

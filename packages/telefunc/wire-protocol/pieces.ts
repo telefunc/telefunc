@@ -123,12 +123,12 @@ class PieceReceiver {
 
   constructor(private readonly send: (frame: Uint8Array<ArrayBuffer>) => void) {}
 
-  /** After a whole frame of `bytes` arrived, in one message or in pieces. A data frame dates the ack's span: it takes the
-   *  queues an upload fills, where the frames that go at once pass them. */
-  arrived(bytes: number, data: boolean): void {
+  /** After a whole frame of `bytes` arrived at `at`, in one message or in pieces. A data frame dates the ack's span: it
+   *  takes the queues an upload fills, where the frames that go at once pass them. */
+  arrived(bytes: number, data: boolean, at: number): void {
     this.took += bytes
-    this.newestAt = performance.now()
-    if (data) this.newestDataAt = this.newestAt
+    this.newestAt = at
+    if (data) this.newestDataAt = at
     if (this.took - this.acknowledgedTook <= WIRE_PIECE_BYTES) return
     const wait = this.ackedAt + WIRE_PIECES_ACK_GAP_MS - this.newestAt
     if (wait <= 0) this.acknowledge()

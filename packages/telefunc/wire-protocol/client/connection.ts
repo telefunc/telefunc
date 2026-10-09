@@ -123,8 +123,8 @@ class Heartbeat {
     this.armPongDeadline(this.pongTimeoutMs)
   }
 
-  noteReceived(): void {
-    this.lastReceivedAt = performance.now()
+  noteReceived(at = performance.now()): void {
+    this.lastReceivedAt = at
   }
 
   /** How long the wire has delivered nothing, since the heartbeat started or got a PONG if later. */
@@ -1825,7 +1825,7 @@ class WsTransport implements UpgradeTarget {
     let onClose: (() => void) | null = null
     let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
     ws.onmessage = ({ data }: MessageEvent) => {
-      const message = receiveMessage(ws, pieces, data)
+      const message = receiveMessage(ws, pieces, data, performance.now())
       if (message === null) return
       if (message.frame.tag === TAG.PONG) {
         onPong?.()
@@ -1971,8 +1971,9 @@ class WsTransport implements UpgradeTarget {
     const budget = new SendBudget(sender)
     this.budget = budget
     ws.onmessage = ({ data }: MessageEvent) => {
-      this.heartbeat?.noteReceived()
-      const message = receiveMessage(ws, pieces, data)
+      const now = performance.now()
+      this.heartbeat?.noteReceived(now)
+      const message = receiveMessage(ws, pieces, data, now)
       if (message === null) return
       const { frame } = message
       if (frame.tag === TAG.PIECES_ACK) {
@@ -2075,12 +2076,13 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** The frame a WebSocket message completes, or null: a piece before its frame's last, or bytes that close `ws`. Its
- *  receiver acknowledges a large one (`PieceReceiver.arrived`). */
+/** The frame a WebSocket message that arrived at `at` completes, or null: a piece before its frame's last, or bytes that
+ *  close `ws`. Its receiver acknowledges a large one (`PieceReceiver.arrived`). */
 function receiveMessage(
   ws: WebSocket,
   pieces: PieceReceiver,
   data: unknown,
+  at: number,
 ): { frame: DecodedFrame; byteLength: number } | null {
   try {
     let raw = new Uint8Array(data as ArrayBuffer)
@@ -2091,7 +2093,7 @@ function receiveMessage(
       raw = whole
       frame = decode(raw)
     }
-    pieces.arrived(raw.byteLength, isSequencedTag(frame.tag))
+    pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at)
     return { frame, byteLength: raw.byteLength }
   } catch {
     ws.close()
