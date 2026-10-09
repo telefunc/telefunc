@@ -1,6 +1,7 @@
 export { SSEStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
+import { SSELineSplitter } from '../SSELineSplitter.js'
 import { concat } from '../../frame.js'
 import { base64urlToUint8Array } from '../../base64url.js'
 import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -11,15 +12,14 @@ const EMPTY = new Uint8Array(0)
  *  binary frames.
  *
  *  `readExact` is the only method implemented here. SSE line parser state
- *  (`lineBuf`, `pendingData`, `TextDecoder`) lives as instance fields,
+ *  (`lines`, `pendingData`) lives as instance fields,
  *  persisted across calls. `reader.read()` is called inline — only when more
  *  bytes are needed — preserving the full pull chain through
  *  `FrameDemuxer.ensureReading` to the server generator. No separate pump. */
 class SSEStreamReader extends BaseStreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
   private binary: Uint8Array<ArrayBuffer> = EMPTY
-  private decoder = new TextDecoder()
-  private lineBuf = ''
+  private lines = new SSELineSplitter()
   private pendingData = ''
 
   constructor(
@@ -59,20 +59,19 @@ class SSEStreamReader extends BaseStreamReader {
         if (this.cancelled) return EMPTY
         throw readError ?? new Error('Connection lost — server closed the SSE stream before all data was received.')
       }
-      this.lineBuf += this.decoder.decode(value!, { stream: true })
-      const lines = this.lineBuf.split('\n')
-      this.lineBuf = lines.pop()!
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          this.pendingData = line.slice(6)
-        } else if (line === '' && this.pendingData !== '') {
-          this.binary = concat(this.binary, base64urlToUint8Array(this.pendingData))
-          this.pendingData = ''
-        }
-      }
+      this.lines.push(value!, this.onLine)
     }
     const result = this.binary.subarray(0, n)
     this.binary = n < this.binary.length ? this.binary.subarray(n) : EMPTY
     return result
+  }
+
+  private onLine = (line: string) => {
+    if (line.startsWith('data: ')) {
+      this.pendingData = line.slice(6)
+    } else if (line === '' && this.pendingData !== '') {
+      this.binary = concat(this.binary, base64urlToUint8Array(this.pendingData))
+      this.pendingData = ''
+    }
   }
 }

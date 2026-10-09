@@ -71,6 +71,7 @@ import type {
 } from '../shared-ws.js'
 import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
+import { SSELineSplitter } from './SSELineSplitter.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 
 type BufferedFrame = {
@@ -2753,13 +2754,7 @@ function createSseEventStreamReader(
   cancel: () => void
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
 } {
-  const decoder = new TextDecoder()
-  // Cursor-based incremental parser. `lineBuf` accumulates decoded text; `cursor` is
-  // the offset of the first unparsed byte. We walk it line-by-line via `indexOf('\n')`
-  // and queue completed events as we go — no full-buffer splits, no re-joins. The
-  // prefix gets trimmed amortised once the consumed region exceeds half the buffer.
-  let lineBuf = ''
-  let cursor = 0
+  const lines = new SSELineSplitter()
   let pendingData = ''
   const ready: Array<Uint8Array<ArrayBuffer>> = []
   let cancelled = false
@@ -2779,25 +2774,14 @@ function createSseEventStreamReader(
     }
   }
 
-  const processBufferedLines = () => {
-    while (cursor < lineBuf.length) {
-      const nl = lineBuf.indexOf('\n', cursor)
-      if (nl === -1) break // incomplete tail line — wait for more bytes
-      const line = lineBuf.slice(cursor, nl)
-      cursor = nl + 1
-      if (line.length === 0) {
-        flushEvent()
-        continue
-      }
-      if (line.charCodeAt(0) === 58 /* ':' */) continue
-      if (line.startsWith('data: ')) {
-        pendingData = line.slice(6)
-      }
+  const onLine = (line: string) => {
+    if (line.length === 0) {
+      flushEvent()
+      return
     }
-    // Amortised compaction — discard the consumed prefix once it dominates the buffer.
-    if (cursor > 16384 && cursor * 2 >= lineBuf.length) {
-      lineBuf = lineBuf.slice(cursor)
-      cursor = 0
+    if (line.charCodeAt(0) === 58 /* ':' */) return
+    if (line.startsWith('data: ')) {
+      pendingData = line.slice(6)
     }
   }
 
@@ -2819,8 +2803,7 @@ function createSseEventStreamReader(
         throw readError ?? new Error('Connection lost before all SSE frames were received.')
       }
       onChunk()
-      lineBuf += decoder.decode(value!, { stream: true })
-      processBufferedLines()
+      lines.push(value!, onLine)
     }
   }
 
