@@ -1,4 +1,4 @@
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
@@ -58,7 +58,8 @@ const reconciled = (ixes: number[], lastSeqs = new Map<number, number>()) =>
  *  POST to `onBatchFrame`, and leaves the upload POST unsettled until the test settles it. What the test sends before
  *  the page's first SSE request reaches it goes out once it does, and an upload the test settles before the page's
  *  request reaches it is settled as it does, as a server can only answer requests it has. `uplinkBytesPerS`: a frame of a
- *  batch POST reaches it as its last byte crosses, and the POST is answered once they all did. */
+ *  batch POST reaches it as its last byte crosses, counted from the POST's start, and the POST is answered once they all
+ *  did. */
 function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = () => {}, uplinkBytesPerS = Infinity) {
   const encoder = new TextEncoder()
   let write: ((frame: Uint8Array) => void) | null = null
@@ -88,6 +89,7 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
       pendingUpload = null
     },
     fetch: (async (_url: string, init: RequestInit) => {
+      const sentAt = Date.now()
       const body = init.body as unknown
       if (!(body instanceof Blob)) {
         const settlement = uploadSettlement
@@ -96,8 +98,10 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
       }
       const { metadata, frames } = await parseBlobBody(body)
       if (!metadata.streamResponse) {
+        let crossed = 0
         for (const raw of frames) {
-          if (uplinkBytesPerS !== Infinity) await delay((raw.byteLength * 1000) / uplinkBytesPerS)
+          crossed += raw.byteLength
+          if (uplinkBytesPerS !== Infinity) await delay(sentAt + (crossed * 1000) / uplinkBytesPerS - Date.now())
           onBatchFrame(decode(raw as never))
         }
         return new Response('', { status: cut.has(metadata.connId) ? 400 : 200 })
@@ -425,68 +429,85 @@ test("a RECONCILED that comes on an SSE wire the page gave up doesn't settle the
   connection.dispose()
 })
 
-/** A page that uploads `frames` of 64 KiB on a connection to a server whose uplink takes `uplinkBytesPerS`. */
-async function uploadingPage(
-  name: string,
-  frames: number,
-  uplinkBytesPerS: number,
-  onBatchFrame: (frame: ReturnType<typeof decode>) => void,
-) {
-  const server = fakeServer(onBatchFrame, uplinkBytesPerS)
-  const channel = createChannel()
-  const connectionKey = crypto.randomUUID()
-  const register = (channel: ReturnType<typeof createChannel>) =>
-    ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel as never, {
-      transports: ['sse'],
-      fetchImpl: server.fetch,
-      connectionKey,
-    }) as any
-  const connection = register(channel)
-  await delay(20)
-  server.refuseUpload() // batch POSTs, as Firefox and Safari send them
-  server.reconcile()
-  await delay(20)
-  const chunk = new Uint8Array(64 * 1024)
-  for (let i = 0; i < frames; i++) connection.sendBinary(channel, chunk)
-  return { server, connection, channel, register }
-}
-
-test("a window refresh the page queues while an upload fills a slow uplink reaches the server within about a batch POST's target, not after the upload", async () => {
-  const arrivals: number[] = []
-  const { connection, channel } = await uploadingPage('window-hol', 24, 300 * 1024, (frame) => {
-    if (frame.tag === TAG.WINDOW) arrivals.push(Date.now())
+describe('a slow uplink', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
   })
-  await delay(500)
-  const queuedAt = Date.now()
-  connection.sendByteWindowUpdate(channel, 1 << 20, true)
-  await vi.waitFor(() => expect(arrivals).toHaveLength(1), { timeout: 5_000 })
-  expect(arrivals[0]! - queuedAt).toBeLessThan(SSE_POST_TARGET_MS + 1_000)
-  connection.dispose()
-})
 
-test("a RECONCILE for a channel the page opens while an upload fills a slow uplink reaches the server within about a batch POST's target, and the upload's frames arrive once, in order", async () => {
-  const seqs: number[] = []
-  const lastSeqs = new Map<number, number>()
-  const reconcileArrivals: number[] = []
-  let server!: ReturnType<typeof fakeServer>
-  const page = await uploadingPage('reconcile-hol', 24, 300 * 1024, (frame) => {
-    if (frame.tag === TAG.BINARY) {
-      seqs.push(frame.seq)
-      lastSeqs.set(frame.index, frame.seq)
-    }
-    if (frame.tag === TAG.RECONCILE) {
-      reconcileArrivals.push(Date.now())
-      const ixes = frame.payload.open.map((entry) => entry.ix)
-      setTimeout(() => server.send(reconciled(ixes, lastSeqs)), 20)
-    }
+  afterEach(() => {
+    vi.useRealTimers()
   })
-  server = page.server
-  await delay(500)
-  const openedAt = Date.now()
-  page.register(createChannel())
-  await vi.waitFor(() => expect(reconcileArrivals).toHaveLength(1), { timeout: 5_000 })
-  expect(reconcileArrivals[0]! - openedAt).toBeLessThan(SSE_POST_TARGET_MS + 1_000)
-  await vi.waitFor(() => expect(seqs).toHaveLength(24), { timeout: 10_000 })
-  expect(seqs).toEqual(Array.from({ length: 24 }, (_, i) => i + 1))
-  page.connection.dispose()
+
+  /** Advances the clock until `done()`, for at most `ms`. */
+  async function advanceUntil(done: () => boolean, ms: number) {
+    for (let waited = 0; waited < ms && !done(); waited += 10) await vi.advanceTimersByTimeAsync(10)
+  }
+
+  /** A page that uploads `frames` of 64 KiB on a connection to a server whose uplink takes `uplinkBytesPerS`. */
+  async function uploadingPage(
+    name: string,
+    frames: number,
+    uplinkBytesPerS: number,
+    onBatchFrame: (frame: ReturnType<typeof decode>) => void,
+  ) {
+    const server = fakeServer(onBatchFrame, uplinkBytesPerS)
+    const channel = createChannel()
+    const connectionKey = crypto.randomUUID()
+    const register = (channel: ReturnType<typeof createChannel>) =>
+      ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel as never, {
+        transports: ['sse'],
+        fetchImpl: server.fetch,
+        connectionKey,
+      }) as any
+    const connection = register(channel)
+    await vi.advanceTimersByTimeAsync(20)
+    server.refuseUpload() // batch POSTs, as Firefox and Safari send them
+    server.reconcile()
+    await vi.advanceTimersByTimeAsync(20)
+    const chunk = new Uint8Array(64 * 1024)
+    for (let i = 0; i < frames; i++) connection.sendBinary(channel, chunk)
+    return { server, connection, channel, register }
+  }
+
+  test("a window refresh the page queues while an upload fills it reaches the server within about a batch POST's target, not after the upload", async () => {
+    const arrivals: number[] = []
+    const { connection, channel } = await uploadingPage('window-hol', 24, 300 * 1024, (frame) => {
+      if (frame.tag === TAG.WINDOW) arrivals.push(Date.now())
+    })
+    await vi.advanceTimersByTimeAsync(500)
+    const queuedAt = Date.now()
+    connection.sendByteWindowUpdate(channel, 1 << 20, true)
+    await advanceUntil(() => arrivals.length === 1, 10_000)
+    expect(arrivals).toHaveLength(1)
+    expect(arrivals[0]! - queuedAt).toBeLessThan(SSE_POST_TARGET_MS + 1_000)
+    connection.dispose()
+  })
+
+  test("a RECONCILE for a channel the page opens while an upload fills it reaches the server within about a batch POST's target, and the upload's frames arrive once, in order", async () => {
+    const seqs: number[] = []
+    const lastSeqs = new Map<number, number>()
+    const reconcileArrivals: number[] = []
+    let server!: ReturnType<typeof fakeServer>
+    const page = await uploadingPage('reconcile-hol', 24, 300 * 1024, (frame) => {
+      if (frame.tag === TAG.BINARY) {
+        seqs.push(frame.seq)
+        lastSeqs.set(frame.index, frame.seq)
+      }
+      if (frame.tag === TAG.RECONCILE) {
+        reconcileArrivals.push(Date.now())
+        const ixes = frame.payload.open.map((entry) => entry.ix)
+        setTimeout(() => server.send(reconciled(ixes, lastSeqs)), 20)
+      }
+    })
+    server = page.server
+    await vi.advanceTimersByTimeAsync(500)
+    const openedAt = Date.now()
+    page.register(createChannel())
+    await advanceUntil(() => reconcileArrivals.length === 1, 10_000)
+    expect(reconcileArrivals).toHaveLength(1)
+    expect(reconcileArrivals[0]! - openedAt).toBeLessThan(SSE_POST_TARGET_MS + 1_000)
+    await advanceUntil(() => seqs.length >= 24, 20_000)
+    expect(seqs).toEqual(Array.from({ length: 24 }, (_, i) => i + 1))
+    page.connection.dispose()
+  })
 })
