@@ -68,6 +68,7 @@ import { RoomStubChannel, unorderedEventText } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, binaryLaneKey, type LaneHolder, type WantsChange } from './replay.js'
 import { TailHold } from './tail.js'
+import { PendingDmAcks } from './dm-acks.js'
 import { RoomSubscriptions, type HolderWants } from './subscriptions.js'
 import {
   SEMANTIC_LANE,
@@ -134,8 +135,8 @@ class ServerRoom extends RoomStateView implements Room {
   readonly _inc: string
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private _tail: TailHold | null = null
-  /** In-flight `send(…, { ack: true })`s by `ackId`; a leave of either end, or a close, fails the ones it strands. */
-  private readonly _pendingDmAcks = new Map<string, { from: string; to: string; settle: (reply: DmReply) => void }>()
+  /** In-flight `send(…, { ack: true })`s; a leave of either end, or a close, fails the ones it strands. */
+  private readonly _pendingDmAcks = new PendingDmAcks()
   private _guards: Partial<RoomGuardHooks> | null = null
   /** @internal */ readonly _state: RoomState
   private readonly _local: LocalHolder
@@ -422,12 +423,10 @@ class ServerRoom extends RoomStateView implements Room {
     const ackId = crypto.randomUUID()
     let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<DmReply>((settle) => {
-      this._pendingDmAcks.set(ackId, { from, to, settle })
+      this._pendingDmAcks.add(ackId, { from, to, settle })
       // Bounds the wait nothing else settles: a lost DM or reply, or a recipient that never listens.
       timer = unrefTimer(
-        setTimeout(() => {
-          if (this._pendingDmAcks.delete(ackId)) settle(DM_FAILURE.timeout)
-        }, ROOM_DM_ACK_TIMEOUT_MS),
+        setTimeout(() => this._pendingDmAcks.settle(ackId, DM_FAILURE.timeout), ROOM_DM_ACK_TIMEOUT_MS),
       )
     })
     let receipt: RoomSendReceipt
@@ -484,21 +483,6 @@ class ServerRoom extends RoomStateView implements Room {
     )
     // A sender that left had its wait failed by its leave; only a closed room is an error.
     if ('stale' in committed && committed.stale === 'incarnation') throw staleCommitError(this.id, committed)
-  }
-
-  private _resolveDmAck(envelope: RoomDmAckEnvelope): void {
-    const pending = this._pendingDmAcks.get(envelope.ackId)
-    if (!pending) return
-    this._pendingDmAcks.delete(envelope.ackId)
-    pending.settle(envelope)
-  }
-
-  private _rejectDmAcks(reply: DmReply, member?: string): void {
-    for (const [ackId, pending] of this._pendingDmAcks) {
-      if (member !== undefined && pending.from !== member && pending.to !== member) continue
-      this._pendingDmAcks.delete(ackId)
-      pending.settle(reply)
-    }
   }
 
   private async _resolveMember(id: string): Promise<Sender | null> {
@@ -576,7 +560,7 @@ class ServerRoom extends RoomStateView implements Room {
   _onDm(serialized: string, rawInfo: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
-    if (envelope.__r === 'dm-ack') return this._resolveDmAck(envelope)
+    if (envelope.__r === 'dm-ack') return this._pendingDmAcks.settle(envelope.ackId, envelope)
     const holder = this._holderOf(envelope.to)
     // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
     if (holder instanceof RoomStubChannel) return holder._relayDm(encodePublishText(serialized, rawInfo), envelope)
@@ -627,7 +611,7 @@ class ServerRoom extends RoomStateView implements Room {
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this._announcedTracks.delete(id)
-    this._rejectDmAcks(DM_FAILURE.left, id) // strand no waiter on a gone sender or recipient
+    this._pendingDmAcks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)
@@ -649,7 +633,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** The room closed. Runs once, after the `closed` event has been applied and relayed. */
   private _teardown(): void {
-    this._rejectDmAcks(DM_FAILURE.roomClosed) // no recipient will reply now
+    this._pendingDmAcks.settleAll(DM_FAILURE.roomClosed) // no recipient will reply now
     this._teardownTail()
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
