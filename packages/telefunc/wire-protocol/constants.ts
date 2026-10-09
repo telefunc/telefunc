@@ -180,7 +180,7 @@ export const SSE_POST_MIN_BYTES_PER_S = 16 * 1024
 
 /** A batch POST is sized to take about this long, so what waits behind it, a window refresh or a RECONCILE, waits as long. */
 export const SSE_POST_TARGET_MS = 1500
-/** What a batch POST carries at least, whatever the uplink. */
+/** The smallest a batch POST's allowance gets, however slow the uplink. */
 export const SSE_POST_MIN_BYTES = 64 * 1024
 
 /** Latest-send deadline for SSE reconcile batches so immediate channel activity can coalesce into one POST. */
