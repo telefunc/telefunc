@@ -476,7 +476,8 @@ class ClientConnection implements MuxConnection {
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
-  /** For the page's life, once a wire was lost, here or the server's word, with a frame in flight and no rate measured. */
+  /** For the page's life, once a wire was lost, here or the server's word, with a frame in flight and no rate measured,
+   *  or silent past its RECONCILE deadline. */
   private slowLink = false
   /** The heartbeat last installed is the provisional one before a first RECONCILED (see `beatFromReconcile`). */
   private provisionalHeartbeat = false
@@ -1115,6 +1116,8 @@ class ClientConnection implements MuxConnection {
     // delivered nothing for the deadline.
     const quiet = this.transport.quietFor()
     if (quiet < RECONCILE_TIMEOUT_MS) return this.armReconcileDeadline(RECONCILE_TIMEOUT_MS - quiet)
+    // RECONCILED never came, so neither did the session by which the server would tell the next wire the link is slow.
+    this.slowLink = true
     this.dropWire(this.transport)
   }
 

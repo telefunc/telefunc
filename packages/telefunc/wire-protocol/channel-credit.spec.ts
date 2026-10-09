@@ -933,6 +933,18 @@ test('on a link too slow for 256 KiB in a ping deadline, a megabyte sent at conn
   expect(loop.sockets).toHaveLength(wires)
 })
 
+test('on a link too slow for 256 KiB in the RECONCILE deadline, a megabyte the server sends as the page attaches arrives after at most one reconnect', async () => {
+  // 100 kbit/s: 256 KiB takes 21 s, past the 10 s a first wire has to deliver its RECONCILED, which goes behind it.
+  loop.linkBytesPerMs = 12.5
+  const { server, page } = loop.open<Uint8Array, Uint8Array>()
+  server.onOpen(() => void server.sendBinary(new Uint8Array(1_000_000)))
+  const atPage: number[] = []
+  page.listenBinary((data) => void atPage.push(data.byteLength))
+  await runUntil(() => atPage.length === 1, 120_000)
+  expect(atPage).toEqual([1_000_000])
+  expect(loop.sockets.length).toBeLessThanOrEqual(2)
+})
+
 test('a WebSocket that cannot be constructed sends the channel to its reconnect loop, it does not throw', async () => {
   config.channel.transports = ['ws']
   vi.stubGlobal('WebSocket', undefined)
