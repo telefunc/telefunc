@@ -50,6 +50,8 @@ type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp
 type Generation = {
   revision: number
   cells: Map<string, StoredCell>
+  /** Cell keys by each of their prefixes ending in ':', the separator of cell keys, so a prefix read lists its own. */
+  cellsByPrefix: Map<string, Set<string>>
   order: Map<string, OrderingInfo>
   retained: Map<string, RetainedEntry>
   subs: Subscriptions
@@ -88,7 +90,44 @@ function nextTurn(callback: () => void): void {
 }
 
 function newGeneration(): Generation {
-  return { revision: 0, cells: new Map(), order: new Map(), retained: new Map(), subs: new Map() }
+  return {
+    revision: 0,
+    cells: new Map(),
+    cellsByPrefix: new Map(),
+    order: new Map(),
+    retained: new Map(),
+    subs: new Map(),
+  }
+}
+
+function* separatorPrefixes(key: string): Generator<string> {
+  for (let end = key.indexOf(':'); end !== -1; end = key.indexOf(':', end + 1)) yield key.slice(0, end + 1)
+}
+
+function cellKeysWithPrefix(gen: Generation, prefix: string): Iterable<string> {
+  const indexed = prefix.slice(0, prefix.lastIndexOf(':') + 1)
+  const keys = indexed === '' ? gen.cells.keys() : (gen.cellsByPrefix.get(indexed) ?? [])
+  return indexed === prefix ? keys : [...keys].filter((key) => key.startsWith(prefix))
+}
+
+function setCell(gen: Generation, key: string, bytes: Uint8Array | null): void {
+  if (bytes === null) {
+    if (!gen.cells.delete(key)) return
+    for (const prefix of separatorPrefixes(key)) {
+      const keys = gen.cellsByPrefix.get(prefix)!
+      keys.delete(key)
+      if (keys.size === 0) gen.cellsByPrefix.delete(prefix)
+    }
+    return
+  }
+  if (!gen.cells.has(key)) {
+    for (const prefix of separatorPrefixes(key)) {
+      const keys = gen.cellsByPrefix.get(prefix)
+      if (keys === undefined) gen.cellsByPrefix.set(prefix, new Set([key]))
+      else keys.add(key)
+    }
+  }
+  gen.cells.set(key, { bytes: copyBytes(bytes) })
 }
 
 function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: number): OrderingInfo {
@@ -216,7 +255,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     // Closing tails may read; only writes require an open head.
     if (room === undefined || head === null || head.currentInc !== inc) return { staleInc: true }
     const gen = this._generation(room, inc)
-    const keys = 'keys' in sel ? sel.keys : [...gen.cells.keys()].filter((key) => key.startsWith(sel.prefix))
+    const keys = 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix)
     const cells = new Map<string, Uint8Array>()
     for (const key of keys) {
       const cell = gen.cells.get(key)
@@ -237,10 +276,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (room === undefined || !isOpenIncarnation(head, inc)) return 'stale-inc'
     const gen = this._generation(room, inc)
     if (String(gen.revision) !== revision) return 'conflict'
-    for (const mutation of mutations) {
-      if (mutation.bytes === null) gen.cells.delete(mutation.key)
-      else gen.cells.set(mutation.key, { bytes: copyBytes(mutation.bytes) })
-    }
+    for (const mutation of mutations) setCell(gen, mutation.key, mutation.bytes)
     gen.revision += 1
     return 'committed'
   }

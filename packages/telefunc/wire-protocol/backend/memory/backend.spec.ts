@@ -169,6 +169,41 @@ describe('memory backend behind the supervised consumer', () => {
     const subscription = getRoomBackend().subscribeLane('refused-room', 'refused-inc', semanticLane, () => {})
     await expect(subscription.ready).rejects.toThrow("has no open incarnation 'refused-inc'")
   })
+  it('reads a prefix without scanning the other cells, and drops its index entries with its cells', async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'prefixes',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    const keys = ['m:1', 'm:2', 'identity:a:1', 'identity:a:2', 'identity:ab:3', 'hold']
+    const write = async (mutations: { key: string; bytes: Uint8Array | null }[]) => {
+      const read = await backend.readCells('prefixes', 'inc-1', { keys: [] })
+      if ('staleInc' in read) throw new Error('cell read fenced unexpectedly')
+      expect(await backend.compareExchangeCells('prefixes', 'inc-1', read.revision, mutations)).toBe('committed')
+    }
+    const readKeys = async (prefix: string) => {
+      const read = await backend.readCells('prefixes', 'inc-1', { prefix })
+      if ('staleInc' in read) throw new Error('cell read fenced unexpectedly')
+      return [...read.cells.keys()].sort()
+    }
+    await write(keys.map((key) => ({ key, bytes: encoder.encode(key) })))
+    await write([{ key: 'm:1', bytes: encoder.encode('rewritten') }])
+    const generation = memoryState.rooms.get('prefixes')!.gens.get('inc-1')!
+    const scan = vi.spyOn(generation.cells, 'keys')
+    expect(await readKeys('m:')).toEqual(['m:1', 'm:2'])
+    expect(await readKeys('identity:a:')).toEqual(['identity:a:1', 'identity:a:2'])
+    expect(await readKeys('identity:')).toEqual(['identity:a:1', 'identity:a:2', 'identity:ab:3'])
+    expect(await readKeys('identity:a')).toEqual(['identity:a:1', 'identity:a:2', 'identity:ab:3'])
+    expect(await readKeys('missing:')).toEqual([])
+    expect(scan).not.toHaveBeenCalled()
+    expect(await readKeys('h')).toEqual(['hold'])
+    expect(await readKeys('')).toEqual([...keys].sort())
+    await write([{ key: 'identity:a:1', bytes: null }])
+    expect(await readKeys('identity:a:')).toEqual(['identity:a:2'])
+    await write(keys.map((key) => ({ key, bytes: null })))
+    expect(generation.cellsByPrefix.size).toBe(0)
+  })
   it("releases a closed room's memory record once its tombstone lapses", async () => {
     vi.useFakeTimers()
     await Room.create('released-record')
