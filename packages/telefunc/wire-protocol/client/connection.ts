@@ -2296,13 +2296,15 @@ class SseTransport implements UpgradeSource {
     // `fetchEndedP` catches its rejection eagerly so it's always handled even if openStream exits early.
     let fetchEndedP: Promise<'fetch-ended'> | undefined
     let uploadBody: PushReadableStream<Uint8Array<ArrayBuffer>> | undefined
+    const uploadAbort = new AbortController()
+    abortController.signal.addEventListener('abort', () => uploadAbort.abort(), { once: true })
     if (this.streamRequest.tag !== 'failed') {
       const body = createPushReadableStream<Uint8Array<ArrayBuffer>>()
       uploadBody = body
       // Metadata header first — the server classifies the POST by it; `streamRequest: true`
       // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
       body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
-      const fetch = this.openStreamRequest(body, abortController.signal)
+      const fetch = this.openStreamRequest(body, uploadAbort.signal)
       this.streamRequest = { tag: 'active', body, unconfirmed: [] }
       fetchEndedP = (async (): Promise<'fetch-ended'> => {
         try {
@@ -2396,7 +2398,8 @@ class SseTransport implements UpgradeSource {
       } else {
         // The server may not have read a body it never acknowledged: resend it, first; it drops a seq it already has.
         const unsent = this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
-        this.closeStreamRequest()
+        // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
+        uploadAbort.abort()
         this.streamRequest = { tag: 'failed' }
         if (unsent) {
           this.outbox = [...unsent.map((frame) => ({ frame, deadline: Date.now() })), ...this.outbox]
