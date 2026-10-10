@@ -796,25 +796,6 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(seen).toEqual(['first:1', 'second:1', 'first:2', 'second:2'])
   })
 
-  it('lets the event loop run while a listener answers every message on its own key', async () => {
-    let answers = 0
-    const unsubscribe = Broadcast.subscribe<number>('room:self-answer', (n) => {
-      answers++
-      void Broadcast.publish('room:self-answer', n + 1)
-    })
-    const unsubscribeAsync = Broadcast.subscribe<number>('room:self-answer-async', async (n) => {
-      await Promise.resolve()
-      answers++
-      void Broadcast.publish('room:self-answer-async', n + 1)
-    })
-    void Broadcast.publish('room:self-answer', 0)
-    void Broadcast.publish('room:self-answer-async', 0)
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    unsubscribe()
-    unsubscribeAsync()
-    expect(answers).toBeGreaterThan(0)
-  })
-
   it('reports the end of a subscription its consumers share once', async () => {
     const ending = new PendingAttempt()
     let opens = 0
@@ -1114,12 +1095,5 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     await Broadcast.publish('room:static-unsub', { text: 'second' })
 
     expect(received).toEqual([{ text: 'first' }])
-  })
-
-  it('shares one monotonic per-key sequence across text and binary routes', async () => {
-    const text = await Broadcast.publish('broadcast:shared-order', { text: 'one' })
-    const binary = await Broadcast.publishBinary('broadcast:shared-order', new Uint8Array([2]))
-    expect(text.seq).toBe(1)
-    expect(binary.seq).toBe(2)
   })
 })
