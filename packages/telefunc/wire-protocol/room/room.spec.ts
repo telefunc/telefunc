@@ -2626,11 +2626,14 @@ describe('Room public behavior', () => {
   it('drops the wants naming a member as it leaves', async () => {
     const room = (await Room.create('declared-leave')) as ServerRoom
     const member = await room.join()
-    const stub = register(room)
-    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: { all: true, tracks: [] } } })
-    declare(stub, { __r: 'sub-text', announce: false, members: { [member.id]: true } })
+    const binaryStub = register(room)
+    const textStub = register(room)
+    declare(binaryStub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: { all: true, tracks: [] } } })
+    declare(textStub, { __r: 'sub-text', announce: false, members: { [member.id]: true } })
     await member.leave()
-    expect(wantsHeld(room, stub)).toEqual({ text: [], binary: [], indexedText: [], indexedBinary: [] })
+    const none = { text: [], binary: [], indexedText: [], indexedBinary: [] }
+    expect(wantsHeld(room, binaryStub)).toEqual(none)
+    expect(wantsHeld(room, textStub)).toEqual(none)
   })
   it('holds no want naming an id the view does not hold while every roster read fails', async () => {
     const authority = await Room.create('declared-before-roster')
