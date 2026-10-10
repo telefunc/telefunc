@@ -37,7 +37,7 @@ import { DriverAttempt } from '../attempt.js'
 import { macrotaskYield } from '../../flow-control/macrotask-yield.js'
 
 type MemoryBackendOptions = {
-  /** @internal Storage to share with a reconstructed backend. */
+  /** @internal For specs: storage to inspect, or to share with another backend. */
   state?: MemoryBackendState
 }
 
@@ -62,7 +62,7 @@ type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
 /** Subscriptions by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
 type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
 
-/** @internal The storage, kept apart from the backend so a reconstructed one can reuse it. */
+/** @internal The backend's storage, kept apart from it so specs can inspect it and share it between backends. */
 class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, string>()
