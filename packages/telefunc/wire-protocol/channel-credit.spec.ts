@@ -19,7 +19,7 @@ import {
 import { ChannelOverflowError } from './channel-errors.js'
 import { TAG, encode } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
-import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
+import { config, getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { Room } from './room/server/statics.js'
 import type { ServerLocalParticipant, ServerRoom } from './room/server/room.js'
 import { ResponseRoomGrants, RoomParticipantStubChannel } from './room/server/stub.js'
@@ -244,7 +244,14 @@ class Loopback {
         connectionKey: this.connectionKey,
       })
       this.pages.push(page as ClientChannel)
-      return new ClientStandaloneParticipant(page, { channelId: stub.id, id, meta, selfDelivery, identity })
+      return new ClientStandaloneParticipant(page, {
+        channelId: stub.id,
+        id,
+        meta,
+        selfDelivery,
+        identity,
+        bufferLimit: getServerConfig().channel.bufferLimit,
+      })
     }
     return { room, participant, stub, openPage }
   }

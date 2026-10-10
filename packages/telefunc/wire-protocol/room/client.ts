@@ -85,10 +85,13 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly _declaredBinary: BinaryWants = emptyBinaryWants()
   /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
   private readonly _roster = createDeferred()
+  /** @internal */
+  readonly _bufferLimit: number
 
   constructor(stub: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
     super()
     this._stub = stub
+    this._bufferLimit = snapshot.bufferLimit
     this._state = new RoomState({
       owner: this,
       roomId: snapshot.roomId,
@@ -361,6 +364,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     selfDelivery: boolean,
     identity: string | null,
     private readonly _requestParticipant: (request: ParticipantMutationRequest) => Promise<unknown>,
+    private readonly _bufferLimit: number,
   ) {
     super(id, meta, selfDelivery, identity)
   }
@@ -451,6 +455,10 @@ abstract class ClientParticipantBase extends ParticipantBase {
   protected _reportError(err: unknown): void {
     reportClientCallbackError(err)
   }
+
+  protected _inboxBufferLimit(): number {
+    return this._bufferLimit
+  }
 }
 
 /** `LocalParticipant` returned by `ClientRoom.join()`. Operates through the room's stub. */
@@ -459,7 +467,14 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean) {
     // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
-    super(id, meta, selfDelivery, null, (request) => clientRoom._request({ ...request, id } as RoomStubRequest))
+    super(
+      id,
+      meta,
+      selfDelivery,
+      null,
+      (request) => clientRoom._request({ ...request, id } as RoomStubRequest),
+      clientRoom._bufferLimit,
+    )
     this._room = clientRoom
   }
 
@@ -496,7 +511,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
     const request = (req: ParticipantStubRequest) => channel.send(req, { ack: true })
-    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity, request)
+    super(metadata.id, metadata.meta, metadata.selfDelivery, metadata.identity, request, metadata.bufferLimit)
     this._channel = channel
     this._request = request
 

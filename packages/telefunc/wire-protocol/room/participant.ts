@@ -1,8 +1,11 @@
 export { ParticipantBase }
 
+import { stringify } from '@brillout/json-serializer/stringify'
 import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
 import { makeDisposer } from './disposer.js'
 import { Listeners } from '../../utils/Listeners.js'
+import { Fifo } from '../../utils/Fifo.js'
+import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
@@ -15,8 +18,10 @@ import type {
   PublishOptions,
   Sender,
 } from './types.js'
-/** DMs held before the first `listen()`, dropping the oldest. The inbox is the one lane no want gates, so the only one to bridge. */
-const PENDING_INBOX_MAX_COUNT = 64
+/** What holding a DM before the first `listen()` retains beyond its serialized bytes (about 55 measured), so many small
+ *  ones are bounded by memory too. The inbox is the one lane no want gates, so the only one to bridge. */
+const PENDING_INBOX_OVERHEAD_BYTES = 64
+type HeldDm = { msg: InboxMessage; bytes: number; ackResolve?: (reply: DmReply) => void }
 type InboxForwarder = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<DmReply> }
 /** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 abstract class ParticipantBase implements LocalParticipant {
@@ -35,7 +40,8 @@ abstract class ParticipantBase implements LocalParticipant {
   private readonly _listenerCleanups = new Set<() => void>()
   private _inboxAttached = false
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
-  private _pendingInbox: Array<{ msg: InboxMessage; ackResolve?: (reply: DmReply) => void }> | null = null
+  private _pendingInbox: Fifo<HeldDm> | null = null
+  private _pendingInboxBytes = 0
   /** When a client holds this participant, its inbox forwards there instead of to local listeners (see `RoomParticipantStubChannel`). */
   private _forwarder: InboxForwarder | null = null
   /** @internal Route this participant's inbox to a remote holder instead of local listeners. */
@@ -78,6 +84,8 @@ abstract class ParticipantBase implements LocalParticipant {
   abstract leave(): Promise<void>
   /** A user callback threw. Each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
+  /** The bytes of DMs held before the first `listen()`, past which the oldest is dropped. */
+  protected abstract _inboxBufferLimit(): number
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
     const unlisten = this._register(this._messageCbs, callback)
     this._flushHeld({ deliver: (msg) => this._fireInbox(msg), deliverAck: (msg) => this._fireInboxAck(msg) })
@@ -108,16 +116,22 @@ abstract class ParticipantBase implements LocalParticipant {
     this._inboxAttached = true
     const held = this._pendingInbox
     this._pendingInbox = null
+    this._pendingInboxBytes = 0
     for (const { msg, ackResolve } of held ?? []) {
       if (ackResolve) void to.deliverAck(msg).then(ackResolve)
       else to.deliver(msg)
     }
   }
   private _hold(msg: InboxMessage, ackResolve?: (reply: DmReply) => void): void {
-    const pending = (this._pendingInbox ??= [])
-    pending.push({ msg, ackResolve })
-    if (pending.length > PENDING_INBOX_MAX_COUNT) {
-      pending.shift()?.ackResolve?.(DM_FAILURE.overflow)
+    const pending = (this._pendingInbox ??= new Fifo())
+    const bytes = utf8ByteLength(stringify(msg)) + PENDING_INBOX_OVERHEAD_BYTES
+    pending.push({ msg, bytes, ackResolve })
+    this._pendingInboxBytes += bytes
+    const limit = this._inboxBufferLimit()
+    while (this._pendingInboxBytes > limit) {
+      const dropped = pending.shift()!
+      this._pendingInboxBytes -= dropped.bytes
+      dropped.ackResolve?.(DM_FAILURE.overflow)
     }
   }
   /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a room view exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
@@ -181,6 +195,7 @@ abstract class ParticipantBase implements LocalParticipant {
     // Held ack DMs will never be handled now, so fail their senders instead of hanging them.
     const held = this._pendingInbox
     this._pendingInbox = null
+    this._pendingInboxBytes = 0
     if (held) for (const entry of held) entry.ackResolve?.(DM_FAILURE.left)
     const cbs = this._leaveCbs.list()
     for (const unlisten of [...this._listenerCleanups]) unlisten()

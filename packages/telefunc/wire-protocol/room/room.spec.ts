@@ -809,17 +809,26 @@ describe('Room public behavior', () => {
     await publishing
     await vi.waitFor(() => expect(received).toEqual(['first']))
   })
-  it("refuses a publish held behind this instance's establishing lane past 1,024 of them, or past bufferLimit bytes, with ChannelOverflowError", async () => {
+  it("holds publishes behind this instance's establishing lane while their bytes, each with its overhead, fit bufferLimit, refusing one past it with ChannelOverflowError", async () => {
     const room = (await Room.create('establishing-bound')) as ServerRoom
     const member = await room.join()
+    const received: unknown[] = []
     const release = delayDriverLane((lane) => lane.kind === 'semantic')
-    room.subscribe(() => {})
-    const held = Array.from({ length: 1_024 }, (_, n) => member.publish(n))
-    const pastCount = captureOutcome(member.publish('one more'))
+    room.subscribe((data) => received.push(data))
+    const held = Array.from({ length: 1_200 }, (_, n) => member.publish(n))
     await new Promise((resolve) => setTimeout(resolve, 0))
-    expect(pastCount.value).toBeInstanceOf(ChannelOverflowError)
     release()
     await Promise.all(held)
+    await vi.waitFor(() => expect(received).toHaveLength(1_200))
+    const flooded = (await Room.create('establishing-flood')) as ServerRoom
+    const flooding = await flooded.join()
+    const release1 = delayDriverLane((lane) => lane.kind === 'semantic')
+    flooded.subscribe(() => {})
+    // Their payloads alone fit bufferLimit; with each one's overhead they don't.
+    const flood = Array.from({ length: 4_000 }, (_, n) => captureOutcome(flooding.publish(n)))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(flood.at(-1)!.value).toBeInstanceOf(ChannelOverflowError)
+    release1()
     const release2 = delayDriverLane((lane) => lane.kind === 'binary')
     room.subscribeBinary(() => {})
     const pastBytes = captureOutcome(
@@ -3321,22 +3330,29 @@ describe('Room public behavior', () => {
     expect(received).toEqual([])
     expect(reply).toMatchObject({ ok: false })
   })
-  it('holds at most 64 DMs before the first listen(), failing the ack sender of the oldest it drops', async () => {
+  it('holds DMs before the first listen() while their bytes, each with its overhead, fit bufferLimit, failing the ack sender of the oldest it drops', async () => {
     const room = await Room.create('inbox-overflow')
     const recipient = await room.join()
     const sender = await room.join()
+    for (let n = 0; n < 200; n++) await sender.send(recipient.id, n)
+    const received: unknown[] = []
+    recipient.listen((data) => void received.push(data))
+    expect(received).toEqual(Array.from({ length: 200 }, (_, n) => n))
+    const late = await room.join()
     const oldestHeld = createDeferred()
     Room.guard(room, {
       onAfterSend: (_from, _to, data) => {
         if (data === 0) oldestHeld.resolve()
       },
     })
-    const oldest = sender.send(recipient.id, 0, { ack: true })
+    const oldest = sender.send(late.id, 0, { ack: true })
     await oldestHeld.promise
-    for (let n = 1; n <= 64; n++) await sender.send(recipient.id, n)
-    const received: unknown[] = []
-    recipient.listen((data) => void received.push(data))
-    expect(received).toEqual(Array.from({ length: 64 }, (_, i) => i + 1))
+    const half = getServerConfig().channel.bufferLimit / 2
+    await sender.send(late.id, 'a'.repeat(half))
+    await sender.send(late.id, 'b'.repeat(half))
+    const kept: string[] = []
+    late.listen((data) => void kept.push((data as string)[0]!))
+    expect(kept).toEqual(['b'])
     await expect(oldest).rejects.toThrow('Inbox overflowed before the message was handled')
   })
   it('reports rejected async participant inbox, demand, and leave callbacks', async () => {
@@ -3451,6 +3467,22 @@ describe('client Room lifecycle', () => {
     acks[0]!({ meta: { v: 'A' }, seq: 1 }) // the older write's ack arrives last
     await Promise.all([first, second])
     expect(participant.meta).toEqual({ v: 'B' })
+  })
+  it('holds DMs before a client-held participant’s first listen() within the bufferLimit its server sent', () => {
+    const dm = (data: number) => ({ __r: 'dm', from: '', fromMeta: null, data })
+    const roomy = standaloneParticipant({})
+    for (let n = 0; n < 200; n++) roomy.notify(dm(n))
+    const received: unknown[] = []
+    roomy.participant.listen((data) => void received.push(data))
+    expect(received).toEqual(Array.from({ length: 200 }, (_, n) => n))
+    // Their serialized bytes alone fit 20,000; with each one's overhead they don't.
+    const tight = standaloneParticipant({}, undefined, 20_000)
+    for (let n = 0; n < 200; n++) tight.notify(dm(n))
+    const kept: number[] = []
+    tight.participant.listen((data) => void kept.push(data as number))
+    expect(kept.length).toBeGreaterThan(0)
+    expect(kept.length).toBeLessThan(200)
+    expect(kept).toEqual(Array.from({ length: kept.length }, (_, i) => 200 - kept.length + i))
   })
   it("applies a handed-out participant's whole demand set as the changes from what it had", () => {
     const { participant, notify } = standaloneParticipant({})
@@ -4619,7 +4651,11 @@ function fakeClient(
   }
 }
 /** A client-held participant whose channel the test drives: `notify` delivers a stub notice. */
-function standaloneParticipant(meta: ParticipantMeta, send?: () => Promise<unknown>) {
+function standaloneParticipant(
+  meta: ParticipantMeta,
+  send?: () => Promise<unknown>,
+  bufferLimit = getServerConfig().channel.bufferLimit,
+) {
   let notify!: (notice: unknown) => unknown
   const channel = {
     listen: (cb: (notice: unknown) => unknown) => {
@@ -4634,6 +4670,7 @@ function standaloneParticipant(meta: ParticipantMeta, send?: () => Promise<unkno
     meta,
     selfDelivery: true,
     identity: null,
+    bufferLimit,
   })
   return { participant, notify: (notice: unknown) => notify(notice) }
 }
@@ -4658,6 +4695,7 @@ function snapshot(roomId: string): RoomSnapshotMetadata {
     closed: false,
     count: 0,
     metaSeq: 0,
+    bufferLimit: getServerConfig().channel.bufferLimit,
   }
 }
 async function pendingClientJoin(roomId: string, onSend?: (message: unknown) => unknown) {

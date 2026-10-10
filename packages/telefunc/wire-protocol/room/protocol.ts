@@ -68,6 +68,8 @@ type RoomSnapshotMetadata = {
   count: number
   /** How many meta writes `meta` reflects, which orders later updates. */
   metaSeq: number
+  /** The server's `config.channel.bufferLimit`, which bounds the DMs a participant holds before its first `listen()`. */
+  bufferLimit: number
   maxFrameBytes?: number
 }
 /** Serializer metadata of a `RemoteParticipant` crossing the wire: its room, revived first, and the member snapshot. */
@@ -79,6 +81,8 @@ type ParticipantStubMetadata = {
   meta: ParticipantMeta
   selfDelivery: boolean
   identity: string | null
+  /** As `RoomSnapshotMetadata.bufferLimit`. */
+  bufferLimit: number
   maxFrameBytes?: number
 }
 /** Control-lane events. The origin applies its own event and later absorbs the echo: `join`/`leave`/`closed` are

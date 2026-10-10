@@ -80,6 +80,7 @@ import {
 } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { reconnectWindow, reportServerChannelError } from '../../server/channel.js'
+import { getServerConfig } from '../../../node/server/serverConfig.js'
 import {
   createMember,
   evictMember,
@@ -703,6 +704,7 @@ class ServerRoom extends RoomStateView implements Room {
         meta: this.meta,
         closed: this.isClosed,
         metaSeq: this._state.metaSeq,
+        bufferLimit: getServerConfig().channel.bufferLimit,
         count: this.count,
       },
     }
@@ -981,6 +983,9 @@ class ServerLocalParticipant extends ParticipantBase {
 
   protected _reportError(err: unknown): void {
     reportServerChannelError(err)
+  }
+  protected _inboxBufferLimit(): number {
+    return getServerConfig().channel.bufferLimit
   }
 }
 

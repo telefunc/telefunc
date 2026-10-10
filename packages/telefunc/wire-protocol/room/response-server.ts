@@ -11,7 +11,7 @@ import type { RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from './protocol.js'
 import { RoomParticipantStubChannel, ResponseRoomGrants } from './server/stub.js'
 import { remoteBacking } from './state.js'
-import { getAdapterMaxFrameBytes } from '../../node/server/serverConfig.js'
+import { getAdapterMaxFrameBytes, getServerConfig } from '../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -95,6 +95,7 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Int
         meta: participant.meta,
         selfDelivery: participant.selfDelivery,
         identity: participant.identity,
+        bufferLimit: getServerConfig().channel.bufferLimit,
         ...(maxFrameBytes && { maxFrameBytes }),
       },
       async close() {

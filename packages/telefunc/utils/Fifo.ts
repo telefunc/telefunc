@@ -23,4 +23,8 @@ class Fifo<T> {
     }
     return item
   }
+
+  *[Symbol.iterator](): Iterator<T> {
+    for (let i = this.head; i < this.items.length; i++) yield this.items[i] as T
+  }
 }

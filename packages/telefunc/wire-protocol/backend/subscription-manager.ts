@@ -32,7 +32,7 @@ type Hold = { readonly established: Promise<void>; sends: number; readonly bytes
 
 /** A held send's bytes, counted in its class and read only for a send that is held; a send its hold can't fit is refused
  *  with `overflow()`. */
-type HoldWeight = { class: string; bytes(): number; fits(sends: number, bytes: number): boolean; overflow(): Error }
+type HoldWeight = { class: string; bytes(): number; fits(bytes: number): boolean; overflow(): Error }
 
 /** What a send waits for, read only while some subscription could be establishing; `sources` share a partition. */
 type SendHold<Source> = { key: string; sources: readonly [Source, ...Source[]]; weight?: HoldWeight }
@@ -118,7 +118,7 @@ class SubscriptionManager<Source> {
     const bytes = weight?.bytes() ?? 0
     if (weight !== undefined) {
       const held = (current.bytes.get(weight.class) ?? 0) + bytes
-      if (!weight.fits(current.sends + 1, held)) return Promise.reject(weight.overflow())
+      if (!weight.fits(held)) return Promise.reject(weight.overflow())
       current.bytes.set(weight.class, held)
     }
     this._holds.set(holdKey, current)
