@@ -92,30 +92,12 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect([...read.cells.keys()].sort()).toEqual(['p:b', 'pq', 'q'])
   })
 
-  it('admits a thousand simultaneous joins from four servers, and counts each as a hold', async () => {
+  it('admits a thousand simultaneous joins from four servers, counting each as a hold, while roster reads never fail', async () => {
     const prefix = uniquePrefix('join-burst')
     const redis = ownClient(connect())
     installRedis(redis, { prefix })
     onTestFinished(() => disposeBackend())
     const room = await Room.create('join-burst')
-    const startAt = Date.now() + 3_000
-    const failures = await Promise.all(
-      [0, 1, 2, 3].map(() => joinFrom({ ...env, PREFIX: prefix, ROOM: room.id, COUNT: '250', START_AT: `${startAt}` })),
-    )
-    expect(failures.flat()).toEqual([])
-    expect(await Room.getParticipants(room.id)).toHaveLength(1_000)
-    const backend = new RedisBackend({ redis, prefix })
-    const inc = (await backend.readHead(room.id))!.currentInc!
-    const read = await backend.readCells(room.id, inc, { keys: ['holds'] })
-    if ('staleInc' in read) throw new Error('the room is gone')
-    expect(JSON.parse(Buffer.from(read.cells.get('holds')!).toString())).toMatchObject({ value: 1_000 })
-  })
-
-  it('reads the roster as of one moment while a thousand joins land, never failing', async () => {
-    const prefix = uniquePrefix('roster-under-joins')
-    installRedis(ownClient(connect()), { prefix })
-    onTestFinished(() => disposeBackend())
-    const room = await Room.create('roster-under-joins')
     const startAt = Date.now() + 3_000
     let joining = true
     const joined = Promise.all(
@@ -128,6 +110,11 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     // Nobody leaves, so each read lists at least what the one before it did.
     expect(sizes).toEqual([...sizes].sort((a, b) => a - b))
     expect(await Room.getParticipants(room.id)).toHaveLength(1_000)
+    const backend = new RedisBackend({ redis, prefix })
+    const inc = (await backend.readHead(room.id))!.currentInc!
+    const read = await backend.readCells(room.id, inc, { keys: ['holds'] })
+    if ('staleInc' in read) throw new Error('the room is gone')
+    expect(JSON.parse(Buffer.from(read.cells.get('holds')!).toString())).toMatchObject({ value: 1_000 })
   })
   it('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
     installRedis(ownClient(connect()), { prefix: uniquePrefix('meta-order') })
