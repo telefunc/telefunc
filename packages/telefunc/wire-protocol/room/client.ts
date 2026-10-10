@@ -225,7 +225,6 @@ class ClientRoom extends RoomStateView implements Room {
     }
     switch (event.__r) {
       case 'roster':
-        // Positioned presence rosters reflect prior events; later events layer on without pruning directly granted hidden handles.
         this._applyRoster(event.members)
         return
       case 'roster-error':
@@ -402,7 +401,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
     return markHandled(this._sendPublishBinary(encodeBinaryFrame(this.id, data, options)))
   }
 
-  // Implementation of the overloaded `LocalParticipant.send`; the interface supplies precise returns.
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     assertKnownOptions(options, ['ack'], 'send()')
     assertUsage(

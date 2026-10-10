@@ -43,7 +43,7 @@ type RoomMeta = Record<string, unknown>
 /** Participant metadata (e.g. name, score). Must be serializable. */
 type ParticipantMeta = Record<string, unknown>
 
-/** A verified sender snapshot; use `room.getParticipant(id)` for the live handle. */
+/** A verified sender: a plain `{ id, meta, identity }`, or a live `RemoteParticipant`, which has the same fields. */
 type Sender<P extends ParticipantMeta = ParticipantMeta> = {
   readonly id: string
   readonly meta: P
