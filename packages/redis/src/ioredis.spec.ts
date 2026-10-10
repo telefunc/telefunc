@@ -123,9 +123,7 @@ function readCommand(buffer: Buffer): { args: string[]; length: number } | undef
 }
 
 test('duplicates the subscriber from a standalone client or a live Cluster node, connecting a lazyConnect Cluster first', async () => {
-  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
-    lazyConnect: true,
-  })
+  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], { lazyConnect: true })
   const ended = new Redis({ lazyConnect: true })
   const live = new Redis({ lazyConnect: true })
   onTestFinished(() => [cluster, ended, live].forEach((redis) => redis.disconnect()))
@@ -142,9 +140,7 @@ test('duplicates the subscriber from a standalone client or a live Cluster node,
 })
 
 test("waits for a connecting Cluster's masters instead of reporting none", async () => {
-  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
-    lazyConnect: true,
-  })
+  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], { lazyConnect: true })
   const master = new Redis({ lazyConnect: true })
   onTestFinished(() => [cluster, master].forEach((redis) => redis.disconnect()))
   // A non-lazy Cluster is 'connecting' from its constructor until its node pool fills.
@@ -197,9 +193,7 @@ test('names Pub/Sub channels per database, as Pub/Sub spans every database', asy
 })
 
 test('moves the subscriber to the next master on each reconnect, so a failed master it never used does not hold it', async () => {
-  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
-    lazyConnect: true,
-  })
+  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], { lazyConnect: true })
   const masters = [0, 1].map(() => new Redis({ lazyConnect: true }))
   onTestFinished(() => [cluster, ...masters].forEach((redis) => redis.disconnect()))
   vi.spyOn(cluster, 'connect').mockImplementation(async () => {
@@ -213,9 +207,7 @@ test('moves the subscriber to the next master on each reconnect, so a failed mas
 })
 
 test("takes the subscriber from a replica when the Cluster's pool labels no live master, as after a one-shard failover", async () => {
-  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], {
-    lazyConnect: true,
-  })
+  const cluster = new Cluster([{ host: '127.0.0.1', port: 6379 }], { lazyConnect: true })
   const promoted = new Redis({ lazyConnect: true })
   onTestFinished(() => [cluster, promoted].forEach((redis) => redis.disconnect()))
   vi.spyOn(cluster, 'connect').mockImplementation(async () => {
