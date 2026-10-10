@@ -2,8 +2,8 @@ export { RedisBackend }
 
 import { assert } from './assert.js'
 import {
-  assertSupportedClient,
   callDefinedCommand,
+  createCommandClient,
   createSubscriberSocket,
   isCluster,
   type RedisClient,
@@ -58,18 +58,17 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   private readonly _laneTurns = new Map<string, Promise<void>>()
 
   constructor(options: RedisBackendOptions) {
-    assertSupportedClient(options.redis)
-    this._publisher = options.redis
     assertKeyPrefix(options.prefix)
+    this._publisher = createCommandClient(options.redis)
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
-    this._prefix = isCluster(options.redis) ? options.prefix : `${options.prefix}${options.redis.options.db ?? 0}:`
+    this._prefix = isCluster(this._publisher) ? options.prefix : `${options.prefix}${this._publisher.options.db ?? 0}:`
     // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
-    this._reportsReceivers = !isCluster(options.redis)
+    this._reportsReceivers = !isCluster(this._publisher)
     for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS))
       this._publisher.defineCommand(name, numberOfKeys === null ? { lua } : { numberOfKeys, lua })
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
-      createSubscriber: () => createSubscriberSocket(options.redis),
+      createSubscriber: () => createSubscriberSocket(this._publisher),
       validateGeneration: (source) => this._run(REDIS_COMMANDS.validateGeneration, source),
     })
   }

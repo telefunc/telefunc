@@ -50,44 +50,40 @@ describe('Redis real three-master Cluster CI certification', () => {
     await Promise.all((masters ?? []).map(({ client }) => client.quit().catch(() => client.disconnect())))
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
-  it('requires compatible Telefunc, master reads, and a never-resend command connection', async () => {
+  it("requires compatible Telefunc, and runs commands on a never-resend connection whatever the app client's options", async () => {
     const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
       peerDependencies: { telefunc: string }
     }
     expect(manifest.peerDependencies.telefunc).toBe('>=0.2.25')
-    const scaleReads = cluster.options.scaleReads
-    const retryDelayOnFailover = cluster.options.retryDelayOnFailover
-    try {
-      cluster.options.scaleReads = 'slave'
-      expect(() => new RedisBackend({ redis: cluster, prefix: 'rejected:' })).toThrow(/scaleReads.*master/i)
-      cluster.options.scaleReads = scaleReads
-      cluster.options.retryDelayOnFailover = 100
-      expect(() => new RedisBackend({ redis: cluster, prefix: 'unsafe-cluster:' })).toThrow(/at-most-once/i)
-    } finally {
-      cluster.options.scaleReads = scaleReads
-      cluster.options.retryDelayOnFailover = retryDelayOnFailover
-    }
+    // ioredis's defaults resend a command whose reply a dropped connection lost.
+    const app = own(new Cluster(CLUSTER_NODES, { scaleReads: 'slave' }), (client) =>
+      client.quit().catch(() => client.disconnect()),
+    )
+    app.on('error', () => {})
+    const options = { ...app.options }
     const prefix = uniquePrefix('reply-loss')
-    const backend = roomBackend(cluster, prefix)
+    const clones = interceptCommandClients(app)
+    const backend = roomBackend(app, prefix)
+    const commandClient = clones[0] as Cluster
+    expect(app.options).toEqual(options)
     for (const unsafePrefix of ['x{}', 'x{', '{global}']) {
       expect(() => new RedisBackend({ redis: cluster, prefix: unsafePrefix })).toThrow(/prefix/i)
     }
     expect(await backend.publish({ key: '}edge', kind: 'text' }, 'edge')).toMatchObject({
       seq: expect.any(Number),
     })
-    const commands = cluster as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
-    const publish = commands.tfPublish?.bind(cluster)
+    const commands = commandClient as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
+    const publish = commands.tfPublish?.bind(commandClient)
     if (publish === undefined) throw new Error('tfPublish is not registered')
     vi.spyOn(commands, 'tfPublish').mockImplementation(async (...args) => {
       await publish(...args)
-      if (cluster.options.retryDelayOnFailover === 0) throw new Error('simulated reply loss after execution')
+      if (commandClient.options.retryDelayOnFailover === 0) throw new Error('simulated reply loss after execution')
       return await publish(...args)
     })
     // An existing counter isn't seeded, so it counts executions exactly.
     await cluster.set(broadcastSequenceKey(prefix, 'once'), '0')
     await expect(backend.publish({ key: 'once', kind: 'text' }, 'once')).rejects.toThrow()
     expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toBe('1')
-    expect(() => new RedisBackend({ redis: (masters[0] as Master).client, prefix: 'tf:' })).toThrow(/at-most-once/i)
   })
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
     const runtime = await exerciseRuntimeSlotCommands()
@@ -109,7 +105,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       let holdNextSubscribe = false
       const subscribeEntered = deferred()
       const releaseSubscribe = deferred()
-      interceptSubscribers(client, (subscriber) => {
+      interceptSubscribers((subscriber) => {
         subscriberOpens++
         if (!holdNextSubscribe) return
         holdNextSubscribe = false
@@ -120,14 +116,15 @@ describe('Redis real three-master Cluster CI certification', () => {
           return await subscribe(...channels)
         }) as typeof subscriber.subscribe
       })
-      const observation = observeCommands(client)
+      const observation = observeCommands()
+      const clones = interceptCommandClients(client, observation.observe)
       const backend = ownBackend(client, prefix)
       const authority = roomBackend(client, prefix)
-      for (const { name } of Object.values(REDIS_COMMANDS)) observation.wrapDefinedCommand(name)
+      const commandClient = clones[0] as Cluster
       const roomId = 'runtime-slot} proof'
       const inc = 'runtime-slot-inc'
       const head = await open(backend, roomId, inc)
-      const time = vi.spyOn(client, 'time').mockImplementation(async () => {
+      const time = vi.spyOn(commandClient, 'time').mockImplementation(async () => {
         throw new Error('control: keyless TIME escaped the room slot')
       })
       expect((await authority.readHead(roomId))?.currentInc).toBe(inc)
@@ -158,8 +155,11 @@ describe('Redis real three-master Cluster CI certification', () => {
       ).toEqual({ stale: 'cell', key: 'cell} escape' })
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
       await backend.directoryPut(roomId, inc)
-      const hmget = client.hmget.bind(client)
-      const hmgetMock = vi.spyOn(client, 'hmget').mockImplementation((async (key: string, ...fields: string[]) => {
+      const hmget = commandClient.hmget.bind(commandClient)
+      const hmgetMock = vi.spyOn(commandClient, 'hmget').mockImplementation((async (
+        key: string,
+        ...fields: string[]
+      ) => {
         await client.hdel(key, ...fields)
         return await hmget(key, ...fields)
       }) as never)
@@ -355,7 +355,9 @@ process.exit(0)`,
     const prefix = uniquePrefix('reshard-inventory')
     const client = ownCluster()
     await client.ping()
+    const clones = interceptCommandClients(client)
     const backend = ownBackend(client, prefix)
+    const commandClient = clones[0] as Cluster
     const target = masters[0] as Master
     const source = masters[1] as Master
     const roomId = await roomOnMaster(prefix, source.id, 'reshard-inventory')
@@ -364,9 +366,9 @@ process.exit(0)`,
     await target.client.cluster('SETSLOT', slotNumber, 'IMPORTING', source.id)
     await source.client.cluster('SETSLOT', slotNumber, 'MIGRATING', target.id)
     await restoreSlot(slotNumber, source, target)
-    const smembers = client.smembers.bind(client)
+    const smembers = commandClient.smembers.bind(commandClient)
     let relocation: Promise<void> | undefined
-    vi.spyOn(client, 'smembers').mockImplementation((async (key: string) => {
+    vi.spyOn(commandClient, 'smembers').mockImplementation((async (key: string) => {
       if (key === generationKeysKey(prefix, roomId, inc)) await (relocation ??= moveSlot(slotNumber, source, target))
       return await smembers(key)
     }) as never)
@@ -415,7 +417,7 @@ process.exit(0)`,
     let failNext = false
     let injectedFailure = false
     let opens = 0
-    interceptSubscribers(cluster, (client) => {
+    interceptSubscribers((client) => {
       opens++
       if (!failNext) return
       failNext = false
@@ -456,7 +458,7 @@ process.exit(0)`,
   it('does not settle before subscriber dispatch or credit a held dispatch from a closed epoch', async () => {
     const { prefix, roomId, inc } = room('held-dispatch')
     const subscribers: Redis[] = []
-    interceptSubscribers(cluster, (client) => {
+    interceptSubscribers((client) => {
       subscribers.push(client)
       return client
     })
@@ -612,15 +614,25 @@ process.exit(0)`,
   function subscribe(backend: ManagedBackend, roomId: string, inc: string, receiver: LaneReceiver): Subscription {
     return ownSubscription(backend.subscribeLane(roomId, inc, SEMANTIC_LANE, receiver))
   }
-  function interceptSubscribers(redis: Cluster, onOpen: (subscriber: Redis) => void): void {
-    for (const node of redis.nodes('master')) {
-      const duplicate = node.duplicate.bind(node)
-      vi.spyOn(node, 'duplicate').mockImplementation((options) => {
-        const subscriber = duplicate(options)
-        onOpen(subscriber)
-        return subscriber
-      })
-    }
+  /** The clones of `redis` that backends installed from here on run their commands on, each passed to `prepare` first. */
+  function interceptCommandClients(redis: Cluster, prepare: (commands: Cluster) => void = () => {}): Cluster[] {
+    const clones: Cluster[] = []
+    const duplicate = redis.duplicate.bind(redis)
+    vi.spyOn(redis, 'duplicate').mockImplementation((...args) => {
+      const commands = duplicate(...args)
+      prepare(commands)
+      clones.push(commands)
+      return commands
+    })
+    return clones
+  }
+  function interceptSubscribers(onOpen: (subscriber: Redis) => void): void {
+    const duplicate = Redis.prototype.duplicate
+    vi.spyOn(Redis.prototype, 'duplicate').mockImplementation(function (this: Redis, options) {
+      const connection = duplicate.call(this, options)
+      if (options?.connectionName?.startsWith('telefunc-subscriber-')) onOpen(connection)
+      return connection
+    })
   }
   function owner(slotNumber: number): Master {
     const match = masters.find(({ ranges }) => ranges.some(([start, end]) => slotNumber >= start && slotNumber <= end))
@@ -804,46 +816,46 @@ async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Prom
   ])
 }
 const bytes = (value: string): Uint8Array => new TextEncoder().encode(value)
-function observeCommands(client: Cluster): {
+function observeCommands(): {
   definitions: CommandDefinition[]
   calls: CommandCall[]
-  wrapDefinedCommand(name: string): unknown[][]
+  observe(client: Cluster): void
 } {
   const definitions: CommandDefinition[] = []
   const calls: CommandCall[] = []
-  const defineCommand = client.defineCommand.bind(client)
-  vi.spyOn(client, 'defineCommand').mockImplementation(((name: string, options: CommandOptions) => {
-    definitions.push({ name, lua: options.lua, numberOfKeys: options.numberOfKeys ?? null })
-    defineCommand(name, options)
-  }) as never)
   return {
     definitions,
     calls,
-    wrapDefinedCommand(name) {
-      const target = client as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
-      const observed: unknown[][] = []
-      // ioredis installs a Buffer-reply twin of every defined command; both are this command's calls.
-      for (const method of [name, `${name}Buffer`]) {
-        const command = target[method]
-        if (command === undefined) throw new Error(`defined command '${method}' was not installed`)
-        const bound = command.bind(client)
-        vi.spyOn(target, method).mockImplementation(async (...passed) => {
-          // ioredis flattens an array argument into the command, as it sends it.
-          const args = passed.flat()
-          observed.push(args)
-          const definition = [...definitions].reverse().find((candidate) => candidate.name === name)
-          if (definition !== undefined) {
-            const dynamic = definition.numberOfKeys === null
-            calls.push({
-              name,
-              keyCount: definition.numberOfKeys ?? Number(args[0]),
-              args: dynamic ? args.slice(1) : args,
-            })
-          }
-          return await bound(...passed)
-        })
-      }
-      return observed
+    observe(client) {
+      const defineCommand = client.defineCommand.bind(client)
+      vi.spyOn(client, 'defineCommand').mockImplementation(((name: string, options: CommandOptions) => {
+        definitions.push({ name, lua: options.lua, numberOfKeys: options.numberOfKeys ?? null })
+        defineCommand(name, options)
+        wrapDefinedCommand(client, name)
+      }) as never)
     },
+  }
+  function wrapDefinedCommand(client: Cluster, name: string): void {
+    const target = client as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>
+    // ioredis installs a Buffer-reply twin of every defined command; both are this command's calls.
+    for (const method of [name, `${name}Buffer`]) {
+      const command = target[method]
+      if (command === undefined) throw new Error(`defined command '${method}' was not installed`)
+      const bound = command.bind(client)
+      vi.spyOn(target, method).mockImplementation(async (...passed) => {
+        // ioredis flattens an array argument into the command, as it sends it.
+        const args = passed.flat()
+        const definition = [...definitions].reverse().find((candidate) => candidate.name === name)
+        if (definition !== undefined) {
+          const dynamic = definition.numberOfKeys === null
+          calls.push({
+            name,
+            keyCount: definition.numberOfKeys ?? Number(args[0]),
+            args: dynamic ? args.slice(1) : args,
+          })
+        }
+        return await bound(...passed)
+      })
+    }
   }
 }

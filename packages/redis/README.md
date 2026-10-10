@@ -14,26 +14,17 @@ npm install @telefunc/redis ioredis
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis('redis://localhost:6379', { maxRetriesPerRequest: 0 })
+const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That one `installRedis()` call configures Broadcast and Room from the same client. Never-resend options make a lost command reply reject rather than execute twice. Make the call before the first Broadcast or Room use: an earlier use starts the in-memory backend, and `installRedis()` then throws.
+That one `installRedis()` call configures Broadcast and Room from the same client. Telefunc runs its commands on its own connection, duplicated from your client with retries off, so a command whose reply was lost rejects rather than executes twice. Your client keeps its options, and Telefunc's connection closes when your client does. Make the call before the first Broadcast or Room use: an earlier use starts the in-memory backend, and `installRedis()` then throws.
 
-`installRedis()` uses the same optional `prefix` for Broadcast and Room; `{` is reserved in prefixes. Calling it again with the same client and prefix does nothing.
+`installRedis()` uses the same optional `prefix` for Broadcast and Room; `{` is reserved in prefixes. Calling it again with the same client and prefix does nothing. ioredis applies `keyPrefix` to commands but not to Pub/Sub channels, so `installRedis()` throws for a client that sets one; use `installRedis(redis, { prefix })` instead.
 
 `Channel` is per-instance — reconnects must land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/stream/scale).
 
-### Required client options
-
-`installRedis()` rejects a client configured otherwise:
-
-| Client | Required |
-|---|---|
-| `Redis` | `maxRetriesPerRequest: 0`; no `reconnectOnError`; no `keyPrefix` |
-| `Cluster` | `retryDelayOnFailover: 0`; `redisOptions.maxRetriesPerRequest: 0`; no `redisOptions.reconnectOnError`; no `redisOptions.keyPrefix`; `scaleReads: 'master'` (the default); no `enableAutoPipelining` |
-
-ioredis applies `keyPrefix` to commands but not to Pub/Sub channels; use `installRedis(redis, { prefix })` instead.
+### Redis Cluster
 
 ```ts
 import { Cluster } from 'ioredis'
@@ -43,19 +34,19 @@ const redis = new Cluster([
   { host: '127.0.0.1', port: 7000 },
   { host: '127.0.0.1', port: 7001 },
   { host: '127.0.0.1', port: 7002 },
-], { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } })
+])
 installRedis(redis)
 ```
 
 ### Sharing an existing client
 
-Pass an [`ioredis`](https://github.com/redis/ioredis) instance to share TLS/authentication settings. Keep the never-resend settings above; installation rejects retry-capable clients:
+Pass an [`ioredis`](https://github.com/redis/ioredis) instance to share TLS/authentication settings:
 
 ```ts
 import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 
-const redis = new IORedis(process.env.REDIS_URL, { tls: {}, maxRetriesPerRequest: 0 })
+const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
