@@ -1932,6 +1932,25 @@ describe('Room public behavior', () => {
     await expect(room.join({ identity: 'user-1' })).rejects.toThrow('Connection is closed.')
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
+  it('lets a join whose reply was lost and whose eviction failed lapse from its join, though a heartbeat landed meanwhile', async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('join-reply-lost-eviction-failed')) as ServerRoom
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    vi.spyOn(driver, 'compareExchangeCells')
+      .mockImplementationOnce(async (...args) => {
+        await compareExchange(...args)
+        throw new Error('Connection is closed.')
+      })
+      .mockImplementationOnce(async () => {
+        vi.setSystemTime(Date.now() + ROOM_HEARTBEAT_INTERVAL_MS)
+        await subsOf(room)._heartbeatTick()
+        throw new Error('backend unavailable')
+      })
+    await expect(room.join()).rejects.toThrow('Connection is closed.')
+    await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS - ROOM_HEARTBEAT_INTERVAL_MS + 1)
+    expect(await Room.getParticipants(room.id)).toEqual([])
+  })
   it('rejects a join whose member was removed before its join event committed, leaving no member behind', async () => {
     const room = (await Room.create('join-kicked')) as ServerRoom
     const observer = (await Room.get(room.id)) as ServerRoom
