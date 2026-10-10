@@ -249,7 +249,6 @@ describe('cloudflare adapter entrypoint', () => {
       request: new Request('https://telefunc.test/_telefunc?session=lapsed-token'),
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
     })
-    await new Promise((resolve) => setTimeout(resolve, 0))
     expect(vi.mocked(resolveSessionRoutingTarget)).toHaveBeenLastCalledWith(
       'telefunc',
       undefined,
