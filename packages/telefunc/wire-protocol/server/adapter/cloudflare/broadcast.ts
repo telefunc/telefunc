@@ -80,7 +80,6 @@ type BroadcastNamespace = {
 /** One route's presence at the key's authority, for one member DO. */
 class MemberRoute {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
-  teardownRequested = false
   readonly route: BroadcastRoute
   readonly #setup = createDeferred()
   readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
@@ -313,10 +312,7 @@ class CloudflareBroadcastMember {
 
   #ensureRoute(route: BroadcastRoute, routeKey: string): MemberRoute {
     const existing = this.#routes.get(routeKey)
-    if (existing !== undefined) {
-      existing.teardownRequested = false
-      return existing
-    }
+    if (existing !== undefined) return existing
     const memberRoute = new MemberRoute(route)
     this.#routes.set(routeKey, memberRoute)
     // Nobody awaits a deferred teardown; a failed withdrawal lapses with the presence TTL.
@@ -333,17 +329,14 @@ class CloudflareBroadcastMember {
       return
     }
     memberRoute.acknowledgePresence()
-    if (memberRoute.teardownRequested) return this.#release(routeKey, memberRoute)
+    if (!this.#subscriptions.has(routeKey)) return this.#release(routeKey, memberRoute)
     memberRoute.startRefresh(() => this.#recordPresence(memberRoute.route))
   }
 
   async #teardownIfEmpty(routeKey: string): Promise<void> {
     const memberRoute = this.#routes.get(routeKey)
-    if (memberRoute === undefined) return
-    if (memberRoute.state === 'establishing') {
-      memberRoute.teardownRequested = true
-      return
-    }
+    // An establishing route is released once its presence is recorded, if no subscription remains.
+    if (memberRoute === undefined || memberRoute.state === 'establishing') return
     await this.#release(routeKey, memberRoute)
   }
 
