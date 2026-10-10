@@ -314,7 +314,7 @@ describe('Redis real three-master Cluster CI certification', () => {
 import { Room } from 'telefunc'
 import { installRedis } from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)}
 const { NODES, PREFIX, ROOM } = process.env
-installRedis(new Cluster(JSON.parse(NODES), { scaleReads: 'master', retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }), { prefix: PREFIX })
+installRedis(new Cluster(JSON.parse(NODES)), { prefix: PREFIX })
 await Room.create(ROOM, { emptyTimeout: 1_000 })
 await Room.setMeta(ROOM, { topic: 'kept' })
 process.exit(0)`,

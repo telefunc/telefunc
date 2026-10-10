@@ -21,10 +21,10 @@ if (process.env.REDIS_CLUSTER_NODES) {
     const port = Number(entry.slice(separator + 1))
     return { host, port }
   })
-  installRedis(new Cluster(nodes, { retryDelayOnFailover: 0, redisOptions: { maxRetriesPerRequest: 0 } }))
+  installRedis(new Cluster(nodes))
   console.log(`[INST=${INST}] Redis Cluster backend installed (${nodes.length} seeds)`)
 } else if (process.env.REDIS_URL) {
-  installRedis(new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: 0 }))
+  installRedis(new IORedis(process.env.REDIS_URL))
   console.log(`[INST=${INST}] Redis backend installed`)
 }
 // Translate Ctrl-C / docker-stop into a clean `process.exit(0)`. Without this, Node's
