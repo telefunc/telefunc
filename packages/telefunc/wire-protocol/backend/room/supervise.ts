@@ -18,12 +18,7 @@ function checkDelivery(_source: RoomSubscriptionSource, payload: BackendPayload,
 /** Owns the Room subscription manager, holds a lane's commits while this instance's subscription on it establishes,
  *  and checks what the driver is given and returns. */
 function superviseRoomDriver(driver: RoomDriver): RoomBackend {
-  const subscriptions = new SubscriptionManager(
-    driver.subscriptions,
-    console.error,
-    roomSubscriptionSourceKey,
-    checkDelivery,
-  )
+  const subscriptions = new SubscriptionManager(driver.subscriptions, roomSubscriptionSourceKey, checkDelivery)
 
   return {
     readHead: (roomId) => driver.readHead(roomId),

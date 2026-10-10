@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { SubscriptionManager } from './subscription-manager.js'
 import type {
   BackendPayload,
@@ -16,7 +16,7 @@ describe('shared subscription supervision', () => {
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready(firstCleanup.promise))
     raw.plan(() => ControlledAttempt.ready(secondCleanup.promise))
-    const manager = new SubscriptionManager(raw, vi.fn(), String, () => {})
+    const manager = new SubscriptionManager(raw, String, () => {})
     const received: string[] = []
     const first = manager.subscribe('source', (payload) => void received.push(`a:${payload}`))
     const second = manager.subscribe('source', (payload) => void received.push(`b:${payload}`))
@@ -53,7 +53,7 @@ describe('shared subscription supervision', () => {
     raw.plan(() => ControlledAttempt.ready(unsubscribeCleanup.promise))
     raw.plan(() => ControlledAttempt.ready(disposeCleanup.promise))
     raw.plan(() => ControlledAttempt.ready(terminalCleanup.promise))
-    const manager = new SubscriptionManager(raw, console.error, String, () => {})
+    const manager = new SubscriptionManager(raw, String, () => {})
     const first = manager.subscribe('unsubscribe', () => {})
     const second = manager.subscribe('dispose', () => {})
     const terminal = manager.subscribe('already-terminal', () => {})
@@ -87,13 +87,9 @@ describe('shared subscription supervision', () => {
     const cleanup = Promise.withResolvers<void>()
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready(cleanup.promise))
-    const reports: unknown[] = []
-    const subscription = new SubscriptionManager(
-      raw,
-      (error) => reports.push(error),
-      String,
-      () => {},
-    ).subscribe('listeners', () => {})
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => report.mockRestore())
+    const subscription = new SubscriptionManager(raw, String, () => {}).subscribe('listeners', () => {})
     await subscription.ready
     let siblingCalls = 0
     subscription.onStateChange(() => {
@@ -114,21 +110,17 @@ describe('shared subscription supervision', () => {
     expect(settled).toBe(false)
     cleanup.resolve()
     await expect(stopping).resolves.toBe('resolved')
-    expect(reports).toHaveLength(1)
+    expect(report).toHaveBeenCalledOnce()
   })
   it('checks a delivery once for all its consumers, and reports one it refuses without handing it to any', async () => {
     const raw = new ControlledDriver()
-    const reports: unknown[] = []
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => report.mockRestore())
     const checked: string[] = []
-    const manager = new SubscriptionManager(
-      raw,
-      (error) => reports.push(error),
-      String,
-      (source, payload) => {
-        checked.push(`${source}:${payload}`)
-        if (payload === 'refused') throw new Error('refused delivery')
-      },
-    )
+    const manager = new SubscriptionManager(raw, String, (source, payload) => {
+      checked.push(`${source}:${payload}`)
+      if (payload === 'refused') throw new Error('refused delivery')
+    })
     const received: string[] = []
     const consumers = ['a', 'b'].map((name) =>
       manager.subscribe('source', (payload) => void received.push(`${name}:${payload}`)),
@@ -137,13 +129,13 @@ describe('shared subscription supervision', () => {
     await raw.deliver(0, 'refused')
     await raw.deliver(0, 'accepted')
     expect(checked).toEqual(['source:refused', 'source:accepted'])
-    expect(reports).toEqual([new Error('refused delivery')])
+    expect(report.mock.calls).toEqual([[new Error('refused delivery')]])
     expect(received).toEqual(['a:accepted', 'b:accepted'])
     await Promise.all(consumers.map((consumer) => consumer.unsubscribe()))
   })
   it('hands a delivery to the consumers attached when it started, and none to one that left', async () => {
     const raw = new ControlledDriver()
-    const manager = new SubscriptionManager(raw, vi.fn(), String, () => {})
+    const manager = new SubscriptionManager(raw, String, () => {})
     const received: string[] = []
     let late: ReturnType<typeof manager.subscribe> | undefined
     const first = manager.subscribe('source', (payload) => {
@@ -163,10 +155,7 @@ describe('shared subscription supervision', () => {
   })
   it('does not emit a stale nonterminal state after re-entrant unsubscribe', async () => {
     const raw = new ControlledDriver()
-    const subscription = new SubscriptionManager(raw, vi.fn(), String, () => {}).subscribe(
-      'reentrant-listener',
-      () => {},
-    )
+    const subscription = new SubscriptionManager(raw, String, () => {}).subscribe('reentrant-listener', () => {})
     await subscription.ready
     const siblingStates: SubscriptionState[] = []
     subscription.onStateChange((state) => {
@@ -179,8 +168,9 @@ describe('shared subscription supervision', () => {
   it('surfaces readiness, recovery and terminal failure as state changes', async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
-    const report = vi.fn()
-    const manager = new SubscriptionManager(raw, report, String, () => {})
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    onTestFinished(() => report.mockRestore())
+    const manager = new SubscriptionManager(raw, String, () => {})
     const subscription = manager.subscribe('async-ready', () => {})
     const states: SubscriptionState[] = []
     subscription.onStateChange((state) => states.push(state))
@@ -207,10 +197,7 @@ describe('shared subscription supervision', () => {
     expect(states).toEqual(['ready', 'lost', 'ready', 'closed'])
     const failedRaw = new ControlledDriver()
     failedRaw.plan(() => new ControlledAttempt())
-    const failed = new SubscriptionManager(failedRaw, console.error, String, () => {}).subscribe(
-      'initial-failure',
-      () => {},
-    )
+    const failed = new SubscriptionManager(failedRaw, String, () => {}).subscribe('initial-failure', () => {})
     const failedStates: SubscriptionState[] = []
     failed.onStateChange((state) => failedStates.push(state))
     const failedReadiness = failed.ready
@@ -223,10 +210,7 @@ describe('shared subscription supervision', () => {
   it("keeps a driver's reason for an end as the failure's cause", async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
-    const subscription = new SubscriptionManager(raw, console.error, String, () => {}).subscribe(
-      'with-reason',
-      () => {},
-    )
+    const subscription = new SubscriptionManager(raw, String, () => {}).subscribe('with-reason', () => {})
     const readiness = subscription.ready
     const reason = new Error('room has no open incarnation')
     raw.opens[0]!.attempt.close(reason)
@@ -240,7 +224,7 @@ describe('shared subscription supervision', () => {
     const raw = new ControlledDriver()
     raw.plan(() => ControlledAttempt.ready())
     raw.plan(() => ControlledAttempt.ready())
-    const manager = new SubscriptionManager(raw, console.error, String, () => {})
+    const manager = new SubscriptionManager(raw, String, () => {})
     const received: string[] = []
     raw.partition = 'session-a'
     const first = manager.subscribe('same-source', (payload) => void received.push(`a:${payload}`))
@@ -256,7 +240,7 @@ describe('shared subscription supervision', () => {
   it("holds a send only for its own partition's establishing subscriptions", async () => {
     const raw = new ControlledDriver()
     raw.plan(() => new ControlledAttempt())
-    const manager = new SubscriptionManager(raw, console.error, String, () => {})
+    const manager = new SubscriptionManager(raw, String, () => {})
     const sent: string[] = []
     raw.partition = 'session-b'
     manager.subscribe('key', () => {})

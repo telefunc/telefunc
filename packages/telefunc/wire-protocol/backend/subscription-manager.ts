@@ -43,7 +43,6 @@ type DeliveryCheck<Source> = (source: Source, payload: BackendPayload, info: { s
 type SubscriptionSlotConfig = {
   binding: SubscriptionBinding
   checkDelivery: (payload: BackendPayload, info: { seq: number; timestamp: number }) => void
-  reportError: (error: unknown) => void
   sourceKey: string
   cleanup: (attempt: SubscriptionAttempt) => Promise<void>
   unmap: () => void
@@ -59,7 +58,6 @@ class SubscriptionManager<Source> {
 
   constructor(
     private readonly _driver: SubscriptionDriver<Source>,
-    private readonly _reportError: (error: unknown) => void,
     private readonly _sourceKey: (source: Source) => string,
     private readonly _checkDelivery: DeliveryCheck<Source>,
   ) {}
@@ -73,7 +71,6 @@ class SubscriptionManager<Source> {
       const created: SubscriptionSlot = new SubscriptionSlot({
         binding,
         checkDelivery: (payload, info) => this._checkDelivery(source, payload, info),
-        reportError: this._reportError,
         sourceKey,
         cleanup: (attempt) => this._cleanup(attempt),
         unmap: () => {
@@ -96,7 +93,7 @@ class SubscriptionManager<Source> {
   private _cleanup(attempt: SubscriptionAttempt): Promise<void> {
     // Not deferred: a subscribe in the same tick opens the source's next attempt after this one let go.
     const unsubscribing = new Promise<void>((resolve) => resolve(attempt.unsubscribe()))
-    const cleanup = unsubscribing.catch((error) => this._reportError(error))
+    const cleanup = unsubscribing.catch((error) => console.error(error))
     this._cleanups.add(cleanup)
     void cleanup.finally(() => this._cleanups.delete(cleanup))
     return cleanup
@@ -200,10 +197,6 @@ class SubscriptionSlot {
     await this.stop()
   }
 
-  reportError(error: unknown): void {
-    this._config.reportError(error)
-  }
-
   stop(): Promise<void> {
     if (this._stopPromise !== null) return this._stopPromise
     this._stopPromise = this._release()
@@ -221,13 +214,13 @@ class SubscriptionSlot {
           try {
             this._config.checkDelivery(payload, info)
           } catch (error) {
-            return this._config.reportError(error)
+            return console.error(error)
           }
           for (const attachment of this._targets()) {
             try {
               attachment.receiver(payload, info)
             } catch (error) {
-              this._config.reportError(error)
+              console.error(error)
             }
           }
         },
@@ -336,7 +329,7 @@ class SlotAttachment implements BackendSubscription {
       try {
         listener(state)
       } catch (error) {
-        this._slot.reportError(error)
+        console.error(error)
       }
     }
   }
