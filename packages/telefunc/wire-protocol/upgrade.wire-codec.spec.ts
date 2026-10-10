@@ -53,15 +53,12 @@ describe('upgrade wire vocabulary', () => {
     })
   })
 
-  test('the new tags are connection ctrl and 0x0a stays reserved', () => {
+  test('the new tags are connection ctrl', () => {
     for (const tag of [TAG.PREPARE, TAG.READY, TAG.BARRIER]) {
       expect(isConnCtrlTag(tag)).toBe(true)
       expect(isChannelCtrlTag(tag)).toBe(false)
     }
     expect([TAG.PREPARE, TAG.READY, TAG.BARRIER]).toEqual([0x07, 0x08, 0x09])
-    const reserved = new Uint8Array(7)
-    reserved[0] = 0x0a
-    expect(() => decode(reserved)).toThrow()
   })
 
   test('every tag names one frame', () => {

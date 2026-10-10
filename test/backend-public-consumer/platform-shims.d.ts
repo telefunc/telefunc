@@ -5,7 +5,6 @@ declare namespace Cloudflare {
 type DurableObjectLocationHint = string
 type DurableObjectJurisdiction = string
 interface DurableObjectState {}
-interface ExecutionContext {}
 
 declare module 'cloudflare:workers' {
   export class DurableObject {

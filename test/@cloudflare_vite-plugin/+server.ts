@@ -23,7 +23,7 @@ export default {
       await Broadcast.publish('worker-publish', { from: 'worker' })
       return new Response(null, { status: 204 })
     }
-    const resp = await tf.serve({ request, env, ctx })
+    const resp = await tf.serve({ request, env })
     return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)
   },
 } satisfies ExportedHandler<Env>
