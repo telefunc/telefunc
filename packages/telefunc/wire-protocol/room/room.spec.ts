@@ -84,6 +84,21 @@ afterEach(async () => {
   }
 })
 describe('Room public behavior', () => {
+  it('a pending acknowledged send fails as its client-held recipient leaves, not at the ack timeout', async () => {
+    const room = (await Room.create('recipient-leaves-ack')) as ServerRoom
+    const sender = await room.join()
+    const stub = register(room)
+    const recipient = await joinThrough(stub) // its client never answers
+    let outcome: unknown = 'pending'
+    void sender.send(recipient, 'ping', { ack: true }).then(
+      () => (outcome = 'answered'),
+      (error: unknown) => (outcome = isRoomError(error) ? error.message : error),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await stub._handleRequest({ __r: 'req-leave', id: recipient })
+    await vi.waitFor(() => expect(outcome).toBe('Participant left the room'), { timeout: 2000 })
+  })
+
   it('opens semantic ingestion only when a semantic listener wants delivery', async () => {
     const room = (await Room.create('semantic-demand')) as ServerRoom
     let semanticSubscriptions = 0
