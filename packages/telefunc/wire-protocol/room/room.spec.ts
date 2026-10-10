@@ -2616,7 +2616,7 @@ describe('Room public behavior', () => {
     const room = (await Room.create('declared-non-member')) as ServerRoom
     const member = await room.join()
     const stub = register(room)
-    const ids = [member.id, crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]
+    const ids = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), member.id]
     const binary = Object.fromEntries(ids.map((id) => [id, { all: true, tracks: [] }]))
     declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: binary })
     declare(stub, { __r: 'sub-text', announce: false, members: Object.fromEntries(ids.map((id) => [id, true])) })
@@ -2648,7 +2648,7 @@ describe('Room public behavior', () => {
     const stub = register(observer)
     const peer = attachPeer(stub)
     await vi.waitFor(() => expect(relayed(peer).map(({ __r }) => __r)).toContain('roster-error'))
-    const ids = [member.id, crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()]
+    const ids = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), member.id]
     const binary = Object.fromEntries(ids.map((id) => [id, { all: true, tracks: [] }]))
     declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: binary })
     declare(stub, { __r: 'sub-text', announce: false, members: Object.fromEntries(ids.map((id) => [id, true])) })
