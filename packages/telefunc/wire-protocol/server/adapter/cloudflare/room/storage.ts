@@ -176,10 +176,16 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
         .toArray()[0]
       return row === undefined ? [] : [{ key, ...row }]
     })
-  // A key range, so the read seeks the primary key instead of scanning every cell of the incarnation.
-  const end = prefixEnd(sel.prefix)
-  const query = `SELECT key, bytes, version FROM cell WHERE inc = ? AND key >= ?${end === null ? '' : ' AND key < ?'}`
-  return sql.exec<CellRow>(query, inc, sel.prefix, ...(end === null ? [] : [end])).toArray()
+  const range = prefixRange(sel.prefix)
+  return sql
+    .exec<CellRow>(`SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)
+    .toArray()
+}
+
+/** A key range, so a query seeks the primary key instead of scanning every cell of the incarnation. */
+function prefixRange(prefix: string): { where: string; args: string[] } {
+  const end = prefixEnd(prefix)
+  return end === null ? { where: 'key >= ?', args: [prefix] } : { where: 'key >= ? AND key < ?', args: [prefix, end] }
 }
 
 // Reads stay available while closing; staleInc means the head is absent or names another incarnation.
@@ -199,7 +205,7 @@ function readRevision(sql: SqlStorage, inc: string): number {
 }
 
 function cellVersion(sql: SqlStorage, inc: string, key: string): string | null {
-  const row = sql.exec<{ version: number }>('SELECT version FROM cell WHERE inc = ? AND key = ?', inc, key).toArray()[0]
+  const row = selectCellRows(sql, inc, { keys: [key] })[0]
   return row === undefined ? null : String(row.version)
 }
 
@@ -216,13 +222,8 @@ function compareExchangeCells(sql: SqlStorage, inc: string, cx: CellsCx, now: nu
   sql.exec('UPDATE gen SET revision = revision + 1 WHERE inc = ?', inc)
   const version = readRevision(sql, inc)
   for (const prefix of cx.clear ?? []) {
-    const end = prefixEnd(prefix)
-    sql.exec(
-      `DELETE FROM cell WHERE inc = ? AND key >= ?${end === null ? '' : ' AND key < ?'}`,
-      inc,
-      prefix,
-      ...(end === null ? [] : [end]),
-    )
+    const range = prefixRange(prefix)
+    sql.exec(`DELETE FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)
   }
   for (const mutation of cx.mutations) writeCell(sql, inc, mutation.key, mutation.bytes, version)
   const counters = new Map<string, CellCounter>()
