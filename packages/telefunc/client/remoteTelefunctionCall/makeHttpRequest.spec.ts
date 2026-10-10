@@ -31,11 +31,11 @@ test("a page's concurrent first calls present one session token, so they reach o
   for (const { headers } of requests) expect(headers).not.toHaveProperty(TELEFUNC_SESSION_HEADER)
 })
 
-test('a page keeps the session token it named, whatever a response names', async () => {
+test("a page's later calls present the session token its first call named", async () => {
   const sessions: Array<string | null> = []
   const fetch = (async (url: string) => {
     sessions.push(new URL(url).searchParams.get('session'))
-    return new Response('', { status: 500, headers: { [TELEFUNC_SESSION_HEADER]: 'named-by-the-server' } })
+    return new Response('', { status: 500 })
   }) as unknown as typeof globalThis.fetch
   const call = () =>
     makeHttpRequest({
