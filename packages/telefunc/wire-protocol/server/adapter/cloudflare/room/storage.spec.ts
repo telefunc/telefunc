@@ -46,6 +46,20 @@ test("a directory page reads a prefix's rooms as a primary-key range, up to the 
   expect(listed('')).toHaveLength(rooms.length)
 })
 
+test('a directory lists its rooms in code point order', () => {
+  const { sql } = sqlStorage()
+  for (const roomId of ['order:a', 'order:\u{1f600}', 'order:é', 'order:\uff01', 'order:B', 'order:f'])
+    directoryPut(sql, roomId, 'tag')
+  expect(directoryList(sql, 'order:').entries.map((entry) => entry.roomId)).toEqual([
+    'order:B',
+    'order:a',
+    'order:f',
+    'order:é',
+    'order:\uff01',
+    'order:\u{1f600}',
+  ])
+})
+
 test("a directory pages a prefix's rooms from the cursor it hands back", () => {
   const { sql } = sqlStorage()
   const rooms = Array.from({ length: 150 }, (_, index) => `room:${String(index).padStart(3, '0')}`)

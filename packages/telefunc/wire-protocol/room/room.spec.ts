@@ -369,6 +369,18 @@ describe('Room public behavior', () => {
     })
     expect((await Room.list()).map(({ id }) => id)).toEqual(['list-open'])
   })
+  it('lists rooms in code point order, as the Redis and Cloudflare backends do', async () => {
+    for (const id of ['order:a', 'order:\u{1f600}', 'order:é', 'order:\uff01', 'order:B', 'order:f'])
+      await Room.create(id)
+    expect((await Room.list({ prefix: 'order:' })).map(({ id }) => id)).toEqual([
+      'order:B',
+      'order:a',
+      'order:f',
+      'order:é',
+      'order:\uff01',
+      'order:\u{1f600}',
+    ])
+  })
   it('creates a room whose head went away between its read and the create, as a lapsing tombstone does', async () => {
     const lapsed = { conflict: true, current: null } as unknown as Awaited<
       ReturnType<MemoryBackend['compareExchangeHead']>

@@ -380,10 +380,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (this._state.directory.get(roomId) === incTag) this._state.directory.delete(roomId)
   }
 
-  async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
+  async directoryList(prefix: string): Promise<DirectoryPage> {
     const entries = [...this._state.directory]
-      .filter(([roomId]) => roomId.startsWith(prefix) && (cursor === undefined || roomId > cursor))
-      .sort(([left], [right]) => left.localeCompare(right))
+      .filter(([roomId]) => roomId.startsWith(prefix))
+      .sort(([left], [right]) => compareCodePoints(left, right))
       .map(([roomId, incTag]) => ({ roomId, incTag }))
     return { entries }
   }
@@ -423,6 +423,17 @@ function removeSubscription(subs: Subscriptions, key: string, sub: MemorySubscri
   const rest = current.filter((other) => other !== sub)
   if (rest.length === 0) subs.delete(key)
   else subs.set(key, rest)
+}
+
+/** Redis and SQLite order room ids by their UTF-8 bytes, which is code point order. */
+function compareCodePoints(left: string, right: string): number {
+  for (let i = 0; i < left.length && i < right.length; ) {
+    const a = left.codePointAt(i)!
+    const b = right.codePointAt(i)!
+    if (a !== b) return a - b
+    i += a > 0xffff ? 2 : 1
+  }
+  return left.length - right.length
 }
 
 function getOrCreate<Key, Value>(map: Map<Key, Value>, key: Key, create: () => Value): Value {
