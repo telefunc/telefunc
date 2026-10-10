@@ -54,17 +54,11 @@ type MemberResult = {
   memberName: string | null
   sameObject: boolean
 }
-function testRoomScenario<Result>(
-  id: string,
-  name: string,
-  validate: (result: Result) => void | Promise<void>,
-  after?: () => Promise<void>,
-) {
+function testRoomScenario<Result>(id: string, name: string, validate: (result: Result) => void | Promise<void>) {
   test(name, async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click(`#test-room-${id}`)
     await autoRetry(async () => validate(await getResult<Result>('#room-result')))
-    await after?.()
   })
 }
 function testRoom() {
@@ -132,10 +126,10 @@ function testRoom() {
     'shield',
     'room: the declared message type is shielded at runtime (a malformed publish is rejected)',
     (r) => {
-      expect(r.okAck).toBe(true) // the well-typed payload is admitted
+      expect(r.okAck).toBe(true)
       // The generated shield rejects malformed ingress through the publish promise.
       expect(r.badError).toBe('ShieldValidationError')
-      expect(r.received).deep.equal(['hi']) // only the valid payload ever reached the room
+      expect(r.received).deep.equal(['hi'])
     },
   )
   testRoomScenario<AdminResult>(
@@ -145,7 +139,7 @@ function testRoom() {
       expect(result.announcements).deep.equal(['maintenance'])
       expect(result.system).deep.equal([{ data: 'welcome', fromRoom: true }])
       expect(result.kicked).toBe(true) // LocalParticipant.onLeave fired on removeParticipant()
-      expect(result.kickCause).deep.equal({ type: 'removed', reason: 'be nice' }) // the reason rode the removal
+      expect(result.kickCause).deep.equal({ type: 'removed', reason: 'be nice' })
       expect(result.closed).toBe(true) // Room.onClose fired on close()
       expect(result.isClosed).toBe(true)
       expect(result.count).toBe(0)
@@ -170,10 +164,10 @@ function testRoom() {
     localName: string | null
     localHasScore: boolean
   }>('attributes', 'room: setAttributes merges per key and deletes on undefined', (r) => {
-    expect(r.name).toBe('Zoe') // untouched key preserved across merges
-    expect(r.title).toBe('lead') // added key
+    expect(r.name).toBe('Zoe')
+    expect(r.title).toBe('lead')
     expect(r.hasScore).toBe(false) // score removed by `undefined`
-    expect(r.localName).toBe('Zoe') // the local handle reflects the merge too
+    expect(r.localName).toBe('Zoe')
     expect(r.localHasScore).toBe(false)
   })
   testRoomScenario<{ cam: boolean[] }>(
@@ -197,18 +191,18 @@ function testRoom() {
     publish: { name: string; data: unknown; seqOk: boolean } | null
     send: { name: string; to: string; seqOk: boolean } | null
   }>('hooks', 'room: onAfterJoin/Publish/Send fire with authoritative receipts', (r) => {
-    expect(r.joins).deep.equal(['A', 'B']) // onAfterJoin fired for both grants
-    expect(r.joinHasTs).toBe(true) // receipt carries joinedAt
-    expect(r.publish).deep.equal({ name: 'A', data: 'hello', seqOk: true }) // onAfterPublish + seq
-    expect(r.send).deep.equal({ name: 'A', to: 'B', seqOk: true }) // onAfterSend + seq
+    expect(r.joins).deep.equal(['A', 'B'])
+    expect(r.joinHasTs).toBe(true)
+    expect(r.publish).deep.equal({ name: 'A', data: 'hello', seqOk: true })
+    expect(r.send).deep.equal({ name: 'A', to: 'B', seqOk: true })
   })
   testRoomScenario<{ xText: string[]; xBin: number[]; all: string[] }>(
     'member-sub',
     'room: a per-member subscription receives only that member',
     (r) => {
       expect(r.all).deep.equal(['x1', 'y1']) // both delivered room-wide (so absence below is meaningful)
-      expect(r.xText).deep.equal(['x1']) // the per-member text sub saw only X
-      expect(r.xBin).deep.equal([7]) // per-member binary is selective too
+      expect(r.xText).deep.equal(['x1'])
+      expect(r.xBin).deep.equal([7])
     },
   )
   testRoomScenario<{ held: string[] }>(
@@ -223,8 +217,8 @@ function testRoom() {
     'room: selfDelivery:false suppresses your own frames locally, not for others',
     (r) => {
       expect(r.selfDelivery).toBe(false)
-      expect(r.theirs).deep.equal(['hi']) // others receive it
-      expect(r.mine).deep.equal([]) // you don't
+      expect(r.theirs).deep.equal(['hi'])
+      expect(r.mine).deep.equal([])
     },
   )
   testRoomScenario<{ mine: string[]; theirs: string[]; selfDelivery: boolean }>(
@@ -232,7 +226,7 @@ function testRoom() {
     'room: a co-returned server-side selfDelivery:false member sees no own publish, while a client join on the same room view is delivered',
     (r) => {
       expect(r.selfDelivery).toBe(false)
-      expect(r.theirs).deep.equal(['from-me', 'from-notme']) // the observer receives both
+      expect(r.theirs).deep.equal(['from-me', 'from-notme'])
       expect(r.mine).deep.equal(['from-notme']) // own co-return echo suppressed; client join delivered
     },
   )
@@ -245,18 +239,18 @@ function testRoom() {
     sameCount: number
   }>('reconfig', 'room: Room.setMeta propagates; list and getOrCreate resolve', (r) => {
     expect(r.updates).toContain('updated') // room.onUpdate fired
-    expect(r.topic).toBe('updated') // room.meta reflects it
-    expect([...r.listed].sort()).deep.equal([...r.expectedIds].sort()) // both exact rooms enumerated by Room.list
-    expect(r.sameId).toBe(true) // getOrCreate returned the existing room
+    expect(r.topic).toBe('updated')
+    expect([...r.listed].sort()).deep.equal([...r.expectedIds].sort())
+    expect(r.sameId).toBe(true)
     expect(r.sameCount).toBe(1) // ...with exactly its original member preserved
   })
   testRoomScenario<{ cause: { type: string; reason?: unknown } | null; count: number; empty: boolean }>(
     'identity',
     'room: removeParticipant({ identity }) kicks; onEmpty fires',
     (r) => {
-      expect(r.cause).deep.equal({ type: 'removed', reason: 'multi-tab' }) // kicked by identity, reason rode along
+      expect(r.cause).deep.equal({ type: 'removed', reason: 'multi-tab' })
       expect(r.count).toBe(0)
-      expect(r.empty).toBe(true) // onEmpty fired when the last member went
+      expect(r.empty).toBe(true)
     },
   )
 }
