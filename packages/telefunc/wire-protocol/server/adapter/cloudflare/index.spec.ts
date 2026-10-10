@@ -180,7 +180,6 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
     })
 
     expect(mocks.enableChannelTransports).toHaveBeenCalled()
@@ -207,7 +206,6 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
     })
 
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-0' }), {
@@ -229,7 +227,6 @@ describe('cloudflare adapter entrypoint', () => {
       await tf.serve({
         request: new Request('https://telefunc.test/_telefunc?session=new-token'),
         env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-        ctx: { waitUntil: (p: Promise<unknown>) => void p } as unknown as ExecutionContext,
       })
     }
     expect(put).not.toHaveBeenCalled()
@@ -242,7 +239,6 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request: new Request('https://telefunc.test/_telefunc?session=lapsed-token'),
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: (p: Promise<unknown>) => void p.then(() => {}) } as unknown as ExecutionContext,
     })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(vi.mocked(resolveSessionRoutingTarget)).toHaveBeenLastCalledWith(
@@ -261,7 +257,6 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
       env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: (p: Promise<unknown>) => void p.then(() => {}) } as unknown as ExecutionContext,
     })
     expect(response?.headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
   })
@@ -274,7 +269,6 @@ describe('cloudflare adapter entrypoint', () => {
         tf.serve({
           request: new Request(`https://telefunc.test${path}`),
           env: {} as Cloudflare.Env,
-          ctx: {} as ExecutionContext,
         }),
       ).resolves.toBeUndefined()
     }
@@ -287,7 +281,6 @@ describe('cloudflare adapter entrypoint', () => {
       tf.serve({
         request: new Request('https://telefunc.test/_telefunc'),
         env: {} as Cloudflare.Env,
-        ctx: {} as ExecutionContext,
       }),
     ).rejects.toThrow('Missing Cloudflare Durable Object binding')
   })
@@ -301,7 +294,6 @@ describe('cloudflare adapter entrypoint', () => {
     const response = await tf.serve({
       request,
       env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
-      ctx: {} as ExecutionContext,
     })
 
     expect(response?.status).toBe(400)
@@ -315,7 +307,6 @@ describe('cloudflare adapter entrypoint', () => {
     await tf.serve({
       request: new Request('https://telefunc.test/_telefunc'),
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
-      ctx: { waitUntil: vi.fn() } as unknown as ExecutionContext,
     })
 
     expect(jurisdiction).toHaveBeenCalledWith('eu')

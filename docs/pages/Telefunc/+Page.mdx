@@ -154,8 +154,8 @@ const telefunc = new Telefunc({
 export const TelefuncDurableObject = telefunc.TelefuncDurableObject
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const response = await telefunc.serve({ request, env, ctx })
+  async fetch(request: Request, env: Env) {
+    const response = await telefunc.serve({ request, env })
     if (response) return response
 
     return new Response('Not found', { status: 404 })
@@ -198,7 +198,7 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 
 | Method | Runtime | Description |
 |---|---|---|
-| `serve(input)` | all | Process a request and return the response. The input shape (`{ request }`, `{ req, res }`, `{ request, env, ctx }`, …) and return type vary by runtime — see <Link href="#return" />. |
+| `serve(input)` | all | Process a request and return the response. The input shape (`{ request }`, `{ req, res }`, `{ request, env }`, …) and return type vary by runtime — see <Link href="#return" />. |
 | `installWebSocket(server)` | Node | Enable WebSocket channels on your HTTP server. Idempotent (calling it multiple times is safe). (The Node.js adapter auto-detects your HTTP server from the request socket.)|
 | `websocket` | Bun | The WebSocket handler — pass it to `Bun.serve({ websocket })`. |
 | `TelefuncDurableObject` | Cloudflare | The Durable Object class to export — see <Link href="/stream/cloudflare" />. |
