@@ -8,10 +8,8 @@ export {
   isNamedTrack,
   emptyTrackWants,
   emptyBinaryWants,
-  mergeTrackWants,
   wantsTrack,
   sameTrackWants,
-  wantsAnyBinary,
   binaryWantsCovers,
   isRoomTrack,
 }
@@ -185,10 +183,6 @@ function emptyTrackWants(): TrackWants {
 function emptyBinaryWants(): BinaryWants {
   return { everyMember: emptyTrackWants(), members: Object.create(null) }
 }
-function mergeTrackWants(a: TrackWants, b: TrackWants): TrackWants {
-  if (a.all || b.all) return { all: true, tracks: [] }
-  return { all: false, tracks: [...new Set([...a.tracks, ...b.tracks])] }
-}
 function wantsTrack(wants: TrackWants, track: string): boolean {
   return wants.all || wants.tracks.includes(track)
 }
@@ -200,9 +194,6 @@ function binaryWantsCovers(wants: BinaryWants, memberId: string, track: string):
   if (wantsTrack(wants.everyMember, track)) return true
   const memberWants = wants.members[memberId]
   return memberWants !== undefined && wantsTrack(memberWants, track)
-}
-function wantsAnyBinary(wants: BinaryWants): boolean {
-  return wants.everyMember.all || wants.everyMember.tracks.length > 0 || Object.keys(wants.members).length > 0
 }
 /** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that doesn't fit. */
 function isRoomTrack(track: unknown): track is string {
