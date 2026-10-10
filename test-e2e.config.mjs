@@ -70,6 +70,12 @@ function getCiJobs() {
       setups: setupModern,
     },
     {
+      name: 'Redis',
+      // Starts its own standalone Redis and three-master Cluster
+      command: 'bash packages/redis/scripts/certification.sh',
+      setups: setupModern,
+    },
+    {
       name: 'Next.js',
       setups,
     },

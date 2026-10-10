@@ -355,6 +355,18 @@ describe('prepare()', () => {
           "splitFiles": false,
         },
         {
+          "jobCmd": "bash packages/redis/scripts/certification.sh",
+          "jobName": "Redis",
+          "jobSetups": [
+            {
+              "node_version": "23",
+              "os": "ubuntu-latest",
+            },
+          ],
+          "jobTests": null,
+          "splitFiles": false,
+        },
+        {
           "jobCmd": "pnpm exec test-e2e",
           "jobName": "Next.js",
           "jobSetups": [
