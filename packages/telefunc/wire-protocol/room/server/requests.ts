@@ -13,7 +13,6 @@ export type { RoomRequest, RoomDeclaration }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ProtocolViolationError } from '../../shared-ws.js'
 import { decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type TrackWants } from '../binary.js'
-import { ROOM_NAMED_TRACKS_MAX } from '../constants.js'
 import { isRecord } from '../model.js'
 import type { DmReply, ParticipantStubRequest, RoomDataPublish, RoomStubRequest } from '../protocol.js'
 assertIsNotBrowser()
@@ -123,7 +122,7 @@ function decodeMemberChanges<T>(changes: unknown, what: string, decode: (change:
 }
 function decodeTrackWants(wants: unknown): TrackWants {
   if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) malformed('binary wants')
-  if (wants.tracks.length > ROOM_NAMED_TRACKS_MAX || !wants.tracks.every(isRoomTrack)) malformed('binary wants')
+  if (!wants.tracks.every(isRoomTrack)) malformed('binary wants')
   return { all: wants.all, tracks: wants.tracks as string[] }
 }
 

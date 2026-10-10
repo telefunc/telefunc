@@ -14,7 +14,6 @@ import {
   type BinaryWants,
   type TrackWants,
 } from './binary.js'
-import { ROOM_NAMED_TRACKS_MAX } from './constants.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
 import type { AcceptedMeta, MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
 import type {
@@ -33,7 +32,6 @@ type MembershipEvent =
   | { join: MemberSnapshot }
   | { leave: string }
   | { meta: { id: string; meta: ParticipantMeta; seq: number } }
-  | { track: { id: string; track: string } }
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
 type TrackCounts = { all: number; named: Map<string, number> }
 type CountedTrack = { counts: TrackCounts; track: TrackFilter }
@@ -44,8 +42,6 @@ type MemberEntry = {
   identity: string | null
   /** Latest applied meta revision. Stale and echoed `p-meta` events are absorbed. */
   metaSeq: number
-  /** Named tracks the member is known to publish, grown by `track` events and rosters, never shrunk (tracks live as long as the member). Drives all-track key subscriptions. */
-  tracks: Set<string>
   /** An off-presence participant: a member for routing/discovery, excluded from every presence read (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
   hidden: boolean
   remote: RemoteParticipant | null
@@ -242,11 +238,6 @@ class RoomState {
   hasMember(id: string): boolean {
     return this._members.has(id)
   }
-  /** Named tracks the member is known to publish (`[]` for unknown members). */
-  memberTracks(id: string): string[] {
-    const entry = this._members.get(id)
-    return entry ? [...entry.tracks] : []
-  }
   /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
   textWants(): MemberWants {
     return { all: this._roomDataCbs.size > 0, members: this._textWanted }
@@ -263,13 +254,12 @@ class RoomState {
     return [...this._members.keys()]
   }
   snapshotMembers(): MemberSnapshot[] {
-    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity, tracks, hidden }) => ({
+    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity, hidden }) => ({
       id,
       meta,
       joinedAt,
       metaSeq,
       identity,
-      ...(tracks.size === 0 ? {} : { tracks: [...tracks] }),
       ...(hidden ? { hidden: true } : {}),
     }))
   }
@@ -296,7 +286,7 @@ class RoomState {
     cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo, from: Sender) => unknown,
     opts?: { track?: string | null },
   ): () => void {
-    const listener = binaryListener(this._roomBinaryTracks, cb, opts)
+    const listener = binaryListener(cb, opts)
     return this._register(this._roomBinaryCbs, listener, null, {
       counts: this._roomBinaryTracks,
       track: listener.track,
@@ -330,15 +320,6 @@ class RoomState {
   }
   onAnnounce(cb: (data: unknown, info: ChannelPublishInfo) => void): () => void {
     return this._register(this._announceCbs, cb)
-  }
-  /** A member published its first frame on a new named track (idempotent: echoes, rosters, and the owner's local apply all land here). */
-  applyTrack(id: string, track: string): boolean {
-    this._record({ track: { id, track } })
-    const entry = this._members.get(id)
-    if (!entry) return false
-    if (entry.tracks.has(track)) return false
-    entry.tracks.add(track)
-    return true
   }
   /** Immutable view of the whole room, cached by state version, so the reference is stable until something actually changes (the `useSyncExternalStore` contract). */
   snapshot(): RoomSnapshotView {
@@ -510,12 +491,7 @@ class RoomState {
     const narrate = this._rosterKnown
     this._rosterKnown = true
     let narratedDrift = false
-    let viewChanged = false
-    for (const member of roster) {
-      const outcome = this._mergeRosterMember(member, narrate)
-      narratedDrift ||= outcome.narrated
-      viewChanged ||= outcome.viewChanged
-    }
+    for (const member of roster) narratedDrift = this._mergeRosterMember(member, narrate) || narratedDrift
     const listed = new Set([...roster.map((member) => member.id), ...departing])
     narratedDrift = this._removeMissingMembers(listed) || narratedDrift
     if (!narrate) {
@@ -523,30 +499,27 @@ class RoomState {
       this._bumpState()
       return false
     }
-    if (viewChanged && !narratedDrift) this._bumpState()
     return narratedDrift
   }
-  private _mergeRosterMember(member: MemberSnapshot, narrate: boolean): { narrated: boolean; viewChanged: boolean } {
+  /** Whether the member's drift was narrated as events. */
+  private _mergeRosterMember(member: MemberSnapshot, narrate: boolean): boolean {
     const entry = this._members.get(member.id)
     if (!entry) {
       if (!narrate) {
         this._createEntry(member)
-        return { narrated: false, viewChanged: true }
+        return false
       }
       this.applyJoin(member)
-      return { narrated: true, viewChanged: false }
+      return true
     }
-    let narrated = false
-    if (member.metaSeq > entry.metaSeq) {
-      if (narrate) {
-        this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
-        narrated = true
-      } else {
-        entry.meta = ownMetadata(member.meta)
-        entry.metaSeq = member.metaSeq
-      }
+    if (member.metaSeq <= entry.metaSeq) return false
+    if (narrate) {
+      this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
+      return true
     }
-    return { narrated, viewChanged: this._mergeKnownTracks(entry, member.tracks) }
+    entry.meta = ownMetadata(member.meta)
+    entry.metaSeq = member.metaSeq
+    return false
   }
   private _applyPreRosterMeta(): void {
     for (const [id, { meta, seq }] of this._preRosterMeta) {
@@ -556,11 +529,6 @@ class RoomState {
       entry.metaSeq = seq
     }
     this._preRosterMeta.clear()
-  }
-  private _mergeKnownTracks(entry: MemberEntry, tracks: string[] | undefined): boolean {
-    const before = entry.tracks.size
-    for (const track of tracks ?? []) entry.tracks.add(track)
-    return entry.tracks.size !== before
   }
   private _removeMissingMembers(seen: Set<string>): boolean {
     let removed = false
@@ -587,7 +555,6 @@ class RoomState {
       joinedAt,
       identity: entrySeed.identity ?? null,
       metaSeq: entrySeed.metaSeq,
-      tracks: new Set(entrySeed.tracks),
       hidden: entrySeed.hidden === true,
       remote: null,
       left: false,
@@ -615,7 +582,7 @@ class RoomState {
         },
         subscribe: (cb) => this._registerLive(entry, entry.dataCbs, cb),
         subscribeBinary: (cb, opts) => {
-          const listener = binaryListener(entry.binaryTracks, cb, opts)
+          const listener = binaryListener(cb, opts)
           return this._registerLive(entry, entry.binaryCbs, listener, {
             counts: entry.binaryTracks,
             track: listener.track,
@@ -691,15 +658,10 @@ function replayMembership(
     } else if ('leave' in event) {
       members.delete(event.leave)
       departing.delete(event.leave)
-    } else if ('meta' in event) {
+    } else {
       const { id, meta, seq } = event.meta
       const member = members.get(id)
       if (member !== undefined && seq > member.metaSeq) members.set(id, { ...member, meta, metaSeq: seq })
-    } else {
-      const { id, track } = event.track
-      const member = members.get(id)
-      if (member !== undefined && !member.tracks?.includes(track))
-        members.set(id, { ...member, tracks: [...(member.tracks ?? []), track] })
     }
   }
   return { members: [...members.values()], departing }
@@ -716,19 +678,8 @@ function normalizeTrackFilter(opts: { track?: string | null } | undefined): Trac
   assertUsage(isNamedTrack(track), 'subscribeBinary() track should be a valid non-empty string')
   return track
 }
-function binaryListener<CB>(
-  tracks: TrackCounts,
-  cb: CB,
-  opts: { track?: string | null } | undefined,
-): { cb: CB; track: TrackFilter } {
-  const listener = { cb, track: normalizeTrackFilter(opts) }
-  // Named tracks count even beside an all-track listener, whose removal would declare them all.
-  const added = listener.track !== undefined && !tracks.named.has(laneTrack(listener.track)) ? 1 : 0
-  assertUsage(
-    tracks.named.size + added <= ROOM_NAMED_TRACKS_MAX,
-    `subscribeBinary() can name at most ${ROOM_NAMED_TRACKS_MAX} tracks per participant, the default track included, and as many room-wide; subscribe without a track to receive every track`,
-  )
-  return listener
+function binaryListener<CB>(cb: CB, opts: { track?: string | null } | undefined): { cb: CB; track: TrackFilter } {
+  return { cb, track: normalizeTrackFilter(opts) }
 }
 function newTrackCounts(): TrackCounts {
   return { all: 0, named: new Map() }

@@ -8,7 +8,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_NAMED_TRACKS_MAX } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
@@ -18,19 +18,11 @@ import {
   laneTrack,
   publicTrack,
   wantsTrack,
-  DEFAULT_TRACK,
   type BinaryFrame,
   type BinaryWants,
   type TrackWants,
 } from '../binary.js'
-import {
-  DM_FAILURE,
-  RoomError,
-  participantGoneError,
-  participantLeftError,
-  roomClosedError,
-  roomFailureError,
-} from '../errors.js'
+import { DM_FAILURE, participantGoneError, participantLeftError, roomClosedError, roomFailureError } from '../errors.js'
 import {
   assertKnownOptions,
   mergeAttributes,
@@ -118,7 +110,7 @@ function decodeLaneEnvelope(serialized: string): { __r: string } {
 }
 /** The owner that wrote the event flags a hidden member; room-level events always reach clients. */
 function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
-  if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta' || event.__r === 'track')
+  if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta')
     return event.hidden === true ? event.id : null
   return null
 }
@@ -154,8 +146,6 @@ class ServerRoom extends RoomStateView implements Room {
   /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
   private readonly _pendingAdmissions = new Set<string>()
 
-  /** (member, track) pairs this instance announced, so only a track's first frame pays for the announcement. */
-  private readonly _announcedTracks = new Map<string, Set<string>>()
   private readonly _publishTurns = new Map<string, Promise<void>>()
   /** Binary demand across instances (`onDemand`). */
   private readonly _demand: RoomDemand
@@ -365,7 +355,6 @@ class ServerRoom extends RoomStateView implements Room {
     const { sender, commit } = await this._inCallOrder(binaryLaneKey(from, lane.track), async (sent) => {
       const sender = await this._admitPublish(from, frame.payload)
       this._demand.published(from, lane.track)
-      if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitRoomLaneOrThrow(this.id, this._inc, lane, framed, opts)
       sent()
@@ -407,28 +396,6 @@ class ServerRoom extends RoomStateView implements Room {
     const onAfterPublish = this._guards?.onAfterPublish
     if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, receipt))
     return { key: this.id, ...receipt }
-  }
-
-  /** A new track is durably recorded and announced before its first frame; later frames use the idempotent cache. */
-  private async _ensureTrackAnnounced(from: string, track: string): Promise<void> {
-    let announced = this._announcedTracks.get(from)
-    if (announced?.has(track)) return
-    if (!announced) {
-      announced = new Set()
-      this._announcedTracks.set(from, announced)
-    }
-    const hidden = await updateMemberRecord(this.id, this._inc, from, (record) => {
-      const tracks = record.tracks ?? []
-      // Already recorded by an attempt whose announcement failed: announce it now.
-      if (tracks.includes(track)) return { value: record.hidden === true }
-      if (tracks.length >= ROOM_NAMED_TRACKS_MAX)
-        throw new RoomError(`A participant publishes on at most ${ROOM_NAMED_TRACKS_MAX} named tracks`)
-      return { value: record.hidden === true, next: { ...record, tracks: [...tracks, track] } }
-    })
-    const event = { __r: 'track', id: from, track, ...(hidden ? { hidden: true } : {}) } as const
-    await publishCtrl(this.id, this._inc, event)
-    if (this._applyTrack(from, track)) this._relayApplied(event)
-    announced.add(track)
   }
 
   /** A member that left while its call waited has no sender to show a guard. */
@@ -604,8 +571,6 @@ class ServerRoom extends RoomStateView implements Room {
         return false
       case 'join':
         return this._applyJoin(joinedMember(event))
-      case 'track':
-        return this._applyTrack(event.id, event.track)
       case 'leave':
         this._state.applyLeave(event.id, leaveCauseFromWire(event))
         return false
@@ -625,12 +590,8 @@ class ServerRoom extends RoomStateView implements Room {
     this._subs.memberChanged(member.id)
     return true
   }
-  private _applyTrack(id: string, track: string): boolean {
-    return this._state.applyTrack(id, track)
-  }
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
-    this._announcedTracks.delete(id)
     this._pendingDmAcks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
     const local = this._localParticipants.get(id)
     if (local) {
@@ -806,21 +767,24 @@ class ServerRoom extends RoomStateView implements Room {
           return next !== undefined && gainsTracks(prev, next) ? [{ member, next }] : []
         })
     if (!roomWide && gained.length === 0) return
-    if (roomWide || gained.some(({ next }) => next.all)) await this._subs.ensureRoster()
+    if (roomWide) await this._subs.ensureRoster()
     // Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane.
     await this._subs.binaryReady()
     const backend = getRoomBackend()
-    const candidates: Array<{ member: string; track: string }> = roomWide
-      ? (await backend.listRetained(this.id, this._inc)).filter(
-          (lane): lane is Extract<LaneId, { kind: 'binary' }> => lane.kind === 'binary',
-        )
-      : gained.flatMap(({ member, next }) =>
-          (next.all ? [DEFAULT_TRACK, ...this._state.memberTracks(member)] : next.tracks).map((track) => ({
-            member,
-            track,
-          })),
-        )
-    for (const { member, track } of candidates) {
+    const candidates = roomWide
+      ? await backend.listRetained(this.id, this._inc)
+      : (
+          await Promise.all(
+            gained.map(({ member, next }) =>
+              next.all
+                ? backend.listRetained(this.id, this._inc, { member })
+                : next.tracks.map((track): LaneId => ({ kind: 'binary', member, track })),
+            ),
+          )
+        ).flat()
+    for (const lane of candidates) {
+      if (lane.kind !== 'binary') continue
+      const { member, track } = lane
       // A member whose own want didn't change had the one it has now.
       const prev = before.members.has(member) ? before.members.get(member) : wants.members[member]
       if (wantsTrack(before.everyMember, track) || (prev !== undefined && wantsTrack(prev, track))) continue

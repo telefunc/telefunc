@@ -17,7 +17,6 @@ import {
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
-  ROOM_NAMED_TRACKS_MAX,
   ROOM_EMPTY_TIMEOUT_MS,
   ROOM_DEPARTURE_TIMEOUT_MS,
 } from './constants.js'
@@ -336,13 +335,13 @@ describe('Room public behavior', () => {
     const causes: unknown[] = []
     member.onLeave((cause) => causes.push(cause))
     room.onLeave((_, cause) => causes.push(cause))
-    const deleteRetained = driver.deleteRetained.bind(driver)
+    const listRetained = driver.listRetained.bind(driver)
     const ticked = createDeferred()
-    // The eviction's first retained delete: its member delete committed, its leave isn't published.
-    vi.spyOn(driver, 'deleteRetained').mockImplementationOnce(async (...args) => {
+    // The eviction's retained listing: its member delete committed, its leave isn't published.
+    vi.spyOn(driver, 'listRetained').mockImplementationOnce(async (...args) => {
       await subsOf(room)._heartbeatTick()
       ticked.resolve()
-      return deleteRetained(...args)
+      return listRetained(...args)
     })
     await member.leave()
     await ticked.promise
@@ -368,13 +367,13 @@ describe('Room public behavior', () => {
       }
       return readCells(roomId, inc, selector)
     })
-    const deleteRetained = driver.deleteRetained.bind(driver)
+    const listRetained = driver.listRetained.bind(driver)
     const committed = createDeferred()
     const publish = createDeferred()
-    vi.spyOn(driver, 'deleteRetained').mockImplementationOnce(async (...args) => {
+    vi.spyOn(driver, 'listRetained').mockImplementationOnce(async (...args) => {
       committed.resolve()
       await publish.promise
-      return deleteRetained(...args)
+      return listRetained(...args)
     })
     const refresh = subsOf(observer).reconcileAuthority()
     await memberRead.started.promise
@@ -1782,37 +1781,6 @@ describe('Room public behavior', () => {
     ]
     for (const [call, message] of calls) await expect(Promise.resolve().then(call)).rejects.toThrow(message)
   })
-  it('bounds the named tracks a publisher can open', async () => {
-    const room = (await Room.create('publish-track-cap')) as ServerRoom
-    const me = await room.join()
-    for (let track = 0; track < ROOM_NAMED_TRACKS_MAX; track++)
-      await me.publishBinary(new Uint8Array([1]), { track: `t${track}` })
-    await expect(me.publishBinary(new Uint8Array([1]), { track: 'one-too-many' })).rejects.toThrow(
-      'at most 16 named tracks',
-    )
-    await me.publishBinary(new Uint8Array([2]), { track: 't0' })
-    await me.publishBinary(new Uint8Array([3]))
-  })
-  it('bounds the named tracks a subscriber can want, on the API and on the wire', async () => {
-    const room = (await Room.create('track-cap')) as ServerRoom
-    const member = await room.join()
-    const remote = (await room.getParticipant(member.id))!
-    const tracks = Array.from({ length: 17 }, (_, i) => `t${i}`)
-    for (const track of tracks.slice(0, 16)) remote.subscribeBinary(() => {}, { track })
-    expect(() => remote.subscribeBinary(() => {}, { track: tracks[16] })).toThrow('at most 16 tracks per participant')
-    remote.subscribeBinary(() => {}, { track: tracks[0] })
-    room.subscribeBinary(() => {})
-    for (const track of tracks.slice(0, 16)) room.subscribeBinary(() => {}, { track })
-    expect(() => room.subscribeBinary(() => {}, { track: tracks[16] })).toThrow('at most 16 tracks per participant')
-    const stub = register(room)
-    const subBinary = (wanted: string[]) => ({
-      __r: 'sub-binary',
-      everyMember: emptyTrackWants(),
-      members: { [member.id]: { all: false, tracks: wanted } },
-    })
-    expect(() => declare(stub, subBinary(tracks.slice(0, 16)))).not.toThrow()
-    expect(() => declare(stub, subBinary(tracks))).toThrow(ProtocolViolationError)
-  })
   it('treats a request the client library never sends, unparsable or misshapen, as a protocol violation', async () => {
     const stub = register((await Room.create('malformed-stub-request')) as ServerRoom)
     const holder = (await Room.join('malformed-stub-request')) as ServerLocalParticipant
@@ -2562,26 +2530,6 @@ describe('Room public behavior', () => {
     expect(toRoomFailure(error, report)).toEqual({ ok: false, err: error.message })
     expect(report).not.toHaveBeenCalled()
   })
-  it('announces a named track on the next publish after its first announcement failed', async () => {
-    const room = await Room.create('track-announce-retry')
-    const publisher = await room.join()
-    const observer = await Room.get('track-announce-retry')
-    const frames: number[] = []
-    observer.subscribeBinary((data) => frames.push(data[0]!))
-    await observer.getParticipants()
-    const commitLane = driver.commitLane.bind(driver)
-    let failed = false
-    vi.spyOn(driver, 'commitLane').mockImplementation(async (roomId, inc, lane, payload, options) => {
-      if (!failed && lane.kind === 'control' && decoder.decode(payload).includes('"__r":"track"')) {
-        failed = true
-        throw new Error('transient control-lane failure')
-      }
-      return commitLane(roomId, inc, lane, payload, options)
-    })
-    await expect(publisher.publishBinary(new Uint8Array([1]), { track: 'camera' })).rejects.toThrow()
-    await publisher.publishBinary(new Uint8Array([2]), { track: 'camera' })
-    await vi.waitFor(() => expect(frames).toContain(2))
-  })
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {
     await Room.create('guarded')
     const room = (await Room.get('guarded')) as ServerRoom
@@ -2739,7 +2687,7 @@ describe('Room public behavior', () => {
     await publisher.publishBinary(new Uint8Array([8]), { track: 'camera' })
     await vi.waitFor(() => expect({ texts, frames }).toEqual({ texts: ['state', 'live'], frames: [[7], [8]] }))
   })
-  it("replays a member's retained frames on each of its tracks to a want for that member, listing no lane", async () => {
+  it("replays a member's retained frames on each of its tracks to a want for that member, listing only that member's lanes", async () => {
     const authority = await Room.create('retained-member-want')
     const publisher = await authority.join()
     const other = await authority.join()
@@ -2751,7 +2699,7 @@ describe('Room public behavior', () => {
     const frames: number[][] = []
     ;(await observer.getParticipant(publisher.id))!.subscribeBinary((data) => void frames.push([...data]))
     await vi.waitFor(() => expect(frames.sort()).toEqual([[1], [2]]))
-    expect(listRetained).not.toHaveBeenCalled()
+    expect(listRetained.mock.calls.map(([, , of]) => of)).toEqual([{ member: publisher.id }])
   })
   it('drops a live frame older than a retained frame that reached the subscriber first', async () => {
     const authority = await Room.create('retained-before-older-live')
@@ -2932,7 +2880,7 @@ describe('Room public behavior', () => {
     await other.publishBinary(new Uint8Array([3]), { retain: true })
     const listRetained = vi.spyOn(driver, 'listRetained')
     await member.leave()
-    expect(listRetained).not.toHaveBeenCalled()
+    expect(listRetained.mock.calls.map(([, , of]) => of)).toEqual([{ member: member.id }])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([{ kind: 'binary', member: other.id, track: '' }])
   })
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
@@ -3051,29 +2999,12 @@ describe('Room public behavior', () => {
     await me.publishBinary(new Uint8Array([7]))
     await vi.waitFor(() => expect(frames).toEqual([7]))
   })
-  it("tells this instance's clients a member's new track whose echo arrives after it", async () => {
-    const room = (await Room.create('own-track-relay')) as ServerRoom
-    // The echo reaches this instance later, as over a networked backend.
-    const echo = holdLaneDelivery((lane) => lane.kind === 'control')
-    const member = await room.join()
-    const peer = attachPeer(register(room))
-    const frames: number[] = []
-    room.subscribeBinary((data) => frames.push(data[0]!))
-    await member.publishBinary(new Uint8Array([1]), { track: 'cam' })
-    await echo.release()
-    await member.publishBinary(new Uint8Array([2]), { track: 'cam' })
-    expect(relayed(peer).filter(({ __r }) => __r === 'track')).toEqual([
-      expect.objectContaining({ id: member.id, track: 'cam' }),
-    ])
-    // The all-track listener's lane carries the new track from its first frame.
-    await vi.waitFor(() => expect(frames).toEqual([1, 2]))
-  })
   it('gets an every-track subscriber on another instance the unretained first frame of a track started after it subscribed, and tells the publisher it is wanted', async () => {
     const room = await Room.create('first-frame-of-new-track')
     const publisher = await room.join()
     const demand: Array<[string | null, boolean]> = []
     publisher.onDemand((track, wanted) => demand.push([track, wanted]))
-    // The new track's announcement reaches the observer only later, as over a networked backend.
+    // Control events reach the observer only later, as over a networked backend: the new track needs none.
     const control = holdLaneDelivery((lane) => lane.kind === 'control')
     const observer = (await Room.get(room.id)) as ServerRoom
     const frames: string[] = []
@@ -3088,6 +3019,123 @@ describe('Room public behavior', () => {
     ])
     await control.release()
   })
+  it('gets a subscriber of one of 100 named tracks only that track', async () => {
+    const room = await Room.create('hundred-tracks')
+    const publisher = await room.join()
+    const frames: string[] = []
+    ;(await room.getParticipant(publisher.id))!.subscribeBinary(
+      (data, info) => frames.push(`${info.track}:${data[0]}`),
+      { track: 't73' },
+    )
+    for (const track of trackNames(100)) await publisher.publishBinary(new Uint8Array([1]), { track })
+    await publisher.publishBinary(new Uint8Array([2]), { track: 't73' })
+    await vi.waitFor(() => expect(frames).toEqual(['t73:1', 't73:2']))
+  })
+  it('gets an every-track subscriber on another instance one frame from each of 1,000 tracks, over one backend subscription', async () => {
+    const room = await Room.create('thousand-tracks')
+    const publisher = await room.join()
+    const observer = (await Room.get(room.id)) as ServerRoom
+    const subscribed = countBinarySubscriptions()
+    const frames: string[] = []
+    ;(await observer.getParticipant(publisher.id))!.subscribeBinary((_data, info) => frames.push(info.track!))
+    await subsOf(observer).binaryReady()
+    const tracks = trackNames(1_000)
+    for (const track of tracks) await publisher.publishBinary(new Uint8Array([1]), { track })
+    await vi.waitFor(() => expect(frames.length).toBe(1_000))
+    expect(frames).toEqual(tracks)
+    expect(subscribed).toEqual([{ kind: 'binary-all', member: publisher.id }])
+  })
+  it("lets a subscriber name 1,000 tracks of one member, receiving each track's frames in that track's order", async () => {
+    const room = await Room.create('thousand-named')
+    const publisher = await room.join()
+    const observer = (await Room.get(room.id)) as ServerRoom
+    const remote = (await observer.getParticipant(publisher.id))!
+    const received = trackNames(1_000).map((track) => {
+      const frames: number[] = []
+      remote.subscribeBinary((data) => frames.push(data[0]!), { track })
+      return { track, frames }
+    })
+    await subsOf(observer).binaryReady()
+    for (const round of [0, 1, 2])
+      for (const { track } of received) await publisher.publishBinary(new Uint8Array([round]), { track })
+    await vi.waitFor(() => expect(received.every(({ frames }) => frames.length === 3)).toBe(true))
+    expect(received.filter(({ frames }) => frames.join() !== '0,1,2')).toEqual([])
+  })
+  it('gets a room-wide subscriber of one track that track from each member publishing on 1,000, and no other', async () => {
+    const room = await Room.create('room-wide-track')
+    const a = await room.join()
+    const b = await room.join()
+    const observer = (await Room.get(room.id)) as ServerRoom
+    const frames: string[] = []
+    observer.subscribeBinary(
+      (data, info, from) => frames.push(`${from.id === a.id ? 'a' : 'b'}:${info.track}:${data[0]}`),
+      {
+        track: 't500',
+      },
+    )
+    await observer.getParticipants()
+    await subsOf(observer).binaryReady()
+    for (const track of trackNames(1_000))
+      for (const member of [a, b]) await member.publishBinary(new Uint8Array([1]), { track })
+    for (const member of [a, b]) await member.publishBinary(new Uint8Array([2]), { track: 't500' })
+    await vi.waitFor(() => expect([...frames].sort()).toEqual(['a:t500:1', 'a:t500:2', 'b:t500:1', 'b:t500:2']))
+  })
+  it('tells a publisher on 1,000 tracks that t900 is wanted while another instance receives every track, with no flap as it narrows to t900', async () => {
+    const room = await Room.create('demand-thousand')
+    const publisher = await room.join()
+    for (const track of trackNames(1_000)) await publisher.publishBinary(new Uint8Array([1]), { track })
+    const demand: boolean[] = []
+    publisher.onDemand((track, wanted) => {
+      if (track === 't900') demand.push(wanted)
+    })
+    const observer = (await Room.get(room.id)) as ServerRoom
+    const remote = (await observer.getParticipant(publisher.id))!
+    const offAll = remote.subscribeBinary(() => {})
+    await vi.waitFor(() => expect(demand).toEqual([true]))
+    const offNamed = remote.subscribeBinary(() => {}, { track: 't900' })
+    offAll()
+    const t900 = encodeLaneKey({ kind: 'binary', member: publisher.id, track: 't900' })
+    await vi.waitFor(() => expect(binaryLanes(observer)).toEqual([t900]))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(demand).toEqual([true])
+    offNamed()
+    await vi.waitFor(() => expect(demand).toEqual([true, false]))
+  })
+  it("replays a retained frame on one of a member's 1,000 tracks once to a late every-track subscriber, and drops it when the member leaves", async () => {
+    const room = await Room.create('retained-of-thousand')
+    const publisher = await room.join()
+    for (const track of trackNames(1_000))
+      await publisher.publishBinary(new Uint8Array([1]), { track, retain: track === 't700' })
+    const retained = () => [...memoryState.rooms.get(room.id)!.gens.values()].flatMap((gen) => [...gen.retained.keys()])
+    expect(retained()).toEqual([encodeLaneKey({ kind: 'binary', member: publisher.id, track: 't700' })])
+    const observer = await Room.get(room.id)
+    const frames: string[] = []
+    ;(await observer.getParticipant(publisher.id))!.subscribeBinary((data, info) =>
+      frames.push(`${info.track}:${data[0]}`),
+    )
+    await vi.waitFor(() => expect(frames).toEqual(['t700:1']))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(frames).toEqual(['t700:1'])
+    await publisher.leave()
+    await vi.waitFor(() => expect(retained()).toEqual([]))
+  })
+  it.each([1, 1_000, 100_000])(
+    'opens one backend subscription for an every-track subscriber of a member publishing on %i tracks',
+    async (count) => {
+      const room = await Room.create(`every-track-${count}`)
+      const publisher = await room.join()
+      for (const track of trackNames(count)) await publisher.publishBinary(new Uint8Array([1]), { track })
+      const observer = (await Room.get(room.id)) as ServerRoom
+      const subscribed = countBinarySubscriptions()
+      let frames = 0
+      ;(await observer.getParticipant(publisher.id))!.subscribeBinary(() => void frames++)
+      await subsOf(observer).binaryReady()
+      await publisher.publishBinary(new Uint8Array([2]), { track: `t${count - 1}` })
+      await vi.waitFor(() => expect(frames).toBe(1))
+      expect(subscribed).toEqual([{ kind: 'binary-all', member: publisher.id }])
+    },
+    60_000,
+  )
   // The server notices a drop at once (the socket closed) or only at its ping deadline (a silent drop).
   const dropNoticed = [0, 2 * CHANNEL_PING_INTERVAL_MS]
   it.each(dropNoticed)(
@@ -4018,28 +4066,23 @@ describe('client Room lifecycle', () => {
   })
 })
 describe('RoomState', () => {
-  it('records the events of members it does not know for a roster read, and keeps reconcile outcomes distinct', async () => {
+  it('records the events of members it does not know for a roster read, and narrates only what a roster changes', async () => {
     const state = newState({ roomId: 'unknown-member-epoch' })
     const id = crypto.randomUUID()
     const { events } = await state.recordingMembership(async () => {
-      state.applyTrack(id, 'screen')
       state.applyParticipantMeta(id, { step: 1 }, 1)
       state.applyLeave(id, { type: 'left' })
     })
-    expect(events).toEqual([
-      { track: { id, track: 'screen' } },
-      { meta: { id, meta: { step: 1 }, seq: 1 } },
-      { leave: id },
-    ])
+    expect(events).toEqual([{ meta: { id, meta: { step: 1 }, seq: 1 } }, { leave: id }])
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
     expect(state.reconcileRoster([member])).toBe(true)
     let changes = 0
     state.onChange(() => changes++)
-    const reconcile = (tracks: string[]) => state.reconcileRoster([{ ...member, metaSeq: 1, tracks }])
-    expect(reconcile(['screen'])).toBe(true)
+    const reconcile = () => state.reconcileRoster([{ ...member, metaSeq: 1 }])
+    expect(reconcile()).toBe(true)
     expect(changes).toBe(1)
-    expect(reconcile(['screen', 'camera'])).toBe(false)
-    expect(changes).toBe(2)
+    expect(reconcile()).toBe(false)
+    expect(changes).toBe(1)
   })
   it('reconciles every member to the final state and preserves semantic joins', () => {
     const alice = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0 }
@@ -4572,6 +4615,21 @@ function binaryLanes(room: ServerRoom): string[] {
     return encodeLaneKey({ kind: 'binary', member, track })
   })
   return [...[...subs._everyTrack.keys()].map(everyTrackLaneKey), ...named].sort()
+}
+function trackNames(count: number): string[] {
+  return Array.from({ length: count }, (_, i) => `t${i}`)
+}
+/** The binary lanes opened on the backend from now on. */
+function countBinarySubscriptions(): SubscribedLane[] {
+  const subscribed: SubscribedLane[] = []
+  mockLaneSubscription(
+    (lane) => lane.kind === 'binary' || lane.kind === 'binary-all',
+    (subscribeLane, roomId, inc, lane, receiver) => {
+      subscribed.push(lane)
+      return subscribeLane(roomId, inc, lane, receiver)
+    },
+  )
+  return subscribed
 }
 /** The member ids a stub's wants name, as it holds them and as the room's index does. */
 function wantsHeld(room: ServerRoom, stub: RoomStubChannel) {

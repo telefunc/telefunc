@@ -14,7 +14,6 @@ export {
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellCount, CellCounter, CellMutation, CellSelector } from '../../backend/room/contract.js'
-import { DEFAULT_TRACK } from '../binary.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import {
@@ -45,8 +44,7 @@ import {
 
 type CellPlan<T> = { value: T; mutations: CellMutation[]; counts?: CellCount[] }
 type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
-/** `tracks` are the named tracks the member's record listed: each is recorded before its first frame. */
-type PendingMemberCleanup = { cause: WireLeaveCause; hidden?: true; tracks?: string[] }
+type PendingMemberCleanup = { cause: WireLeaveCause; hidden?: true }
 /** A page's view of the room, renewed like a member record. */
 type ViewRecord = { seenAt: number }
 
@@ -197,7 +195,6 @@ async function removeMemberCells(
     const cleanup: PendingMemberCleanup = {
       cause: leaveCauseToWire(cause),
       ...(record.hidden ? { hidden: true } : {}),
-      ...(record.tracks?.length ? { tracks: record.tracks } : {}),
     }
     const config = record.hidden ? null : room.hold
     return {
@@ -272,7 +269,6 @@ function memberSnapshot(id: string, record: RoomMemberRecord): MemberSnapshot {
     joinedAt: record.joinedAt,
     metaSeq: record.metaSeq,
     identity: record.identity ?? null,
-    ...(record.tracks === undefined ? {} : { tracks: record.tracks }),
     ...(record.hidden ? { hidden: true } : {}),
   }
 }
@@ -291,10 +287,10 @@ async function reapAndResolveIdentity(room: RoomIncarnation, identity: string): 
   return members
 }
 
-async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string, tracks: string[]): Promise<void> {
+async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
   const backend = getRoomBackend()
-  for (const track of [DEFAULT_TRACK, ...tracks])
-    await backend.deleteRetained(roomId, inc, { kind: 'binary', member: memberId, track })
+  for (const lane of await backend.listRetained(roomId, inc, { member: memberId }))
+    await backend.deleteRetained(roomId, inc, lane)
   const text = await backend.readRetained(roomId, inc, SEMANTIC_LANE)
   if (text !== null && decodeRoomRecord<RoomDataEnvelope>(text.payload).from === memberId)
     await backend.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: text.seq })
@@ -309,7 +305,7 @@ async function finishPendingMemberCleanup(roomId: string, inc: string, memberId:
 async function completeCleanup(roomId: string, inc: string, memberId: string, raw: Uint8Array): Promise<void> {
   const key = cleanupCellKey(memberId)
   const cleanup = decodeRoomRecord<PendingMemberCleanup>(raw)
-  await dropRetainedOwnedBy(roomId, inc, memberId, cleanup.tracks ?? [])
+  await dropRetainedOwnedBy(roomId, inc, memberId)
   await publishCtrl(roomId, inc, {
     __r: 'leave',
     id: memberId,

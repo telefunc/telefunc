@@ -49,8 +49,6 @@ type RoomMemberRecord = {
   /** Issued by the member's single owner; orders `p-meta` events. */
   metaSeq: number
   identity?: string
-  /** Appended before each named track's first frame, so a late observer can subscribe a track it can't name. */
-  tracks?: string[]
   /** Off-presence (`join({ hidden: true })`): routable, but not in count, roster or presence events. */
   hidden?: boolean
 }
@@ -61,7 +59,6 @@ type MemberSnapshot = {
   joinedAt: number
   metaSeq: number
   identity?: string | null
-  tracks?: string[]
   hidden?: boolean
 }
 /** Scalars only: the roster streams once the stub's peer attaches, so serializing a room is O(1) in members. */
@@ -97,8 +94,6 @@ type RoomCtrlEnvelope =
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number; hidden?: boolean }
   | { __r: 'update'; meta: RoomMeta; seq: number }
-  // Announced before a named track's first frame, so all-track subscribers open its lane.
-  | { __r: 'track'; id: string; track: string; hidden?: boolean }
   // Demand gossip between instances, never relayed to clients; a `null` track is every track the member publishes.
   | { __r: 'want'; member: string; track: string | null; instance: string; on: boolean }
   | { __r: 'closed' }
