@@ -2584,6 +2584,17 @@ describe('Room public behavior', () => {
     declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [a.id]: null } })
     expect(lanes()).toEqual([`${b.id}\0`])
   })
+  it("reopens a member's binary lane wanted again after its want stopped", async () => {
+    const room = (await Room.create('declared-rewant')) as ServerRoom
+    const member = await room.join()
+    const stub = register(room)
+    const lanes: number[] = []
+    for (const wants of [{ all: true, tracks: [] }, null, { all: true, tracks: [] }]) {
+      declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: wants } })
+      lanes.push(subsOf(room)._binary.size)
+    }
+    expect(lanes).toEqual([1, 0, 1])
+  })
   it('opens no backend lane for a declared want naming no member', async () => {
     const authority = await Room.create('declared-strangers')
     await authority.join()
