@@ -221,7 +221,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     const members = new Map<string, TrackWants | undefined>()
     for (const [id, next] of Object.entries(changes)) {
       const prev = wants.members[id]
-      if (sameTrackWants(prev, next ?? undefined)) continue
+      if (sameTrackWants(prev, next ?? undefined) || (next !== null && !this._room._mayWant(id))) continue
       members.set(id, prev)
       if (next === null) delete wants.members[id]
       else wants.members[id] = next
@@ -234,7 +234,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _declareTextWants(changes: Record<string, boolean>, announce: boolean): void {
     const members = new Map<string, boolean>()
     for (const [id, wanted] of Object.entries(changes)) {
-      if (wanted === this._textMemberWants.has(id)) continue
+      if (wanted === this._textMemberWants.has(id) || (wanted && !this._room._mayWant(id))) continue
       members.set(id, !wanted)
       if (wanted) this._textMemberWants.add(id)
       else this._textMemberWants.delete(id)
@@ -282,6 +282,18 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   // Wants, as the room's subscription planner reads them
+
+  /** The members its wants name. */
+  _wantedMembers(): string[] {
+    return [...new Set([...this._textMemberWants, ...Object.keys(this._binary.members)])]
+  }
+
+  /** Drops its wants naming `id`; returns whether it held any. */
+  _forgetWantsOf(id: string): boolean {
+    const held = this._textMemberWants.delete(id) || id in this._binary.members
+    delete this._binary.members[id]
+    return held
+  }
 
   get _binaryWants(): BinaryWants {
     return this._binary

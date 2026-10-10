@@ -2612,6 +2612,43 @@ describe('Room public behavior', () => {
     await observer.getParticipants()
     expect(subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary')).toEqual([])
   })
+  it('holds no want naming an id that is no member, however many a client declares', async () => {
+    const room = (await Room.create('declared-flood')) as ServerRoom
+    const member = await room.join()
+    const stub = register(room)
+    for (let i = 0; i < 100; i++) {
+      const ids = Array.from({ length: 1000 }, () => crypto.randomUUID())
+      const binary = Object.fromEntries(ids.map((id) => [id, { all: true, tracks: [] }]))
+      declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: binary })
+      declare(stub, { __r: 'sub-text', announce: false, members: Object.fromEntries(ids.map((id) => [id, true])) })
+    }
+    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: { all: true, tracks: [] } } })
+    declare(stub, { __r: 'sub-text', announce: false, members: { [member.id]: true } })
+    const only = [member.id]
+    expect(wantsHeld(room, stub)).toEqual({ text: only, binary: only, indexedText: only, indexedBinary: only })
+  })
+  it('drops the wants naming a member as it leaves', async () => {
+    const room = (await Room.create('declared-leave')) as ServerRoom
+    const member = await room.join()
+    const stub = register(room)
+    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: { all: true, tracks: [] } } })
+    declare(stub, { __r: 'sub-text', announce: false, members: { [member.id]: true } })
+    await member.leave()
+    expect(wantsHeld(room, stub)).toEqual({ text: [], binary: [], indexedText: [], indexedBinary: [] })
+  })
+  it('drops a want declared before the roster once the roster names no such member', async () => {
+    const authority = await Room.create('declared-before-roster')
+    const member = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const stub = register(observer)
+    const stranger = crypto.randomUUID()
+    const wants = { all: true, tracks: [] }
+    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: wants, [stranger]: wants } })
+    declare(stub, { __r: 'sub-text', announce: false, members: { [member.id]: true, [stranger]: true } })
+    await observer.getParticipants()
+    const only = [member.id]
+    expect(wantsHeld(observer, stub)).toEqual({ text: only, binary: only, indexedText: only, indexedBinary: only })
+  })
   it('opens an exact-member binary lane once the roster names the member', async () => {
     const authority = await Room.create('exact-binary-after-roster')
     const publisher = await authority.join()
@@ -4194,6 +4231,19 @@ function subsOf(room: Room | ServerRoom): {
   reconcileAuthority(): Promise<void>
 } {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+}
+/** The member ids a stub's wants name, as it holds them and as the room's index does. */
+function wantsHeld(room: ServerRoom, stub: RoomStubChannel) {
+  const held = stub as unknown as { _textMemberWants: Set<string>; _binary: { members: Record<string, unknown> } }
+  const index = (
+    subsOf(room) as unknown as { _wants: { _textMembers: Map<string, unknown>; _members: Map<string, unknown> } }
+  )._wants
+  return {
+    text: [...held._textMemberWants],
+    binary: Object.keys(held._binary.members),
+    indexedText: [...index._textMembers.keys()],
+    indexedBinary: [...index._members.keys()],
+  }
 }
 function stubIndexOf(room: ServerRoom): Map<string, RoomStubChannel> {
   return (room as unknown as { _stubOf: Map<string, RoomStubChannel> })._stubOf

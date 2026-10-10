@@ -173,7 +173,7 @@ class RoomSubscriptions {
     this._syncHeartbeat()
   }
 
-  /** Declared wants filter the room's members; a want naming anyone else takes effect on their `join`. */
+  /** Declared wants filter the room's members; one declared before the roster takes effect once its member is known. */
   private _syncMemberBinary(member: string): void {
     const host = this._host
     const state = host._state
