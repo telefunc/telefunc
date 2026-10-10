@@ -551,36 +551,41 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     try {
       this._flow.onReceived(bytes)
-      const data = parsePeerText(text) as ChannelData<ClientToServer>
-      const validateData = this._validators.get('data')
-      // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
-      // await a response, so there's no `ShieldValidationError` to surface — listeners simply
-      // never see the bad value. Ack-bearing sends go through `_dispatchAckReq` and *do*
-      // reject the sender's promise via the `shield-error` wire status.
-      // Dropping still consumes: window refreshes are consumption-driven, so skipping
-      // `onConsumed` would leak receive credit and eventually stall the client's sends.
-      if (validateData && validateData(data) !== true) {
-        this._flow.onConsumed(bytes)
-        return
-      }
-      const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners.list()) {
-        try {
-          const result = cb(data)
-          if (isPromise(result)) {
-            pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
-          }
-        } catch (err) {
-          if (this._handleCallbackError(err)) return
-        }
-      }
-      if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._flow.onConsumed(bytes))
-      } else {
-        this._flow.onConsumed(bytes)
-      }
+      this._onPeerData(parsePeerText(text), bytes)
     } finally {
       this._flow._recordSelfTime(performance.now() - t0)
+    }
+  }
+
+  /** A parsed no-ack message: handling it releases its receive credit (`_flow.onConsumed`) unless the channel aborted. */
+  protected _onPeerData(value: unknown, bytes: number): void {
+    const data = value as ChannelData<ClientToServer>
+    const validateData = this._validators.get('data')
+    // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
+    // await a response, so there's no `ShieldValidationError` to surface — listeners simply
+    // never see the bad value. Ack-bearing sends go through `_dispatchAckReq` and *do*
+    // reject the sender's promise via the `shield-error` wire status.
+    // Dropping still consumes: window refreshes are consumption-driven, so skipping
+    // `onConsumed` would leak receive credit and eventually stall the client's sends.
+    if (validateData && validateData(data) !== true) {
+      this._flow.onConsumed(bytes)
+      return
+    }
+    const pending: Promise<unknown>[] = []
+    for (const cb of this._listeners.list()) {
+      try {
+        const result = cb(data)
+        if (isPromise(result)) {
+          pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
+        }
+      } catch (err) {
+        if (this._handleCallbackError(err)) return
+      }
+    }
+    if (pending.length > 0) {
+      Promise.all(pending).finally(() => this._flow.onConsumed(bytes))
+    } else {
+      this._flow.onConsumed(bytes)
     }
   }
 

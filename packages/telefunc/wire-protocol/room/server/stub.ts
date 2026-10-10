@@ -148,20 +148,14 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   // Client requests
 
-  override _onPeerMessage(text: string, bytes: number): void {
-    const started = performance.now()
+  protected override _onPeerData(value: unknown, bytes: number): void {
+    const declaration = decodeRoomDeclaration(value)
     try {
-      this._flow.onReceived(bytes)
-      const declaration = decodeRoomDeclaration(parsePeerText(text))
-      try {
-        this._applyDeclaration(declaration)
-      } catch (error) {
-        this._handleCallbackError(error)
-      }
-      this._flow.onConsumed(bytes)
-    } finally {
-      this._flow._recordSelfTime(performance.now() - started)
+      this._applyDeclaration(declaration)
+    } catch (error) {
+      this._handleCallbackError(error)
     }
+    this._flow.onConsumed(bytes)
   }
 
   override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
