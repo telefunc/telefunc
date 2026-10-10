@@ -655,26 +655,12 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** @internal Every client gets a roster that corrected a drift; otherwise only the clients still owed their first. */
   _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): void {
-    const first = !this._state.rosterKnown
     const drifted = this._state.reconcileRoster(members, departing)
-    if (first) this._forgetWantsOfStrangers()
     const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
     this._rosterOwed.clear()
     if (recipients.length === 0) return
     const snapshot = this._state.snapshotMembers()
     for (const stub of recipients) stub._relayRoster(snapshot)
-  }
-  /** The first roster settles the wants declared before it. */
-  private _forgetWantsOfStrangers(): void {
-    for (const stub of this._stubs) {
-      const strangers = stub._wantedMembers().filter((id) => !this._state.hasMember(id))
-      for (const id of strangers) stub._forgetWantsOf(id)
-      if (strangers.length > 0) this._subs.holderChanged(stub, false, strangers)
-    }
-  }
-  /** @internal A want names a member of this view, or any id before its first roster, which then settles it. */
-  _mayWant(id: string): boolean {
-    return !this._state.rosterKnown || this._state.hasMember(id)
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {

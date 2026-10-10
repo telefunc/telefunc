@@ -2636,28 +2636,39 @@ describe('Room public behavior', () => {
     await member.leave()
     expect(wantsHeld(room, stub)).toEqual({ text: [], binary: [], indexedText: [], indexedBinary: [] })
   })
-  it('drops a want declared before the roster once the roster names no such member', async () => {
+  it('holds no want naming an id the view does not hold while every roster read fails', async () => {
     const authority = await Room.create('declared-before-roster')
-    const member = await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
+    const readCells = driver.readCells.bind(driver)
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      if (roomId === authority.id && 'prefix' in selector) throw new Error('backend roster read failed')
+      return readCells(roomId, inc, selector)
+    })
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const member = await observer.join()
     const stub = register(observer)
-    const stranger = crypto.randomUUID()
-    const wants = { all: true, tracks: [] }
-    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: wants, [stranger]: wants } })
-    declare(stub, { __r: 'sub-text', announce: false, members: { [member.id]: true, [stranger]: true } })
-    await observer.getParticipants()
+    const peer = attachPeer(stub)
+    await vi.waitFor(() => expect(relayed(peer).map(({ __r }) => __r)).toContain('roster-error'))
+    for (let i = 0; i < 100; i++) {
+      const ids = Array.from({ length: 1000 }, () => crypto.randomUUID())
+      const binary = Object.fromEntries(ids.map((id) => [id, { all: true, tracks: [] }]))
+      declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: binary })
+      declare(stub, { __r: 'sub-text', announce: false, members: Object.fromEntries(ids.map((id) => [id, true])) })
+    }
+    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: { all: true, tracks: [] } } })
+    declare(stub, { __r: 'sub-text', announce: false, members: { [member.id]: true } })
+    expect(observer._state.rosterKnown).toBe(false)
     const only = [member.id]
     expect(wantsHeld(observer, stub)).toEqual({ text: only, binary: only, indexedText: only, indexedBinary: only })
   })
-  it('opens an exact-member binary lane once the roster names the member', async () => {
-    const authority = await Room.create('exact-binary-after-roster')
-    const publisher = await authority.join()
+  it('opens an exact-member binary lane for a member the view holds before its roster loads', async () => {
+    const authority = await Room.create('exact-binary-before-roster')
     const observer = (await Room.get(authority.id)) as ServerRoom
+    const publisher = await observer.join()
     const stub = register(observer)
     const roster = delayRosterRead(authority.id)
     const subscribeLane = vi.spyOn(getRoomBackend(), 'subscribeLane')
     const binaryLanes = () => subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary').length
-    expect(observer._state.rosterKnown).toBe(false)
     try {
       declare(stub, {
         __r: 'sub-binary',
@@ -2665,9 +2676,8 @@ describe('Room public behavior', () => {
         members: { [publisher.id]: { all: false, tracks: ['screen'] } },
       })
       await roster.started
-      expect(binaryLanes()).toBe(0)
-      roster.release()
-      await vi.waitFor(() => expect(binaryLanes()).toBe(1))
+      expect(observer._state.rosterKnown).toBe(false)
+      expect(binaryLanes()).toBe(1)
       await subsOf(observer).binaryReady()
       await publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
       const frame = attachPeer(stub)
