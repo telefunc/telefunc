@@ -97,3 +97,12 @@ test("closes a room nothing holds as Room.close() does, and one whose server is 
     alarmAfterLapse: null,
   })
 })
+
+test('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
+  expect(await probe('/meta-order')).toEqual([
+    ['b', 'a', 'c'],
+    ['a', 'c', 'aa', 'b'],
+    ['z', 'y', 'x'],
+    ['z', 'y', 'x', 'w'],
+  ])
+})

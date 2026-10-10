@@ -139,6 +139,24 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
       await Room.create(roomId, { emptyTimeout })
     })
   }
+  // A server writes a room's meta, and reads its keys after each step.
+  metaKeyOrder(roomId: string): Promise<string[][]> {
+    return this.#run(async () => {
+      const room = await Room.create(roomId, { meta: { b: 1, a: 1 } })
+      const seen: string[][] = []
+      const see = async () => seen.push(Object.keys((await Room.get(room.id)).meta))
+      await Room.setAttributes(room.id, { c: 1, a: 2 })
+      await see()
+      await Room.setAttributes(room.id, { aa: 1, b: undefined, a: 3 })
+      await Room.setAttributes(room.id, { b: 2 })
+      await see()
+      await Room.setMeta(room.id, { z: 1, y: 1, x: 1 })
+      await see()
+      await Room.setAttributes(room.id, { y: 2, w: 1 })
+      await see()
+      return seen
+    })
+  }
   // The server is gone, with the timers it set.
   die(): void {
     this.ctx.abort()
@@ -206,7 +224,7 @@ type BroadcastSession = RpcMethods<
   Pick<TelefuncProbeDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
 type CallbackSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'callWithCallback' | 'leave'>>
-type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'die'>>
+type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'metaKeyOrder' | 'die'>>
 type TelefuncAuthority = RpcMethods<Pick<TelefuncProbeDurableObject, 'readHead' | 'scheduledAlarm'>>
 type Env = Cloudflare.Env
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
@@ -220,6 +238,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/refused-first-write': refusedFirstWrite,
   '/callback-timers': callbackTimers,
   '/auto-close': autoClose,
+  '/meta-order': metaKeyOrder,
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -407,6 +426,10 @@ async function autoClose(env: Env, suffix: string) {
     afterLapse: await gone.state(),
     alarmAfterLapse: await gone.authority.scheduledAlarm(),
   }
+}
+async function metaKeyOrder(env: Env, suffix: string) {
+  const server = env.TELEFUNC.get(env.TELEFUNC.idFromName(`meta-order-server-${suffix}`)) as unknown as RoomServer
+  return await server.metaKeyOrder(`meta-order-${suffix}`)
 }
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')

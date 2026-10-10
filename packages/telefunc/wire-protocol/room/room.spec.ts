@@ -1514,6 +1514,43 @@ describe('Room public behavior', () => {
     expect(metas).toContainEqual(stored)
     await vi.waitFor(() => expect(observer.meta).toEqual(stored))
   })
+  it('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
+    const room = await Room.create('meta-order', { meta: { b: 1, a: 1 } })
+    const seen: string[][] = []
+    const see = async () => seen.push(Object.keys((await Room.get(room.id)).meta))
+    await Room.setAttributes(room.id, { c: 1, a: 2 })
+    await see()
+    await Room.setAttributes(room.id, { aa: 1, b: undefined, a: 3 })
+    await Room.setAttributes(room.id, { b: 2 })
+    await see()
+    await Room.setMeta(room.id, { z: 1, y: 1, x: 1 })
+    await see()
+    await Room.setAttributes(room.id, { y: 2, w: 1 })
+    await see()
+    expect(seen).toEqual([
+      ['b', 'a', 'c'],
+      ['a', 'c', 'aa', 'b'],
+      ['z', 'y', 'x'],
+      ['z', 'y', 'x', 'w'],
+    ])
+  })
+  it('lists the keys concurrent Room.setAttributes() calls add in one order, whichever call commits first', async () => {
+    yieldAfterEachReadAndCountWrites()
+    const orders: string[][] = []
+    for (const [id, calls] of [
+      ['meta-ties-zy', [{ z: 1 }, { y: 1 }]],
+      ['meta-ties-yz', [{ y: 1 }, { z: 1 }]],
+    ] as const) {
+      await Room.create(id, { meta: { topic: 'start' } })
+      await Room.setAttributes(id, { first: 1 })
+      await Promise.all(calls.map((attrs) => Room.setAttributes(id, attrs)))
+      orders.push(Object.keys((await Room.get(id)).meta))
+    }
+    expect(orders).toEqual([
+      ['topic', 'first', 'y', 'z'],
+      ['topic', 'first', 'y', 'z'],
+    ])
+  })
   it('takes meta as it was at the call, nested values included', async () => {
     const created = { topic: { name: 'a' } }
     const creating = Room.create('nested-meta', { meta: created })

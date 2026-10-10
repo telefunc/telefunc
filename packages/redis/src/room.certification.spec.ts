@@ -129,6 +129,29 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(sizes).toEqual([...sizes].sort((a, b) => a - b))
     expect(await Room.getParticipants(room.id)).toHaveLength(1_000)
   })
+  it('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
+    installRedis(ownClient(connect()), { prefix: uniquePrefix('meta-order') })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('meta-order', { meta: { b: 1, a: 1 } })
+    const seen: string[][] = []
+    const see = async () => seen.push(Object.keys((await Room.get(room.id)).meta))
+    await Room.setAttributes(room.id, { c: 1, a: 2 })
+    await see()
+    await Room.setAttributes(room.id, { aa: 1, b: undefined, a: 3 })
+    await Room.setAttributes(room.id, { b: 2 })
+    await see()
+    await Room.setMeta(room.id, { z: 1, y: 1, x: 1 })
+    await see()
+    await Room.setAttributes(room.id, { y: 2, w: 1 })
+    await see()
+    expect(seen).toEqual([
+      ['b', 'a', 'c'],
+      ['a', 'c', 'aa', 'b'],
+      ['z', 'y', 'x'],
+      ['z', 'y', 'x', 'w'],
+    ])
+  })
+
   it("counts a member who joins before the new room's first cell write, closing it only after they leave", async () => {
     installRedis(ownClient(connect()), { prefix: uniquePrefix('join-before-hold') })
     onTestFinished(() => disposeBackend())
