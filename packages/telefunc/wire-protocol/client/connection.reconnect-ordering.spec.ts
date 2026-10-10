@@ -12,7 +12,7 @@
 // faithfully mirroring server/sse.ts runStreamResponse + server/mux.ts:313 (RECONCILED.lastSeq is
 // captured from _lastClientSeq at reconcile time, before the initial-batch data frames dispatch).
 
-import { describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
@@ -21,8 +21,6 @@ import { ServerChannel } from '../server/channel.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import { decodeU32, concat } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
-
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 function createChannel(id = crypto.randomUUID()) {
   return {
@@ -197,31 +195,39 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   })
 
   // 1) First connect + reconcile.
-  await delay(120)
+  await vi.advanceTimersByTimeAsync(120)
   expect(wire).toBe(1)
 
   // 2) Send seq 1 — goes onto wire 1's streamRequest (delivered, or "lost" in flight).
   conn.send(channel as never, stringify(1))
-  await delay(40)
+  await vi.advanceTimersByTimeAsync(40)
   expect(upstreamSeqsByPost[1]).toContain(1) // client always emits seq 1 on wire 1
 
   // 3) Sever wire 1 → client reconnects. From here upstream is delivered to the server.
   dropUpstream = false
   downstream!.close()
-  await delay(20)
+  await vi.advanceTimersByTimeAsync(20)
 
   // 4) Send seq 2 while reconnecting → buffered, picked up by the reconnect.
   conn.send(channel as never, stringify(2))
 
   // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) + settle.
-  await delay(900)
+  await vi.advanceTimersByTimeAsync(900)
   expect(wire).toBe(2)
-  await delay(50)
+  await vi.advanceTimersByTimeAsync(50)
 
   return { received, wire2Upstream: upstreamSeqsByPost[2] ?? [] }
 }
 
 describe('SSE reconnect preserves client→server seq order (exactly-once)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   test('an earlier send that survived the wire, then a buffered send → both delivered, in order', async () => {
     const { received } = await runScenario(/* loseSeq1 */ false)
     expect(received).toEqual([1, 2])
