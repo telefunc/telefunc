@@ -30,13 +30,13 @@ export default {
 }
 ```
 
+{/* spellcheck-ignore:on */}
 ```jsonc
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later: channels need MessageChannel
   // Required: Telefunc finds a subscription's session through AsyncLocalStorage (`nodejs_compat` works too).
   // enable_request_signal lets context.signal see a client disconnect.
-  // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
@@ -51,6 +51,7 @@ export default {
   ]
 }
 ```
+{/* spellcheck-ignore:off */}
 
 > Fundamentally, channels are stateful: the server holds live state for each open channel. Cloudflare Workers, however, are stateless and ephemeral — any request can be served by any worker, and nothing is remembered between requests. The state therefore needs to live somewhere else — Durable Objects and KV are Cloudflare's primitives for exactly that:
 >

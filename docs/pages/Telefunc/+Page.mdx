@@ -169,10 +169,10 @@ export default {
 
 Add the AsyncLocalStorage flag, and the Durable Object and KV bindings, to your `wrangler.jsonc`:
 
+{/* spellcheck-ignore:on */}
 ```jsonc
 {
   // Required: Telefunc finds a subscription's session through AsyncLocalStorage (`nodejs_compat` works too).
-  // spellcheck-ignore  nodejs_als is Cloudflare's AsyncLocalStorage compatibility flag
   "compatibility_flags": ["nodejs_als"],
   "durable_objects": {
     "bindings": [
@@ -187,6 +187,7 @@ Add the AsyncLocalStorage flag, and the Durable Object and KV bindings, to your 
   ]
 }
 ```
+{/* spellcheck-ignore:off */}
 
 > See <Link href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
 
