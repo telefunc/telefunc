@@ -58,6 +58,7 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId, RoomSubscriptionSource } from '../backend/room/contract.js'
+import { encodeLaneKey, everyTrackLaneKey } from '../backend/room/lane-key.js'
 import type {
   BackendReceiver,
   BackendSubscription,
@@ -831,13 +832,32 @@ describe('Room public behavior', () => {
     expect(flood.at(-1)!.value).toBeInstanceOf(ChannelOverflowError)
     release1()
     const release2 = delayDriverLane((lane) => lane.kind === 'binary')
-    room.subscribeBinary(() => {})
+    room.subscribeBinary(() => {}, { track: 'camera' })
     const pastBytes = captureOutcome(
-      member.publishBinary(new Uint8Array(getServerConfig().channel.bufferLimitBinary + 1)),
+      member.publishBinary(new Uint8Array(getServerConfig().channel.bufferLimitBinary + 1), { track: 'camera' }),
     )
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(pastBytes.value).toBeInstanceOf(ChannelOverflowError)
     release2()
+  })
+  it("holds a member's binary publishes behind this instance's establishing every-track lane, refusing one past bufferLimitBinary", async () => {
+    const room = (await Room.create('establishing-every-track')) as ServerRoom
+    const member = await room.join()
+    const received: string[] = []
+    const release = delayDriverLane((lane) => lane.kind === 'binary-all')
+    room.subscribeBinary((data, info) => received.push(`${info.track}:${data[0]}`))
+    const held = [
+      member.publishBinary(new Uint8Array([1]), { track: 'camera' }),
+      member.publishBinary(new Uint8Array([2])),
+    ]
+    const pastBytes = captureOutcome(
+      member.publishBinary(new Uint8Array(getServerConfig().channel.bufferLimitBinary), { track: 'screen' }),
+    )
+    await vi.waitFor(() => expect(pastBytes.value).toBeInstanceOf(ChannelOverflowError))
+    release()
+    await Promise.all(held)
+    // Each track is its own order.
+    await vi.waitFor(() => expect([...received].sort()).toEqual(['camera:1', 'null:2']))
   })
   it('reads authority while the control subscription is establishing', async () => {
     const authority = await Room.create('establishing-roster')
@@ -2279,7 +2299,7 @@ describe('Room public behavior', () => {
     expect(demand.at(-1)).toEqual([null, false])
     declare(b, { __r: 'sub-binary', ...EVERY_TRACK }) // a closed stub's late declaration
     await subsOf(room).binaryReady()
-    expect(subsOf(room)._binary.size).toBe(0)
+    expect(binaryLanes(room)).toEqual([])
   })
   it("keeps a member's lanes while one of its listeners remains, and indexes only that member per listener change", async () => {
     const room = (await Room.create('counted-member-listeners')) as ServerRoom
@@ -2301,12 +2321,12 @@ describe('Room public behavior', () => {
     ])
     const lanes = () => ({
       text: subsOf(room)._semantic.wanted,
-      binary: [...subsOf(room)._binary.keys()].filter((key) => key.startsWith(me.id)),
+      binary: binaryLanes(room).filter((key) => key.includes(me.id)),
     })
-    expect(lanes()).toEqual({ text: true, binary: [`${me.id}\0screen`] })
+    expect(lanes()).toEqual({ text: true, binary: [`binary:${me.id}:screen`] })
     text[0]!()
     screen[0]!()
-    expect(lanes()).toEqual({ text: true, binary: [`${me.id}\0screen`] })
+    expect(lanes()).toEqual({ text: true, binary: [`binary:${me.id}:screen`] })
     text[1]!()
     screen[1]!()
     expect(lanes()).toEqual({ text: false, binary: [] })
@@ -2314,7 +2334,7 @@ describe('Room public behavior', () => {
   it('waits for a binary lane that is still establishing before it reports binary readiness', async () => {
     const room = (await Room.create('binary-ready-establishing')) as ServerRoom
     await room.join()
-    const binary = delayLaneSubscription((lane) => lane.kind === 'binary')
+    const binary = delayLaneSubscription((lane) => lane.kind === 'binary-all')
     room.subscribeBinary(() => {})
     await binary.started
     let ready = false
@@ -2333,9 +2353,9 @@ describe('Room public behavior', () => {
     const me = await room.join()
     declare(register(room), { __r: 'sub-binary', ...EVERY_TRACK })
     await subsOf(room).binaryReady()
-    expect(subsOf(room)._binary.size).toBe(1)
+    expect(binaryLanes(room)).toEqual([`binary-all:${me.id}`])
     await me.leave()
-    expect(subsOf(room)._binary.size).toBe(0)
+    expect(binaryLanes(room)).toEqual([])
   })
   it("plans a selfDelivery: false member's lane from the holders that get its frames back", async () => {
     const room = (await Room.create('incremental-binary-suppressed')) as ServerRoom
@@ -2366,7 +2386,7 @@ describe('Room public behavior', () => {
     const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
     declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await subsOf(room).binaryReady()
-    expect(subsOf(room)._binary.size).toBe(0)
+    expect(binaryLanes(room)).toEqual([])
     declare(register(room), { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
   })
@@ -2384,7 +2404,7 @@ describe('Room public behavior', () => {
     declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
     roomParticipantReplacer.replace(me, context)
-    expect(subsOf(room)._binary.size).toBe(0)
+    expect(binaryLanes(room)).toEqual([])
     await vi.waitFor(() =>
       expect(demand).toEqual([
         [null, true],
@@ -2799,12 +2819,11 @@ describe('Room public behavior', () => {
     const a = await room.join()
     const b = await room.join()
     const stub = register(room)
-    const lanes = () => [...subsOf(room)._binary.keys()].sort()
     declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [a.id]: { all: true, tracks: [] } } })
     declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [b.id]: { all: true, tracks: [] } } })
-    expect(lanes()).toEqual([`${a.id}\0`, `${b.id}\0`].sort())
+    expect(binaryLanes(room)).toEqual([`binary-all:${a.id}`, `binary-all:${b.id}`].sort())
     declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [a.id]: null } })
-    expect(lanes()).toEqual([`${b.id}\0`])
+    expect(binaryLanes(room)).toEqual([`binary-all:${b.id}`])
   })
   it("reopens a member's binary lane wanted again after its want stopped", async () => {
     const room = (await Room.create('declared-rewant')) as ServerRoom
@@ -2813,7 +2832,7 @@ describe('Room public behavior', () => {
     const lanes: number[] = []
     for (const wants of [{ all: true, tracks: [] }, null, { all: true, tracks: [] }]) {
       declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: { [member.id]: wants } })
-      lanes.push(subsOf(room)._binary.size)
+      lanes.push(binaryLanes(room).length)
     }
     expect(lanes).toEqual([1, 0, 1])
   })
@@ -3046,8 +3065,28 @@ describe('Room public behavior', () => {
     expect(relayed(peer).filter(({ __r }) => __r === 'track')).toEqual([
       expect.objectContaining({ id: member.id, track: 'cam' }),
     ])
-    // The all-track listener here subscribes the new track's lane before its first frame.
+    // The all-track listener's lane carries the new track from its first frame.
     await vi.waitFor(() => expect(frames).toEqual([1, 2]))
+  })
+  it('gets an every-track subscriber on another instance the unretained first frame of a track started after it subscribed, and tells the publisher it is wanted', async () => {
+    const room = await Room.create('first-frame-of-new-track')
+    const publisher = await room.join()
+    const demand: Array<[string | null, boolean]> = []
+    publisher.onDemand((track, wanted) => demand.push([track, wanted]))
+    // The new track's announcement reaches the observer only later, as over a networked backend.
+    const control = holdLaneDelivery((lane) => lane.kind === 'control')
+    const observer = (await Room.get(room.id)) as ServerRoom
+    const frames: string[] = []
+    observer.subscribeBinary((data, info) => frames.push(`${info.track}:${data[0]}`))
+    await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
+    await subsOf(observer).binaryReady()
+    await publisher.publishBinary(new Uint8Array([1]), { track: 'screen' })
+    await vi.waitFor(() => expect(frames).toEqual(['screen:1']))
+    expect(demand).toEqual([
+      [null, true],
+      ['screen', true],
+    ])
+    await control.release()
   })
   // The server notices a drop at once (the socket closed) or only at its ping deadline (a silent drop).
   const dropNoticed = [0, 2 * CHANNEL_PING_INTERVAL_MS]
@@ -4514,6 +4553,7 @@ function subsOf(room: Room | ServerRoom): {
   _control: LaneSubscription
   _semantic: LaneSubscription
   _binary: Map<string, LaneSubscription>
+  _everyTrack: Map<string, LaneSubscription>
   _inbox: Map<string, LaneSubscription>
   memberOwned(member: string): void
   _refreshMembers(): Promise<void>
@@ -4523,6 +4563,15 @@ function subsOf(room: Room | ServerRoom): {
   reconcileAuthority(): Promise<void>
 } {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+}
+/** The binary lanes a room subscribes, by their backend keys. */
+function binaryLanes(room: ServerRoom): string[] {
+  const subs = subsOf(room)
+  const named = [...subs._binary.keys()].map((key) => {
+    const [member, track] = key.split('\0') as [string, string]
+    return encodeLaneKey({ kind: 'binary', member, track })
+  })
+  return [...[...subs._everyTrack.keys()].map(everyTrackLaneKey), ...named].sort()
 }
 /** The member ids a stub's wants name, as it holds them and as the room's index does. */
 function wantsHeld(room: ServerRoom, stub: RoomStubChannel) {

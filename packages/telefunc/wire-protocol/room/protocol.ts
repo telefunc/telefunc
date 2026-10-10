@@ -99,8 +99,8 @@ type RoomCtrlEnvelope =
   | { __r: 'update'; meta: RoomMeta; seq: number }
   // Announced before a named track's first frame, so all-track subscribers open its lane.
   | { __r: 'track'; id: string; track: string; hidden?: boolean }
-  // Demand gossip between instances, never relayed to clients.
-  | { __r: 'want'; member: string; track: string; instance: string; on: boolean }
+  // Demand gossip between instances, never relayed to clients; a `null` track is every track the member publishes.
+  | { __r: 'want'; member: string; track: string | null; instance: string; on: boolean }
   | { __r: 'closed' }
 
 /** A `LeaveCause` on the wire: no `cause` means the member left on its own. */

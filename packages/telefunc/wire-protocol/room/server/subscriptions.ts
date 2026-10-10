@@ -29,7 +29,7 @@ type SubscriptionHost = {
   /** Read-only here: every change goes through the host's methods. */
   readonly _state: Pick<
     RoomState,
-    'closed' | 'rosterKnown' | 'listenerCount' | 'recordingMembership' | 'listMemberIds' | 'hasMember' | 'memberTracks'
+    'closed' | 'rosterKnown' | 'listenerCount' | 'recordingMembership' | 'listMemberIds' | 'hasMember'
   >
   /** Whether anything here observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean
@@ -56,9 +56,15 @@ class RoomSubscriptions {
   private readonly _wants = new WantsIndex()
   private readonly _control = this._newLaneSubscription()
   private readonly _semantic = this._newLaneSubscription()
-  /** Keyed by (member, track); `_binaryTracks` lists each member's. */
+  /** Named lanes, keyed by (member, track); `_binaryTracks` lists each member's. */
   private readonly _binary = new Map<string, LaneSubscription>()
   private readonly _binaryTracks = new Map<string, Set<string>>()
+  /** Each member's every-track lane, while some holder here receives all of its tracks. */
+  private readonly _everyTrack = new Map<string, LaneSubscription>()
+  /** The binary lanes that were ready once: what they carry is this instance's demand. */
+  private readonly _delivering = new WeakSet<LaneSubscription>()
+  /** The members whose every-track lane waits for the named lanes replacing it. */
+  private readonly _releasing = new Set<string>()
   /** The binary lanes not ready yet, so a readiness wait never visits the ready ones. */
   private readonly _binaryPending = new Set<LaneSubscription>()
   private readonly _inbox = new Map<string, LaneSubscription>()
@@ -86,7 +92,8 @@ class RoomSubscriptions {
       const state = this._host._state
       const members = state.closed ? [] : state.listMemberIds()
       const present = new Set(members)
-      for (const member of [...this._binaryTracks.keys()]) if (!present.has(member)) this._syncMemberBinary(member)
+      for (const member of new Set([...this._binaryTracks.keys(), ...this._everyTrack.keys()]))
+        if (!present.has(member)) this._syncMemberBinary(member)
       for (const member of members) this._syncMemberBinary(member)
       const owned = new Set(state.closed ? [] : this._host._ownedMembers().all)
       for (const member of [...this._inbox.keys()]) if (!owned.has(member)) this._closeInbox(member)
@@ -108,7 +115,7 @@ class RoomSubscriptions {
     })
   }
 
-  /** A member joined or published a new track. */
+  /** A member joined. */
   memberChanged(member: string): void {
     this._replanAround(() => this._syncMemberBinary(member))
   }
@@ -173,43 +180,115 @@ class RoomSubscriptions {
     this._syncHeartbeat()
   }
 
+  /** A member's binary lanes: its every-track lane while some holder here receives all of its tracks, else a lane per
+   *  track some holder names. A switch between them keeps the lanes it leaves until the lanes it takes deliver. */
   private _syncMemberBinary(member: string): void {
-    const host = this._host
-    const state = host._state
-    const wanted = new Set<string>()
-    if (!state.closed && state.hasMember(member)) {
-      for (const track of this._wants.tracksOf(member, () => state.memberTracks(member)))
-        if (this._wants.wantsPair(member, track)) wanted.add(track)
-    }
-    const had = this._binaryTracks.get(member)
-    for (const track of had ?? []) {
-      if (wanted.has(track)) continue
-      const key = binaryLaneKey(member, track)
-      this._binary.get(key)?.stop()
+    const state = this._host._state
+    const present = !state.closed && state.hasMember(member)
+    const everyTrack = present && this._wants.wantsEveryTrack(member)
+    if (everyTrack) this._openEveryTrack(member)
+    const all = this._everyTrack.get(member)
+    const everyTrackDemand = everyTrack && this._delivering.has(all!)
+    // On before off, so a pair one lane hands to another stays wanted throughout.
+    if (everyTrackDemand) this._demand.setLocal(member, null, true)
+    const tracks = present ? this._wants.namedTracksOf(member) : new Set<string>()
+    for (const track of [...(this._binaryTracks.get(member) ?? []), ...this._demand.localTracks(member)])
+      tracks.add(track)
+    for (const track of tracks) this._syncNamedLane(member, track)
+    if (!everyTrackDemand) this._demand.setLocal(member, null, false)
+    if (!everyTrack && all !== undefined) this._releaseEveryTrack(member, all)
+  }
+
+  /** A named lane while some holder names the track and none receives every track; beside an every-track lane, one
+   *  stays until that lane delivers. The pair is demand while some lane here delivers it to a holder that wants it. */
+  private _syncNamedLane(member: string, track: string): void {
+    const state = this._host._state
+    const present = !state.closed && state.hasMember(member)
+    const named = present && this._wants.wantsNamedPair(member, track)
+    const all = this._everyTrack.get(member)
+    const allDelivers = all !== undefined && this._delivering.has(all)
+    const key = binaryLaneKey(member, track)
+    let lane = this._binary.get(key)
+    const keep = present && this._wants.wantsEveryTrack(member) ? lane !== undefined && !allDelivers : named
+    if (!keep && lane !== undefined) {
+      lane.stop()
       this._binary.delete(key)
-      this._demand.setLocal(member, track, false)
+      const tracks = this._binaryTracks.get(member)!
+      tracks.delete(track)
+      if (tracks.size === 0) this._binaryTracks.delete(member)
+      lane = undefined
+    } else if (keep && lane === undefined) {
+      lane = this._openNamedLane(member, track)
     }
-    if (wanted.size === 0) this._binaryTracks.delete(member)
-    else this._binaryTracks.set(member, wanted)
-    for (const track of wanted) {
-      const key = binaryLaneKey(member, track)
-      let slot = this._binary.get(key)
-      const added = slot === undefined
-      if (!slot) this._binary.set(key, (slot = this._newLaneSubscription(this._binaryPending)))
-      slot.sync(true, () =>
-        getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary', member, track }, (framed, info) =>
-          host._onBinary(framed, info),
-        ),
-      )
-      if (!added) continue
-      // Demand is reported once the lane is ready, so an encoder started on demand loses no frames.
-      const subscribed = slot
-      void withinRoomHorizon(subscribed.ready)
-        .then(() => {
-          if (this._binary.get(key) === subscribed) this._demand.setLocal(member, track, true)
-        })
-        .catch(reportRoomError)
+    const delivers = allDelivers || (lane !== undefined && this._delivering.has(lane))
+    this._demand.setLocal(member, track, (named || lane !== undefined) && delivers)
+  }
+
+  private _openEveryTrack(member: string): void {
+    if (this._everyTrack.has(member)) return
+    const host = this._host
+    const lane = this._newLaneSubscription(this._binaryPending)
+    this._everyTrack.set(member, lane)
+    lane.sync(true, () =>
+      getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary-all', member }, (framed, info) =>
+        host._onBinary(framed, info),
+      ),
+    )
+    this._onceDelivering(
+      lane,
+      () => this._everyTrack.get(member) === lane,
+      () => this._syncMemberBinary(member),
+    )
+  }
+
+  private _openNamedLane(member: string, track: string): LaneSubscription {
+    const host = this._host
+    const key = binaryLaneKey(member, track)
+    const lane = this._newLaneSubscription(this._binaryPending)
+    this._binary.set(key, lane)
+    let tracks = this._binaryTracks.get(member)
+    if (!tracks) this._binaryTracks.set(member, (tracks = new Set()))
+    tracks.add(track)
+    lane.sync(true, () =>
+      getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary', member, track }, (framed, info) =>
+        host._onBinary(framed, info),
+      ),
+    )
+    this._onceDelivering(
+      lane,
+      () => this._binary.get(key) === lane,
+      () => this._syncNamedLane(member, track),
+    )
+    return lane
+  }
+
+  /** Demand is reported once a lane is ready, so an encoder started on demand loses no frames. */
+  private _onceDelivering(lane: LaneSubscription, current: () => boolean, sync: () => void): void {
+    void withinRoomHorizon(lane.ready)
+      .then(() => {
+        if (!current()) return
+        this._delivering.add(lane)
+        this._replanAround(sync)
+      })
+      .catch(reportRoomError)
+  }
+
+  /** An every-track lane nothing here wants any more stops once the named lanes replacing it deliver. */
+  private _releaseEveryTrack(member: string, all: LaneSubscription): void {
+    const pending = [...(this._binaryTracks.get(member) ?? [])]
+      .map((track) => this._binary.get(binaryLaneKey(member, track))!)
+      .filter((lane) => !this._delivering.has(lane))
+    if (pending.length === 0) {
+      all.stop()
+      this._everyTrack.delete(member)
+      return
     }
+    if (this._releasing.has(member)) return
+    this._releasing.add(member)
+    void withinRoomHorizon(Promise.all(pending.map((lane) => lane.ready)))
+      .finally(() => this._releasing.delete(member))
+      .then(() => this._replanAround(() => this._syncMemberBinary(member)))
+      .catch(reportRoomError)
   }
 
   private _openInbox(member: string): void {

@@ -86,27 +86,29 @@ class WantsIndex {
     return all ? 'all' : affected
   }
 
-  /** The member's tracks some holder wants: a named track, or every one it publishes. */
-  tracksOf(member: string, published: () => string[]): string[] {
-    const own = this._members.get(member)
-    if (this._everyMember.has(null) || own?.has(null)) return [DEFAULT_TRACK, ...published()]
-    const tracks = new Set(this._everyMember.keys() as Iterable<string>)
-    for (const track of (own?.keys() ?? []) as Iterable<string>) tracks.add(track)
-    return [...tracks]
+  /** Whether some holder receives every track of the member: a publisher's own suppressed frames are no demand. */
+  wantsEveryTrack(member: string): boolean {
+    // A holder covering every track wants the default one unless it suppresses the member.
+    return this._receives(member, DEFAULT_TRACK, [this._everyMember.get(null), this._members.get(member)?.get(null)])
   }
 
-  /** Whether some holder receives the pair: a publisher's own suppressed frames are no demand and need no lane. */
-  wantsPair(member: string, track: string): boolean {
-    const own = this._members.get(member)
-    for (const coverers of [
-      this._everyMember.get(null),
-      this._everyMember.get(track),
-      own?.get(null),
-      own?.get(track),
-    ]) {
-      // Each coverer suppresses only members it holds, so this stops within a few.
-      for (const holder of coverers ?? []) if (holder._wantsBinary(member, track)) return true
-    }
+  /** The tracks some holder names for the member, `DEFAULT_TRACK` for the default one. */
+  namedTracksOf(member: string): Set<string> {
+    const tracks = new Set<string>()
+    for (const track of this._everyMember.keys()) if (track !== null) tracks.add(track)
+    for (const track of this._members.get(member)?.keys() ?? []) if (track !== null) tracks.add(track)
+    return tracks
+  }
+
+  /** Whether some holder that names the track receives it from the member. */
+  wantsNamedPair(member: string, track: string): boolean {
+    return this._receives(member, track, [this._everyMember.get(track), this._members.get(member)?.get(track)])
+  }
+
+  private _receives(member: string, track: string, coverers: Array<Set<LaneHolder> | undefined>): boolean {
+    // Each coverer suppresses only members it holds, so this stops within a few.
+    for (const holders of coverers)
+      for (const holder of holders ?? []) if (holder._wantsBinary(member, track)) return true
     return false
   }
 

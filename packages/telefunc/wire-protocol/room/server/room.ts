@@ -364,6 +364,7 @@ class ServerRoom extends RoomStateView implements Room {
     const lane = { kind: 'binary', member: from, track: laneTrack(frame.track) } as const
     const { sender, commit } = await this._inCallOrder(binaryLaneKey(from, lane.track), async (sent) => {
       const sender = await this._admitPublish(from, frame.payload)
+      this._demand.published(from, lane.track)
       if (frame.track !== null) await this._ensureTrackAnnounced(from, frame.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitRoomLaneOrThrow(this.id, this._inc, lane, framed, opts)
@@ -625,9 +626,7 @@ class ServerRoom extends RoomStateView implements Room {
     return true
   }
   private _applyTrack(id: string, track: string): boolean {
-    if (!this._state.applyTrack(id, track)) return false
-    this._subs.memberChanged(id) // all-track subscribers need the new (member, track) lane
-    return true
+    return this._state.applyTrack(id, track)
   }
   /** Every leave the state applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
