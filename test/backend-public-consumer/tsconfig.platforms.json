@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2019",
+    "types": []
+  },
+  "include": ["released-api-platforms.ts", "platform-shims.d.ts"]
+}

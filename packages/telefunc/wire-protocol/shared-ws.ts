@@ -31,6 +31,8 @@ export type {
   ChannelDataFrame,
   ReconcilePayload,
   ReconcileOpenEntry,
+  BroadcastKind,
+  BroadcastSubscriptions,
   ReattachState,
   BarrierPayload,
   ReconciledPayload,
@@ -41,6 +43,7 @@ export type {
   WirePublishInfo,
 }
 
+import { decodeOrderingFrame, encodeOrderingFrame } from './ordering-frame.js'
 import type { ChannelTransports } from './constants.js'
 import { assert } from '../utils/assert.js'
 
@@ -217,12 +220,15 @@ type ReconcileOpenEntry = {
    *  missing. */
   initial?: true
   /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
-  broadcast?: { text: boolean; binary: boolean }
+  broadcast?: BroadcastSubscriptions
   /** A BDP probe's number, which the server answers as it reads the entry, ahead of what the attach sends of the
    *  channel: on another wire than the last, the ack queues behind none of the channel's data, so its round trip is the
    *  path's. */
   probe?: number
 }
+
+type BroadcastKind = 'text' | 'binary'
+type BroadcastSubscriptions = Record<BroadcastKind, boolean>
 
 /** What a channel adds to its own RECONCILE entry. */
 type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
@@ -282,12 +288,15 @@ type ReconciledPayload = {
  *  - `ERROR`: a generic listener/channel error; `text` is the user-facing message.
  *  - `ABORT`: `text` is the serialized abort value.
  *  - `SHIELD_ERROR`: a shield validator rejected the data/ack; `text` is the validator message.
- *    Kept distinct from `ERROR` so the receiving side can throw `ShieldValidationError`. */
+ *    Kept distinct from `ERROR` so the receiving side can throw `ShieldValidationError`.
+ *  - `OVERFLOW`: a full buffer refused a publish; `text` is the error message. The publisher throws
+ *    `ChannelOverflowError`. */
 const ACK_STATUS = {
   OK: 0x00 as const,
   ERROR: 0x01 as const,
   ABORT: 0x02 as const,
   SHIELD_ERROR: 0x03 as const,
+  OVERFLOW: 0x04 as const,
 }
 
 type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
@@ -296,7 +305,7 @@ type AckResultStatus = (typeof ACK_STATUS)[keyof typeof ACK_STATUS]
 const ERROR_REASON = {
   /** An unhandled server error. */
   BUG: 0x00 as const,
-  /** Its page fell further behind a broadcast than the server holds for it. */
+  /** Its page fell further behind than the server holds for it, where no sender could be refused. */
   OVERFLOW: 0x01 as const,
   /** A reconnect needed frames its sender's replay buffer had dropped to stay within its size. */
   LOST: 0x02 as const,
@@ -673,7 +682,8 @@ function decode(frame: Uint8Array): DecodedFrame {
         status === ACK_STATUS.OK ||
           status === ACK_STATUS.ERROR ||
           status === ACK_STATUS.ABORT ||
-          status === ACK_STATUS.SHIELD_ERROR,
+          status === ACK_STATUS.SHIELD_ERROR ||
+          status === ACK_STATUS.OVERFLOW,
         `ACK_RES unknown status ${status}`,
       )
       const text = textDecoder.decode(payload.subarray(ACK_RES_PREFIX))
@@ -806,15 +816,14 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
 ])
 
 /** Server ingress: `decode` owns the frame's shape, this owns its direction and the upgrade frames'
- *  size cap. The cap is checked on the raw bytes because its job is to bound what an unauthenticated
- *  peer can make us parse — after `decode` it would be bounding nothing. */
+ *  size cap. Both are checked on the raw bytes because their job is to bound what an unauthenticated
+ *  peer can make us parse. After `decode` they would be bounding nothing. */
 function decodeClientFrame(raw: Uint8Array<ArrayBuffer>, maxUpgradeFrameBytes: number): DecodedFrame {
   const tag = peekTag(raw)
+  assertProtocol(tag !== undefined && CLIENT_TAGS.has(tag), `client sent a server-only frame ${tag}`)
   const isUpgradeFrame = tag === TAG.PREPARE || tag === TAG.BARRIER
   assertProtocol(!isUpgradeFrame || raw.byteLength <= maxUpgradeFrameBytes, 'upgrade frame over byte cap')
-  const frame = decode(raw)
-  assertProtocol(CLIENT_TAGS.has(frame.tag), `client sent a server-only frame ${frame.tag}`)
-  return frame
+  return decode(raw)
 }
 
 function parseJsonPayload(payload: Uint8Array): unknown {
@@ -904,26 +913,11 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
   return { text: wire.slice(nl + 1), info: { seq, timestamp } }
 }
 
-// ===== Binary publish info helpers =====
-// Format: [8 bytes: seq as f64 LE][8 bytes: timestamp as f64 LE][binary data]
-// The seq goes as the number a text publish's decimal carries, so both deliver the same one.
-
-const PUBLISH_BINARY_HEADER = 16
-
 function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
-  const result = new Uint8Array(PUBLISH_BINARY_HEADER + data.byteLength)
-  const view = new DataView(result.buffer)
-  view.setFloat64(0, info.seq, true)
-  view.setFloat64(8, info.timestamp, true)
-  result.set(data, PUBLISH_BINARY_HEADER)
-  return result
+  return encodeOrderingFrame(data, info)
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {
-  assertProtocol(wire.byteLength >= PUBLISH_BINARY_HEADER, 'PUBLISH_BINARY frame too short for info header')
-  const view = new DataView(wire.buffer, wire.byteOffset, wire.byteLength)
-  const seq = view.getFloat64(0, true)
-  const timestamp = view.getFloat64(8, true)
-  assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH_BINARY frame info must be finite numbers')
-  return { data: wire.subarray(PUBLISH_BINARY_HEADER), info: { seq, timestamp } }
+  const { payload, info } = decodeOrderingFrame(wire)
+  return { data: payload, info }
 }

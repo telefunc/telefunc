@@ -1,0 +1,29 @@
+import { Link } from '@brillout/docpress'
+import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
+
+**Environment**: server.
+
+<TelefuncStreamBeta />
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+config.room = {
+  emptyTimeout: 300_000,    // A room nobody joined closes this long after nothing holds it (ms)
+  departureTimeout: 20_000, // A room a member had joined closes this long after nothing holds it (ms)
+}
+```
+
+These are the defaults of every <Link href="/room">`Room`</Link>; the options of the same names to `Room.create()` and `Room.getOrCreate()` override them for the room they create. A room keeps the timeouts it was created with: `Room.getOrCreate()` on an existing room ignores its options, as it does `meta`. What holds a room, and when it closes, is in <Link href="/room#when-a-room-closes">When a room closes</Link>.
+
+Durations are in milliseconds, at most 2147483647 (about 24.8 days), or `Infinity` to keep a room until `Room.close()`.
+
+<ConfigWhereServer />
+
+
+## See also
+
+- <Link href="/room" />
+- <Link href="/channel-config" />

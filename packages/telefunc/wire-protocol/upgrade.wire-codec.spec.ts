@@ -267,6 +267,12 @@ describe('decodeClientFrame — direction', () => {
     expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)
   })
 
+  test('a server-only frame is refused before its payload is parsed', () => {
+    const publish = encodePublishBinary(new Uint8Array(), { seq: 1, timestamp: 1 })
+    const truncatedOrdering = encode.publishBinary(0, publish.subarray(0, publish.byteLength - 1), 1)
+    expect(() => clientFrame(truncatedOrdering)).toThrow(ProtocolViolationError)
+  })
+
   const clientLegal: [string, Uint8Array<ArrayBuffer>][] = [
     ['PING', encode.ping()],
     ['RECONCILE', encode.reconcile({ open: goodOpen })],
@@ -345,7 +351,8 @@ describe('seqs past 32 bits', () => {
   })
 
   test("a binary publish carries its key's seq as a text publish does, past 2^32", () => {
-    for (const seq of [0, 1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER]) {
+    // An ordering position's seq starts at 1.
+    for (const seq of [1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER]) {
       const info = { seq, timestamp: 1_700_000_000_000 }
       const binary = encode.publishBinary(3, encodePublishBinary(new Uint8Array([7]), info), 1)
       const text = encode.publish(3, encodePublishText('"x"', info), 1)

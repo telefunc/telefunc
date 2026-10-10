@@ -8,11 +8,11 @@ import { ServerChannel } from './server/channel.js'
 import { Broadcast, ServerBroadcast } from './server/server-broadcast.js'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
 import {
+  CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
   CREDIT_WINDOW_MAX_BYTES,
-  CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   RECONCILE_TIMEOUT_MS,
 } from './constants.js'
@@ -20,6 +20,10 @@ import { ChannelOverflowError } from './channel-errors.js'
 import { TAG, encode } from './shared-ws.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
+import { Room } from './room/server/statics.js'
+import type { ServerLocalParticipant, ServerRoom } from './room/server/room.js'
+import { ResponseRoomGrants, RoomParticipantStubChannel } from './room/server/stub.js'
+import { ClientRoom, ClientStandaloneParticipant } from './room/client.js'
 
 const LATENCY_MS = 5
 
@@ -136,9 +140,11 @@ class Loopback {
       this.sends('server', frame)
       socket.toPage.push(frame.slice())
     },
-    bufferedAmount: (socket) => socket.toPage.bytes,
+    bufferedAmount: (socket) => (this.reportsBacklog ? socket.toPage.bytes : undefined),
     terminateConnection: (socket) => socket.cut(),
   }
+  /** Whether the server's runtime tells what waits on a socket, as workerd's doesn't. */
+  reportsBacklog = true
   private readonly connectionKey = crypto.randomUUID()
   private readonly pages: ClientChannel[] = []
   private watch: { from: 'page' | 'server'; tag: number; then: () => void } | null = null
@@ -193,6 +199,54 @@ class Loopback {
     })
     this.pages.push(page as ClientChannel)
     return { server, page }
+  }
+  /** A room's stub the server has registered, and the page's view of the room through it, on the same connection. */
+  async openRoom() {
+    const { room, stub, openPage } = await this.roomStub()
+    return { room, stub, ...openPage() }
+  }
+  /** A room's stub the server has registered, and `openPage`, which opens the page's view of the room through it. */
+  async roomStub() {
+    const room = (await Room.create(`room:${crypto.randomUUID()}`)) as ServerRoom
+    const { stub, metadata } = room._openStub({ grants: new ResponseRoomGrants() })
+    this.mux.registerChannel(stub)
+    const openPage = () => {
+      const page = new ClientBroadcast({
+        channelId: stub.id,
+        key: room.id,
+        transports: [CHANNEL_TRANSPORT.WS],
+        telefuncUrl: 'http://loopback.test/_telefunc',
+        connectionKey: this.connectionKey,
+      })
+      this.pages.push(page as ClientChannel)
+      return { page, view: new ClientRoom(page, metadata) }
+    }
+    return { room, stub, openPage }
+  }
+  /** A server participant handed to the page: its stub, which the server has registered, and the page's handle. */
+  async openParticipant() {
+    const { room, participant, stub, openPage } = await this.participantStub()
+    return { room, participant, stub, member: openPage() }
+  }
+  /** A server participant's stub the server has registered, and `openPage`, which opens the page's handle on it. */
+  async participantStub() {
+    const room = (await Room.create(`room:${crypto.randomUUID()}`)) as ServerRoom
+    const participant = (await room.join()) as ServerLocalParticipant
+    const stub = new RoomParticipantStubChannel(participant)
+    this.mux.registerChannel(stub)
+    // As the response handing it to the page carries it.
+    const { id, meta, selfDelivery, identity } = participant
+    const openPage = () => {
+      const page = new ClientChannel({
+        channelId: stub.id,
+        transports: [CHANNEL_TRANSPORT.WS],
+        telefuncUrl: 'http://loopback.test/_telefunc',
+        connectionKey: this.connectionKey,
+      })
+      this.pages.push(page as ClientChannel)
+      return new ClientStandaloneParticipant(page, { channelId: stub.id, id, meta, selfDelivery, identity })
+    }
+    return { room, participant, stub, openPage }
   }
   dispose(): void {
     for (const page of this.pages) page.abort()
@@ -777,6 +831,66 @@ test("a broadcast's page acknowledges what it read as a stream's page does, howe
   expect(replay.byteLength).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 4)
 })
 
+test("a Room member's page gone quiet has its replay, and its room's, let go of what the other end got within a heartbeat", async () => {
+  const { room, stub, page, view } = await loop.openRoom()
+  const seen: unknown[] = []
+  view.subscribe((data) => void seen.push(data))
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  const speaker = await room.join()
+  await run(100)
+  // Less than a quarter window each way, which no limit acknowledges.
+  for (let n = 0; n < 8; n++) {
+    void speaker.publish(String(n).padEnd(16 * KIB))
+    void me.publish(String(n).padEnd(16 * KIB))
+  }
+  await runUntil(() => seen.length === 16, 1_000)
+  const connection = (page as unknown as { _connection: { replayBuffers: Map<number, { byteLength: number }> } })
+    ._connection
+  const pageReplay = [...connection.replayBuffers.values()][0]!
+  const held = () => [stub._replayBuffer!.byteLength, pageReplay.byteLength]
+  expect(held().every((bytes) => bytes > 0)).toBe(true)
+  await run(CHANNEL_PING_INTERVAL_MS)
+  expect(held()).toEqual([0, 0])
+})
+
+test.each([2 ** 31, 2 ** 32])(
+  "a Room member's page whose channel passes seq %d gets the room's messages in order, and its publishes answered",
+  async (boundary) => {
+    const { room, stub, page, view } = await loop.openRoom()
+    const seen: string[] = []
+    view.subscribe((data) => void seen.push(data as string))
+    const joining = view.join()
+    await runUntil(() => view.count === 1, 1_000)
+    const me = await joining
+    const speaker = await room.join()
+    await run(100)
+    // As if `boundary - 4` more frames had gone each way and arrived.
+    const connection = (page as unknown as { _connection: any })._connection
+    const ix = connection.channelIndex.get(page)
+    for (const replay of [stub._replayBuffer, connection.replayBuffers.get(ix)]) {
+      replay._seq += boundary - 4
+      replay.pushedSeq += boundary - 4
+    }
+    stub._lastClientSeq += boundary - 4
+    ;(stub as unknown as { _pageLastSeq: number })._pageLastSeq += boundary - 4
+    connection.lastSeqByChannel.set(ix, connection.lastSeqByChannel.get(ix) + boundary - 4)
+    const receipts: Promise<unknown>[] = []
+    for (let n = 0; n < 8; n++) {
+      if (n % 2 === 0) receipts.push(me.publish(String(n)))
+      else void speaker.publish(String(n))
+      await run(10)
+    }
+    await runUntil(() => seen.length === 8, 1_000)
+    expect(seen).toEqual(Array.from({ length: 8 }, (_, n) => String(n)))
+    expect(await Promise.all(receipts)).toHaveLength(4)
+    expect(stub._replayBuffer!.seq).toBeGreaterThan(boundary)
+    expect(connection.replayBuffers.get(ix).seq).toBeGreaterThan(boundary)
+    expect(stub.isClosed).toBe(false)
+  },
+)
+
 test('on a slow link, producers that await their sends are handed the credit one at a time, and none is refused', async () => {
   const feed = loop.open<never, string>()
   const page = consume(feed.page)
@@ -841,6 +955,36 @@ test("on an uplink slower than a window per ping deadline, the server doesn't cu
   await run(30_000)
   expect(terminateConnection).not.toHaveBeenCalled()
   expect(server.received.length).toBeGreaterThan(30)
+})
+
+// A Room member's page grants the largest window from the start: all of it can be on the wire ahead of its pong.
+test("on a link slower than the room's messages per ping deadline, a Room member's page keeps its wire while they keep arriving ahead of its pong", async () => {
+  const { room, view } = await loop.openRoom()
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  const speaker = await room.join()
+  await run(100)
+  loop.socket.toPage.bytesPerMs = 100
+  const publication = (n: number) => String(n).padEnd(64 * KIB)
+  for (let n = 0; n < 32; n++) void speaker.publish(publication(n))
+  await run(30_000)
+  expect(loop.sockets).toHaveLength(1)
+  expect(seen).toEqual(Array.from({ length: 32 }, (_, n) => publication(n)))
+})
+
+test("on an uplink slower than a window per ping deadline, the server doesn't cut the wire of a Room member's page while its publishes keep arriving ahead of its ping", async () => {
+  const { view } = await loop.openRoom()
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 100
+  const terminateConnection = vi.spyOn(loop.transport, 'terminateConnection')
+  const receipts: unknown[] = []
+  for (let n = 0; n < 32; n++) void me.publish(String(n).padEnd(64 * KIB)).then((receipt) => receipts.push(receipt))
+  await run(30_000)
+  expect(terminateConnection).not.toHaveBeenCalled()
+  expect(receipts).toHaveLength(32)
 })
 
 // 100 KB/s, with a ping every second: the page's ping waits 20 s behind its 2 MiB window, and the server's refresh for a
@@ -1184,6 +1328,362 @@ test('on a slow link, a producer that awaits its sends is not refused for the cr
   expect((await settled).map((result) => result.status)).toEqual(['fulfilled', 'fulfilled'])
   expect(page.received.at(-1)).toBe(message(1))
 })
+
+test.each([
+  ['tells what waits on a socket', true],
+  ["can't tell what waits on a socket, as a Durable Object's", false],
+])(
+  "on a runtime that %s, a Room member's page that stops reading is let go with ChannelOverflowError once the server holds its room and a quarter more of the room's messages for it: its view closes and its member leaves",
+  async (_, reportsBacklog) => {
+    loop.reportsBacklog = reportsBacklog
+    const { room, stub, view } = await loop.openRoom()
+    let serverEnd: Error | undefined
+    stub.onClose((err) => void (serverEnd = err))
+    const seen: string[] = []
+    view.subscribe((data) => void seen.push(data as string))
+    let viewClosed = false
+    view.onClose(() => void (viewClosed = true))
+    const joining = view.join()
+    await runUntil(() => view.count === 1, 1_000)
+    const me = await joining
+    const left: unknown[] = []
+    me.onLeave((cause) => void left.push(cause))
+    const leftOnServer: unknown[] = []
+    room.onLeave((member, cause) => void leftOnServer.push([member.id, cause]))
+    const speaker = await room.join()
+    await run(100)
+    loop.socket.toPage.hold()
+    const publication = (n: number) => String(n).padEnd(256 * KIB)
+    let published = 0
+    while (!stub.isClosed && published < 1_000) {
+      void speaker.publish(publication(published++))
+      await run(0)
+    }
+    expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+    expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES * 1.25)
+    expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(CREDIT_WINDOW_MAX_BYTES * 1.25 + 512 * KIB)
+    await runUntil(() => leftOnServer.length > 0, 1_000)
+    expect(leftOnServer).toEqual([[me.id, { type: 'disconnected' }]])
+    const inFlight = me.publish('in flight').catch((err: unknown) => err)
+
+    // Once the page reads again it gets, in order, every message the server sent before the one that found it behind,
+    // then the end.
+    loop.socket.toPage.release()
+    await runUntil(() => viewClosed, 2_000)
+    expect(left).toEqual([{ type: 'disconnected' }])
+    expect(await inFlight).toBeInstanceOf(ChannelOverflowError)
+    expect(seen.length).toBeGreaterThan((CREDIT_WINDOW_MAX_BYTES * 1.25) / (256 * KIB) - 1)
+    expect(seen).toEqual(Array.from({ length: seen.length }, (_, n) => publication(n)))
+  },
+)
+
+test.each([
+  ['tells what waits on a socket', true],
+  ["can't tell what waits on a socket, as a Durable Object's", false],
+])(
+  "on a slow link and a runtime that %s, a Room member's page that keeps up with the room stays in through a burst as it attaches, and through more in all than the server holds for a page behind, while an awaited stream fills the wire",
+  async (_, reportsBacklog) => {
+    loop.reportsBacklog = reportsBacklog
+    const stream = loop.open<never, string>()
+    consume(stream.page)
+    const { room, stub, view } = await loop.openRoom()
+    let serverEnd: unknown = 'open'
+    stub.onClose((err) => void (serverEnd = err))
+    const seen: string[] = []
+    view.subscribe((data) => void seen.push(data as string))
+    const speaker = await room.join()
+    const publication = (n: number) => String(n).padEnd(256 * KIB)
+    // 20 MiB as the server attaches the page, before the window the page grants reaches it, then 26 MB/s, 100 MiB in all.
+    const burst = 80
+    const count = 400
+    loop.onSend('server', TAG.RECONCILED, () => {
+      loop.socket.toPage.bytesPerMs = 40_000 // 40 MB/s
+      for (let n = 0; n < burst; n++) void speaker.publish(publication(n))
+    })
+    let held = 0
+    for (let elapsed = 0; elapsed < 1_000 && seen.length < burst; elapsed++) {
+      held = Math.max(held, loop.sockets[0]?.toPage.bytes ?? 0)
+      await run(1)
+    }
+    void (async () => {
+      while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+    })().catch(() => {})
+    for (let n = burst; n < count; n++) {
+      void speaker.publish(publication(n))
+      await run(10)
+    }
+    await runUntil(() => seen.length === count, 2_000)
+    expect(serverEnd).toBe('open')
+    expect(held).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES / 4)
+    expect(count * 256 * KIB).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES * 1.25)
+    expect(seen).toEqual(Array.from({ length: count }, (_, n) => publication(n)))
+  },
+)
+
+test("a Room member's page whose wire drops with more of the room's messages in flight than a wire holds besides its channels' allowances gets them all as it reconnects, and keeps its new wire", async () => {
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  const speaker = await room.join()
+  await run(100)
+  loop.socket.toPage.hold()
+  const publication = (n: number) => String(n).padEnd(256 * KIB)
+  // 72 MiB: past the 64 MiB a wire holds besides what its channels' flow control allows, within the 80 MiB a page may be
+  // behind.
+  const count = 288
+  for (let n = 0; n < count; n++) {
+    void speaker.publish(publication(n))
+    await run(0)
+  }
+  expect(serverEnd).toBe('open')
+  loop.socket.cut()
+  await runUntil(() => seen.length === count, 5_000)
+  expect(loop.sockets).toHaveLength(2)
+  expect(seen).toEqual(Array.from({ length: count }, (_, n) => publication(n)))
+  expect(serverEnd).toBe('open')
+})
+
+test("a Room member's page cut off further behind than the server's replay buffer holds is let go with ChannelOverflowError, having got the room's messages before it in order: its view closes and its member leaves", async () => {
+  config.channel.serverReplayBuffer = 1_024
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  let viewClosed = false
+  view.onClose(() => void (viewClosed = true))
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  const left: unknown[] = []
+  me.onLeave((cause) => void left.push(cause))
+  const speaker = await room.join()
+  await run(100)
+  void speaker.publish('before')
+  await run(50)
+  loop.socket.toPage.hold()
+  const publication = (n: number) => String(n).padEnd(256)
+  for (let n = 0; n < 8; n++) void speaker.publish(publication(n))
+  await run(50)
+  loop.socket.cut()
+  await runUntil(() => viewClosed, 2_000)
+  expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+  expect(left).toEqual([{ type: 'disconnected' }])
+  expect(seen).toEqual(['before', ...seen.slice(1).map((_, n) => publication(n))])
+})
+
+test("a Room member's page offline while more of the room's messages were sent to it than config.channel.bufferLimit holds is let go with ChannelOverflowError at its reconnect: its view closes and its member leaves", async () => {
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const seen: string[] = []
+  view.subscribe((data) => void seen.push(data as string))
+  let viewClosed = false
+  view.onClose(() => void (viewClosed = true))
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  const left: unknown[] = []
+  me.onLeave((cause) => void left.push(cause))
+  const speaker = await room.join()
+  await run(100)
+  void speaker.publish('before')
+  await run(50)
+  loop.socket.cut()
+  // Offline, the server holds 512 KiB of text for the page: these are 1 MiB.
+  for (let n = 0; n < 8; n++) void speaker.publish(String(n).padEnd(128 * KIB))
+  await runUntil(() => viewClosed, 2_000)
+  expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+  expect(left).toEqual([{ type: 'disconnected' }])
+  expect(seen).toEqual(['before'])
+})
+
+test("a Room closed while its page's wire dies reaches the page once it reconnects: its view closes and its member leaves with 'closed'", async () => {
+  const { room, stub, view } = await loop.openRoom()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  let viewClosed = false
+  view.onClose(() => void (viewClosed = true))
+  const joining = view.join()
+  await runUntil(() => view.count === 1, 1_000)
+  const me = await joining
+  const left: unknown[] = []
+  me.onLeave((cause) => void left.push(cause))
+  await run(100)
+  loop.socket.toPage.hold()
+  void Room.close(room.id)
+  await run(50)
+  loop.socket.cut()
+  await runUntil(() => viewClosed && serverEnd !== 'open', 5_000)
+  expect(left).toEqual([{ type: 'closed' }])
+  expect(serverEnd).toBe(undefined)
+})
+
+// A stub's close waits the reconnect window, 70 s with the defaults, for a page that attaches only after it.
+test("a Room closed before its page attaches, with a connectTtl longer than its stub's close waits, reaches the page as it attaches, after what the room sent it meanwhile: the members it holds leave with 'closed'", async () => {
+  config.channel = { connectTtl: 120_000 }
+  const { room, stub, openPage } = await loop.roomStub()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const other = await room.join()
+  const later = await room.join()
+  await Room.close(room.id)
+  await run(71_000)
+  expect((serverEnd as Error).message).toBe('Channel close timed out')
+
+  const { view } = openPage()
+  const joined: string[] = []
+  view.onJoin((member) => void joined.push(member.id))
+  // Returned with the room, as a telefunction may.
+  const held = view._reviveRemote({ id: other.id, meta: {}, joinedAt: Date.now(), metaSeq: 0, identity: null })
+  const left: unknown[] = []
+  held.onLeave((cause) => void left.push(cause))
+  await run(1_000)
+  expect(joined).toEqual([later.id])
+  expect(left).toEqual([{ type: 'closed' }])
+})
+
+test.each([
+  ['tells what waits on a socket', true],
+  ["can't tell what waits on a socket, as a Durable Object's", false],
+])(
+  'on a runtime that %s, the page of a participant handed to it that stops reading is let go with ChannelOverflowError once the server holds the largest window a page grants past its credit, instead of losing the messages refused past it',
+  async (_, reportsBacklog) => {
+    loop.reportsBacklog = reportsBacklog
+    const { room, participant, stub, member } = await loop.openParticipant()
+    let serverEnd: Error | undefined
+    stub.onClose((err) => void (serverEnd = err))
+    const leftOnServer: unknown[] = []
+    participant.onLeave((cause) => void leftOnServer.push(cause))
+    const inbox: string[] = []
+    member.listen((data) => void inbox.push(data as string))
+    const left: unknown[] = []
+    member.onLeave((cause) => void left.push(cause))
+    const sender = await room.join()
+    await run(100)
+    loop.socket.toPage.hold()
+    const message = (n: number) => String(n).padEnd(256 * KIB)
+    let sent = 0
+    while (!stub.isClosed && sent < 1_000) {
+      void sender.send(participant.id, message(sent++))
+      await run(0)
+    }
+    expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+    expect(loop.socket.toPage.bytes).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES)
+    expect(loop.socket.toPage.bytes).toBeLessThanOrEqual(
+      CREDIT_WINDOW_MAX_BYTES + CREDIT_WINDOW_INITIAL_BYTES + 512 * KIB,
+    )
+    await runUntil(() => leftOnServer.length > 0, 1_000)
+    expect(leftOnServer).toEqual([{ type: 'disconnected' }])
+
+    // Once the page reads again it gets, in order, every message the server sent before the one that found it behind,
+    // then the end.
+    loop.socket.toPage.release()
+    await runUntil(() => left.length > 0, 2_000)
+    expect(left).toEqual([{ type: 'disconnected' }])
+    expect(inbox.length).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES / (256 * KIB))
+    expect(inbox).toEqual(Array.from({ length: inbox.length }, (_, n) => message(n)))
+  },
+)
+
+test("the page of a participant handed to it that the room removes before the page attaches, with a connectTtl longer than its stub's close waits, gets as it attaches the messages sent to the participant and its meta, then its leave", async () => {
+  config.channel = { connectTtl: 120_000 }
+  const { room, participant, stub, openPage } = await loop.participantStub()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const sender = await room.join()
+  await sender.send(participant.id, 'hello')
+  await participant.setMeta({ mood: 'away' })
+  await Room.removeParticipant(room.id, { id: participant.id, reason: 'kicked' })
+  await run(71_000)
+  expect((serverEnd as Error).message).toBe('Channel close timed out')
+
+  const member = openPage()
+  const inbox: unknown[] = []
+  member.listen((data) => void inbox.push(data))
+  const left: unknown[] = []
+  member.onLeave((cause) => void left.push(cause))
+  await run(1_000)
+  expect(inbox).toEqual(['hello'])
+  expect(member.meta).toEqual({ mood: 'away' })
+  expect(left).toEqual([{ type: 'removed', reason: 'kicked' }])
+})
+
+test('the page of a participant handed to it, offline while more messages were sent to its participant than config.channel.bufferLimit holds, is let go with ChannelOverflowError at its reconnect, instead of missing them', async () => {
+  const { room, participant, stub, member } = await loop.openParticipant()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const leftOnServer: unknown[] = []
+  participant.onLeave((cause) => void leftOnServer.push(cause))
+  const inbox: string[] = []
+  member.listen((data) => void inbox.push(data as string))
+  const left: unknown[] = []
+  member.onLeave((cause) => void left.push(cause))
+  const sender = await room.join()
+  await run(100)
+  void sender.send(participant.id, 'before')
+  await run(50)
+  loop.socket.cut()
+  // Offline, the server holds 512 KiB of text for the page: these are 1 MiB.
+  for (let n = 0; n < 8; n++) void sender.send(participant.id, String(n).padEnd(128 * KIB))
+  await runUntil(() => left.length > 0, 2_000)
+  expect(serverEnd).toBeInstanceOf(ChannelOverflowError)
+  expect(leftOnServer).toEqual([{ type: 'disconnected' }])
+  expect(left).toEqual([{ type: 'disconnected' }])
+  expect(inbox).toEqual(['before'])
+})
+
+test('the page of a participant handed to it, offline while less was sent to its participant than config.channel.bufferLimit holds, gets it all at its reconnect', async () => {
+  const { room, participant, stub, member } = await loop.openParticipant()
+  let serverEnd: unknown = 'open'
+  stub.onClose((err) => void (serverEnd = err))
+  const inbox: string[] = []
+  member.listen((data) => void inbox.push(data as string))
+  const sender = await room.join()
+  await run(100)
+  loop.socket.cut()
+  const message = (n: number) => String(n).padEnd(128 * KIB)
+  for (let n = 0; n < 3; n++) void sender.send(participant.id, message(n))
+  await runUntil(() => inbox.length === 3, 2_000)
+  expect(inbox).toEqual(Array.from({ length: 3 }, (_, n) => message(n)))
+  expect(serverEnd).toBe('open')
+})
+
+test.each([
+  ['tells what waits on a socket', true],
+  ["can't tell what waits on a socket, as a Durable Object's", false],
+])(
+  'on a slow link and a runtime that %s, the page of a participant handed to it that keeps up stays in through more in all than the server holds for a page behind, while an awaited stream fills the wire',
+  async (_, reportsBacklog) => {
+    loop.reportsBacklog = reportsBacklog
+    const stream = loop.open<never, string>()
+    consume(stream.page)
+    const { room, participant, stub, member } = await loop.openParticipant()
+    let serverEnd: unknown = 'open'
+    stub.onClose((err) => void (serverEnd = err))
+    const inbox: string[] = []
+    member.listen((data) => void inbox.push(data as string))
+    const sender = await room.join()
+    await run(100)
+    loop.socket.toPage.bytesPerMs = 40_000 // 40 MB/s
+    void (async () => {
+      while (!stream.server.isClosed) await stream.server.send('x'.repeat(64 * KIB))
+    })().catch(() => {})
+    const message = (n: number) => String(n).padEnd(256 * KIB)
+    // 26 MB/s of messages, 100 MiB in all.
+    const count = 400
+    for (let n = 0; n < count; n++) {
+      void sender.send(participant.id, message(n))
+      await run(10)
+    }
+    await runUntil(() => inbox.length === count, 2_000)
+    expect(serverEnd).toBe('open')
+    expect(count * 256 * KIB).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES + CREDIT_WINDOW_INITIAL_BYTES)
+    expect(inbox).toEqual(Array.from({ length: count }, (_, n) => message(n)))
+  },
+)
 
 test("a window refresh, a BDP_PING_ACK and a RECONCILE the page sends while an upload fills its slow uplink reach the server within the wire's queue delay, not behind the upload's window, and the upload keeps the uplink full", async () => {
   const upload = loop.open<Uint8Array, Uint8Array>()

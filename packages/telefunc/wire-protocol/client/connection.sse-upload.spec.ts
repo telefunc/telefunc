@@ -295,9 +295,9 @@ describe('an upload POST a proxy holds until its body ends', () => {
     await uploadGivenUp()
     unsubscribe()
     await allSent()
-    expect((server as any)._peerSubscribedText).toBe(false)
+    expect((server as any)._peerSubscriptions.text).toBe(false)
     await forwardUpload()
-    expect((server as any)._peerSubscribedText).toBe(false)
+    expect((server as any)._peerSubscriptions.text).toBe(false)
     page.abort()
   })
 
@@ -310,7 +310,7 @@ describe('an upload POST a proxy holds until its body ends', () => {
     const received: string[] = []
     page.subscribe((message) => void received.push(message))
     await allSent()
-    expect((server as any)._peerSubscribedText).toBe(true)
+    expect((server as any)._peerSubscriptions.text).toBe(true)
     await forwardUpload()
     await server.publish('after')
     await advanceUntil(() => received.length > 0, 1_000)

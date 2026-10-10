@@ -15,7 +15,7 @@ import { textEncoder } from '../frame.js'
 import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
-import type { ReconcileOutcome, ServerTransport } from './mux.js'
+import type { ChannelMux, ReconcileOutcome, ServerTransport } from './mux.js'
 import { encode, ProtocolViolationError } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
@@ -56,7 +56,10 @@ class SseConnectionTransport {
   /** When each wire closed, oldest first, for `connectTtl`: a page opens each wire under a new connId, so a POST for
    *  one of these comes from a page that hasn't seen its wire end yet, and is refused rather than held. */
   private readonly closedAt = new Map<string, number>()
-  private readonly mux = getChannelMux()
+  /** Per use: a Cloudflare session DO hosts its own channels, and this transport serves every one in the isolate. */
+  private get mux(): ChannelMux {
+    return getChannelMux()
+  }
   private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
     setSessionId: (connection, sessionId) => {

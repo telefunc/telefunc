@@ -13,11 +13,15 @@ import { createRequestContext } from '../node/server/context/requestContext.js'
 import { parseResponse } from './client/response/parse.js'
 import { STREAM_TRANSPORT, type ChannelTransports, type StreamTransport } from './constants.js'
 import { config, getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
+import { Room } from './room/server/statics.js'
+import type { LocalParticipant, Room as RoomType } from './room/types.js'
 import { config as clientConfig } from '../client/clientConfig.js'
 import type { ClientBroadcast, ClientChannel } from './client/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 import type {
   ClientReviverContext,
+  InternalClientReviverContext,
+  InternalServerReplacerContext,
   ReplacerType,
   ReviverType,
   ServerReplacerContext,
@@ -46,7 +50,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
   const producers: { createProducer: () => StreamingProducer; index: number }[] = []
   const lifecycles: Lifecycle[] = []
   let nextIndex = 0
-  const context: ServerReplacerContext = {
+  const context: InternalServerReplacerContext = {
     createChannel(opts) {
       const channel = new ServerChannel(opts)
       context.registerChannel(channel)
@@ -61,6 +65,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
       return { metadata: { __index: index }, close() {}, abort() {} }
     },
     validators: new Map(),
+    responseState: (_key, init) => init(),
   }
   const replacer = createStreamingReplacer(
     () => context,
@@ -78,7 +83,8 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const mintedBroadcasts: { channelId: string; key: string }[] = []
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
-  const context: ClientReviverContext = {
+  const context: InternalClientReviverContext = {
+    shareLifecycle() {},
     createChannel(opts) {
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never
@@ -489,6 +495,11 @@ async function collect<T>(gen: AsyncGenerator<T>): Promise<T[]> {
   return out
 }
 
+async function teeAndDrop(stream: ReadableStream<Uint8Array<ArrayBuffer>>): Promise<ReadableStream<Uint8Array>> {
+  const { ret } = await roundTrip({ stream })
+  return (ret as { stream: ReadableStream<Uint8Array> }).stream.tee()[0]
+}
+
 const utf8 = (text: string) => new TextEncoder().encode(text) as Uint8Array<ArrayBuffer>
 
 function droppableNetwork() {
@@ -659,6 +670,36 @@ describe('reference identity — full pipeline', () => {
     expect(counters.clientAbort).toBe(1)
   })
 
+  test("a value that shares its owner's lifecycle keeps its identity, with no wrapper of its own", async () => {
+    const owner = makeRoomExtension()
+    class Member {
+      constructor(readonly room: TestServerRoom) {}
+    }
+    const prefix = '!RefIdentityMember:'
+    const serverType: ReplacerType<TypeContract, ServerReplacerContext> = {
+      prefix,
+      detect: (value): value is Member => value instanceof Member,
+      replace: (member) => ({ metadata: { room: (member as Member).room }, close() {}, abort() {} }),
+    }
+    const member = { kind: 'client-member' }
+    const clientType: ReviverType<TypeContract, ClientReviverContext> = {
+      prefix,
+      revive(metadata, context) {
+        ;(context as InternalClientReviverContext).shareLifecycle(member, metadata.room as object)
+        return { value: member, close() {}, abort() {} }
+      },
+    }
+    const room = new TestServerRoom('owner')
+    const { ret } = await roundTrip(
+      { room, member: new Member(room) },
+      {
+        serverExtensions: [owner.serverType as ReplacerType<TypeContract, ServerReplacerContext>, serverType],
+        clientExtensions: [owner.clientType as ReviverType<TypeContract, ClientReviverContext>, clientType],
+      },
+    )
+    expect((ret as { member: unknown }).member).toBe(member)
+  })
+
   test.each([STREAM_TRANSPORT.BINARY_INLINE, STREAM_TRANSPORT.SSE_INLINE])(
     '%s: a body that drops under an inline stream leaves no unhandled rejection',
     (streamTransport) =>
@@ -739,6 +780,18 @@ describe('reference identity — full pipeline', () => {
     await pending
     retTyped.b.cancel()
     expect(await retTyped.b.readNextChunk()).toBe(null)
+  })
+
+  test('a tee() branch keeps a returned stream open after the stream itself is dropped', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array<ArrayBuffer>>
+    const branch = await teeAndDrop(new ReadableStream({ start: (c) => void (controller = c) }))
+    for (let cycle = 0; cycle < 8; cycle++) {
+      ;(globalThis as { gc(): void }).gc()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    controller.enqueue(utf8('tail'))
+    controller.close()
+    expect(await new Response(branch).text()).toBe('tail')
   })
 })
 
@@ -884,6 +937,19 @@ test("a runtime's lower frame limit reaches each channel, broadcast and function
     const sseOnly = (await roundTrip(returned(), { transports: ['sse'] })).ret as Revived
     expect(() => sseOnly.channel.sendBinary(tooLarge)).not.toThrow()
     for (const revived of [channel, broadcast, sseOnly.channel, sseOnly.broadcast]) revived.abort()
+    const room = await Room.create('frame-limit')
+    const roomed = { room, member: await room.join(), solo: await (await Room.create('frame-limit-solo')).join() }
+    type RevivedRoom = { room: RoomType; member: LocalParticipant; solo: LocalParticipant }
+    const revivedRoom = (await roundTrip(roomed, { transports: ['sse', 'ws'] })).ret as RevivedRoom
+    const { member, solo } = revivedRoom
+    await expect(revivedRoom.room.join({ meta: { name: 'x'.repeat(1024) } })).rejects.toThrow(
+      'the server accepts 1024 at most',
+    )
+    for (const participant of [member, solo]) {
+      await expect(Promise.resolve().then(() => participant.publishBinary(tooLarge))).rejects.toThrow(
+        'the server accepts 1024 at most',
+      )
+    }
   } finally {
     setAdapterMaxFrameBytes(undefined)
     delete clientConfig.fetch

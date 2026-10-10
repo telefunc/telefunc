@@ -271,6 +271,12 @@ const headings = [
   },
   {
     level: 2,
+    titleInNav: '`room`',
+    title: '`room` (config)',
+    url: '/room-config',
+  },
+  {
+    level: 2,
     title: '`fetch`',
     url: '/fetch',
   },
@@ -318,6 +324,12 @@ const headings = [
     title: '`Channel`',
     url: '/channel',
     sectionTitles: ['`new Channel()`', '`Broadcast`', '`new BroadcastChannel()`'],
+  },
+  {
+    level: 2,
+    title: '`Room`',
+    url: '/room',
+    sectionTitles: ['Overview', 'Quick start', 'Core concepts', 'Guides', 'Recipes', 'Production', 'Reference'],
   },
   {
     level: 2,

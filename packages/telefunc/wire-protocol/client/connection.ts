@@ -2738,7 +2738,7 @@ function channelErrorFor(reason: number): Error {
   switch (reason) {
     case ERROR_REASON.OVERFLOW:
       return new ChannelOverflowError(
-        'Broadcast closed: this client fell further behind than the server holds for a client',
+        'Channel closed: this client fell further behind than the server holds for a client',
       )
     case ERROR_REASON.LOST:
       return replayLossError('server')

@@ -167,10 +167,13 @@ export default {
 
 > On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
 
-Add the Durable Object and KV bindings to your `wrangler.jsonc`:
+Add the AsyncLocalStorage flag, and the Durable Object and KV bindings, to your `wrangler.jsonc`:
 
+{/* spellcheck-ignore:on */}
 ```jsonc
 {
+  // Required: Telefunc finds a subscription's session through AsyncLocalStorage (`nodejs_compat` works too).
+  "compatibility_flags": ["nodejs_als"],
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
@@ -180,10 +183,11 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
     { "binding": "TelefuncKV", "id": "your-kv-namespace-id" }
   ],
   "migrations": [
-    { "tag": "v1", "new_classes": ["TelefuncDurableObject"] }
+    { "tag": "v1", "new_sqlite_classes": ["TelefuncDurableObject"] }
   ]
 }
 ```
+{/* spellcheck-ignore:off */}
 
 > See <Link href="/stream/cloudflare" /> for scaling, distributed broadcast, delivery guarantees, and Durable Object configuration.
 

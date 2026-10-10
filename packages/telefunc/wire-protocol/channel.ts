@@ -1,4 +1,4 @@
-export { makePublishInfo }
+export { invokeChannelListener, makePublishInfo }
 export type {
   ChannelBase,
   ChannelShield,
@@ -10,31 +10,54 @@ export type {
   ChannelAck,
   ChannelPublishAck,
   ChannelPublishInfo,
-  ChannelPublishMeta,
   ChannelListenReturn,
   ChannelListener,
   ChannelBinaryListener,
   BroadcastListener,
   BroadcastBinaryListener,
+  BroadcastListenerByKind,
+  BroadcastListeners,
 }
 
 import type { TELEFUNC_SHIELDS } from '../node/shared/transformer/generateShield/shield-key.js'
+import { isPromise } from '../utils/isPromise.js'
+import type { Listeners } from '../utils/Listeners.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
-type ChannelPublishMeta = Record<string, unknown>
 /** Metadata delivered to broadcast subscribers alongside each message. */
 type ChannelPublishInfo = {
   key: string
-  /** Strict per-key counter (1, 2, 3…). Resets if the authority restarts. Use for gap detection. */
+  /** Per-key counter, one more than the key's previous publish. It starts at 1 (in memory, again after a restart); on
+   *  Redis a key starts at the Redis clock in microseconds, so a lost counter never goes backwards. Use for gap
+   *  detection. */
   seq: number
   /** Server timestamp, Unix epoch milliseconds. */
   timestamp: number
 }
-type ChannelPublishAck = ChannelPublishInfo & { meta?: ChannelPublishMeta }
+type ChannelPublishAck = ChannelPublishInfo & {
+  /** Who the message was handed to, when the backend can count it: subscribers in memory, server instances on
+   *  standalone Redis, session Durable Objects on Cloudflare; absent on Redis Cluster. Not a viewer count. */
+  receivers?: number
+}
 
 function makePublishInfo(key: string, seq: number, timestamp: number): ChannelPublishInfo {
   return { key, seq, timestamp }
+}
+
+/** Invoke a fire-and-forget listener while routing both thrown and rejected failures. Returns what `handleError`
+ *  returned for a synchronous throw only, which a caller can use to stop iterating; a rejection can't stop it. */
+function invokeChannelListener<Args extends unknown[]>(
+  listener: (...args: Args) => unknown,
+  args: Args,
+  handleError: (error: unknown) => boolean | void,
+): boolean | void {
+  try {
+    const result = listener(...args)
+    if (isPromise(result)) void result.catch(handleError)
+  } catch (error) {
+    return handleError(error)
+  }
 }
 type ChannelListenReturn<T> = [T] extends [never]
   ? void
@@ -47,6 +70,9 @@ type ChannelBinaryListener = (data: Uint8Array) => unknown | Promise<unknown>
 type BroadcastListener<T> = (data: ChannelData<T>, info: ChannelPublishInfo) => ChannelListenReturn<T>
 /** Callback for `Broadcast.subscribeBinary()` — receives raw binary data and publish info. */
 type BroadcastBinaryListener = (data: Uint8Array, info: ChannelPublishInfo) => unknown | Promise<unknown>
+type BroadcastListenerByKind<T> = { text: BroadcastListener<T>; binary: BroadcastBinaryListener }
+/** A broadcast's local listeners, by kind. */
+type BroadcastListeners<T> = { [K in keyof BroadcastListenerByKind<T>]: Listeners<BroadcastListenerByKind<T>[K]> }
 type ChannelCloseOptions = {
   timeout?: number
 }

@@ -1,9 +1,19 @@
-import { afterEach, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { CHANNEL_TRANSPORT } from '../constants.js'
-import { TAG, decode, encode, encodePublishBinary, encodePublishText, type ChannelFrame } from '../shared-ws.js'
+import {
+  ACK_STATUS,
+  TAG,
+  decode,
+  encode,
+  encodePublishBinary,
+  encodePublishText,
+  type AckResultStatus,
+  type ChannelFrame,
+} from '../shared-ws.js'
+import { ChannelOverflowError } from '../channel-errors.js'
 import { getSessionUrl } from './session-registry.js'
 
 const broadcasts: ClientBroadcast[] = []
@@ -140,6 +150,56 @@ test("a subscriber that unsubscribes itself doesn't make the next one miss the m
       bytes: 0,
     })
   expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
+})
+
+function publishThatSettlesWith(status: AckResultStatus, binary: boolean) {
+  const broadcast = stalledBroadcast()
+  const publishing = binary ? broadcast.publishBinary(new Uint8Array([1])) : broadcast.publish('message')
+  const text = status === ACK_STATUS.ABORT ? JSON.stringify('expected') : 'unexpected publish bug'
+  broadcast._dispatchFrame({ tag: TAG.ACK_RES, index: 0, seq: 1, bytes: 0, ackedSeq: 1, status, text })
+  return publishing
+}
+
+describe.each([
+  ['text', false],
+  ['binary', true],
+] as const)('ClientBroadcast %s', (_name, binary) => {
+  test('reports an unexpected publish error through the client bug pipeline', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(publishThatSettlesWith(ACK_STATUS.ERROR, binary)).rejects.toThrow('unexpected publish bug')
+    expect(report).toHaveBeenCalledOnce()
+    expect(report.mock.calls[0]?.[0]).toBe('[telefunc:channel-error]')
+    expect(report.mock.calls[0]?.[1]).toMatchObject({ message: 'unexpected publish bug' })
+  })
+
+  test.each([
+    ['an expected Abort', ACK_STATUS.ABORT, expect.objectContaining({ abortValue: 'expected' })],
+    ['a refused publish', ACK_STATUS.OVERFLOW, expect.any(ChannelOverflowError)],
+    [
+      'a shield validation failure',
+      ACK_STATUS.SHIELD_ERROR,
+      expect.objectContaining({ name: 'ShieldValidationError' }),
+    ],
+  ] as const)('keeps %s quiet', async (_name, status, rejection) => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(publishThatSettlesWith(status, binary)).rejects.toEqual(rejection)
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  test('reports a rejected subscriber promise through the client bug pipeline', async () => {
+    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const broadcast = stalledBroadcast()
+    const rejected = () => Promise.reject(new Error('subscriber rejected'))
+    const info = { seq: 1, timestamp: 1 }
+    if (binary) {
+      broadcast.subscribeBinary(rejected)
+      broadcast._dispatchFrame({ tag: TAG.PUBLISH_BINARY, index: 0, seq: 1, data: new Uint8Array(), info, bytes: 0 })
+    } else {
+      broadcast.subscribe(rejected)
+      broadcast._dispatchFrame({ tag: TAG.PUBLISH, index: 0, seq: 1, text: 'null', info, bytes: 0 })
+    }
+    await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
+  })
 })
 
 test('a broadcast delivers each publish with the seq its key was given, to text and binary subscribers alike, past 2^32', () => {

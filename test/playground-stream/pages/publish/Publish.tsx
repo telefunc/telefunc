@@ -1,6 +1,7 @@
 export { Publish }
 
 import React, { useEffect, useState } from 'react'
+import { keepReachable } from '../keepReachable'
 import { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient } from './Publish.telefunc'
 
 type ShieldState = {
@@ -35,6 +36,8 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const { publisher, subscriber, getReceived } = await onTextBroadcast()
+          // `subscriber` is a remote handle a GC pass would close, tearing down the server-side subscription mid-test.
+          const releaseSubscriber = keepReachable(subscriber)
           // Publish 3 messages from the publisher
           const acks = []
           for (let i = 0; i < 3; i++) {
@@ -50,10 +53,7 @@ function Publish() {
             if (received.length >= 3) break
             await new Promise((r) => setTimeout(r, 200))
           }
-          // `subscriber` is unused but must stay reachable until the scenario is over:
-          // it crosses the wire as a remote handle, and a GC pass would close it,
-          // tearing down the server-side subscription mid-test.
-          void subscriber
+          releaseSubscriber()
         }}
       >
         Text publish (3 messages)
@@ -66,6 +66,8 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const { publisher, subscriber, getReceived } = await onBinaryBroadcastPair()
+          // Keep the unused remote handle, see the text broadcast above.
+          const releaseSubscriber = keepReachable(subscriber)
           // Publish 3 binary frames
           const acks = []
           for (let i = 0; i < 3; i++) {
@@ -80,8 +82,7 @@ function Publish() {
             if (received.length >= 3) break
             await new Promise((r) => setTimeout(r, 200))
           }
-          // Keep the unused remote handle reachable, see the text broadcast above.
-          void subscriber
+          releaseSubscriber()
         }}
       >
         Binary publish (3 frames)

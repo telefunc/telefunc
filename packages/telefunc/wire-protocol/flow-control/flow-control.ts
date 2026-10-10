@@ -322,8 +322,7 @@ class FlowControl {
     this._byteWindowFloor = bytes
   }
 
-  // A frame counted in bytes only takes no message credit and starts no BDP probe: a broadcast's publish, which
-  // nothing waits on.
+  // A frame counted in bytes only takes no message credit and starts no BDP probe: a publish, which nothing waits on.
 
   countSentBytes(bytes: number): void {
     const hadCredit = !this.isPastByteCredit
