@@ -667,11 +667,11 @@ class RoomState {
     for (const cb of cbs.list()) invokeChannelListener(cb, args, this._onCallbackError)
   }
 }
-/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */
 /** Later timestamp wins; equal timestamps break deterministically by writer ID. */
 function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {
   return a.at > b.at || (a.at === b.at && a.by > b.by)
 }
+/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */
 function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
   assertUsage(
     opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),
