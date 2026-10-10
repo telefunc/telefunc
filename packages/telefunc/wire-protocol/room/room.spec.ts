@@ -1995,6 +1995,33 @@ describe('Room public behavior', () => {
     expect(await Room.getParticipants(room.id)).toEqual([])
     expect(departed).not.toHaveBeenCalled() // the admission rolls itself back
   })
+  it('reports a member whose client stub closed after its member write committed as disconnected, once', async () => {
+    const room = (await Room.create('stub-close-after-member-write')) as ServerRoom
+    const observer = await Room.get(room.id)
+    const stub = register(room)
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    const written = createDeferred()
+    const release = createDeferred()
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (...args) => {
+      const result = await compareExchange(...args)
+      if (args[3].some(({ key }) => key.startsWith(MEMBER_CELL_PREFIX))) {
+        written.resolve()
+        await release.promise
+      }
+      return result
+    })
+    const joining = joinThrough(stub).catch((error: unknown) => error)
+    await written.promise
+    const causes: unknown[] = []
+    observer.onLeave((_member, cause) => causes.push(cause?.type))
+    expect(await observer.getParticipants()).toHaveLength(1)
+    stub.abort()
+    release.resolve()
+    expect(isRoomError(await joining)).toBe(true)
+    await vi.waitFor(() => expect(causes).toEqual(['disconnected']))
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(causes).toEqual(['disconnected'])
+  })
   it('keeps no stub index entry for a member that left, or whose stub closed', async () => {
     const room = (await Room.create('stub-index-cleanup')) as ServerRoom
     const stub = register(room)

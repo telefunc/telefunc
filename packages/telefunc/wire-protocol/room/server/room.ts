@@ -251,8 +251,11 @@ class ServerRoom extends RoomStateView implements Room {
       if (this._applyJoin(joinedMember(join))) this._relayApplied(join)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
-      await evictMember(this.id, this._inc, id, identity, { type: 'left' }).catch(reportRoomError)
-      this._abandonAdmission(id)
+      // In an open room the inbox closes only when the holder detached, or a removal already evicted the member.
+      const lost = this._subs.inboxOf(id) === undefined && !this._state.closed
+      const cause = lost ? ({ type: 'disconnected' } as const) : ({ type: 'left' } as const)
+      await evictMember(this.id, this._inc, id, identity, cause).catch(reportRoomError)
+      this._abandonAdmission(id, cause)
       throw error
     }
   }
@@ -267,9 +270,9 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._subs.inboxOf(id) === undefined)
       throw this._state.closed ? roomClosedError(this.id) : participantLeftError()
   }
-  private _abandonAdmission(id: string): void {
+  private _abandonAdmission(id: string, cause: LeaveCause): void {
     this._pendingAdmissions.delete(id)
-    this._state.applyLeave(id, { type: 'left' })
+    this._state.applyLeave(id, cause)
   }
 
   /** @internal */
