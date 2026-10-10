@@ -9,7 +9,7 @@ import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
 import type { RoomDemand } from '../demand.js'
-import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
+import type { HoldConfig, MemberSnapshot, RoomConfigRecord } from '../protocol.js'
 import { replayMembership, type RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
@@ -25,6 +25,7 @@ assertIsNotBrowser()
 type SubscriptionHost = {
   readonly id: string
   readonly _inc: string
+  readonly _hold: HoldConfig | null
   /** Read-only here: every change goes through the host's methods. */
   readonly _state: Pick<
     RoomState,
@@ -277,7 +278,7 @@ class RoomSubscriptions {
   private async _runMemberRefresh(): Promise<void> {
     const host = this._host
     if (host._state.closed) return
-    const read = await host._state.recordingMembership(() => reapAndReadRoster(host.id, host._inc))
+    const read = await host._state.recordingMembership(() => reapAndReadRoster(host.id, host._inc, host._hold))
     if (host._state.closed) return
     const { members, departing } = replayMembership(read.value, read.events)
     host._applyAuthorityRoster(members, departing)
@@ -320,7 +321,7 @@ class RoomSubscriptions {
       }
       this.replan() // bounded retry trigger for still-wanted terminal lanes
       await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views
-      if (!host._state.closed) await maintainHold(host.id, host._inc)
+      if (!host._state.closed) await maintainHold(host.id, host._inc, host._hold)
       if (renewalFailure) throw renewalFailure.error
     } finally {
       this._heartbeatBusy = false

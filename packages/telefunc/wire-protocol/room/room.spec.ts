@@ -31,7 +31,7 @@ import {
   type InboxMessage,
   type RoomSnapshotMetadata,
 } from './protocol.js'
-import { HOLD_CELL_KEY, HOLDS_CELL_KEY, JOINS_CELL_KEY, MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
+import { HOLDS_CELL_KEY, JOINS_CELL_KEY, MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
 import { holdViews } from './server/membership.js'
 import type { LeaveCause, ParticipantMeta, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
@@ -71,7 +71,7 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
 const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
-const HOLD_RECORD_KEYS = [HOLD_CELL_KEY, HOLDS_CELL_KEY, JOINS_CELL_KEY].join()
+const HOLD_RECORD_KEYS = [HOLDS_CELL_KEY, JOINS_CELL_KEY].join()
 let driver: MemoryBackend
 let memoryState: MemoryBackendState
 beforeEach(async () => {
@@ -4265,13 +4265,13 @@ describe('a room nothing holds closes on its own', () => {
     const room = (await Room.create('view-lapses')) as ServerRoom
     const closed = await observe(room.id)
     // A view the server holding the page wrote before it died, renewed by nothing since.
-    await holdViews(room.id, room._inc, ['gone-page'])
+    await holdViews(room.id, room._inc, room._hold, ['gone-page'])
     await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
     expect(await isListed(room.id)).toBe(true)
     await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)
     await expectClosed(room.id, closed)
   })
-  it('keeps a room whose hold record failed to write open under its members, never closing it on its own', async () => {
+  it("keeps a room whose creation's hold count failed to write open under its members", async () => {
     vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(new Error('transient'))
     await expect(Room.create('hold-write-failed')).rejects.toThrow('transient')
     const room = await Room.getOrCreate('hold-write-failed')
@@ -4280,6 +4280,27 @@ describe('a room nothing holds closes on its own', () => {
     await vi.advanceTimersByTimeAsync(10 * 60_000)
     expect((await getRoomBackend().readHead(room.id))?.state).toBe('open')
     expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
+  })
+  it("counts a member who joins from another server before the new room's first cell write, closing it only after they leave", async () => {
+    const exchange = driver.compareExchangeCells.bind(driver)
+    let joined: ReturnType<typeof Room.join> | undefined
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, cx) => {
+      if (joined === undefined) {
+        joined = Room.join(roomId)
+        await joined
+      }
+      return await exchange(roomId, inc, cx)
+    })
+    const room = await Room.create('join-before-hold', { emptyTimeout: 1_000, departureTimeout: 5_000 })
+    const closed = await observe(room.id)
+    const member = await joined!
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
+    await member.leave()
+    await vi.advanceTimersByTimeAsync(5_000 - 1)
+    expect(await isListed(room.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    await expectClosed(room.id, closed)
   })
   it("keeps a room's lapse through a meta write", async () => {
     const room = await Room.create('meta-keeps-lapse', { emptyTimeout: 60_000 })

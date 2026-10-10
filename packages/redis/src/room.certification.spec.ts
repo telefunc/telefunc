@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { Cluster, Redis } from 'ioredis'
-import { describe, expect, it, onTestFinished } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis } from './index.js'
 import { RedisBackend } from './backend.js'
 import { disposeBackend } from '../../telefunc/dist/wire-protocol/backend/install.js'
@@ -129,6 +129,33 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(sizes).toEqual([...sizes].sort((a, b) => a - b))
     expect(await Room.getParticipants(room.id)).toHaveLength(1_000)
   })
+  it("counts a member who joins before the new room's first cell write, closing it only after they leave", async () => {
+    installRedis(ownClient(connect()), { prefix: uniquePrefix('join-before-hold') })
+    onTestFinished(() => disposeBackend())
+    const exchange = RedisBackend.prototype.compareExchangeCells
+    let joined: ReturnType<typeof Room.join> | undefined
+    const spy = vi.spyOn(RedisBackend.prototype, 'compareExchangeCells').mockImplementation(async function (
+      this: RedisBackend,
+      roomId,
+      inc,
+      cx,
+    ) {
+      if (joined === undefined) {
+        joined = Room.join(roomId)
+        await joined
+      }
+      return await exchange.call(this, roomId, inc, cx)
+    })
+    onTestFinished(() => spy.mockRestore())
+    const room = await Room.create('join-before-hold', { emptyTimeout: 500, departureTimeout: 2_000 })
+    const member = await joined!
+    await sleep(2_000)
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
+    await member.leave()
+    await sleep(1_000)
+    expect(await Room.getParticipants(room.id)).toEqual([])
+    await vi.waitFor(() => expect(Room.get(room.id)).rejects.toThrow('Room not found'), { timeout: 5_000 })
+  })
 })
 
 /** A server that joins the room COUNT times at START_AT, and reports each join's failure. */
@@ -166,6 +193,10 @@ function ownClient<Client extends Redis | Cluster>(client: Client): Client {
 }
 
 const uniquePrefix = (label: string): string => `redis-room-ci:${process.pid}:${Date.now().toString(36)}:${label}:`
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 function bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value)

@@ -48,6 +48,7 @@ import {
   leaveCauseFromWire,
   leaveCauseToWire,
   type MemberSnapshot,
+  type HoldConfig,
   type RoomConfigRecord,
   type RoomSnapshotMetadata,
   type RoomCtrlEnvelope,
@@ -132,6 +133,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** Every authority check and member write carries this incarnation, rejecting stale handles after recreate. */
   readonly _inc: string
+  /** @internal */ readonly _hold: HoldConfig | null
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private _tail: TailHold | null = null
   /** In-flight `send(…, { ack: true })`s; a leave of either end, or a close, fails the ones it strands. */
@@ -162,11 +164,13 @@ class ServerRoom extends RoomStateView implements Room {
   constructor(
     roomId: string,
     inc: string,
+    hold: HoldConfig | null,
     stored: StoredRoomMeta,
     seed: { members: MemberSnapshot[] } | { count: number },
   ) {
     super()
     this._inc = inc
+    this._hold = hold
     this._state = new RoomState({
       owner: this,
       roomId,
@@ -248,7 +252,13 @@ class ServerRoom extends RoomStateView implements Room {
     this._subs.memberOwned(id)
     try {
       await this._inboxReady(id)
-      await createMember(this.id, this._inc, id, { meta, joinedAt, seenAt: joinedAt, metaSeq: 0, ...optional })
+      await createMember(this.id, this._inc, this._hold, id, {
+        meta,
+        joinedAt,
+        seenAt: joinedAt,
+        metaSeq: 0,
+        ...optional,
+      })
       this._assertAdmitted(id)
       this._pendingAdmissions.delete(id)
       const join = { __r: 'join', id, meta, joinedAt, ...optional } as const
@@ -261,7 +271,7 @@ class ServerRoom extends RoomStateView implements Room {
       // In an open room the inbox closes only when the holder detached, or a removal already evicted the member.
       const lost = this._subs.inboxOf(id) === undefined && !this._state.closed
       const cause = lost ? ({ type: 'disconnected' } as const) : ({ type: 'left' } as const)
-      await evictMember(this.id, this._inc, id, identity, cause).catch(reportRoomError)
+      await evictMember(this.id, this._inc, this._hold, id, identity, cause).catch(reportRoomError)
       this._abandonAdmission(id, cause)
       throw error
     }
@@ -286,7 +296,7 @@ class ServerRoom extends RoomStateView implements Room {
   async _removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this._state.closed) return // close() already removed everyone
     const identity = this._state.getRemote(id)?.identity ?? null
-    await evictMember(this.id, this._inc, id, identity, cause)
+    await evictMember(this.id, this._inc, this._hold, id, identity, cause)
     this._state.applyLeave(id, cause)
   }
 
@@ -500,7 +510,7 @@ class ServerRoom extends RoomStateView implements Room {
   private async _resolveMember(id: string): Promise<Sender | null> {
     const remote = this._state.getRemote(id)
     if (remote) return senderOf(id, remote.meta, remote.identity)
-    const [member] = await reapAndReadMembersById(this.id, this._inc, [id])
+    const [member] = await reapAndReadMembersById(this.id, this._inc, this._hold, [id])
     return member === undefined ? null : senderOf(id, member.meta, member.identity ?? null)
   }
   /** @internal */
@@ -711,7 +721,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
-    this._views.set(stub, holdViews(this.id, this._inc, [stub.id]).catch(reportRoomError))
+    this._views.set(stub, holdViews(this.id, this._inc, this._hold, [stub.id]).catch(reportRoomError))
     if (this._tail !== null) {
       stub._beginTail(this._tail.take(), () => this._subs.holderChanged(stub))
       this._tail = null
@@ -743,7 +753,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._stubs.delete(stub)
     const view = this._views.get(stub)
     this._views.delete(stub)
-    void view?.then(() => removeView(this.id, this._inc, stub.id)).catch(reportRoomError)
+    void view?.then(() => removeView(this.id, this._inc, this._hold, stub.id)).catch(reportRoomError)
     this._rosterOwed.delete(stub)
     stub._endTail()
     this._subs.holderChanged(stub, true)
@@ -857,6 +867,7 @@ class ServerRoom extends RoomStateView implements Room {
       holdViews(
         this.id,
         this._inc,
+        this._hold,
         stubs.map((stub) => stub.id),
       ),
     )

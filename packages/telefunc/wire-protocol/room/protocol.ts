@@ -2,6 +2,7 @@
 export { hasRoomTag, joinedMember, inboxMessageFromWire, wireDmFromInbox, leaveCauseFromWire, leaveCauseToWire }
 export type {
   RoomConfigRecord,
+  HoldConfig,
   RoomMemberRecord,
   MemberSnapshot,
   RoomSnapshotMetadata,
@@ -34,7 +35,11 @@ import type { LeaveCause, ParticipantMeta, RoomMeta } from './types.js'
 type RoomConfigRecord = {
   meta: RoomMeta
   inc: string
+  /** Its hold timeouts (see `lifecycle.ts`); a room that never closes on its own has none. */
+  hold: HoldConfig | null
 }
+
+type HoldConfig = { emptyTimeout: number; departureTimeout: number }
 
 /** A member cell. Its owner renews `seenAt` every heartbeat; a record older than the member TTL is reaped. */
 type RoomMemberRecord = {

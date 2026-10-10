@@ -7,7 +7,6 @@ export {
   memberIdOfCleanupKey,
   identityCellKey,
   identityCellPrefix,
-  HOLD_CELL_KEY,
   HOLDS_CELL_KEY,
   JOINS_CELL_KEY,
   VIEW_CELL_PREFIX,
@@ -43,8 +42,6 @@ function identityCellPrefix(identity: string): string {
 function identityCellKey(identity: string, memberId: string): string {
   return identityCellPrefix(identity) + memberId
 }
-/** The room's hold timeouts (see `lifecycle.ts`), written once, with its counters. */
-const HOLD_CELL_KEY = 'hold'
 /** Counters: what holds the room, counted in the compare-exchange that adds or removes a hold, and its joins. */
 const HOLDS_CELL_KEY = 'holds'
 const JOINS_CELL_KEY = 'joins'
