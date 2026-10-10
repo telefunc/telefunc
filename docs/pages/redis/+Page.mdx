@@ -43,9 +43,13 @@ installRedis(redis)
 
 Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc. Subscriptions share one duplicated connection; when it drops (a Redis restart, a failover), they resume on a fresh one. Messages published while it was down are lost, as delivery is at-most-once. A failover whose new master missed the last writes rewinds their sequence numbers: subscribers still connected then drop as many later messages as it lost, since delivery never goes back in order. When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops.
 
-Telefunc runs its commands on its own connection, duplicated from your client with retries off, so a command whose reply was lost can't execute twice. Your client keeps its options, and Telefunc's connection closes when your client does. Pub/Sub channels ignore an ioredis `keyPrefix`, so `installRedis()` throws for a client that sets one: pass `installRedis(redis, { prefix })` instead.
+Telefunc runs its commands on its own connection, duplicated from your client with retries off, so a command whose reply was lost can't execute twice. Your client keeps its options, and Telefunc's connection closes when your client does. Pub/Sub channels ignore an ioredis `keyPrefix`, so `installRedis()` throws for a client that sets one: pass `installRedis(redis, { prefix })` instead. It also throws for a `prefix` that contains `{`.
 
 Room keeps its state (rooms, members, lane order) in Redis keys with no expiry, so Redis must never evict them: use `maxmemory-policy noeviction`, or a `volatile-*` policy, which evicts only keys with an expiry. An `allkeys-*` policy can silently break a room.
+
+Keep your Redis masters' clocks synchronized. Broadcast timestamps, the `seq` a key restarts at when Redis lost its counter, and the moment a room whose server is gone lapses all come from the clock of the master that holds the key, so a failover or a Cluster reshard onto a master whose clock is off shifts them.
+
+On a Redis Cluster, a server sends a room's room-wide messages one at a time, each once Redis has answered the one before, and the same for the direct messages to one member and for each member's binary track. Each of these carries at most one message per round trip to Redis from that server.
 
 ## Channels
 
