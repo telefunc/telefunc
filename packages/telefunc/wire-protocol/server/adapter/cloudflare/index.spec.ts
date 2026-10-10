@@ -47,7 +47,6 @@ const mocks = vi.hoisted(() => {
         return new ReadableStream()
       },
     })),
-    rawContext: null as Record<symbol, unknown> | null,
     workerEnv: {} as Record<string, unknown>,
     transportInstances: [] as MockCloudflareBroadcast[],
     authorityInstances: [] as MockCloudflareBroadcastAuthorityState[],
@@ -88,27 +87,6 @@ vi.mock('../../../../node/server/telefunc.js', () => ({
 }))
 
 vi.mock('../../../../node/server/async_hooks.js', () => ({}))
-
-vi.mock('../../../../node/server/context/context.js', () => ({
-  getRawContext: () => mocks.rawContext,
-  restoreContext: <T>(context: Record<symbol, unknown>, fn: () => T): T => {
-    const previous = mocks.rawContext
-    mocks.rawContext = context
-    try {
-      const result = fn()
-      if (result instanceof Promise) {
-        return result.finally(() => {
-          mocks.rawContext = previous
-        }) as T
-      }
-      mocks.rawContext = previous
-      return result
-    } catch (error) {
-      mocks.rawContext = previous
-      throw error
-    }
-  },
-}))
 
 vi.mock('./broadcast.js', () => ({
   CloudflareBroadcastAuthorityState: mocks.MockCloudflareBroadcastAuthorityState,
@@ -196,7 +174,6 @@ beforeEach(() => {
       return new ReadableStream()
     },
   })
-  mocks.rawContext = null
   for (const key of Object.keys(mocks.workerEnv)) delete mocks.workerEnv[key]
   mocks.transportInstances.length = 0
   mocks.authorityInstances.length = 0
