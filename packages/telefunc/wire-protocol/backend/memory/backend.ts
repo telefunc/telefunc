@@ -4,7 +4,8 @@ export { MemoryBackendState, MemoryBackend }
 
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
 import type {
-  CellMutation,
+  CellCounter,
+  CellsCx,
   HeadCxResult,
   CommitResult,
   CxResult,
@@ -23,6 +24,8 @@ import type {
 import { encodeLaneKey } from '../room/lane-key.js'
 import {
   commitPreconditionHolds,
+  countCell,
+  encodeCellCounter,
   headCxMatches,
   isOpenIncarnation,
   materializeHead,
@@ -44,11 +47,12 @@ type MemoryBackendOptions = {
 type MemorySubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 type Expiring = { expiresAt: number | null }
-type StoredCell = { bytes: Uint8Array }
+type StoredCell = { bytes: Uint8Array; version: string }
 type RetainedEntry = { lane: LaneId; payload: Uint8Array; seq: number; timestamp: number }
 
 type Generation = {
-  revision: number
+  /** The last cell version this generation issued. */
+  version: number
   cells: Map<string, StoredCell>
   /** Cell keys by each of their prefixes ending in ':', the separator of cell keys, so a prefix read lists its own. */
   cellsByPrefix: Map<string, Set<string>>
@@ -91,7 +95,7 @@ function nextTurn(callback: () => void): void {
 
 function newGeneration(): Generation {
   return {
-    revision: 0,
+    version: 0,
     cells: new Map(),
     cellsByPrefix: new Map(),
     order: new Map(),
@@ -110,7 +114,7 @@ function cellKeysWithPrefix(gen: Generation, prefix: string): Iterable<string> {
   return indexed === prefix ? keys : [...keys].filter((key) => key.startsWith(prefix))
 }
 
-function setCell(gen: Generation, key: string, bytes: Uint8Array | null): void {
+function setCell(gen: Generation, key: string, bytes: Uint8Array | null, version: string): void {
   if (bytes === null) {
     if (!gen.cells.delete(key)) return
     for (const prefix of separatorPrefixes(key)) {
@@ -127,7 +131,7 @@ function setCell(gen: Generation, key: string, bytes: Uint8Array | null): void {
       else keys.add(key)
     }
   }
-  gen.cells.set(key, { bytes: copyBytes(bytes) })
+  gen.cells.set(key, { bytes: copyBytes(bytes), version })
 }
 
 function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: number): OrderingInfo {
@@ -257,28 +261,32 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const gen = this._generation(room, inc)
     const keys = 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix)
     const cells = new Map<string, Uint8Array>()
+    const versions = new Map<string, string>()
     for (const key of keys) {
       const cell = gen.cells.get(key)
       if (cell === undefined) continue
       cells.set(key, copyBytes(cell.bytes))
+      versions.set(key, cell.version)
     }
-    return { revision: String(gen.revision), cells }
+    return { cells, versions }
   }
 
-  async compareExchangeCells(
-    roomId: string,
-    inc: string,
-    revision: string,
-    mutations: CellMutation[],
-  ): Promise<CxResult> {
+  async compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
     const room = this._state.rooms.get(roomId)
     const head = this._liveHead(room)
     if (room === undefined || !isOpenIncarnation(head, inc)) return 'stale-inc'
     const gen = this._generation(room, inc)
-    if (String(gen.revision) !== revision) return 'conflict'
-    for (const mutation of mutations) setCell(gen, mutation.key, mutation.bytes)
-    gen.revision += 1
-    return 'committed'
+    if (cx.expect.some(({ key, version }) => (gen.cells.get(key)?.version ?? null) !== version)) return 'conflict'
+    const version = String(++gen.version)
+    for (const mutation of cx.mutations) setCell(gen, mutation.key, mutation.bytes, version)
+    const counters = new Map<string, CellCounter>()
+    for (const count of cx.counts ?? []) {
+      const counted = countCell(gen.cells.get(count.key)?.bytes, count, Date.now())
+      if (counted === null) continue
+      if (counted.written) setCell(gen, count.key, encodeCellCounter(counted.counter), version)
+      counters.set(count.key, counted.counter)
+    }
+    return { committed: counters }
   }
 
   async commitLane(

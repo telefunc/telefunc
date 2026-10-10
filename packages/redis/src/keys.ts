@@ -6,6 +6,7 @@ export {
   headKey,
   generationKeysKey,
   revKey,
+  versionsKey,
   cellKeyPrefix,
   cellKey,
   cellIndexKey,
@@ -56,6 +57,10 @@ function generationKeysKey(prefix: string, roomId: string, inc: string): string 
 }
 function revKey(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rev`
+}
+/** Each cell's version, by its key. */
+function versionsKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:vers`
 }
 function cellKeyPrefix(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:c:`

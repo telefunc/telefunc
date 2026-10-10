@@ -57,7 +57,7 @@ import {
 import { ServerRoom } from './room.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
-import { lapseNewRoom, newHoldRecord } from './lifecycle.js'
+import { lapseNewRoom, newHoldConfig } from './lifecycle.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
@@ -163,7 +163,7 @@ type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
   const backend = getRoomBackend()
-  return await retryCompareExchange(id, async () => {
+  return await retryCompareExchange(async () => {
     let current = await backend.readHead(id)
     if (current?.state === 'closing') {
       const closing = await acquireClosingLease(backend, id, current)
@@ -189,8 +189,8 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
     }
     assert('head' in result)
-    // The head lapses only once the hold record that keeps it ahead is written.
-    const hold = newHoldRecord(emptyTimeout, departureTimeout)
+    // The head lapses only once the hold cells that keep it ahead are written.
+    const hold = newHoldConfig(emptyTimeout, departureTimeout)
     if (hold !== null) {
       await createHold(id, created.inc, hold)
       await lapseNewRoom(id, created.inc)
@@ -321,7 +321,7 @@ async function writeRoomConfig(
 ): Promise<void> {
   const by = writerId()
   const backend = getRoomBackend()
-  const update = await retryCompareExchange(id, async () => {
+  const update = await retryCompareExchange(async () => {
     const current = await backend.readHead(id)
     const currentConfig = openConfig(current, config.inc)
     if (current === null || currentConfig === null) throw roomClosedError(id)

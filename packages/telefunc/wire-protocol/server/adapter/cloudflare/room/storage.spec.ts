@@ -1,5 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { expect, test } from 'vitest'
+import type { CellsCx } from '../../../../backend/room/contract.js'
 import {
   compareExchangeCells,
   compareExchangeHead,
@@ -77,7 +78,7 @@ test("a prefix read selects the incarnation's cells under it as a primary-key ra
   compareExchangeHead(sql, { form: 'absent' }, { head: { state: 'open', currentInc: 'inc-1', config } }, now)
   const keys = ['m:1', 'identity:a:1', 'identity:a:2', 'identity:ab:3', 'identity;', 'x\u{10ffff}y']
   const mutations = keys.map((key) => ({ key, bytes: new Uint8Array([1]) }))
-  expect(compareExchangeCells(sql, 'inc-1', '0', mutations, now)).toBe('committed')
+  expect(compareExchangeCells(sql, 'inc-1', { expect: [], mutations }, now)).toEqual({ committed: new Map() })
   const listed = (prefix: string) => {
     const read = readCells(sql, 'inc-1', { prefix }, now)
     if ('staleInc' in read) throw new Error('cell read fenced unexpectedly')
@@ -91,4 +92,61 @@ test("a prefix read selects the incarnation's cells under it as a primary-key ra
   expect(listed('identity:')).toEqual(['identity:a:1', 'identity:a:2', 'identity:ab:3'])
   expect(listed('x\u{10ffff}')).toEqual(['x\u{10ffff}y'])
   expect(listed('')).toHaveLength(keys.length)
+})
+
+test('an exchange commits while the cells it expects are as read, whatever else changed, and never conflicts on a count', () => {
+  const { sql } = sqlStorage()
+  compareExchangeHead(
+    sql,
+    { form: 'absent' },
+    { head: { state: 'open', currentInc: 'inc', config: new TextEncoder().encode('config') } },
+    1_000,
+  )
+  const exchange = (cx: CellsCx, now: number) => compareExchangeCells(sql, 'inc', cx, now)
+  const bytes = (value: string) => new TextEncoder().encode(value)
+  expect(
+    exchange(
+      {
+        expect: [{ key: 'a', version: null }],
+        mutations: [{ key: 'a', bytes: bytes('a1') }],
+        counts: [{ key: 'n', delta: 0, create: true }],
+      },
+      1_000,
+    ),
+  ).toEqual({ committed: new Map([['n', { value: 0, changedAt: 1_000 }]]) })
+  const read = readCells(sql, 'inc', { keys: ['a'] }, 1_000)
+  if ('staleInc' in read) throw new Error('the room is gone')
+  const a = read.versions.get('a')!
+  // Another writer: a cell this exchange didn't read, and the counter.
+  exchange({ expect: [{ key: 'b', version: null }], mutations: [{ key: 'b', bytes: bytes('b1') }] }, 2_000)
+  expect(exchange({ expect: [], mutations: [], counts: [{ key: 'n', delta: 1 }] }, 2_000)).toEqual({
+    committed: new Map([['n', { value: 1, changedAt: 2_000 }]]),
+  })
+  expect(
+    exchange(
+      {
+        expect: [{ key: 'a', version: a }],
+        mutations: [{ key: 'a', bytes: bytes('a2') }],
+        counts: [{ key: 'n', delta: 2 }],
+      },
+      3_000,
+    ),
+  ).toEqual({ committed: new Map([['n', { value: 3, changedAt: 3_000 }]]) })
+  // `a` was written since that read.
+  expect(exchange({ expect: [{ key: 'a', version: a }], mutations: [], counts: [{ key: 'n', delta: 5 }] }, 3_000)).toBe(
+    'conflict',
+  )
+  const counts = [
+    { key: 'n', delta: 0 },
+    { key: 'missing', delta: 1 },
+  ]
+  expect(exchange({ expect: [], mutations: [], counts }, 4_000)).toEqual({
+    committed: new Map([['n', { value: 3, changedAt: 3_000 }]]),
+  })
+  const after = readCells(sql, 'inc', { keys: ['a', 'n', 'missing'] }, 4_000)
+  if ('staleInc' in after) throw new Error('the room is gone')
+  expect([...after.cells].map(([key, value]) => [key, new TextDecoder().decode(value)])).toEqual([
+    ['a', 'a2'],
+    ['n', JSON.stringify({ value: 3, changedAt: 3_000 })],
+  ])
 })

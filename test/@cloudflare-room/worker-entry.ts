@@ -442,16 +442,19 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
   )
   const initialCells = await probe.authority.readCells(probe.inc, { keys: ['native'] })
   if ('staleInc' in initialCells) throw new Error('native RPC cell read was stale')
-  const cellResult = await probe.authority.compareExchangeCells(probe.inc, initialCells.revision, [
-    { key: 'native', bytes: new Uint8Array([0x44, 0x55]) },
-  ])
-  if (cellResult !== 'committed') throw new Error(`native RPC cell write returned ${cellResult}`)
+  const cellResult = await probe.authority.compareExchangeCells(probe.inc, {
+    expect: [{ key: 'native', version: initialCells.versions.get('native') ?? null }],
+    mutations: [{ key: 'native', bytes: new Uint8Array([0x44, 0x55]) }],
+    counts: [{ key: 'count', delta: 1, create: true }],
+  })
+  if (typeof cellResult !== 'object') throw new Error(`native RPC cell write returned ${cellResult}`)
   const storedCells = await probe.authority.readCells(probe.inc, { keys: ['native'] })
   if ('staleInc' in storedCells) throw new Error('native RPC cell reread was stale')
   const stored = storedCells.cells.get('native')
   return {
     headConfig: [...opened.config],
     cell: stored === undefined ? null : [...stored],
+    count: cellResult.committed.get('count')?.value,
     staleCell: await probe.authority.commitLane(probe.inc, { kind: 'semantic' }, new Uint8Array([1]), {
       requiredCellKeys: ['m:missing'],
     }),

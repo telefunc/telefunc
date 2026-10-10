@@ -17,7 +17,8 @@ export {
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
 import type {
-  CellMutation,
+  CellCounter,
+  CellsCx,
   CxResult,
   HeadCx,
   HeadNext,
@@ -26,6 +27,8 @@ import type {
   DirectoryPage,
 } from '../../../../backend/room/contract.js'
 import {
+  countCell,
+  encodeCellCounter,
   headCxMatches,
   isOpenIncarnation,
   materializeHead,
@@ -48,13 +51,13 @@ type HeadRow = {
 }
 
 function initSchema(sql: SqlStorage): void {
-  // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's cell revision.
+  // The DO is the room: `head` is one row or absent; `gen` is each installed incarnation's last cell version.
   sql.exec(`
     CREATE TABLE IF NOT EXISTS head
       (id INTEGER PRIMARY KEY CHECK (id = 1), rev TEXT NOT NULL, inc TEXT, state TEXT NOT NULL, config BLOB NOT NULL, lease_id TEXT, lease_until INTEGER, expires_at INTEGER);
     CREATE TABLE IF NOT EXISTS gen (inc TEXT PRIMARY KEY, revision INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS cell
-      (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (inc, key));
+      (inc TEXT NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (inc, key));
     CREATE TABLE IF NOT EXISTS ord
       (inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, domain));
     CREATE TABLE IF NOT EXISTS rt_manifest
@@ -164,18 +167,18 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number, current: Stored
   return head
 }
 
-type CellRow = { key: string; bytes: ArrayBuffer }
+type CellRow = { key: string; bytes: ArrayBuffer; version: number }
 function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
   if ('keys' in sel)
     return sel.keys.flatMap((key) => {
       const row = sql
-        .exec<Omit<CellRow, 'key'>>('SELECT bytes FROM cell WHERE inc = ? AND key = ?', inc, key)
+        .exec<Omit<CellRow, 'key'>>('SELECT bytes, version FROM cell WHERE inc = ? AND key = ?', inc, key)
         .toArray()[0]
       return row === undefined ? [] : [{ key, ...row }]
     })
   // A key range, so the read seeks the primary key instead of scanning every cell of the incarnation.
   const end = prefixEnd(sel.prefix)
-  const query = `SELECT key, bytes FROM cell WHERE inc = ? AND key >= ?${end === null ? '' : ' AND key < ?'}`
+  const query = `SELECT key, bytes, version FROM cell WHERE inc = ? AND key >= ?${end === null ? '' : ' AND key < ?'}`
   return sql.exec<CellRow>(query, inc, sel.prefix, ...(end === null ? [] : [end])).toArray()
 }
 
@@ -183,8 +186,11 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
 function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
-  const revision = String(readRevision(sql, inc))
-  return { revision, cells: new Map(selectCellRows(sql, inc, sel).map((row) => [row.key, new Uint8Array(row.bytes)])) }
+  const rows = selectCellRows(sql, inc, sel)
+  return {
+    cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
+    versions: new Map(rows.map((row) => [row.key, String(row.version)])),
+  }
 }
 
 function readRevision(sql: SqlStorage, inc: string): number {
@@ -192,26 +198,33 @@ function readRevision(sql: SqlStorage, inc: string): number {
   return row?.revision ?? 0
 }
 
-// Cell writes are all-or-nothing under the read-set revision and require an open head.
-function compareExchangeCells(
-  sql: SqlStorage,
-  inc: string,
-  revision: string,
-  mutations: CellMutation[],
-  now: number,
-): CxResult {
+function cellVersion(sql: SqlStorage, inc: string, key: string): string | null {
+  const row = sql.exec<{ version: number }>('SELECT version FROM cell WHERE inc = ? AND key = ?', inc, key).toArray()[0]
+  return row === undefined ? null : String(row.version)
+}
+
+function writeCell(sql: SqlStorage, inc: string, key: string, bytes: Uint8Array | null, version: number): void {
+  if (bytes === null) sql.exec('DELETE FROM cell WHERE inc = ? AND key = ?', inc, key)
+  else sql.exec('INSERT OR REPLACE INTO cell (inc, key, bytes, version) VALUES (?, ?, ?, ?)', inc, key, bytes, version)
+}
+
+// Cell writes are all-or-nothing while every expected cell is at its version, and require an open head.
+function compareExchangeCells(sql: SqlStorage, inc: string, cx: CellsCx, now: number): CxResult {
   const head = readLiveHead(sql, now)
   if (!isOpenIncarnation(head, inc)) return 'stale-inc'
-  if (String(readRevision(sql, inc)) !== revision) return 'conflict'
-  for (const mutation of mutations) {
-    if (mutation.bytes === null) {
-      sql.exec('DELETE FROM cell WHERE inc = ? AND key = ?', inc, mutation.key)
-    } else {
-      sql.exec('INSERT OR REPLACE INTO cell (inc, key, bytes) VALUES (?, ?, ?)', inc, mutation.key, mutation.bytes)
-    }
-  }
+  if (cx.expect.some(({ key, version }) => cellVersion(sql, inc, key) !== version)) return 'conflict'
   sql.exec('UPDATE gen SET revision = revision + 1 WHERE inc = ?', inc)
-  return 'committed'
+  const version = readRevision(sql, inc)
+  for (const mutation of cx.mutations) writeCell(sql, inc, mutation.key, mutation.bytes, version)
+  const counters = new Map<string, CellCounter>()
+  for (const count of cx.counts ?? []) {
+    const current = selectCellRows(sql, inc, { keys: [count.key] })[0]
+    const counted = countCell(current === undefined ? undefined : new Uint8Array(current.bytes), count, now)
+    if (counted === null) continue
+    if (counted.written) writeCell(sql, inc, count.key, encodeCellCounter(counted.counter), version)
+    counters.set(count.key, counted.counter)
+  }
+  return { committed: counters }
 }
 
 // `seq` strictly increases for the lifetime of a domain instance.

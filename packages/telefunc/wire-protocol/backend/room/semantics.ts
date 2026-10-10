@@ -1,7 +1,16 @@
-export { headCxMatches, commitPreconditionHolds, isOpenIncarnation, materializeHead, nextOrderMark }
+export {
+  headCxMatches,
+  commitPreconditionHolds,
+  isOpenIncarnation,
+  materializeHead,
+  nextOrderMark,
+  countCell,
+  encodeCellCounter,
+  decodeCellCounter,
+}
 export type { StoredHead }
 
-import type { HeadCx, HeadNext, LaneId, RoomHead } from './contract.js'
+import type { CellCount, CellCounter, HeadCx, HeadNext, LaneId, RoomHead } from './contract.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
@@ -62,4 +71,25 @@ function commitPreconditionHolds(
 /** `seq` strictly increases per domain; `timestamp` is authority time, clamped so it never goes back. */
 function nextOrderMark(previous: OrderingInfo | undefined, now: number): OrderingInfo {
   return { seq: (previous?.seq ?? 0) + 1, timestamp: Math.max(now, previous?.timestamp ?? 0) }
+}
+
+/** A counter cell after `count` at authority time `now`: `written` when it changed, null when absent and not created. */
+function countCell(
+  current: Uint8Array | undefined,
+  { delta, create }: CellCount,
+  now: number,
+): { counter: CellCounter; written: boolean } | null {
+  if (current === undefined) return create ? { counter: { value: delta, changedAt: now }, written: true } : null
+  const counter = decodeCellCounter(current)
+  return delta === 0
+    ? { counter, written: false }
+    : { counter: { value: counter.value + delta, changedAt: now }, written: true }
+}
+
+function encodeCellCounter(counter: CellCounter): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(counter))
+}
+
+function decodeCellCounter(bytes: Uint8Array): CellCounter {
+  return JSON.parse(new TextDecoder().decode(bytes)) as CellCounter
 }

@@ -127,10 +127,12 @@ describe('Redis real three-master Cluster CI certification', () => {
       time.mockRestore()
       if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
       expect(
-        await backend.compareExchangeCells(roomId, inc, cells.revision, [
-          { key: 'cell} escape', bytes: bytes('value') },
-        ]),
-      ).toBe('committed')
+        await backend.compareExchangeCells(roomId, inc, {
+          expect: [{ key: 'cell} escape', version: null }],
+          mutations: [{ key: 'cell} escape', bytes: bytes('value') }],
+          counts: [{ key: 'count} escape', delta: 1, create: true }],
+        }),
+      ).toEqual({ committed: new Map([['count} escape', { value: 1, changedAt: expect.any(Number) }]]) })
       const firstSubscription = subscribe(backend, roomId, inc, () => {})
       await firstSubscription.ready
       await accepted(
@@ -143,8 +145,11 @@ describe('Redis real three-master Cluster CI certification', () => {
       if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
       expect(await backend.readCells(roomId, inc, { prefix: 'cell}' })).toEqual(currentCells)
       expect(
-        await backend.compareExchangeCells(roomId, inc, currentCells.revision, [{ key: 'cell} escape', bytes: null }]),
-      ).toBe('committed')
+        await backend.compareExchangeCells(roomId, inc, {
+          expect: [{ key: 'cell} escape', version: currentCells.versions.get('cell} escape')! }],
+          mutations: [{ key: 'cell} escape', bytes: null }],
+        }),
+      ).toEqual({ committed: new Map() })
       expect(
         await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), { requiredCellKeys: ['cell} escape'] }),
       ).toEqual({ stale: 'cell', key: 'cell} escape' })
@@ -249,10 +254,10 @@ describe('Redis real three-master Cluster CI certification', () => {
     const { prefix, roomId, inc } = room('closed-keys')
     const backend = roomBackend(cluster, prefix)
     const opened = await open(backend, roomId, inc)
-    const cells = await backend.readCells(roomId, inc, { keys: [] })
-    if ('staleInc' in cells) throw new Error('fresh generation was unexpectedly stale')
     const member = { key: 'm:member', bytes: bytes('member') }
-    expect(await backend.compareExchangeCells(roomId, inc, cells.revision, [member])).toBe('committed')
+    expect(await backend.compareExchangeCells(roomId, inc, { expect: [], mutations: [member] })).toEqual({
+      committed: new Map(),
+    })
     const join = { retain: true, requiredCellKeys: [member.key] }
     accepted(await backend.commitLane(roomId, inc, CONTROL_LANE, bytes('join'), join))
     await close(backend, roomId, opened, 500)

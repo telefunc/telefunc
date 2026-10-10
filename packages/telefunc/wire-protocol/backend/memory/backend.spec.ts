@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { disposeBackend, getRoomBackend, installBackend } from '../install.js'
-import type { LaneId } from '../room/contract.js'
+import type { CellsCx, LaneId } from '../room/contract.js'
 import { MemoryBackend, MemoryBackendState } from './backend.js'
 import { Room } from '../../room/server/statics.js'
 const encoder = new TextEncoder()
@@ -28,14 +28,14 @@ describe('memory backend behind the supervised consumer', () => {
       { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
     )
     if (!('head' in created)) throw new Error('head create failed')
-    const cells = await backend.readCells('spi', 'inc-1', { keys: ['member'] })
-    if (!('revision' in cells)) throw new Error('cell read fenced unexpectedly')
+    const absent = [{ key: 'member', version: null }]
     expect(
-      await backend.compareExchangeCells('spi', 'inc-1', cells.revision, [
-        { key: 'member', bytes: encoder.encode('Alice') },
-      ]),
-    ).toBe('committed')
-    expect(await backend.compareExchangeCells('spi', 'inc-1', cells.revision, [])).toBe('conflict')
+      await backend.compareExchangeCells('spi', 'inc-1', {
+        expect: absent,
+        mutations: [{ key: 'member', bytes: encoder.encode('Alice') }],
+      }),
+    ).toEqual({ committed: new Map() })
+    expect(await backend.compareExchangeCells('spi', 'inc-1', { expect: absent, mutations: [] })).toBe('conflict')
     const received: string[] = []
     const subscription = backend.subscribeLane(
       'spi',
@@ -59,8 +59,11 @@ describe('memory backend behind the supervised consumer', () => {
     const currentCells = await backend.readCells('spi', 'inc-1', { keys: ['member'] })
     if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
     expect(
-      await backend.compareExchangeCells('spi', 'inc-1', currentCells.revision, [{ key: 'member', bytes: null }]),
-    ).toBe('committed')
+      await backend.compareExchangeCells('spi', 'inc-1', {
+        expect: [{ key: 'member', version: currentCells.versions.get('member')! }],
+        mutations: [{ key: 'member', bytes: null }],
+      }),
+    ).toEqual({ committed: new Map() })
     expect(
       await backend.commitLane('spi', 'inc-1', semanticLane, encoder.encode('fenced'), {
         requiredCellKeys: ['member'],
@@ -105,6 +108,61 @@ describe('memory backend behind the supervised consumer', () => {
     expect((await backend.directoryList('s')).entries).toHaveLength(1)
     await backend.directoryDelete('spi', 'inc-1')
     expect((await backend.directoryList('s')).entries).toEqual([])
+  })
+  it('commits an exchange while the cells it expects are as read, whatever else changed, and never conflicts on a count', async () => {
+    vi.useFakeTimers({ now: 1_000 })
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'cells',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc', config: encoder.encode('config') } },
+    )
+    const exchange = (cx: CellsCx) => backend.compareExchangeCells('cells', 'inc', cx)
+    expect(
+      await exchange({
+        expect: [{ key: 'a', version: null }],
+        mutations: [{ key: 'a', bytes: encoder.encode('a1') }],
+        counts: [{ key: 'n', delta: 0, create: true }],
+      }),
+    ).toEqual({ committed: new Map([['n', { value: 0, changedAt: 1_000 }]]) })
+    const read = await backend.readCells('cells', 'inc', { keys: ['a'] })
+    if ('staleInc' in read) throw new Error('the room is gone')
+    const a = read.versions.get('a')!
+    // Another writer: a cell this exchange didn't read, and the counter.
+    vi.setSystemTime(2_000)
+    await exchange({ expect: [{ key: 'b', version: null }], mutations: [{ key: 'b', bytes: encoder.encode('b1') }] })
+    expect(await exchange({ expect: [], mutations: [], counts: [{ key: 'n', delta: 1 }] })).toEqual({
+      committed: new Map([['n', { value: 1, changedAt: 2_000 }]]),
+    })
+    vi.setSystemTime(3_000)
+    expect(
+      await exchange({
+        expect: [{ key: 'a', version: a }],
+        mutations: [{ key: 'a', bytes: encoder.encode('a2') }],
+        counts: [{ key: 'n', delta: 2 }],
+      }),
+    ).toEqual({ committed: new Map([['n', { value: 3, changedAt: 3_000 }]]) })
+    // `a` was written since that read.
+    expect(
+      await exchange({ expect: [{ key: 'a', version: a }], mutations: [], counts: [{ key: 'n', delta: 5 }] }),
+    ).toBe('conflict')
+    vi.setSystemTime(4_000)
+    expect(
+      await exchange({
+        expect: [],
+        mutations: [],
+        counts: [
+          { key: 'n', delta: 0 },
+          { key: 'missing', delta: 1 },
+        ],
+      }),
+    ).toEqual({ committed: new Map([['n', { value: 3, changedAt: 3_000 }]]) })
+    const after = await backend.readCells('cells', 'inc', { keys: ['a', 'n', 'missing'] })
+    if ('staleInc' in after) throw new Error('the room is gone')
+    expect([...after.cells].map(([key, value]) => [key, decoder.decode(value)])).toEqual([
+      ['a', 'a2'],
+      ['n', JSON.stringify({ value: 3, changedAt: 3_000 })],
+    ])
   })
   it('advances order before delivery and preserves it across time and driver reconstruction', async () => {
     await disposeBackend()
@@ -178,9 +236,9 @@ describe('memory backend behind the supervised consumer', () => {
     )
     const keys = ['m:1', 'm:2', 'identity:a:1', 'identity:a:2', 'identity:ab:3', 'hold']
     const write = async (mutations: { key: string; bytes: Uint8Array | null }[]) => {
-      const read = await backend.readCells('prefixes', 'inc-1', { keys: [] })
-      if ('staleInc' in read) throw new Error('cell read fenced unexpectedly')
-      expect(await backend.compareExchangeCells('prefixes', 'inc-1', read.revision, mutations)).toBe('committed')
+      expect(await backend.compareExchangeCells('prefixes', 'inc-1', { expect: [], mutations })).toEqual({
+        committed: new Map(),
+      })
     }
     const readKeys = async (prefix: string) => {
       const read = await backend.readCells('prefixes', 'inc-1', { prefix })

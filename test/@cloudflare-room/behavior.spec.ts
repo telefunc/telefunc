@@ -60,6 +60,7 @@ test('heads, cells and a stale commit cross native Durable Object RPC intact', a
   expect(await probe('/native-rpc')).toEqual({
     headConfig: [0x11, 0x22, 0x33],
     cell: [0x44, 0x55],
+    count: 1,
     staleCell: { stale: 'cell', key: 'm:missing' },
   })
 })

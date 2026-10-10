@@ -14,7 +14,7 @@ export {
 
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { CellMutation, CellSelector } from '../../backend/room/contract.js'
+import type { CellCount, CellCounter, CellMutation, CellSelector } from '../../backend/room/contract.js'
 import { DEFAULT_TRACK } from '../binary.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
@@ -28,7 +28,16 @@ import {
 import type { LeaveCause } from '../types.js'
 import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
-import { afterHoldChange, countHold, scheduleClose, type HoldChange, type HoldRecord } from './lifecycle.js'
+import {
+  afterHoldChange,
+  holdCells,
+  holdChange,
+  holdConfigOf,
+  holdCounts,
+  holdRecord,
+  scheduleClose,
+  type HoldConfig,
+} from './lifecycle.js'
 import {
   CLEANUP_CELL_PREFIX,
   HOLD_CELL_KEY,
@@ -44,7 +53,8 @@ import {
   viewIdOfCellKey,
 } from './cells.js'
 
-type CellPlan<T> = { value: T; mutations: CellMutation[] }
+type CellPlan<T> = { value: T; mutations: CellMutation[]; counts?: CellCount[] }
+type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
 /** `tracks` are the named tracks the member's record listed: each is recorded before its first frame. */
 type PendingMemberCleanup = { cause: WireLeaveCause; hidden?: true; tracks?: string[] }
 /** A page's view of the room, renewed like a member record. */
@@ -60,29 +70,34 @@ async function readCells(roomId: string, inc: string, selector: CellSelector): P
   return result.cells
 }
 
+/** Reads `keys`, plans, and commits only while each of them is still as read. */
 async function mutateCells<T>(
   roomId: string,
   inc: string,
-  selector: CellSelector,
+  keys: string[],
   plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T>,
-): Promise<T> {
+): Promise<CellCommit<T>> {
   const backend = getRoomBackend()
-  return await retryCompareExchange(roomId, async () => {
-    const read = await backend.readCells(roomId, inc, selector)
+  return await retryCompareExchange(async () => {
+    const read = await backend.readCells(roomId, inc, { keys })
     if ('staleInc' in read) throw roomClosedError(roomId)
-    const next = plan(read.cells)
-    if (next.mutations.length === 0) return next.value
-    const result = await backend.compareExchangeCells(roomId, inc, read.revision, next.mutations)
+    const { value, mutations, counts = [] } = plan(read.cells)
+    if (mutations.length === 0 && counts.length === 0) return { value, counters: new Map() }
+    const expect = keys.map((key) => ({ key, version: read.versions.get(key) ?? null }))
+    const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
     if (result === 'stale-inc') throw roomClosedError(roomId)
-    return result === 'committed' ? next.value : CX_CONFLICT
+    return result === 'conflict' ? CX_CONFLICT : { value, counters: result.committed }
   })
 }
 
-/** A new room's hold record, before anything can hold it. */
-async function createHold(roomId: string, inc: string, record: HoldRecord): Promise<void> {
-  const mutations = [{ key: HOLD_CELL_KEY, bytes: encodeRoomRecord(record) }]
-  await mutateCells(roomId, inc, { keys: [HOLD_CELL_KEY] }, () => ({ value: undefined, mutations }))
-  if (record.closesAt !== undefined) scheduleClose(roomId, inc, record.closesAt)
+/** A new room's hold timeouts and counters, before anything can hold it. */
+async function createHold(roomId: string, inc: string, config: HoldConfig): Promise<void> {
+  const { counters } = await mutateCells(roomId, inc, [HOLD_CELL_KEY], () => ({
+    value: undefined,
+    ...holdCells(config),
+  }))
+  const { closesAt } = holdRecord(config, counters)
+  if (closesAt !== undefined) scheduleClose(roomId, inc, closesAt)
 }
 
 /** Persist a join's member record and identity marker; a non-hidden member holds the room. */
@@ -91,39 +106,39 @@ async function createMember(roomId: string, inc: string, id: string, record: Roo
   if (record.identity !== undefined)
     mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
   const keys = [...mutations.map(({ key }) => key), HOLD_CELL_KEY]
-  const hold = await mutateCells(roomId, inc, { keys }, (cells) => {
-    const hold = record.hidden ? null : countHold(cells, 1, true)
-    return { value: hold, mutations: hold === null ? mutations : [...mutations, hold.mutation] }
+  const { value: config, counters } = await mutateCells(roomId, inc, keys, (cells) => {
+    const config = record.hidden ? null : holdConfigOf(cells)
+    return { value: config, mutations, counts: holdCounts(config, 1, true) }
   })
-  afterHoldChange(roomId, inc, hold)
+  afterHoldChange(roomId, inc, holdChange(config, counters, 1, true))
 }
 
-/** Writes or renews pages' views in one write; each holds the room, and a room without a hold record keeps none. A
+/** Writes or renews pages' views in one write; each holds the room, and a room without hold timeouts keeps none. A
  *  renewal also restores a view whose write failed or that was reaped while its page held on. */
 async function holdViews(roomId: string, inc: string, ids: string[]): Promise<void> {
   const keys = ids.map(viewCellKey)
-  const hold = await mutateCells(roomId, inc, { keys: [...keys, HOLD_CELL_KEY] }, (cells) => {
+  const { value: hold, counters } = await mutateCells(roomId, inc, [...keys, HOLD_CELL_KEY], (cells) => {
+    const config = holdConfigOf(cells)
+    if (config === null) return { value: null, mutations: [] }
     const added = keys.filter((key) => !cells.has(key)).length
-    const hold = countHold(cells, added)
-    if (hold === null) return { value: null, mutations: [] }
     const view = encodeRoomRecord({ seenAt: Date.now() } satisfies ViewRecord)
     const views = keys.map((key) => ({ key, bytes: view }))
-    return added === 0 ? { value: null, mutations: views } : { value: hold, mutations: [...views, hold.mutation] }
+    return { value: { config, added }, mutations: views, counts: holdCounts(config, added) }
   })
-  afterHoldChange(roomId, inc, hold)
+  if (hold !== null && hold.added > 0) afterHoldChange(roomId, inc, holdChange(hold.config, counters, hold.added))
 }
 
 /** With `onlyIfLapsed`, a view renewed meanwhile stays. */
 async function removeView(roomId: string, inc: string, id: string, opts?: { onlyIfLapsed: true }): Promise<void> {
   const key = viewCellKey(id)
-  const hold = await mutateCells(roomId, inc, { keys: [key, HOLD_CELL_KEY] }, (cells) => {
+  const { value: config, counters } = await mutateCells(roomId, inc, [key, HOLD_CELL_KEY], (cells) => {
     const raw = cells.get(key)
     if (raw === undefined || (opts?.onlyIfLapsed && !isLapsed(decodeRoomRecord<ViewRecord>(raw))))
       return { value: null, mutations: [] }
-    const hold = countHold(cells, -1)
-    return { value: hold, mutations: [{ key, bytes: null }, ...(hold === null ? [] : [hold.mutation])] }
+    const config = holdConfigOf(cells)
+    return { value: config, mutations: [{ key, bytes: null }], counts: holdCounts(config, -1) }
   })
-  afterHoldChange(roomId, inc, hold)
+  afterHoldChange(roomId, inc, holdChange(config, counters, -1))
 }
 
 /** Read-modify-write one member record; a returned `next` is stored with a renewed lease. */
@@ -134,12 +149,13 @@ async function mutateMember<T>(
   update: (record: RoomMemberRecord | null) => { value: T; next?: RoomMemberRecord },
 ): Promise<T> {
   const key = memberCellKey(id)
-  return await mutateCells(roomId, inc, { keys: [key] }, (cells) => {
+  const { value } = await mutateCells(roomId, inc, [key], (cells) => {
     const raw = cells.get(key)
     const { value, next } = update(raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw))
     if (next === undefined) return { value, mutations: [] }
     return { value, mutations: [{ key, bytes: encodeRoomRecord({ ...next, seenAt: Date.now() }) }] }
   })
+  return value
 }
 
 async function updateMemberRecord<T>(
@@ -191,34 +207,31 @@ async function removeMemberCells(
   const memberKey = memberCellKey(id)
   const cleanupKey = cleanupCellKey(id)
   const removedKeys = identity === null ? [memberKey] : [memberKey, identityCellKey(identity, id)]
-  const outcome = await mutateCells<{ live: RoomMemberRecord } | { cleanup: boolean; hold: HoldChange | null }>(
-    roomId,
-    inc,
-    { keys: [...removedKeys, cleanupKey, HOLD_CELL_KEY] },
-    (cells) => {
-      const pending = cells.has(cleanupKey)
-      const raw = cells.get(memberKey)
-      const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
-      if (record !== null && opts?.onlyIfLapsed && !isLapsed(record)) return { value: { live: record }, mutations: [] }
-      if (record === null) return { value: { cleanup: pending, hold: null }, mutations: [] }
-      const cleanup: PendingMemberCleanup = {
-        cause: leaveCauseToWire(cause),
-        ...(record.hidden ? { hidden: true } : {}),
-        ...(record.tracks?.length ? { tracks: record.tracks } : {}),
-      }
-      const hold = record.hidden ? null : countHold(cells, -1)
-      return {
-        value: { cleanup: true, hold },
-        mutations: [
-          ...removedKeys.map((key) => ({ key, bytes: null })),
-          ...(pending ? [] : [{ key: cleanupKey, bytes: encodeRoomRecord(cleanup) }]),
-          ...(hold === null ? [] : [hold.mutation]),
-        ],
-      }
-    },
-  )
+  const { value: outcome, counters } = await mutateCells<
+    { live: RoomMemberRecord } | { cleanup: boolean; config: HoldConfig | null }
+  >(roomId, inc, [...removedKeys, cleanupKey, HOLD_CELL_KEY], (cells) => {
+    const pending = cells.has(cleanupKey)
+    const raw = cells.get(memberKey)
+    const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
+    if (record !== null && opts?.onlyIfLapsed && !isLapsed(record)) return { value: { live: record }, mutations: [] }
+    if (record === null) return { value: { cleanup: pending, config: null }, mutations: [] }
+    const cleanup: PendingMemberCleanup = {
+      cause: leaveCauseToWire(cause),
+      ...(record.hidden ? { hidden: true } : {}),
+      ...(record.tracks?.length ? { tracks: record.tracks } : {}),
+    }
+    const config = record.hidden ? null : holdConfigOf(cells)
+    return {
+      value: { cleanup: true, config },
+      mutations: [
+        ...removedKeys.map((key) => ({ key, bytes: null })),
+        ...(pending ? [] : [{ key: cleanupKey, bytes: encodeRoomRecord(cleanup) }]),
+      ],
+      counts: holdCounts(config, -1),
+    }
+  })
   if ('live' in outcome) return outcome.live
-  afterHoldChange(roomId, inc, outcome.hold)
+  afterHoldChange(roomId, inc, holdChange(outcome.config, counters, -1))
   if (outcome.cleanup) await finishPendingMemberCleanup(roomId, inc, id)
   return null
 }
@@ -328,7 +341,7 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
     ...cleanup.cause,
     ...(cleanup.hidden ? { hidden: true } : {}),
   })
-  await mutateCells(roomId, inc, { keys: [key] }, (cells) => ({
+  await mutateCells(roomId, inc, [key], (cells) => ({
     value: undefined,
     mutations: cells.has(key) ? [{ key, bytes: null }] : [],
   }))

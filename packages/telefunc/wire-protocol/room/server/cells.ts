@@ -8,6 +8,8 @@ export {
   identityCellKey,
   identityCellPrefix,
   HOLD_CELL_KEY,
+  HOLDS_CELL_KEY,
+  JOINS_CELL_KEY,
   VIEW_CELL_PREFIX,
   viewCellKey,
   viewIdOfCellKey,
@@ -36,8 +38,11 @@ function identityCellPrefix(identity: string): string {
 function identityCellKey(identity: string, memberId: string): string {
   return identityCellPrefix(identity) + memberId
 }
-/** The room's hold record (see `lifecycle.ts`), changed in the compare-exchange that adds or removes a hold. */
+/** The room's hold timeouts (see `lifecycle.ts`), written once, with its counters. */
 const HOLD_CELL_KEY = 'hold'
+/** Counters: what holds the room, counted in the compare-exchange that adds or removes a hold, and its joins. */
+const HOLDS_CELL_KEY = 'holds'
+const JOINS_CELL_KEY = 'joins'
 /** One per page holding the room: its view, renewed like a member and reaped once it lapses. */
 const VIEW_CELL_PREFIX = 'v:'
 function viewCellKey(viewId: string): string {

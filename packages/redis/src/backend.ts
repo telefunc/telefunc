@@ -12,7 +12,7 @@ import type {
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
-  CellMutation,
+  CellsCx,
   CommitResult,
   CxResult,
   HeadCx,
@@ -101,8 +101,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     throw new Error(`readCells: stable read did not converge in ${STABLE_READ_ATTEMPTS} attempts (room '${roomId}')`)
   }
 
-  compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
-    return this._run(REDIS_COMMANDS.cellsCx, { roomId, inc, revision, mutations })
+  compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
+    return this._run(REDIS_COMMANDS.cellsCx, { roomId, inc, cx })
   }
 
   commitLane(

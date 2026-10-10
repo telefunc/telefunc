@@ -31,7 +31,7 @@ import {
   type InboxMessage,
   type RoomSnapshotMetadata,
 } from './protocol.js'
-import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
+import { HOLD_CELL_KEY, HOLDS_CELL_KEY, JOINS_CELL_KEY, MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
 import { holdViews } from './server/membership.js'
 import type { LeaveCause, ParticipantMeta, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
@@ -71,6 +71,7 @@ const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
 const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
+const HOLD_RECORD_KEYS = [HOLD_CELL_KEY, HOLDS_CELL_KEY, JOINS_CELL_KEY].join()
 let driver: MemoryBackend
 let memoryState: MemoryBackendState
 beforeEach(async () => {
@@ -179,6 +180,29 @@ describe('Room public behavior', () => {
     })
     await expect(room.join()).rejects.toThrow('join announcement failed')
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
+  })
+  it('admits a thousand simultaneous joins, each read racing the others’ writes, with no conflict, and counts each as a hold', async () => {
+    const room = (await Room.create('join-burst')) as ServerRoom
+    const readCells = driver.readCells.bind(driver)
+    // Every read yields, so the other joins' writes land between a join's read and its write.
+    vi.spyOn(driver, 'readCells').mockImplementation(async (...args) => {
+      const read = await readCells(...args)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return read
+    })
+    const compareExchange = driver.compareExchangeCells.bind(driver)
+    let conflicts = 0
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (...args) => {
+      const result = await compareExchange(...args)
+      if (result === 'conflict') conflicts++
+      return result
+    })
+    await Promise.all(Array.from({ length: 1_000 }, (_, i) => room.join({ identity: `user-${i % 50}` })))
+    expect(conflicts).toBe(0)
+    expect(await Room.getParticipants(room.id)).toHaveLength(1_000)
+    const read = await readCells(room.id, room._inc, { keys: [HOLDS_CELL_KEY] })
+    if ('staleInc' in read) throw new Error('the room is gone')
+    expect(JSON.parse(decoder.decode(read.cells.get(HOLDS_CELL_KEY)!))).toMatchObject({ value: 1_000 })
   })
   it('keeps a server participant active so a transient durable-leave failure can be retried', async () => {
     const room = await Room.create('retry-local-leave')
@@ -1053,13 +1077,16 @@ describe('Room public behavior', () => {
     if ('staleInc' in read) throw new Error('unexpected stale generation')
     const record = parse(decoder.decode(read.cells.get(memberKey)!)) as Record<string, unknown>
     await expect(
-      driver.compareExchangeCells(room.id, room._inc, read.revision, [
-        {
-          key: memberKey,
-          bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
-        },
-      ]),
-    ).resolves.toBe('committed')
+      driver.compareExchangeCells(room.id, room._inc, {
+        expect: [{ key: memberKey, version: read.versions.get(memberKey)! }],
+        mutations: [
+          {
+            key: memberKey,
+            bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
+          },
+        ],
+      }),
+    ).resolves.toEqual({ committed: new Map() })
     const commitLane = vi.spyOn(driver, 'commitLane')
     await expect(Room.send(room.id, { id: member.id }, 'post-crash')).rejects.toThrow('Participant not found')
     expect(commitLane.mock.calls.some(([, , lane]) => lane.kind === 'inbox')).toBe(false)
@@ -1108,16 +1135,19 @@ describe('Room public behavior', () => {
     expect(initialRaw).toBeDefined()
     const initialRecord = parse(decoder.decode(initialRaw!)) as Record<string, unknown>
     await expect(
-      compareExchange(room.id, room._inc, initial.revision, [
-        {
-          key: memberKey,
-          bytes: encoder.encode(stringify({ ...initialRecord, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
-        },
-      ]),
-    ).resolves.toBe('committed')
+      compareExchange(room.id, room._inc, {
+        expect: [{ key: memberKey, version: initial.versions.get(memberKey)! }],
+        mutations: [
+          {
+            key: memberKey,
+            bytes: encoder.encode(stringify({ ...initialRecord, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
+          },
+        ],
+      }),
+    ).resolves.toEqual({ committed: new Map() })
     let raced = false
-    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
-      if (!raced && mutations.some(({ key, bytes }) => key === memberKey && bytes === null)) {
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, cx) => {
+      if (!raced && cx.mutations.some(({ key, bytes }) => key === memberKey && bytes === null)) {
         raced = true
         const fresh = await driver.readCells(roomId, inc, { keys: [memberKey] })
         expect('staleInc' in fresh).toBe(false)
@@ -1126,15 +1156,13 @@ describe('Room public behavior', () => {
         expect(raw).toBeDefined()
         const record = parse(decoder.decode(raw!)) as Record<string, unknown>
         await expect(
-          compareExchange(roomId, inc, fresh.revision, [
-            {
-              key: memberKey,
-              bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })),
-            },
-          ]),
-        ).resolves.toBe('committed')
+          compareExchange(roomId, inc, {
+            expect: [{ key: memberKey, version: fresh.versions.get(memberKey)! }],
+            mutations: [{ key: memberKey, bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })) }],
+          }),
+        ).resolves.toEqual({ committed: new Map() })
       }
-      return compareExchange(roomId, inc, revision, mutations)
+      return compareExchange(roomId, inc, cx)
     })
     expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
     expect(raced).toBe(true)
@@ -2049,7 +2077,7 @@ describe('Room public behavior', () => {
     const release = createDeferred()
     vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (...args) => {
       const result = await compareExchange(...args)
-      if (args[3].some(({ key }) => key.startsWith(MEMBER_CELL_PREFIX))) {
+      if (args[2].mutations.some(({ key }) => key.startsWith(MEMBER_CELL_PREFIX))) {
         written.resolve()
         await release.promise
       }
@@ -2323,10 +2351,10 @@ describe('Room public behavior', () => {
     await observer.getParticipants()
     const memberKey = memberCellKey(member.id)
     const compareExchange = driver.compareExchangeCells.bind(driver)
-    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, revision, mutations) => {
-      if (mutations.some((mutation) => mutation.key === memberKey && mutation.bytes !== null))
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, cx) => {
+      if (cx.mutations.some((mutation) => mutation.key === memberKey && mutation.bytes !== null))
         throw new Error('crashed')
-      return compareExchange(roomId, inc, revision, mutations)
+      return compareExchange(roomId, inc, cx)
     })
     vi.spyOn(console, 'error').mockImplementation(() => {})
     await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
@@ -2545,9 +2573,10 @@ describe('Room public behavior', () => {
     const member = await room.join()
     const current = await driver.readCells(room.id, room._inc, { keys: [memberCellKey(member.id)] })
     if ('staleInc' in current) throw new Error('room went stale')
-    await driver.compareExchangeCells(room.id, room._inc, current.revision, [
-      { key: memberCellKey(member.id), bytes: null },
-    ])
+    await driver.compareExchangeCells(room.id, room._inc, {
+      expect: [{ key: memberCellKey(member.id), version: current.versions.get(memberCellKey(member.id))! }],
+      mutations: [{ key: memberCellKey(member.id), bytes: null }],
+    })
     const target = await room.join()
     const readCells = vi.spyOn(driver, 'readCells')
     const readHead = vi.spyOn(driver, 'readHead')
@@ -4107,9 +4136,7 @@ describe('a room nothing holds closes on its own', () => {
     const tick = captureOutcome(subsOf(room)._heartbeatTick())
     const join = captureOutcome(room.join())
     await vi.advanceTimersByTimeAsync(5_000)
-    const viewWrites = writes.mock.calls.filter(([, , , mutations]) =>
-      mutations.some(({ key }) => key.startsWith('v:')),
-    )
+    const viewWrites = writes.mock.calls.filter(([, , cx]) => cx.mutations.some(({ key }) => key.startsWith('v:')))
     expect({
       tick: tick.value,
       joined: (join.value as { id?: string }).id !== undefined,
@@ -4149,16 +4176,38 @@ describe('a room nothing holds closes on its own', () => {
     await Room.setMeta(room.id, { topic: 'kept' })
     expect((await getRoomBackend().readHead(room.id))?.expiresAt).toBe(expiresAt)
   })
+  it("closes a room departureTimeout after the leave that left it unheld, though another server's member left it last", async () => {
+    const room = (await Room.create('last-leave-elsewhere', { departureTimeout: 60_000 })) as ServerRoom
+    const closed = await observe(room.id)
+    const member = await room.join()
+    // Another server's member joins, and leaves 10 s after this server's; that server is gone before its timer fires.
+    const count = (counts: { key: string; delta: number }[]) =>
+      driver.compareExchangeCells(room.id, room._inc, { expect: [], mutations: [], counts })
+    await count([
+      { key: HOLDS_CELL_KEY, delta: 1 },
+      { key: JOINS_CELL_KEY, delta: 1 },
+    ])
+    await member.leave()
+    await vi.advanceTimersByTimeAsync(10_000)
+    await count([{ key: HOLDS_CELL_KEY, delta: -1 }])
+    // This server's heartbeat finds the room unheld, closing 60 s after that last leave.
+    await vi.advanceTimersByTimeAsync(60_000 - 1)
+    expect(await isListed(room.id)).toBe(true)
+    await vi.advanceTimersByTimeAsync(1)
+    await expectClosed(room.id, closed)
+  })
   it('waits on when its close timer fires early: another server left the room unheld later than this one armed it for', async () => {
     const room = (await Room.create('close-fires-early', { emptyTimeout: 10_000 })) as ServerRoom
     const closed = await observe(room.id)
-    // Another server's write: held, then unheld again, closing 4 s after this server's timer fires.
-    const read = await driver.readCells(room.id, room._inc, { keys: ['hold'] })
-    if ('staleInc' in read) throw new Error('the room is gone')
-    const hold = parse(decoder.decode(read.cells.get('hold')!)) as Record<string, unknown>
-    const later = encodeRoomRecord({ ...hold, holds: 0, joined: true, closesAt: Date.now() + 14_000 })
-    await driver.compareExchangeCells(room.id, room._inc, read.revision, [{ key: 'hold', bytes: later }])
-    await vi.advanceTimersByTimeAsync(10_000)
+    // Another server's writes, 4 s in: held, then unheld again, closing 4 s after this server's timer fires.
+    await vi.advanceTimersByTimeAsync(4_000)
+    for (const delta of [1, -1])
+      await driver.compareExchangeCells(room.id, room._inc, {
+        expect: [],
+        mutations: [],
+        counts: [{ key: HOLDS_CELL_KEY, delta }],
+      })
+    await vi.advanceTimersByTimeAsync(6_000)
     expect(await isListed(room.id)).toBe(true)
     await vi.advanceTimersByTimeAsync(4_000)
     await expectClosed(room.id, closed)
@@ -4169,8 +4218,8 @@ describe('a room nothing holds closes on its own', () => {
     let joined: Promise<unknown> = Promise.resolve()
     vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
       const read = await readCells(roomId, inc, selector)
-      // The second read of the hold record alone is the one that sets the new room's expiry: a join commits after it.
-      if ('keys' in selector && selector.keys.join() === 'hold' && ++holdReads === 2) {
+      // The first read of the hold record is the one that sets the new room's expiry: a join commits after it.
+      if ('keys' in selector && selector.keys.join() === HOLD_RECORD_KEYS && ++holdReads === 1) {
         joined = Room.join(roomId)
         await joined
         await vi.advanceTimersByTimeAsync(0) // the join's own expiry write

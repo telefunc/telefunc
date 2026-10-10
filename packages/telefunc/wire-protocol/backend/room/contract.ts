@@ -1,5 +1,9 @@
 export type {
   CellMutation,
+  CellExpectation,
+  CellCount,
+  CellCounter,
+  CellsCx,
   CellSelector,
   CellsRead,
   CommitOptions,
@@ -69,10 +73,24 @@ type CellMutation = { key: string; bytes: Uint8Array | null }
 
 type CellSelector = { keys: string[] } | { prefix: string }
 
-/** Cells at one revision, or the incarnation is no longer the head's. */
-type CellsRead = { revision: string; cells: Map<string, Uint8Array> } | { staleInc: true }
+/** The cells found, each with its version, or the incarnation is no longer the head's. A write gives each cell it
+ *  writes a version that cell never had in its incarnation. */
+type CellsRead = { cells: Map<string, Uint8Array>; versions: Map<string, string> } | { staleInc: true }
 
-type CxResult = 'committed' | 'conflict' | 'stale-inc'
+/** A cell still at the version read; `null`: still absent. */
+type CellExpectation = { key: string; version: string | null }
+
+/** A counter cell's bytes are this as JSON; `changedAt` is the authority time its value last changed. */
+type CellCounter = { value: number; changedAt: number }
+
+/** Adds `delta` to a counter cell. An absent counter stays absent, unless `create` makes it at `delta`. */
+type CellCount = { key: string; delta: number; create?: true }
+
+/** Commits the mutations and counts only while every expectation holds; counts never conflict. */
+type CellsCx = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
+
+/** A commit returns each counted counter as it left it. */
+type CxResult = { committed: Map<string, CellCounter> } | 'conflict' | 'stale-inc'
 
 type CommitOptions = { retain?: boolean; closingLease?: string; requiredCellKeys?: string[] }
 
@@ -105,7 +123,7 @@ type RoomDriver = {
   readHead(roomId: string): Promise<RoomHead | null>
   compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult>
   readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead>
-  compareExchangeCells(roomId: string, inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult>
+  compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult>
   commitLane(
     roomId: string,
     inc: string,

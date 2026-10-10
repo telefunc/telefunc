@@ -6,7 +6,7 @@ export type { CommitWire, RegisterWire }
 
 import { DurableObject } from 'cloudflare:workers'
 import type {
-  CellMutation,
+  CellsCx,
   CxResult,
   HeadCx,
   HeadCxResult,
@@ -95,9 +95,9 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     return readCells(this.#sql(), inc, sel, Date.now())
   }
 
-  async compareExchangeCells(inc: string, revision: string, mutations: CellMutation[]): Promise<CxResult> {
+  async compareExchangeCells(inc: string, cx: CellsCx): Promise<CxResult> {
     const now = Date.now()
-    return this.#transaction((sql) => compareExchangeCells(sql, inc, revision, mutations, now))
+    return this.#transaction((sql) => compareExchangeCells(sql, inc, cx, now))
   }
 
   async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
