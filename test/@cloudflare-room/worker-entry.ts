@@ -32,6 +32,7 @@ import { createRequestContext } from '../../packages/telefunc/node/server/contex
 import { getServerConfig } from '../../packages/telefunc/node/server/serverConfig.js'
 import { SERIALIZER_PREFIX_FUNCTION } from '../../packages/telefunc/wire-protocol/constants.js'
 import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.js'
+import { raceTimeout } from '../../packages/telefunc/utils/raceTimeout.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 const broadcast = new CloudflareBroadcast({
   baseInstanceName: 'telefunc',
@@ -474,20 +475,6 @@ function accepted(result: CommitWire, operation: string): Extract<CommitWire, { 
   if ('stale' in result) throw new Error(`${operation} commit was stale`)
   return result
 }
-async function within<T>(promise: Promise<T>, label: string): Promise<T> {
-  let timer!: ReturnType<typeof setTimeout>
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`${label} did not settle within ${CONTROL_HORIZON_MS}ms`)),
-      CONTROL_HORIZON_MS,
-    )
-  })
-  try {
-    return await Promise.race([promise, timeout])
-  } finally {
-    clearTimeout(timer)
-  }
-}
 async function poll<T>(read: () => Promise<T>, done: (value: T) => boolean): Promise<T> {
   const deadline = Date.now() + CONTROL_HORIZON_MS
   for (;;) {
@@ -498,7 +485,9 @@ async function poll<T>(read: () => Promise<T>, done: (value: T) => boolean): Pro
 }
 async function rejectionOf(promise: Promise<unknown>, label: string): Promise<string> {
   try {
-    await within(promise, label)
+    await raceTimeout(promise, CONTROL_HORIZON_MS, () => {
+      throw new Error(`${label} did not settle within ${CONTROL_HORIZON_MS}ms`)
+    })
     return 'resolved'
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
