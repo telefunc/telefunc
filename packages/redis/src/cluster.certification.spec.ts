@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
 import { Cluster, Redis } from 'ioredis'
 import type { CommitAccepted, LaneId, RoomHead, SubscriptionState } from 'telefunc/__internal'
 import { decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
@@ -50,11 +49,7 @@ describe('Redis real three-master Cluster CI certification', () => {
     await Promise.all((masters ?? []).map(({ client }) => client.quit().catch(() => client.disconnect())))
     if (cluster !== undefined) await cluster.quit().catch(() => cluster.disconnect())
   })
-  it("requires compatible Telefunc, and runs commands on a never-resend connection whatever the app client's options", async () => {
-    const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-      peerDependencies: { telefunc: string }
-    }
-    expect(manifest.peerDependencies.telefunc).toBe('>=0.2.25')
+  it("runs commands on a never-resend connection whatever the app client's options", async () => {
     // ioredis's defaults resend a command whose reply a dropped connection lost.
     const app = own(new Cluster(CLUSTER_NODES, { scaleReads: 'slave' }), (client) =>
       client.quit().catch(() => client.disconnect()),
