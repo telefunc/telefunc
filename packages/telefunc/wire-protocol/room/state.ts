@@ -67,8 +67,8 @@ type RoomStateOptions = {
   meta: RoomMeta
   /** Either the authoritative roster, or just its member count. A lazy view seeds with `{ count }` and learns the members from its first roster (read on the server, streamed to the client). */
   seed: { members: MemberSnapshot[] } | { count: number }
-  /** The LWW stamp of the config `meta` was read from (see `applyRoomUpdate`). */
-  updateStamp: { at: number; by: string }
+  /** How many meta writes `meta` reflects (see `applyRoomUpdate`). */
+  metaSeq: number
   closed?: boolean
   /** Fired whenever the number of attached listeners changes, with the member whose own listeners changed (`null` for
    *  a room-level one). Lets the owner (de)activate its event source (adapter subscription, wire subscription). */
@@ -182,7 +182,7 @@ class RoomState {
   private readonly _closeCbs: Listeners<() => void> = new Listeners()
   private readonly _announceCbs: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
   private _listenerCount = 0
-  private _updateStamp: { at: number; by: string }
+  private _metaSeq: number
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
@@ -193,7 +193,7 @@ class RoomState {
     this.roomId = opts.roomId
     this.meta = ownMetadata(opts.meta)
     this.closed = opts.closed === true
-    this._updateStamp = opts.updateStamp
+    this._metaSeq = opts.metaSeq
     this._onListenersChanged = opts.onListenersChanged
     this._onCallbackError = opts.onCallbackError
     this._onLeave = opts.onLeave
@@ -437,21 +437,21 @@ class RoomState {
     this._fireAll(this._participantUpdateCbs, this._remote(entry), next, prev)
     return true
   }
-  /** Last-writer-wins by `(at, by)`, so every instance converges; `prev` is this view's own previous meta, which can
-   *  differ per instance. `true` when the update applied. */
-  applyRoomUpdate(meta: RoomMeta, at: number, by: string): boolean {
-    if (!stampNewer({ at, by }, this._updateStamp)) return false
+  /** The newest by `seq` wins, so every instance converges; `prev` is this view's own previous meta, which can differ
+   *  per instance. `true` when the update applied. */
+  applyRoomUpdate(meta: RoomMeta, seq: number): boolean {
+    if (seq <= this._metaSeq) return false
     const prev = this.meta
-    this._updateStamp = { at, by }
+    this._metaSeq = seq
     const next = ownMetadata(meta)
     this.meta = next
     this._bumpState()
     this._fireAll(this._updateCbs, next, prev)
     return true
   }
-  /** The stamp of the config this view currently reflects (serialized into room snapshots). */
-  get updateStamp(): { at: number; by: string } {
-    return this._updateStamp
+  /** How many meta writes this view's meta reflects (serialized into room snapshots). */
+  get metaSeq(): number {
+    return this._metaSeq
   }
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty` intentionally don't fire: `onClose` is the signal. */
   applyClosed(cause: LeaveCause = { type: 'closed' }): boolean {
@@ -678,7 +678,6 @@ class RoomState {
     for (const cb of cbs.list()) invokeChannelListener(cb, args, this._onCallbackError)
   }
 }
-/** Later timestamp wins; equal timestamps break deterministically by writer ID. */
 /** A roster read with the membership events this view got during it replayed onto it, so applying it undoes none. */
 function replayMembership(
   roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
@@ -704,9 +703,6 @@ function replayMembership(
     }
   }
   return { members: [...members.values()], departing }
-}
-function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {
-  return a.at > b.at || (a.at === b.at && a.by > b.by)
 }
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */
 function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {

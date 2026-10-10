@@ -752,9 +752,22 @@ describe('Room public behavior', () => {
     const room = await Room.create('control-seq-restart')
     room.onUpdate(() => {})
     const at = Date.now() + 1000
-    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 1 }, at, by: 'a' }), { seq: 5, timestamp: at })
-    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 2 }, at: at + 1, by: 'a' }), { seq: 1, timestamp: at + 1 })
+    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 1 }, seq: 1 }), { seq: 5, timestamp: at })
+    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 2 }, seq: 2 }), { seq: 1, timestamp: at + 1 })
     expect(room.meta).toEqual({ step: 2 })
+  })
+  it('keeps the newest room meta when an older update arrives after it', async () => {
+    let deliver!: BackendReceiver
+    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
+      deliver = receiver
+      return subscribeLane(roomId, inc, lane, receiver)
+    })
+    const room = await Room.create('control-late-update')
+    const updates: unknown[] = []
+    room.onUpdate((meta) => updates.push(meta))
+    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 2 }, seq: 2 }), { seq: 1, timestamp: 1 })
+    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 1 }, seq: 1 }), { seq: 2, timestamp: 2 })
+    expect({ meta: room.meta, updates }).toEqual({ meta: { step: 2 }, updates: [{ step: 2 }] })
   })
   it('reconciles authority after a same-attempt recovery', async () => {
     const room = (await Room.create('control-reconcile')) as ServerRoom
@@ -1467,6 +1480,30 @@ describe('Room public behavior', () => {
     expect(isRoomError(await queued)).toBe(true)
     await first
     expect(identities).toEqual(['alice'])
+  })
+  it('applies two hundred concurrent Room.setAttributes() calls on one room, each in about one write, and every view ends with all of them', async () => {
+    const room = await Room.create('meta-burst', { meta: { topic: 'start' } })
+    const observer = await Room.get(room.id)
+    observer.onUpdate(() => {})
+    const writes = yieldAfterEachReadAndCountWrites()
+    const calls = 200
+    await Promise.all(Array.from({ length: calls }, (_, i) => Room.setAttributes(room.id, { [`k${i}`]: i })))
+    expect(writes()).toBeLessThanOrEqual(2 * calls)
+    const expected = { topic: 'start', ...Object.fromEntries(Array.from({ length: calls }, (_, i) => [`k${i}`, i])) }
+    expect((await Room.get(room.id)).meta).toEqual(expected)
+    await vi.waitFor(() => expect(observer.meta).toEqual(expected))
+  })
+  it('replaces the meta wholesale under concurrent Room.setMeta() calls, each in about one write, every view ending on the one stored', async () => {
+    const room = await Room.create('meta-replace-burst', { meta: { topic: 'start' } })
+    const observer = await Room.get(room.id)
+    observer.onUpdate(() => {})
+    const writes = yieldAfterEachReadAndCountWrites()
+    const metas = Array.from({ length: 50 }, (_, i) => ({ [`only${i}`]: i }))
+    await Promise.all(metas.map((meta) => Room.setMeta(room.id, meta)))
+    expect(writes()).toBeLessThanOrEqual(2 * metas.length)
+    const stored = (await Room.get(room.id)).meta
+    expect(metas).toContainEqual(stored)
+    await vi.waitFor(() => expect(observer.meta).toEqual(stored))
   })
   it('takes meta as it was at the call, nested values included', async () => {
     const created = { topic: { name: 'a' } }
@@ -4368,6 +4405,20 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
 }
 const EVERY_TRACK = { everyMember: { all: true, tracks: [] }, members: {} }
 const NO_TRACK = { everyMember: { all: false, tracks: [] }, members: {} }
+/** Every read of the driver yields once, so other calls' writes land between a read and the write after it; the
+ *  returned function counts the head and cell writes since. */
+function yieldAfterEachReadAndCountWrites(): () => number {
+  for (const method of ['readHead', 'readCells'] as const) {
+    const read = (driver[method] as (...args: unknown[]) => Promise<unknown>).bind(driver)
+    vi.spyOn(driver, method).mockImplementation((async (...args: unknown[]) => {
+      const result = await read(...args)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      return result
+    }) as never)
+  }
+  const writes = [vi.spyOn(driver, 'compareExchangeHead'), vi.spyOn(driver, 'compareExchangeCells')]
+  return () => writes.reduce((total, write) => total + write.mock.calls.length, 0)
+}
 function subsOf(room: Room | ServerRoom): {
   _control: LaneSubscription
   _semantic: LaneSubscription
@@ -4592,7 +4643,7 @@ function newState(options: Partial<ConstructorParameters<typeof RoomState>[0]>):
     roomId: 'state',
     meta: {},
     seed: { members: [] },
-    updateStamp: { at: 0, by: '' },
+    metaSeq: 0,
     onListenersChanged: () => {},
     onCallbackError: () => {},
     onLeave: () => {},
@@ -4606,7 +4657,7 @@ function snapshot(roomId: string): RoomSnapshotMetadata {
     meta: {},
     closed: false,
     count: 0,
-    stamp: { at: 0, by: '' },
+    metaSeq: 0,
   }
 }
 async function pendingClientJoin(roomId: string, onSend?: (message: unknown) => unknown) {

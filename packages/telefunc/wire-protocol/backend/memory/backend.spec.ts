@@ -164,6 +164,22 @@ describe('memory backend behind the supervised consumer', () => {
       ['n', JSON.stringify({ value: 3, changedAt: 3_000 })],
     ])
   })
+  it('deletes every cell under a cleared prefix before its mutations, only when the exchange commits', async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'clear',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc', config: encoder.encode('config') } },
+    )
+    const exchange = (cx: CellsCx) => backend.compareExchangeCells('clear', 'inc', cx)
+    const set = (key: string) => ({ key, bytes: encoder.encode(key) })
+    await exchange({ expect: [], mutations: [set('p:a'), set('p:b'), set('p:\u{10ffff}'), set('pq'), set('q')] })
+    expect(await exchange({ expect: [{ key: 'q', version: null }], clear: ['p:'], mutations: [] })).toBe('conflict')
+    expect(await exchange({ expect: [], clear: ['p:'], mutations: [set('p:b')] })).toEqual({ committed: new Map() })
+    const read = await backend.readCells('clear', 'inc', { prefix: '' })
+    if ('staleInc' in read) throw new Error('the room is gone')
+    expect([...read.cells.keys()].sort()).toEqual(['p:b', 'pq', 'q'])
+  })
   it('advances order before delivery and preserves it across time and driver reconstruction', async () => {
     await disposeBackend()
     let now = 1

@@ -94,7 +94,7 @@ class ClientRoom extends RoomStateView implements Room {
       roomId: snapshot.roomId,
       meta: snapshot.meta,
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
-      updateStamp: snapshot.stamp,
+      metaSeq: snapshot.metaSeq,
       closed: snapshot.closed,
       onListenersChanged: (member) => this._syncWants(member),
       onCallbackError: reportClientCallbackError,
@@ -243,7 +243,7 @@ class ClientRoom extends RoomStateView implements Room {
         this._acceptParticipantMeta(event.id, event)
         return
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.at, event.by)
+        this._state.applyRoomUpdate(event.meta, event.seq)
         return
       case 'closed':
         this._applyClosed('closed')

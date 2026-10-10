@@ -30,11 +30,9 @@ import { isRecord, ownLeaveCause, removedCause } from './model.js'
 import type { TrackWants } from './binary.js'
 import type { LeaveCause, ParticipantMeta, RoomMeta } from './types.js'
 
-/** The head's config. `at`/`by` stamps the latest room meta write. `inc` is random, not a counter: a room recreated after its tombstone lapses can't reuse an id a stale handle holds. */
+/** The head's config. `meta` is the one the room was created with, until its first meta write (see `meta.ts`). `inc` is random, not a counter: a room recreated after its tombstone lapses can't reuse an id a stale handle holds. */
 type RoomConfigRecord = {
   meta: RoomMeta
-  at: number
-  by: string
   inc: string
 }
 
@@ -68,8 +66,8 @@ type RoomSnapshotMetadata = {
   meta: RoomMeta
   closed: boolean
   count: number
-  /** The config's last-writer-wins stamp, which orders later updates. */
-  stamp: { at: number; by: string }
+  /** How many meta writes `meta` reflects, which orders later updates. */
+  metaSeq: number
   maxFrameBytes?: number
 }
 /** Serializer metadata of a `RemoteParticipant` crossing the wire: its room, revived first, and the member snapshot. */
@@ -84,12 +82,12 @@ type ParticipantStubMetadata = {
   maxFrameBytes?: number
 }
 /** Control-lane events. The origin applies its own event and later absorbs the echo: `join`/`leave`/`closed` are
- *  idempotent, `p-meta` orders by `seq` and `update` by its stamp, so every instance converges. */
+ *  idempotent, `p-meta` and `update` order by `seq`, so every instance converges. */
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number; hidden?: boolean }
-  | { __r: 'update'; meta: RoomMeta; at: number; by: string }
+  | { __r: 'update'; meta: RoomMeta; seq: number }
   // Announced before a named track's first frame, so all-track subscribers open its lane.
   | { __r: 'track'; id: string; track: string; hidden?: boolean }
   // Demand gossip between instances, never relayed to clients.

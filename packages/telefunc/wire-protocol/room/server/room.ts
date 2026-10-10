@@ -89,6 +89,7 @@ import {
   updateMemberRecord,
 } from './membership.js'
 import { memberCellKey } from './cells.js'
+import type { StoredRoomMeta } from './meta.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
@@ -157,22 +158,27 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _demand: RoomDemand
   private readonly _subs: RoomSubscriptions
 
-  constructor(roomId: string, config: RoomConfigRecord, seed: { members: MemberSnapshot[] } | { count: number }) {
+  constructor(
+    roomId: string,
+    inc: string,
+    stored: StoredRoomMeta,
+    seed: { members: MemberSnapshot[] } | { count: number },
+  ) {
     super()
-    this._inc = config.inc
+    this._inc = inc
     this._state = new RoomState({
       owner: this,
       roomId,
-      meta: config.meta,
+      meta: stored.meta,
       seed,
-      updateStamp: { at: config.at, by: config.by },
+      metaSeq: stored.seq,
       onListenersChanged: (member) => this._onHolderWantsChanged(this._local, this._local.refreshWants(member)),
       onCallbackError: reportServerChannelError,
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._local = new LocalHolder(this._state, this._localSuppressed)
     this._demand = new RoomDemand(
-      (event) => void publishCtrl(roomId, config.inc, { __r: 'want', ...event }).catch(reportRoomError),
+      (event) => void publishCtrl(roomId, inc, { __r: 'want', ...event }).catch(reportRoomError),
       (id) => this._holderOf(id) !== undefined,
       (member, track, wanted) => this._deliverDemand(member, track, wanted),
     )
@@ -598,7 +604,7 @@ class ServerRoom extends RoomStateView implements Room {
         return applied
       }
       case 'update':
-        return this._state.applyRoomUpdate(event.meta, event.at, event.by)
+        return this._state.applyRoomUpdate(event.meta, event.seq)
       case 'closed':
         return this._state.applyClosed()
     }
@@ -651,10 +657,9 @@ class ServerRoom extends RoomStateView implements Room {
     this._subs.replan()
   }
 
-  /** @internal A newer config reaching this view through the authority never reached its clients as an event. */
-  _applyAuthorityConfig(config: RoomConfigRecord): void {
-    if (this._state.applyRoomUpdate(config.meta, config.at, config.by))
-      this._relayApplied({ __r: 'update', meta: config.meta, at: config.at, by: config.by })
+  /** @internal A newer meta reaching this view through the authority never reached its clients as an event. */
+  _applyAuthorityMeta(stored: StoredRoomMeta): void {
+    if (this._state.applyRoomUpdate(stored.meta, stored.seq)) this._relayApplied({ __r: 'update', ...stored })
   }
   /** @internal Every client gets a roster that corrected a drift; otherwise only the clients still owed their first. */
   _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): void {
@@ -697,7 +702,7 @@ class ServerRoom extends RoomStateView implements Room {
         roomId: this.id,
         meta: this.meta,
         closed: this.isClosed,
-        stamp: this._state.updateStamp,
+        metaSeq: this._state.metaSeq,
         count: this.count,
       },
     }
@@ -715,7 +720,7 @@ class ServerRoom extends RoomStateView implements Room {
   _onStubAttached(stub: RoomStubChannel): void {
     if (!this._stubs.has(stub)) return
     this._sendRosterTo(stub)
-    stub._relayEvent({ __r: 'update', meta: this.meta, ...this._state.updateStamp })
+    stub._relayEvent({ __r: 'update', meta: this.meta, seq: this._state.metaSeq })
     for (const member of stub._heldMembers())
       stub._relayEvent({ __r: 'demand-state', member, tracks: this._demand.wanted(member).map(publicTrack) })
   }

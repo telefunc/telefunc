@@ -74,6 +74,24 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     ])
   })
 
+  it('deletes every cell under a cleared prefix before its mutations, only when the exchange commits', async () => {
+    const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('clear') })
+    await backend.compareExchangeHead(
+      'clear',
+      { form: 'absent' },
+      { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
+    )
+    const exchange = (cx: Parameters<RedisBackend['compareExchangeCells']>[2]) =>
+      backend.compareExchangeCells('clear', 'inc', cx)
+    const set = (key: string) => ({ key, bytes: bytes(key) })
+    await exchange({ expect: [], mutations: [set('p:a'), set('p:b'), set('p:\u{10ffff}'), set('pq'), set('q')] })
+    expect(await exchange({ expect: [{ key: 'q', version: null }], clear: ['p:'], mutations: [] })).toBe('conflict')
+    expect(await exchange({ expect: [], clear: ['p:'], mutations: [set('p:b')] })).toEqual({ committed: new Map() })
+    const read = await backend.readCells('clear', 'inc', { prefix: '' })
+    if ('staleInc' in read) throw new Error('the room is gone')
+    expect([...read.cells.keys()].sort()).toEqual(['p:b', 'pq', 'q'])
+  })
+
   it('admits a thousand simultaneous joins from four servers, and counts each as a hold', async () => {
     const prefix = uniquePrefix('join-burst')
     const redis = ownClient(connect())

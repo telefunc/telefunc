@@ -11,7 +11,6 @@ import {
   assertParticipantIdentity,
   assertRoomTimeout,
   isRecord,
-  mergeAttributes,
   ownMessage,
   ownMetadata,
   removedCause,
@@ -51,10 +50,10 @@ import {
   commitRoomLaneOrThrow,
   openConfig,
   encodeRoomRecord,
-  publishCtrl,
   staleCommitError,
 } from './lanes.js'
 import { ServerRoom } from './room.js'
+import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
 import { lapseNewRoom, newHoldConfig } from './lifecycle.js'
@@ -116,13 +115,6 @@ const Room: RoomStatic = {
   getParticipants: getRoomParticipants as RoomStatic['getParticipants'],
 }
 
-let _writerId: string | undefined
-
-function writerId(): string {
-  _writerId ??= crypto.randomUUID()
-  return _writerId
-}
-
 function assertRoomId(id: unknown): asserts id is string {
   assertUsage(typeof id === 'string' && id.length > 0, 'The room ID should be a non-empty string')
   assertUsage(id.isWellFormed(), 'The room ID should be a well-formed string')
@@ -172,12 +164,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     }
     if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
     if (current !== null && current.state !== 'closed') return { kind: 'exists' }
-    const created: RoomConfigRecord = {
-      meta,
-      at: Date.now(),
-      by: writerId(),
-      inc: crypto.randomUUID(),
-    }
+    const created: RoomConfigRecord = { meta, inc: crypto.randomUUID() }
     const result = await backend.compareExchangeHead(
       id,
       current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
@@ -199,7 +186,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
     if (lapsed !== undefined) await backend.dropGeneration(id, lapsed.incTag)
     await backend.directoryPut(id, created.inc)
-    return { kind: 'created', room: new ServerRoom(id, created, { members: [] }) }
+    return { kind: 'created', room: new ServerRoom(id, created.inc, { meta, seq: 0 }, { members: [] }) }
   })
 }
 
@@ -219,7 +206,14 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 
 async function openRoom(id: string): Promise<ServerRoom> {
   const config = await requireRoom(id)
-  return new ServerRoom(id, config, { count: await reapAndCountPresence(id, config.inc) })
+  const count = await reapAndCountPresence(id, config.inc)
+  return new ServerRoom(id, config.inc, await requireRoomMeta(id, config), { count })
+}
+
+async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {
+  const stored = await readRoomMeta(id, config.inc, config.meta)
+  if (stored === null) throw roomClosedError(id)
+  return stored
 }
 
 async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -267,7 +261,7 @@ function guardRoom(room: Room, guards: Partial<Record<keyof RoomGuardHooks, unkn
 
 async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {
   const config = await requireRoom(id)
-  return await new ServerRoom(id, config, { count: 0 }).join(options)
+  return await new ServerRoom(id, config.inc, await requireRoomMeta(id, config), { count: 0 }).join(options)
 }
 
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
@@ -293,8 +287,9 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
         if (isRoomError(error) && openConfig(await backend.readHead(roomId), config.inc) === null) return null
         throw error
       })
-      if (count === null) continue
-      rooms.push({ id: roomId, meta: config.meta, count, isEmpty: count === 0 })
+      const stored = count === null ? null : await readRoomMeta(roomId, config.inc, config.meta)
+      if (count === null || stored === null) continue
+      rooms.push({ id: roomId, meta: stored.meta, count, isEmpty: count === 0 })
     }
   } while (cursor !== undefined)
   return rooms
@@ -304,39 +299,14 @@ async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
   assertUsage(isRecord(meta), 'Room.setMeta() meta should be an object')
   const owned = ownMetadata(meta)
   const config = await requireRoom(id)
-  await writeRoomConfig(id, config, () => owned)
+  await writeRoomMeta(id, config.inc, config.meta, { replace: owned })
 }
 
 async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void> {
   assertUsage(isRecord(attributes), 'Room.setAttributes() attributes should be an object')
   const owned = ownMetadata(attributes)
   const config = await requireRoom(id)
-  await writeRoomConfig(id, config, (current) => mergeAttributes(current, owned))
-}
-
-async function writeRoomConfig(
-  id: string,
-  config: RoomConfigRecord,
-  computeMeta: (current: RoomMeta) => RoomMeta,
-): Promise<void> {
-  const by = writerId()
-  const backend = getRoomBackend()
-  const update = await retryCompareExchange(async () => {
-    const current = await backend.readHead(id)
-    const currentConfig = openConfig(current, config.inc)
-    if (current === null || currentConfig === null) throw roomClosedError(id)
-    const next = { meta: computeMeta(currentConfig.meta), at: Math.max(Date.now(), currentConfig.at + 1), by }
-    const result = await backend.compareExchangeHead(
-      id,
-      { form: 'rev', rev: current.rev },
-      {
-        head: { currentInc: config.inc, state: 'open', config: encodeRoomRecord({ ...next, inc: config.inc }) },
-        ttlMs: 'keep',
-      },
-    )
-    return 'conflict' in result ? CX_CONFLICT : next
-  })
-  await publishCtrl(id, config.inc, { __r: 'update', ...update })
+  await writeRoomMeta(id, config.inc, config.meta, { merge: owned })
 }
 
 async function closeRoom(id: string): Promise<void> {

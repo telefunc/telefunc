@@ -18,6 +18,7 @@ import { WantsIndex } from './wants-index.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import { reapAndReadRoster, renewMemberLease } from './membership.js'
 import { maintainHold } from './lifecycle.js'
+import { readRoomMeta, type StoredRoomMeta } from './meta.js'
 assertIsNotBrowser()
 
 /** The room side these subscriptions serve: it aggregates its holders and applies what the lanes and the authority carry. */
@@ -42,7 +43,7 @@ type SubscriptionHost = {
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
   _onDm(serialized: string, info: WirePublishInfo): void
   _readOpenConfig(): Promise<RoomConfigRecord | null>
-  _applyAuthorityConfig(config: RoomConfigRecord): void
+  _applyAuthorityMeta(stored: StoredRoomMeta): void
   /** A complete roster read: applied, and sent to the clients it concerns. */
   _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): void
   _closeFromAuthority(): void
@@ -141,8 +142,9 @@ class RoomSubscriptions {
     const host = this._host
     if (host._state.closed) return
     const config = await host._readOpenConfig()
-    if (config === null) return host._closeFromAuthority()
-    host._applyAuthorityConfig(config)
+    const stored = config && (await readRoomMeta(host.id, host._inc, config.meta))
+    if (stored === null) return host._closeFromAuthority()
+    host._applyAuthorityMeta(stored)
     await this._refreshMembers()
   }
 

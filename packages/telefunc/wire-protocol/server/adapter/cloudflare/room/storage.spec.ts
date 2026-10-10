@@ -94,6 +94,24 @@ test("a prefix read selects the incarnation's cells under it as a primary-key ra
   expect(listed('')).toHaveLength(keys.length)
 })
 
+test('an exchange deletes every cell under a cleared prefix before its mutations, only when it commits', () => {
+  const { sql } = sqlStorage()
+  compareExchangeHead(
+    sql,
+    { form: 'absent' },
+    { head: { state: 'open', currentInc: 'inc', config: new TextEncoder().encode('config') } },
+    1_000,
+  )
+  const exchange = (cx: CellsCx) => compareExchangeCells(sql, 'inc', cx, 1_000)
+  const set = (key: string) => ({ key, bytes: new TextEncoder().encode(key) })
+  exchange({ expect: [], mutations: [set('p:a'), set('p:b'), set('p:\u{10ffff}'), set('pq'), set('q')] })
+  expect(exchange({ expect: [{ key: 'q', version: null }], clear: ['p:'], mutations: [] })).toBe('conflict')
+  expect(exchange({ expect: [], clear: ['p:'], mutations: [set('p:b')] })).toEqual({ committed: new Map() })
+  const read = readCells(sql, 'inc', { prefix: '' }, 1_000)
+  if ('staleInc' in read) throw new Error('the room is gone')
+  expect([...read.cells.keys()].sort()).toEqual(['p:b', 'pq', 'q'])
+})
+
 test('an exchange commits while the cells it expects are as read, whatever else changed, and never conflicts on a count', () => {
   const { sql } = sqlStorage()
   compareExchangeHead(

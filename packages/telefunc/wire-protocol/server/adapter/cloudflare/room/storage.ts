@@ -215,6 +215,15 @@ function compareExchangeCells(sql: SqlStorage, inc: string, cx: CellsCx, now: nu
   if (cx.expect.some(({ key, version }) => cellVersion(sql, inc, key) !== version)) return 'conflict'
   sql.exec('UPDATE gen SET revision = revision + 1 WHERE inc = ?', inc)
   const version = readRevision(sql, inc)
+  for (const prefix of cx.clear ?? []) {
+    const end = prefixEnd(prefix)
+    sql.exec(
+      `DELETE FROM cell WHERE inc = ? AND key >= ?${end === null ? '' : ' AND key < ?'}`,
+      inc,
+      prefix,
+      ...(end === null ? [] : [end]),
+    )
+  }
   for (const mutation of cx.mutations) writeCell(sql, inc, mutation.key, mutation.bytes, version)
   const counters = new Map<string, CellCounter>()
   for (const count of cx.counts ?? []) {

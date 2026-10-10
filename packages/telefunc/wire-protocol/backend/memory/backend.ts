@@ -278,6 +278,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const gen = this._generation(room, inc)
     if (cx.expect.some(({ key, version }) => (gen.cells.get(key)?.version ?? null) !== version)) return 'conflict'
     const version = String(++gen.version)
+    for (const prefix of cx.clear ?? [])
+      for (const key of [...cellKeysWithPrefix(gen, prefix)]) setCell(gen, key, null, version)
     for (const mutation of cx.mutations) setCell(gen, mutation.key, mutation.bytes, version)
     const counters = new Map<string, CellCounter>()
     for (const count of cx.counts ?? []) {
