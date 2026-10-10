@@ -115,14 +115,14 @@ Before its first request, the client names a session token, and every request ca
 
 ### Room state
 
-Each logical <Link href="/room">room</Link> has one authority, a `TelefuncDurableObject` instance of its own, holding the room's head, members, ordering watermarks, retained generations, and live delivery routes in SQLite. A directory instance backs `Room.list`. Room writes and reads therefore go through the room's authority; they don't use a Broadcast authority or a Workers KV room-state mirror.
+Each <Link href="/room">room</Link> lives on a `TelefuncDurableObject` instance of its own, which stores the room's state in SQLite. One more instance stores the listing that `Room.list()` reads.
 
 Room calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. Server-side listeners (`subscribe()`, `onJoin()`, …) deliver to a Telefunc session, so install them inside a telefunction or a channel handler.
 
 | State | Storage | Consistency |
 |---|---|---|
-| Room head, roster, ordering, retained messages | The room's authority Durable Object (SQLite) | Strongly consistent |
-| `Room.list` directory projection | The directory Durable Object (SQLite) | Repairable projection, verified against the room head |
+| Room metadata, members, message order, retained messages | The room's Durable Object (SQLite) | Strongly consistent |
+| `Room.list()` listing | The listing Durable Object (SQLite) | Checked against each room's Durable Object on read, so only open rooms are listed |
 | Broadcast sequence numbers and presence | The key's authority Durable Object (SQLite) | Strongly consistent |
 | Session affinity | Workers KV | Eventually consistent |
 
@@ -175,7 +175,7 @@ Publisher (Durable Object)
 
 ### Ordering
 
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Every subscriber receives them in `seq` order: the authority forwards them in that order, and each hop sends through one Durable Object stub, whose calls Cloudflare delivers in the order they were made. Publishes from one session reach the authority in the order they were made.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Every subscriber receives them in `seq` order, and publishes from one session reach the authority in the order they were made.
 
 ### Presence
 
@@ -186,7 +186,7 @@ Each key's authority records which Durable Objects have subscribers, in its own 
 | TTL | 90 seconds |
 | Refresh | every 30 seconds |
 
-A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe, once for text and once for binary. A subscription is ready once the authority has recorded it, so every publish sequenced after that reaches it. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it.
+A Durable Object registers with the authority on its first subscription to a key and withdraws on its last unsubscribe. A subscription is ready once the authority has recorded it, so every publish sequenced after that reaches it. If a Durable Object is evicted (e.g. during a deployment), its record lapses after 90 seconds and fan-out skips it.
 
 
 ## Delivery guarantees
