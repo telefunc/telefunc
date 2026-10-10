@@ -3,6 +3,7 @@ import { Cluster, Redis } from 'ioredis'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis } from './index.js'
 import { RedisBackend } from './backend.js'
+import { encodeLaneKey } from 'telefunc/__internal'
 import { disposeBackend, getRoomBackend } from '../../telefunc/dist/wire-protocol/backend/install.js'
 import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
 
@@ -128,6 +129,32 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
       ['camera-1@1', 'mic-1@1'],
       ['camera-1@1', 'mic-1@1', 'camera-2@2'],
     ])
+  })
+
+  it("lists one member's retained binary lanes from that member's own set, which leaves the generation's keys once empty", async () => {
+    const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('retained-of') })
+    await backend.compareExchangeHead(
+      'retained-of',
+      { form: 'absent' },
+      { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
+    )
+    const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
+    for (const lane of [binary('m', 'camera'), binary('m', ''), binary('other', ''), { kind: 'semantic' } as const])
+      await backend.commitLane('retained-of', 'inc', lane, bytes('frame'), { retain: true })
+    const listed = async () => (await backend.listRetained('retained-of', 'inc', { member: 'm' })).map(encodeLaneKey)
+    const generationKeys = () =>
+      (backend as unknown as { _generationKeys(roomId: string, inc: string): Promise<string[]> })._generationKeys(
+        'retained-of',
+        'inc',
+      )
+    expect((await listed()).sort()).toEqual(['binary:m:', 'binary:m:camera'])
+    await backend.deleteRetained('retained-of', 'inc', binary('m', 'camera'))
+    expect(await listed()).toEqual(['binary:m:'])
+    const before = await generationKeys()
+    await backend.deleteRetained('retained-of', 'inc', binary('m', ''))
+    expect(await listed()).toEqual([])
+    // The retained frame and the member's set leave the generation's keys together.
+    expect(before.length - (await generationKeys()).length).toBe(2)
   })
 
   it('admits a thousand simultaneous joins from four servers, counting each as a hold, while roster reads never fail', async () => {

@@ -51,7 +51,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
       if (retained !== null) assertDriverPosition(retained)
       return retained
     },
-    listRetained: (roomId, inc) => driver.listRetained(roomId, inc),
+    listRetained: (roomId, inc, of) => driver.listRetained(roomId, inc, of),
     deleteRetained: (roomId, inc, lane, opts) => driver.deleteRetained(roomId, inc, lane, opts),
     // The manager hands a lane's consumers only the deliveries checkDelivery passed.
     subscribeLane: (roomId, inc, lane, receiver) =>

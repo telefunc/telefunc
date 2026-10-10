@@ -1,4 +1,4 @@
-export { encodeLaneKey, decodeLaneKey, everyTrackLaneKey, roomSubscriptionSourceKey }
+export { encodeLaneKey, decodeLaneKey, everyTrackLaneKey, binaryLaneKeyPrefix, roomSubscriptionSourceKey }
 
 import { assert } from '../../../utils/assert.js'
 import type { EveryTrackLane, LaneId, RoomSubscriptionSource } from './contract.js'
@@ -7,7 +7,12 @@ function encodeLaneKey(lane: LaneId | EveryTrackLane): string {
   if (lane.kind === 'semantic' || lane.kind === 'control') return lane.kind
   if (lane.kind === 'inbox') return `inbox:${encodeURIComponent(lane.member)}`
   if (lane.kind === 'binary-all') return everyTrackLaneKey(lane.member)
-  return `binary:${encodeURIComponent(lane.member)}:${encodeURIComponent(lane.track)}`
+  return `${binaryLaneKeyPrefix(lane.member)}${encodeURIComponent(lane.track)}`
+}
+
+/** What the key of each binary lane of `member` starts with. */
+function binaryLaneKeyPrefix(member: string): string {
+  return `binary:${encodeURIComponent(member)}:`
 }
 
 /** The key of the lane that receives every binary commit of `member`. */

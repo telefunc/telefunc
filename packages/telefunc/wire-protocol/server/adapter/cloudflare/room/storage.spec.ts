@@ -10,6 +10,8 @@ import {
   readCells,
 } from './storage.js'
 import { snapshotRoutes, upsertRoute } from './routes.js'
+import { deleteRetained, installRetained, listRetained } from './retained.js'
+import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 
 /** Cloudflare's SQL storage over node:sqlite, recording the plan of each read. */
 function sqlStorage() {
@@ -182,4 +184,26 @@ test("a binary commit's delivery targets are its lane's and its member's every-t
   const targets = snapshotRoutes(sql, 'inc', ['binary:m:camera', 'binary-all:m'], 1)
   expect(targets.map((route) => route.sessionDoId).sort()).toEqual(['camera', 'every-track'])
   expect(plans).toEqual([expect.stringMatching(/^SEARCH route USING INDEX \w+ \(inc=\? AND lane_key=\?\)$/)])
+})
+
+test("one member's retained binary lanes are a primary-key range of its lane keys", () => {
+  const { sql, plans } = sqlStorage()
+  const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
+  for (const lane of [
+    binary('m', 'camera'),
+    binary('m', ''),
+    binary('m:1', 'camera'),
+    binary('n', ''),
+    { kind: 'semantic' } as const,
+  ])
+    installRetained(sql, 'inc', encodeLaneKey(lane), new Uint8Array([1]), { seq: 1, timestamp: 1 })
+  plans.length = 0
+  expect(listRetained(sql, 'inc', { member: 'm' })).toEqual([binary('m', ''), binary('m', 'camera')])
+  expect(plans).toEqual([
+    expect.stringMatching(
+      /^SEARCH rt_manifest USING COVERING INDEX sqlite_autoindex_rt_manifest_1 \(inc=\? AND lane_key>\? AND lane_key<\?\)$/,
+    ),
+  ])
+  deleteRetained(sql, 'inc', binary('m', 'camera'))
+  expect(listRetained(sql, 'inc', { member: 'm' })).toEqual([binary('m', '')])
 })

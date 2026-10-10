@@ -134,8 +134,8 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     return readRetained(this.#sql(), inc, lane)
   }
 
-  async listRetained(inc: string): Promise<LaneId[]> {
-    return listRetained(this.#sql(), inc)
+  async listRetained(inc: string, of?: { member: string }): Promise<LaneId[]> {
+    return listRetained(this.#sql(), inc, of)
   }
 
   async deleteRetained(inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {

@@ -4,8 +4,9 @@ export { installRetained, readRetained, listRetained, deleteRetained }
 // Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap.
 
 import type { LaneId, RetainedFrame } from '../../../../backend/room/contract.js'
-import { decodeLaneKey, encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { binaryLaneKeyPrefix, decodeLaneKey, encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
+import { prefixEnd } from './storage.js'
 
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
@@ -49,11 +50,20 @@ function readRetained(sql: SqlStorage, inc: string, lane: LaneId): RetainedFrame
   return { payload, seq: manifest.seq, timestamp: manifest.ts }
 }
 
-function listRetained(sql: SqlStorage, inc: string): LaneId[] {
-  return sql
-    .exec<Pick<ManifestRow, 'lane_key'>>('SELECT lane_key FROM rt_manifest WHERE inc = ?', inc)
-    .toArray()
-    .map((row) => decodeLaneKey(row.lane_key))
+// A member's lanes are a primary-key range: their keys share its prefix.
+function listRetained(sql: SqlStorage, inc: string, of?: { member: string }): LaneId[] {
+  const query = 'SELECT lane_key FROM rt_manifest WHERE inc = ?'
+  const prefix = of === undefined ? null : binaryLaneKeyPrefix(of.member)
+  const rows =
+    prefix === null
+      ? sql.exec<Pick<ManifestRow, 'lane_key'>>(query, inc)
+      : sql.exec<Pick<ManifestRow, 'lane_key'>>(
+          `${query} AND lane_key >= ? AND lane_key < ?`,
+          inc,
+          prefix,
+          prefixEnd(prefix)!,
+        )
+  return rows.toArray().map((row) => decodeLaneKey(row.lane_key))
 }
 
 function deleteRetained(sql: SqlStorage, inc: string, lane: LaneId, opts?: { ifSeq?: number }): void {

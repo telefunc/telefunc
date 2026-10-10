@@ -34,6 +34,7 @@ import {
   headKey,
   orderKey,
   retainedKey,
+  retainedOfKey,
   revKey,
 } from './keys.js'
 
@@ -250,7 +251,7 @@ return reply
 // published on its member's every-track channel, after its lane key's two-byte length and the key, so a receiver orders
 // it by its own lane; no lane key is long enough for that length's first byte to read as a fence.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6]=cell values
-//         [7]=the member's every-track channel (another lane repeats [4])
+//         [7]=the member's every-track channel [8]=the member's retained lanes (another lane repeats [4] and [3])
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
 //         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9..]=required live cells
 const COMMIT_LUA = `${HEAD_PRELUDE}
@@ -293,6 +294,10 @@ local frame = tf_ordering_frame(seq, ts, ARGV[5])
 if ARGV[4] == '1' then
   redis.call('SET', retained_key, frame)
   redis.call('SADD', generation_keys_key, retained_key)
+  if ARGV[2] == 'binary' then
+    redis.call('SADD', KEYS[8], ARGV[8])
+    redis.call('SADD', generation_keys_key, KEYS[8])
+  end
 end
 local receivers = redis.call('PUBLISH', channel_key, frame)
 if ARGV[2] == 'binary' then
@@ -307,8 +312,8 @@ return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',
 `
 
 // Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
-//   KEYS: [1]=generation-keys [2]=retained
-//   ARGV: [1]=ifSeq or ''
+//   KEYS: [1]=generation-keys [2]=retained [3]=a binary lane's member's retained lanes (another lane repeats [2])
+//   ARGV: [1]=ifSeq or '' [2]=a binary lane's key or ''
 const RETAINED_DELETE_LUA = `
 if ARGV[1] ~= '' then
   local frame = redis.call('GET', KEYS[2])
@@ -317,6 +322,10 @@ if ARGV[1] ~= '' then
   if seq_hi * 4294967296 + seq_lo ~= tonumber(ARGV[1]) then return 0 end
 end
 redis.call('SREM', KEYS[1], KEYS[2])
+if ARGV[2] ~= '' then
+  redis.call('SREM', KEYS[3], ARGV[2])
+  if redis.call('SCARD', KEYS[3]) == 0 then redis.call('SREM', KEYS[1], KEYS[3]) end
+end
 return redis.call('DEL', KEYS[2])
 `
 
@@ -502,20 +511,23 @@ const REDIS_COMMANDS = {
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: 7,
+    numberOfKeys: 8,
     invoke: (prefix, input: CommitInput) => {
       const { roomId, inc, lane } = input
       const laneKey = encodeLaneKey(lane)
       const channel = channelKey(prefix, roomId, inc, laneKey)
+      const retained = retainedKey(prefix, roomId, inc, laneKey)
+      const binary = lane.kind === 'binary'
       return {
         keys: [
           headKey(prefix, roomId),
           orderKey(prefix, roomId, inc, laneKey),
-          retainedKey(prefix, roomId, inc, laneKey),
+          retained,
           channel,
           generationKeysKey(prefix, roomId, inc),
           cellValuesKey(prefix, roomId, inc),
-          lane.kind === 'binary' ? channelKey(prefix, roomId, inc, everyTrackLaneKey(lane.member)) : channel,
+          binary ? channelKey(prefix, roomId, inc, everyTrackLaneKey(lane.member)) : channel,
+          binary ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
         ],
         argv: [
           inc,
@@ -541,11 +553,20 @@ const REDIS_COMMANDS = {
   retainedDelete: command({
     name: 'tfRoomRetainedDelete',
     lua: RETAINED_DELETE_LUA,
-    numberOfKeys: 2,
-    invoke: (prefix, { roomId, inc, lane, ifSeq }: RoomInc & { lane: LaneId; ifSeq: number | undefined }) => ({
-      keys: [generationKeysKey(prefix, roomId, inc), retainedKey(prefix, roomId, inc, encodeLaneKey(lane))],
-      argv: [ifSeq === undefined ? '' : String(ifSeq)],
-    }),
+    numberOfKeys: 3,
+    invoke: (prefix, { roomId, inc, lane, ifSeq }: RoomInc & { lane: LaneId; ifSeq: number | undefined }) => {
+      const laneKey = encodeLaneKey(lane)
+      const retained = retainedKey(prefix, roomId, inc, laneKey)
+      const binary = lane.kind === 'binary'
+      return {
+        keys: [
+          generationKeysKey(prefix, roomId, inc),
+          retained,
+          binary ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
+        ],
+        argv: [ifSeq === undefined ? '' : String(ifSeq), binary ? laneKey : ''],
+      }
+    },
     parse: () => {},
   }),
   directoryPut: command({

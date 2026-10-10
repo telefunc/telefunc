@@ -106,8 +106,8 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     return this.#stub(roomId).readRetained(inc, lane)
   }
 
-  async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
-    return this.#stub(roomId).listRetained(inc)
+  async listRetained(roomId: string, inc: string, of?: { member: string }): Promise<LaneId[]> {
+    return this.#stub(roomId).listRetained(inc, of)
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {

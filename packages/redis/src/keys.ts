@@ -12,6 +12,7 @@ export {
   orderKey,
   retainedKeyPrefix,
   retainedKey,
+  retainedOfKey,
   channelKey,
   generationInvalidationChannel,
   directoryIndexKey,
@@ -77,6 +78,10 @@ function retainedKeyPrefix(prefix: string, roomId: string, inc: string): string 
 }
 function retainedKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${retainedKeyPrefix(prefix, roomId, inc)}${laneKey}`
+}
+/** The lane keys of one member's retained binary frames. */
+function retainedOfKey(prefix: string, roomId: string, inc: string, member: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:rtm:${encodeURIComponent(member)}`
 }
 function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`

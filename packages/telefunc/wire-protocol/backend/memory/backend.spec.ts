@@ -259,6 +259,31 @@ describe('memory backend behind the supervised consumer', () => {
     })
     await everyTrack.unsubscribe()
   })
+  it("lists one member's retained binary lanes from its own index, not by scanning the room's", async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'retained-of',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
+    for (const lane of [
+      binary('m', 'camera'),
+      binary('m', ''),
+      binary('m:1', 'camera'),
+      binary('other', ''),
+      semanticLane,
+    ])
+      await backend.commitLane('retained-of', 'inc-1', lane, encoder.encode('frame'), { retain: true })
+    const scan = vi.spyOn(memoryState.rooms.get('retained-of')!.gens.get('inc-1')!.retained, 'values')
+    const listed = () => backend.listRetained('retained-of', 'inc-1', { member: 'm' })
+    expect(await listed()).toEqual([binary('m', 'camera'), binary('m', '')])
+    await backend.deleteRetained('retained-of', 'inc-1', binary('m', 'camera'))
+    expect(await listed()).toEqual([binary('m', '')])
+    await backend.deleteRetained('retained-of', 'inc-1', binary('m', ''))
+    expect(await listed()).toEqual([])
+    expect(scan).not.toHaveBeenCalled()
+  })
   it('does not retain or expose mutable lane aliases', async () => {
     await driver.compareExchangeHead(
       'retained-lane-alias',

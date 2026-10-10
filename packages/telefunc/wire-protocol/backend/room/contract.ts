@@ -137,7 +137,8 @@ type RoomDriver = {
     opts?: CommitOptions,
   ): Promise<CommitResult>
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>
-  listRetained(roomId: string, inc: string): Promise<LaneId[]>
+  /** The lanes holding a retained frame; with `of`, only that member's binary lanes, at a cost of their count. */
+  listRetained(roomId: string, inc: string, of?: { member: string }): Promise<LaneId[]>
   deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void>
   dropGeneration(roomId: string, inc: string): Promise<void>
   directoryPut(roomId: string, incTag: string): Promise<void>

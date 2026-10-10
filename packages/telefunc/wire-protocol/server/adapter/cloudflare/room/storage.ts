@@ -12,6 +12,7 @@ export {
   compareExchangeCells,
   advanceOrder,
   dropGenerationRows,
+  prefixEnd,
 }
 
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.

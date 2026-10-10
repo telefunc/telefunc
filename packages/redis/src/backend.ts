@@ -36,6 +36,7 @@ import {
   assertKeyPrefix,
   retainedKey,
   retainedKeyPrefix,
+  retainedOfKey,
 } from './keys.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { RedisSubscriptionDriver } from './subscriber.js'
@@ -166,7 +167,9 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return { payload: Uint8Array.from(payload), seq, timestamp }
   }
 
-  async listRetained(roomId: string, inc: string): Promise<LaneId[]> {
+  async listRetained(roomId: string, inc: string, of?: { member: string }): Promise<LaneId[]> {
+    if (of !== undefined)
+      return (await this._publisher.smembers(retainedOfKey(this._prefix, roomId, inc, of.member))).map(decodeLaneKey)
     const prefix = retainedKeyPrefix(this._prefix, roomId, inc)
     const keys = (await this._generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
     return keys.map((physical) => decodeLaneKey(physical.slice(prefix.length)))
