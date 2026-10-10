@@ -127,7 +127,6 @@ function Room() {
       {scenario('retain', 'Retained Replay', 'Retained replay to a late subscriber', async () => {
         const roomId = await createRoomId('retain')
 
-        // Read retained state only after subscription readiness.
         const pubView = await onGetRoom(roomId)
         // A GC pass would close `pubView`, and Author leaving with it deletes the message it retained.
         const releasePubView = keepReachable(pubView)
