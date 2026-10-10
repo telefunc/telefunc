@@ -1413,6 +1413,11 @@ describe('Room public behavior', () => {
     joined.pos.x = 9
     const me = await joining
     expect({ room: room.meta, me: me.meta }).toEqual({ room: { topic: { name: 'a' } }, me: { pos: { x: 0 } } })
+    expect([Object.isFrozen(room.meta), Object.isFrozen(me.meta)]).toEqual([true, true])
+    const replaced = { pos: { x: 0 }, tag: { v: 'a' } }
+    const replacing = me.setMeta(replaced)
+    replaced.tag.v = 'changed'
+    await replacing
     const attrs = { pos: { x: 1 } }
     const setting = me.setAttributes(attrs)
     attrs.pos.x = 9
@@ -1423,6 +1428,7 @@ describe('Room public behavior', () => {
     await settingRoom
     await vi.waitFor(() => expect(room.meta).toEqual({ topic: { name: 'b' } }))
     // A change after the call settled reaches nothing either.
+    replaced.tag.v = 'later'
     attrs.pos.x = 8
     roomMeta.topic.name = 'later'
     const fresh = await Room.get(room.id)
@@ -1430,8 +1436,8 @@ describe('Room public behavior', () => {
       view: [room.meta, me.meta],
       stored: [fresh.meta, (await fresh.getParticipants()).map(({ meta }) => meta)],
     }).toEqual({
-      view: [{ topic: { name: 'b' } }, { pos: { x: 1 } }],
-      stored: [{ topic: { name: 'b' } }, [{ pos: { x: 1 } }]],
+      view: [{ topic: { name: 'b' } }, { pos: { x: 1 }, tag: { v: 'a' } }],
+      stored: [{ topic: { name: 'b' } }, [{ pos: { x: 1 }, tag: { v: 'a' } }]],
     })
   })
   it.each([false, true])(
@@ -3329,22 +3335,6 @@ describe('Room public behavior', () => {
     expect(remoteBacking(remote)).not.toBeNull()
     expect(remoteBacking(Object.create(remote!))).toBeNull()
     expect(Object.getOwnPropertySymbols(remote!)).toEqual([])
-  })
-  it('copies metadata into state and freezes every public metadata view', async () => {
-    const roomMeta = { topic: 'original' }
-    const room = await Room.create('owned-meta', { meta: roomMeta })
-    roomMeta.topic = 'caller mutation'
-    expect(room.meta).toEqual({ topic: 'original' })
-    expect(Object.isFrozen(room.meta)).toBe(true)
-    const joinMeta = { name: 'Alice' }
-    const participant = await room.join({ meta: joinMeta })
-    joinMeta.name = 'caller mutation'
-    expect(participant.meta).toEqual({ name: 'Alice' })
-    expect(Object.isFrozen(participant.meta)).toBe(true)
-    const replacement = { name: 'Bob' }
-    await participant.setMeta(replacement)
-    replacement.name = 'caller mutation'
-    expect(participant.meta).toEqual({ name: 'Bob' })
   })
 })
 describe('client Room lifecycle', () => {
