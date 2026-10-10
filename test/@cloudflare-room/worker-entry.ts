@@ -232,6 +232,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/pipelined-delivery': pipelinedDelivery,
   '/alarm-policy': alarmScheduling,
   '/route-renewal': routeRenewal,
+  '/every-track': everyTrackRoutes,
   '/native-rpc': nativeRpcRoundTrip,
   '/large-retained': largeRetainedReplay,
   '/broadcast-sessions': broadcastAcrossSessions,
@@ -308,6 +309,34 @@ async function pipelinedDelivery(env: Env, suffix: string) {
     whileHeld,
     settlements: await Promise.all(commits.map((commit) => rejectionOf(probe.settle(commit), 'pipelined settlement'))),
   }
+}
+// One session holds the camera lane of `m`, another its every-track lane.
+async function everyTrackRoutes(env: Env, suffix: string) {
+  const probe = roomProbe(env, suffix, 'every-track')
+  await probe.open()
+  for (const [role, laneKey] of [
+    ['camera', 'binary:m:camera'],
+    ['every-track', 'binary-all:m'],
+  ] as const) {
+    const sessionDoId = sessionOf(env, `${role}-${suffix}`).toString()
+    const route = { roomId: probe.roomId, inc: probe.inc, laneKey, sessionDoId, leaseId: `${role}-${suffix}` }
+    const registration = await probe.authority.registerRoute(route)
+    if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
+  }
+  const receivers: number[] = []
+  for (const [member, track, text] of [
+    ['m', 'camera', 'camera-1'],
+    ['m', 'mic', 'mic-1'],
+    ['other', 'camera', 'other'],
+    ['m', 'camera', 'camera-2'],
+  ] as const) {
+    const frame = textEncoder.encode(text)
+    const commit = accepted(await probe.authority.commitLane(probe.inc, { kind: 'binary', member, track }, frame), text)
+    await probe.settle(commit)
+    receivers.push(commit.receivers)
+  }
+  const arrived = (role: string) => session(env, `${role}-${suffix}`).arrived()
+  return { receivers, everyTrack: await arrived('every-track'), camera: await arrived('camera') }
 }
 async function alarmScheduling(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)

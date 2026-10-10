@@ -52,6 +52,14 @@ test('a room authority arms its alarm while it holds a route or an orphaned gene
   })
 })
 
+test("a binary commit reaches its lane's sessions and its member's every-track sessions", async () => {
+  expect(await probe('/every-track')).toEqual({
+    receivers: [2, 1, 0, 2],
+    everyTrack: ['camera-1', 'mic-1', 'camera-2'],
+    camera: ['camera-1', 'camera-2'],
+  })
+})
+
 test('a route renews under its own lease only', async () => {
   expect(await probe('/route-renewal')).toEqual({ live: true, otherLease: false })
 })

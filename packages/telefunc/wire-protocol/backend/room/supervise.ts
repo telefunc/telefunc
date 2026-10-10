@@ -35,7 +35,11 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
       const result = await (opts?.closingLease === undefined
         ? subscriptions.afterEstablished(commit, () => ({
             key: roomSubscriptionSourceKey(source),
-            sources: [source],
+            // A binary commit also reaches its member's every-track lane.
+            sources:
+              lane.kind === 'binary'
+                ? [source, { roomId, inc, lane: { kind: 'binary-all', member: lane.member } }]
+                : [source],
             weight: heldSendWeight(lane.kind === 'binary' ? 'binary' : 'text', () => payload.byteLength, 'Room'),
           }))
         : commit())

@@ -5,6 +5,7 @@ export type { RedisCommand }
 
 import {
   encodeLaneKey,
+  everyTrackLaneKey,
   type BroadcastPayload,
   type BroadcastRoute,
   type CellCounter,
@@ -245,10 +246,13 @@ redis.call('SADD', generation_keys_key, rev_key, cell_index_key, values_key, ver
 return reply
 `
 
-// COMMIT: while the room is closing, only the close's control commit under its lease lands.
+// COMMIT: while the room is closing, only the close's control commit under its lease lands. A binary commit is also
+// published on its member's every-track channel, after its lane key's two-byte length and the key, so a receiver orders
+// it by its own lane; no lane key is long enough for that length's first byte to read as a fence.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6]=cell values
-//   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1')
-//         [5]=payload [6]=local delivery-fence token or '' [7..]=required live cells
+//         [7]=the member's every-track channel (another lane repeats [4])
+//   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
+//         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9..]=required live cells
 const COMMIT_LUA = `${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, generation_keys_key =
@@ -265,8 +269,8 @@ if head and head.inc == ARGV[1] then
   end
 end
 if not ok then return '{"stale":"incarnation"}' end
-for i = 7, #ARGV do
-  if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - 7) .. '}' end
+for i = 9, #ARGV do
+  if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - 9) .. '}' end
 end
 
 local base_seq, base_ts = 0, 0
@@ -291,9 +295,14 @@ if ARGV[4] == '1' then
   redis.call('SADD', generation_keys_key, retained_key)
 end
 local receivers = redis.call('PUBLISH', channel_key, frame)
--- A Cluster forwards both publications from this slot owner over the same ordered bus link. The
--- impossible ordering-frame prefix makes the second publication an internal local-dispatch fence.
-if ARGV[6] ~= '' then redis.call('PUBLISH', channel_key, string.char(${REDIS_DELIVERY_FENCE_BYTE}) .. ARGV[6]) end
+if ARGV[2] == 'binary' then
+  receivers = receivers + redis.call('PUBLISH', KEYS[7], struct.pack('>I2', #ARGV[8]) .. ARGV[8] .. frame)
+end
+-- A Cluster forwards every publication from this slot owner over the same ordered bus link. The
+-- impossible ordering-frame prefix makes a channel's later publication an internal local-dispatch fence.
+local fence = string.char(${REDIS_DELIVERY_FENCE_BYTE})
+if ARGV[6] ~= '' then redis.call('PUBLISH', channel_key, fence .. ARGV[6]) end
+if ARGV[7] ~= '' then redis.call('PUBLISH', KEYS[7], fence .. ARGV[7]) end
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 
@@ -348,7 +357,8 @@ type CommitInput = RoomInc & {
   retain: boolean
   closingLease: string | undefined
   requiredCellKeys: readonly string[]
-  fenceToken: string
+  /** Each channel's fence token, `''` where no local attempt awaits the commit. */
+  fenceTokens: { lane: string; everyTrack: string }
 }
 type CommitReply =
   | { stale: 'incarnation' }
@@ -492,26 +502,30 @@ const REDIS_COMMANDS = {
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: 6,
+    numberOfKeys: 7,
     invoke: (prefix, input: CommitInput) => {
-      const { roomId, inc } = input
-      const laneKey = encodeLaneKey(input.lane)
+      const { roomId, inc, lane } = input
+      const laneKey = encodeLaneKey(lane)
+      const channel = channelKey(prefix, roomId, inc, laneKey)
       return {
         keys: [
           headKey(prefix, roomId),
           orderKey(prefix, roomId, inc, laneKey),
           retainedKey(prefix, roomId, inc, laneKey),
-          channelKey(prefix, roomId, inc, laneKey),
+          channel,
           generationKeysKey(prefix, roomId, inc),
           cellValuesKey(prefix, roomId, inc),
+          lane.kind === 'binary' ? channelKey(prefix, roomId, inc, everyTrackLaneKey(lane.member)) : channel,
         ],
         argv: [
           inc,
-          input.lane.kind,
+          lane.kind,
           input.closingLease ?? '',
           input.retain ? '1' : '0',
           toBuffer(input.payload),
-          input.fenceToken,
+          input.fenceTokens.lane,
+          input.fenceTokens.everyTrack,
+          laneKey,
           ...input.requiredCellKeys,
         ],
       }

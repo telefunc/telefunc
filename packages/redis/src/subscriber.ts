@@ -6,12 +6,19 @@ import type {
   BackendReceiver,
   BroadcastRoute,
   Deferred,
+  LaneId,
   RoomSubscriptionSource,
   SubscriptionAttempt,
   SubscriptionBinding,
   SubscriptionDriver,
 } from 'telefunc/__internal'
-import { DriverAttempt, createDeferred, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
+import {
+  DriverAttempt,
+  createDeferred,
+  decodeOrderingFrame,
+  encodeLaneKey,
+  everyTrackLaneKey,
+} from 'telefunc/__internal'
 import { broadcastChannel, channelKey, generationInvalidationChannel } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
@@ -76,19 +83,32 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     return ''
   }
 
-  /** Arms a delivery fence on the lane's ready attempts: `delivery` settles once each saw the commit. */
-  prepareFence(source: RoomSubscriptionSource): { token: string; delivery: Promise<void>; cancel(): void } {
+  /** Arms a delivery fence on the ready attempts of each channel the commit is published on, its lane's and, for a
+   *  binary lane, its member's every-track one: `delivery` settles once each saw the commit. */
+  prepareFence(source: RoomSubscriptionSource & { lane: LaneId }): {
+    tokens: { lane: string; everyTrack: string }
+    delivery: Promise<void>
+    cancel(): void
+  } {
     const token = randomUUID()
-    const attempts = [...(this._byChannel.get(laneChannel(this._prefix, source)) ?? [])]
-    const armed = attempts.flatMap((attempt) => attempt.prepareFence(token) ?? [])
-    const delivery = Promise.all(armed).then(() => {})
+    const arm = (channel: string) => {
+      const attempts = [...(this._byChannel.get(channel) ?? [])]
+      return { attempts, armed: attempts.flatMap((attempt) => attempt.prepareFence(token) ?? []) }
+    }
+    const { roomId, inc, lane } = source
+    const own = arm(laneChannel(this._prefix, source))
+    const everyTrack =
+      lane.kind === 'binary'
+        ? arm(channelKey(this._prefix, roomId, inc, everyTrackLaneKey(lane.member)))
+        : { attempts: [], armed: [] }
+    const delivery = Promise.all([...own.armed, ...everyTrack.armed]).then(() => {})
     // A subscriber can drop before the commit awaiting this delivery returns.
     void delivery.catch(() => {})
     return {
-      token: armed.length === 0 ? '' : token,
+      tokens: { lane: own.armed.length === 0 ? '' : token, everyTrack: everyTrack.armed.length === 0 ? '' : token },
       delivery,
       cancel: () => {
-        for (const attempt of attempts) attempt.settleFence(token)
+        for (const attempt of [...own.attempts, ...everyTrack.attempts]) attempt.settleFence(token)
       },
     }
   }
@@ -254,7 +274,10 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
 class RedisSubscriptionAttempt extends DriverAttempt {
   readonly channels: readonly string[]
   private readonly _fences = new Map<string, Deferred<void>>()
-  private _lastSequence = 0
+  /** The last seq delivered per lane: an every-track channel carries each of its member's binary lanes, keyed by lane
+   *  key; any other channel one lane, keyed `''`. */
+  private readonly _lastSequence = new Map<string, number>()
+  private readonly _everyTrack: boolean
 
   constructor(
     readonly source: RedisSubscriptionSource,
@@ -266,6 +289,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   ) {
     super()
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
+    this._everyTrack = 'roomId' in source && source.lane.kind === 'binary-all'
   }
 
   async unsubscribe(): Promise<void> {
@@ -294,7 +318,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   markReady(): void {
     if (!this.awaitsConfirmation()) return
     // Frames published while lost are gone; a Redis restarted without its data may restart the sequence.
-    this._lastSequence = 0
+    this._lastSequence.clear()
     this.transition('ready')
   }
 
@@ -317,12 +341,18 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     if (frame[0] === REDIS_DELIVERY_FENCE_BYTE) {
       return this.settleFence(frame.subarray(1).toString())
     }
+    let lane = ''
+    if (this._everyTrack) {
+      const end = 2 + frame.readUInt16BE(0)
+      lane = frame.toString('latin1', 2, end)
+      frame = frame.subarray(end)
+    }
     const { payload, info } = decodeOrderingFrame(frame)
     // Redis Cluster can forward publications from the old and new slot owners over independent bus
-    // paths during resharding. Preserve ordered at-most-once delivery by dropping a late frame; gaps
-    // remain loss, never replay.
-    if (info.seq <= this._lastSequence) return
-    this._lastSequence = info.seq
+    // paths during resharding. Preserve ordered at-most-once delivery by dropping a frame late on its
+    // own lane; gaps remain loss, never replay.
+    if (info.seq <= (this._lastSequence.get(lane) ?? 0)) return
+    this._lastSequence.set(lane, info.seq)
     const text = !('roomId' in this.source) && this.source.kind === 'text'
     this._receiver(text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
   }

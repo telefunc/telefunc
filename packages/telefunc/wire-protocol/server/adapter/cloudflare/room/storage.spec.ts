@@ -9,6 +9,7 @@ import {
   initSchema,
   readCells,
 } from './storage.js'
+import { snapshotRoutes, upsertRoute } from './routes.js'
 
 /** Cloudflare's SQL storage over node:sqlite, recording the plan of each read. */
 function sqlStorage() {
@@ -167,4 +168,18 @@ test('an exchange commits while the cells it expects are as read, whatever else 
     ['a', 'a2'],
     ['n', JSON.stringify({ value: 3, changedAt: 3_000 })],
   ])
+})
+
+test("a binary commit's delivery targets are its lane's and its member's every-track routes, two primary-key lookups", () => {
+  const { sql, plans } = sqlStorage()
+  for (const [laneKey, sessionDoId] of [
+    ['binary:m:camera', 'camera'],
+    ['binary-all:m', 'every-track'],
+    ['binary:m:mic', 'mic'],
+    ['binary-all:other', 'other'],
+  ])
+    upsertRoute(sql, { roomId: 'room', inc: 'inc', laneKey: laneKey!, sessionDoId: sessionDoId!, leaseId: 'lease' }, 0)
+  const targets = snapshotRoutes(sql, 'inc', ['binary:m:camera', 'binary-all:m'], 1)
+  expect(targets.map((route) => route.sessionDoId).sort()).toEqual(['camera', 'every-track'])
+  expect(plans).toEqual([expect.stringMatching(/^SEARCH route USING INDEX \w+ \(inc=\? AND lane_key=\?\)$/)])
 })

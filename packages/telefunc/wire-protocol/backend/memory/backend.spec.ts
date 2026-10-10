@@ -220,6 +220,45 @@ describe('memory backend behind the supervised consumer', () => {
     )
     expect(reconstructed).toMatchObject({ accepted: true, seq: 3, timestamp: 3 })
   })
+  it("delivers each of a member's binary commits to its every-track lane with its own track's seq, and counts that lane as a receiver", async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'every-track',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    const received: string[] = []
+    const everyTrack = backend.subscribeLane(
+      'every-track',
+      'inc-1',
+      { kind: 'binary-all', member: 'm' },
+      (payload, info) => void received.push(`${decoder.decode(payload)}@${info.seq}`),
+    )
+    await everyTrack.ready
+    const receivers: number[] = []
+    for (const [member, track, text] of [
+      ['m', 'camera', 'camera-1'],
+      ['m', 'mic', 'mic-1'],
+      ['other', 'camera', 'other'],
+      ['m', 'camera', 'camera-2'],
+      ['m', '', 'default-1'],
+    ] as const) {
+      const commit = await backend.commitLane(
+        'every-track',
+        'inc-1',
+        { kind: 'binary', member, track },
+        encoder.encode(text),
+      )
+      if (!('accepted' in commit)) throw new Error('lane commit fenced unexpectedly')
+      await commit.delivery
+      receivers.push(commit.receivers!)
+    }
+    expect({ received, receivers }).toEqual({
+      received: ['camera-1@1', 'mic-1@1', 'camera-2@2', 'default-1@1'],
+      receivers: [1, 1, 0, 1, 1],
+    })
+    await everyTrack.unsubscribe()
+  })
   it('does not retain or expose mutable lane aliases', async () => {
     await driver.compareExchangeHead(
       'retained-lane-alias',

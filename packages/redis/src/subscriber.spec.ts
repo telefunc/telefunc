@@ -3,6 +3,7 @@ import type { SubscriberSocket } from './ioredis.js'
 import { expect, onTestFinished, test, vi } from 'vitest'
 import type { BackendPayload, BackendReceiver, SubscriptionAttempt, SubscriptionState } from 'telefunc/__internal'
 import { RedisSubscriptionDriver } from './subscriber.js'
+import { channelKey } from './keys.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
 function untilReady(attempt: SubscriptionAttempt): Promise<void> {
@@ -43,6 +44,17 @@ function orderingFrame(seq: number, payload: string): Uint8Array {
   view.setUint32(4, seq)
   view.setUint32(12, 1)
   frame.set(bytes, 16)
+  return frame
+}
+
+/** A frame on an every-track channel: its lane key, two bytes of length first, then the lane's ordering frame. */
+function everyTrackFrame(laneKey: string, seq: number, payload: string): Uint8Array {
+  const key = new TextEncoder().encode(laneKey)
+  const ordered = orderingFrame(seq, payload)
+  const frame = new Uint8Array(2 + key.byteLength + ordered.byteLength)
+  new DataView(frame.buffer).setUint16(0, key.byteLength)
+  frame.set(key, 2)
+  frame.set(ordered, 2 + key.byteLength)
   return frame
 }
 
@@ -133,6 +145,29 @@ test('reports the outage of a connection opened after an earlier outage released
   const second = openAttempt(driver, route)
   await vi.waitFor(() => expect(report).toHaveBeenCalledTimes(2))
   await second.unsubscribe()
+})
+
+test('an every-track lane drops a frame only when it is late on its own lane, as a Cluster resharding can deliver it', async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets)
+  const received: string[] = []
+  const attempt = openAttempt(
+    driver,
+    { roomId: 'room', inc: 'inc', lane: { kind: 'binary-all', member: 'm' } },
+    (payload, info) => void received.push(`${new TextDecoder().decode(payload as Uint8Array)}@${info.seq}`),
+  )
+  await untilReady(attempt)
+  const channel = channelKey('tf:', 'room', 'inc', 'binary-all:m')
+  for (const [lane, seq] of [
+    ['camera', 5],
+    ['mic', 1],
+    ['camera', 4],
+    ['mic', 2],
+    ['mic', 2],
+    ['camera', 6],
+  ] as const)
+    sockets[0]!.deliver(channel, everyTrackFrame(`binary:m:${lane}`, seq, lane))
+  expect(received).toEqual(['camera@5', 'mic@1', 'mic@2', 'camera@6'])
 })
 
 test("a fence resolves when its subscription's owner releases it: no receiver is left to hand off to", async () => {

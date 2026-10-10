@@ -3,7 +3,7 @@ import { Cluster, Redis } from 'ioredis'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis } from './index.js'
 import { RedisBackend } from './backend.js'
-import { disposeBackend } from '../../telefunc/dist/wire-protocol/backend/install.js'
+import { disposeBackend, getRoomBackend } from '../../telefunc/dist/wire-protocol/backend/install.js'
 import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
 
 // Room on a real Redis: REDIS_URL names a standalone server, REDIS_CLUSTER_NODES a Cluster's nodes; each one set runs.
@@ -90,6 +90,44 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     const read = await backend.readCells('clear', 'inc', { prefix: '' })
     if ('staleInc' in read) throw new Error('the room is gone')
     expect([...read.cells.keys()].sort()).toEqual(['p:b', 'pq', 'q'])
+  })
+
+  it("delivers each of a member's binary commits to its every-track subscription with its own track's seq before the commit's delivery settles", async () => {
+    installRedis(ownClient(connect()), { prefix: uniquePrefix('every-track') })
+    onTestFinished(() => disposeBackend())
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'every-track',
+      { form: 'absent' },
+      { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
+    )
+    const received: string[] = []
+    const everyTrack = backend.subscribeLane(
+      'every-track',
+      'inc',
+      { kind: 'binary-all', member: 'm' },
+      (payload, info) => void received.push(`${Buffer.from(payload).toString()}@${info.seq}`),
+    )
+    onTestFinished(() => everyTrack.unsubscribe())
+    await everyTrack.ready
+    const seen: string[][] = []
+    for (const [member, track, text] of [
+      ['m', 'camera', 'camera-1'],
+      ['m', 'mic', 'mic-1'],
+      ['other', 'camera', 'other'],
+      ['m', 'camera', 'camera-2'],
+    ] as const) {
+      const commit = await backend.commitLane('every-track', 'inc', { kind: 'binary', member, track }, bytes(text))
+      if (!('accepted' in commit)) throw new Error('the room is gone')
+      await commit.delivery
+      seen.push([...received])
+    }
+    expect(seen).toEqual([
+      ['camera-1@1'],
+      ['camera-1@1', 'mic-1@1'],
+      ['camera-1@1', 'mic-1@1'],
+      ['camera-1@1', 'mic-1@1', 'camera-2@2'],
+    ])
   })
 
   it('admits a thousand simultaneous joins from four servers, counting each as a hold, while roster reads never fail', async () => {

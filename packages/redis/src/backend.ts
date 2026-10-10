@@ -136,7 +136,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
         retain: opts?.retain === true,
         closingLease: opts?.closingLease,
         requiredCellKeys: opts?.requiredCellKeys ?? [],
-        fenceToken: fence.token,
+        fenceTokens: fence.tokens,
       })
     } catch (error) {
       fence.cancel()

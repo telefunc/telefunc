@@ -57,7 +57,7 @@ import { reconnectWindow, type ServerChannel } from '../server/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import type { LaneId } from '../backend/room/contract.js'
+import type { LaneId, RoomSubscriptionSource } from '../backend/room/contract.js'
 import type {
   BackendReceiver,
   BackendSubscription,
@@ -70,6 +70,7 @@ import { wrapProxy } from '../wrapProxy.js'
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 const semanticLane = { kind: 'semantic' } as const satisfies LaneId
+type SubscribedLane = RoomSubscriptionSource['lane']
 const allBinary = { everyMember: { all: true, tracks: [] }, members: {} }
 const HOLD_RECORD_KEYS = [HOLDS_CELL_KEY, JOINS_CELL_KEY].join()
 let driver: MemoryBackend
@@ -4886,18 +4887,18 @@ function captureOutcome<T>(promise: Promise<T>) {
   return outcome
 }
 function mockLaneSubscription(
-  match: LaneId['kind'] | ((lane: LaneId) => boolean),
+  match: SubscribedLane['kind'] | ((lane: SubscribedLane) => boolean),
   replacement: (
     subscribeLane: ReturnType<typeof getRoomBackend>['subscribeLane'],
     roomId: string,
     inc: string,
-    lane: LaneId,
+    lane: SubscribedLane,
     receiver: BackendReceiver,
   ) => BackendSubscription,
 ) {
   const backend = getRoomBackend()
   const subscribeLane = backend.subscribeLane.bind(backend)
-  const matches = typeof match === 'function' ? match : (lane: LaneId) => lane.kind === match
+  const matches = typeof match === 'function' ? match : (lane: SubscribedLane) => lane.kind === match
   vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) =>
     matches(lane)
       ? replacement(subscribeLane, roomId, inc, lane, receiver)
@@ -4905,7 +4906,7 @@ function mockLaneSubscription(
   )
   return backend
 }
-function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
+function rejectLaneSubscriptions(kind: SubscribedLane['kind'], diagnostic: string) {
   vi.useFakeTimers()
   const started = createDeferred()
   const backend = mockLaneSubscription(kind, () => {
@@ -4916,7 +4917,7 @@ function rejectLaneSubscriptions(kind: LaneId['kind'], diagnostic: string) {
   return { backend, started: started.promise }
 }
 /** Loses the frames picked on matching lanes opened from now on, as a lane that stays ready. */
-function loseLaneFrames(matches: (lane: LaneId) => boolean) {
+function loseLaneFrames(matches: (lane: SubscribedLane) => boolean) {
   let pick: (text: string) => boolean = () => false
   mockLaneSubscription(matches, (subscribeLane, roomId, inc, lane, receiver) =>
     subscribeLane(roomId, inc, lane, (payload, info) => {
@@ -4933,7 +4934,7 @@ function loseLaneFrames(matches: (lane: LaneId) => boolean) {
   }
 }
 /** Holds the frames delivered on matching lanes opened from now on, until released in delivery order. */
-function holdLaneDelivery(matches: (lane: LaneId) => boolean) {
+function holdLaneDelivery(matches: (lane: SubscribedLane) => boolean) {
   const held: Array<() => void | Promise<void>> = []
   let holding = true
   mockLaneSubscription(matches, (subscribeLane, roomId, inc, lane, receiver) =>
@@ -4950,7 +4951,7 @@ function holdLaneDelivery(matches: (lane: LaneId) => boolean) {
   }
 }
 /** A matching lane's driver attempt receives only once released, as a Redis SUBSCRIBE still in flight. */
-function delayDriverLane(matches: (lane: LaneId) => boolean): () => void {
+function delayDriverLane(matches: (lane: SubscribedLane) => boolean): () => void {
   const bind = driver.subscriptions.bind.bind(driver.subscriptions)
   let release: () => void = () => {}
   vi.spyOn(driver.subscriptions, 'bind').mockImplementation((source) => {
@@ -4983,7 +4984,7 @@ function delayDriverLane(matches: (lane: LaneId) => boolean): () => void {
   })
   return () => release()
 }
-function delayLaneSubscription(matches: (lane: LaneId) => boolean) {
+function delayLaneSubscription(matches: (lane: SubscribedLane) => boolean) {
   const started = createDeferred()
   let release!: () => Promise<void>
   mockLaneSubscription(matches, (subscribeLane, roomId, inc, lane, receiver) => {

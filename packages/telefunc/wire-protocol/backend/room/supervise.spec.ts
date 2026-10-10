@@ -41,6 +41,21 @@ describe('Room driver supervision', () => {
       await backend.dispose()
     }
   })
+  it("holds a member's binary commits, and only theirs, while its every-track lane establishes", async () => {
+    const attempt = new ManualAttempt()
+    const { driver, committed } = recordingDriver(() => attempt)
+    const backend = superviseRoomDriver(driver)
+    const subscription = backend.subscribeLane('room', 'inc', { kind: 'binary-all', member: 'm' }, () => {})
+    const binary = (member: string, text: string) =>
+      backend.commitLane('room', 'inc', { kind: 'binary', member, track: 'camera' }, encoder.encode(text))
+    const commits = [binary('m', 'held'), binary('other', 'other')]
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(committed).toEqual(['other'])
+    attempt.ready()
+    await Promise.all(commits)
+    expect(committed).toEqual(['other', 'held'])
+    await subscription.unsubscribe()
+  })
   it('validates HeadNext shape before delegating to any raw driver', async () => {
     const driver = new MemoryBackend()
     const backend = superviseRoomDriver(driver)

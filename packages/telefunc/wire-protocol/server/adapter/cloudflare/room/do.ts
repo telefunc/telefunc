@@ -21,7 +21,7 @@ import type {
   DirectoryPage,
 } from '../../../../backend/room/contract.js'
 import { assert } from '../../../../../utils/assert.js'
-import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { encodeLaneKey, everyTrackLaneKey } from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds, isOpenIncarnation, type StoredHead } from '../../../../backend/room/semantics.js'
 import { Fanout, type RoomSessionNamespace } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
@@ -115,7 +115,9 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
         }
         const mark = advanceOrder(sql, inc, key, now)
         if (opts?.retain === true) installRetained(sql, inc, key, payload, mark)
-        return { ...mark, routes: snapshotRoutes(sql, inc, key, now) }
+        // A binary commit also reaches its member's every-track lane.
+        const laneKeys = lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member)] : [key]
+        return { ...mark, routes: snapshotRoutes(sql, inc, laneKeys, now) }
       },
     )
     if ('stale' in outcome) return outcome
