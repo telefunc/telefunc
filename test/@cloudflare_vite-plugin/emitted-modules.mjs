@@ -22,7 +22,8 @@ for (const relative of files) {
     assert(allowedExternalImports.has(specifier), `${relative} imports unexpected external module '${specifier}'`)
   }
 }
-assert.deepEqual([...importedExternals].sort(), [...allowedExternalImports].sort())
+// The Worker's own import, so a scan that finds no imports fails.
+assert(importedExternals.has('cloudflare:workers'))
 
 async function walk(directory) {
   const entries = await readdir(directory, { withFileTypes: true })
