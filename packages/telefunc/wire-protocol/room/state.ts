@@ -1,4 +1,5 @@
-export { RoomState, RoomStateView, remoteBacking }
+export { RoomState, RoomStateView, remoteBacking, replayMembership }
+export type { MembershipEvent }
 
 import { assert, assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -28,6 +29,12 @@ import type {
 } from './types.js'
 /** A binary listener's track filter: `undefined` = every track, `null` = the default lane only, a name = that track only. */
 type TrackFilter = string | null | undefined
+/** A membership event as this view got it, whether it applied it or not. */
+type MembershipEvent =
+  | { join: MemberSnapshot }
+  | { leave: string }
+  | { meta: { id: string; meta: ParticipantMeta; seq: number } }
+  | { track: { id: string; track: string } }
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
 type TrackCounts = { all: number; named: Map<string, number> }
 type CountedTrack = { counts: TrackCounts; track: TrackFilter }
@@ -143,12 +150,12 @@ class RoomState {
   readonly roomId: string
   meta: RoomMeta
   closed: boolean
-  /** Bumped on every membership change. Guards an in-flight roster read against going stale. */
-  membershipVersion = 0
   /** Bumped on every observable change (membership, participant meta, room config, closure). Drives `onChange`/`snapshot()` cache invalidation. */
   private _stateVersion = 0
   private _snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   private readonly _listenerCleanups = new Map<object, Set<() => void>>()
+  /** The membership events each in-flight roster read has seen so far. */
+  private readonly _membershipRecords = new Set<MembershipEvent[]>()
   private readonly _changeCbs: Listeners<() => void> = new Listeners()
   private readonly _members = new Map<string, MemberEntry>()
   private _hiddenMembers = 0
@@ -327,11 +334,9 @@ class RoomState {
   }
   /** A member published its first frame on a new named track (idempotent: echoes, rosters, and the owner's local apply all land here). */
   applyTrack(id: string, track: string): boolean {
+    this._record({ track: { id, track } })
     const entry = this._members.get(id)
-    if (!entry) {
-      this._markUnknownMember()
-      return false
-    }
+    if (!entry) return false
     if (entry.tracks.has(track)) return false
     entry.tracks.add(track)
     return true
@@ -361,35 +366,40 @@ class RoomState {
     this._stateVersion++
     this._fireAll(this._changeCbs)
   }
-  /** Membership changed: guard an in-flight roster read against going stale, and narrate the change. */
-  private _bumpMembership(): void {
-    this.membershipVersion++
-    this._bumpState()
+  /** Runs `read`, recording the membership events this view gets meanwhile. */
+  async recordingMembership<T>(read: () => Promise<T>): Promise<{ value: T; events: MembershipEvent[] }> {
+    const events: MembershipEvent[] = []
+    this._membershipRecords.add(events)
+    try {
+      return { value: await read(), events }
+    } finally {
+      this._membershipRecords.delete(events)
+    }
   }
-  /** An event for a member this view doesn't know means the roster drifted, so an in-flight roster read is stale. */
-  private _markUnknownMember(): void {
-    this.membershipVersion++
+  private _record(event: MembershipEvent): void {
+    for (const events of this._membershipRecords) events.push(event)
   }
   // ── Event application ──
   applyJoin(member: MemberSnapshot): boolean {
+    this._record({ join: member })
     if (this.closed) return false
     // A known member's join echo has nothing new: its meta is the admission meta, frozen before any guard.
     if (this._members.has(member.id)) return false
     const entry = this._createEntry(member)
     // A hidden participant is no presence event (no count, no `onJoin`), but the roster changed, so `onChange` fires.
     if (entry.hidden) {
-      this._bumpMembership()
+      this._bumpState()
       return true
     }
     if (!this._rosterKnown) this._seedCount++ // pre-roster, `count` is the seed adjusted by applied events
-    this._bumpMembership()
+    this._bumpState()
     this._fireAll(this._joinCbs, this._remote(entry))
     return true
   }
   applyLeave(id: string, cause: LeaveCause): void {
+    this._record({ leave: id })
     const entry = this._members.get(id)
     if (entry) this._removeEntry(entry, ownLeaveCause(cause))
-    else this._markUnknownMember()
     this._onLeave(id, cause, entry ? entry.hidden : null)
   }
   private _removeEntry(entry: MemberEntry, cause: LeaveCause): void {
@@ -400,7 +410,7 @@ class RoomState {
     if (entry.hidden) this._hiddenMembers--
     // A hidden participant's leave is no presence event either; its own handlers and listener release still run.
     if (!entry.hidden && !this._rosterKnown) this._seedCount = Math.max(0, this._seedCount - 1)
-    this._bumpMembership()
+    this._bumpState()
     this._fireAll(entry.leaveCbs, cause)
     if (!entry.hidden) this._fireAll(this._leaveCbs, remote, cause)
     this._releaseEntryListeners(entry)
@@ -409,11 +419,12 @@ class RoomState {
   }
   /** Applies only revisions newer than the entry's: the origin's echo (same seq) and events arriving behind a fresher reconcile are absorbed. */
   applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): boolean {
+    this._record({ meta: { id, meta, seq } })
     const entry = this._members.get(id)
     if (!entry) {
-      // Before the first roster every member is unknown: its meta change is no drift, and the first roster applies it.
-      if (this._rosterKnown) this._markUnknownMember()
-      else if (seq > (this._preRosterMeta.get(id)?.seq ?? 0)) this._preRosterMeta.set(id, { meta, seq })
+      // Before the first roster every member is unknown, and the first roster applies its newest meta change.
+      if (!this._rosterKnown && seq > (this._preRosterMeta.get(id)?.seq ?? 0))
+        this._preRosterMeta.set(id, { meta, seq })
       return false
     }
     if (seq <= entry.metaSeq) return false
@@ -452,7 +463,7 @@ class RoomState {
     this._rosterKnown = true // authoritatively empty
     this._members.clear()
     this._hiddenMembers = 0
-    this._bumpMembership()
+    this._bumpState()
     // State and snapshot are already closed-and-empty when cleanup callbacks run.
     for (const entry of departed) {
       entry.left = true
@@ -509,10 +520,10 @@ class RoomState {
     narratedDrift = this._removeMissingMembers(listed) || narratedDrift
     if (!narrate) {
       this._applyPreRosterMeta()
-      this._bumpMembership()
+      this._bumpState()
       return false
     }
-    if (viewChanged && !narratedDrift) this._bumpMembership()
+    if (viewChanged && !narratedDrift) this._bumpState()
     return narratedDrift
   }
   private _mergeRosterMember(member: MemberSnapshot, narrate: boolean): { narrated: boolean; viewChanged: boolean } {
@@ -668,6 +679,32 @@ class RoomState {
   }
 }
 /** Later timestamp wins; equal timestamps break deterministically by writer ID. */
+/** A roster read with the membership events this view got during it replayed onto it, so applying it undoes none. */
+function replayMembership(
+  roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+  events: readonly MembershipEvent[],
+): { members: MemberSnapshot[]; departing: Set<string> } {
+  const members = new Map(roster.members.map((member) => [member.id, member]))
+  const departing = new Set(roster.departing)
+  for (const event of events) {
+    if ('join' in event) {
+      if (!members.has(event.join.id)) members.set(event.join.id, event.join)
+    } else if ('leave' in event) {
+      members.delete(event.leave)
+      departing.delete(event.leave)
+    } else if ('meta' in event) {
+      const { id, meta, seq } = event.meta
+      const member = members.get(id)
+      if (member !== undefined && seq > member.metaSeq) members.set(id, { ...member, meta, metaSeq: seq })
+    } else {
+      const { id, track } = event.track
+      const member = members.get(id)
+      if (member !== undefined && !member.tracks?.includes(track))
+        members.set(id, { ...member, tracks: [...(member.tracks ?? []), track] })
+    }
+  }
+  return { members: [...members.values()], departing }
+}
 function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {
   return a.at > b.at || (a.at === b.at && a.by > b.by)
 }

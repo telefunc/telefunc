@@ -9,9 +9,8 @@ import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
 import type { RoomDemand } from '../demand.js'
-import { RoomError } from '../errors.js'
 import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
-import type { RoomState } from '../state.js'
+import { replayMembership, type RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey, type LaneHolder } from './replay.js'
@@ -21,8 +20,6 @@ import { reapAndReadRoster, renewMemberLease } from './membership.js'
 import { maintainHold } from './lifecycle.js'
 assertIsNotBrowser()
 
-const ROSTER_REFRESH_RETRY_LIMIT = 5
-
 /** The room side these subscriptions serve: it aggregates its holders and applies what the lanes and the authority carry. */
 type SubscriptionHost = {
   readonly id: string
@@ -30,7 +27,7 @@ type SubscriptionHost = {
   /** Read-only here: every change goes through the host's methods. */
   readonly _state: Pick<
     RoomState,
-    'closed' | 'rosterKnown' | 'listenerCount' | 'membershipVersion' | 'listMemberIds' | 'hasMember' | 'memberTracks'
+    'closed' | 'rosterKnown' | 'listenerCount' | 'recordingMembership' | 'listMemberIds' | 'hasMember' | 'memberTracks'
   >
   /** Whether anything here observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean
@@ -274,19 +271,15 @@ class RoomSubscriptions {
     return this._pendingRefresh
   }
 
-  /** A roster read that raced a membership event is retried, so the committed snapshot never undoes a newer event. */
+  /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. */
   private async _runMemberRefresh(): Promise<void> {
     const host = this._host
-    for (let attempt = 0; !host._state.closed; attempt++) {
-      const version = host._state.membershipVersion
-      const { members, departing } = await reapAndReadRoster(host.id, host._inc)
-      if (host._state.membershipVersion === version) {
-        host._applyAuthorityRoster(members, departing)
-        this.replan()
-        return
-      }
-      if (attempt === ROSTER_REFRESH_RETRY_LIMIT) throw new RoomError(`Room roster refresh contention: ${host.id}`)
-    }
+    if (host._state.closed) return
+    const read = await host._state.recordingMembership(() => reapAndReadRoster(host.id, host._inc))
+    if (host._state.closed) return
+    const { members, departing } = replayMembership(read.value, read.events)
+    host._applyAuthorityRoster(members, departing)
+    this.replan()
   }
 
   // Graceful departures use events; heartbeats renew owned members and reap records orphaned by hard crashes.

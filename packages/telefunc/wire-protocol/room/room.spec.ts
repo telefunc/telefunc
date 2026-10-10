@@ -853,7 +853,7 @@ describe('Room public behavior', () => {
       { id: player.id, meta: { score } },
     ])
   })
-  it('makes roster readers join one bounded authoritative refresh', async () => {
+  it('makes roster readers join one authoritative refresh', async () => {
     const authority = (await Room.create('roster-refresh-owner')) as ServerRoom
     await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
@@ -865,16 +865,13 @@ describe('Room public behavior', () => {
     const started = createDeferred()
     const release = createDeferred()
     let held = false
-    let churn = 0
     vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
       if (!held && 'prefix' in selector && selector.prefix === MEMBER_CELL_PREFIX) {
         held = true
         started.resolve()
         await release.promise
       }
-      const result = await readCells(roomId, inc, selector)
-      if (churn-- > 0 && 'prefix' in selector) observer._state.membershipVersion++
-      return result
+      return await readCells(roomId, inc, selector)
     })
     const refresh = subsOf(observer)._refreshMembers()
     await started.promise
@@ -888,8 +885,48 @@ describe('Room public behavior', () => {
     release.resolve()
     await refresh
     expect((await participants).map(({ id }) => id)).toHaveLength(1)
-    churn = 20
-    await expect(subsOf(observer)._refreshMembers()).rejects.toThrow('Room roster refresh contention')
+  })
+  it('applies the membership events that race its roster read, each once, without reading again', async () => {
+    const authority = (await Room.create('roster-refresh-races')) as ServerRoom
+    const first = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const narrated: string[] = []
+    observer.onJoin((member) => narrated.push(`join ${member.id}`))
+    observer.onLeave((member) => narrated.push(`leave ${member.id}`))
+    observer.onParticipantUpdate((member, meta) => narrated.push(`meta ${member.id} ${JSON.stringify(meta)}`))
+    await observer.getParticipants()
+    await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
+    const readCells = driver.readCells.bind(driver)
+    let rosterReads = 0
+    const expected: string[] = []
+    const kept: string[] = []
+    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
+      const read = await readCells(roomId, inc, selector)
+      if (!('prefix' in selector) || selector.prefix !== MEMBER_CELL_PREFIX || ++rosterReads > 6) return read
+      // Six membership events reach this view after the read: three joins, a meta change and two leaves.
+      const [left, updated, gone] = [await authority.join(), await authority.join(), await authority.join()]
+      await updated.setAttributes({ read: rosterReads })
+      await left.leave()
+      await gone.leave()
+      expected.push(
+        `join ${left.id}`,
+        `join ${updated.id}`,
+        `join ${gone.id}`,
+        `meta ${updated.id} {"read":${rosterReads}}`,
+        `leave ${left.id}`,
+        `leave ${gone.id}`,
+      )
+      kept.push(updated.id)
+      await vi.waitFor(() => expect(narrated).toEqual(expected))
+      return read
+    })
+    await subsOf(observer)._refreshMembers()
+    expect(rosterReads).toBe(1)
+    expect(narrated).toEqual(expected)
+    expect((await observer.getParticipants()).map(({ id, meta }) => ({ id, meta }))).toEqual([
+      { id: first.id, meta: {} },
+      ...kept.map((id) => ({ id, meta: { read: 1 } })),
+    ])
   })
   it('heartbeats pure control observers without owned members or binary demand', async () => {
     vi.useFakeTimers()
@@ -3835,21 +3872,28 @@ describe('client Room lifecycle', () => {
   })
 })
 describe('RoomState', () => {
-  it('dirties unknown events and keeps reconcile outcomes distinct', () => {
+  it('records the events of members it does not know for a roster read, and keeps reconcile outcomes distinct', async () => {
     const state = newState({ roomId: 'unknown-member-epoch' })
     const id = crypto.randomUUID()
-    state.applyTrack(id, 'screen')
-    state.applyParticipantMeta(id, { step: 1 }, 1)
-    state.applyLeave(id, { type: 'left' })
-    expect(state.membershipVersion).toBe(3)
+    const { events } = await state.recordingMembership(async () => {
+      state.applyTrack(id, 'screen')
+      state.applyParticipantMeta(id, { step: 1 }, 1)
+      state.applyLeave(id, { type: 'left' })
+    })
+    expect(events).toEqual([
+      { track: { id, track: 'screen' } },
+      { meta: { id, meta: { step: 1 }, seq: 1 } },
+      { leave: id },
+    ])
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
     expect(state.reconcileRoster([member])).toBe(true)
-    const version = state.membershipVersion
+    let changes = 0
+    state.onChange(() => changes++)
     const reconcile = (tracks: string[]) => state.reconcileRoster([{ ...member, metaSeq: 1, tracks }])
     expect(reconcile(['screen'])).toBe(true)
-    expect(state.membershipVersion).toBe(version)
+    expect(changes).toBe(1)
     expect(reconcile(['screen', 'camera'])).toBe(false)
-    expect(state.membershipVersion).toBe(version + 1)
+    expect(changes).toBe(2)
   })
   it('reconciles every member to the final state and preserves semantic joins', () => {
     const alice = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0 }
