@@ -62,8 +62,6 @@ export default {
 >
 > See <Link href="#architecture" /> for implementation details.
 
-> **Upgrading from a key-value-backed `TelefuncDurableObject`:** earlier releases declared it with `new_classes`. Cloudflare can't change an existing class's storage backend, so [re-provision it](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/): delete the class, then declare it again as a SQLite class. Its state is lost in between; Broadcast sequence numbers restart at 1.
-
 ## Context
 
 Pass per-request data to telefunctions via <Link href="/getContext"><code>getContext()</code></Link>:
