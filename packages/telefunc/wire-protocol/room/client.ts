@@ -15,18 +15,12 @@ import {
   type BinaryWants,
   type TrackWants,
 } from './binary.js'
-import {
-  assertKnownOptions,
-  leaveCauseFromWire,
-  normalizeJoinOptions,
-  ownMessage,
-  ownMetaArgument,
-  recipientId,
-} from './model.js'
+import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from './model.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
   joinedMember,
+  leaveCauseFromWire,
   type InboxMessage,
   type MemberSnapshot,
   type ParticipantStubMetadata,

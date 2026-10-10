@@ -23,8 +23,14 @@ import {
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, emptyTrackWants, encodeBinaryFrame } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
-import { leaveCauseFromWire, leaveCauseToWire, mergeAttributes } from './model.js'
-import { hasRoomTag, type InboxMessage, type RoomSnapshotMetadata } from './protocol.js'
+import { mergeAttributes } from './model.js'
+import {
+  hasRoomTag,
+  leaveCauseFromWire,
+  leaveCauseToWire,
+  type InboxMessage,
+  type RoomSnapshotMetadata,
+} from './protocol.js'
 import { MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
 import { holdViews } from './server/membership.js'
 import type { LeaveCause, ParticipantMeta, Sender } from './types.js'

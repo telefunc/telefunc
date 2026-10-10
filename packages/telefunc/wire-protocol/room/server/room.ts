@@ -33,8 +33,6 @@ import {
 } from '../errors.js'
 import {
   assertKnownOptions,
-  leaveCauseFromWire,
-  leaveCauseToWire,
   mergeAttributes,
   normalizeJoinOptions,
   ownMetaArgument,
@@ -47,6 +45,8 @@ import {
   hasRoomTag,
   inboxMessageFromWire,
   joinedMember,
+  leaveCauseFromWire,
+  leaveCauseToWire,
   type MemberSnapshot,
   type RoomConfigRecord,
   type RoomSnapshotMetadata,

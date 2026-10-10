@@ -15,7 +15,7 @@ import {
   type TrackWants,
 } from './binary.js'
 import { ROOM_NAMED_TRACKS_MAX } from './constants.js'
-import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf, stampNewer } from './model.js'
+import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
 import type { AcceptedMeta, MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
 import type {
   BinaryFrameInfo,
@@ -668,6 +668,10 @@ class RoomState {
   }
 }
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */
+/** Later timestamp wins; equal timestamps break deterministically by writer ID. */
+function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {
+  return a.at > b.at || (a.at === b.at && a.by > b.by)
+}
 function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
   assertUsage(
     opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),

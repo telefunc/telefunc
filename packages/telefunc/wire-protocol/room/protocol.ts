@@ -1,5 +1,5 @@
 // Shared Room storage records and wire envelopes.
-export { hasRoomTag, joinedMember, inboxMessageFromWire, wireDmFromInbox }
+export { hasRoomTag, joinedMember, inboxMessageFromWire, wireDmFromInbox, leaveCauseFromWire, leaveCauseToWire }
 export type {
   RoomConfigRecord,
   RoomMemberRecord,
@@ -26,9 +26,9 @@ export type {
   WireLeaveCause,
 }
 
-import { isRecord } from './model.js'
+import { isRecord, ownLeaveCause, removedCause } from './model.js'
 import type { TrackWants } from './binary.js'
-import type { ParticipantMeta, RoomMeta } from './types.js'
+import type { LeaveCause, ParticipantMeta, RoomMeta } from './types.js'
 
 /** The head's config. `at`/`by` stamps the latest room meta write. `inc` is random, not a counter: a room recreated after its tombstone lapses can't reuse an id a stale handle holds. */
 type RoomConfigRecord = {
@@ -197,6 +197,15 @@ function wireDmFromInbox(msg: InboxMessage): WireDm {
     data: msg.data,
     ...(msg.ackId ? { ackId: msg.ackId } : {}),
   }
+}
+function leaveCauseFromWire(event: WireLeaveCause): LeaveCause {
+  if (event.cause === 'removed') return removedCause(event.reason)
+  return ownLeaveCause({ type: event.cause ?? 'left' })
+}
+function leaveCauseToWire(cause: LeaveCause): WireLeaveCause {
+  if (cause.type === 'removed')
+    return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }
+  return cause.type === 'left' ? {} : { cause: cause.type }
 }
 
 /** The member a `join` event announces, before any meta write or track. */

@@ -18,8 +18,13 @@ import type { CellMutation, CellSelector } from '../../backend/room/contract.js'
 import { DEFAULT_TRACK } from '../binary.js'
 import { ROOM_MEMBER_TTL_MS } from '../constants.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
-import { leaveCauseToWire } from '../model.js'
-import type { MemberSnapshot, RoomDataEnvelope, RoomMemberRecord, WireLeaveCause } from '../protocol.js'
+import {
+  leaveCauseToWire,
+  type MemberSnapshot,
+  type RoomDataEnvelope,
+  type RoomMemberRecord,
+  type WireLeaveCause,
+} from '../protocol.js'
 import type { LeaveCause } from '../types.js'
 import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'

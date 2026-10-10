@@ -41,8 +41,8 @@ import {
   type TrackWants,
 } from '../binary.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
-import { leaveCauseToWire } from '../model.js'
 import {
+  leaveCauseToWire,
   wireDmFromInbox,
   type DmReply,
   type MemberSnapshot,

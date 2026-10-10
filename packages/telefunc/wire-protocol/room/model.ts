@@ -4,9 +4,6 @@ export {
   ownMessage,
   ownMetadata,
   ownLeaveCause,
-  stampNewer,
-  leaveCauseFromWire,
-  leaveCauseToWire,
   mergeAttributes,
   normalizeJoinOptions,
   assertParticipantIdentity,
@@ -23,7 +20,6 @@ import { assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
 import { TIMER_DELAY_MAX_MS } from '../constants.js'
 import type { JoinOptions, LeaveCause, ParticipantMeta, RoomMeta, Sender } from './types.js'
-import type { WireLeaveCause } from './protocol.js'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!isObject(value) || Array.isArray(value)) return false
@@ -55,21 +51,6 @@ function recipientId(to: string | Sender): string {
   const id: unknown = typeof to === 'object' && to !== null ? to.id : to
   assertUsage(typeof id === 'string', 'send() recipient should be a participant or its id')
   return id
-}
-
-/** Later timestamp wins; equal timestamps break deterministically by writer ID. */
-function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {
-  return a.at > b.at || (a.at === b.at && a.by > b.by)
-}
-
-function leaveCauseFromWire(event: WireLeaveCause): LeaveCause {
-  if (event.cause === 'removed') return removedCause(event.reason)
-  return ownLeaveCause({ type: event.cause ?? 'left' })
-}
-function leaveCauseToWire(cause: LeaveCause): WireLeaveCause {
-  if (cause.type === 'removed')
-    return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }
-  return cause.type === 'left' ? {} : { cause: cause.type }
 }
 
 /** Merge `attrs` into `meta` per key, returning a new object (the `setAttributes()` semantics). A value of `undefined` deletes its key (the serializer preserves `undefined` on the wire). */
