@@ -19,6 +19,11 @@ afterEach(() => {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/** Advances the fake clock until `done()`, for at most `ms`. */
+async function advanceUntil(done: () => boolean, ms: number) {
+  for (let waited = 0; waited < ms && !done(); waited += 10) await vi.advanceTimersByTimeAsync(10)
+}
+
 async function parseBlobBody(
   blob: Blob,
 ): Promise<{ metadata: { connId: string; streamResponse?: boolean }; frames: Uint8Array[] }> {
@@ -224,6 +229,14 @@ describe('an upload POST whose open-ack never comes', () => {
 })
 
 describe('an upload POST a proxy holds until its body ends', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   /** A page whose upload POST gets no open-ack: the proxy forwards it only once its body ended, when `forwardUpload` is
    *  called, and never once the page aborted it. Its first SSE request reaches the server once `connect` is called, so
    *  what the page queues before is released into the upload by the RECONCILED; everything else as the page sends it. */
@@ -261,24 +274,23 @@ describe('an upload POST a proxy holds until its body ends', () => {
       connectionKey: crypto.randomUUID(),
     })
     const transport = () => (page as any)._connection.transport
-    await vi.waitFor(() => expect(upload).not.toBeNull())
+    await advanceUntil(() => upload !== null, 1_000)
+    expect(upload).not.toBeNull()
     const forwardUpload = async () => {
       const { ended, signal } = upload!
       if (signal.aborted) return
       await toServer(new Blob([await ended]))
     }
-    const uploadGivenUp = () =>
-      vi.waitFor(() => expect(transport().streamRequest.tag).toBe('failed'), {
-        timeout: STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS + 2_000,
-      })
+    const uploadGivenUp = async () => {
+      await advanceUntil(() => transport().streamRequest.tag === 'failed', STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS + 2_000)
+      expect(transport().streamRequest.tag).toBe('failed')
+    }
     /** The page has nothing queued or in flight, so the server has taken all it sent. */
-    const allSent = () =>
-      vi.waitFor(() =>
-        expect({ queued: transport().outbox.length, flushing: transport().flushing }).toEqual({
-          queued: 0,
-          flushing: false,
-        }),
-      )
+    const allSent = async () => {
+      const sending = () => ({ queued: transport().outbox.length, flushing: transport().flushing })
+      await advanceUntil(() => sending().queued === 0 && !sending().flushing, 1_000)
+      expect(sending()).toEqual({ queued: 0, flushing: false })
+    }
     return { server, page, connect, forwardUpload, uploadGivenUp, allSent }
   }
 
@@ -308,7 +320,8 @@ describe('an upload POST a proxy holds until its body ends', () => {
     expect((server as any)._peerSubscriptions.text).toBe(true)
     await forwardUpload()
     await server.publish('after')
-    await vi.waitFor(() => expect(received).toEqual(['after']))
+    await advanceUntil(() => received.length > 0, 1_000)
+    expect(received).toEqual(['after'])
     page.abort()
   })
 })
@@ -588,11 +601,6 @@ describe('a slow uplink', () => {
   afterEach(() => {
     vi.useRealTimers()
   })
-
-  /** Advances the clock until `done()`, for at most `ms`. */
-  async function advanceUntil(done: () => boolean, ms: number) {
-    for (let waited = 0; waited < ms && !done(); waited += 10) await vi.advanceTimersByTimeAsync(10)
-  }
 
   /** A page that uploads `frames` of 64 KiB on a connection to a server whose uplink takes `uplinkBytesPerS`. */
   async function uploadingPage(
