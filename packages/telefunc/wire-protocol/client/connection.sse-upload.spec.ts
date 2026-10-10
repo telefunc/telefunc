@@ -15,6 +15,7 @@ import { uint8ArrayToBase64url } from '../base64url.js'
 
 afterEach(() => {
   delete config.fetch
+  vi.useRealTimers()
 })
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -327,6 +328,7 @@ describe('an upload POST a proxy holds until its body ends', () => {
 })
 
 test("a batch POST still in flight for a dead wire can't unsubscribe the listener the page swapped in across the reconnect", async () => {
+  vi.useFakeTimers()
   const sse = getTelefuncSseChannelHooks()
   const toServer = async (body: Blob): Promise<Response> => {
     const response = (await sse.handleRequest(new Request('http://localhost/_telefunc', { method: 'POST', body })))!
@@ -380,22 +382,27 @@ test("a batch POST still in flight for a dead wire can't unsubscribe the listene
   })
   const first: string[] = []
   const offFirst = page.subscribe((message) => void first.push(message))
-  await vi.waitFor(async () => {
-    await server.publish('before')
-    expect(first).toContain('before')
-  })
+  await advanceUntil(() => (server as any)._peerSubscribedText, 1_000)
+  await server.publish('before')
+  await advanceUntil(() => first.length > 0, 1_000)
+  expect(first).toEqual(['before'])
   holdBatches = true
   offFirst()
   const second: string[] = []
   page.subscribe((message) => void second.push(message))
-  await vi.waitFor(() => expect(held).toHaveLength(1))
+  await advanceUntil(() => held.length === 1, 1_000)
+  expect(held).toHaveLength(1)
   cutWire()
-  await vi.waitFor(() => expect(wires).toBe(2), { timeout: 5_000 })
-  await vi.waitFor(() => expect((page as any)._connection.state.tag).toBe('open'))
+  await advanceUntil(() => wires === 2 && (page as any)._connection.state.tag === 'open', 5_000)
+  expect(wires).toBe(2)
+  expect((page as any)._connection.state.tag).toBe('open')
   // The dead wire's POST, the unsubscribe in it, arrives now. A server that doesn't take it holds it for connectTtl.
-  await Promise.race([Promise.all(held.map(toServer)), delay(1_000)])
+  let taken = false
+  void Promise.all(held.map(toServer)).then(() => (taken = true))
+  await advanceUntil(() => taken, 1_000)
   await server.publish('after')
-  await vi.waitFor(() => expect(second).toEqual(['after']))
+  await advanceUntil(() => second.length > 0, 1_000)
+  expect(second).toEqual(['after'])
   page.abort()
 })
 
@@ -545,25 +552,27 @@ test('a channel the page aborted before the server confirmed it gets none of wha
 })
 
 test("an upload request the server ends after its open-ack, as Node's requestTimeout does, replaces the wire", async () => {
+  vi.useFakeTimers()
   const server = fakeServer()
   const connection = ClientConnection.getOrCreate('http://upload-cut.test/_telefunc', createChannel() as never, {
     transports: ['sse'],
     fetchImpl: server.fetch,
     connectionKey: crypto.randomUUID(),
   }) as any
-  await delay(20)
+  await vi.advanceTimersByTimeAsync(20)
   server.send(encode.streamRequestOpenAck())
   server.reconcile()
-  await delay(20)
+  await vi.advanceTimersByTimeAsync(20)
   expect(server.wires).toBe(1)
   // The SSE stream stays up; what the page writes into the upload no longer reaches the server.
   server.settleUpload(new Response('', { status: 408 }))
-  await delay(1_500)
+  await advanceUntil(() => server.wires === 2, 1_500)
   expect(server.wires).toBe(2)
   connection.dispose()
 })
 
 test("a RECONCILED that comes on an SSE wire the page gave up doesn't settle the next wire's RECONCILE", async () => {
+  vi.useFakeTimers()
   const server = fakeServer()
   const connectionKey = crypto.randomUUID()
   const register = () =>
@@ -573,22 +582,23 @@ test("a RECONCILED that comes on an SSE wire the page gave up doesn't settle the
       connectionKey,
     }) as any
   const connection = register()
-  await delay(20)
+  await vi.advanceTimersByTimeAsync(20)
   server.refuseUpload()
   server.reconcile()
-  await delay(20)
+  await vi.advanceTimersByTimeAsync(20)
   register() // its RECONCILE goes in a batch POST
-  await delay(20)
+  await vi.advanceTimersByTimeAsync(20)
   register() // waits for that RECONCILE's RECONCILED
-  await delay(20)
+  await vi.advanceTimersByTimeAsync(20)
   // The server cut the wire: it refuses the page's next POST, a PING, while the wire's event stream still delivers.
   server.cutWire()
   connection.transport.sendPing(encode.ping())
   void connection.transport.flushOutbox() // its heartbeat delay passed
-  await vi.waitFor(() => expect(server.wires).toBe(2), { timeout: 2_000 })
+  await advanceUntil(() => server.wires === 2, 2_000)
+  expect(server.wires).toBe(2)
   server.sendOnWire(0, reconciled([0, 1]))
   server.sendOnWire(1, reconciled([0, 1, 2]))
-  await delay(20)
+  await vi.advanceTimersByTimeAsync(20)
   expect([...connection.channels.values()].map((entry) => entry.state.tag)).toEqual(['open', 'open', 'open'])
   connection.dispose()
 })
