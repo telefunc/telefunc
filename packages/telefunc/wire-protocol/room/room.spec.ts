@@ -2616,10 +2616,7 @@ describe('Room public behavior', () => {
     const room = (await Room.create('declared-non-member')) as ServerRoom
     const member = await room.join()
     const stub = register(room)
-    const ids = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), member.id]
-    const binary = Object.fromEntries(ids.map((id) => [id, { all: true, tracks: [] }]))
-    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: binary })
-    declare(stub, { __r: 'sub-text', announce: false, members: Object.fromEntries(ids.map((id) => [id, true])) })
+    declareEach(stub, [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), member.id])
     const only = [member.id]
     expect(wantsHeld(room, stub)).toEqual({ text: only, binary: only, indexedText: only, indexedBinary: only })
   })
@@ -2648,10 +2645,7 @@ describe('Room public behavior', () => {
     const stub = register(observer)
     const peer = attachPeer(stub)
     await vi.waitFor(() => expect(relayed(peer).map(({ __r }) => __r)).toContain('roster-error'))
-    const ids = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), member.id]
-    const binary = Object.fromEntries(ids.map((id) => [id, { all: true, tracks: [] }]))
-    declare(stub, { __r: 'sub-binary', ...NO_TRACK, members: binary })
-    declare(stub, { __r: 'sub-text', announce: false, members: Object.fromEntries(ids.map((id) => [id, true])) })
+    declareEach(stub, [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), member.id])
     expect(observer._state.rosterKnown).toBe(false)
     const only = [member.id]
     expect(wantsHeld(observer, stub)).toEqual({ text: only, binary: only, indexedText: only, indexedBinary: only })
@@ -4249,6 +4243,15 @@ function wantsHeld(room: ServerRoom, stub: RoomStubChannel) {
     indexedText: [...index._textMembers.keys()],
     indexedBinary: [...index._members.keys()],
   }
+}
+/** Declares a binary want for every track of each id, and a text want for each, in order. */
+function declareEach(stub: RoomStubChannel, ids: string[]): void {
+  declare(stub, {
+    __r: 'sub-binary',
+    ...NO_TRACK,
+    members: Object.fromEntries(ids.map((id) => [id, { all: true, tracks: [] }])),
+  })
+  declare(stub, { __r: 'sub-text', announce: false, members: Object.fromEntries(ids.map((id) => [id, true])) })
 }
 function stubIndexOf(room: ServerRoom): Map<string, RoomStubChannel> {
   return (room as unknown as { _stubOf: Map<string, RoomStubChannel> })._stubOf
