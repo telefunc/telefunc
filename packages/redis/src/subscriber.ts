@@ -255,7 +255,6 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   readonly channels: readonly string[]
   private readonly _fences = new Map<string, Deferred<void>>()
   private _lastSequence = 0
-  private _cleanup: Promise<void> | null = null
 
   constructor(
     readonly source: RedisSubscriptionSource,
@@ -269,9 +268,10 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
   }
 
-  unsubscribe(): Promise<void> {
-    this._cleanup ??= this._dispose()
-    return this._cleanup
+  async unsubscribe(): Promise<void> {
+    for (const token of [...this._fences.keys()]) this.settleFence(token)
+    this.transition('closed', new Error(`Redis subscription '${this.laneChannel}' was closed`))
+    this._onDetach()
   }
 
   prepareFence(token: string): Promise<void> | null {
@@ -325,12 +325,6 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     this._lastSequence = info.seq
     const text = !('roomId' in this.source) && this.source.kind === 'text'
     this._receiver(text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
-  }
-
-  private async _dispose(): Promise<void> {
-    for (const token of [...this._fences.keys()]) this.settleFence(token)
-    this.transition('closed', new Error(`Redis subscription '${this.laneChannel}' was closed`))
-    this._onDetach()
   }
 
   private _rejectFences(error: unknown): void {

@@ -24,7 +24,6 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     roomSubscriptionSourceKey,
     checkDelivery,
   )
-  let disposal: Promise<void> | undefined
 
   return {
     readHead: (roomId) => driver.readHead(roomId),
@@ -63,7 +62,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     directoryPut: (roomId, incTag) => driver.directoryPut(roomId, incTag),
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),
     directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),
-    dispose: () => (disposal ??= subscriptions.dispose()),
+    dispose: () => subscriptions.dispose(),
   }
 }
 

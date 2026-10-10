@@ -28,7 +28,6 @@ function checkDelivery(route: BroadcastRoute, payload: BackendPayload, info: Ord
  *  later loss holds nothing. */
 function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
   const subscriptions = new SubscriptionManager(driver.subscriptions, console.error, broadcastRouteKey, checkDelivery)
-  let disposal: Promise<void> | undefined
 
   const publishNow = (route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> => {
     const result = driver.publish(route, payload)
@@ -61,6 +60,6 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     publish,
     // The manager hands a route's consumers only the deliveries checkDelivery passed.
     subscribe: (route, receiver) => subscriptions.subscribe(route, receiver as BackendReceiver<BackendPayload>),
-    dispose: () => (disposal ??= subscriptions.dispose()),
+    dispose: () => subscriptions.dispose(),
   }
 }
