@@ -4,13 +4,12 @@ import { ChannelOverflowError } from '../channel-errors.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import type { HoldWeight } from './subscription-manager.js'
 
-/** What holding a send retains beyond its payload (130–160 bytes measured), so many small sends are bounded by memory
- *  too. */
+/** What holding a send retains beyond its payload (130–160 bytes measured), so small sends are bounded too. */
 const HELD_SEND_OVERHEAD_BYTES = 256
 
-/** A send held for an establishing subscription is bounded like a channel's buffered sends: its payload and
- *  `HELD_SEND_OVERHEAD_BYTES` count against `bufferLimit`, `bufferLimitBinary` for binary, read only for a held send, as
- *  resolving the config is costly. One past it is refused with `ChannelOverflowError`. */
+/** A send held for an establishing subscription counts its payload and `HELD_SEND_OVERHEAD_BYTES` against `bufferLimit`
+ *  (`bufferLimitBinary` for binary), read only for a held send, as resolving the config is costly; one past it is
+ *  refused with `ChannelOverflowError`. */
 function heldSendWeight(kind: 'text' | 'binary', bytes: () => number, what: string): HoldWeight {
   return {
     class: kind,

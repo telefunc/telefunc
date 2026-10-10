@@ -71,8 +71,8 @@ function holdChange(
   return { before: { holds: after.holds - delta, joins: after.joins - (joining ? 1 : 0) }, after }
 }
 
-/** Null while nothing counted the room: it has no hold timeouts, or its creation's count failed and nothing has held it
- *  since. */
+/** Null once the incarnation is gone, or while nothing counted it: it has no hold timeouts, or its creation's count
+ *  failed and nothing has held it since. */
 async function readHoldRecord({ id, inc, hold }: RoomIncarnation): Promise<HoldRecord | null> {
   if (hold === null) return null
   const read = await getRoomBackend().readCells(id, inc, { keys: [HOLDS_CELL_KEY, JOINS_CELL_KEY] })
