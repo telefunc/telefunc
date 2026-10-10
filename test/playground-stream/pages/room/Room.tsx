@@ -1,6 +1,7 @@
 export { Room }
 
 import React, { useEffect, useState } from 'react'
+import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
   onGetRoom,
@@ -126,8 +127,10 @@ function Room() {
       {scenario('retain', 'Retained Replay', 'Retained replay to a late subscriber', async () => {
         const roomId = await createRoomId('retain')
 
-        // Read retained state only after subscription readiness; keep its membership-owning publisher referenced.
+        // Read retained state only after subscription readiness.
         const pubView = await onGetRoom(roomId)
+        // A GC pass would close `pubView`, and Author leaving with it deletes the message it retained.
+        const releasePubView = keepReachable(pubView)
         const author = await pubView.join({ meta: { name: 'Author' } })
         await author.publish({ text: 'pinned' }, { retain: true })
 
@@ -136,8 +139,7 @@ function Room() {
         late.subscribe((data) => received.push((data as { text: string }).text))
 
         await pollUntil(() => ({ result: { received }, done: received.length >= 1 }))
-        // A GC pass would close `pubView`, and Author leaving with it deletes the message it retained.
-        void pubView
+        releasePubView()
       })}
 
       {scenario('participant', 'Server-Joined Participant', 'Server-side join + publish', async () => {
@@ -378,6 +380,8 @@ function Room() {
 
       {scenario('demand', 'onDemand (track demand)', 'Track demand up & down', async () => {
         const [roomId, pubRoom] = await createRoom('demand')
+        // A GC pass would close `pubRoom`, and Pub leaving with it ends the demand this waits on.
+        const releasePubRoom = keepReachable(pubRoom)
         const pub = await pubRoom.join({ meta: { name: 'Pub' } })
         const cam: boolean[] = []
         pub.onDemand((track, wanted) => {
@@ -393,8 +397,7 @@ function Room() {
           result: { cam },
           done: cam.includes(true) && cam[cam.length - 1] === false,
         }))
-        // A GC pass would close `pubRoom`, and Pub leaving with it ends the demand this waits on.
-        void pubRoom
+        releasePubRoom()
       })}
 
       {scenario('tail', 'Tail (single-call history)', 'Tail holds pre-subscribe messages', async () => {
@@ -447,6 +450,8 @@ function Room() {
 
       {scenario('member-sub', 'Member-selective receive', 'Follow one member', async () => {
         const [roomId, room] = await createRoom('membersub')
+        // A GC pass would close `room`, and X leaving with it drops the observer's subscription to X's frames.
+        const releaseRoom = keepReachable(room)
         const x = await room.join({ meta: { name: 'X' } })
         const y = await room.join({ meta: { name: 'Y' } })
 
@@ -469,8 +474,7 @@ function Room() {
           result: { xText, xBin, all: [...all].sort() },
           done: all.includes('x1') && all.includes('y1') && xBin.includes(7),
         }))
-        // A GC pass would close `room`, and X leaving with it drops the observer's subscription to X's frames.
-        void room
+        releaseRoom()
       })}
 
       {scenario('dm-hold', 'DM pre-listen hold', 'Send before listen', async () => {
