@@ -17,7 +17,7 @@ const vikeAsCloudflareHandler = vike as unknown as ExportedHandler<Env>
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
-    const resp = await tf.serve({ request, env, ctx })
+    const resp = await tf.serve({ request, env })
     return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)
   },
 } satisfies ExportedHandler<Env>

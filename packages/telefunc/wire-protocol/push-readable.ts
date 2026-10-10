@@ -4,7 +4,11 @@ export type { PushReadable }
 import type { Readable } from 'node:stream'
 import { getStreamNodeModule } from '../utils/loadStreamNodeModule.js'
 
-type PushReadable = Readable & { close(): void }
+type PushReadable = Readable & {
+  close(): void
+  /** Bytes pushed that the consumer hasn't read yet. */
+  readonly bufferedAmount: number
+}
 
 function createPushReadable(onCancel?: () => void, onDrain?: () => void): PushReadable {
   const { Readable } = getStreamNodeModule()
@@ -27,5 +31,6 @@ function createPushReadable(onCancel?: () => void, onDrain?: () => void): PushRe
     ended = true
     readable.push(null)
   }
+  Object.defineProperty(readable, 'bufferedAmount', { get: () => readable.readableLength })
   return readable
 }

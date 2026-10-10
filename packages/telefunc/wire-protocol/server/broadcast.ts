@@ -10,7 +10,11 @@ export type {
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
+import { Fifo } from '../../utils/Fifo.js'
 import type { WirePublishInfo } from '../shared-ws.js'
+
+/** Most in-memory deliveries that run before the event loop gets a turn, so listeners answering each other can't starve it. */
+const IN_MEMORY_DELIVERY_BURST = 1024
 
 /** Transport-level publish result. */
 type BroadcastPublishResult = WirePublishInfo & { meta?: Record<string, unknown> }
@@ -64,6 +68,11 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private readonly transportBinaryUnsubs = new Map<string, () => void>()
   /** Per-key seq counter for in-memory mode. */
   private readonly keySeqs = new Map<string, number>()
+  /** In-memory publishes waiting for the ones before them, in publish order. */
+  private readonly queued = new Fifo<() => void>()
+  private delivering = false
+  /** Reset by a macrotask scheduled once half the burst has run. */
+  private deliveredInBurst = 0
 
   constructor(transport?: BroadcastTransport) {
     this.transport = transport ?? null
@@ -149,10 +158,45 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
     data: T,
-  ): BroadcastPublishResult {
+  ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
     const seq = (this.keySeqs.get(key) ?? 0) + 1
     this.keySeqs.set(key, seq)
     const timestamp = Date.now()
+    // A publish made from a listener reaches every subscriber after the message it answers, as through a transport, and
+    // one past the burst after the event loop's turn.
+    if (this.delivering || this.queued.length > 0 || this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST) {
+      return new Promise((resolve, reject) => {
+        this.queued.push(() => {
+          try {
+            resolve(this._deliverInMemory(subs, key, data, seq, timestamp))
+          } catch (err) {
+            reject(err)
+          }
+        })
+      })
+    }
+    this.delivering = true
+    try {
+      return this._deliverInMemory(subs, key, data, seq, timestamp)
+    } finally {
+      this.delivering = false
+      if (this.queued.length > 0) this._drainQueued()
+    }
+  }
+
+  private _deliverInMemory<T>(
+    subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
+    key: string,
+    data: T,
+    seq: number,
+    timestamp: number,
+  ): BroadcastPublishResult {
+    if (++this.deliveredInBurst === IN_MEMORY_DELIVERY_BURST / 2) {
+      afterEventLoopTurn(() => {
+        this.deliveredInBurst = 0
+        this._drainQueued()
+      })
+    }
     const info = { seq, timestamp }
     let delivered = 0
     const set = subs.get(key)
@@ -163,6 +207,15 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       }
     }
     return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
+  }
+
+  private _drainQueued(): void {
+    while (this.queued.length > 0 && this.deliveredInBurst < IN_MEMORY_DELIVERY_BURST) {
+      const deliver = this.queued.shift()!
+      this.delivering = true
+      deliver()
+      this.delivering = false
+    }
   }
 
   // ── Shared ──
@@ -184,6 +237,12 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     map.delete(key)
     unsub()
   }
+}
+
+// setImmediate runs after pending I/O, where it exists.
+function afterEventLoopTurn(fn: () => void): void {
+  if (typeof setImmediate === 'function') setImmediate(fn)
+  else setTimeout(fn, 0)
 }
 
 // ---------------------------------------------------------------------------

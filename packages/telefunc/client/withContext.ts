@@ -2,6 +2,8 @@ export { withContext, getPendingContext }
 export type { ClientCallContext, StreamTransport }
 
 import { getGlobalObject } from '../utils/getGlobalObject.js'
+import { assertUsage } from '../utils/assert.js'
+import { TIMER_DELAY_MAX_MS } from '../wire-protocol/constants.js'
 import type { StreamTransport, ChannelTransports } from '../wire-protocol/constants.js'
 
 const globalObject = getGlobalObject<{ pendingContext: ClientCallContext | null }>('withContext.ts', {
@@ -47,6 +49,12 @@ type ClientCallContext = {
  *  ```
  */
 function withContext<F extends (...args: any[]) => any>(telefunc: F, context: ClientCallContext): F {
+  const idleTimeout = context.channel?.idleTimeout
+  assertUsage(
+    idleTimeout === undefined ||
+      (Number.isSafeInteger(idleTimeout) && idleTimeout >= 0 && idleTimeout <= TIMER_DELAY_MAX_MS),
+    `withContext()'s \`channel.idleTimeout\` should be a non-negative safe integer of milliseconds, at most ${TIMER_DELAY_MAX_MS}, the longest a timer waits`,
+  )
   return ((...args: any[]) => {
     globalObject.pendingContext = context
     try {

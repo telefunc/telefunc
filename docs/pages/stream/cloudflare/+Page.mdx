@@ -21,8 +21,8 @@ const telefunc = new Telefunc()
 export const TelefuncDurableObject = telefunc.TelefuncDurableObject
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const response = await telefunc.serve({ request, env, ctx })
+  async fetch(request: Request, env: Env) {
+    const response = await telefunc.serve({ request, env })
     if (response) return response
 
     return new Response('Not found', { status: 404 })
@@ -33,6 +33,8 @@ export default {
 ```jsonc
 // wrangler.jsonc
 {
+  "compatibility_date": "2025-08-15", // or later: channels need MessageChannel
+  "compatibility_flags": ["enable_request_signal"], // lets context.signal see a client disconnect
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
@@ -98,11 +100,11 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
-On the first request, Telefunc picks a Durable Object in the nearest region, stores a session token in KV (TTL: 24 hours), and returns that token to the client via the `x-telefunc-session` header. Subsequent requests send this token back so Telefunc routes to the same Durable Object.
+Before its first request, the client names a session token, and every request carries it as the `session` query parameter. The token picks one Durable Object of the nearest region, and KV remembers that region for it (TTL: 24 hours, renewed while the client keeps using it). So a client's requests reach the same Durable Object, even after the KV entry lapses while the client stays in that region.
 
 <Warning>
 
-**CDN / reverse proxy** — make sure `x-telefunc-session` isn't stripped from responses or requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
+**CDN / reverse proxy** — make sure the `session` query parameter isn't stripped from requests. Without it, each request would be routed to a random Durable Object and channel state would be lost.
 
 </Warning>
 
@@ -178,7 +180,7 @@ A KV record is created on subscribe and deleted on unsubscribe. If a Durable Obj
 | Buffering | The server buffers messages while the client is disconnected: up to `config.channel.bufferLimit` for text (default: 512 KB) and up to `config.channel.bufferLimitBinary` for binary (default: 2 MB). Binary frames have a separate budget and can never evict text. |
 | Replay | Both sides keep a replay buffer. On reconnect, missing messages are replayed and duplicates are ignored. |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
-| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
+| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, or a reconnect needs messages a replay buffer no longer holds, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
 
 ### Broadcast messages (`publish` / `subscribe`)
 

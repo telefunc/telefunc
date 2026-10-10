@@ -1,19 +1,24 @@
 import { describe, expect, test } from 'vitest'
 
 import { ReplayBuffer } from '../../wire-protocol/replay-buffer.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../../wire-protocol/shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG, decode, encode } from '../../wire-protocol/shared-ws.js'
+import type { ChannelFrame } from '../../wire-protocol/shared-ws.js'
 import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
-import { ServerChannel } from '../../wire-protocol/server/channel.js'
+import { ServerChannel, reconnectWindow } from '../../wire-protocol/server/channel.js'
+import { config } from './serverConfig.js'
 
+/** Records what the channel sends, but for the flow-control limits every attach sends. */
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer(
     {
       send(frame) {
+        if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW) return
         frames.push(frame)
       },
+      bufferedAmount: () => 0,
     },
     7,
-    new ReplayBuffer(1024 * 1024, 60_000, 2 * 1024 * 1024),
+    new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
   )
 }
 
@@ -34,6 +39,31 @@ function expectCloseAckFrame(frame: Uint8Array) {
 // ── Self-initiated close ──
 
 describe('self-initiated close', () => {
+  test('close() refuses a timeout longer than a timer waits, which would fire at once', () => {
+    const channel = new ServerChannel<never, never>()
+    channel._attachPeer(createPeer([]))
+    expect(() => channel.close({ timeout: 2 ** 31 })).toThrow('at most 2147483647')
+    expect(channel.isClosed).toBe(false)
+  })
+
+  test('a channel closes within the reconnect window of the longest reconnectTimeout, as a returned stream does', () => {
+    config.channel = { reconnectTimeout: 2 ** 31 - 1 }
+    try {
+      const channel = new ServerChannel<never, never>()
+      channel._attachPeer(createPeer([]))
+      expect(reconnectWindow()).toBe(2 ** 31 - 1)
+      expect(() => channel.close({ timeout: reconnectWindow() })).not.toThrow()
+    } finally {
+      config.channel = {}
+    }
+  })
+
+  test("a page's close request for longer than a timer waits is a protocol violation", () => {
+    const channel = new ServerChannel<never, never>()
+    channel._attachPeer(createPeer([]))
+    expect(() => channel._onPeerCloseRequest(2 ** 31)).toThrow(ProtocolViolationError)
+  })
+
   test.each([ACK_STATUS.OK, ACK_STATUS.ABORT])('malformed ack status %s rejects its waiter', async (status) => {
     const channel = new ServerChannel<string, string>({ ack: true })
     const frames: Uint8Array[] = []
@@ -134,7 +164,7 @@ describe('self-initiated close', () => {
   })
 
   test('close() waits for inflight outbound ack before resolving', async () => {
-    const channel = new ServerChannel<(v: string) => string, never>({ ack: true, id: crypto.randomUUID() })
+    const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))
@@ -185,7 +215,7 @@ describe('self-initiated close', () => {
   })
 
   test('buffered send flushes before close request on attachPeer', async () => {
-    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+    const channel = new ServerChannel<never, number>({ id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel.send(1)
@@ -207,7 +237,7 @@ describe('self-initiated close', () => {
   })
 
   test('send({ack:true}) resolves and close() resolves 0 when both acks arrive', async () => {
-    const channel = new ServerChannel<(v: string) => string, never>({ ack: true, id: crypto.randomUUID() })
+    const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))
@@ -225,7 +255,7 @@ describe('self-initiated close', () => {
   })
 
   test('outbound ack that arrives after timeout rejects with close error', async () => {
-    const channel = new ServerChannel<(v: string) => string, never>({ ack: true, id: crypto.randomUUID() })
+    const channel = new ServerChannel<never, (v: string) => string>({ ack: true, id: crypto.randomUUID() })
     const frames: Uint8Array[] = []
 
     channel._attachPeer(createPeer(frames))
@@ -388,4 +418,27 @@ describe('cross-close', () => {
     await expect(closePromise).resolves.toBe(1)
     expect(channel._didShutdown).toBe(true)
   })
+})
+
+describe("a page's closing frames", () => {
+  test.each([
+    ['CLOSE', encode.close(7, 1_000, 2)],
+    ['CLOSE_ACK', encode.closeAck(7, 2)],
+  ])(
+    'a %s counts toward the lastSeq a RECONCILED reports, as data does, and one delivered twice is handled once',
+    (_tag, raw) => {
+      const channel = new ServerChannel<number, string>({ ack: true })
+      const frames: Uint8Array[] = []
+      channel._attachPeer(createPeer(frames))
+      void channel.send('question', { ack: true }).catch(() => {}) // the close waits for its answer
+      if (raw[0] === TAG.CLOSE_ACK) void channel.close({ timeout: 1_000 })
+      channel._dispatchFrame(decode(encode.text(7, '1', 1)) as ChannelFrame)
+      const frame = decode(raw) as ChannelFrame
+      channel._dispatchFrame(frame)
+      channel._dispatchFrame(frame)
+      expect(channel._lastClientSeq).toBe(2)
+      expect(frames.filter((frame) => frame[0] === TAG.CLOSE_ACK)).toHaveLength(raw[0] === TAG.CLOSE ? 1 : 0)
+      channel.abort()
+    },
+  )
 })

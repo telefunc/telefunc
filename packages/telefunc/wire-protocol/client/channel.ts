@@ -22,19 +22,30 @@ import { createAbortError, isAbort } from '../../shared/Abort.js'
 import {
   ACK_STATUS,
   TAG,
+  countsCredit,
   isChannelCtrlTag,
   type AckResultStatus,
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
+  type ReattachState,
   type WirePublishInfo,
 } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
+import { Listeners } from '../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
-import { appendSessionParam, getSessionToken } from './session-registry.js'
-import { CHANNEL_CLOSE_TIMEOUT_MS, type ChannelTransports } from '../constants.js'
+import { getSessionUrl } from './session-registry.js'
+import {
+  TIMER_DELAY_MAX_MS,
+  CHANNEL_CLOSE_TIMEOUT_MS,
+  CREDIT_WINDOW_MAX_BYTES,
+  FC_PAGE_YIELD_BYTES,
+  CHANNEL_TRANSPORT,
+  WIRE_MAX_RAW_FRAME_BYTES,
+  type ChannelTransports,
+} from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channel-errors.js'
@@ -54,9 +65,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly id: string
   readonly ack: boolean
   readonly key: string | undefined
+  readonly _maxFrameBytes: number
   protected _connection: MuxConnection
-  private _listeners: Array<ChannelListener<ServerToClient>> = []
-  private _binaryListeners: Array<ChannelBinaryListener> = []
+  private readonly _listeners = new Listeners<ChannelListener<ServerToClient>>()
+  private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
   private _openCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
@@ -80,13 +92,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
   /** Owns sender-side credit, receiver-side consumption tracking, BDP estimator,
    *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
-   *  forget TEXT/BINARY only — see `constants.ts`. */
-  private _flow: FlowControl
+   *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
+  protected _flow: FlowControl
 
   constructor({
     channelId,
     ack = false,
     key,
+    maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES,
     transports,
     connectionKey,
     headers,
@@ -96,6 +109,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     channelId: string
     ack?: boolean
     key?: string
+    maxFrameBytes?: number
     transports: ChannelTransports
     connectionKey?: string
     headers?: Record<string, string>
@@ -105,22 +119,21 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = channelId
     this.ack = ack
     this.key = key
-    this._flow = new FlowControl({
-      byteWindowUpdate: (bytes) => this._connection.sendByteWindowUpdate(this, bytes),
-      msgWindowUpdate: (count) => this._connection.sendMsgWindowUpdate(this, count),
-      bdpPing: () => this._connection.sendBdpPing(this),
-    })
+    // A runtime's lower limit is its WebSocket's.
+    this._maxFrameBytes = transports.includes(CHANNEL_TRANSPORT.WS) ? maxFrameBytes : WIRE_MAX_RAW_FRAME_BYTES
+    this._flow = new FlowControl(
+      {
+        byteWindowUpdate: (limit, urgent) => this._connection.sendByteWindowUpdate(this, limit, urgent),
+        msgWindowUpdate: (limit, urgent) => this._connection.sendMsgWindowUpdate(this, limit, urgent),
+        bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
+      },
+      () => this._connection.bufferedAmount(),
+      FC_PAGE_YIELD_BYTES,
+    )
     const config = resolveClientConfig()
-    // Read the latest stored session token for this URL. `makeHttpRequest` writes the freshest
-    // server-issued token to the registry before this constructor runs (on the response side),
-    // and the request side reads whatever was stored from the prior round-trip. Either way,
-    // querying here keeps the channel's transport in sync with whatever HTTP is using.
-    const sessionToken = getSessionToken(telefuncUrl)
-    const url = sessionToken ? appendSessionParam(telefuncUrl, sessionToken) : telefuncUrl
-    this._connection = ClientConnection.getOrCreate(url, this, {
+    this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
       transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
-      sessionToken,
       connectionKey,
       headers,
       idleTimeout,
@@ -158,12 +171,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
-      return this._trackAck(
-        new Promise<ChannelAck<ClientToServer>>((resolve, reject) => {
-          this._connection.sendTextAckReq(this, serialized, (seq) => {
-            this._pendingAcks.set(seq, { resolve, reject })
-          })
-        }),
+      return this._sendAckReq<ChannelAck<ClientToServer>>((onQueued) =>
+        this._connection.sendTextAckReq(this, serialized, onQueued),
       )
     }
     return this._waitForWindow(this._connection.send(this, serialized))
@@ -187,13 +196,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) throw new ChannelClosedError()
     // Ack-bearing path bypasses credit; see `_send` for rationale.
     if (opts?.ack === true) {
-      return this._trackAck(
-        new Promise<unknown>((resolve, reject) => {
-          this._connection.sendBinaryAckReq(this, data, (seq) => {
-            this._pendingAcks.set(seq, { resolve, reject })
-          })
-        }),
-      )
+      return this._sendAckReq((onQueued) => this._connection.sendBinaryAckReq(this, data, onQueued))
     }
     this._connection.sendBinary(this, data)
     return this._waitForWindow(data.byteLength)
@@ -210,19 +213,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   listen(callback: ChannelListener<ServerToClient>): () => void {
-    this._listeners.push(callback)
-    return () => {
-      const i = this._listeners.indexOf(callback)
-      if (i >= 0) this._listeners.splice(i, 1)
-    }
+    return this._listeners.add(callback)
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
-    this._binaryListeners.push(callback)
-    return () => {
-      const i = this._binaryListeners.indexOf(callback)
-      if (i >= 0) this._binaryListeners.splice(i, 1)
-    }
+    return this._binaryListeners.add(callback)
   }
 
   onClose(callback: ChannelCloseCallback): void {
@@ -253,22 +248,49 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._closePromise
   }
 
+  /** @internal How long a server that is away is waited for. */
+  _reconnectWindow(): number {
+    return this._connection.reconnectWindow()
+  }
+
   abort(): void
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
     if (this._didTerminate || this._isClosed) return
     this._isClosed = true
     const abortError = createAbortError(abortValue, message)
-    this._connection.sendAbort(this)
+    this._connection.sendAbort(this, stringify(abortValue))
     this._finalizeClose(abortError)
   }
 
   // ── Called by transport connection ──
 
-  _onTransportOpen(batched: boolean): void {
+  /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
+   *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
+  _reattachState(wire: number, batched: boolean): ReattachState {
+    const probe = batched ? undefined : this._flow.probeAttach(wire)
+    return probe === undefined ? {} : { probe }
+  }
+
+  /** @internal */
+  _fitReplays(window: number, peerWindow: number): void {
+    this._flow.fitReplays(window, peerWindow)
+  }
+
+  /** @internal At each heartbeat: see `FlowControl.acknowledge`. */
+  _acknowledge(): void {
+    this._flow.acknowledge()
+  }
+
+  /** @internal */
+  _onTransportBatched(): void {
+    if (!this._isClosed) this._flow.useBatchTransportInitial()
+  }
+
+  _onTransportOpen(batched: boolean, wire: number): void {
     if (this._isClosed) return
-    this._flow.reset()
     if (batched) this._flow.useBatchTransportInitial()
+    this._flow.attach(wire)
     this._fireOpen()
   }
 
@@ -278,7 +300,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._flow.onReceived(bytes)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners) {
+      for (const cb of this._listeners.list()) {
         try {
           const result = cb(parsed)
           if (isPromise(result)) {
@@ -312,7 +334,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners) {
+      for (const cb of this._binaryListeners.list()) {
         try {
           const result = cb(data)
           if (isPromise(result)) {
@@ -339,7 +361,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
-    this._dispatchDataFrame(frame as ChannelDataFrame)
+    const data = frame as ChannelDataFrame
+    if (!countsCredit(data.tag)) this._flow.onReceivedUncounted(data.bytes)
+    this._dispatchDataFrame(data)
   }
 
   /** @internal — Tag-keyed data-frame switch. `ClientBroadcast` overrides to add the
@@ -389,10 +413,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._connection.sendBdpPingAck(this)
+        this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing(), this._flow.pathRtt())
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck()
+        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }
@@ -440,7 +464,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onTransportClose(err?: Error): void {
     this._isClosed = true
-    this._finalizeClose(err)
+    // A close the server acknowledged is graceful, whatever takes the channel off the wire before it finishes.
+    this._finalizeClose(this._didReceiveCloseAck ? undefined : err)
   }
 
   // ── Private ──
@@ -518,13 +543,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchAckReq(data: string, seq: number): Promise<void> {
-    if (this._listeners.length === 0) {
+    if (this._listeners.size === 0) {
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     const parsed = parse(data) as ChannelData<ServerToClient>
     let lastResult: unknown
-    for (const cb of this._listeners) {
+    for (const cb of this._listeners.list()) {
       try {
         lastResult = await cb(parsed)
       } catch (err) {
@@ -537,12 +562,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
-    if (this._binaryListeners.length === 0) {
+    if (this._binaryListeners.size === 0) {
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     let lastResult: unknown
-    for (const cb of this._binaryListeners) {
+    for (const cb of this._binaryListeners.list()) {
       try {
         lastResult = await cb(data)
       } catch (err) {
@@ -552,6 +577,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
     }
     this._connection.sendAckRes(this, seq, stringify(lastResult))
+  }
+
+  /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */
+  protected _sendAckReq<T>(send: (onQueued: (seq: number) => void) => void): Promise<T> {
+    let pending!: { resolve: (v: T) => void; reject: (err: Error) => void }
+    const ack = new Promise<T>((resolve, reject) => (pending = { resolve, reject }))
+    send((seq) => this._pendingAcks.set(seq, pending))
+    return this._trackAck(ack)
   }
 
   protected _trackAck<T>(promise: Promise<T>): Promise<T> {
@@ -570,7 +603,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
-    this._connection.unregister(this, ackErr)
+    this._connection.unregister(this)
     this._fireClose(err)
     this._notifyCloseProgress()
   }
@@ -606,8 +639,16 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
-  private _broadcastListeners: Array<BroadcastListener<T>> = []
-  private _broadcastBinaryListeners: Array<BroadcastBinaryListener> = []
+  private readonly _broadcastListeners = new Listeners<BroadcastListener<T>>()
+  private readonly _broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
+  /** The subscriptions this page asks the server for. */
+  private readonly _wire = { text: false, binary: false }
+
+  constructor(...args: ConstructorParameters<typeof ClientChannel>) {
+    super(...args)
+    // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
+    this._flow.widenByteWindow(CREDIT_WINDOW_MAX_BYTES)
+  }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
@@ -616,91 +657,91 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
     const serialized = stringify(data)
-    const ret = this._trackAck(
-      new Promise<ChannelPublishAck>((resolve, reject) => {
-        this._connection.sendPublishAckReq(this, serialized, (seq) => {
-          this._pendingAcks.set(seq, { resolve, reject })
-        })
-      }),
+    const ret = this._sendAckReq<ChannelPublishAck>((onQueued) =>
+      this._connection.sendPublishAckReq(this, serialized, onQueued),
     )
     ret.catch(reportChannelError)
     return ret
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    if (this._broadcastListeners.length === 0) {
-      this._connection.sendBroadcastSubscribe(this, false)
-    }
-    this._broadcastListeners.push(callback)
+    if (this._broadcastListeners.size === 0) this._setWireSubscribed('text', true)
+    const remove = this._broadcastListeners.add(callback)
     return () => {
-      const index = this._broadcastListeners.indexOf(callback)
-      if (index >= 0) this._broadcastListeners.splice(index, 1)
-      if (this._broadcastListeners.length === 0) {
-        this._connection.sendBroadcastUnsubscribe(this, false)
-      }
+      remove()
+      if (this._broadcastListeners.size === 0) this._setWireSubscribed('text', false)
     }
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this._isClosed) throw new ChannelClosedError()
-    const ret = this._trackAck(
-      new Promise<ChannelPublishAck>((resolve, reject) => {
-        this._connection.sendPublishBinaryAckReq(this, data, (seq) => {
-          this._pendingAcks.set(seq, { resolve, reject })
-        })
-      }),
+    const ret = this._sendAckReq<ChannelPublishAck>((onQueued) =>
+      this._connection.sendPublishBinaryAckReq(this, data, onQueued),
     )
     ret.catch(reportChannelError)
     return ret
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this._broadcastBinaryListeners.length === 0) {
-      this._connection.sendBroadcastSubscribe(this, true)
-    }
-    this._broadcastBinaryListeners.push(callback)
+    if (this._broadcastBinaryListeners.size === 0) this._setWireSubscribed('binary', true)
+    const remove = this._broadcastBinaryListeners.add(callback)
     return () => {
-      const index = this._broadcastBinaryListeners.indexOf(callback)
-      if (index >= 0) this._broadcastBinaryListeners.splice(index, 1)
-      if (this._broadcastBinaryListeners.length === 0) {
-        this._connection.sendBroadcastUnsubscribe(this, true)
-      }
+      remove()
+      if (this._broadcastBinaryListeners.size === 0) this._setWireSubscribed('binary', false)
     }
+  }
+
+  private _setWireSubscribed(kind: 'text' | 'binary', on: boolean): void {
+    if (on === this._wire[kind] || this._isClosed) return
+    this._wire[kind] = on
+    if (on) this._connection.sendBroadcastSubscribe(this, kind === 'binary')
+    else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+  }
+
+  /** @internal Every (re)attach declares the subscriptions: a SUB or UNSUB written to a wire that died isn't replayed.
+   *  Publishes start no BDP probe, so it probes no path. */
+  override _reattachState(): ReattachState {
+    return { broadcast: { ...this._wire } }
   }
 
   override _dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
-      this._onTransportPublish(frame.text, frame.info)
+      this._onTransportPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      this._onTransportPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info)
+      this._onTransportPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
     super._dispatchDataFrame(frame)
   }
 
-  _onTransportPublish(data: string, wireInfo: WirePublishInfo): void {
+  // A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is.
+  _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
+    this._flow.onArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._broadcastListeners) {
+    for (const cb of this._broadcastListeners.list()) {
       try {
         cb(parsed, info)
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
     }
+    this._flow.onConsumedBytes(bytes)
   }
 
-  _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo): void {
+  _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
+    this._flow.onArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._broadcastBinaryListeners) {
+    for (const cb of this._broadcastBinaryListeners.list()) {
       try {
         cb(data, info)
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
     }
+    this._flow.onConsumedBytes(bytes)
   }
 }
 
@@ -710,7 +751,9 @@ function reportChannelError(err: unknown): void {
 
 function normalizeCloseTimeout(timeout: number | undefined): number {
   if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  if (!Number.isFinite(timeout) || timeout < 0)
-    throw new Error('Channel close timeout must be a non-negative finite number')
+  if (!Number.isFinite(timeout) || timeout < 0 || timeout > TIMER_DELAY_MAX_MS)
+    throw new Error(
+      `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
+    )
   return timeout
 }

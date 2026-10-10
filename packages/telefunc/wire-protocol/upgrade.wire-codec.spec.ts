@@ -1,16 +1,21 @@
 import { describe, expect, test } from 'vitest'
 
 import {
+  ERROR_REASON,
   ProtocolViolationError,
   TAG,
   decode,
   decodeClientFrame,
   encode,
+  encodePublishBinary,
+  encodePublishText,
   isChannelCtrlTag,
   isConnCtrlTag,
   type BarrierPayload,
   type ReconcilePayload,
   type ReconciledPayload,
+  seqNear,
+  seqThrough,
 } from './shared-ws.js'
 import {
   CHANNEL_TRANSPORT,
@@ -28,6 +33,8 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
   reconnectTimeout: 1,
   idleTimeout: 2,
   pingInterval: 3,
+  serverReplayBuffer: 8,
+  serverReplayBufferBinary: 9,
   clientReplayBuffer: 4,
   clientReplayBufferBinary: 5,
   sseFlushThrottle: 6,
@@ -40,18 +47,64 @@ describe('upgrade wire vocabulary', () => {
   test('PREPARE and READY round-trip', () => {
     const prepare = { upgradeId: 'upg-1', sessionId: 'sess-0' }
     expect(decode(encode.prepare(prepare))).toEqual({ tag: TAG.PREPARE, payload: prepare })
-    expect(decode(encode.ready({ upgradeId: 'upg-9' }))).toEqual({ tag: TAG.READY, payload: { upgradeId: 'upg-9' } })
+    expect(decode(encode.ready({ upgradeId: 'upg-9' }))).toEqual({
+      tag: TAG.READY,
+      payload: { upgradeId: 'upg-9' },
+    })
   })
 
-  test('the new tags are connection ctrl and 0x0a stays reserved', () => {
+  test('the new tags are connection ctrl', () => {
     for (const tag of [TAG.PREPARE, TAG.READY, TAG.BARRIER]) {
       expect(isConnCtrlTag(tag)).toBe(true)
       expect(isChannelCtrlTag(tag)).toBe(false)
     }
     expect([TAG.PREPARE, TAG.READY, TAG.BARRIER]).toEqual([0x07, 0x08, 0x09])
-    const reserved = new Uint8Array(7)
-    reserved[0] = 0x0a
-    expect(() => decode(reserved)).toThrow()
+  })
+
+  test('every tag names one frame', () => {
+    const tags = Object.values(TAG)
+    expect(new Set(tags).size).toBe(tags.length)
+  })
+
+  test("ATTACH_RESULT is a channel ctrl at 0x3b, and round-trips an attach's lastSeq or its absence", () => {
+    expect(TAG.ATTACH_RESULT).toBe(0x3b)
+    expect(isChannelCtrlTag(TAG.ATTACH_RESULT)).toBe(true)
+    expect(decode(encode.attachResult(3, 7))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: 7 })
+    expect(decode(encode.attachResult(3, null))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
+  })
+
+  test("BDP_PING round-trips its probe, and BDP_PING_ACK the probe, whether the window starved its sender, and the path's round trip it measured", () => {
+    expect(decode(encode.bdpPing(3, 0xffff_ffff))).toEqual({
+      tag: TAG.BDP_PING,
+      index: 3,
+      probe: 0xffff_ffff,
+    })
+    expect(decode(encode.bdpPingAck(3, 7, true, 42.5))).toEqual({
+      tag: TAG.BDP_PING_ACK,
+      index: 3,
+      probe: 7,
+      starved: true,
+      pathRtt: 42.5,
+    })
+    // Where it measured none.
+    expect(decode(encode.bdpPingAck(3, 7, false, Infinity))).toEqual({
+      tag: TAG.BDP_PING_ACK,
+      index: 3,
+      probe: 7,
+      starved: false,
+      pathRtt: Infinity,
+    })
+    // Under a microsecond, as on loopback, it still says it measured one.
+    expect(decode(encode.bdpPingAck(3, 7, false, 0.0001))).toMatchObject({ pathRtt: 0.001 })
+  })
+
+  test('WINDOW round-trips its limit and the last seq its receiver has', () => {
+    expect(decode(encode.window(3, 1_024, 0xffff_fffe))).toEqual({
+      tag: TAG.WINDOW,
+      index: 3,
+      bytes: 1_024,
+      lastSeq: 0xffff_fffe,
+    })
   })
 
   test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {
@@ -60,8 +113,10 @@ describe('upgrade wire vocabulary', () => {
     const open = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, (_, ix) => ({
       id: String(ix).padStart(UPGRADE_MAX_ID_BYTES, 'x'),
       ix: 0xffff - ix,
-      lastSeq: 0xffffffff,
+      lastSeq: Number.MAX_SAFE_INTEGER,
       initial: true as const,
+      broadcast: { text: false, binary: false },
+      probe: 0xffff_ffff,
     }))
     const max: BarrierPayload = { sessionId: 'x'.repeat(64), upgradeId: 'y'.repeat(64), open }
     const encoded = encode.barrier(max)
@@ -69,7 +124,10 @@ describe('upgrade wire vocabulary', () => {
     // that refuses the largest legal barrier would fail every client that hit the entry cap.
     expect(encoded.byteLength).toBeGreaterThan(MAX_CHANNELS_PER_CONNECTION * UPGRADE_MAX_ID_BYTES)
     expect(encoded.byteLength).toBeLessThanOrEqual(WIRE_MAX_CONN_CTRL_FRAME_BYTES)
-    expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toEqual({ tag: TAG.BARRIER, payload: max })
+    expect(decodeClientFrame(encoded, WIRE_MAX_CONN_CTRL_FRAME_BYTES)).toEqual({
+      tag: TAG.BARRIER,
+      payload: max,
+    })
   })
 
   test('a RECONCILED round-trips the commit upgradeId', () => {
@@ -89,7 +147,7 @@ describe('decodeClientFrame — hostile schemas', () => {
     ['duplicate ix entries', { sessionId: 's', open: [...goodOpen, { id: 'B', ix: goodOpen[0]!.ix, lastSeq: 0 }] }],
     ['an entry with a non-integer lastSeq', { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: 'x' }] }],
     ['an entry with a negative lastSeq', { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: -3 }] }],
-    ['an entry with an overflowing lastSeq', { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: 0x100000000 }] }],
+    ['an entry with an overflowing lastSeq', { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: 2 ** 53 }] }],
     [
       'an entry whose initial is not literally true',
       { sessionId: 's', open: [{ id: 'A', ix: 0, lastSeq: 0, initial: 'yes' }] },
@@ -104,7 +162,7 @@ describe('decodeClientFrame — hostile schemas', () => {
     const legal: ReconcilePayload[] = [
       { sessionId: 's', open: goodOpen },
       { open: [{ id: 'A', ix: 0, lastSeq: 0, initial: true }] },
-      { open: [{ id: 'A', ix: 0xffff, lastSeq: 0xffffffff }] },
+      { open: [{ id: 'A', ix: 0xffff, lastSeq: Number.MAX_SAFE_INTEGER }] },
       { open: [] },
     ]
     for (const payload of legal) expect(clientFrame(encode.reconcile(payload)).tag).toBe(TAG.RECONCILE)
@@ -151,6 +209,17 @@ describe('decodeClientFrame — hostile schemas', () => {
     expect(() => clientFrame(hostile(encode.reconcile, payload))).toThrow(ProtocolViolationError)
   })
 
+  test("a RECONCILE entry's broadcast subscriptions must be two booleans", () => {
+    const entry = { id: 'A', ix: 0, lastSeq: 0 }
+    const legal = encode.reconcile({ open: [{ ...entry, broadcast: { text: true, binary: false } }] })
+    expect(clientFrame(legal)).toMatchObject({ payload: { open: [{ broadcast: { text: true, binary: false } }] } })
+    for (const broadcast of [null, true, { text: true }, { text: 'yes', binary: false }]) {
+      expect(() => clientFrame(hostile(encode.reconcile, { open: [{ ...entry, broadcast }] }))).toThrow(
+        ProtocolViolationError,
+      )
+    }
+  })
+
   test('truncated bytes, unparsable JSON and an unknown tag are all violations', () => {
     expect(() => clientFrame(new Uint8Array(2) as Uint8Array<ArrayBuffer>)).toThrow(ProtocolViolationError)
     const junk = encode.text(0, 'not json', 1)
@@ -162,6 +231,27 @@ describe('decodeClientFrame — hostile schemas', () => {
   })
 })
 
+describe('heartbeat', () => {
+  test("a PING names each channel the page ended with its seq, and a PONG answers each with the server's seq or none", () => {
+    const ended = [
+      { ix: 3, lastSeq: 7 },
+      { ix: 65_535, lastSeq: 2 ** 31 - 1 },
+    ]
+    expect(clientFrame(encode.ping(ended))).toEqual({ tag: TAG.PING, ended })
+    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, ended: [] })
+    const answers = [
+      { ix: 3, lastSeq: 5 },
+      { ix: 4, lastSeq: null },
+    ]
+    expect(decode(encode.pong(answers))).toEqual({ tag: TAG.PONG, ended: answers })
+  })
+
+  test('a PING whose payload splits an entry is a violation', () => {
+    const ragged = encode.ping([{ ix: 1, lastSeq: 1 }]).slice(0, 12)
+    expect(() => clientFrame(ragged)).toThrow(ProtocolViolationError)
+  })
+})
+
 describe('decodeClientFrame — direction', () => {
   const serverOnly: [string, Uint8Array<ArrayBuffer>][] = [
     ['PONG', encode.pong()],
@@ -170,9 +260,8 @@ describe('decodeClientFrame — direction', () => {
     ['STREAM_REQUEST_OPEN_ACK', encode.streamRequestOpenAck()],
     ['PUBLISH', encode.publish(0, `9,1700000000000\n${JSON.stringify(1)}`, 1)],
     ['PUBLISH_BINARY', encode.publishBinary(0, new Uint8Array(14), 1)],
-    ['ABORT', encode.abort(0, JSON.stringify('nope'))],
-    ['ERROR', encode.error(0)],
     ['RECONCILED', encode.reconciled(reconciled())],
+    ['ATTACH_RESULT', encode.attachResult(0, 0)],
   ]
   test.each(serverOnly)('a client-sent %s is refused', (_name, frame) => {
     expect(() => clientFrame(frame)).toThrow(ProtocolViolationError)
@@ -192,14 +281,89 @@ describe('decodeClientFrame — direction', () => {
     ['PUBLISH_BINARY_ACK_REQ', encode.publishBinaryAckReq(0, new Uint8Array([1]), 1)],
     ['CLOSE', encode.close(0, 1_000)],
     ['CLOSE_ACK', encode.closeAck(0)],
-    ['WINDOW', encode.window(0, 1_024)],
+    ['ABORT', encode.abort(0, JSON.stringify('nope'), 1)],
+    ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
+    ['WINDOW', encode.window(0, 1_024, 7)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
-    ['BDP_PING', encode.bdpPing(0)],
-    ['BDP_PING_ACK', encode.bdpPingAck(0)],
+    ['BDP_PING', encode.bdpPing(0, 1)],
+    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, true, 50)],
     ['BROADCAST_SUB', encode.broadcastSub(0, false)],
     ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
   ]
   test.each(clientLegal)('control: a client-sent %s passes', (_name, frame) => {
     expect(clientFrame(frame).tag).toBe(frame[0])
+  })
+})
+
+describe('seqs past 32 bits', () => {
+  const around = (boundary: number) => Array.from({ length: 7 }, (_, n) => boundary - 3 + n)
+  const boundaries = [2 ** 31, 2 ** 32, 5 * 2 ** 32, 2 ** 40]
+
+  const sequenced: [string, (seq: number) => Uint8Array<ArrayBuffer>][] = [
+    ['TEXT', (seq) => encode.text(3, '"x"', seq)],
+    ['BINARY', (seq) => encode.binary(3, new Uint8Array([1]), seq)],
+    ['TEXT_ACK_REQ', (seq) => encode.textAckReq(3, '"x"', seq)],
+    ['BINARY_ACK_REQ', (seq) => encode.binaryAckReq(3, new Uint8Array([1]), seq)],
+    ['ACK_RES', (seq) => encode.ackRes(3, seq, 1, '"x"')],
+    ['PUBLISH', (seq) => encode.publish(3, encodePublishText('"x"', { seq: 1, timestamp: 2 }), seq)],
+    ['PUBLISH_ACK_REQ', (seq) => encode.publishAckReq(3, '"x"', seq)],
+    [
+      'PUBLISH_BINARY',
+      (seq) => encode.publishBinary(3, encodePublishBinary(new Uint8Array([1]), { seq: 1, timestamp: 2 }), seq),
+    ],
+    ['PUBLISH_BINARY_ACK_REQ', (seq) => encode.publishBinaryAckReq(3, new Uint8Array([1]), seq)],
+    ['CLOSE', (seq) => encode.close(3, 1_000, seq)],
+    ['CLOSE_ACK', (seq) => encode.closeAck(3, seq)],
+    ['ABORT', (seq) => encode.abort(3, '"x"', seq)],
+    ['ERROR', (seq) => encode.error(3, ERROR_REASON.LOST, seq)],
+  ]
+  test.each(sequenced)("a %s's seq reads whole across 2^31 and 2^32, from the highest its receiver has", (_, build) => {
+    for (const seq of boundaries.flatMap(around)) {
+      const { seq: bits } = decode(build(seq)) as { seq: number }
+      // The next it expects, one a replay repeats, and one past a gap a lost replay leaves.
+      for (const highest of [seq - 1, seq + 1_000, seq - 1_000_000]) expect(seqNear(bits, highest + 1)).toBe(seq)
+    }
+  })
+
+  test('an acknowledgement reads whole across 2^31 and 2^32, from the last seq its receiver sent', () => {
+    for (const lastSeq of boundaries.flatMap(around)) {
+      // All that was sent, or all but what a wire or a replay holds.
+      const window = decode(encode.window(3, 1_024, lastSeq)) as { lastSeq: number }
+      const attached = decode(encode.attachResult(3, lastSeq)) as { lastSeq: number }
+      const ping = decode(encode.ping([{ ix: 3, lastSeq }])) as { ended: { lastSeq: number }[] }
+      const pong = decode(encode.pong([{ ix: 3, lastSeq }])) as { ended: { lastSeq: number }[] }
+      const carried = [window.lastSeq, attached.lastSeq, ping.ended[0]!.lastSeq, pong.ended[0]!.lastSeq]
+      // All that was sent, or all but what a wire or a replay holds.
+      for (const sent of [lastSeq, lastSeq + 1_000_000])
+        expect(carried.map((bits) => seqThrough(bits, sent))).toEqual([lastSeq, lastSeq, lastSeq, lastSeq])
+    }
+  })
+
+  test('an ACK_RES carries the seq it answers whole, past 2^32', () => {
+    for (const ackedSeq of [0, 1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER])
+      expect(decode(encode.ackRes(3, 1, ackedSeq, '"x"'))).toMatchObject({ ackedSeq })
+  })
+
+  test("a binary publish carries its key's seq as a text publish does, past 2^32", () => {
+    for (const seq of [0, 1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER]) {
+      const info = { seq, timestamp: 1_700_000_000_000 }
+      const binary = encode.publishBinary(3, encodePublishBinary(new Uint8Array([7]), info), 1)
+      const text = encode.publish(3, encodePublishText('"x"', info), 1)
+      expect(decode(binary)).toMatchObject({ info, data: new Uint8Array([7]) })
+      expect(decode(text)).toMatchObject({ info, text: '"x"' })
+    }
+  })
+
+  test('a seq never reads below 0, whatever its bits', () => {
+    for (const bits of [0, 1, 2 ** 31 - 1, 2 ** 31, 2 ** 31 + 1, 2 ** 32 - 1])
+      for (const at of [0, 1, 7]) {
+        expect(seqNear(bits, at + 1)).toBeGreaterThanOrEqual(0)
+        expect(seqThrough(bits, at)).toBeGreaterThanOrEqual(0)
+      }
+  })
+
+  test('a RECONCILE carries a lastSeq past 2^32 whole', () => {
+    const open = [{ id: 'A', ix: 0, lastSeq: 2 ** 32 + 5 }]
+    expect(clientFrame(encode.reconcile({ open }))).toEqual({ tag: TAG.RECONCILE, payload: { open } })
   })
 })

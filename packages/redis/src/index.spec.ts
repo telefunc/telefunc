@@ -17,6 +17,11 @@ class FakeIoredis {
     this.clockMs = ms
   }
 
+  /** What the next `INCR` on `seqKey` counts on from. */
+  setCounter(seqKey: string, seq: number): void {
+    this.counters.set(seqKey, seq)
+  }
+
   // `duplicate()` would normally allocate a new TCP connection; in the fake we
   // share state — there's only one in-memory Redis to emulate.
   duplicate(): this {
@@ -61,13 +66,15 @@ class FakeIoredis {
 }
 
 function encodeFrame(seq: number, ts: number, payload: Uint8Array): Uint8Array {
-  const HEADER = 12
+  const HEADER = 16
   const out = new Uint8Array(HEADER + payload.byteLength)
   const view = new DataView(out.buffer)
-  view.setUint32(0, seq, false)
+  const seqHi = Math.floor(seq / 0x1_0000_0000)
+  view.setUint32(0, seqHi, false)
+  view.setUint32(4, seq - seqHi * 0x1_0000_0000, false)
   const tsHi = Math.floor(ts / 0x1_0000_0000)
-  view.setUint32(4, tsHi, false)
-  view.setUint32(8, ts - tsHi * 0x1_0000_0000, false)
+  view.setUint32(8, tsHi, false)
+  view.setUint32(12, ts - tsHi * 0x1_0000_0000, false)
   out.set(payload, HEADER)
   return out
 }
@@ -124,7 +131,7 @@ describe('Redis adapter — live delivery', () => {
     ])
   })
 
-  it('decodes binary frames including the 12-byte BE header (seq + u64 ts split into two halves)', async () => {
+  it('decodes binary frames including the 16-byte BE header (seq and ts, each split into two halves)', async () => {
     const { fake, adapter } = newAdapter()
     fake.setClock(1_700_000_003_000)
 
@@ -137,5 +144,22 @@ describe('Redis adapter — live delivery', () => {
     expect(Array.from(received[0]!.payload)).toEqual([0xde, 0xad, 0xbe, 0xef])
     expect(received[0]!.seq).toBe(1)
     expect(received[0]!.timestamp).toBe(1_700_000_003_000)
+  })
+
+  it('gives subscribers the seq the publisher saw past 2^32 publishes on a key, text and binary alike', async () => {
+    const { fake, adapter } = newAdapter()
+    fake.setCounter('tf:seq:{room:far}', 2 ** 32 - 2)
+    const received: number[] = []
+    adapter.subscribe('room:far', (_, info) => void received.push(info.seq))
+    adapter.subscribeBinary('room:far', (_, info) => void received.push(info.seq))
+
+    const published = [
+      await adapter.publish('room:far', 'a'),
+      await adapter.publishBinary('room:far', new Uint8Array([1])),
+      await adapter.publish('room:far', 'b'),
+    ]
+
+    expect(published.map(({ seq }) => seq)).toEqual([2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1])
+    expect(received).toEqual([2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1])
   })
 })

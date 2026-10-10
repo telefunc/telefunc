@@ -6,6 +6,10 @@ class DeadlineScheduler {
 
   constructor(private readonly run: () => void) {}
 
+  get pending(): boolean {
+    return this.timer !== null
+  }
+
   schedule(deadlineAt: number): void {
     if (this.timer && this.scheduledAt <= deadlineAt) return
 

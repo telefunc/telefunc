@@ -36,6 +36,17 @@ function testTodolist() {
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
+    // Reset only changes the DOM if the list differs from its initial 2 items, so its response is observable
+    const todoItemOld = `Buy eggs ${Math.random()}`
+    const numberOfItemsBefore = await getNumberOfItems()
+    await page.fill('input[type="text"]', todoItemOld)
+    await page.click('button[type="submit"]')
+    await autoRetry(
+      async () => {
+        expect(await getNumberOfItems()).toBe(numberOfItemsBefore + 1)
+      },
+      { timeout: 5000 },
+    )
     await page.locator('button', { hasText: 'Reset' }).click()
     await autoRetry(
       async () => {

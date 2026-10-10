@@ -2,19 +2,21 @@ export { IndexedPeer }
 export type { PeerSender }
 
 import { ACK_STATUS, encode, payloadBytes } from '../shared-ws.js'
-import type { AckResultStatus } from '../shared-ws.js'
+import type { AckResultStatus, ErrorReason } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
+  /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
+  bufferedAmount(): number | undefined
 }
 
-/** Wraps a crossws peer, encodes frames with a fixed channel index.
+/** Wraps a `PeerSender`, encodes frames with a fixed channel index.
  *  Assigns sequence numbers. Frames are added to the replay buffer only once
  *  they are committed to a transport send path. */
 class IndexedPeer {
   constructor(
-    private sender: PeerSender,
+    readonly sender: PeerSender,
     private index: number,
     private replay: ReplayBuffer,
   ) {}
@@ -27,109 +29,92 @@ class IndexedPeer {
     return payloadBytes(frame)
   }
 
-  /** Send a text frame that requests an ack response from the receiver. Returns seq. */
-  sendTextAckReq(data: string, onQueued?: (seq: number) => void): number {
+  /** Send a text frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
+  sendTextAckReq(data: string, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
     const frame = encode.textAckReq(this.index, data, seq)
-    onQueued?.(seq)
+    onQueued(seq, payloadBytes(frame))
     this.sender.send(frame, () => this.replay.push(seq, frame))
-    return seq
   }
 
   sendBinary(data: Uint8Array): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame, true))
+    this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
-  /** Send a binary frame that requests an ack response from the receiver. Returns seq. */
-  sendBinaryAckReq(data: Uint8Array, onQueued?: (seq: number) => void): number {
+  /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
+  sendBinaryAckReq(data: Uint8Array, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binaryAckReq(this.index, data, seq)
-    onQueued?.(seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame, true))
-    return seq
+    onQueued(seq, data.byteLength)
+    this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 
   /** Send an acknowledgement response for a message the client sent.
    *  ACK_RES frames use the normal sequenced send path and are replayable on reconnect. */
   sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const seq = this.replay.nextSeq()
-    const frame = encode.ackRes(this.index, seq, ackedSeq, result, status)
-    try {
-      this.sender.send(frame, () => this.replay.push(seq, frame))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendSequenced(seq, encode.ackRes(this.index, seq, ackedSeq, result, status))
   }
 
-  sendCloseRequest(timeoutMs: number): void {
-    try {
-      this.sender.send(encode.close(this.index, timeoutMs))
-    } catch {
-      /* transport may already be closed */
-    }
+  /** Returns its seq. */
+  sendCloseRequest(timeoutMs: number): number {
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.close(this.index, timeoutMs, seq))
+    return seq
   }
 
   sendCloseAck(): void {
-    try {
-      this.sender.send(encode.closeAck(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.closeAck(this.index, seq))
   }
 
   sendAbort(abortValue: string): void {
-    try {
-      this.sender.send(encode.abort(this.index, abortValue))
-    } catch {
-      /* transport may already be closed */
-    }
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.abort(this.index, abortValue, seq))
   }
 
-  sendError(): void {
-    try {
-      this.sender.send(encode.error(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+  sendError(reason: ErrorReason): void {
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.error(this.index, reason, seq))
   }
 
-  sendByteWindowUpdate(bytes: number): void {
-    try {
-      this.sender.send(encode.window(this.index, bytes))
-    } catch {
-      /* transport may already be closed */
-    }
+  /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
+  sendByteWindowUpdate(limit: number, lastSeq: number): void {
+    this.sendCtrl(encode.window(this.index, limit, lastSeq))
   }
 
-  sendMsgWindowUpdate(count: number): void {
-    try {
-      this.sender.send(encode.msgWindow(this.index, count))
-    } catch {
-      /* transport may already be closed */
-    }
+  sendMsgWindowUpdate(limit: number): void {
+    this.sendCtrl(encode.msgWindow(this.index, limit))
   }
 
-  sendBdpPing(): void {
-    try {
-      this.sender.send(encode.bdpPing(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+  sendBdpPing(probe: number): void {
+    this.sendCtrl(encode.bdpPing(this.index, probe))
   }
 
-  sendBdpPingAck(): void {
-    try {
-      this.sender.send(encode.bdpPingAck(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+  sendBdpPingAck(probe: number, starved: boolean, pathRtt: number): void {
+    this.sendCtrl(encode.bdpPingAck(this.index, probe, starved, pathRtt))
   }
 
-  sendPublish(data: string): void {
+  /** Returns the frame's payload byte count. */
+  sendPublish(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publish(this.index, data, seq)
+    this.sendSequenced(seq, frame)
+    return payloadBytes(frame)
+  }
+
+  /** Returns the frame's payload byte count. */
+  sendPublishBinary(data: Uint8Array): number {
+    const seq = this.replay.nextSeq()
+    const frame = encode.publishBinary(this.index, data, seq)
+    this.sendSequenced(seq, frame)
+    return payloadBytes(frame)
+  }
+
+  /** Replayed once committed, so a frame a dead wire lost goes again. */
+  private sendSequenced(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     try {
       this.sender.send(frame, () => this.replay.push(seq, frame))
     } catch {
@@ -137,11 +122,9 @@ class IndexedPeer {
     }
   }
 
-  sendPublishBinary(data: Uint8Array): void {
-    const seq = this.replay.nextSeq()
-    const frame = encode.publishBinary(this.index, data, seq)
+  private sendCtrl(frame: Uint8Array<ArrayBuffer>): void {
     try {
-      this.sender.send(frame, () => this.replay.push(seq, frame, true))
+      this.sender.send(frame)
     } catch {
       /* transport may already be closed */
     }

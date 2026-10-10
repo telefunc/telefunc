@@ -1,7 +1,8 @@
 export { SSEStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { concat } from '../../frame.js'
+import { SSELineSplitter } from '../SSELineSplitter.js'
+import { concatAll } from '../../frame.js'
 import { base64urlToUint8Array } from '../../base64url.js'
 import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 
@@ -11,15 +12,17 @@ const EMPTY = new Uint8Array(0)
  *  binary frames.
  *
  *  `readExact` is the only method implemented here. SSE line parser state
- *  (`lineBuf`, `pendingData`, `TextDecoder`) lives as instance fields,
+ *  (`lines`, `pendingData`) lives as instance fields,
  *  persisted across calls. `reader.read()` is called inline — only when more
  *  bytes are needed — preserving the full pull chain through
  *  `FrameDemuxer.ensureReading` to the server generator. No separate pump. */
 class SSEStreamReader extends BaseStreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
   private binary: Uint8Array<ArrayBuffer> = EMPTY
-  private decoder = new TextDecoder()
-  private lineBuf = ''
+  /** Events decoded since `binary`, joined once `readExact` has its bytes. */
+  private events: Uint8Array<ArrayBuffer>[] = []
+  private eventBytes = 0
+  private lines = new SSELineSplitter()
   private pendingData = ''
 
   constructor(
@@ -32,16 +35,17 @@ class SSEStreamReader extends BaseStreamReader {
   ) {
     super(callContext)
     this.reader = reader
-    callContext.abortController.signal.addEventListener('abort', () => reader.cancel(), { once: true })
+    callContext.abortController.signal.addEventListener('abort', () => reader.cancel().catch(() => {}), { once: true })
   }
 
   cancel(): void {
     this.cancelled = true
-    this.reader.cancel()
+    // An errored body rejects its cancel; that error already reached the reads.
+    this.reader.cancel().catch(() => {})
   }
 
   async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
-    while (this.binary.length < n) {
+    while (this.binary.length + this.eventBytes < n) {
       let done: boolean
       let value: Uint8Array<ArrayBuffer> | undefined
       let readError: unknown
@@ -58,20 +62,27 @@ class SSEStreamReader extends BaseStreamReader {
         if (this.cancelled) return EMPTY
         throw readError ?? new Error('Connection lost — server closed the SSE stream before all data was received.')
       }
-      this.lineBuf += this.decoder.decode(value!, { stream: true })
-      const lines = this.lineBuf.split('\n')
-      this.lineBuf = lines.pop()!
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          this.pendingData = line.slice(6)
-        } else if (line === '' && this.pendingData !== '') {
-          this.binary = concat(this.binary, base64urlToUint8Array(this.pendingData))
-          this.pendingData = ''
-        }
-      }
+      this.lines.push(value!, this.onLine)
+    }
+    if (this.events.length > 0) {
+      const parts = this.binary.length > 0 ? [this.binary, ...this.events] : this.events
+      this.binary = parts.length === 1 ? parts[0]! : concatAll(parts)
+      this.events = []
+      this.eventBytes = 0
     }
     const result = this.binary.subarray(0, n)
     this.binary = n < this.binary.length ? this.binary.subarray(n) : EMPTY
     return result
+  }
+
+  private onLine = (line: string) => {
+    if (line.startsWith('data: ')) {
+      this.pendingData = line.slice(6)
+    } else if (line === '' && this.pendingData !== '') {
+      const event = base64urlToUint8Array(this.pendingData)
+      this.events.push(event)
+      this.eventBytes += event.length
+      this.pendingData = ''
+    }
   }
 }

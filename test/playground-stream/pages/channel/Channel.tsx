@@ -461,7 +461,7 @@ function ChannelDemo() {
   const testClientAbortServer = useCallback(async () => {
     if (clientAbortServerChannelRef.current && !clientAbortServerChannelRef.current.isClosed) {
       const channelId = channelState.clientAbortServerChannelId
-      clientAbortServerChannelRef.current.abort()
+      clientAbortServerChannelRef.current.abort({ reason: 'client-abort' })
       clientAbortServerChannelRef.current = null
       addLog('system', `client abort() sent for channel ${channelId}`)
       return
@@ -471,7 +471,7 @@ function ChannelDemo() {
     const { channel, channelId } = await openChannel(onChannelClientAbortInstrument)
     clientAbortServerChannelRef.current = channel
     setChannelState((s) => ({ ...s, clientAbortServerChannelId: channelId }))
-    channel.abort()
+    channel.abort({ reason: 'client-abort' })
     clientAbortServerChannelRef.current = null
     addLog('system', `client abort() sent for channel ${channelId}`)
   }, [addLog, channelState.clientAbortServerChannelId])

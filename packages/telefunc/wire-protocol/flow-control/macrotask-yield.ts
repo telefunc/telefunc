@@ -1,6 +1,7 @@
 export { macrotaskYield }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
+import { assertUsage } from '../../utils/assert.js'
 
 /**
  * Process-wide macrotask-boundary yield with sub-millisecond cost.
@@ -20,6 +21,14 @@ class MacrotaskYield {
   private channel: MessageChannel | null = null
   private waiters: Array<() => void> = []
   private posted = false
+
+  /** Called as each channel is created, so a runtime without MessageChannel fails there rather than on a busy send. */
+  assertSupported(): void {
+    assertUsage(
+      typeof MessageChannel === 'function',
+      'Telefunc channels need MessageChannel. On Cloudflare Workers, set compatibility_date to 2025-08-15 or later.',
+    )
+  }
 
   yield(): Promise<void> {
     return new Promise<void>((resolve) => {

@@ -266,7 +266,8 @@ function openWith<F extends (...args: never[]) => unknown>(
     channel: {
       transports: [scenario.transport],
       connectionKey: `bench-${scenario.id}-${bytes}b-ch${slot}`,
-      idleTimeout: 0,
+      // An idle SSE connection holds one of the six sockets HTTP/1.1 gives a page per origin, and every cell has its own.
+      ...(scenario.transport === 'sse' ? { idleTimeout: 0 } : {}),
     },
   }) as F
 }
@@ -418,6 +419,19 @@ function bestPlateauWindow(samples: number[], k: number): number {
   return bestMean
 }
 
+/** What the servers received per second from the end of the warmup to the end of the flood, each on its own clock. */
+function serverReceiveRate(channels: { at: number; total: number }[][], floodMs: number): number {
+  let rate = 0
+  for (const samples of channels) {
+    const inFlood = samples.filter((s) => s.at - samples[0]!.at >= WARMUP_MS && s.at - samples[0]!.at <= floodMs)
+    if (inFlood.length < 2) continue
+    const first = inFlood[0]!
+    const last = inFlood.at(-1)!
+    rate += (last.total - first.total) / ((last.at - first.at) / 1000)
+  }
+  return rate
+}
+
 async function measureThroughputCell(
   scenario: RoutedScenario,
   instances: number,
@@ -436,10 +450,13 @@ async function measureThroughputCell(
         instances,
         slot: i,
         bytes,
-      })(bytes),
+      })(bytes, SAMPLE_MS),
     ),
   )
   const instanceList = opens.map((o) => o.instance)
+  // Each channel has a connection of its own, and while one of a page's WebSockets floods a host, Chrome holds up its
+  // next handshake to that host for seconds: a channel still connecting as the others flood can miss connectTtl.
+  await Promise.all(opens.map((o) => new Promise<void>((resolve) => o.channel.onOpen(resolve))))
   const binaryPayload = scenario.binary ? new Uint8Array(bytes).fill(0xab) : null
   const textPayload = scenario.binary ? null : 'x'.repeat(bytes)
 
@@ -457,14 +474,12 @@ async function measureThroughputCell(
 
   try {
     // ── Phase TX: client floods, server counts (no echoes). Workers run
-    // continuously while `measureRate` samples the local `sent` counter every
-    // SAMPLE_MS and waits for the rate to plateau — i.e., for the BDP credit
-    // window to finish ramping and the system to reach steady state.
-    //
-    // Local counter rather than `getServerReceived` RPC: under WS saturation,
-    // closure-RPC queues for seconds. Credit-window backpressure enforces that
-    // completed-send-rate == server-consume-rate in steady state, so the local
-    // count is the right signal.
+    // continuously while `measureRate` waits on the local `sent` counter for the
+    // flood to plateau, which only decides when the flood stops: `sent` counts
+    // sends that resolved, and where the send buffer is unbounded those are not
+    // messages the server read. The rate reported is what the server received
+    // from the end of the warmup to the end of the flood, from its samples fetched
+    // once the flood is over (a closure-RPC queues for seconds under WS saturation).
     let txActive = true
     let sent = 0
     const txWorkers = opens.map((r) =>
@@ -478,13 +493,16 @@ async function measureThroughputCell(
         } catch {}
       })(),
     )
-    const txMsgS = await measureRate(() => sent, signal)
+    const floodStart = performance.now()
+    await measureRate(() => sent, signal)
+    const floodMs = performance.now() - floodStart
     txActive = false
     await Promise.all(txWorkers)
 
     // Drain backlog before flipping to RX so `{ctrl:'start'}` isn't queued
     // behind in-flight TX data.
     await drain()
+    const txMsgS = serverReceiveRate(await Promise.all(opens.map((o) => o.getReceivedSamples())), floodMs)
 
     // ── Phase RX: server pushes fire-and-forget, client counts. Same plateau-
     // detection on the receive-side counter.
@@ -1102,14 +1120,14 @@ function Bench() {
           <strong>Throughput:</strong> {INSTANCE_COUNTS.join('/')} channels. <code>round-robin</code> uses{' '}
           <code>?bench_instances=N</code> (Caddy distributes). <code>pinned</code> uses{' '}
           <code>?bench_instance=&lt;letter&gt;</code> (fixed backend per slot). Pure one-direction measurement:{' '}
-          <strong>TX</strong> = client floods, server counts received (no echoes); <strong>RX</strong> = server pushes
-          fire-and-forget, client counts. Two sequential phases per cell. Each phase burns {WARMUP_MS / 1000}s of warmup
-          (workers running, no samples collected) so the BDP credit window ramps before measurement starts. Then samples
-          the rate every {SAMPLE_MS}ms and terminates when the rate has held within{' '}
-          {(PLATEAU_TOLERANCE * 100).toFixed(0)}% of its mean for a continuous {PLATEAU_HOLD_MS}ms window — BDP ramp
-          produces shifting samples that can't form a plateau, so the hold-window naturally waits past it. Measurement
-          capped at {MAX_MEASURE_MS / 1000}s. No RTT in the loop. Each cell: msg/s + MB/s. Green = best per row. Scale =
-          top / base.
+          <strong>TX</strong> = client floods, the server's received count from the end of the warmup to the end of the
+          flood (no echoes); <strong>RX</strong> = server pushes fire-and-forget, client counts. Two sequential phases
+          per cell. Each phase burns {WARMUP_MS / 1000}s of warmup (workers running, no samples collected) so the BDP
+          credit window ramps before measurement starts. Then samples the rate every {SAMPLE_MS}ms and terminates when
+          the rate has held within {(PLATEAU_TOLERANCE * 100).toFixed(0)}% of its mean for a continuous{' '}
+          {PLATEAU_HOLD_MS}ms window — BDP ramp produces shifting samples that can't form a plateau, so the hold-window
+          naturally waits past it. Measurement capped at {MAX_MEASURE_MS / 1000}s. No RTT in the loop. Each cell: msg/s
+          + MB/s. Green = best per row. Scale = top / base.
         </p>
         <p>
           <strong>Server Push:</strong> {INSTANCE_COUNTS.join('/')} channels. Each cell: {PUSH_COUNT}-msg burst across N

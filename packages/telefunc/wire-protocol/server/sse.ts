@@ -53,6 +53,9 @@ class SseConnectionTransport {
    *  connection — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
+  /** When each wire closed, oldest first, for `connectTtl`: a page opens each wire under a new connId, so a POST for
+   *  one of these comes from a page that hasn't seen its wire end yet, and is refused rather than held. */
+  private readonly closedAt = new Map<string, number>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
@@ -61,6 +64,10 @@ class SseConnectionTransport {
     },
     getConnId: (connection) => connection.connId,
     sendNow: (connection, frame) => this.sendNow(connection, frame),
+    wholeMessages: false,
+    // An event carries its frame in base64, 4 bytes for every 3 and framing on top: three quarters of what waits is
+    // never fewer bytes than the frames it carries.
+    bufferedAmount: (connection) => Math.floor((connection.stream.bufferedAmount * 3) / 4),
     terminateConnection: (connection) => this.terminateConnection(connection),
   }
 
@@ -150,12 +157,16 @@ class SseConnectionTransport {
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
+    reader.onChunk = () => this.mux.onConnectionBytes(connection)
     // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
     // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
     // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
     this.sendNow(connection, encode.streamRequestOpenAck())
-    if (!(await this.waitReady(connection))) return badRequest()
+    // No deadline: the client trusts this POST from the ack on. The gate opens on every path, when runStreamResponse
+    // ends or the connection closes.
+    await connection.ready
+    if (connection.closed) return badRequest()
     try {
       while (true) {
         const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
@@ -175,6 +186,7 @@ class SseConnectionTransport {
   private async handleBatchPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
+    reader.onChunk = () => this.mux.onConnectionBytes(connection)
     if (!(await this.waitReady(connection))) return badRequest()
     const drain = this.drainDeferred(connection, reader)
     connection.pendingDispatches.add(drain)
@@ -239,7 +251,19 @@ class SseConnectionTransport {
   }
 
   private async resolveConnection(connId: string): Promise<SseConnection | null> {
-    return this.mux.getConnectionByConnId<SseConnection>(connId) ?? (await this.waitForConnection(connId))
+    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
+    if (connection) return connection
+    if (this.closedAt.has(connId)) return null
+    return await this.waitForConnection(connId)
+  }
+
+  private rememberClosed(connId: string): void {
+    const now = performance.now()
+    for (const [closed, at] of this.closedAt) {
+      if (now - at < this.mux.connectTtl) break
+      this.closedAt.delete(closed)
+    }
+    this.closedAt.set(connId, now)
   }
 
   /** Mirrors `ChannelMux.waitForChannelRegistration`: the timeout path must remove the
@@ -300,6 +324,7 @@ class SseConnectionTransport {
   private closeConnection(connection: SseConnection, { permanent }: { permanent: boolean }): void {
     if (connection.closed) return
     connection.closed = true
+    this.rememberClosed(connection.connId)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
     connection.resolveReady()
     this.mux.onConnectionClosed(connection, { permanent })
@@ -307,8 +332,7 @@ class SseConnectionTransport {
   }
 
   private terminateConnection(connection: SseConnection): void {
-    const terminatePermanently = this.mux.readPermanentTermination(connection)
-    this.closeConnection(connection, { permanent: terminatePermanently === true })
+    this.closeConnection(connection, { permanent: this.mux.readPermanentTermination(connection) })
   }
 }
 

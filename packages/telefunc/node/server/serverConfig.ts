@@ -2,7 +2,10 @@ export { configUser as config }
 export { getServerConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
+export { setAdapterMaxFrameBytes }
+export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
+export { pingDeadlineOf }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -32,6 +35,7 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
@@ -42,6 +46,7 @@ import {
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
   type StreamTransport,
+  TIMER_DELAY_MAX_MS,
 } from '../../wire-protocol/constants.js'
 
 type StreamConfigUser = {
@@ -88,18 +93,16 @@ type ChannelConfigUser = {
    */
   pingInterval?: number
   /**
-   * Per-channel replay buffer size, in bytes, kept on the server for
-   * reconnect recovery.
+   * The most bytes of text messages the server keeps per channel, of those it sent that the client hasn't acknowledged,
+   * to replay after a reconnect. The client's window never passes half of this or of `serverReplayBufferBinary`,
+   * whichever is smaller, so what flow control lets be in flight always fits.
    */
   serverReplayBuffer?: number
-  /** Per-channel replay buffer size for binary frames, in bytes, kept on the server. */
+  /** As `serverReplayBuffer`, for binary messages. */
   serverReplayBufferBinary?: number
-  /**
-   * Per-channel replay buffer size, in bytes, advertised to the client so it
-   * can replay recent client-to-server frames after reconnect.
-   */
+  /** As `serverReplayBuffer`, for what the client sends: the client keeps that replay, sized as the server tells it. */
   clientReplayBuffer?: number
-  /** Per-channel replay buffer size for binary frames, in bytes, advertised to the client. */
+  /** As `clientReplayBuffer`, for binary messages. */
   clientReplayBufferBinary?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to
@@ -217,12 +220,14 @@ type ConfigResolved = {
   extensions: TelefuncServerExtension[]
 }
 
-const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
-  stream: {},
-  channel: {},
-  broadcast: {},
-  extensions: [],
+const globalObject = getGlobalObject('serverConfig.ts', {
+  config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
+  /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
+  adapterChannelTransports: new Set<ChannelTransports[number]>(),
+  /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
+  adapterMaxFrameBytes: undefined as number | undefined,
 })
+const configState = globalObject.config
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
@@ -336,7 +341,9 @@ function getServerConfig(): ConfigResolved {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
     channel: {
-      transports: configState.channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS],
+      transports: configState.channel.transports ?? [
+        ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports]),
+      ],
       reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
       idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
       pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
@@ -356,6 +363,11 @@ function getServerConfig(): ConfigResolved {
   }
 }
 
+/** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
+function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
+  return Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2
+}
+
 /** Extension wire types are consumed after user modules may have registered more extensions.
  * Keep them out of the request-start config snapshot and resolve only at the operation that uses them. */
 function getServerExtensionTypes() {
@@ -365,13 +377,18 @@ function getServerExtensionTypes() {
   }
 }
 
-/** @internal Push additional transports into the default only if the user hasn't set one. */
+/** @internal Adds transports to the defaults, which apply while the user sets none. */
 function enableChannelTransports(transports: ChannelTransports): void {
-  if (!configState.channel.transports) {
-    configState.channel.transports = [
-      ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...transports]),
-    ] as ChannelTransports
-  }
+  for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
+}
+
+/** @internal The runtime ends a WebSocket on a larger message: each channel tells its page, which refuses one. */
+function setAdapterMaxFrameBytes(bytes: number | undefined): void {
+  globalObject.adapterMaxFrameBytes = bytes
+}
+
+function getAdapterMaxFrameBytes(): number | undefined {
+  return globalObject.adapterMaxFrameBytes
 }
 
 function applyUserConfig(prop: string | symbol, val: unknown) {
@@ -472,6 +489,14 @@ function applyStreamConfig(val: unknown): void {
   configState.stream = next
 }
 
+/** Milliseconds a timer waits, at most `max`, which `bound` explains. */
+function assertDuration(value: unknown, configPath: string, max: number, bound: string): asserts value is number {
+  assertUsage(
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max,
+    `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${max}, ${bound}`,
+  )
+}
+
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
@@ -481,20 +506,33 @@ function applyChannelConfig(val: unknown): void {
       case 'transports':
         next.transports = validateChannelTransports(value, configPath)
         break
+      case 'pingInterval':
+        assertDuration(
+          value,
+          configPath,
+          TIMER_DELAY_MAX_MS >> 1,
+          'as its deadline, twice it, is at most the longest a timer waits',
+        )
+        next[key] = value
+        break
       case 'reconnectTimeout':
       case 'idleTimeout':
-      case 'pingInterval':
+      case 'connectTtl':
+      case 'sseFlushThrottle':
+      case 'ssePostIdleFlushDelay':
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
+        next[key] = value
+        break
       case 'serverReplayBuffer':
       case 'serverReplayBufferBinary':
       case 'clientReplayBuffer':
       case 'clientReplayBufferBinary':
-      case 'connectTtl':
       case 'bufferLimit':
       case 'bufferLimitBinary':
-      case 'sseFlushThrottle':
-      case 'ssePostIdleFlushDelay':
-        assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)
-        assertUsage(value >= 0, `\`${configPath}\` should be a non-negative number`)
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
+          `\`${configPath}\` should be a non-negative safe integer`,
+        )
         ;(next as Record<string, unknown>)[key] = value
         break
       default:
