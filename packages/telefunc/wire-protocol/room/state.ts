@@ -1,5 +1,4 @@
 export { RoomState, RoomStateView, remoteBacking, replayMembership }
-export type { MembershipEvent }
 
 import { assert, assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -154,8 +153,8 @@ class RoomState {
   private _stateVersion = 0
   private _snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   private readonly _listenerCleanups = new Map<object, Set<() => void>>()
-  /** The membership events each in-flight roster read has seen so far. */
-  private readonly _membershipRecords = new Set<MembershipEvent[]>()
+  /** The membership events the in-flight roster read has seen so far. */
+  private _recording: MembershipEvent[] | null = null
   private readonly _changeCbs: Listeners<() => void> = new Listeners()
   private readonly _members = new Map<string, MemberEntry>()
   private _hiddenMembers = 0
@@ -368,16 +367,17 @@ class RoomState {
   }
   /** Runs `read`, recording the membership events this view gets meanwhile. */
   async recordingMembership<T>(read: () => Promise<T>): Promise<{ value: T; events: MembershipEvent[] }> {
+    assert(this._recording === null)
     const events: MembershipEvent[] = []
-    this._membershipRecords.add(events)
+    this._recording = events
     try {
       return { value: await read(), events }
     } finally {
-      this._membershipRecords.delete(events)
+      this._recording = null
     }
   }
   private _record(event: MembershipEvent): void {
-    for (const events of this._membershipRecords) events.push(event)
+    this._recording?.push(event)
   }
   // ── Event application ──
   applyJoin(member: MemberSnapshot): boolean {
