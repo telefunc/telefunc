@@ -1,4 +1,4 @@
-export { newHoldConfig, holdCounts, holdRecord, holdChange, afterHoldChange, scheduleClose, maintainHold, lapseNewRoom }
+export { newHoldConfig, holdCounts, holdChange, afterHoldChange, createHold, maintainHold, lapseNewRoom }
 export type { RoomIncarnation }
 
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
@@ -13,6 +13,7 @@ import { decodeCellCounter } from '../../backend/room/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
 import type { HoldConfig } from '../protocol.js'
+import { roomClosedError } from '../errors.js'
 import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from './cells.js'
 import { closeIncarnation } from './close.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
@@ -92,6 +93,21 @@ function afterHoldChange(room: RoomIncarnation, change: HoldChange | null): void
   if (after.closesAt !== undefined) return scheduleClose(room, after.closesAt)
   if (before.holds === 0 || before.joins > 0 !== after.joins > 0)
     void extendLapse(room, after, before.holds === 0).catch(reportRoomError)
+}
+
+/** Counts a new room's creation, which a first hold may have counted before it. */
+async function createHold(room: RoomIncarnation): Promise<void> {
+  const { hold } = room
+  if (hold === null) return
+  const result = await getRoomBackend().compareExchangeCells(room.id, room.inc, {
+    expect: [],
+    mutations: [],
+    counts: holdCounts(hold, 0),
+  })
+  if (result === 'stale-inc') throw roomClosedError(room.id)
+  assert(result !== 'conflict')
+  const { closesAt } = holdRecord(hold, result.committed)
+  if (closesAt !== undefined) scheduleClose(room, closesAt)
 }
 
 /** Each heartbeat, after its roster read reaped lapsed holds: keeps a held room's lapse ahead, or arms the close of

@@ -36,7 +36,6 @@ import type {
   SendGuard,
 } from '../types.js'
 import {
-  createHold,
   evictMember,
   reapAndCountPresence,
   reapAndReadMembersById,
@@ -56,7 +55,7 @@ import { ServerRoom } from './room.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
-import { lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
+import { createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<

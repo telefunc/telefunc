@@ -1,5 +1,4 @@
 export {
-  createHold,
   holdViews,
   removeView,
   createMember,
@@ -29,14 +28,7 @@ import {
 import type { LeaveCause } from '../types.js'
 import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
-import {
-  afterHoldChange,
-  holdChange,
-  holdCounts,
-  holdRecord,
-  scheduleClose,
-  type RoomIncarnation,
-} from './lifecycle.js'
+import { afterHoldChange, holdChange, holdCounts, type RoomIncarnation } from './lifecycle.js'
 import {
   CLEANUP_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
@@ -86,19 +78,6 @@ async function mutateCells<T>(
     if (result === 'stale-inc') throw roomClosedError(roomId)
     return result === 'conflict' ? CX_CONFLICT : { value, counters: result.committed }
   })
-}
-
-/** Counts a new room's creation, which a first hold may have counted before it. */
-async function createHold(room: RoomIncarnation): Promise<void> {
-  const { hold } = room
-  if (hold === null) return
-  const { counters } = await mutateCells(room.id, room.inc, [], () => ({
-    value: undefined,
-    mutations: [],
-    counts: holdCounts(hold, 0),
-  }))
-  const { closesAt } = holdRecord(hold, counters)
-  if (closesAt !== undefined) scheduleClose(room, closesAt)
 }
 
 /** Persist a join's member record and identity marker; a non-hidden member holds the room. */
