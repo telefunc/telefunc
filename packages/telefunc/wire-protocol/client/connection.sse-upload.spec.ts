@@ -173,10 +173,6 @@ describe('an upload POST whose open-ack never comes', () => {
     vi.useFakeTimers()
   })
 
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
   /** A page whose upload POST gets no open-ack: it writes 7 into the upload's body, gives the upload up, then sends 8. */
   async function pageGivingUpItsUpload(name: string) {
     const received: number[] = []
@@ -232,10 +228,6 @@ describe('an upload POST whose open-ack never comes', () => {
 describe('an upload POST a proxy holds until its body ends', () => {
   beforeEach(() => {
     vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
   })
 
   /** A page whose upload POST gets no open-ack: the proxy forwards it only once its body ended, when `forwardUpload` is
@@ -388,10 +380,10 @@ test("a batch POST still in flight for a dead wire can't unsubscribe the listene
   expect(first).toEqual(['before'])
   holdBatches = true
   offFirst()
-  const second: string[] = []
-  page.subscribe((message) => void second.push(message))
   await advanceUntil(() => held.length === 1, 1_000)
   expect(held).toHaveLength(1)
+  const second: string[] = []
+  page.subscribe((message) => void second.push(message))
   cutWire()
   await advanceUntil(() => wires === 2 && (page as any)._connection.state.tag === 'open', 5_000)
   expect(wires).toBe(2)
@@ -606,10 +598,6 @@ test("a RECONCILED that comes on an SSE wire the page gave up doesn't settle the
 describe('a slow uplink', () => {
   beforeEach(() => {
     vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
   })
 
   /** A page that uploads `frames` of 64 KiB on a connection to a server whose uplink takes `uplinkBytesPerS`. */
