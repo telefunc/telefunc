@@ -29,11 +29,9 @@ import { currentCloudflareSession } from './session.js'
 const PRESENCE_TTL_MS = 90_000
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000
 
-/** `locationBucket` is the publishing session's; a publish from outside a session, as from a cron trigger, has none. */
 type BroadcastPublishRequest = {
   key: string
   kind: BroadcastRoute['kind']
-  locationBucket: LocationBucket | null
   payload: BroadcastPayload
 }
 
@@ -169,13 +167,13 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
 }
 
 const AUTHORITY_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRIMARY KEY, seq INTEGER NOT NULL, authority_bucket TEXT);
+  CREATE TABLE IF NOT EXISTS broadcast_key (key TEXT PRIMARY KEY, seq INTEGER NOT NULL);
   CREATE TABLE IF NOT EXISTS broadcast_presence
     (route_key TEXT NOT NULL, member TEXT NOT NULL, bucket TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (route_key, member));
 `
 
-/** A key authority DO's Broadcast state, in its SQLite storage: each key's `seq` and first-touch bucket, and each
- *  route's member presence. The tables are created on first use, so a DO in another role never has them. */
+/** A key authority DO's Broadcast state, in its SQLite storage: each key's `seq` and each route's member presence.
+ *  The tables are created on first use, so a DO in another role never has them. */
 class CloudflareBroadcastAuthorityState {
   readonly #storage: DurableObjectStorage
   #schema = false
@@ -184,28 +182,13 @@ class CloudflareBroadcastAuthorityState {
     this.#storage = state.storage
   }
 
-  /** The key's next `seq`; the key's first publish from a session fixes its authority bucket. */
-  nextSequence(
-    key: string,
-    preferredBucket: LocationBucket | null,
-  ): { seq: number; authorityBucket: LocationBucket | null } {
+  nextSequence(key: string): number {
     const sql = this.#sql()
     return this.#storage.transactionSync(() => {
-      const row = sql
-        .exec<{ seq: number; authority_bucket: LocationBucket | null }>(
-          'SELECT seq, authority_bucket FROM broadcast_key WHERE key = ?',
-          key,
-        )
-        .toArray()[0]
-      const current = row?.seq ?? 0
-      const authorityBucket = row?.authority_bucket ?? preferredBucket
-      sql.exec(
-        'INSERT OR REPLACE INTO broadcast_key (key, seq, authority_bucket) VALUES (?, ?, ?)',
-        key,
-        current + 1,
-        authorityBucket,
-      )
-      return { seq: current + 1, authorityBucket }
+      const row = sql.exec<{ seq: number }>('SELECT seq FROM broadcast_key WHERE key = ?', key).toArray()[0]
+      const seq = (row?.seq ?? 0) + 1
+      sql.exec('INSERT OR REPLACE INTO broadcast_key (key, seq) VALUES (?, ?)', key, seq)
+      return seq
     })
   }
 
@@ -393,7 +376,7 @@ class CloudflareBroadcast {
   async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
     const member = currentCloudflareSession()?.broadcast
     const locationBucket = member?.bucket ?? null
-    const request = { key: route.key, kind: route.kind, locationBucket, payload }
+    const request = { key: route.key, kind: route.kind, payload }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
     const name = this.authorityName(route.key)
     return member === undefined
@@ -414,11 +397,9 @@ class CloudflareBroadcast {
     calls: BroadcastCalls,
     request: BroadcastPublishRequest,
   ): Promise<PublishResult> {
-    const { key, kind, locationBucket, payload } = request
-    const { seq, authorityBucket } = authorityState.nextSequence(key, locationBucket)
-    const info = { seq, timestamp: Date.now() }
+    const { key, kind, payload } = request
+    const info = { seq: authorityState.nextSequence(key), timestamp: Date.now() }
     const presenceByBucket = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
-    const fanoutBuckets = Array.from(presenceByBucket.keys())
     let receivers = 0
     // Presence written before a redeploy dropped its region forwards through the fallback region's coordinators.
     const membersByCoordinatorBucket = new Map<LocationBucket, string[]>()
@@ -437,7 +418,7 @@ class CloudflareBroadcast {
       ),
     )
     reportLostDeliveries(`Cloudflare Broadcast delivery of '${key}'`, forwards)
-    return { ...info, receivers, meta: { authorityBucket, fanoutBuckets } }
+    return { ...info, receivers }
   }
 
   /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs, in arrival order. */

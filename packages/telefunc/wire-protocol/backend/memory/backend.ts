@@ -201,7 +201,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       // A string can't change, so every subscription gets the same one; bytes are copied for each.
       for (const target of targets) target.deliver(typeof payload === 'string' ? payload : copyBytes(payload), mark)
     })
-    return { seq: mark.seq, timestamp: mark.timestamp, receivers, meta: { transport: 'in-memory' } }
+    return { seq: mark.seq, timestamp: mark.timestamp, receivers }
   }
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */

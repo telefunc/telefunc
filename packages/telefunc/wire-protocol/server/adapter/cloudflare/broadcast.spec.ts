@@ -405,39 +405,14 @@ describe('cloudflare broadcast routing', () => {
     await subscription.unsubscribe()
   })
 
-  it('keeps the first-touch authority bucket in publish receipts', async () => {
-    const authorityState = createAuthorityState()
-    const calls: BroadcastCalls = new OrderedStubs()
-    const broadcast = createBroadcast(createBasicBinding())
-    // The key's first publish, from weur, fixes its authority bucket.
-    authorityState.nextSequence('room:first-touch', 'weur')
-    for (const bucket of ['weur', 'apac'] as const) {
-      authorityState.setPresence({
-        key: 'room:first-touch',
-        kind: 'text',
-        member: `telefunc-shard-${bucket}-0`,
-        bucket,
-      })
-    }
-    const receipt = await broadcast.publishToSubscribers(authorityState, calls, {
-      key: 'room:first-touch',
-      kind: 'text',
-      locationBucket: 'apac',
-      payload: '{"text":"hello"}',
-    })
-    expect(receipt).toMatchObject({ seq: 2, meta: { authorityBucket: 'weur' } })
-    expect((receipt.meta!.fanoutBuckets as string[]).sort()).toEqual(['apac', 'weur'])
-    expect(receipt.timestamp).toEqual(expect.any(Number))
-  })
-
   it('a publish waits only for its own session’s subscription, and leaves from its own session', async () => {
     const recorded = Promise.withResolvers<void>()
-    const publishBuckets: Array<string | null> = []
+    const publishBuckets: string[] = []
     const broadcast = createBroadcast(
       createBasicBinding({
         onPresence: () => recorded.promise,
         onPublish(_id, request) {
-          publishBuckets.push(request.locationBucket)
+          publishBuckets.push(JSON.parse(request.payload))
           return Promise.resolve({ seq: publishBuckets.length, timestamp: Date.now() })
         },
       }),
@@ -488,10 +463,11 @@ describe('cloudflare broadcast routing', () => {
       await flushMicrotasks(2)
       expect(received).toEqual([])
       recorded.resolve()
-      await expect(receipt).resolves.toMatchObject({
+      await expect(receipt).resolves.toStrictEqual({
         key: 'room:test',
         seq: 1,
-        meta: { authorityBucket: 'weur', fanoutBuckets: ['weur'] },
+        timestamp: expect.any(Number),
+        receivers: 1,
       })
       expect(received).toEqual(['hello'])
     })
@@ -514,7 +490,6 @@ describe('cloudflare broadcast routing', () => {
     await broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
-      locationBucket: 'weur',
       payload: '{"text":"hello"}',
     })
     expect(coordinators.sort()).toEqual([
@@ -547,7 +522,6 @@ describe('cloudflare broadcast routing', () => {
     const receipt = await broadcast.publishToSubscribers(authorityState, new OrderedStubs(), {
       key: 'room:redeployed',
       kind: 'text',
-      locationBucket: 'weur',
       payload: '"hello"',
     })
     expect(forwards).toEqual([
@@ -626,8 +600,7 @@ describe('cloudflare broadcast routing', () => {
     const route = { key: 'room:order', kind: 'text' } as const
     const subscription = member.openSubscription(route, (_payload, info) => void received.push(info.seq))
     await untilReady(subscription)
-    const publish = () =>
-      broadcast.publishToSubscribers(authority, calls, { ...route, locationBucket: 'weur', payload: '"x"' })
+    const publish = () => broadcast.publishToSubscribers(authority, calls, { ...route, payload: '"x"' })
     await Promise.all([publish(), publish(), publish()])
     expect(received).toEqual([1, 2, 3])
     await subscription.unsubscribe()
@@ -668,12 +641,12 @@ describe('cloudflare broadcast routing', () => {
     expect(published).toEqual([[1], [1], [3]])
   })
 
-  it('publishes from outside a session, as from a cron trigger, without a bucket', async () => {
-    const coordinatorPublishes: Array<{ name: string; key: string; locationBucket: string | null; text: string }> = []
+  it('publishes from outside a session, as from a cron trigger, to the key’s authority', async () => {
+    const coordinatorPublishes: Array<{ name: string; key: string; text: string }> = []
     const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({
-        onPublish(id, { key, locationBucket, payload }) {
-          coordinatorPublishes.push({ name: id.name, key, locationBucket, text: payload })
+        onPublish(id, { key, payload }) {
+          coordinatorPublishes.push({ name: id.name, key, text: payload })
           return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
       }),
@@ -689,7 +662,6 @@ describe('cloudflare broadcast routing', () => {
       {
         name: 'telefunc:broadcast:authority:room:test:no-ctx',
         key: 'room:test:no-ctx',
-        locationBucket: null,
         text: '{"text":"hello"}',
       },
     ])
@@ -721,14 +693,12 @@ describe('cloudflare broadcast routing', () => {
     const firstPublish = broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
-      locationBucket: 'weur',
       payload: '{"text":"first"}',
     })
     await flushMicrotasks(8)
     const secondPublish = broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
-      locationBucket: 'weur',
       payload: '{"text":"second"}',
     })
     await flushMicrotasks(8)
@@ -862,7 +832,6 @@ describe('cloudflare broadcast routing', () => {
       expect(subscription.state()).toBe('lost')
       await broadcast.publishToSubscribers(authority, calls, {
         ...route,
-        locationBucket: 'weur',
         payload: '"during"',
       })
       expect(received).toEqual(['"during"'])

@@ -337,8 +337,8 @@ function publishRoute<Kind extends BroadcastKind>(
 }
 
 /** The backend's receipt as the public ack, carrying its key like a subscriber's `info`. */
-function toAck(key: string, { seq, timestamp, meta, receivers }: PublishResult): ChannelPublishAck {
-  return receivers === undefined ? { key, seq, timestamp, meta } : { key, seq, timestamp, meta, receivers }
+function toAck(key: string, { seq, timestamp, receivers }: PublishResult): ChannelPublishAck {
+  return receivers === undefined ? { key, seq, timestamp } : { key, seq, timestamp, receivers }
 }
 
 function assertBroadcastKey(key: unknown): void {

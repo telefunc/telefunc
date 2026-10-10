@@ -10,7 +10,6 @@ export type {
   ChannelAck,
   ChannelPublishAck,
   ChannelPublishInfo,
-  ChannelPublishMeta,
   ChannelListenReturn,
   ChannelListener,
   ChannelBinaryListener,
@@ -26,7 +25,6 @@ import type { Listeners } from '../utils/Listeners.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown
-type ChannelPublishMeta = Record<string, unknown>
 /** Metadata delivered to broadcast subscribers alongside each message. */
 type ChannelPublishInfo = {
   key: string
@@ -38,7 +36,6 @@ type ChannelPublishInfo = {
   timestamp: number
 }
 type ChannelPublishAck = ChannelPublishInfo & {
-  meta?: ChannelPublishMeta
   /** Who the message was handed to, when the backend can count it: subscribers in memory, server instances on
    *  standalone Redis, session Durable Objects on Cloudflare; absent on Redis Cluster. Not a viewer count. */
   receivers?: number

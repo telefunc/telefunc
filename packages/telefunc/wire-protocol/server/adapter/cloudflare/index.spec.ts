@@ -448,7 +448,6 @@ describe('cloudflare adapter entrypoint', () => {
     const publish = {
       key: 'room:test',
       kind: 'text' as const,
-      locationBucket: 'weur' as const,
       payload: '"hello"',
     }
     instance.telefuncBroadcastPublish(publish)

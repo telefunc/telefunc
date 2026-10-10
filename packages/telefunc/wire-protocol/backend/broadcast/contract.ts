@@ -14,7 +14,6 @@ type PublishResult = {
   seq: number
   timestamp: number
   receivers?: number
-  meta?: Record<string, unknown>
 }
 
 /** What a backend implements for Broadcast. */

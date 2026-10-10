@@ -484,9 +484,9 @@ describe('keyed in-process broadcast', () => {
     expect(b1.key).toBe(k2)
     expect(a2.seq).toBe(a1.seq + 1)
     expect(b1.seq).toBe(a1.seq) // separate key → seq counter is independent
+    expect(Object.keys(a1).sort()).toEqual(['key', 'receivers', 'seq', 'timestamp'])
     expect(typeof a1.timestamp).toBe('number')
     expect(a1.receivers).toBe(0)
-    expect(a1.meta).toEqual({ transport: 'in-memory' })
   })
 })
 
