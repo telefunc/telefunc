@@ -903,6 +903,10 @@ class ServerLocalParticipant extends ParticipantBase {
       options?.retain === undefined || typeof options.retain === 'boolean',
       'publish() options.retain should be a boolean',
     )
+    assertUsage(
+      options?.coalesce === undefined || typeof options.coalesce === 'string',
+      'publish() options.coalesce should be a string',
+    )
     return markHandled(this._publishText(ownMessage(data), options?.retain))
   }
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
@@ -936,6 +940,10 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     assertKnownOptions(options, ['ack'], 'send()')
+    assertUsage(
+      options?.ack === undefined || typeof options.ack === 'boolean',
+      'send() options.ack should be a boolean',
+    )
     return markHandled(this._sendDm(recipientId(to), ownMessage(data), options?.ack === true))
   }
   private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {

@@ -383,6 +383,10 @@ abstract class ClientParticipantBase extends ParticipantBase {
       options?.retain === undefined || typeof options.retain === 'boolean',
       'publish() options.retain should be a boolean',
     )
+    assertUsage(
+      options?.coalesce === undefined || typeof options.coalesce === 'string',
+      'publish() options.coalesce should be a string',
+    )
     const key = options?.coalesce
     if (key === undefined) return markHandled(this._sendPublish(data, options?.retain))
     return markHandled(
@@ -407,6 +411,10 @@ abstract class ClientParticipantBase extends ParticipantBase {
   // Implementation of the overloaded `LocalParticipant.send`; the interface supplies precise returns.
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     assertKnownOptions(options, ['ack'], 'send()')
+    assertUsage(
+      options?.ack === undefined || typeof options.ack === 'boolean',
+      'send() options.ack should be a boolean',
+    )
     return markHandled(this._sendDm(recipientId(to), data, options?.ack === true))
   }
 

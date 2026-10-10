@@ -1746,6 +1746,8 @@ describe('Room public behavior', () => {
       [() => room.join({ selfDelivery: 'false' } as never), 'join() options.selfDelivery should be a boolean'],
       [() => room.join({ selfDelivery: 0 } as never), 'join() options.selfDelivery should be a boolean'],
       [() => me.publish('kept', { retain: 1 } as never), 'publish() options.retain should be a boolean'],
+      [() => me.publish('kept', { coalesce: 1 } as never), 'publish() options.coalesce should be a string'],
+      [() => me.send(me.id, 'hi', { ack: 'yes' } as never), 'send() options.ack should be a boolean'],
       [
         () => me.publishBinary(new Uint8Array([1]), { retain: 'yes' } as never),
         'publishBinary() options.retain should be a boolean',
@@ -3466,6 +3468,8 @@ describe('client Room lifecycle', () => {
       [() => me.publish('x', { persist: true } as never), 'Unknown publish() option: persist'],
       [() => me.send(id, 'x', { confirm: true } as never), 'Unknown send() option: confirm'],
       [() => me.publish('x', { retain: 1 } as never), 'publish() options.retain should be a boolean'],
+      [() => me.publish('x', { coalesce: 1 } as never), 'publish() options.coalesce should be a string'],
+      [() => me.send(id, 'x', { ack: 'yes' } as never), 'send() options.ack should be a boolean'],
       [
         () => me.publishBinary(new Uint8Array([1]), { retain: 1 } as never),
         'publishBinary() options.retain should be a boolean',
