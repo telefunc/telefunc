@@ -92,6 +92,25 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     if ('staleInc' in read) throw new Error('the room is gone')
     expect(JSON.parse(Buffer.from(read.cells.get('holds')!).toString())).toMatchObject({ value: 1_000 })
   })
+
+  it('reads the roster as of one moment while a thousand joins land, never failing', async () => {
+    const prefix = uniquePrefix('roster-under-joins')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('roster-under-joins')
+    const startAt = Date.now() + 3_000
+    let joining = true
+    const joined = Promise.all(
+      [0, 1, 2, 3].map(() => joinFrom({ ...env, PREFIX: prefix, ROOM: room.id, COUNT: '250', START_AT: `${startAt}` })),
+    ).finally(() => (joining = false))
+    await new Promise((resolve) => setTimeout(resolve, startAt - Date.now()))
+    const sizes: number[] = []
+    while (joining) sizes.push((await Room.getParticipants(room.id)).length)
+    expect((await joined).flat()).toEqual([])
+    // Nobody leaves, so each read lists at least what the one before it did.
+    expect(sizes).toEqual([...sizes].sort((a, b) => a - b))
+    expect(await Room.getParticipants(room.id)).toHaveLength(1_000)
+  })
 })
 
 /** A server that joins the room COUNT times at START_AT, and reports each join's failure. */

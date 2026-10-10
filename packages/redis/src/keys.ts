@@ -6,10 +6,9 @@ export {
   headKey,
   generationKeysKey,
   revKey,
-  versionsKey,
-  cellKeyPrefix,
-  cellKey,
   cellIndexKey,
+  cellValuesKey,
+  cellVersionsKey,
   orderKey,
   retainedKeyPrefix,
   retainedKey,
@@ -58,19 +57,17 @@ function generationKeysKey(prefix: string, roomId: string, inc: string): string 
 function revKey(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rev`
 }
-/** Each cell's version, by its key. */
-function versionsKey(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:vers`
-}
-function cellKeyPrefix(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:c:`
-}
-function cellKey(prefix: string, roomId: string, inc: string, key: string): string {
-  return `${cellKeyPrefix(prefix, roomId, inc)}${key}`
-}
 /** The generation's cell keys, all at score 0, so a prefix read is a lexicographic range. */
 function cellIndexKey(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:cells`
+}
+/** Each cell's bytes, by its key. */
+function cellValuesKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:values`
+}
+/** Each cell's version, by its key. */
+function cellVersionsKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:versions`
 }
 function orderKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${genPrefix(prefix, roomId, inc)}:o:${laneKey}`

@@ -8,6 +8,7 @@ import {
   type BroadcastPayload,
   type BroadcastRoute,
   type CellCounter,
+  type CellSelector,
   type CellsCx,
   type CxResult,
   type HeadCx,
@@ -22,8 +23,8 @@ import {
   broadcastChannel,
   broadcastSequenceKey,
   cellIndexKey,
-  cellKey,
-  cellKeyPrefix,
+  cellValuesKey,
+  cellVersionsKey,
   channelKey,
   directoryIndexKey,
   directoryTagsKey,
@@ -33,7 +34,6 @@ import {
   orderKey,
   retainedKey,
   revKey,
-  versionsKey,
 } from './keys.js'
 
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
@@ -139,34 +139,26 @@ if not head then return '{"head":null}' end
 return '{"head":' .. cjson.encode(head) .. '}'
 `
 
-// The generation's cells under a prefix, with the revision that fences reading them.
-//   KEYS: [1]=head [2]=revision [3]=cell-index
-//   ARGV: [1]=inc [2]=cell-key prefix [3]=cell prefix
-// No UTF-8 text holds the byte 0xFF, so the range ends past every key under the prefix.
-const FIND_CELLS_LUA = `${HEAD_PRELUDE}
-local head = tf_live_head(KEYS[1], tf_now())
-if not head or head.inc ~= ARGV[1] then return {'stale'} end
-local reply = {'found', redis.call('GET', KEYS[2]) or '0'}
-local wanted = ARGV[2] .. ARGV[3]
-for _, key in ipairs(redis.call('ZRANGEBYLEX', KEYS[3], '[' .. wanted, '(' .. wanted .. '\\255')) do
-  reply[#reply + 1] = string.sub(key, #ARGV[2] + 1)
-end
-return reply
-`
-
-// Reads cells, each with its version, while the head still names the incarnation (closing tails may read). With an
-// expected revision, a moved one reads as 'moved'; a missing cell reads as nil.
-//   KEYS: [1]=head [2]=revision [3]=versions [4..]=cells
-//   ARGV: [1]=inc [2]=expected revision or ''
+// Reads the named cells, or every cell under a prefix, each with its version, while the head still names the
+// incarnation (closing tails may read). A missing cell is left out.
+//   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
+//   ARGV: [1]=inc [2]='keys' then the cell keys, or 'prefix' then the prefix
+// No UTF-8 text holds the byte 0xFF, so a prefix's range ends past every key under it.
 const READ_CELLS_LUA = `${HEAD_PRELUDE}
 local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
-local revision = redis.call('GET', KEYS[2]) or '0'
-if ARGV[2] ~= '' and revision ~= ARGV[2] then return {'moved'} end
-local reply = {'cells', revision}
-for i = 4, #KEYS do
-  reply[#reply + 1] = redis.call('GET', KEYS[i])
-  reply[#reply + 1] = redis.call('HGET', KEYS[3], KEYS[i])
+local keys, first = ARGV, 3
+if ARGV[2] == 'prefix' then
+  keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[3], '(' .. ARGV[3] .. '\\255'), 1
+end
+local reply = {'cells'}
+for i = first, #keys do
+  local value = redis.call('HGET', KEYS[3], keys[i])
+  if value then
+    reply[#reply + 1] = keys[i]
+    reply[#reply + 1] = value
+    reply[#reply + 1] = redis.call('HGET', KEYS[4], keys[i])
+  end
 end
 return reply
 `
@@ -194,63 +186,62 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 
 // CELLS CX: all mutations and counts or none, while each expected cell is at its version; success implies the head
 // precondition (open + inc) held at apply time. A commit's writes take the generation's next revision as version.
-//   KEYS: [1]=head [2]=rev [3]=generation-keys [4]=cell-index [5]=versions, then the mutated, expected and counted cells
-//   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell op('set'|'del') and value,
-//         per expected cell its version ('' while absent), per counted cell its delta and create ('1' or '')
+//   KEYS: [1]=head [2]=rev [3]=generation-keys [4]=cell-index [5]=values [6]=versions
+//   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
+//         and value, per expected cell its key and version ('' while absent), per counted cell its key, delta and
+//         create ('1' or '')
 const CELLS_CX_LUA = `${HEAD_PRELUDE}
-local head_key, rev_key, generation_keys_key, cell_index_key, versions_key = KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
+local head_key, rev_key, generation_keys_key, cell_index_key, values_key, versions_key =
+  KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local now = tf_now()
 local head = tf_live_head(head_key, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return {'stale-inc'} end
 local mutated, expected, counted = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
-for i = 1, expected do
-  local key = KEYS[5 + mutated + i]
-  if (redis.call('HGET', versions_key, key) or '') ~= ARGV[4 + 2 * mutated + i] then return {'conflict'} end
+local first_expected = 5 + 3 * mutated
+local first_counted = first_expected + 2 * expected
+for at = first_expected, first_counted - 1, 2 do
+  if (redis.call('HGET', versions_key, ARGV[at]) or '') ~= ARGV[at + 1] then return {'conflict'} end
 end
 local version = redis.call('INCR', rev_key)
 local function write(key, value)
   if value then
-    redis.call('SET', key, value)
+    redis.call('HSET', values_key, key, value)
     redis.call('HSET', versions_key, key, version)
-    redis.call('SADD', generation_keys_key, key)
     redis.call('ZADD', cell_index_key, 0, key)
   else
-    redis.call('DEL', key)
+    redis.call('HDEL', values_key, key)
     redis.call('HDEL', versions_key, key)
-    redis.call('SREM', generation_keys_key, key)
     redis.call('ZREM', cell_index_key, key)
   end
 end
-for i = 1, mutated do
-  write(KEYS[5 + i], ARGV[3 + 2 * i] == 'set' and ARGV[4 + 2 * i] or nil)
+for at = 5, first_expected - 1, 3 do
+  write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil)
 end
 local reply = {'committed'}
-for i = 1, counted do
-  local key = KEYS[5 + mutated + expected + i]
-  local base = 4 + 2 * mutated + expected + 2 * (i - 1)
-  local delta = tonumber(ARGV[base + 1])
-  local raw = redis.call('GET', key)
+for at = first_counted, first_counted + 3 * counted - 1, 3 do
+  local key, delta = ARGV[at], tonumber(ARGV[at + 1])
+  local raw = redis.call('HGET', values_key, key)
   local counter = raw and cjson.decode(raw)
-  if not counter and ARGV[base + 2] == '1' then counter = { value = 0 } end
+  if not counter and ARGV[at + 2] == '1' then counter = { value = 0 } end
   if counter then
     if delta ~= 0 or not raw then
       counter.value = counter.value + delta
       counter.changedAt = now
       write(key, string.format('{"value":%d,"changedAt":%d}', counter.value, counter.changedAt))
     end
-    reply[#reply + 1] = tostring(i)
+    reply[#reply + 1] = key
     reply[#reply + 1] = string.format('%d', counter.value)
     reply[#reply + 1] = string.format('%d', counter.changedAt)
   end
 end
-redis.call('SADD', generation_keys_key, rev_key, cell_index_key, versions_key)
+redis.call('SADD', generation_keys_key, rev_key, cell_index_key, values_key, versions_key)
 return reply
 `
 
 // COMMIT: while the room is closing, only the close's control commit under its lease lands.
-//   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6..]=required live cells
+//   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6]=cell values
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1')
-//         [5]=payload [6]=local delivery-fence token or ''
+//         [5]=payload [6]=local delivery-fence token or '' [7..]=required live cells
 const COMMIT_LUA = `${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, generation_keys_key =
@@ -267,8 +258,8 @@ if head and head.inc == ARGV[1] then
   end
 end
 if not ok then return '{"stale":"incarnation"}' end
-for i = 6, #KEYS do
-  if not redis.call('GET', KEYS[i]) then return '{"stale":"cell","index":' .. (i - 6) .. '}' end
+for i = 7, #ARGV do
+  if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - 7) .. '}' end
 end
 
 local base_seq, base_ts = 0, 0
@@ -401,46 +392,30 @@ const REDIS_COMMANDS = {
       return head === null ? null : toPublicHead(head)
     },
   }),
-  findCells: command({
-    name: 'tfRoomFindCells',
-    lua: FIND_CELLS_LUA,
-    numberOfKeys: 3,
-    invoke: (prefix, { roomId, inc, cellPrefix }: RoomInc & { cellPrefix: string }) => ({
-      keys: [headKey(prefix, roomId), revKey(prefix, roomId, inc), cellIndexKey(prefix, roomId, inc)],
-      argv: [inc, cellKeyPrefix(prefix, roomId, inc), cellPrefix],
-    }),
-    parse: (reply): { staleInc: true } | { revision: string; keys: string[] } => {
-      const [tag, revision, ...keys] = reply as string[]
-      return tag === 'stale' ? { staleInc: true } : { revision: revision!, keys }
-    },
-  }),
   readCells: command({
     name: 'tfRoomReadCells',
     lua: READ_CELLS_LUA,
-    numberOfKeys: null,
+    numberOfKeys: 4,
     binaryReply: true,
-    invoke: (prefix, { roomId, inc, keys, revision }: RoomInc & { keys: readonly string[]; revision?: string }) => ({
+    invoke: (prefix, { roomId, inc, sel }: RoomInc & { sel: CellSelector }) => ({
       keys: [
         headKey(prefix, roomId),
-        revKey(prefix, roomId, inc),
-        versionsKey(prefix, roomId, inc),
-        ...keys.map((key) => cellKey(prefix, roomId, inc, key)),
+        cellIndexKey(prefix, roomId, inc),
+        cellValuesKey(prefix, roomId, inc),
+        cellVersionsKey(prefix, roomId, inc),
       ],
-      argv: [inc, revision ?? ''],
+      argv: [inc, ...('keys' in sel ? ['keys', ...sel.keys] : ['prefix', sel.prefix])],
     }),
-    parse: (reply, { keys }): CellsRead | 'moved' => {
-      const [tag, _revision, ...values] = reply as Array<Buffer | null>
-      const outcome = tag!.toString()
-      if (outcome === 'stale') return { staleInc: true }
-      if (outcome === 'moved') return 'moved'
+    parse: (reply): CellsRead => {
+      const [tag, ...found] = reply as Buffer[]
+      if (tag!.toString() === 'stale') return { staleInc: true }
       const cells = new Map<string, Uint8Array>()
       const versions = new Map<string, string>()
-      keys.forEach((key, i) => {
-        const value = values[2 * i]
-        if (value === null || value === undefined) return
-        cells.set(key, Uint8Array.from(value))
-        versions.set(key, values[2 * i + 1]!.toString())
-      })
+      for (let i = 0; i < found.length; i += 3) {
+        const key = found[i]!.toString()
+        cells.set(key, Uint8Array.from(found[i + 1]!))
+        versions.set(key, found[i + 2]!.toString())
+      }
       return { cells, versions }
     },
   }),
@@ -471,9 +446,8 @@ const REDIS_COMMANDS = {
   cellsCx: command({
     name: 'tfRoomCellsCx',
     lua: CELLS_CX_LUA,
-    numberOfKeys: null,
+    numberOfKeys: 6,
     invoke: (prefix, { roomId, inc, cx }: RoomInc & { cx: CellsCx }) => {
-      const cell = (key: string) => cellKey(prefix, roomId, inc, key)
       const counts = cx.counts ?? []
       return {
         keys: [
@@ -481,37 +455,35 @@ const REDIS_COMMANDS = {
           revKey(prefix, roomId, inc),
           generationKeysKey(prefix, roomId, inc),
           cellIndexKey(prefix, roomId, inc),
-          versionsKey(prefix, roomId, inc),
-          ...cx.mutations.map(({ key }) => cell(key)),
-          ...cx.expect.map(({ key }) => cell(key)),
-          ...counts.map(({ key }) => cell(key)),
+          cellValuesKey(prefix, roomId, inc),
+          cellVersionsKey(prefix, roomId, inc),
         ],
         argv: [
           inc,
           String(cx.mutations.length),
           String(cx.expect.length),
           String(counts.length),
-          ...cx.mutations.flatMap(({ bytes }) => (bytes === null ? ['del', ''] : ['set', toBuffer(bytes)])),
-          ...cx.expect.map(({ version }) => version ?? ''),
-          ...counts.flatMap(({ delta, create }) => [String(delta), create ? '1' : '']),
+          ...cx.mutations.flatMap(({ key, bytes }) =>
+            bytes === null ? [key, 'del', ''] : [key, 'set', toBuffer(bytes)],
+          ),
+          ...cx.expect.flatMap(({ key, version }) => [key, version ?? '']),
+          ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
         ],
       }
     },
-    parse: (reply, { cx }): CxResult => {
+    parse: (reply): CxResult => {
       const [tag, ...counted] = reply as string[]
       if (tag !== 'committed') return tag as 'conflict' | 'stale-inc'
       const counters = new Map<string, CellCounter>()
-      for (let i = 0; i < counted.length; i += 3) {
-        const { key } = cx.counts![Number(counted[i]) - 1]!
-        counters.set(key, { value: Number(counted[i + 1]), changedAt: Number(counted[i + 2]) })
-      }
+      for (let i = 0; i < counted.length; i += 3)
+        counters.set(counted[i]!, { value: Number(counted[i + 1]), changedAt: Number(counted[i + 2]) })
       return { committed: counters }
     },
   }),
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: null,
+    numberOfKeys: 6,
     invoke: (prefix, input: CommitInput) => {
       const { roomId, inc } = input
       const laneKey = encodeLaneKey(input.lane)
@@ -522,7 +494,7 @@ const REDIS_COMMANDS = {
           retainedKey(prefix, roomId, inc, laneKey),
           channelKey(prefix, roomId, inc, laneKey),
           generationKeysKey(prefix, roomId, inc),
-          ...input.requiredCellKeys.map((required) => cellKey(prefix, roomId, inc, required)),
+          cellValuesKey(prefix, roomId, inc),
         ],
         argv: [
           inc,
@@ -531,6 +503,7 @@ const REDIS_COMMANDS = {
           input.retain ? '1' : '0',
           toBuffer(input.payload),
           input.fenceToken,
+          ...input.requiredCellKeys,
         ],
       }
     },

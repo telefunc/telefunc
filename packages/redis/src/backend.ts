@@ -41,7 +41,6 @@ import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { RedisSubscriptionDriver } from './subscriber.js'
 
 const DIRECTORY_PAGE_SIZE = 100
-const STABLE_READ_ATTEMPTS = 8
 
 type RedisBackendOptions = {
   redis: RedisClient
@@ -86,19 +85,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return this._run(REDIS_COMMANDS.headCx, { roomId, cx, next })
   }
 
-  async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
-    if ('keys' in sel) {
-      const read = await this._run(REDIS_COMMANDS.readCells, { roomId, inc, keys: sel.keys })
-      assert(read !== 'moved') // without an expected revision there is nothing to move from
-      return read
-    }
-    for (let attempt = 0; attempt < STABLE_READ_ATTEMPTS; attempt++) {
-      const found = await this._run(REDIS_COMMANDS.findCells, { roomId, inc, cellPrefix: sel.prefix })
-      if ('staleInc' in found) return found
-      const read = await this._run(REDIS_COMMANDS.readCells, { roomId, inc, ...found })
-      if (read !== 'moved') return read
-    }
-    throw new Error(`readCells: stable read did not converge in ${STABLE_READ_ATTEMPTS} attempts (room '${roomId}')`)
+  readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
+    return this._run(REDIS_COMMANDS.readCells, { roomId, inc, sel })
   }
 
   compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
