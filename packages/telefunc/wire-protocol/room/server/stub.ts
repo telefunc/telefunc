@@ -245,13 +245,6 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._room._onHolderWantsChanged(this, { text: { all: this._wantsText, members } })
   }
 
-  /** Drops its wants naming `id`; returns whether it held any. */
-  _forgetWantsOf(id: string): boolean {
-    const held = this._textMemberWants.delete(id) || id in this._binary.members
-    delete this._binary.members[id]
-    return held
-  }
-
   private async _publishText(publish: RoomDataPublish): Promise<ChannelPublishAck> {
     this._requireMember(publish.from)
     assertPublishShield(this._publishShield, publish.data)
@@ -287,6 +280,13 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._members.delete(id)
     this._selfSuppressed.delete(id)
     this._replay.forgetMember(id)
+  }
+
+  /** Drops its wants naming `id`; returns whether it held any. */
+  _forgetWantsOf(id: string): boolean {
+    const held = this._textMemberWants.delete(id) || id in this._binary.members
+    delete this._binary.members[id]
+    return held
   }
 
   // Wants, as the room's subscription planner reads them
