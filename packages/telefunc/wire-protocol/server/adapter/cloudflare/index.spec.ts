@@ -177,7 +177,7 @@ describe('cloudflare adapter entrypoint', () => {
     await kv.put('session:my-token', JSON.stringify({ s: 'telefunc-shard-weur-1', b: 'weur' }))
     const request = new Request('https://telefunc.test/_telefunc?session=my-token')
 
-    const response = await tf.serve({
+    await tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
     })
@@ -193,8 +193,7 @@ describe('cloudflare adapter entrypoint', () => {
     const forwardedRequest = fetch.mock.calls[0]![0] as Request
     expect(forwardedRequest.headers.get('x-telefunc-shard')).toBe('telefunc-shard-weur-1')
     expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('weur')
-
-    expect(response?.headers.get('x-telefunc-session')).toBe('my-token')
+    expect(forwardedRequest.headers.get('x-telefunc-session')).toBe('my-token')
   })
 
   it('derives a new shard and token when no token is provided, and hands the token to the session Durable Object', async () => {
@@ -203,7 +202,7 @@ describe('cloudflare adapter entrypoint', () => {
     const kv = createMockKV()
     const request = new Request('https://telefunc.test/_telefunc')
 
-    const response = await tf.serve({
+    await tf.serve({
       request,
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
     })
@@ -213,9 +212,7 @@ describe('cloudflare adapter entrypoint', () => {
     })
     expect(fetch).toHaveBeenCalledTimes(1)
 
-    const token = response?.headers.get('x-telefunc-session')
-    expect(token).toMatch(/^[0-9a-f-]{36}$/)
-    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toBe(token)
+    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
   })
 
   it("leaves a page's pin to its session Durable Object, however many of its first requests miss KV", async () => {
@@ -233,10 +230,10 @@ describe('cloudflare adapter entrypoint', () => {
   })
 
   it('keeps a presented token whose KV entry lapsed, and routes it by that token again', async () => {
-    const { binding } = createBinding()
+    const { binding, fetch } = createBinding()
     const tf = new Telefunc()
     const kv = createMockKV()
-    const response = await tf.serve({
+    await tf.serve({
       request: new Request('https://telefunc.test/_telefunc?session=lapsed-token'),
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
     })
@@ -248,17 +245,28 @@ describe('cloudflare adapter entrypoint', () => {
       'weur',
       'lapsed-token',
     )
-    expect(response?.headers.get('x-telefunc-session')).toBe('lapsed-token')
+    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toBe('lapsed-token')
   })
 
   it('takes the session token from the session query parameter only', async () => {
-    const { binding } = createBinding()
+    const { binding, fetch } = createBinding()
     const tf = new Telefunc()
-    const response = await tf.serve({
+    await tf.serve({
       request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
       env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
     })
-    expect(response?.headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
+    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
+  })
+
+  it("returns the session Durable Object's response as is, without the session token", async () => {
+    const { binding, fetch } = createBinding()
+    const tf = new Telefunc()
+    const response = await tf.serve({
+      request: new Request('https://telefunc.test/_telefunc?session=my-token'),
+      env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
+    })
+    expect(response?.headers.has('x-telefunc-session')).toBe(false)
+    expect(response).toBe(await fetch.mock.results[0]!.value)
   })
 
   it('returns undefined for non-telefunc traffic', async () => {

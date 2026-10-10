@@ -223,17 +223,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })
 
-      const doResponse = await binding
+      return binding
         .get(binding.idFromName(sessionInstanceName), { locationHint: locationBucket })
         .fetch(forwardedRequest)
-
-      if (!isWebSocketRequest) {
-        const headers = new Headers(doResponse.headers)
-        headers.set(TELEFUNC_SESSION_HEADER, token)
-        return new Response(doResponse.body, { status: doResponse.status, headers })
-      }
-
-      return doResponse
     },
     TelefuncDurableObject,
   }
