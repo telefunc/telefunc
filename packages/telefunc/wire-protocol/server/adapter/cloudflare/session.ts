@@ -2,6 +2,7 @@ export { currentCloudflareSession, requireCloudflareSession, withCloudflareSessi
 export type { CloudflareSession }
 
 import { getRawContext, restoreContext } from '../../../../node/server/context/context.js'
+import { assertUsage } from '../../../../utils/assert.js'
 import { CHANNEL_MUX, type ChannelMux } from '../../mux.js'
 import type { CloudflareBroadcastMember } from './broadcast.js'
 import type { CloudflareRoomSessionManager } from './room/subscription.js'
@@ -26,9 +27,9 @@ function currentCloudflareSession(): CloudflareSession | undefined {
 
 function requireCloudflareSession(): CloudflareSession {
   const session = currentCloudflareSession()
-  if (session === undefined)
-    throw new Error(
-      'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
-    )
+  assertUsage(
+    session !== undefined,
+    'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
+  )
   return session
 }

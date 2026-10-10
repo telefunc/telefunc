@@ -377,11 +377,11 @@ describe('cloudflare adapter entrypoint', () => {
     expect(readHead).toHaveBeenCalled()
   })
 
-  it('names the session a subscription needs when made outside one', () => {
+  it('names the session a subscription needs when made outside one, as a usage error', () => {
     mocks.workerEnv.TelefuncDurableObject = createBinding().binding
     new Telefunc()
     const subscribe = () => getRoomBackend().subscribeLane('r', 'i', { kind: 'control' }, () => {})
-    expect(subscribe).toThrow('A Cloudflare subscription delivers to a Telefunc session')
+    expect(subscribe).toThrow(/\[Wrong Usage\].*A Cloudflare subscription delivers to a Telefunc session/)
   })
 
   it('refuses a second setup on another binding, which the installed backend would not address', () => {
