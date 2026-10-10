@@ -4302,7 +4302,7 @@ describe('a room nothing holds closes on its own', () => {
     const room = (await Room.create('view-lapses')) as ServerRoom
     const closed = await observe(room.id)
     // A view the server holding the page wrote before it died, renewed by nothing since.
-    await holdViews(room.id, room._inc, room._hold, ['gone-page'])
+    await holdViews(room._incarnation, ['gone-page'])
     await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
     expect(await isListed(room.id)).toBe(true)
     await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)
