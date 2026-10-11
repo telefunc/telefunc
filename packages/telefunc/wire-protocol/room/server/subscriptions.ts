@@ -5,7 +5,7 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
 import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
-import { nextTurn } from '../../flow-control/macrotask-yield.js'
+import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX, ROOM_PLAN_SLICE_MS } from '../constants.js'
@@ -575,7 +575,12 @@ class RoomSubscriptions {
       // No cell I/O, so member-cell latency never delays demand renewal.
       this._demand.heartbeat()
       let renewalFailure: { error: unknown } | null = null
+      let deadline = performance.now() + ROOM_PLAN_SLICE_MS
       for (const id of host._ownedMembers().renewable) {
+        if (performance.now() >= deadline) {
+          await nextTurnOf()
+          deadline = performance.now() + ROOM_PLAN_SLICE_MS
+        }
         try {
           await renewMemberLease(host.id, host._inc, id)
         } catch (error) {
@@ -588,6 +593,7 @@ class RoomSubscriptions {
         renewalFailure ??= { error }
       }
       this.replan() // bounded retry trigger for still-wanted terminal lanes
+      if (performance.now() >= deadline) await nextTurnOf() // the roster read starts its own slices
       await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views
       if (!host._state.closed) await maintainHold(host._incarnation)
       if (renewalFailure) throw renewalFailure.error
@@ -603,8 +609,4 @@ function newBinaryPlan(): BinaryPlan {
 
 function isEmpty(plan: BinaryPlan): boolean {
   return !plan.all && plan.members.size === 0 && plan.tracks.size === 0 && plan.pairs.size === 0
-}
-
-function nextTurnOf(): Promise<void> {
-  return new Promise((resolve) => nextTurn(resolve))
 }

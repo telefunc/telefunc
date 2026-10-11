@@ -13,8 +13,9 @@ export {
 
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
+import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
 import type { CellCount, CellCounter, CellMutation, CellSelector } from '../../backend/room/contract.js'
-import { ROOM_MEMBER_TTL_MS } from '../constants.js'
+import { ROOM_MEMBER_TTL_MS, ROOM_PLAN_SLICE_MS } from '../constants.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import {
   leaveCauseToWire,
@@ -252,7 +253,12 @@ async function liveMembers(
   entries: ReadonlyArray<readonly [string, Uint8Array]>,
 ): Promise<MemberSnapshot[]> {
   const members: MemberSnapshot[] = []
+  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
   for (const [id, raw] of entries) {
+    if (performance.now() >= deadline) {
+      await nextTurnOf()
+      deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    }
     const candidate = decodeRoomRecord<RoomMemberRecord>(raw)
     const record = isLapsed(candidate)
       ? await evictMember(room, id, candidate.identity ?? null, { type: 'disconnected' }, { onlyIfLapsed: true })

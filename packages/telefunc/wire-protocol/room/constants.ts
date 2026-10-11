@@ -39,5 +39,6 @@ const ROOM_TRACK_WANTS_MAX = MAX_CHANNELS_PER_CONNECTION
 const ROOM_MEMBER_NAMED_LANES_MAX = 16
 // Demand gossip commits an instance keeps in flight; the rest wait as events.
 const ROOM_GOSSIP_IN_FLIGHT_MAX = 64
-// Lane planning, or demand telling, one event-loop turn runs before timers and I/O get theirs.
+// Lane planning, demand telling, or a heartbeat's renewals and roster read: what one event-loop turn runs before timers
+// and I/O get theirs.
 const ROOM_PLAN_SLICE_MS = 10

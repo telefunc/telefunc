@@ -4611,6 +4611,24 @@ describe('room protocol validation', () => {
     // The shorter of two runs, so a scheduling hiccup in one run is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(100)
   })
+  it('keeps the event loop turning through a heartbeat tick renewing and reading 10,000 owned members', async () => {
+    const room = (await Room.create('heartbeat-turns')) as ServerRoom
+    await Promise.all(Array.from({ length: 10_000 }, () => room.join()))
+    const longestGap = async () => {
+      let last = performance.now()
+      let longest = 0
+      const timer = setInterval(() => {
+        const now = performance.now()
+        longest = Math.max(longest, now - last)
+        last = now
+      }, 1)
+      await subsOf(room)._heartbeatTick()
+      clearInterval(timer)
+      return Math.max(longest, performance.now() - last)
+    }
+    // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
+  })
   it('tells a watched track of each of 20,000 members wanted once while a heartbeat tick replans between two slices of telling it', async () => {
     const room = (await Room.create('demand-told-whole')) as ServerRoom
     const members = await Promise.all(Array.from({ length: 20_000 }, () => room.join()))
