@@ -118,6 +118,7 @@ class RoomSubscriptions {
   private _pendingRefresh: Promise<void> | null = null
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _metaRepair: ReturnType<typeof setTimeout> | null = null
+  private _memberMetaRepair: ReturnType<typeof setTimeout> | null = null
   private _heartbeatBusy = false
 
   constructor(
@@ -264,6 +265,18 @@ class RoomSubscriptions {
         this._metaRepair = null
         const state = this._host._state
         if (state.metaWaiting && !state.closed) void this._reconcileMeta().catch(reportRoomError)
+      }, ROOM_META_REPAIR_MS),
+    )
+  }
+
+  /** A member's meta change arrived past a gap and was dropped: a roster read `ROOM_META_REPAIR_MS` after it repairs the
+   *  member rather than the next heartbeat's. */
+  memberMetaGap(): void {
+    if (this._memberMetaRepair !== null) return
+    this._memberMetaRepair = unrefTimer(
+      setTimeout(() => {
+        this._memberMetaRepair = null
+        if (!this._host._state.closed) void this._refreshMembers().catch(reportRoomError)
       }, ROOM_META_REPAIR_MS),
     )
   }

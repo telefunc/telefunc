@@ -233,6 +233,47 @@ describe('Room at 100,000 members', () => {
     // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
   }, 60_000)
+  it("merges one key into a member's meta of 100,000 keys with both event loops turning, a view and a client applying it", async () => {
+    const room = await Room.create('member-meta-merge-turns')
+    const meta = Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`k${i}`, i]))
+    const member = await room.join({ meta })
+    const observer = (await Room.get(room.id)) as ServerRoom
+    observer.onJoin(() => {})
+    const peer = attachPeer(register(observer))
+    await vi.waitFor(() => expect(observer._state.hasMember(member.id)).toBe(true))
+    const { client, emit } = fakeClient(room.id)
+    client.onJoin(() => {})
+    let fed = 0
+    const feed = () => {
+      for (const frame of peer.decoded().slice(fed))
+        if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
+      fed = peer.decoded().length
+    }
+    await vi.waitFor(() => {
+      feed()
+      expect(client.snapshot().participants).toHaveLength(1)
+    })
+    const remote = (await observer.getParticipant(member.id))!
+    const seen = (await client.getParticipant(member.id))!
+    const changes = { server: 0, client: 0 }
+    observer.onChange(() => changes.server++)
+    client.onChange(() => changes.client++)
+    // Timed until each view applied the write; reading the whole meta after it is the reader's own cost.
+    const merge = async (value: number) => {
+      const { server, client } = changes
+      const written = await longestGapWhile(async () => {
+        await member.setAttributes({ k0: value })
+        await vi.waitFor(() => expect(changes.server).toBe(server + 1))
+      })
+      const { gap } = await longestGapWhile(async () => feed())
+      expect(changes.client).toBe(client + 1)
+      expect([remote.meta.k0, seen.meta.k0]).toEqual([value, value])
+      return Math.max(written.gap, gap)
+    }
+    await merge(-1)
+    // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
+  }, 60_000)
 })
 /** How many binary lanes the room holds: per track and every-track. */
 function binaryLanesOf(room: ServerRoom): number {

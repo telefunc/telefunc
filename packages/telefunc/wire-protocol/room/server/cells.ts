@@ -20,6 +20,12 @@ export {
   metaKeyCellPrefix,
   metaKeyCellKey,
   metaKeyOfCellKey,
+  MEMBER_META_CELL_PREFIX,
+  memberMetaCellPrefix,
+  memberMetaGenPrefix,
+  memberMetaCellKey,
+  memberMetaKeyOfCellKey,
+  memberIdOfMetaCellKey,
 }
 
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
@@ -74,4 +80,25 @@ function metaKeyCellKey(gen: number, key: string): string {
 }
 function metaKeyOfCellKey(gen: number, cellKey: string): string {
   return JSON.parse(cellKey.slice(metaKeyCellPrefix(gen).length)) as string
+}
+
+/** A member's meta, a cell per top-level key in the generation its record names (`RoomMemberRecord.metaGen`). Member
+ *  ids hold no `:`. */
+const MEMBER_META_CELL_PREFIX = 'pm:'
+function memberMetaCellPrefix(memberId: string): string {
+  return `${MEMBER_META_CELL_PREFIX}${memberId}:`
+}
+function memberMetaGenPrefix(memberId: string, gen: number): string {
+  return `${memberMetaCellPrefix(memberId)}${gen}:`
+}
+function memberMetaCellKey(memberId: string, gen: number, key: string): string {
+  return memberMetaGenPrefix(memberId, gen) + JSON.stringify(key)
+}
+function memberIdOfMetaCellKey(cellKey: string): string {
+  return cellKey.slice(MEMBER_META_CELL_PREFIX.length, cellKey.indexOf(':', MEMBER_META_CELL_PREFIX.length))
+}
+/** The key of a cell of generation `gen`, or null for another generation's. */
+function memberMetaKeyOfCellKey(memberId: string, gen: number, cellKey: string): string | null {
+  const prefix = memberMetaGenPrefix(memberId, gen)
+  return cellKey.startsWith(prefix) ? (JSON.parse(cellKey.slice(prefix.length)) as string) : null
 }

@@ -81,7 +81,8 @@ import {
   holdViews,
   reapAndReadMembersById,
   removeView,
-  updateMemberRecord,
+  writeMemberMeta,
+  dropMemberMetaGeneration,
 } from './membership.js'
 import { memberCellKey } from './cells.js'
 import type { StoredRoomMeta } from './meta.js'
@@ -172,6 +173,7 @@ class ServerRoom extends RoomStateView implements Room {
       seed,
       metaSeq: stored.seq,
       onMetaWaiting: () => this._subs.metaWaiting(),
+      onMemberMetaGap: () => this._subs.memberMetaGap(),
       onListenersChanged: (member, binary) => {
         this._onHolderTextChanged(this._local, this._local.refreshText(member))
         if (binary !== null && this._local.applyBinary(binary)) this._onHolderBinaryChanged(this._local, binary)
@@ -251,13 +253,12 @@ class ServerRoom extends RoomStateView implements Room {
     this._subs.memberOwned(id)
     try {
       await this._inboxReady(id)
-      await createMember(this._incarnation, id, {
+      await createMember(
+        this._incarnation,
+        id,
+        { joinedAt, seenAt: joinedAt, metaSeq: 0, metaGen: 0, ...optional },
         meta,
-        joinedAt,
-        seenAt: joinedAt,
-        metaSeq: 0,
-        ...optional,
-      })
+      )
       this._assertAdmitted(id)
       this._pendingAdmissions.delete(id)
       const join = { __r: 'join', id, meta, joinedAt, ...optional } as const
@@ -312,31 +313,27 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal Full replace (`setMeta`). */
   async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<AcceptedMeta> {
-    const owned = ownMetaArgument(meta, 'setMeta() meta')
-    return await this._writeMemberMeta(id, () => owned)
+    return await this._writeMemberMeta(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
   }
 
   /** @internal Per-key merge (`setAttributes`); an `undefined` value deletes the key. */
   async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<AcceptedMeta> {
-    const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    return await this._writeMemberMeta(id, (current) => mergeAttributes(current, owned))
+    return await this._writeMemberMeta(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
   }
 
-  private async _writeMemberMeta(
-    id: string,
-    computeMeta: (current: ParticipantMeta) => ParticipantMeta,
-  ): Promise<AcceptedMeta> {
-    const { meta, seq, hidden } = await updateMemberRecord(this.id, this._inc, id, (record) => {
-      const meta = computeMeta(record.meta)
-      const seq = record.metaSeq + 1
-      return { value: { meta, seq, hidden: record.hidden === true }, next: { ...record, meta, metaSeq: seq } }
+  /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
+   *  seq order. */
+  private async _writeMemberMeta(id: string, write: Parameters<typeof writeMemberMeta>[2]): Promise<AcceptedMeta> {
+    return await this._inCallOrder(`meta:${id}`, async (sent) => {
+      const { update, hidden, replaced } = await writeMemberMeta(this._incarnation, id, write)
+      const accepted = { __r: 'p-meta', id, ...update, ...(hidden ? { hidden: true } : {}) } as const
+      if (this._applyCtrl(accepted)) this._relayApplied(accepted)
+      const publishing = publishCtrl(this.id, this._inc, accepted)
+      sent()
+      await publishing
+      if (replaced !== null) await dropMemberMetaGeneration(this._incarnation, id, replaced)
+      return update
     })
-    const applied = this._state.applyParticipantMeta(id, meta, seq)
-    this._localParticipants.get(id)?._acceptMeta({ meta, seq })
-    const accepted = { __r: 'p-meta', id, meta, seq, ...(hidden ? { hidden: true } : {}) } as const
-    if (applied) this._relayApplied(accepted)
-    await publishCtrl(this.id, this._inc, accepted)
-    return { meta, seq }
   }
 
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
@@ -404,7 +401,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** `sender` with the meta seq it reflects, as `_memberSender(from)` just read it. */
   private _stampOf(from: string, sender: Sender): SenderStamp {
-    const seq = this._state.acceptedMeta(from)?.seq ?? this._localParticipants.get(from)!._acceptedMeta.seq
+    const seq = this._state.memberMetaSeq(from) ?? this._localParticipants.get(from)!._metaSeq
     return {
       fromMeta: sender.meta,
       fromMetaSeq: seq,
@@ -556,7 +553,7 @@ class ServerRoom extends RoomStateView implements Room {
    *  every client here names the sender as of the send. */
   private _applyStamp(id: string, { fromMeta, fromMetaSeq }: SenderStamp): void {
     const hidden = this._state.memberHidden(id)
-    if (hidden === null || this._state.acceptedMeta(id)!.seq >= fromMetaSeq) return
+    if (hidden === null || this._state.memberMetaSeq(id)! >= fromMetaSeq) return
     const update = { __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq, ...(hidden ? { hidden: true } : {}) } as const
     if (this._applyCtrl(update)) this._relayApplied(update)
   }
@@ -612,7 +609,7 @@ class ServerRoom extends RoomStateView implements Room {
         this._state.applyLeave(event.id, leaveCauseFromWire(event))
         return false
       case 'p-meta': {
-        const applied = this._state.applyParticipantMeta(event.id, event.meta, event.seq)
+        const applied = this._state.applyParticipantMeta(event.id, event)
         this._localParticipants.get(event.id)?._acceptMeta(event)
         return applied
       }
@@ -950,6 +947,7 @@ const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomP
 class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */ readonly _room: ServerRoom
+  private _metaMirror: ((accepted: AcceptedMeta) => void) | null = null
   constructor(
     serverRoom: ServerRoom,
     id: string,
@@ -995,14 +993,17 @@ class ServerLocalParticipant extends ParticipantBase {
     this._assertActive()
     return await this._room._publishBinaryFrame(frame, framed)
   }
-  /** @internal Each meta write this room accepts for the participant, with its revision. */
+  /** @internal Each meta update this participant applies, which a client holding it mirrors. */
   _onAcceptedMeta(callback: (accepted: AcceptedMeta) => void): () => void {
-    const state = this._room._state
-    const unlisten = state.getRemote(this.id)?.onUpdate(() => {
-      const accepted = state.acceptedMeta(this.id)
-      if (accepted) callback(accepted)
-    })
-    return unlisten ?? (() => {})
+    this._metaMirror = callback
+    return () => {
+      if (this._metaMirror === callback) this._metaMirror = null
+    }
+  }
+  override _acceptMeta(update: AcceptedMeta): boolean {
+    if (!super._acceptMeta(update)) return false
+    this._metaMirror?.(update)
+    return true
   }
   /** @internal The client holding this participant went away without leaving. */
   _releaseHolder(): Promise<void> {

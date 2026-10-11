@@ -1,5 +1,5 @@
-export { readRoomMeta, readRoomMetaSeq, writeRoomMeta, dropReplacedMetaGenerations }
-export type { StoredRoomMeta, RoomMetaWrite }
+export { readRoomMeta, readRoomMetaSeq, writeRoomMeta, dropReplacedMetaGenerations, mergeRuns, META_RUN_KEYS }
+export type { StoredRoomMeta, RoomMetaWrite, MetaKeyCell }
 
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellMutation, CellsRead, CxResult } from '../../backend/room/contract.js'

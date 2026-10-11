@@ -1778,6 +1778,67 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect([room, other].map(viewOf)).toEqual([expected, expected]))
     expect(viewOf(clientView(peer, room.id))).toEqual(expected)
   })
+  it("grows a member's meta to 20,000 keys one setAttributes() at a time, each write taking about as long at 20,000 keys as at 1,000", async () => {
+    const room = await Room.create('member-meta-growth')
+    const member = await room.join()
+    const observer = await Room.get(room.id)
+    observer.onJoin(() => {}) // a live view: it applies every write, and builds the meta only when read
+    const windows: number[] = []
+    let started = 0
+    for (let i = 1; i <= 20_000; i++) {
+      if (i % 1_000 === 501) started = performance.now()
+      await member.setAttributes({ [`k${i}`]: i })
+      if (i === 1_000 || i === 10_000 || i === 20_000) windows.push(performance.now() - started)
+    }
+    await vi.waitFor(async () =>
+      expect(Object.keys((await observer.getParticipant(member.id))!.meta)).toHaveLength(20_000),
+    )
+    // The last 500 writes before each size.
+    const [at1k, at10k, at20k] = windows as [number, number, number]
+    expect(Math.max(at10k, at20k)).toBeLessThanOrEqual(3 * at1k)
+  }, 60_000)
+  it("ends every view, a client too, on a member's stored meta, its key order and its seq under concurrent setAttributes() and setMeta() calls", async () => {
+    const room = (await Room.create('member-meta-converge')) as ServerRoom
+    const member = await room.join({ meta: { topic: 'start' } })
+    const other = (await Room.get(room.id)) as ServerRoom
+    for (const view of [room, other]) view.onParticipantUpdate(() => {})
+    await other.getParticipants()
+    const { peer } = serve(room)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    yieldAfterEachReadAndCountWrites()
+    await Promise.all(
+      Array.from({ length: 120 }, (_, i) =>
+        i % 12 === 11
+          ? member.setMeta({ [`r${i}`]: i, topic: i })
+          : member.setAttributes({ [`k${i % 7}`]: i, [`n${i}`]: i, [`n${i - 3}`]: undefined }),
+      ),
+    )
+    const viewOf = (view: ServerRoom | ClientRoom) => {
+      const accepted = (view as unknown as { _state: RoomState })._state.acceptedMeta(member.id)!
+      return { keys: Object.keys(accepted.meta), meta: accepted.meta, seq: accepted.seq }
+    }
+    const stored = (await Room.get(room.id)) as ServerRoom
+    await stored.getParticipants()
+    const expected = viewOf(stored)
+    expect(expected.seq).toBe(120)
+    await vi.waitFor(() => expect([room, other].map(viewOf)).toEqual([expected, expected]))
+    expect(viewOf(clientView(peer, room.id))).toEqual(expected)
+    expect({ keys: Object.keys(member.meta), meta: member.meta }).toEqual({ keys: expected.keys, meta: expected.meta })
+  })
+  it('repairs a member meta update a view never got from the next one it gets, well within a heartbeat', async () => {
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
+    const room = await Room.create('member-meta-gap')
+    const member = await room.join()
+    const observer = await Room.get(room.id)
+    observer.onParticipantUpdate(() => {})
+    await vi.waitFor(async () => expect(await observer.getParticipant(member.id)).not.toBeNull())
+    control.next()
+    await member.setAttributes({ a: 1 })
+    await member.setAttributes({ b: 2 })
+    await vi.waitFor(async () => expect((await observer.getParticipant(member.id))!.meta).toEqual({ a: 1, b: 2 }), {
+      timeout: 5_000,
+    })
+  })
   it('repairs a room meta update a view never got from the next one it gets, well within a heartbeat', async () => {
     const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = await Room.create('meta-gap')
@@ -4636,12 +4697,12 @@ describe('RoomState', () => {
     const id = crypto.randomUUID()
     const events = await state.recordingMembership(
       async () => {
-        state.applyParticipantMeta(id, { step: 1 }, 1)
+        state.applyParticipantMeta(id, { seq: 1, meta: { step: 1 } })
         state.applyLeave(id, { type: 'left' })
       },
       (_, events) => events,
     )
-    expect(events).toEqual([{ meta: { id, meta: { step: 1 }, seq: 1 } }, { leave: id }])
+    expect(events).toEqual([{ meta: { id, update: { seq: 1, meta: { step: 1 } } } }, { leave: id }])
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
     expect(await state.reconcileRoster({ members: [member], departing: new Set() }, [])).toBe(true)
     let changes = 0
@@ -5538,7 +5599,7 @@ function delayRosterRead(roomId: string): { started: Promise<void>; release: () 
   const readCellPages = driver.readCellPages.bind(driver)
   const roster = { started: createDeferred(), release: createDeferred() }
   vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (candidateRoomId, inc, prefix) {
-    if (candidateRoomId === roomId) {
+    if (candidateRoomId === roomId && prefix === MEMBER_CELL_PREFIX) {
       roster.started.resolve()
       await roster.release.promise
     }

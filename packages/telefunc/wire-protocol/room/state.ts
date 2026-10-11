@@ -12,8 +12,10 @@ import { Listeners } from '../../utils/Listeners.js'
 import { isNamedTrack, laneTrack, type BinaryFrame, type BinaryWantChange } from './binary.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
 import { RoomMetaState } from './meta-state.js'
+import { MemberMeta } from './member-meta.js'
 import type {
   AcceptedMeta,
+  MemberMetaUpdate,
   MemberSnapshot,
   MemberWants,
   RoomDataEvent,
@@ -33,20 +35,16 @@ import type {
 /** A binary listener's track filter: `undefined` = every track, `null` = the default lane only, a name = that track only. */
 type TrackFilter = string | null | undefined
 /** A membership event as this view got it, whether it applied it or not. */
-type MembershipEvent =
-  | { join: MemberSnapshot }
-  | { leave: string }
-  | { meta: { id: string; meta: ParticipantMeta; seq: number } }
+type MembershipEvent = { join: MemberSnapshot } | { leave: string } | { meta: { id: string; update: MemberMetaUpdate } }
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
 type TrackCounts = { all: number; named: Map<string, number> }
 type CountedTrack = { counts: TrackCounts; track: TrackFilter }
 type MemberEntry = {
   id: string
-  meta: ParticipantMeta
+  /** Stale and echoed `p-meta` events are absorbed. */
+  meta: MemberMeta
   joinedAt: number
   identity: string | null
-  /** Latest applied meta revision. Stale and echoed `p-meta` events are absorbed. */
-  metaSeq: number
   /** An off-presence participant: a member for routing/discovery, excluded from every presence read (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
   hidden: boolean
   remote: RemoteParticipant | null
@@ -89,6 +87,8 @@ type RoomStateOptions = {
   trackWantsMax?: number
   /** A member of a roster still streaming in or applying, which an unstamped message may name. */
   pendingMember?: (id: string) => MemberSnapshot | undefined
+  /** A member's meta change arrived ahead of one before it, which never arrived: the next roster read repairs it. */
+  onMemberMetaGap?: () => void
 }
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
@@ -197,11 +197,12 @@ class RoomState {
   private readonly _meta: RoomMetaState
   private readonly _onMetaWaiting: () => void
   private readonly _pendingMember: (id: string) => MemberSnapshot | undefined
+  private readonly _onMemberMetaGap: () => void
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
-  /** The newest meta change per member that reached this view before its first roster. */
-  private readonly _preRosterMeta = new Map<string, { meta: ParticipantMeta; seq: number }>()
+  /** The meta changes per member that reached this view before its first roster, in order. */
+  private readonly _preRosterMeta = new Map<string, MemberMetaUpdate[]>()
   constructor(opts: RoomStateOptions) {
     this._owner = opts.owner
     this.roomId = opts.roomId
@@ -213,6 +214,7 @@ class RoomState {
     this._onLeave = opts.onLeave
     this._trackWantsMax = opts.trackWantsMax ?? Number.POSITIVE_INFINITY
     this._pendingMember = opts.pendingMember ?? (() => undefined)
+    this._onMemberMetaGap = opts.onMemberMetaGap ?? (() => {})
     if ('members' in opts.seed) {
       this._rosterKnown = true
       for (const member of opts.seed.members) this._createEntry(member)
@@ -248,9 +250,13 @@ class RoomState {
     return this._announceCbs.size > 0
   }
   /** A member's meta with the revision it was accepted at. */
-  acceptedMeta(id: string): AcceptedMeta | null {
+  acceptedMeta(id: string): { meta: ParticipantMeta; seq: number } | null {
     const entry = this._members.get(id)
-    return entry ? { meta: entry.meta, seq: entry.metaSeq } : null
+    return entry ? { meta: entry.meta.object, seq: entry.meta.seq } : null
+  }
+  /** How many meta writes of the member this view reflects; null for a member it doesn't know. */
+  memberMetaSeq(id: string): number | null {
+    return this._members.get(id)?.meta.seq ?? null
   }
   hasMember(id: string): boolean {
     return this._members.has(id)
@@ -276,8 +282,8 @@ class RoomState {
   }
   /** The members, live: one that joins before the iteration reaches the end comes too, one that leaves before it is reached doesn't. */
   *memberSnapshots(): Generator<MemberSnapshot> {
-    for (const { id, meta, joinedAt, metaSeq, identity, hidden } of this._members.values())
-      yield { id, meta, joinedAt, metaSeq, identity, ...(hidden ? { hidden: true } : {}) }
+    for (const { id, meta, joinedAt, identity, hidden } of this._members.values())
+      yield { id, meta: meta.object, joinedAt, metaSeq: meta.seq, identity, ...(hidden ? { hidden: true } : {}) }
   }
   /** A revived `RemoteParticipant`: the live entry if known, else seeded silently from the snapshot (its seed count already includes it). */
   ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
@@ -344,7 +350,7 @@ class RoomState {
     const participants = Object.freeze(
       [...this._members.values()]
         .filter((entry) => !entry.hidden)
-        .map(({ id, identity, meta, joinedAt }) => Object.freeze({ id, identity, meta, joinedAt })),
+        .map(({ id, identity, meta, joinedAt }) => Object.freeze({ id, identity, meta: meta.object, joinedAt })),
     )
     const value = Object.freeze({
       id: this.roomId,
@@ -424,22 +430,28 @@ class RoomState {
     if (entry.hidden) return
     if (this.count === 0) this._fireAll(this._emptyCbs)
   }
-  /** Applies only revisions newer than the entry's: the origin's echo (same seq) and events arriving behind a fresher reconcile are absorbed. */
-  applyParticipantMeta(id: string, meta: ParticipantMeta, seq: number): boolean {
-    this._record({ meta: { id, meta, seq } })
+  /** Applies updates in seq order (see `MemberMeta.apply`): the origin's echo (same seq) and events arriving behind a
+   *  fresher reconcile are absorbed. Only a listener builds the meta object per update. */
+  applyParticipantMeta(id: string, update: MemberMetaUpdate): boolean {
+    this._record({ meta: { id, update } })
     const entry = this._members.get(id)
     if (!entry) {
-      // Before the first roster every member is unknown, and the first roster applies its newest meta change.
-      if (!this._rosterKnown && seq > (this._preRosterMeta.get(id)?.seq ?? 0))
-        this._preRosterMeta.set(id, { meta, seq })
+      // Before the first roster every member is unknown, and the first roster applies the changes after its own.
+      if (!this._rosterKnown) {
+        const early = this._preRosterMeta.get(id)
+        if (early === undefined) this._preRosterMeta.set(id, [update])
+        else early.push(update)
+      }
       return false
     }
-    if (seq <= entry.metaSeq) return false
-    const prev = entry.meta
-    entry.metaSeq = seq
-    const next = ownMetadata(meta)
-    entry.meta = next
+    const listened = entry.updateCbs !== null || this._participantUpdateCbs.size > 0
+    const prev = listened ? entry.meta.object : null
+    const applied = entry.meta.apply(update)
+    if (applied === 'gap') this._onMemberMetaGap()
+    if (applied !== 'applied') return false
     this._bumpState()
+    if (prev === null) return true
+    const next = entry.meta.object
     if (entry.updateCbs) this._fireAll(entry.updateCbs, next, prev)
     this._fireAll(this._participantUpdateCbs, this._remote(entry), next, prev)
     return true
@@ -508,20 +520,20 @@ class RoomState {
     const entry = this._members.get(from)
     if (fromMeta !== undefined && fromMetaSeq !== undefined) {
       if (!entry) return senderOf(from, fromMeta, fromIdentity ?? null)
-      if (entry.metaSeq < fromMetaSeq) this.applyParticipantMeta(from, fromMeta, fromMetaSeq)
+      if (entry.meta.seq < fromMetaSeq) this.applyParticipantMeta(from, { seq: fromMetaSeq, meta: fromMeta })
       return this._remote(entry)
     }
     const pending = this._pendingMember(from)
     if (entry) {
-      if (pending !== undefined && pending.metaSeq > entry.metaSeq)
-        this.applyParticipantMeta(from, pending.meta, pending.metaSeq)
+      if (pending !== undefined && pending.metaSeq > entry.meta.seq)
+        this.applyParticipantMeta(from, { seq: pending.metaSeq, meta: pending.meta })
       return this._remote(entry)
     }
     assert(pending !== undefined)
-    // A meta change relayed after the member's roster part.
-    const early = this._preRosterMeta.get(from)
-    const meta = early !== undefined && early.seq > pending.metaSeq ? early.meta : pending.meta
-    return senderOf(from, ownMetadata(meta), pending.identity ?? null)
+    // With the meta changes relayed after the member's roster part.
+    const meta = new MemberMeta(pending.meta, pending.metaSeq)
+    for (const update of this._preRosterMeta.get(from) ?? []) meta.apply(update)
+    return senderOf(from, meta.object, pending.identity ?? null)
   }
   /** A binary frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
   applyBinary({ from, payload, track, meta }: BinaryFrame, info: ChannelPublishInfo): void {
@@ -612,21 +624,18 @@ class RoomState {
       this.applyJoin(member)
       return true
     }
-    if (member.metaSeq <= entry.metaSeq) return false
+    if (member.metaSeq <= entry.meta.seq) return false
     if (narrate) {
-      this.applyParticipantMeta(member.id, member.meta, member.metaSeq)
+      this.applyParticipantMeta(member.id, { seq: member.metaSeq, meta: member.meta })
       return true
     }
-    entry.meta = ownMetadata(member.meta)
-    entry.metaSeq = member.metaSeq
+    entry.meta.apply({ seq: member.metaSeq, meta: member.meta })
     return false
   }
   private _applyPreRosterMeta(): void {
-    for (const [id, { meta, seq }] of this._preRosterMeta) {
+    for (const [id, updates] of this._preRosterMeta) {
       const entry = this._members.get(id)
-      if (!entry || seq <= entry.metaSeq) continue
-      entry.meta = ownMetadata(meta)
-      entry.metaSeq = seq
+      if (entry) for (const update of updates) entry.meta.apply(update)
     }
     this._preRosterMeta.clear()
   }
@@ -641,10 +650,9 @@ class RoomState {
     const { id, meta, joinedAt } = entrySeed
     const entry: MemberEntry = {
       id,
-      meta: ownMetadata(meta),
+      meta: new MemberMeta(meta, entrySeed.metaSeq),
       joinedAt,
       identity: entrySeed.identity ?? null,
-      metaSeq: entrySeed.metaSeq,
       hidden: entrySeed.hidden === true,
       remote: null,
       left: false,
@@ -661,7 +669,7 @@ class RoomState {
       remote = {
         id: entry.id,
         get meta() {
-          return entry.meta
+          return entry.meta.object
         },
         get joinedAt() {
           return entry.joinedAt
@@ -754,9 +762,11 @@ function replayMembershipEvent(
     members.delete(event.leave)
     departing.delete(event.leave)
   } else {
-    const { id, meta, seq } = event.meta
+    const { id, update } = event.meta
     const member = members.get(id)
-    if (member !== undefined && seq > member.metaSeq) members.set(id, { ...member, meta, metaSeq: seq })
+    if (member === undefined) return
+    const meta = new MemberMeta(member.meta, member.metaSeq)
+    if (meta.apply(update) === 'applied') members.set(id, { ...member, meta: meta.object, metaSeq: meta.seq })
   }
 }
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */

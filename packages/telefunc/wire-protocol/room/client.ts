@@ -323,6 +323,11 @@ class ClientRoom extends RoomStateView implements Room {
   private async _applyRoster(members: MemberSnapshot[], events: readonly MembershipEvent[]): Promise<void> {
     try {
       await this._state.reconcileRoster({ members, departing: new Set() }, events)
+      // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
+      for (const [id, local] of this._localParticipants) {
+        const accepted = this._state.acceptedMeta(id)
+        if (accepted !== null && accepted.seq > local._metaSeq) local._acceptMeta(accepted)
+      }
       this._roster.resolve()
     } finally {
       this._rostersApplying--
@@ -339,7 +344,7 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
   _acceptParticipantMeta(id: string, accepted: AcceptedMeta): void {
-    this._state.applyParticipantMeta(id, accepted.meta, accepted.seq)
+    this._state.applyParticipantMeta(id, accepted)
     this._localParticipants.get(id)?._acceptMeta(accepted)
   }
 

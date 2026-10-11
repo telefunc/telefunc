@@ -379,6 +379,80 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(await other.viewAt(expected.seq)).toEqual(expected)
   }, 30_000)
 
+  it("merges one key into a member's meta of 100,000 keys with the event loop turning, a view applying it, and no Redis command over 20 ms", async () => {
+    const prefix = uniquePrefix('member-meta-merge')
+    const redis = ownClient(connect())
+    installRedis(redis, { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('member-meta-merge')
+    const member = await room.join()
+    onTestFinished(() => member.leave())
+    for (let from = 0; from < 100_000; from += 10_000)
+      await member.setAttributes(Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])))
+    const observer = await Room.get(room.id)
+    // Ended before the backend is, so nothing of this view reaches for a backend after it.
+    onTestFinished(observer.onJoin(() => {}))
+    const remote = (await observer.getParticipant(member.id))!
+    let changes = 0
+    onTestFinished(observer.onChange(() => changes++))
+    // Timed until the view applied the write; reading the whole meta after it is the reader's own cost.
+    const merge = async (value: number) => {
+      const before = changes
+      let last = performance.now()
+      let longest = 0
+      const timer = setInterval(() => {
+        const now = performance.now()
+        longest = Math.max(longest, now - last)
+        last = now
+      }, 1)
+      await member.setAttributes({ k0: value })
+      await vi.waitFor(() => expect(changes).toBe(before + 1))
+      clearInterval(timer)
+      expect(remote.meta.k0).toBe(value)
+      return Math.max(longest, performance.now() - last)
+    }
+    await merge(-1)
+    const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
+    await Promise.all(nodes.map((node) => node.slowlog('RESET')))
+    // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
+    const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
+      number,
+      number,
+      number,
+      string[],
+    ][]
+    const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
+    expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+  }, 60_000)
+  it("ends a second server's view on a member's stored meta, its key order and its seq while its server merges into and replaces it at once", async () => {
+    const prefix = uniquePrefix('member-meta-converge')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('member-meta-converge')
+    const view = await Room.get(room.id)
+    onTestFinished(view.onParticipantUpdate(() => {}))
+    await view.getParticipants()
+    const startAt = Date.now() + 2_000
+    const owner = memberMetaWriterFrom({ ...env, PREFIX: prefix, ROOM: room.id, START_AT: `${startAt}` })
+    const id = await owner.joined
+    await owner.written
+    const accepted = (room: object) =>
+      (
+        room as { _state: { acceptedMeta(id: string): { meta: Record<string, unknown>; seq: number } } }
+      )._state.acceptedMeta(id)
+    const stored = await Room.get(room.id)
+    await stored.getParticipants()
+    const { meta, seq } = accepted(stored)
+    const expected = { keys: Object.keys(meta), meta, seq }
+    expect(seq).toBe(60)
+    await vi.waitFor(() => {
+      const { meta, seq } = accepted(view)
+      expect({ keys: Object.keys(meta), meta, seq }).toEqual(expected)
+    })
+    expect(await owner.viewAt(seq)).toEqual(expected)
+  }, 30_000)
+
   it('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
     installRedis(ownClient(connect()), { prefix: uniquePrefix('meta-order') })
     onTestFinished(() => disposeBackend())
@@ -470,6 +544,77 @@ async function writeMetaBurst(room: typeof Room, roomId: string, side: string): 
         : room.setAttributes(roomId, { [`${side}${i % 5}`]: i, [`${side}n${i}`]: i, [`${side}n${i - 2}`]: undefined }),
     ),
   )
+}
+
+/** Merges into and replaces a member's meta at once. A parameter of a server process's source, as `writeMetaBurst`. */
+async function writeMemberMetaBurst(member: {
+  setMeta(meta: object): Promise<void>
+  setAttributes(attrs: object): Promise<void>
+}): Promise<void> {
+  await Promise.all(
+    Array.from({ length: 60 }, (_, i) =>
+      i % 10 === 9
+        ? member.setMeta({ [`r${i}`]: i, topic: i })
+        : member.setAttributes({ [`k${i % 5}`]: i, [`n${i}`]: i, [`n${i - 2}`]: undefined }),
+    ),
+  )
+}
+
+/** A server that joins ROOM and runs `writeMemberMetaBurst` on its member at START_AT, then reports its view of the
+ *  member once it reaches a seq. */
+function memberMetaWriterFrom(env: Record<string, string>): {
+  joined: Promise<string>
+  written: Promise<void>
+  viewAt: (seq: number) => Promise<unknown>
+} {
+  const server = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { Cluster, Redis } from 'ioredis'
+import { createInterface } from 'node:readline'
+import { Room } from 'telefunc'
+import { installRedis } from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)}
+const { REDIS_URL, NODES, PREFIX, ROOM, START_AT } = process.env
+installRedis(NODES ? new Cluster(JSON.parse(NODES)) : new Redis(REDIS_URL), { prefix: PREFIX })
+const room = await Room.get(ROOM)
+const member = await room.join({ meta: { topic: 'start' } })
+process.stdout.write(member.id + '\\n')
+await new Promise((resolve) => setTimeout(resolve, Number(START_AT) - Date.now()))
+await (${writeMemberMetaBurst.toString().replace(/^async function writeMemberMetaBurst/, 'async function')})(member)
+process.stdout.write('written\\n')
+const [line] = await createInterface({ input: process.stdin })[Symbol.asyncIterator]().next().then((r) => [r.value])
+const seq = Number(line)
+while (room._state.acceptedMeta(member.id).seq < seq) await new Promise((resolve) => setTimeout(resolve, 10))
+const { meta } = room._state.acceptedMeta(member.id)
+process.stdout.write(JSON.stringify({ keys: Object.keys(meta), meta, seq: room._state.acceptedMeta(member.id).seq }) + '\\n')
+process.exit(0)`,
+    ],
+    { cwd: new URL('..', import.meta.url), env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'inherit'] },
+  )
+  const lines: string[] = []
+  const waiting: Array<() => void> = []
+  let buffered = ''
+  server.stdout.on('data', (chunk) => {
+    buffered += chunk
+    const parts = buffered.split('\n')
+    buffered = parts.pop()!
+    lines.push(...parts)
+    for (const wake of waiting.splice(0)) wake()
+  })
+  const line = async (index: number): Promise<string> => {
+    while (lines.length <= index) await new Promise<void>((resolve) => waiting.push(resolve))
+    return lines[index]!
+  }
+  return {
+    joined: line(0),
+    written: line(1).then(() => {}),
+    viewAt: async (seq) => {
+      server.stdin.write(`${seq}\n`)
+      return JSON.parse(await line(2))
+    },
+  }
 }
 
 /** A server viewing ROOM that runs `writeMetaBurst` at START_AT, then reports its view once it reaches a seq. */

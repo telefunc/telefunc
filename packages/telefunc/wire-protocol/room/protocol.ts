@@ -22,6 +22,7 @@ export type {
   RoomDmAckEnvelope,
   DmReply,
   AcceptedMeta,
+  MemberMetaUpdate,
   RoomFailure,
   RoomStubRequest,
   ParticipantStubRequest,
@@ -45,13 +46,15 @@ type RoomConfigRecord = {
 
 type HoldConfig = { emptyTimeout: number; departureTimeout: number }
 
-/** A member cell. Its owner renews `seenAt` every heartbeat; a record older than the member TTL is reaped. */
+/** A member cell. Its owner renews `seenAt` every heartbeat; a record older than the member TTL is reaped. Its meta is
+ *  a cell per key in generation `metaGen` (see `memberMetaCellKey`). */
 type RoomMemberRecord = {
-  meta: ParticipantMeta
   joinedAt: number
   seenAt: number
-  /** Issued by the member's single owner; orders `p-meta` events. */
+  /** Issued by the member's single owner, counting its meta writes; orders `p-meta` events. */
   metaSeq: number
+  /** The `metaSeq` of the replace that wrote the meta's keys, 0 for the join's. */
+  metaGen: number
   identity?: string
   /** Off-presence (`join({ hidden: true })`): routable, but not in count, roster or presence events. */
   hidden?: boolean
@@ -96,7 +99,7 @@ type ParticipantStubMetadata = {
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
-  | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number; hidden?: boolean }
+  | ({ __r: 'p-meta'; id: string; hidden?: boolean } & MemberMetaUpdate)
   | RoomMetaUpdate
   // Demand gossip between instances, never relayed to clients: a track of a member, every track the member publishes
   // (`track: null`), or a track of every member (`member: null`), which the instance receives from the members it covers.
@@ -150,8 +153,10 @@ type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
 /** The recipient handler's return, or its failure. */
 type DmReply = { ok: true; result: unknown } | RoomFailure
 
-/** The ack of a member meta write: the committed value and its sequence. */
-type AcceptedMeta = { meta: ParticipantMeta; seq: number }
+/** A member's meta at `seq`, whole, or as the merge at `seq` changed it: a key it removed as `undefined`. */
+type MemberMetaUpdate = { seq: number; meta: ParticipantMeta } | { seq: number; attrs: ParticipantMeta }
+/** The ack of a member meta write: what it changed, at its sequence. */
+type AcceptedMeta = MemberMetaUpdate
 
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
@@ -179,7 +184,7 @@ type ParticipantStubRequest =
 /** Server→client notices on a participant stub. */
 type ParticipantStubNotice =
   | ({ __r: 'left' } & WireLeaveCause)
-  | { __r: 'p-meta'; meta: ParticipantMeta; seq: number }
+  | ({ __r: 'p-meta' } & MemberMetaUpdate)
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
   | { __r: 'demand'; track: string | null; wanted: boolean }
   | { __r: 'demand-state'; tracks: Array<string | null> }

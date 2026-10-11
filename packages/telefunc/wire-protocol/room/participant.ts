@@ -9,6 +9,7 @@ import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
+import { MemberMeta } from './member-meta.js'
 import type { AcceptedMeta, DmReply, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -30,8 +31,7 @@ abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
   readonly identity: string | null
   readonly selfDelivery: boolean
-  private _meta: ParticipantMeta
-  private _metaSeq = 0
+  private readonly _meta: MemberMeta
   private _leftCause: LeaveCause | null = null
   // Each list is made when its first listener is added.
   private _leaveCbs: Listeners<(cause: LeaveCause) => unknown> | null = null
@@ -55,22 +55,25 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
     this.id = id
-    this._meta = ownMetadata(meta)
+    this._meta = new MemberMeta(meta, 0)
     this.selfDelivery = selfDelivery
     this.identity = identity
   }
   get meta(): ParticipantMeta {
-    return this._meta
+    return this._meta.object
   }
   /** @internal */
-  get _acceptedMeta(): AcceptedMeta {
-    return { meta: this._meta, seq: this._metaSeq }
+  get _metaSeq(): number {
+    return this._meta.seq
   }
-  /** @internal A meta the room accepted at `seq`; an older one never replaces a newer. */
-  _acceptMeta({ meta, seq }: AcceptedMeta): void {
-    if (seq <= this._metaSeq) return
-    this._metaSeq = seq
-    this._meta = ownMetadata(meta)
+  /** @internal Whole, as an attach resends it. */
+  get _acceptedMeta(): AcceptedMeta {
+    return { meta: this._meta.object, seq: this._meta.seq }
+  }
+  /** @internal A meta update the room accepted, applied in seq order; whether it applied. One past a gap waits for the
+   *  whole meta its holder's next attach or roster sends. */
+  _acceptMeta(update: AcceptedMeta): boolean {
+    return this._meta.apply(update) === 'applied'
   }
   protected get _left(): boolean {
     return this._leftCause !== null

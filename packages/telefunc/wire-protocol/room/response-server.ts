@@ -66,9 +66,9 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServe
       metadata: {
         room: state._owner,
         id: entry.id,
-        meta: entry.meta,
+        meta: entry.meta.object,
         joinedAt: entry.joinedAt,
-        metaSeq: entry.metaSeq,
+        metaSeq: entry.meta.seq,
         identity: entry.identity,
         ...(entry.hidden ? { hidden: true } : {}),
       },
