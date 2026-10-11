@@ -49,6 +49,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
         ],
         weight: heldSendWeight(
           kind,
+          broadcastRouteKey(route),
           () => (typeof owned === 'string' ? utf8ByteLength(owned) : owned.byteLength),
           'Broadcast',
         ),

@@ -857,6 +857,27 @@ describe('Room public behavior', () => {
     // Each track is its own order.
     await vi.waitFor(() => expect([...received].sort()).toEqual(['camera:1', 'null:2']))
   })
+  it.each([
+    ['its every-track lane', 'binary-all', (room: ServerRoom) => void room.subscribeBinary(() => {})],
+    ['its named lanes', 'binary', (room: ServerRoom, track: string) => void room.subscribeBinary(() => {}, { track })],
+  ] as const)(
+    'holds at most bufferLimitBinary of one member across its tracks behind %s',
+    async (_, kind, subscribe) => {
+      const room = (await Room.create(`establishing-member-budget-${kind}`)) as ServerRoom
+      const member = await room.join()
+      const tracks = trackNames(8)
+      const release = delayDriverLane((lane) => lane.kind === kind)
+      for (const track of tracks) subscribe(room, track)
+      // One frame of half the bound fits it; the other seven are past it.
+      const half = new Uint8Array(getServerConfig().channel.bufferLimitBinary / 2)
+      const outcomes = tracks.map((track) => captureOutcome(member.publishBinary(half, { track })))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(outcomes.filter(({ value }) => value instanceof ChannelOverflowError)).toHaveLength(7)
+      release()
+      // The one held frame is sent.
+      await vi.waitFor(() => expect(outcomes.filter(({ value }) => typeof value === 'symbol')).toEqual([]))
+    },
+  )
   it('reads authority while the control subscription is establishing', async () => {
     const authority = await Room.create('establishing-roster')
     const observer = (await Room.get(authority.id)) as ServerRoom
@@ -2511,7 +2532,7 @@ describe('Room public behavior', () => {
     const bugs: unknown[] = []
     onBug((err) => bugs.push(err))
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const refused = heldSendWeight('text', () => 0, 'Room').overflow()
+    const refused = heldSendWeight('text', 'semantic', () => 0, 'Room').overflow()
     reportRoomError(refused)
     expect({ bugs, report: report.mock.calls }).toEqual({ bugs: [], report: [[refused]] })
   })
@@ -5053,10 +5074,10 @@ function holdLaneDelivery(matches: (lane: SubscribedLane) => boolean) {
     },
   }
 }
-/** A matching lane's driver attempt receives only once released, as a Redis SUBSCRIBE still in flight. */
+/** Matching lanes' driver attempts receive only once released, as a Redis SUBSCRIBE still in flight. */
 function delayDriverLane(matches: (lane: SubscribedLane) => boolean): () => void {
   const bind = driver.subscriptions.bind.bind(driver.subscriptions)
-  let release: () => void = () => {}
+  const releases: Array<() => void> = []
   vi.spyOn(driver.subscriptions, 'bind').mockImplementation((source) => {
     const binding = bind(source)
     if (!('lane' in source) || !matches(source.lane)) return binding
@@ -5066,11 +5087,11 @@ function delayDriverLane(matches: (lane: SubscribedLane) => boolean): () => void
         let inner: SubscriptionAttempt | null = null
         let state: SubscriptionState = 'establishing'
         const listeners = new Set<(next: SubscriptionState) => void>()
-        release = () => {
+        releases.push(() => {
           inner = binding.open(receiver, localReceiverCount)
           state = inner.state()
           for (const listener of listeners) listener(state)
-        }
+        })
         return {
           state: () => state,
           onStateChange: (listener) => {
@@ -5085,7 +5106,9 @@ function delayDriverLane(matches: (lane: SubscribedLane) => boolean): () => void
       },
     }
   })
-  return () => release()
+  return () => {
+    for (const release of releases.splice(0)) release()
+  }
 }
 function delayLaneSubscription(matches: (lane: SubscribedLane) => boolean) {
   const started = createDeferred()

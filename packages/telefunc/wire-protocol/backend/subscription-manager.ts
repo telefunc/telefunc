@@ -27,12 +27,12 @@ function reportSubscriptionEnd(error: unknown, report: (error: unknown) => void)
   report(error)
 }
 
-/** Sends on one key waiting for this instance's establishing subscriptions, and the bytes they hold per class. */
-type Hold = { readonly established: Promise<void>; sends: number; readonly bytes: Map<string, number> }
+/** Sends on one key waiting for this instance's establishing subscriptions. */
+type Hold = { readonly established: Promise<void>; sends: number }
 
-/** A held send's bytes, counted in its class and read only for a send that is held; a send its hold can't fit is refused
- *  with `overflow()`. */
-type HoldWeight = { class: string; bytes(): number; fits(bytes: number): boolean; overflow(): Error }
+/** A held send's bytes, read only for a send that is held and counted in `budget`, which sends of several keys can share;
+ *  a send its budget can't fit is refused with `overflow()`. */
+type HoldWeight = { budget: string; bytes(): number; fits(bytes: number): boolean; overflow(): Error }
 
 /** What a send waits for, read only while some subscription could be establishing; `sources` share a partition. */
 type SendHold<Source> = { key: string; sources: readonly [Source, ...Source[]]; weight?: HoldWeight }
@@ -53,6 +53,8 @@ class SubscriptionManager<Source> {
   private readonly _slots = new Map<string, SubscriptionSlot>()
   private readonly _cleanups = new Set<Promise<void>>()
   private readonly _holds = new Map<string, Hold>()
+  /** Bytes held per partition and budget. */
+  private readonly _held = new Map<string, number>()
   /** Slots not yet established, counted down a microtask after: at 0, no send has anything to wait for. */
   private _establishing = 0
 
@@ -112,23 +114,31 @@ class SubscriptionManager<Source> {
     if (hold === undefined) {
       if (this._establishingWaits(sources, partition).length === 0) return send()
       const established = raceTimeout(this._established(sources, partition), ESTABLISH_HOLD_MS, () => {})
-      hold = { established, sends: 0, bytes: new Map() }
+      hold = { established, sends: 0 }
     }
     const current = hold
+    let budget: string | null = null
     const bytes = weight?.bytes() ?? 0
     if (weight !== undefined) {
-      const held = (current.bytes.get(weight.class) ?? 0) + bytes
+      budget = JSON.stringify([partition, weight.budget])
+      const held = (this._held.get(budget) ?? 0) + bytes
       if (!weight.fits(held)) return Promise.reject(weight.overflow())
-      current.bytes.set(weight.class, held)
+      this._held.set(budget, held)
     }
     this._holds.set(holdKey, current)
     current.sends++
     // Sent inside the reaction, so a send that finds the hold gone can't reach the driver first.
     return current.established.then(() => {
       if (--current.sends === 0) this._holds.delete(holdKey)
-      if (weight !== undefined) current.bytes.set(weight.class, (current.bytes.get(weight.class) ?? 0) - bytes)
+      if (budget !== null) this._unhold(budget, bytes)
       return send()
     })
+  }
+
+  private _unhold(budget: string, bytes: number): void {
+    const held = this._held.get(budget)! - bytes
+    if (held === 0) this._held.delete(budget)
+    else this._held.set(budget, held)
   }
 
   /** Resolves once no slot of the partition on `sources`, including ones added meanwhile, is establishing. */

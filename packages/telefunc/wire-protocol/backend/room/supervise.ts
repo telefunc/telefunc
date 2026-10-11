@@ -33,15 +33,18 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
       const commit = () => driver.commitLane(roomId, inc, lane, payload, opts)
       // A close commits under its lease, which would lapse before the hold ends.
       const result = await (opts?.closingLease === undefined
-        ? subscriptions.afterEstablished(commit, () => ({
-            key: roomSubscriptionSourceKey(source),
-            // A binary commit also reaches its member's every-track lane.
-            sources:
-              lane.kind === 'binary'
-                ? [source, { roomId, inc, lane: { kind: 'binary-all', member: lane.member } }]
-                : [source],
-            weight: heldSendWeight(lane.kind === 'binary' ? 'binary' : 'text', () => payload.byteLength, 'Room'),
-          }))
+        ? subscriptions.afterEstablished(commit, () => {
+            const key = roomSubscriptionSourceKey(source)
+            if (lane.kind !== 'binary')
+              return { key, sources: [source], weight: heldSendWeight('text', key, () => payload.byteLength, 'Room') }
+            // A binary commit also reaches its member's every-track lane, and its held bytes count against its member's.
+            const everyTrack = { roomId, inc, lane: { kind: 'binary-all', member: lane.member } } as const
+            return {
+              key,
+              sources: [source, everyTrack],
+              weight: heldSendWeight('binary', roomSubscriptionSourceKey(everyTrack), () => payload.byteLength, 'Room'),
+            }
+          })
         : commit())
       if ('accepted' in result) assertDriverPosition(result)
       return result
