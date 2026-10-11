@@ -646,11 +646,13 @@ class ServerRoom extends RoomStateView implements Room {
         ...leaveCauseToWire(cause),
         ...(hidden ? { hidden: true } : {}),
       })
-    this._stubOf.get(id)?._forgetMember(id)
     this._stubOf.delete(id)
     this._local.forgetMember(id)
     this._demand.forgetMember(id)
-    for (const stub of this._stubs) if (stub._forgetWantsOf(id)) this._subs.holderChanged(stub, [id])
+    for (const stub of this._stubs) {
+      stub._forgetMember(id)
+      if (stub._forgetWantsOf(id)) this._subs.holderChanged(stub, [id])
+    }
     this._subs.memberReleased(id)
   }
   /** The room closed. Runs once, after the `closed` event has been applied and relayed. */

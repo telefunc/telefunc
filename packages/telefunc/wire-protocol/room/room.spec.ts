@@ -2542,6 +2542,18 @@ describe('Room public behavior', () => {
     stub.abort()
     expect(stubIndexOf(room).size).toBe(0) // before the departed member's eviction settles
   })
+  it("keeps no order for a sender that left in a stub that didn't hold it", async () => {
+    const room = (await Room.create('stub-replay-forget')) as ServerRoom
+    const stub = register(room)
+    const peer = attachPeer(stub, undefined, { text: true, binary: false })
+    await vi.waitFor(() => expect(rosterEnded(peer)).toBe(true))
+    const senders = await Promise.all(Array.from({ length: 3 }, () => room.join()))
+    for (const sender of senders) await sender.publish('hi')
+    await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toHaveLength(3))
+    for (const sender of senders) await sender.leave()
+    const replay = (stub as unknown as { _replay: { _high: Map<string, number> } })._replay
+    expect([...replay._high.keys()]).toEqual([])
+  })
   it('never indexes a member under a stub that closed before its join held it', async () => {
     const room = (await Room.create('stub-index-closed-before-hold')) as ServerRoom
     const stub = register(room)
