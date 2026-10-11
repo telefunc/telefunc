@@ -747,6 +747,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   async _replayRetainedText(holder: LaneHolder, before: TextWantsChange): Promise<void> {
     if (before.all) return
+    await this._subs.ensureRoster()
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._subs.semanticReady)
     const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
@@ -755,15 +756,16 @@ class ServerRoom extends RoomStateView implements Room {
     const event = parse(serialized) as RoomDataEnvelope
     // A member whose own want didn't change is wanted now only by the new room-wide want, if at all.
     const had = before.members.get(event.from) ?? holder._textDemand().members.has(event.from)
-    if (had || !holder._wantsTextFrom(event.from)) return
+    if (had || !holder._wantsTextFrom(event.from) || !this._state.hasMember(event.from)) return
     // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
   /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so a
    *  frame it already has is not delivered again. A want for one member's track reads that lane; any other lists the
-   *  retained lanes it covers. */
+   *  retained lanes it covers. As with text, a frame replays only while its member is in the roster: a leave clears the
+   *  member's retained frames, and one read just before that is gone with it. */
   async _replayRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange): Promise<void> {
-    if (member === null) await this._subs.ensureRoster()
+    await this._subs.ensureRoster()
     const members = member === null ? this._state.listMemberIds() : [member]
     await (member === null && track === null ? this._subs.binaryReady() : this._subs.pairsReady(members, track))
     const backend = getRoomBackend()
@@ -778,7 +780,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
       const stored = await backend.readRetained(this.id, this._inc, lane)
-      if (stored === null) continue
+      if (stored === null || !this._state.hasMember(lane.member)) continue
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
       assert(frame)

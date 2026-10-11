@@ -2746,6 +2746,51 @@ describe('Room public behavior', () => {
     await retaining[0]!.leave()
     expect((await driver.listRetained(authority.id, authority._inc, { track: 'screen' })).length).toBe(2)
   })
+  it.each([
+    ['one track', { track: 'screen' }],
+    ['every track', undefined],
+  ] as const)(
+    'replays no retained frame of a member that leaves while a room-wide want of %s reads it',
+    async (_, options) => {
+      const authority = (await Room.create(`retained-leaver-${options?.track ?? 'all'}`)) as ServerRoom
+      const leaver = await authority.join()
+      const stayer = await authority.join()
+      await leaver.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
+      await stayer.publishBinary(new Uint8Array([2]), { track: 'screen', retain: true })
+      const readRetained = driver.readRetained.bind(driver)
+      vi.spyOn(driver, 'readRetained').mockImplementation(async (...args) => {
+        const stored = await readRetained(...args)
+        // The leave, its cleanup first, lands between the replay's read and its delivery.
+        if (args[2].kind === 'binary' && args[2].member === leaver.id) await leaver.leave()
+        return stored
+      })
+      const replays = vi.spyOn(authority, '_replayRetainedBinary')
+      const frames: number[] = []
+      authority.subscribeBinary((data) => void frames.push(data[0]!), options)
+      await vi.waitFor(() => expect(replays).toHaveBeenCalled())
+      await Promise.all(replays.mock.results.map(({ value }) => value))
+      expect(frames).toEqual([2])
+    },
+  )
+  it('replays no retained message of a member that leaves while the replay reads it', async () => {
+    const authority = (await Room.create('retained-text-leaver')) as ServerRoom
+    const leaver = await authority.join()
+    await leaver.publish('pinned', { retain: true })
+    const readRetained = driver.readRetained.bind(driver)
+    let left = false
+    vi.spyOn(driver, 'readRetained').mockImplementation(async (...args) => {
+      const stored = await readRetained(...args)
+      // The leave's cleanup reads the message too, and deletes it before the leave lands.
+      if (args[2].kind === 'semantic' && !left) (left = true), await leaver.leave()
+      return stored
+    })
+    const replays = vi.spyOn(authority, '_replayRetainedText')
+    const texts: unknown[] = []
+    authority.subscribe((data) => void texts.push(data))
+    await vi.waitFor(() => expect(replays).toHaveBeenCalled())
+    await Promise.all(replays.mock.results.map(({ value }) => value))
+    expect({ left, texts }).toEqual({ left: true, texts: [] })
+  })
   it('drops a live frame older than a retained frame that reached the subscriber first', async () => {
     const authority = await Room.create('retained-before-older-live')
     const publisher = await authority.join()
