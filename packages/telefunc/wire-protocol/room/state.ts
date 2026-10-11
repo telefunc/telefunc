@@ -1,4 +1,5 @@
-export { RoomState, RoomStateView, remoteBacking, replayMembership }
+export { RoomState, RoomStateView, remoteBacking }
+export type { MembershipEvent }
 
 import { assert, assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -341,22 +342,20 @@ class RoomState {
     this._stateVersion++
     this._fireAll(this._changeCbs)
   }
-  /** Runs `read`, recording the membership events this view gets meanwhile, and hands both to `settle` in the same
-   *  microtask, so no event lands unrecorded in between. */
+  /** Runs `read`, then `settle` with what it read, recording the membership events this view gets until `settle` ends;
+   *  `settle` sees the events grow. */
   async recordingMembership<T, R>(
     read: () => Promise<T>,
-    settle: (value: T, events: readonly MembershipEvent[]) => R,
+    settle: (value: T, events: readonly MembershipEvent[]) => R | Promise<R>,
   ): Promise<R> {
     assert(this._recording === null)
     const events: MembershipEvent[] = []
     this._recording = events
-    let value: T
     try {
-      value = await read()
+      return await settle(await read(), events)
     } finally {
       this._recording = null
     }
-    return settle(value, events)
   }
   private _record(event: MembershipEvent): void {
     this._recording?.push(event)
@@ -488,19 +487,54 @@ class RoomState {
   }
   /** The first roster loads silently; later ones narrate the drift they correct as events. A departing member stays
    *  until its leave event, which carries the cause. */
-  reconcileRoster(roster: MemberSnapshot[], departing: ReadonlySet<string> = new Set()): boolean {
+  reconcileRoster(members: MemberSnapshot[]): boolean {
+    const steps = this.reconcilingRoster({ members, departing: new Set() }, [])
+    for (;;) {
+      const step = steps.next()
+      if (step.done) return step.value
+    }
+  }
+  /** Reconciles with a roster read a member per step, the membership `events` since the read began, which may grow
+   *  between steps, replayed onto it first, so no step undoes one. Returns whether a drift was narrated. */
+  *reconcilingRoster(
+    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+    events: readonly MembershipEvent[],
+  ): Generator<void, boolean> {
+    const listed = new Map<string, MemberSnapshot>()
+    for (const member of roster.members) {
+      listed.set(member.id, member)
+      yield
+    }
+    const departing = new Set(roster.departing)
+    let replayed = 0
+    const replay = () => {
+      for (; replayed < events.length; replayed++) replayMembershipEvent(listed, departing, events[replayed]!)
+    }
+    replay()
+    // The first roster narrates nothing, and `count` stays the seed until its members are in.
     const narrate = this._rosterKnown
-    this._rosterKnown = true
     let narratedDrift = false
-    for (const member of roster) narratedDrift = this._mergeRosterMember(member, narrate) || narratedDrift
-    const listed = new Set([...roster.map((member) => member.id), ...departing])
-    narratedDrift = this._removeMissingMembers(listed) || narratedDrift
+    // A live iteration: a member the replay removes is skipped, one it adds is merged.
+    for (const member of listed.values()) {
+      narratedDrift = this._mergeRosterMember(member, narrate) || narratedDrift
+      yield
+      replay()
+    }
     if (!narrate) {
+      this._rosterKnown = true
       this._applyPreRosterMeta()
       this._bumpState()
-      return false
     }
-    return narratedDrift
+    for (const id of [...this._members.keys()]) {
+      if (this._members.has(id) && !listed.has(id) && !departing.has(id)) {
+        // No leave event reached this view, so its cause is unknown: it is reported as removed.
+        this.applyLeave(id, removedCause(undefined))
+        narratedDrift = true
+      }
+      yield
+      replay()
+    }
+    return narrate && narratedDrift
   }
   /** Whether the member's drift was narrated as events. */
   private _mergeRosterMember(member: MemberSnapshot, narrate: boolean): boolean {
@@ -530,16 +564,6 @@ class RoomState {
       entry.metaSeq = seq
     }
     this._preRosterMeta.clear()
-  }
-  private _removeMissingMembers(seen: Set<string>): boolean {
-    let removed = false
-    for (const id of [...this._members.keys()]) {
-      if (seen.has(id)) continue
-      // No leave event reached this view, so its cause is unknown: it is reported as removed.
-      this.applyLeave(id, removedCause(undefined))
-      removed = true
-    }
-    return removed
   }
   // ── Private ──
   private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
@@ -656,26 +680,21 @@ class RoomState {
     for (const cb of cbs.list()) invokeChannelListener(cb, args, this._onCallbackError)
   }
 }
-/** A roster read with the membership events this view got during it replayed onto it, so applying it undoes none. */
-function replayMembership(
-  roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
-  events: readonly MembershipEvent[],
-): { members: MemberSnapshot[]; departing: Set<string> } {
-  const members = new Map(roster.members.map((member) => [member.id, member]))
-  const departing = new Set(roster.departing)
-  for (const event of events) {
-    if ('join' in event) {
-      if (!members.has(event.join.id)) members.set(event.join.id, event.join)
-    } else if ('leave' in event) {
-      members.delete(event.leave)
-      departing.delete(event.leave)
-    } else {
-      const { id, meta, seq } = event.meta
-      const member = members.get(id)
-      if (member !== undefined && seq > member.metaSeq) members.set(id, { ...member, meta, metaSeq: seq })
-    }
+function replayMembershipEvent(
+  members: Map<string, MemberSnapshot>,
+  departing: Set<string>,
+  event: MembershipEvent,
+): void {
+  if ('join' in event) {
+    if (!members.has(event.join.id)) members.set(event.join.id, event.join)
+  } else if ('leave' in event) {
+    members.delete(event.leave)
+    departing.delete(event.leave)
+  } else {
+    const { id, meta, seq } = event.meta
+    const member = members.get(id)
+    if (member !== undefined && seq > member.metaSeq) members.set(id, { ...member, meta, metaSeq: seq })
   }
-  return { members: [...members.values()], departing }
 }
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */
 function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {

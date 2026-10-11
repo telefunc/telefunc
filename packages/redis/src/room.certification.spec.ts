@@ -134,7 +134,7 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(read.every((key) => [...unchanged, ...removed, ...added].includes(key))).toBe(true)
   })
 
-  it('reads the roster of 100,000 members in a heartbeat tick with no Redis command over 20 ms', async () => {
+  it('reads the roster of 100,000 members in a heartbeat tick with no Redis command over 20 ms and the event loop turning', async () => {
     const prefix = uniquePrefix('roster-pages')
     const redis = ownClient(connect())
     installRedis(redis, { prefix })
@@ -149,7 +149,19 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     }
     const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
     await Promise.all(nodes.map((node) => node.slowlog('RESET')))
-    await (room as unknown as { _subs: { _heartbeatTick(): Promise<void> } })._subs._heartbeatTick()
+    const tick = async () => {
+      let last = performance.now()
+      let longest = 0
+      const timer = setInterval(() => {
+        const now = performance.now()
+        longest = Math.max(longest, now - last)
+        last = now
+      }, 1)
+      await (room as unknown as { _subs: { _heartbeatTick(): Promise<void> } })._subs._heartbeatTick()
+      clearInterval(timer)
+      return Math.max(longest, performance.now() - last)
+    }
+    const gaps = [await tick(), await tick()]
     expect(room.count).toBe(100_000)
     // Each entry: id, time, microseconds, then the command and its arguments.
     const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
@@ -160,6 +172,8 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     ][]
     const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
     expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+    // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(...gaps)).toBeLessThanOrEqual(50)
   })
 
   it("delivers each of a member's binary commits to its every-track subscription with its own track's seq before the commit's delivery settles", async () => {

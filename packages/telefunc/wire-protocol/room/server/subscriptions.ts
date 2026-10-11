@@ -12,7 +12,7 @@ import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX, ROOM_PLAN_SLIC
 import type { BinaryWantChange } from '../binary.js'
 import type { RoomDemand } from '../demand.js'
 import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
-import { replayMembership, type RoomState } from '../state.js'
+import type { MembershipEvent, RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey, type LaneHolder } from './replay.js'
@@ -48,7 +48,10 @@ type SubscriptionHost = {
   _readOpenConfig(): Promise<RoomConfigRecord | null>
   _applyAuthorityMeta(stored: StoredRoomMeta): void
   /** A complete roster read: applied, and sent to the clients it concerns. */
-  _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): void
+  _applyAuthorityRoster(
+    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+    events: readonly MembershipEvent[],
+  ): Promise<boolean>
   _closeFromAuthority(): void
 }
 
@@ -556,12 +559,7 @@ class RoomSubscriptions {
     if (host._state.closed) return
     const read = await host._state.recordingMembership(
       () => reapAndReadRoster(host._incarnation),
-      (roster, events) => {
-        if (host._state.closed) return false
-        const { members, departing } = replayMembership(roster, events)
-        host._applyAuthorityRoster(members, departing)
-        return true
-      },
+      async (roster, events) => !host._state.closed && (await host._applyAuthorityRoster(roster, events)),
     )
     if (read) await this.replan()
   }

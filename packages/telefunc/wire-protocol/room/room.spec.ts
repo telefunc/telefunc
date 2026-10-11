@@ -949,6 +949,41 @@ describe('Room public behavior', () => {
     await refresh
     expect((await participants).map(({ id }) => id)).toHaveLength(1)
   })
+  it('keeps the joins and leaves that land between two slices of applying a roster of 100,000 members, each narrated once', async () => {
+    const authority = (await Room.create('roster-apply-races')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 100_000 }, () => authority.join()))
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const narrated: string[] = []
+    observer.onJoin((member) => narrated.push(`join ${member.id}`))
+    observer.onLeave((member) => narrated.push(`leave ${member.id}`))
+    await observer.getParticipants()
+    await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
+    const expected: string[] = []
+    const race = async (leaving: (typeof members)[number]) => {
+      const joined = await authority.join()
+      await leaving.leave()
+      expected.push(`join ${joined.id}`, `leave ${leaving.id}`)
+    }
+    const state = observer._state
+    const reconciling = state.reconcilingRoster.bind(state)
+    vi.spyOn(state, 'reconcilingRoster').mockImplementation(function* (roster, events) {
+      const steps = reconciling(roster, events)
+      for (let step = 1; ; step++) {
+        const next = steps.next()
+        if (next.done) return next.value
+        // Midway through merging the roster, a member it has not merged yet leaves; midway through removing what it
+        // lacks, one it already passed does. The apply's slices run on while each race lands.
+        const leaving = step === 150_000 ? members[99_999] : step === 250_000 ? members[1] : undefined
+        let landed = leaving === undefined
+        if (leaving !== undefined) void race(leaving).then(() => (landed = true))
+        do yield
+        while (!landed)
+      }
+    })
+    await subsOf(observer)._refreshMembers()
+    expect(narrated).toEqual(expected)
+    expect((await observer.getParticipants()).length).toBe(100_000)
+  }, 60_000)
   it('applies the membership events that race its roster read, each once, without reading again', async () => {
     const authority = (await Room.create('roster-refresh-races')) as ServerRoom
     const first = await authority.join()
@@ -4615,9 +4650,9 @@ describe('room protocol validation', () => {
     // The shorter of two runs, so a scheduling hiccup in one run is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(100)
   })
-  it('keeps the event loop turning through a heartbeat tick renewing and reading 10,000 owned members', async () => {
+  it('keeps the event loop turning through a heartbeat tick renewing and reading 100,000 owned members', async () => {
     const room = (await Room.create('heartbeat-turns')) as ServerRoom
-    await Promise.all(Array.from({ length: 10_000 }, () => room.join()))
+    await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
     const longestGap = async () => {
       let last = performance.now()
       let longest = 0
@@ -4632,7 +4667,7 @@ describe('room protocol validation', () => {
     }
     // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
-  })
+  }, 60_000)
   it('keeps the event loop turning through a replan of 100,000 members', async () => {
     const room = (await Room.create('replan-turns')) as ServerRoom
     await Promise.all(Array.from({ length: 100_000 }, () => room.join()))

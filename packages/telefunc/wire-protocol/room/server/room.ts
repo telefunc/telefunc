@@ -8,7 +8,8 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_PLAN_SLICE_MS } from '../constants.js'
+import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
@@ -48,7 +49,7 @@ import {
   type AcceptedMeta,
   type RoomEnvelope,
 } from '../protocol.js'
-import { RoomState, RoomStateView } from '../state.js'
+import { RoomState, RoomStateView, type MembershipEvent } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
 import { RoomStubChannel, unorderedEventText } from './stub.js'
@@ -637,14 +638,28 @@ class ServerRoom extends RoomStateView implements Room {
   _applyAuthorityMeta(stored: StoredRoomMeta): void {
     if (this._state.applyRoomUpdate(stored.meta, stored.seq)) this._relayApplied({ __r: 'update', ...stored })
   }
-  /** @internal Every client gets a roster that corrected a drift; otherwise only the clients still owed their first. */
-  _applyAuthorityRoster(members: MemberSnapshot[], departing: ReadonlySet<string>): void {
-    const drifted = this._state.reconcileRoster(members, departing)
+  /** @internal Reconciles with a roster read in `ROOM_PLAN_SLICE_MS` slices, replaying `events`, which grow until it
+   *  ends; false if the room closed first. Every client gets a roster that corrected a drift; otherwise only the clients
+   *  still owed their first. */
+  async _applyAuthorityRoster(
+    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+    events: readonly MembershipEvent[],
+  ): Promise<boolean> {
+    const steps = this._state.reconcilingRoster(roster, events)
+    let step = steps.next()
+    for (let deadline = performance.now() + ROOM_PLAN_SLICE_MS; step.done !== true; step = steps.next()) {
+      if (performance.now() < deadline) continue
+      await nextTurnOf()
+      if (this._state.closed) return false
+      deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    }
+    const drifted = step.value
     const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
     this._rosterOwed.clear()
-    if (recipients.length === 0) return
+    if (recipients.length === 0) return true
     const snapshot = this._state.snapshotMembers()
     for (const stub of recipients) stub._relayRoster(snapshot)
+    return true
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
