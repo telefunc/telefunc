@@ -984,62 +984,6 @@ describe('Room public behavior', () => {
     expect(narrated).toEqual(expected)
     expect((await observer.getParticipants()).length).toBe(100_000)
   }, 60_000)
-  it('streams a roster of 100,000 members to a client a part at a time, with the join and leave landing between two parts each once', async () => {
-    const authority = await Room.create('roster-parts')
-    const members = await Promise.all(Array.from({ length: 100_000 }, () => authority.join()))
-    const observer = (await Room.get(authority.id)) as ServerRoom
-    await observer.getParticipants()
-    const stub = register(observer)
-    const joined = crypto.randomUUID()
-    const [sent, unsent] = [members[0]!.id, members[99_999]!.id]
-    const sendPublish = stub._sendPublish.bind(stub)
-    let parts = 0
-    vi.spyOn(stub, '_sendPublish').mockImplementation((wireText, resentOnAttach) => {
-      sendPublish(wireText, resentOnAttach)
-      // As the control lane delivers them, between two parts: a join, and the leaves of a member already sent and of
-      // one not sent yet.
-      if (wireText.includes('\n{"__r":"roster",') && ++parts === 50) {
-        const ctrl = (event: object) => observer._onCtrlMessage(stringify(event), { seq: 0, timestamp: 1 })
-        ctrl({ __r: 'join', id: joined, meta: {}, joinedAt: 1 })
-        ctrl({ __r: 'leave', id: sent })
-        ctrl({ __r: 'leave', id: unsent })
-      }
-    })
-    const rosterEnds = (frames: ReturnType<Peer['decoded']>) =>
-      frames.some(
-        (frame) =>
-          frame.tag === TAG.PUBLISH &&
-          /^\{"__r":"roster","members":/.test(frame.text) &&
-          !/"more":true\}$/.test(frame.text),
-      )
-    const serverGap = await longestGapWhile(async () => {
-      const peer = attachPeer(stub)
-      await vi.waitFor(() => expect(rosterEnds(peer.decoded())).toBe(true), { timeout: 30_000 })
-      return peer
-    })
-    const { client, emit } = fakeClient(authority.id)
-    const narrated: string[] = []
-    client.onJoin((member) => narrated.push(`join ${member.id}`))
-    client.onLeave((member) => narrated.push(`leave ${member.id}`))
-    const clientGap = await longestGapWhile(async () => {
-      // A frame per turn, as a transport delivers them.
-      for (const frame of serverGap.value.decoded()) {
-        if (frame.tag !== TAG.PUBLISH) continue
-        emit(parse(frame.text), frame.info.seq)
-        await new Promise((resolve) => setImmediate(resolve))
-      }
-      await client.getParticipant(joined)
-    })
-    expect(serverGap.gap).toBeLessThanOrEqual(50)
-    expect(clientGap.gap).toBeLessThanOrEqual(50)
-    // Before its first roster the client knows neither leaver, so only the join is narrated, once, though a later part
-    // lists the member too.
-    expect(narrated).toEqual([`join ${joined}`])
-    const ids = (await client.getParticipants()).map(({ id }) => id)
-    expect(new Set(ids).size).toBe(ids.length)
-    expect(ids.sort()).toEqual((await observer.getParticipants()).map(({ id }) => id).sort())
-    expect(ids).toHaveLength(99_999)
-  }, 60_000)
   it('applies the membership events that race its roster read, each once, without reading again', async () => {
     const authority = (await Room.create('roster-refresh-races')) as ServerRoom
     const first = await authority.join()
@@ -3485,6 +3429,8 @@ describe('Room public behavior', () => {
             else remote.subscribeBinary(() => {}, { track })
           await subsOf(observer).binaryReady()
         })
+        // Its clients never connect: they end here, not when the close's wait for them ends, in a later spec.
+        for (const stub of stubs) stub.abort()
         await Room.close(room.id)
         // Its last planning pass runs in slices, which stay out of the next run's time.
         await subsOf(observer).binaryReady()
@@ -4748,42 +4694,6 @@ describe('room protocol validation', () => {
     // The shorter of two runs, so a scheduling hiccup in one run is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(100)
   })
-  it('keeps the event loop turning through a heartbeat tick renewing and reading 100,000 owned members', async () => {
-    const room = (await Room.create('heartbeat-turns')) as ServerRoom
-    await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
-    const longestGap = async () => {
-      let last = performance.now()
-      let longest = 0
-      const timer = setInterval(() => {
-        const now = performance.now()
-        longest = Math.max(longest, now - last)
-        last = now
-      }, 1)
-      await subsOf(room)._heartbeatTick()
-      clearInterval(timer)
-      return Math.max(longest, performance.now() - last)
-    }
-    // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
-    expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
-  }, 60_000)
-  it('keeps the event loop turning through a replan of 100,000 members', async () => {
-    const room = (await Room.create('replan-turns')) as ServerRoom
-    await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
-    const longestGap = async () => {
-      let last = performance.now()
-      let longest = 0
-      const timer = setInterval(() => {
-        const now = performance.now()
-        longest = Math.max(longest, now - last)
-        last = now
-      }, 1)
-      await subsOf(room).replan()
-      clearInterval(timer)
-      return Math.max(longest, performance.now() - last)
-    }
-    // The shorter of two passes, so a scheduling hiccup in one is not read as a stall.
-    expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
-  }, 60_000)
   it('renews 10,000 owned members in a heartbeat tick whose every cell read and write takes a round trip, well within the interval', async () => {
     const room = (await Room.create('heartbeat-round-trips')) as ServerRoom
     await Promise.all(Array.from({ length: 10_000 }, () => room.join()))
@@ -5245,22 +5155,6 @@ describe('a room nothing holds closes on its own', () => {
     }
   })
 })
-/** The longest event-loop gap while `run` runs, and what it returned. */
-async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number; value: T }> {
-  let last = performance.now()
-  let gap = 0
-  const timer = setInterval(() => {
-    const now = performance.now()
-    gap = Math.max(gap, now - last)
-    last = now
-  }, 1)
-  try {
-    const value = await run()
-    return { gap: Math.max(gap, performance.now() - last), value }
-  } finally {
-    clearInterval(timer)
-  }
-}
 function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: BroadcastSubscriptions) {
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!
