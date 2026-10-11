@@ -51,6 +51,10 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
   /** Every channel some attempt needs, with the attempts that listen on it. */
   private readonly _byChannel = new Map<string, Set<RedisSubscriptionAttempt>>()
+  /** The channels some attempt started or stopped needing since the last sync read them. */
+  private _changedChannels = new Set<string>()
+  /** The attempts that may await confirmation; a sync confirms those its connection covers. */
+  private readonly _unconfirmed = new Set<RedisSubscriptionAttempt>()
   private _connection: Connection = { phase: 'idle' }
   private _nextId = 0
   private _syncing: Promise<void> = Promise.resolve()
@@ -111,19 +115,27 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
       () => this._detach(attempt),
     )
     for (const channel of attempt.channels) {
-      const attempts = this._byChannel.get(channel) ?? new Set()
-      this._byChannel.set(channel, attempts.add(attempt))
+      const attempts = this._byChannel.get(channel)
+      if (attempts !== undefined) attempts.add(attempt)
+      else {
+        this._byChannel.set(channel, new Set([attempt]))
+        this._changedChannels.add(channel)
+      }
     }
+    this._unconfirmed.add(attempt)
     if (this._connection.phase === 'connected') this._syncChannels()
     else if (this._connection.phase === 'idle') void this._connect()
     return attempt
   }
 
   private _detach(attempt: RedisSubscriptionAttempt): void {
+    this._unconfirmed.delete(attempt)
     for (const channel of attempt.channels) {
       const attempts = this._byChannel.get(channel)
       attempts?.delete(attempt)
-      if (attempts?.size === 0) this._byChannel.delete(channel)
+      if (attempts?.size !== 0) continue
+      this._byChannel.delete(channel)
+      this._changedChannels.add(channel)
     }
     if (this._byChannel.size > 0) return this._syncChannels()
     // Nothing left to deliver to: release the connection until the next subscription, which starts afresh.
@@ -159,13 +171,17 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     }
     if (!this._isCurrent(id)) return
     this._connection = { phase: 'connected', id, socket, subscribed: new Set() }
+    this._changedChannels = new Set(this._byChannel.keys())
     this._syncChannels()
   }
 
   private _lost(id: number, error: unknown): void {
     if (!this._isCurrent(id)) return
     this._disconnect()
-    for (const attempt of this._attempts()) attempt.lose(error)
+    for (const attempt of this._attempts()) {
+      attempt.lose(error)
+      this._unconfirmed.add(attempt)
+    }
     // A listener may have released the last attempt, or opened one that is already connecting.
     if (this._byChannel.size === 0 || this._connection.phase !== 'idle') return
     if (!this._outageReported) {
@@ -191,7 +207,7 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   }
 
   /** Serialized: brings the connection's channel set to the attempts' and confirms what it covers. A sync reads the
-   *  wanted set when it starts, so one that is queued already covers any later request. */
+   *  changed channels when it starts, so one that is queued already covers any later request. */
   private _syncChannels(): void {
     if (this._syncQueued) return
     this._syncQueued = true
@@ -212,8 +228,15 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   }
 
   private async _syncChannelsOnce({ id, socket, subscribed }: Connected): Promise<void> {
-    const stale = [...subscribed].filter((channel) => !this._byChannel.has(channel))
-    const missing = [...this._byChannel.keys()].filter((channel) => !subscribed.has(channel))
+    const changed = this._changedChannels
+    this._changedChannels = new Set()
+    const stale: string[] = []
+    const missing: string[] = []
+    for (const channel of changed) {
+      const wanted = this._byChannel.has(channel)
+      if (wanted && !subscribed.has(channel)) missing.push(channel)
+      else if (!wanted && subscribed.has(channel)) stale.push(channel)
+    }
     if (stale.length > 0) {
       for (const channel of stale) subscribed.delete(channel)
       await socket.unsubscribe(...stale)
@@ -224,9 +247,14 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
       for (const channel of missing) subscribed.add(channel)
     }
     // An attempt attached during the SUBSCRIBE above waits for the sync it queued.
-    const covered = [...this._attempts()].filter(
-      (attempt) => attempt.awaitsConfirmation() && attempt.channels.every((channel) => subscribed.has(channel)),
-    )
+    const covered: RedisSubscriptionAttempt[] = []
+    for (const attempt of this._unconfirmed) {
+      if (!attempt.awaitsConfirmation()) this._unconfirmed.delete(attempt)
+      else if (attempt.channels.every((channel) => subscribed.has(channel))) {
+        this._unconfirmed.delete(attempt)
+        covered.push(attempt)
+      }
+    }
     await Promise.all(covered.map((attempt) => this._confirm(attempt, id)))
   }
 

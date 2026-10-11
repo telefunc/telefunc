@@ -265,3 +265,31 @@ test('releases the connection once the last subscription leaves', async () => {
   await attempt.unsubscribe()
   expect(disconnect).toHaveBeenCalledOnce()
 })
+
+test("opens and closes a lane beside 100,000 subscribed ones as fast as beside 1,000, touching only that lane's channel", async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets)
+  const lane = (i: number) => ({ roomId: 'room', inc: 'inc', lane: { kind: 'inbox', member: `m${i}` } }) as const
+  let opened = 0
+  // The median time to open one more lane and wait until it is ready.
+  const perJoin = async (subscribed: number): Promise<number> => {
+    while (opened < subscribed) openAttempt(driver, lane(opened++))
+    const times: number[] = []
+    for (let i = 0; i < 101; i++) {
+      const started = performance.now()
+      await untilReady(openAttempt(driver, lane(opened++)))
+      times.push(performance.now() - started)
+    }
+    return times.sort((a, b) => a - b)[50]!
+  }
+  await perJoin(0)
+  const small = await perJoin(1_000)
+  const large = await perJoin(100_000)
+  expect(large / small).toBeLessThan(4)
+  const unsubscribe = vi.spyOn(sockets[0]!.socket, 'unsubscribe')
+  const last = openAttempt(driver, lane(opened++))
+  await untilReady(last)
+  await last.unsubscribe()
+  await vi.waitFor(() => expect(unsubscribe).toHaveBeenCalledOnce())
+  expect(unsubscribe).toHaveBeenCalledWith(channelKey('tf:', 'room', 'inc', encodeLaneKey(lane(opened - 1).lane)))
+})
