@@ -296,13 +296,16 @@ redis.call('SET', order_key, seq_text .. ':' .. ts_text)
 redis.call('SADD', generation_keys_key, order_key)
 local frame = tf_ordering_frame(seq, ts, ARGV[5])
 if ARGV[4] == '1' then
-  redis.call('SET', retained_key, frame)
-  redis.call('SADD', generation_keys_key, retained_key)
-  if ARGV[2] == 'binary' then
-    redis.call('SADD', KEYS[8], ARGV[8])
-    redis.call('SADD', KEYS[9], ARGV[8])
-    redis.call('SADD', generation_keys_key, KEYS[8], KEYS[9])
+  -- A lane holding a retained frame is already indexed: its frame and index entries leave together.
+  if redis.call('EXISTS', retained_key) == 0 then
+    redis.call('SADD', generation_keys_key, retained_key)
+    if ARGV[2] == 'binary' then
+      redis.call('SADD', KEYS[8], ARGV[8])
+      redis.call('SADD', KEYS[9], ARGV[8])
+      redis.call('SADD', generation_keys_key, KEYS[8], KEYS[9])
+    end
   end
+  redis.call('SET', retained_key, frame)
 end
 -- A channel's local attempts awaiting the commit find their fence token ahead of its frame, after a byte no frame
 -- starts with.

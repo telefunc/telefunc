@@ -186,11 +186,15 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     // A member's leave deletes its lanes one by one.
     await backend.deleteRetained('retained-of-track', 'inc', binary('a', 'camera'))
     expect(await listed('camera')).toEqual(['binary:b:camera'])
+    // Retaining again on a lane that holds a retained frame keeps one entry per index.
+    await backend.commitLane('retained-of-track', 'inc', binary('b', 'camera'), bytes('newer'), { retain: true })
     const before = await generationKeys()
     await backend.deleteRetained('retained-of-track', 'inc', binary('b', 'camera'))
     expect(await listed('camera')).toEqual([])
     // The retained frame, its member's set and its track's set leave the generation's keys together.
     expect(before.length - (await generationKeys()).length).toBe(3)
+    await backend.commitLane('retained-of-track', 'inc', binary('a', 'camera'), bytes('again'), { retain: true })
+    expect(await listed('camera')).toEqual(['binary:a:camera'])
     await backend.dropGeneration('retained-of-track', 'inc')
     expect(await listed('camera:1')).toEqual([])
     expect(await listed('mic')).toEqual([])

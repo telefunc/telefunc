@@ -321,15 +321,16 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const frame = copyBytes(payload)
     const mark = advanceOrder(gen.order, key, Date.now())
     if (opts?.retain) {
+      // A lane holding a retained frame is already indexed: its frame and index entries leave together.
+      if (lane.kind === 'binary' && !gen.retained.has(key)) {
+        getOrCreate(gen.retainedOf, lane.member, () => new Set()).add(key)
+        getOrCreate(gen.retainedOfTrack, lane.track, () => new Set()).add(key)
+      }
       gen.retained.set(key, {
         lane: copyLane(lane),
         payload: frame,
         ...mark,
       })
-      if (lane.kind === 'binary') {
-        getOrCreate(gen.retainedOf, lane.member, () => new Set()).add(key)
-        getOrCreate(gen.retainedOfTrack, lane.track, () => new Set()).add(key)
-      }
     }
     const targets = gen.subs.get(key) ?? NO_TARGETS
     // A binary commit also reaches its member's every-track lane.

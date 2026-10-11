@@ -310,6 +310,16 @@ describe('memory backend behind the supervised consumer', () => {
     expect(await backend.listRetained('retained-of-track', 'inc-1', { track: 'camera:1' })).toEqual([
       binary('a', 'camera:1'),
     ])
+    // Retaining again on a lane that holds a retained frame keeps one entry per index.
+    await backend.commitLane('retained-of-track', 'inc-1', binary('b', 'camera'), encoder.encode('newer'), {
+      retain: true,
+    })
+    await backend.deleteRetained('retained-of-track', 'inc-1', binary('b', 'camera'))
+    expect(await listed()).toEqual([])
+    await backend.commitLane('retained-of-track', 'inc-1', binary('a', 'camera'), encoder.encode('again'), {
+      retain: true,
+    })
+    expect(await listed()).toEqual([binary('a', 'camera')])
     expect(scan).not.toHaveBeenCalled()
     await backend.dropGeneration('retained-of-track', 'inc-1')
     expect(await listed()).toEqual([])
