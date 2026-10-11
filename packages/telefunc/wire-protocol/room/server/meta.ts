@@ -1,4 +1,4 @@
-export { readRoomMeta, writeRoomMeta, dropReplacedMetaGenerations }
+export { readRoomMeta, readRoomMetaSeq, writeRoomMeta, dropReplacedMetaGenerations }
 export type { StoredRoomMeta, RoomMetaWrite }
 
 import { getRoomBackend } from '../../backend/install.js'
@@ -79,6 +79,14 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
   }
   runs.push(decodeMetaCells(run, gen).sort(compareMetaEntries))
   return { entries: await mergeRuns(runs), seq: decodeCellCounter(read.cells.get(META_SEQ_CELL_KEY)!).value }
+}
+
+/** How many writes the stored meta reflects; null once the incarnation is gone. */
+async function readRoomMetaSeq(roomId: string, inc: string): Promise<number | null> {
+  const read = await getRoomBackend().readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
+  if ('staleInc' in read) return null
+  const seq = read.cells.get(META_SEQ_CELL_KEY)
+  return seq === undefined ? 0 : decodeCellCounter(seq).value
 }
 
 function decodeMetaCells(cells: ReadonlyMap<string, Uint8Array>, gen: number): RoomMetaEntry[] {

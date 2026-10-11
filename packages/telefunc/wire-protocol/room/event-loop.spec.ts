@@ -10,7 +10,7 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { Room } from './server/statics.js'
 import type { ServerRoom } from './server/room.js'
 import { ResponseRoomGrants, RoomStubChannel } from './server/stub.js'
-import { disposeBackend, installBackend } from '../backend/install.js'
+import { disposeBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 
@@ -118,6 +118,36 @@ describe('Room at 100,000 members', () => {
     expect(new Set(ids).size).toBe(ids.length)
     expect(ids.sort()).toEqual((await observer.getParticipants()).map(({ id }) => id).sort())
     expect(ids).toHaveLength(99_999)
+  }, 60_000)
+  it('reads no page of a room meta of 100,000 keys in a heartbeat tick while the view holds every write', async () => {
+    const room = await Room.create('meta-steady-tick')
+    for (let from = 0; from < 100_000; from += 10_000)
+      await Room.setAttributes(
+        room.id,
+        Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
+      )
+    const observer = (await Room.get(room.id)) as ServerRoom
+    observer.onUpdate(() => {})
+    await subsOf(observer)._heartbeatTick()
+    expect(Object.keys(observer.meta)).toHaveLength(100_000)
+    const backend = getRoomBackend()
+    const { readCells, readCellPages } = backend
+    const prefixes: string[] = []
+    backend.readCells = (roomId, inc, selector) => {
+      if ('prefix' in selector) prefixes.push(selector.prefix)
+      return readCells.call(backend, roomId, inc, selector)
+    }
+    backend.readCellPages = (roomId, inc, prefix) => {
+      prefixes.push(prefix)
+      return readCellPages.call(backend, roomId, inc, prefix)
+    }
+    try {
+      await subsOf(observer)._heartbeatTick()
+    } finally {
+      Object.assign(backend, { readCells, readCellPages })
+    }
+    // A replace's drop marks are read each tick; they hold no key.
+    expect(prefixes.filter((prefix) => prefix.startsWith('meta:') && !prefix.startsWith('meta:drop:'))).toEqual([])
   }, 60_000)
   it("drops the 409,600 track wants of 100 clients whose reconnect windows end in one timer turn with the event loop turning, the publisher's lanes released", async () => {
     const room = await Room.create('mass-expiry')

@@ -25,7 +25,7 @@ import { WantsIndex } from './wants-index.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import { reapAndReadRoster, renewMemberLeases } from './membership.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
-import { dropReplacedMetaGenerations, readRoomMeta, type StoredRoomMeta } from './meta.js'
+import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
 assertIsNotBrowser()
 
 /** The room side these subscriptions serve: it aggregates its holders and applies what the lanes and the authority carry. */
@@ -36,7 +36,14 @@ type SubscriptionHost = {
   /** Read-only here: every change goes through the host's methods. */
   readonly _state: Pick<
     RoomState,
-    'closed' | 'metaWaiting' | 'rosterKnown' | 'listenerCount' | 'recordingMembership' | 'memberIds' | 'hasMember'
+    | 'closed'
+    | 'metaWaiting'
+    | 'metaSeq'
+    | 'rosterKnown'
+    | 'listenerCount'
+    | 'recordingMembership'
+    | 'memberIds'
+    | 'hasMember'
   >
   /** Whether anything here observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean
@@ -253,10 +260,15 @@ class RoomSubscriptions {
     )
   }
 
-  /** The stored meta, applied if newer; false once the room is gone. */
+  /** The stored meta, applied if newer, and read whole only when it holds a write the view lacks or one waits; false
+   *  once the room is gone. */
   private async _reconcileMeta(): Promise<boolean> {
     const host = this._host
     const config = await host._readOpenConfig()
+    if (config !== null && !host._state.metaWaiting) {
+      const seq = await readRoomMetaSeq(host.id, config.inc)
+      if (seq !== null && seq <= host._state.metaSeq) return true
+    }
     const stored = config && (await readRoomMeta(host.id, config))
     if (stored === null) {
       host._closeFromAuthority()
