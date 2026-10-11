@@ -2724,6 +2724,27 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(frames.sort()).toEqual([[1], [2]]))
     expect(listRetained.mock.calls.map(([, , of]) => of)).toEqual([{ member: publisher.id }])
   })
+  it("replays a track's retained frames once each to a room-wide want for that track, reading only those frames, among 100 members", async () => {
+    const authority = (await Room.create('retained-track-want')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 100 }, () => authority.join()))
+    const retaining = members.slice(0, 3)
+    for (const [i, member] of retaining.entries())
+      await member.publishBinary(new Uint8Array([i]), { track: 'screen', retain: true })
+    await members[3]!.publishBinary(new Uint8Array([9]), { track: 'camera', retain: true })
+    const observer = await Room.get(authority.id)
+    const listRetained = vi.spyOn(driver, 'listRetained')
+    const readRetained = vi.spyOn(driver, 'readRetained')
+    const frames: number[] = []
+    observer.subscribeBinary((data) => void frames.push(data[0]!), { track: 'screen' })
+    await vi.waitFor(() => expect(frames.length).toBe(3))
+    for (const member of retaining) await member.publishBinary(new Uint8Array([10]), { track: 'screen' })
+    await vi.waitFor(() => expect(frames.length).toBe(6))
+    expect(frames.sort((a, b) => a - b)).toEqual([0, 1, 2, 10, 10, 10])
+    expect(readRetained).toHaveBeenCalledTimes(3)
+    expect(listRetained.mock.calls.map(([, , of]) => of)).toEqual([{ track: 'screen' }])
+    await retaining[0]!.leave()
+    expect((await driver.listRetained(authority.id, authority._inc, { track: 'screen' })).length).toBe(2)
+  })
   it('drops a live frame older than a retained frame that reached the subscriber first', async () => {
     const authority = await Room.create('retained-before-older-live')
     const publisher = await authority.join()

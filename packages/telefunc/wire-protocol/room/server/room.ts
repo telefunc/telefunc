@@ -758,17 +758,21 @@ class ServerRoom extends RoomStateView implements Room {
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
   /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so a
-   *  frame it already has is not delivered again. A want for every track lists the retained lanes it covers, a want for
-   *  one track reads that track's lane of each member it covers. */
+   *  frame it already has is not delivered again. A want for one member's track reads that lane; any other lists the
+   *  retained lanes it covers. */
   async _replayRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange): Promise<void> {
     if (member === null) await this._subs.ensureRoster()
     const members = member === null ? this._state.listMemberIds() : [member]
     await (member === null && track === null ? this._subs.binaryReady() : this._subs.pairsReady(members, track))
     const backend = getRoomBackend()
     const lanes: LaneId[] =
-      track === null
-        ? await backend.listRetained(this.id, this._inc, member === null ? undefined : { member })
-        : members.map((id) => ({ kind: 'binary', member: id, track }))
+      member !== null && track !== null
+        ? [{ kind: 'binary', member, track }]
+        : await backend.listRetained(
+            this.id,
+            this._inc,
+            member !== null ? { member } : track !== null ? { track } : undefined,
+          )
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
       const stored = await backend.readRetained(this.id, this._inc, lane)
