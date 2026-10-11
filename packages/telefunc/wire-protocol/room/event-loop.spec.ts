@@ -24,12 +24,21 @@ beforeEach(async () => {
   const driver = new MemoryBackend({ state: new MemoryBackendState() })
   installBackend(() => driver)
 })
+// A spec's stubs and rooms end after it, and what ending them sets off finishes before the next spec: a closed room's
+// planning pass releases its lanes a slice at a time, and a stub holds its room until it ends.
 afterEach(async () => {
+  for (const stub of opened.stubs.splice(0)) stub.abort()
+  const rooms = opened.rooms.splice(0)
+  for (const id of new Set(rooms.map((room) => room.id))) await Room.close(id)
+  // A view no lane tells of the close learns it as its next heartbeat would.
+  await Promise.all(rooms.map((room) => subsOf(room).reconcileAuthority()))
+  await Promise.all(rooms.map((room) => subsOf(room).binaryReady()))
+  await settled()
   await disposeBackend()
 })
 describe('Room at 100,000 members', () => {
   it('keeps the event loop turning through a heartbeat tick renewing and reading 100,000 owned members', async () => {
-    const room = (await Room.create('heartbeat-turns')) as ServerRoom
+    const room = await create('heartbeat-turns')
     await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
     const longestGap = async () => {
       let last = performance.now()
@@ -47,7 +56,7 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
   }, 60_000)
   it('keeps the event loop turning through a replan of 100,000 members', async () => {
-    const room = (await Room.create('replan-turns')) as ServerRoom
+    const room = await create('replan-turns')
     await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
     const longestGap = async () => {
       let last = performance.now()
@@ -65,19 +74,18 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
   }, 60_000)
   it('replans 100,000 members no holder wants binary of, allocating at most 700 bytes each', async () => {
-    const room = (await Room.create('replan-allocation')) as ServerRoom
+    const room = await create('replan-allocation')
     await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
     await subsOf(room).replan()
     const before = allocatedBytes()
     await subsOf(room).replan()
     // About 450 measured, the inbox renewal included; 1,400 when every member's plan walked its empty want lists.
     expect((allocatedBytes() - before) / 100_000).toBeLessThanOrEqual(700)
-    await closed(room)
   }, 60_000)
   it('streams a roster of 100,000 members to a client a part at a time, with the join and leave landing between two parts each once', async () => {
-    const authority = await Room.create('roster-parts')
+    const authority = await create('roster-parts')
     const members = await Promise.all(Array.from({ length: 100_000 }, () => authority.join()))
-    const observer = (await Room.get(authority.id)) as ServerRoom
+    const observer = await view(authority.id)
     await observer.getParticipants()
     const stub = register(observer)
     const joined = crypto.randomUUID()
@@ -132,7 +140,7 @@ describe('Room at 100,000 members', () => {
     expect(ids).toHaveLength(99_999)
   }, 60_000)
   it('streams an unchanged roster of 100,000 members to 200 clients attaching one after another, each reusing the text one built', async () => {
-    const room = (await Room.create('serial-rosters')) as ServerRoom
+    const room = await create('serial-rosters')
     await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
     const attach = async () => {
       const before = allocatedBytes()
@@ -148,10 +156,9 @@ describe('Room at 100,000 members', () => {
     // About 330 MB built the text, most of it the serializer's; about 3 MB each after.
     expect(median(allocated)).toBeLessThan(built / 10)
     expect(median(allocated.slice(100))).toBeLessThanOrEqual(median(allocated.slice(0, 100)) * 1.25)
-    await closed(room)
   }, 120_000)
   it('holds at most 5,500 bytes per owned member, measured over 20,000 joins after a full collection', async () => {
-    const room = await Room.create('member-footprint')
+    const room = await create('member-footprint')
     await room.join()
     const live = async () => {
       for (let i = 0; i < 4; i++) {
@@ -169,13 +176,13 @@ describe('Room at 100,000 members', () => {
     expect(members).toHaveLength(20_000)
   }, 60_000)
   it('reads no page of a room meta of 100,000 keys in a heartbeat tick while the view holds every write', async () => {
-    const room = await Room.create('meta-steady-tick')
+    const room = await create('meta-steady-tick')
     for (let from = 0; from < 100_000; from += 10_000)
       await Room.setAttributes(
         room.id,
         Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
       )
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const observer = await view(room.id)
     observer.onUpdate(() => {})
     await subsOf(observer)._heartbeatTick()
     expect(Object.keys(observer.meta)).toHaveLength(100_000)
@@ -199,9 +206,9 @@ describe('Room at 100,000 members', () => {
     expect(prefixes.filter((prefix) => prefix.startsWith('meta:') && !prefix.startsWith('meta:drop:'))).toEqual([])
   }, 60_000)
   it("drops the 409,600 track wants of 100 clients whose reconnect windows end in one timer turn with the event loop turning, the publisher's lanes released", async () => {
-    const room = await Room.create('mass-expiry')
+    const room = await create('mass-expiry')
     const publisher = await room.join()
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const observer = await view(room.id)
     await observer.getParticipant(publisher.id)
     const held = Array.from({ length: 100 }, () => {
       const stub = register(observer)
@@ -223,9 +230,9 @@ describe('Room at 100,000 members', () => {
     expect(binaryLanesOf(observer)).toBe(0)
   }, 60_000)
   it('keeps the event loop turning through a heartbeat replan of one member with 100,000 named tracks', async () => {
-    const room = await Room.create('member-replan-turns')
+    const room = await create('member-replan-turns')
     const publisher = await room.join()
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const observer = await view(room.id)
     await observer.getParticipant(publisher.id)
     for (let c = 0; c < 1_000; c++) {
       const stub = register(observer)
@@ -240,13 +247,13 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await replan(), await replan())).toBeLessThanOrEqual(50)
   }, 60_000)
   it('merges one key into a room meta of 100,000 keys with both event loops turning, a view and a client applying it', async () => {
-    const room = await Room.create('meta-merge-turns')
+    const room = await create('meta-merge-turns')
     for (let from = 0; from < 100_000; from += 10_000)
       await Room.setAttributes(
         room.id,
         Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
       )
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const observer = await view(room.id)
     observer.onUpdate(() => {})
     const peer = attachPeer(register(observer))
     await vi.waitFor(() => expect(peer.decoded().length).toBeGreaterThan(0))
@@ -274,10 +281,10 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
   }, 60_000)
   it("merges one key into a member's meta of 100,000 keys with both event loops turning, a view and a client applying it", async () => {
-    const room = await Room.create('member-meta-merge-turns')
+    const room = await create('member-meta-merge-turns')
     const meta = Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`k${i}`, i]))
     const member = await room.join({ meta })
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const observer = await view(room.id)
     observer.onJoin(() => {})
     const peer = attachPeer(register(observer))
     await vi.waitFor(() => expect(observer._state.hasMember(member.id)).toBe(true))
@@ -322,11 +329,6 @@ function binaryLanesOf(room: ServerRoom): number {
     ._subs
   return subs._binary.size + subs._everyTrack.size
 }
-/** Closes the room and waits out what its close leaves behind, so a later spec times none of it. */
-async function closed(room: ServerRoom): Promise<void> {
-  await Room.close(room.id)
-  await settled()
-}
 /** Each declaration replays the retained frames of its track, so a spec's declarations in one turn leave work behind
  *  them: waits it out, until five timers in a row come on time. */
 async function settled(): Promise<void> {
@@ -350,6 +352,7 @@ function subsOf(room: ServerRoom): {
   _heartbeatTick(): Promise<void>
   replan(): Promise<void>
   binaryReady(): Promise<void>
+  reconcileAuthority(): Promise<void>
 } {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
 }
@@ -369,8 +372,20 @@ async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number;
     clearInterval(timer)
   }
 }
+const opened = { rooms: [] as ServerRoom[], stubs: [] as RoomStubChannel[] }
+async function create(id: string): Promise<ServerRoom> {
+  const room = (await Room.create(id)) as ServerRoom
+  opened.rooms.push(room)
+  return room
+}
+async function view(id: string): Promise<ServerRoom> {
+  const room = (await Room.get(id)) as ServerRoom
+  opened.rooms.push(room)
+  return room
+}
 function register(room: ServerRoom): RoomStubChannel {
   const stub = new RoomStubChannel(room, { grants: new ResponseRoomGrants() })
+  opened.stubs.push(stub)
   stub._registerChannel()
   room._attachStub(stub)
   return stub
