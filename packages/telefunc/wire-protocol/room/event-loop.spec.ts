@@ -258,7 +258,8 @@ describe('Room at 100,000 members', () => {
     const changes = { server: 0, client: 0 }
     observer.onChange(() => changes.server++)
     client.onChange(() => changes.client++)
-    // Timed until each view applied the write; reading the whole meta after it is the reader's own cost.
+    // Timed until each view applied the write. Reading the whole meta builds it, the reader's own cost, so it is read once
+    // at the end, and its garbage lands in no timed merge.
     const merge = async (value: number) => {
       const { server, client } = changes
       const written = await longestGapWhile(async () => {
@@ -267,12 +268,12 @@ describe('Room at 100,000 members', () => {
       })
       const { gap } = await longestGapWhile(async () => feed())
       expect(changes.client).toBe(client + 1)
-      expect([remote.meta.k0, seen.meta.k0]).toEqual([value, value])
       return Math.max(written.gap, gap)
     }
     await merge(-1)
     // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
+    expect([remote.meta.k0, seen.meta.k0]).toEqual([2, 2])
   }, 60_000)
 })
 /** How many binary lanes the room holds: per track and every-track. */

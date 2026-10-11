@@ -395,7 +395,8 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     const remote = (await observer.getParticipant(member.id))!
     let changes = 0
     onTestFinished(observer.onChange(() => changes++))
-    // Timed until the view applied the write; reading the whole meta after it is the reader's own cost.
+    // Timed until the view applied the write. Reading the whole meta builds it, the reader's own cost, so it is read once
+    // at the end, and its garbage lands in no timed merge.
     const merge = async (value: number) => {
       const before = changes
       let last = performance.now()
@@ -408,7 +409,6 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
       await member.setAttributes({ k0: value })
       await vi.waitFor(() => expect(changes).toBe(before + 1))
       clearInterval(timer)
-      expect(remote.meta.k0).toBe(value)
       return Math.max(longest, performance.now() - last)
     }
     await merge(-1)
@@ -424,6 +424,7 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     ][]
     const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
     expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+    expect(remote.meta.k0).toBe(2)
   }, 60_000)
   it("ends a second server's view on a member's stored meta, its key order and its seq while its server merges into and replaces it at once", async () => {
     const prefix = uniquePrefix('member-meta-converge')
