@@ -67,6 +67,8 @@ type RoomStateOptions = {
   /** Every leave, from an event or a reconciled roster, after this view's callbacks; `hidden` is null for a member
    *  this view didn't know. */
   onLeave: (id: string, cause: LeaveCause, hidden: boolean | null) => void
+  /** How many tracks its binary listeners may name, each `(member or room, track)` pair once; unbounded if omitted. */
+  trackWantsMax?: number
 }
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
@@ -170,6 +172,9 @@ class RoomState {
   private readonly _closeCbs: Listeners<() => void> = new Listeners()
   private readonly _announceCbs: Listeners<(data: unknown, info: ChannelPublishInfo) => void> = new Listeners()
   private _listenerCount = 0
+  /** The tracks its binary listeners name, each `(member or room, track)` pair once. */
+  private _trackWants = 0
+  private readonly _trackWantsMax: number
   private _metaSeq: number
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
@@ -185,6 +190,7 @@ class RoomState {
     this._onListenersChanged = opts.onListenersChanged
     this._onCallbackError = opts.onCallbackError
     this._onLeave = opts.onLeave
+    this._trackWantsMax = opts.trackWantsMax ?? Number.POSITIVE_INFINITY
     if ('members' in opts.seed) {
       this._rosterKnown = true
       for (const member of opts.seed.members) this._createEntry(member)
@@ -597,6 +603,12 @@ class RoomState {
   }
   /** `entry` owns the list (`null`: the room); a binary listener's `filter` is counted in its list's counts. */
   private _register<T>(list: Listeners<T>, cb: T, entry: MemberEntry | null = null, filter?: CountedTrack): () => void {
+    assertUsage(
+      filter?.track === undefined ||
+        this._trackWants < this._trackWantsMax ||
+        filter.counts.named.has(laneTrack(filter.track)),
+      `Too many binary tracks subscribed on one room (${this._trackWantsMax} max): subscribe without \`{ track }\` to receive every track`,
+    )
     const remove = list.add(cb)
     this._bumpListenerCount(
       1,
@@ -627,6 +639,7 @@ class RoomState {
   }
   private _bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {
     this._listenerCount += delta
+    if (binary !== null && binary.track !== null) this._trackWants += binary.on ? 1 : -1
     if (entry !== null) {
       if (entry.dataCbs.size > 0) this._textWanted.add(entry.id)
       else this._textWanted.delete(entry.id)

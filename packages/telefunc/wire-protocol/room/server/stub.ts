@@ -3,10 +3,11 @@ export { RoomStubChannel, RoomParticipantStubChannel, ResponseRoomGrants, unorde
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../../utils/assert.js'
-import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TRACK_WANTS_MAX } from '../constants.js'
 import { ServerChannel, parsePeerText, reconnectWindow } from '../../server/channel.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import {
+  assertProtocol,
   encodePublishBinary,
   encodePublishText,
   type BroadcastKind,
@@ -127,6 +128,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private readonly _textMemberWants = new Set<string>()
   private _announce = false
   private readonly _binary: BinaryWants = emptyBinaryWants()
+  /** The tracks `_binary` names, each `(member or room, track)` pair once. */
+  private _trackWants = 0
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private _tail: TailHold | null = null
 
@@ -150,6 +153,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   protected override _onPeerData(value: unknown, bytes: number): void {
     const declaration = decodeRoomDeclaration(value)
+    if (declaration.__r === 'sub-binary') this._assertTrackWantFits(declaration)
     try {
       this._applyDeclaration(declaration)
     } catch (error) {
@@ -210,11 +214,20 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     }
   }
 
+  /** The client library names at most `ROOM_TRACK_WANTS_MAX` tracks, so only a peer bypassing it names more. */
+  private _assertTrackWantFits({ member, track, on }: BinaryWantChange): void {
+    if (!on || track === null || this._trackWants < ROOM_TRACK_WANTS_MAX) return
+    const scope = member === null ? this._binary.everyMember : this._binary.members.get(member)
+    assertProtocol(scope?.tracks.has(track), 'Room binary wants over ROOM_TRACK_WANTS_MAX')
+  }
+
   // A client learns its members from this view alone, so a want naming any other id names one that left or never was.
   private _declareBinaryWant({ member, track, on }: BinaryWantChange): void {
     if (on && member !== null && !this._room._state.hasMember(member)) return
     const change = { member, track, on }
-    if (applyBinaryWantChange(this._binary, change)) this._room._onHolderBinaryChanged(this, change)
+    if (!applyBinaryWantChange(this._binary, change)) return
+    if (track !== null) this._trackWants += on ? 1 : -1
+    this._room._onHolderBinaryChanged(this, change)
   }
 
   private _declareTextWants(changes: Record<string, boolean>, announce: boolean): void {
@@ -270,6 +283,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   /** Drops its wants naming `id`; returns whether it held any. */
   _forgetWantsOf(id: string): boolean {
     const text = this._textMemberWants.delete(id)
+    this._trackWants -= this._binary.members.get(id)?.tracks.size ?? 0
     return this._binary.members.delete(id) || text
   }
 

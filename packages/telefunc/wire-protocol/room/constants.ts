@@ -9,7 +9,10 @@ export {
   ROOM_HORIZON_MS,
   ROOM_EMPTY_TIMEOUT_MS,
   ROOM_DEPARTURE_TIMEOUT_MS,
+  ROOM_TRACK_WANTS_MAX,
 }
+import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
+
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
 // Four heartbeats: a member is reaped only after several renewals in a row were missed.
 const ROOM_MEMBER_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
@@ -27,3 +30,5 @@ const ROOM_HORIZON_MS = 60_000
 // LiveKit's defaults: an unheld room nobody joined closes after 5 minutes, one a member had joined after 20 seconds.
 const ROOM_EMPTY_TIMEOUT_MS = 300_000
 const ROOM_DEPARTURE_TIMEOUT_MS = 20_000
+// Each named track a room handle subscribes to is a substream, as a channel is: as many as one connection carries.
+const ROOM_TRACK_WANTS_MAX = MAX_CHANNELS_PER_CONNECTION

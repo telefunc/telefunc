@@ -29,6 +29,7 @@ import {
   type RoomStubRequest,
 } from './protocol.js'
 import { RoomState, RoomStateView } from './state.js'
+import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 import { ParticipantBase } from './participant.js'
 import type {
   BinaryPublishOptions,
@@ -93,6 +94,7 @@ class ClientRoom extends RoomStateView implements Room {
       closed: snapshot.closed,
       onListenersChanged: (member, binary) => this._syncWants(member, binary),
       onCallbackError: reportClientCallbackError,
+      trackWantsMax: ROOM_TRACK_WANTS_MAX,
       onLeave: (id, cause) => this._onLeave(id, cause),
     })
     if (snapshot.closed) this._roster.resolve()

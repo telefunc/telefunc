@@ -17,6 +17,7 @@ import {
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
+  ROOM_TRACK_WANTS_MAX,
   ROOM_EMPTY_TIMEOUT_MS,
   ROOM_DEPARTURE_TIMEOUT_MS,
 } from './constants.js'
@@ -3068,6 +3069,23 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(received.every(({ frames }) => frames.length === 3)).toBe(true))
     expect(received.filter(({ frames }) => frames.join() !== '0,1,2')).toEqual([])
   })
+  it("relays to a client naming 500 tracks of one member each track's frames", async () => {
+    const room = (await Room.create('client-named-tracks')) as ServerRoom
+    const publisher = await room.join()
+    const { stub, peer } = serve(room)
+    const tracks = trackNames(500)
+    for (const track of tracks) declare(stub, { __r: 'sub-binary', member: publisher.id, track, on: true })
+    await subsOf(room).binaryReady()
+    for (const track of tracks) await publisher.publishBinary(new Uint8Array([1]), { track })
+    await vi.waitFor(() =>
+      expect(
+        peer
+          .decoded()
+          .filter((frame) => frame.tag === TAG.PUBLISH_BINARY)
+          .map((frame) => decodeBinaryFrame(frame.data)!.track),
+      ).toEqual(tracks),
+    )
+  })
   it('gets a room-wide subscriber of one track that track from each member publishing on 1,000, and no other', async () => {
     const room = await Room.create('room-wide-track')
     const a = await room.join()
@@ -3143,7 +3161,7 @@ describe('Room public behavior', () => {
     },
     60_000,
   )
-  it.each(['listeners on this instance', "a client's declarations"])(
+  it.each(['listeners on this instance', "clients' declarations"])(
     'names tracks of one member one by one, through %s, in time linear in their count from 5,000 to 50,000',
     async (through) => {
       const name = async (count: number) => {
@@ -3151,11 +3169,17 @@ describe('Room public behavior', () => {
         const publisher = await room.join()
         const observer = (await Room.get(room.id)) as ServerRoom
         const remote = (await observer.getParticipant(publisher.id))!
-        const stub = register(observer)
+        // A client names at most ROOM_TRACK_WANTS_MAX tracks of a room.
+        const stubs = Array.from({ length: Math.ceil(count / ROOM_TRACK_WANTS_MAX) }, () => register(observer))
         const elapsed = await timeOutsideGc(async () => {
-          for (const track of trackNames(count))
-            if (through === "a client's declarations")
-              declare(stub, { __r: 'sub-binary', member: publisher.id, track, on: true })
+          for (const [n, track] of trackNames(count).entries())
+            if (through === "clients' declarations")
+              declare(stubs[Math.floor(n / ROOM_TRACK_WANTS_MAX)]!, {
+                __r: 'sub-binary',
+                member: publisher.id,
+                track,
+                on: true,
+              })
             else remote.subscribeBinary(() => {}, { track })
           await subsOf(observer).binaryReady()
         })
@@ -3617,6 +3641,21 @@ describe('Room public behavior', () => {
   })
 })
 describe('client Room lifecycle', () => {
+  it('refuses a subscribeBinary naming more than ROOM_TRACK_WANTS_MAX tracks of one room handle, declaring nothing for it', () => {
+    const declared: unknown[] = []
+    const { client } = fakeClient('client-track-wants', { send: async (notice) => void declared.push(notice) })
+    const offs = trackNames(ROOM_TRACK_WANTS_MAX).map((track) => client.subscribeBinary(() => {}, { track }))
+    expect(() => client.subscribeBinary(() => {}, { track: 'past' })).toThrow(
+      `Too many binary tracks subscribed on one room (${ROOM_TRACK_WANTS_MAX} max)`,
+    )
+    // A track already named, and every track, take nothing more.
+    client.subscribeBinary(() => {}, { track: 't0' })
+    client.subscribeBinary(() => {})
+    offs[1]!()
+    client.subscribeBinary(() => {}, { track: 'past' })
+    expect(declared).toHaveLength(ROOM_TRACK_WANTS_MAX + 3)
+    expect(declared.at(-1)).toEqual({ __r: 'sub-binary', member: null, track: 'past', on: true })
+  })
   it("keeps a client-held participant's meta in accepted revision order", async () => {
     const acks: Array<(accepted: unknown) => void> = []
     const { participant, notify } = standaloneParticipant({ v: 0 }, () => new Promise((resolve) => acks.push(resolve)))
@@ -4192,6 +4231,24 @@ describe('room demand lifecycle', () => {
   })
 })
 describe('room protocol validation', () => {
+  it('refuses as a protocol violation a client naming more than ROOM_TRACK_WANTS_MAX tracks, opening no lane for it', async () => {
+    const room = (await Room.create('track-wants-bound')) as ServerRoom
+    const publisher = await room.join()
+    const stub = register(room)
+    const want = (track: string, member: string | null, on = true) =>
+      declare(stub, { __r: 'sub-binary', member, track, on })
+    // Room-wide and one member's tracks count alike.
+    trackNames(ROOM_TRACK_WANTS_MAX).forEach((track, n) => want(track, n % 2 === 0 ? null : publisher.id))
+    want('t0', null)
+    expect(() => want('past', publisher.id)).toThrow(ProtocolViolationError)
+    expect(() => want('past', null)).toThrow(ProtocolViolationError)
+    await subsOf(room).binaryReady()
+    expect(binaryLanes(room)).toHaveLength(ROOM_TRACK_WANTS_MAX)
+    want('t0', null, false)
+    want('past', null)
+    await subsOf(room).binaryReady()
+    expect(binaryLanes(room)).toContain(encodeLaneKey({ kind: 'binary', member: publisher.id, track: 'past' }))
+  })
   it('bounds tails by count and serialized code units at every cap edge', () => {
     const entry = (serialized: string, seq = 0) => ({ serialized, ord: { seq, timestamp: 0 }, from: '' })
     const byCount = new TailHold(() => {})
