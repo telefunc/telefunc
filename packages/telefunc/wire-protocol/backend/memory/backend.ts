@@ -57,7 +57,10 @@ type Generation = {
   cells: Map<string, StoredCell>
   /** Cell keys by each of their prefixes ending in ':', the separator of cell keys, so a prefix read lists its own. */
   cellsByPrefix: Map<string, Set<string>>
+  /** The room-wide lanes' order, by lane key. */
   order: Map<string, OrderingInfo>
+  /** Each member's lanes' order, by lane key, so its leave drops them together. */
+  memberOrders: Map<string, Map<string, OrderingInfo>>
   retained: Map<string, RetainedEntry>
   /** The keys of each member's retained binary lanes. */
   retainedOf: Map<string, Set<string>>
@@ -103,6 +106,7 @@ function newGeneration(): Generation {
     cells: new Map(),
     cellsByPrefix: new Map(),
     order: new Map(),
+    memberOrders: new Map(),
     retained: new Map(),
     retainedOf: new Map(),
     retainedOfTrack: new Map(),
@@ -335,7 +339,11 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (missing !== undefined) return { stale: 'cell', key: missing }
     const key = encodeLaneKey(lane)
     const frame = copyBytes(payload)
-    const mark = advanceOrder(gen.order, key, Date.now())
+    const order =
+      lane.kind === 'inbox' || lane.kind === 'binary'
+        ? getOrCreate(gen.memberOrders, lane.member, () => new Map())
+        : gen.order
+    const mark = advanceOrder(order, key, Date.now())
     if (opts?.retain) {
       // A lane holding a retained frame is already indexed: its frame and index entries leave together.
       if (lane.kind === 'binary' && !gen.retained.has(key)) {
@@ -387,6 +395,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (lane.kind !== 'binary') return
     unindex(gen.retainedOf, lane.member, key)
     unindex(gen.retainedOfTrack, lane.track, key)
+  }
+
+  async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
+    this._state.rooms.get(roomId)?.gens.get(inc)?.memberOrders.delete(member)
   }
 
   private _openSubscription(

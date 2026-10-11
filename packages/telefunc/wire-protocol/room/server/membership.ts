@@ -497,6 +497,8 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
   const key = cleanupCellKey(memberId)
   const cleanup = decodeRoomRecord<PendingMemberCleanup>(raw)
   await dropRetainedOwnedBy(roomId, inc, memberId)
+  // Every commit to the member's lanes requires its cell, which the eviction removed.
+  await getRoomBackend().dropLaneOrders(roomId, inc, memberId)
   await dropCells(roomId, inc, memberMetaCellPrefix(memberId))
   await publishCtrl(roomId, inc, {
     __r: 'leave',

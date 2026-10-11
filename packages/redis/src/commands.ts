@@ -30,6 +30,7 @@ import {
   generationInvalidationChannel,
   generationKeysKey,
   headKey,
+  memberOrderKey,
   orderKey,
   retainedKey,
   retainedOfKey,
@@ -266,7 +267,8 @@ return reply
 // COMMIT: while the room is closing, only the close's control commit under its lease lands. A binary commit is also
 // published on its member's every-track channel, after its lane key's two-byte length and the key, so a receiver orders
 // it by its own lane; no lane key is long enough for that length's first byte to read as the fence byte.
-//   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6]=cell values
+//   KEYS: [1]=head [2]=order: an inbox or binary lane's member's order hash, which holds it under its lane key, or
+//         another lane's own key [3]=retained [4]=channel [5]=generation-keys [6]=cell values
 //         [7]=a binary lane's member's every-track channel (another lane repeats [4])
 //         [8]=a retained binary lane's member's retained lanes [9]=its track's retained lanes (another commit repeats
 //         [3] for both)
@@ -292,8 +294,10 @@ for i = 9, #ARGV do
   if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - 9) .. '}' end
 end
 
+local member_lane = ARGV[2] == 'inbox' or ARGV[2] == 'binary'
 local base_seq, base_ts = 0, 0
-local prev = redis.call('GET', order_key)
+local prev
+if member_lane then prev = redis.call('HGET', order_key, ARGV[8]) else prev = redis.call('GET', order_key) end
 if prev then
   local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
   if not pseq then return redis.error_reply('commitLane: invalid ordering watermark') end
@@ -306,7 +310,11 @@ if base_ts > ts then ts = base_ts end
 -- tostring keeps only 14 significant digits.
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
-redis.call('SET', order_key, seq_text .. ':' .. ts_text)
+if member_lane then
+  redis.call('HSET', order_key, ARGV[8], seq_text .. ':' .. ts_text)
+else
+  redis.call('SET', order_key, seq_text .. ':' .. ts_text)
+end
 redis.call('SADD', generation_keys_key, order_key)
 local frame = tf_ordering_frame(seq, ts, ARGV[5])
 if ARGV[4] == '1' then
@@ -354,6 +362,13 @@ if ARGV[2] ~= '' then
   if redis.call('SCARD', KEYS[4]) == 0 then redis.call('SREM', KEYS[1], KEYS[4]) end
 end
 return redis.call('DEL', KEYS[2])
+`
+
+// Forgets one member's lane order.
+//   KEYS: [1]=generation-keys [2]=the member's order hash
+const DROP_LANE_ORDERS_LUA = `
+redis.call('SREM', KEYS[1], KEYS[2])
+redis.call('UNLINK', KEYS[2])
 `
 
 // Directory records use two co-slotted global keys. Put and compare-delete are each one atomic record,
@@ -559,7 +574,9 @@ const REDIS_COMMANDS = {
       return {
         keys: [
           headKey(prefix, roomId),
-          orderKey(prefix, roomId, inc, laneKey),
+          lane.kind === 'inbox' || lane.kind === 'binary'
+            ? memberOrderKey(prefix, roomId, inc, lane.member)
+            : orderKey(prefix, roomId, inc, laneKey),
           retained,
           channels.lane,
           generationKeysKey(prefix, roomId, inc),
@@ -607,6 +624,16 @@ const REDIS_COMMANDS = {
         argv: [ifSeq === undefined ? '' : String(ifSeq), binary ? laneKey : ''],
       }
     },
+    parse: () => {},
+  }),
+  dropLaneOrders: command({
+    name: 'tfRoomDropLaneOrders',
+    lua: DROP_LANE_ORDERS_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, inc, member }: RoomInc & { member: string }) => ({
+      keys: [generationKeysKey(prefix, roomId, inc), memberOrderKey(prefix, roomId, inc, member)],
+      argv: [],
+    }),
     parse: () => {},
   }),
   directoryPut: command({

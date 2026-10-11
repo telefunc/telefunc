@@ -201,6 +201,10 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return this._run(REDIS_COMMANDS.retainedDelete, { roomId, inc, lane, ifSeq: opts?.ifSeq })
   }
 
+  dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
+    return this._run(REDIS_COMMANDS.dropLaneOrders, { roomId, inc, member })
+  }
+
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     const generationKeys = await this._generationKeys(roomId, inc)
     await this._run(REDIS_COMMANDS.dropGeneration, { roomId, inc, generationKeys })

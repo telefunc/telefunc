@@ -2,17 +2,20 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import type { CellsCx } from '../../../../backend/room/contract.js'
 import {
+  advanceOrder,
   compareExchangeCells,
   compareExchangeHead,
   directoryList,
   directoryPut,
   dropGenerationRows,
+  dropLaneOrderRows,
   initSchema,
   readCells,
   readCellPage,
 } from './storage.js'
 import { snapshotRoutes, upsertRoute } from './routes.js'
 import { deleteRetained, installRetained, listRetained } from './retained.js'
+import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 
 /** Cloudflare's SQL storage over node:sqlite, recording the plan of each read. */
 function sqlStorage() {
@@ -257,4 +260,25 @@ test("one track's retained binary lanes across members are an rt_manifest_track 
   expect(listRetained(sql, 'inc', { track: 'camera' })).toEqual([binary('b', 'camera')])
   dropGenerationRows(sql, 'inc')
   expect(listRetained(sql, 'inc', { track: 'camera:1' })).toEqual([])
+})
+
+test("a member's leave drops the order of its inbox and binary lanes, and no other's", () => {
+  const { sql } = sqlStorage()
+  const lanes = [
+    { kind: 'control' },
+    { kind: 'inbox', member: 'a' },
+    { kind: 'inbox', member: 'ab' },
+    { kind: 'binary', member: 'a', track: 'camera' },
+    { kind: 'binary', member: 'a', track: '' },
+    { kind: 'binary', member: 'ab', track: 'camera' },
+  ] as const
+  for (const lane of lanes) advanceOrder(sql, 'inc', encodeLaneKey(lane), 1)
+  advanceOrder(sql, 'other', encodeLaneKey({ kind: 'inbox', member: 'a' }), 1)
+  dropLaneOrderRows(sql, 'inc', 'a')
+  expect(sql.exec('SELECT inc, domain FROM ord ORDER BY inc, domain').toArray()).toEqual([
+    { inc: 'inc', domain: 'binary:ab:camera' },
+    { inc: 'inc', domain: 'control' },
+    { inc: 'inc', domain: 'inbox:ab' },
+    { inc: 'other', domain: 'inbox:a' },
+  ])
 })

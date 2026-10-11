@@ -222,6 +222,28 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(before.length - (await generationKeys()).length).toBe(2)
   })
 
+  it('keeps no lane order key for any of 100 members that received a DM, published on a track and left', async () => {
+    const prefix = uniquePrefix('lane-order-churn')
+    const redis = ownClient(connect())
+    installRedis(redis, { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('lane-order-churn')
+    const sender = await room.join()
+    for (let i = 0; i < 100; i++) {
+      const member = await room.join()
+      await sender.send(member.id, 'hi')
+      await member.publishBinary(new Uint8Array([1]), { track: 'camera' })
+      await member.leave()
+    }
+    const backend = new RedisBackend({ redis, prefix })
+    const inc = (await backend.readHead(room.id))!.currentInc!
+    const generationKeys = await (
+      backend as unknown as { _generationKeys(roomId: string, inc: string): Promise<string[]> }
+    )._generationKeys(room.id, inc)
+    const orderKeys = generationKeys.filter((key) => /:g:[^:]+:om?:/.test(key))
+    expect(orderKeys).toEqual([expect.stringMatching(/:o:control$/)])
+  })
+
   it("lists one track's retained binary lanes across members from that track's own set, until they are deleted or the generation drops", async () => {
     const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('retained-of-track') })
     await backend.compareExchangeHead(

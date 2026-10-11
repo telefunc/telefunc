@@ -12,6 +12,7 @@ export {
   readCellPage,
   compareExchangeCells,
   advanceOrder,
+  dropLaneOrderRows,
   dropGenerationRows,
   prefixEnd,
 }
@@ -40,6 +41,7 @@ import {
   type StoredHead,
 } from '../../../../backend/room/semantics.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
+import { binaryLaneKeyPrefix, encodeLaneKey } from '../../../../backend/room/lane-key.js'
 
 type HeadCxOutcome = { head: StoredHead } | { conflict: true; current: StoredHead | null }
 
@@ -275,6 +277,18 @@ function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number)
     mark.timestamp,
   )
   return mark
+}
+
+// A member's binary lanes are a primary-key range: their keys share its prefix.
+function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
+  const prefix = binaryLaneKeyPrefix(member)
+  sql.exec(
+    'DELETE FROM ord WHERE inc = ? AND (domain = ? OR (domain >= ? AND domain < ?))',
+    inc,
+    encodeLaneKey({ kind: 'inbox', member }),
+    prefix,
+    prefixEnd(prefix)!,
+  )
 }
 
 function dropGenerationRows(sql: SqlStorage, inc: string): void {

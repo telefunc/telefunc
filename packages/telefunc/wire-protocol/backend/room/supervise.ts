@@ -57,6 +57,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     },
     listRetained: (roomId, inc, of) => driver.listRetained(roomId, inc, of),
     deleteRetained: (roomId, inc, lane, opts) => driver.deleteRetained(roomId, inc, lane, opts),
+    dropLaneOrders: (roomId, inc, member) => driver.dropLaneOrders(roomId, inc, member),
     // The manager hands a lane's consumers only the deliveries checkDelivery passed.
     subscribeLane: (roomId, inc, lane, receiver) =>
       subscriptions.subscribe({ roomId, inc, lane }, receiver as BackendReceiver<BackendPayload>),

@@ -147,6 +147,8 @@ type RoomDriver = {
    *  their count. */
   listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]>
   deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void>
+  /** Forgets the order of `member`'s inbox and binary lanes; called once no commit to them can land. */
+  dropLaneOrders(roomId: string, inc: string, member: string): Promise<void>
   dropGeneration(roomId: string, inc: string): Promise<void>
   directoryPut(roomId: string, incTag: string): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void>

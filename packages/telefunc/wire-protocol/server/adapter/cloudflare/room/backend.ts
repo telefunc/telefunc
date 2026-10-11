@@ -125,6 +125,10 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     return this.#stub(roomId).deleteRetained(inc, lane, opts)
   }
 
+  async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
+    return this.#stub(roomId).dropLaneOrders(inc, member)
+  }
+
   async dropGeneration(roomId: string, inc: string): Promise<void> {
     return this.#stub(roomId).dropGeneration(inc)
   }

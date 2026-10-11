@@ -10,6 +10,7 @@ export {
   cellValuesKey,
   cellVersionsKey,
   orderKey,
+  memberOrderKey,
   retainedKeyPrefix,
   retainedKey,
   retainedOfKey,
@@ -78,6 +79,10 @@ function cellVersionsKey(prefix: string, roomId: string, inc: string): string {
 }
 function orderKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${genPrefix(prefix, roomId, inc)}:o:${laneKey}`
+}
+/** The order of one member's inbox and binary lanes, by lane key. */
+function memberOrderKey(prefix: string, roomId: string, inc: string, member: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:om:${encodeURIComponent(member)}`
 }
 function retainedKeyPrefix(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rt:`

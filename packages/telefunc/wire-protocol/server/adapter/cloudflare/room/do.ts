@@ -42,6 +42,7 @@ import {
   directoryList,
   directoryPut,
   dropGenerationRows,
+  dropLaneOrderRows,
   initSchema,
   deleteLapsedHead,
   listOrphanGenerations,
@@ -172,6 +173,10 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {
     this.#transaction((sql) => deleteRoute(sql, route))
     await this.#scheduleMaintenanceIfNeeded()
+  }
+
+  async dropLaneOrders(inc: string, member: string): Promise<void> {
+    this.#transaction((sql) => dropLaneOrderRows(sql, inc, member))
   }
 
   async dropGeneration(inc: string): Promise<void> {

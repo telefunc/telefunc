@@ -3631,6 +3631,19 @@ describe('Room public behavior', () => {
     await publisher.leave()
     await vi.waitFor(() => expect(retained()).toEqual([]))
   })
+  it('keeps no lane order for any of 1,000 members that received a DM, published on a track and left', async () => {
+    const room = (await Room.create('lane-order-churn')) as ServerRoom
+    const sender = await room.join()
+    for (let i = 0; i < 1_000; i++) {
+      const member = await room.join()
+      await sender.send(member.id, 'hi')
+      await member.publishBinary(new Uint8Array([1]), { track: 'camera' })
+      await member.leave()
+    }
+    const generation = memoryState.rooms.get(room.id)!.gens.get(room._inc)!
+    expect([...generation.order.keys()]).toEqual(['control'])
+    expect(generation.memberOrders.size).toBe(0)
+  })
   it.each([1, 1_000, 100_000])(
     'opens one backend subscription for an every-track subscriber of a member publishing on %i tracks',
     async (count) => {
@@ -5630,10 +5643,8 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
   const serverSeqs: number[] = []
   if (!retain) serverRoom.subscribeBinary((_data, info) => serverSeqs.push(info.seq))
   const generation = memoryState.rooms.get(id)!.gens.get(serverRoom._inc)!
-  generation.order.set(`binary:${encodeURIComponent(camera.id)}:${encodeURIComponent(DEFAULT_TRACK)}`, {
-    seq: 0xffff_ffff,
-    timestamp: 10,
-  })
+  const lane = encodeLaneKey({ kind: 'binary', member: camera.id, track: DEFAULT_TRACK })
+  generation.memberOrders.set(camera.id, new Map([[lane, { seq: 0xffff_ffff, timestamp: 10 }]]))
   if (!retain) {
     declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await subsOf(serverRoom).binaryReady()
