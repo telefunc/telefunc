@@ -57,6 +57,7 @@ import { LocalHolder, binaryLaneKey, type LaneHolder, type TextWantsChange } fro
 import { TailHold } from './tail.js'
 import { PendingDmAcks } from './dm-acks.js'
 import { RoomSubscriptions } from './subscriptions.js'
+import { GossipOutbox } from './gossip.js'
 import {
   SEMANTIC_LANE,
   commitRoomLane,
@@ -172,8 +173,9 @@ class ServerRoom extends RoomStateView implements Room {
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._local = new LocalHolder(this._state, this._localSuppressed)
+    const gossip = new GossipOutbox(roomId, inc)
     this._demand = new RoomDemand(
-      (event) => void publishCtrl(roomId, inc, event).catch(reportRoomError),
+      (event) => gossip.push(event),
       (id) => this._holderOf(id) !== undefined,
       (member, track, wanted) => this._deliverDemand(member, track, wanted),
     )

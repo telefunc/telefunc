@@ -21,6 +21,7 @@ import {
   ROOM_MEMBER_NAMED_LANES_MAX,
   ROOM_EMPTY_TIMEOUT_MS,
   ROOM_DEPARTURE_TIMEOUT_MS,
+  ROOM_GOSSIP_IN_FLIGHT_MAX,
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, encodeBinaryFrame } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
@@ -4500,6 +4501,37 @@ describe('room protocol validation', () => {
       expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
     },
   )
+  it('keeps ROOM_GOSSIP_IN_FLIGHT_MAX gossip commits in flight at most while a client names tracks of 200 members', async () => {
+    const room = (await Room.create('gossip-in-flight')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 200 }, () => room.join()))
+    const demanded = members.map((member) => {
+      const tracks = new Set<string | null>()
+      member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+      return tracks
+    })
+    const backend = getRoomBackend()
+    const commitLane = backend.commitLane.bind(backend)
+    let inFlight = 0
+    let most = 0
+    vi.spyOn(backend, 'commitLane').mockImplementation((...args) => {
+      const committed = commitLane(...args)
+      if (args[0] !== room.id || args[2].kind !== 'control') return committed
+      most = Math.max(most, ++inFlight)
+      void committed
+        .then((result) => ('stale' in result ? undefined : result.delivery))
+        .catch(() => {})
+        .finally(() => inFlight--)
+      return committed
+    })
+    const { published } = spyGossip(room)
+    const stub = register(room)
+    const tracks = trackNames(2 * ROOM_MEMBER_NAMED_LANES_MAX)
+    for (const track of tracks) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+    await vi.waitFor(() => expect(demanded.every((wanted) => wanted.size === tracks.length)).toBe(true))
+    await vi.waitFor(() => expect(inFlight).toBe(0))
+    expect(published.mock.calls.length).toBeGreaterThan(ROOM_GOSSIP_IN_FLIGHT_MAX)
+    expect(most).toBeLessThanOrEqual(ROOM_GOSSIP_IN_FLIGHT_MAX)
+  })
   it('bounds tails by count and serialized code units at every cap edge', () => {
     const entry = (serialized: string, seq = 0) => ({ serialized, ord: { seq, timestamp: 0 }, from: '' })
     const byCount = new TailHold(() => {})

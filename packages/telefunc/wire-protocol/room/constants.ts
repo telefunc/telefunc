@@ -11,6 +11,7 @@ export {
   ROOM_DEPARTURE_TIMEOUT_MS,
   ROOM_TRACK_WANTS_MAX,
   ROOM_MEMBER_NAMED_LANES_MAX,
+  ROOM_GOSSIP_IN_FLIGHT_MAX,
 }
 import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
 
@@ -35,3 +36,5 @@ const ROOM_DEPARTURE_TIMEOUT_MS = 20_000
 const ROOM_TRACK_WANTS_MAX = MAX_CHANNELS_PER_CONNECTION
 // An instance serves a member from its every-track lane once its holders name more than this many of its tracks.
 const ROOM_MEMBER_NAMED_LANES_MAX = 16
+// Demand gossip commits an instance keeps in flight; the rest wait as events.
+const ROOM_GOSSIP_IN_FLIGHT_MAX = 64
