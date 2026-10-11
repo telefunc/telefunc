@@ -757,9 +757,6 @@ class ServerRoom extends RoomStateView implements Room {
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
   /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so a
-   *  frame it already has is not delivered again. A want for every track lists the retained lanes of its scope, a want
-   *  for one track of a member reads that lane. */
-  /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so a
    *  frame it already has is not delivered again. A want for every track lists the retained lanes it covers, a want for
    *  one track reads that track's lane of each member it covers. */
   async _replayRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange): Promise<void> {
