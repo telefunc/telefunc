@@ -14,6 +14,7 @@ export {
   ROOM_GOSSIP_IN_FLIGHT_MAX,
   ROOM_MEMBER_WRITES_IN_FLIGHT_MAX,
   ROOM_PLAN_SLICE_MS,
+  ROOM_ROSTER_PART_MEMBERS,
 }
 import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
 
@@ -45,3 +46,5 @@ const ROOM_MEMBER_WRITES_IN_FLIGHT_MAX = 64
 // Lane planning, demand telling, or a heartbeat's renewals and roster read: what one event-loop turn runs before timers
 // and I/O get theirs.
 const ROOM_PLAN_SLICE_MS = 10
+// The members in one frame of a roster, so neither end stringifies or parses a whole room in one turn.
+const ROOM_ROSTER_PART_MEMBERS = 1024

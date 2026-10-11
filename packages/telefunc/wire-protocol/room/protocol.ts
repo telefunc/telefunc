@@ -116,8 +116,9 @@ type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: bool
 /** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
-/** Sent when a stub opens: it reflects every event relayed before it. A failed read says so, so roster getters don't wait forever. */
-type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] } | { __r: 'roster-error' }
+/** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it; `more`
+ *  on all but the last. A failed read says so, so roster getters don't wait forever. */
+type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true } | { __r: 'roster-error' }
 /** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a reattached client
  *  gets the member's whole wanted set, since its offline buffer may have dropped changes. */
 type RoomDemandEvent =

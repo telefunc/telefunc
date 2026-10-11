@@ -132,6 +132,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _trackWants = 0
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private _tail: TailHold | null = null
+  /** @internal The roster stream this client is being sent; a newer one replaces it. */
+  _rosterStream: object | null = null
 
   constructor(
     serverRoom: ServerRoom,
@@ -321,12 +323,17 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     this._sendPublish(unorderedEventText(event), true)
   }
 
-  /** The roster holds the hidden members this client was handed, whose meta it heals too. */
-  _relayRoster(members: MemberSnapshot[]): void {
-    this._relayEvent({
-      __r: 'roster',
-      members: members.filter(({ id, hidden }) => !hidden || this._grantedHidden.has(id)),
-    })
+  /** `_relayEvent` with the event's text already made, so one text can go to many clients. */
+  _relayEventText(text: string): void {
+    this._sendPublish(text, true)
+  }
+
+  /** A roster part's members this client gets: `visible` itself unless the part holds a hidden member this client was
+   *  handed, whose meta it heals too. */
+  _rosterMembers(part: MemberSnapshot[], visible: MemberSnapshot[]): MemberSnapshot[] {
+    if (visible.length === part.length || this._grantedHidden.size === 0) return visible
+    const members = part.filter(({ id, hidden }) => !hidden || this._grantedHidden.has(id))
+    return members.length === visible.length ? visible : members
   }
 
   /** A hidden member's events reach only the clients that were handed it. */

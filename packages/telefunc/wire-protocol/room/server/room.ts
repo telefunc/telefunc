@@ -8,7 +8,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_PLAN_SLICE_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_PLAN_SLICE_MS, ROOM_ROSTER_PART_MEMBERS } from '../constants.js'
 import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
@@ -39,6 +39,7 @@ import {
   leaveCauseFromWire,
   leaveCauseToWire,
   type MemberSnapshot,
+  type RoomRosterEvent,
   type RoomConfigRecord,
   type RoomSnapshotMetadata,
   type RoomCtrlEnvelope,
@@ -645,21 +646,47 @@ class ServerRoom extends RoomStateView implements Room {
     roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
     events: readonly MembershipEvent[],
   ): Promise<boolean> {
-    const steps = this._state.reconcilingRoster(roster, events)
-    let step = steps.next()
-    for (let deadline = performance.now() + ROOM_PLAN_SLICE_MS; step.done !== true; step = steps.next()) {
-      if (performance.now() < deadline) continue
-      await nextTurnOf()
-      if (this._state.closed) return false
-      deadline = performance.now() + ROOM_PLAN_SLICE_MS
-    }
-    const drifted = step.value
+    const drifted = await this._state.reconcileRoster(roster, events)
+    if (drifted === null) return false
     const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
     this._rosterOwed.clear()
-    if (recipients.length === 0) return true
-    const snapshot = this._state.snapshotMembers()
-    for (const stub of recipients) stub._relayRoster(snapshot)
+    if (recipients.length > 0) void this._streamRoster(recipients).catch(reportRoomError)
     return true
+  }
+  /** The roster to `stubs`, `ROOM_ROSTER_PART_MEMBERS` live members per part and a `ROOM_PLAN_SLICE_MS` slice per turn, so
+   *  each event relayed between two parts is one the parts after it reflect. A stub sent a newer roster drops out. */
+  private async _streamRoster(stubs: RoomStubChannel[]): Promise<void> {
+    const stream = {}
+    for (const stub of stubs) stub._rosterStream = stream
+    const members = this._state.memberSnapshots()
+    let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    for (let part = 0; ; part++) {
+      const chunk: MemberSnapshot[] = []
+      let more = true
+      while (chunk.length < ROOM_ROSTER_PART_MEMBERS) {
+        const next = members.next()
+        if (next.done === true) {
+          more = false
+          break
+        }
+        chunk.push(next.value)
+      }
+      const receiving = stubs.filter((stub) => stub._rosterStream === stream && this._stubs.has(stub))
+      if (receiving.length === 0 || this._state.closed) return
+      const visible = chunk.filter(({ hidden }) => !hidden)
+      let visibleText: string | undefined
+      for (const stub of receiving) {
+        const listed = stub._rosterMembers(chunk, visible)
+        const event: RoomRosterEvent = { __r: 'roster', members: listed, part, ...(more ? { more } : {}) }
+        stub._relayEventText(
+          listed === visible ? (visibleText ??= unorderedEventText(event)) : unorderedEventText(event),
+        )
+      }
+      if (!more) return
+      if (performance.now() < deadline) continue
+      await nextTurnOf()
+      deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    }
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
@@ -720,7 +747,7 @@ class ServerRoom extends RoomStateView implements Room {
     void this._subs
       .ensureRoster()
       .then(() => {
-        if (this._stubs.has(stub) && !this._state.closed) stub._relayRoster(this._state.snapshotMembers())
+        if (this._stubs.has(stub) && !this._state.closed) return this._streamRoster([stub])
       })
       .catch((error) => {
         reportRoomError(error)

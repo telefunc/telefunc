@@ -28,7 +28,7 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './protocol.js'
-import { RoomState, RoomStateView } from './state.js'
+import { RoomState, RoomStateView, type MembershipEvent } from './state.js'
 import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 import { ParticipantBase } from './participant.js'
 import type {
@@ -78,6 +78,14 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly _declaredText = new Set<string>()
   /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
   private readonly _roster = createDeferred()
+  /** The roster streaming in: its members so far and the part due next. */
+  private _rosterIn: { members: MemberSnapshot[]; next: number } | null = null
+  /** The rosters received and not yet applied, applied in turn. */
+  private _rostersApplying = 0
+  private _rosterApplied: Promise<void> = Promise.resolve()
+  /** The membership events since the first part of a roster streaming in or applying. Each roster replays them all:
+   *  those from before its own first part change nothing it lists. */
+  private _rosterEvents: readonly MembershipEvent[] | null = null
   /** @internal */
   readonly _bufferLimit: number
 
@@ -222,7 +230,7 @@ class ClientRoom extends RoomStateView implements Room {
     }
     switch (event.__r) {
       case 'roster':
-        this._applyRoster(event.members)
+        this._onRosterPart(event)
         return
       case 'roster-error':
         this._roster.reject(new Error('Failed to load room participants'))
@@ -279,9 +287,39 @@ class ClientRoom extends RoomStateView implements Room {
     this._state.applyBinary(frame, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
   }
 
-  private _applyRoster(members: MemberSnapshot[]): void {
-    this._state.reconcileRoster(members)
-    this._roster.resolve()
+  private _onRosterPart({ members, part, more }: Extract<RoomRosterEvent, { __r: 'roster' }>): void {
+    if (part === 0) this._rosterIn = { members: [], next: 0 }
+    const into = this._rosterIn
+    // A part lost while offline: the next attach sends the whole roster again.
+    if (into === null || part !== into.next) {
+      this._rosterIn = null
+      return this._stopRosterEvents()
+    }
+    this._rosterEvents ??= this._state.recordMembership()
+    for (const member of members) into.members.push(member)
+    into.next++
+    if (more) return
+    this._rosterIn = null
+    const events = this._rosterEvents
+    const apply = () => this._applyRoster(into.members, events)
+    this._rostersApplying++
+    this._rosterApplied = this._rostersApplying === 1 ? apply() : this._rosterApplied.then(apply)
+  }
+
+  private async _applyRoster(members: MemberSnapshot[], events: readonly MembershipEvent[]): Promise<void> {
+    try {
+      await this._state.reconcileRoster({ members, departing: new Set() }, events)
+      this._roster.resolve()
+    } finally {
+      this._rostersApplying--
+      this._stopRosterEvents()
+    }
+  }
+
+  private _stopRosterEvents(): void {
+    if (this._rosterIn !== null || this._rostersApplying > 0 || this._rosterEvents === null) return
+    this._rosterEvents = null
+    this._state.stopRecordingMembership()
   }
 
   /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */

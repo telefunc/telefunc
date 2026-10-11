@@ -984,6 +984,62 @@ describe('Room public behavior', () => {
     expect(narrated).toEqual(expected)
     expect((await observer.getParticipants()).length).toBe(100_000)
   }, 60_000)
+  it('streams a roster of 100,000 members to a client a part at a time, with the join and leave landing between two parts each once', async () => {
+    const authority = await Room.create('roster-parts')
+    const members = await Promise.all(Array.from({ length: 100_000 }, () => authority.join()))
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    await observer.getParticipants()
+    const stub = register(observer)
+    const joined = crypto.randomUUID()
+    const [sent, unsent] = [members[0]!.id, members[99_999]!.id]
+    const sendPublish = stub._sendPublish.bind(stub)
+    let parts = 0
+    vi.spyOn(stub, '_sendPublish').mockImplementation((wireText, resentOnAttach) => {
+      sendPublish(wireText, resentOnAttach)
+      // As the control lane delivers them, between two parts: a join, and the leaves of a member already sent and of
+      // one not sent yet.
+      if (wireText.includes('\n{"__r":"roster",') && ++parts === 50) {
+        const ctrl = (event: object) => observer._onCtrlMessage(stringify(event), { seq: 0, timestamp: 1 })
+        ctrl({ __r: 'join', id: joined, meta: {}, joinedAt: 1 })
+        ctrl({ __r: 'leave', id: sent })
+        ctrl({ __r: 'leave', id: unsent })
+      }
+    })
+    const rosterEnds = (frames: ReturnType<Peer['decoded']>) =>
+      frames.some(
+        (frame) =>
+          frame.tag === TAG.PUBLISH &&
+          /^\{"__r":"roster","members":/.test(frame.text) &&
+          !/"more":true\}$/.test(frame.text),
+      )
+    const serverGap = await longestGapWhile(async () => {
+      const peer = attachPeer(stub)
+      await vi.waitFor(() => expect(rosterEnds(peer.decoded())).toBe(true), { timeout: 30_000 })
+      return peer
+    })
+    const { client, emit } = fakeClient(authority.id)
+    const narrated: string[] = []
+    client.onJoin((member) => narrated.push(`join ${member.id}`))
+    client.onLeave((member) => narrated.push(`leave ${member.id}`))
+    const clientGap = await longestGapWhile(async () => {
+      // A frame per turn, as a transport delivers them.
+      for (const frame of serverGap.value.decoded()) {
+        if (frame.tag !== TAG.PUBLISH) continue
+        emit(parse(frame.text), frame.info.seq)
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      await client.getParticipant(joined)
+    })
+    expect(serverGap.gap).toBeLessThanOrEqual(50)
+    expect(clientGap.gap).toBeLessThanOrEqual(50)
+    // Before its first roster the client knows neither leaver, so only the join is narrated, once, though a later part
+    // lists the member too.
+    expect(narrated).toEqual([`join ${joined}`])
+    const ids = (await client.getParticipants()).map(({ id }) => id)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids.sort()).toEqual((await observer.getParticipants()).map(({ id }) => id).sort())
+    expect(ids).toHaveLength(99_999)
+  }, 60_000)
   it('applies the membership events that race its roster read, each once, without reading again', async () => {
     const authority = (await Room.create('roster-refresh-races')) as ServerRoom
     const first = await authority.join()
@@ -4166,7 +4222,7 @@ describe('client Room lifecycle', () => {
     const causes: unknown[] = []
     participant.onLeave((cause) => causes.push(cause.type))
     client.onLeave((_, cause) => causes.push(cause?.type))
-    emit({ __r: 'roster', members: [] }, 2)
+    emit({ __r: 'roster', members: [], part: 0 }, 2)
     expect(causes).toEqual(['removed', 'removed'])
   })
   it('applies the newest meta change that arrived before the first roster, unless the roster has a newer one', async () => {
@@ -4183,6 +4239,7 @@ describe('client Room lifecycle', () => {
           { id: newest, meta: { v: 0 }, joinedAt: 1, metaSeq: 0 },
           { id: rosterNewer, meta: { v: 3 }, joinedAt: 1, metaSeq: 3 },
         ],
+        part: 0,
       },
       5,
     )
@@ -4194,7 +4251,7 @@ describe('client Room lifecycle', () => {
   it("derives participant-update prev from the receiver's own applied state", async () => {
     const { client, emit } = fakeClient('receiver-local-prev')
     const memberId = crypto.randomUUID()
-    emit({ __r: 'roster', members: [{ id: memberId, meta: { step: 0 }, joinedAt: 1, metaSeq: 0 }] })
+    emit({ __r: 'roster', members: [{ id: memberId, meta: { step: 0 }, joinedAt: 1, metaSeq: 0 }], part: 0 })
     const member = await client.getParticipant(memberId)
     const updates: Array<[unknown, unknown]> = []
     member!.onUpdate((meta, prev) => updates.push([meta, prev]))
@@ -4205,7 +4262,7 @@ describe('client Room lifecycle', () => {
   it('makes the closed-and-empty state visible before participant leave callbacks run', async () => {
     const { client, emit } = fakeClient('atomic-close-state')
     const memberId = crypto.randomUUID()
-    emit({ __r: 'roster', members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }] })
+    emit({ __r: 'roster', members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }], part: 0 })
     const member = await client.getParticipant(memberId)
     const before = client.snapshot()
     let observed: unknown
@@ -4256,7 +4313,7 @@ describe('client Room lifecycle', () => {
   })
   it('fires onLeave on a directly held hidden member when its leave is relayed', () => {
     const { client, emit } = fakeClient('client-hidden-leave')
-    emit({ __r: 'roster', members: [] })
+    emit({ __r: 'roster', members: [], part: 0 })
     const hidden = client._reviveRemote({
       id: crypto.randomUUID(),
       meta: {},
@@ -4272,18 +4329,18 @@ describe('client Room lifecycle', () => {
   })
   it('keeps a directly held hidden member while its roster carries it, and rejects client enumeration', async () => {
     const { client, emit } = fakeClient('client-hidden-roster')
-    emit({ __r: 'roster', members: [] })
+    emit({ __r: 'roster', members: [], part: 0 })
     const member = { id: crypto.randomUUID(), meta: { role: 'moderator' }, joinedAt: 1, metaSeq: 0, identity: null }
     const hidden = client._reviveRemote({ ...member, hidden: true })
     let left = 0
     hidden.onLeave(() => left++)
-    emit({ __r: 'roster', members: [{ ...member, hidden: true }] }, 2)
+    emit({ __r: 'roster', members: [{ ...member, hidden: true }], part: 0 }, 2)
     expect(client._getRemote(hidden.id)).toBe(hidden)
     await expect(client.getParticipants({ hidden: true })).rejects.toThrow(
       'Hidden participants can only be enumerated on the server',
     )
     // A roster without it: the member left before this client's stub could hear its leave.
-    emit({ __r: 'roster', members: [] }, 3)
+    emit({ __r: 'roster', members: [], part: 0 }, 3)
     expect(client._getRemote(hidden.id)).toBeNull()
     expect(left).toBe(1)
   })
@@ -4364,7 +4421,7 @@ describe('client Room lifecycle', () => {
       },
     })
     const member = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0, identity: null }
-    emit({ __r: 'roster', members: [member] })
+    emit({ __r: 'roster', members: [member], part: 0 })
     const stopRoomWide = client.subscribe(() => {})
     log.length = 0
     client._getRemote(member.id)!.subscribe(() => {})
@@ -4413,7 +4470,7 @@ describe('client Room lifecycle', () => {
       metaSeq: 0,
       identity: null,
     }))
-    emit({ __r: 'roster', members })
+    emit({ __r: 'roster', members, part: 0 })
     for (const { id } of members) client._getRemote(id)!.subscribeBinary(() => {})
     client._getRemote(members[1]!.id)!.subscribe(() => {})()
     expect(sent).toEqual([
@@ -4457,25 +4514,25 @@ describe('RoomState', () => {
     )
     expect(events).toEqual([{ meta: { id, meta: { step: 1 }, seq: 1 } }, { leave: id }])
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
-    expect(state.reconcileRoster([member])).toBe(true)
+    expect(await state.reconcileRoster({ members: [member], departing: new Set() }, [])).toBe(true)
     let changes = 0
     state.onChange(() => changes++)
-    const reconcile = () => state.reconcileRoster([{ ...member, metaSeq: 1 }])
-    expect(reconcile()).toBe(true)
+    const reconcile = () => state.reconcileRoster({ members: [{ ...member, metaSeq: 1 }], departing: new Set() }, [])
+    expect(await reconcile()).toBe(true)
     expect(changes).toBe(1)
-    expect(reconcile()).toBe(false)
+    expect(await reconcile()).toBe(false)
     expect(changes).toBe(1)
   })
-  it('reconciles every member to the final state and preserves semantic joins', () => {
+  it('reconciles every member to the final state and preserves semantic joins', async () => {
     const alice = { id: crypto.randomUUID(), meta: {}, joinedAt: 1, metaSeq: 0 }
     const bob = { id: crypto.randomUUID(), meta: {}, joinedAt: 2, metaSeq: 0 }
     const carol = { id: crypto.randomUUID(), meta: {}, joinedAt: 3, metaSeq: 0 }
     const state = newState({ roomId: 'reconcile-change-count', seed: { members: [alice] } })
     const observed: string[][] = []
     const joins: string[] = []
-    state.onChange(() => observed.push(state.snapshotMembers().map((member) => member.id)))
+    state.onChange(() => observed.push([...state.memberSnapshots()].map((member) => member.id)))
     state.onJoin((member) => joins.push(member.id))
-    state.reconcileRoster([alice, bob, carol])
+    await state.reconcileRoster({ members: [alice, bob, carol], departing: new Set() }, [])
     expect(observed.at(-1)).toEqual([alice.id, bob.id, carol.id])
     expect(joins).toEqual([bob.id, carol.id])
   })
@@ -5188,6 +5245,22 @@ describe('a room nothing holds closes on its own', () => {
     }
   })
 })
+/** The longest event-loop gap while `run` runs, and what it returned. */
+async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number; value: T }> {
+  let last = performance.now()
+  let gap = 0
+  const timer = setInterval(() => {
+    const now = performance.now()
+    gap = Math.max(gap, now - last)
+    last = now
+  }, 1)
+  try {
+    const value = await run()
+    return { gap: Math.max(gap, performance.now() - last), value }
+  } finally {
+    clearInterval(timer)
+  }
+}
 function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: BroadcastSubscriptions) {
   const frames: Uint8Array[] = []
   const replay = stub._replayBuffer!
@@ -5564,6 +5637,7 @@ async function retainOnlyListedRemote({ target, fake, registry, onClose, memberI
     {
       __r: 'roster',
       members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0, identity: null }],
+      part: 0,
     },
     { key: target.id, seq: 1, timestamp: 1 },
   )

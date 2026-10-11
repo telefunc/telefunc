@@ -6,6 +6,8 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
 import { untether } from '../wrapProxy.js'
 import { makeDisposer } from './disposer.js'
+import { ROOM_PLAN_SLICE_MS } from './constants.js'
+import { nextTurnOf } from '../flow-control/macrotask-yield.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { isNamedTrack, laneTrack, type BinaryFrame, type BinaryWantChange } from './binary.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
@@ -249,15 +251,10 @@ class RoomState {
   listMemberIds(): string[] {
     return [...this._members.keys()]
   }
-  snapshotMembers(): MemberSnapshot[] {
-    return [...this._members.values()].map(({ id, meta, joinedAt, metaSeq, identity, hidden }) => ({
-      id,
-      meta,
-      joinedAt,
-      metaSeq,
-      identity,
-      ...(hidden ? { hidden: true } : {}),
-    }))
+  /** The members, live: one that joins before the iteration reaches the end comes too, one that leaves before it is reached doesn't. */
+  *memberSnapshots(): Generator<MemberSnapshot> {
+    for (const { id, meta, joinedAt, metaSeq, identity, hidden } of this._members.values())
+      yield { id, meta, joinedAt, metaSeq, identity, ...(hidden ? { hidden: true } : {}) }
   }
   /** A revived `RemoteParticipant`: the live entry if known, else seeded silently from the snapshot (its seed count already includes it). */
   ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
@@ -348,14 +345,21 @@ class RoomState {
     read: () => Promise<T>,
     settle: (value: T, events: readonly MembershipEvent[]) => R | Promise<R>,
   ): Promise<R> {
-    assert(this._recording === null)
-    const events: MembershipEvent[] = []
-    this._recording = events
+    const events = this.recordMembership()
     try {
       return await settle(await read(), events)
     } finally {
-      this._recording = null
+      this.stopRecordingMembership()
     }
+  }
+  /** Records the membership events this view gets into the returned list, until `stopRecordingMembership()`. */
+  recordMembership(): readonly MembershipEvent[] {
+    assert(this._recording === null)
+    this._recording = []
+    return this._recording
+  }
+  stopRecordingMembership(): void {
+    this._recording = null
   }
   private _record(event: MembershipEvent): void {
     this._recording?.push(event)
@@ -486,13 +490,21 @@ class RoomState {
     }
   }
   /** The first roster loads silently; later ones narrate the drift they correct as events. A departing member stays
-   *  until its leave event, which carries the cause. */
-  reconcileRoster(members: MemberSnapshot[]): boolean {
-    const steps = this.reconcilingRoster({ members, departing: new Set() }, [])
-    for (;;) {
-      const step = steps.next()
-      if (step.done) return step.value
+   *  until its leave event, which carries the cause. Runs `reconcilingRoster` a `ROOM_PLAN_SLICE_MS` slice per turn;
+   *  null if the room closed between slices. */
+  async reconcileRoster(
+    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
+    events: readonly MembershipEvent[],
+  ): Promise<boolean | null> {
+    const steps = this.reconcilingRoster(roster, events)
+    let step = steps.next()
+    for (let deadline = performance.now() + ROOM_PLAN_SLICE_MS; step.done !== true; step = steps.next()) {
+      if (performance.now() < deadline) continue
+      await nextTurnOf()
+      if (this.closed) return null
+      deadline = performance.now() + ROOM_PLAN_SLICE_MS
     }
+    return step.value
   }
   /** Reconciles with a roster read a member per step, the membership `events` since the read began, which may grow
    *  between steps, replayed onto it first, so no step undoes one. Returns whether a drift was narrated. */
