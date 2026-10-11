@@ -630,7 +630,7 @@ class ServerRoom extends RoomStateView implements Room {
     const timeout = reconnectWindow()
     for (const stub of this._stubs) void stub.close({ timeout }).catch(() => {})
     this._gossip.close()
-    this._subs.replan()
+    void this._subs.replan()
   }
 
   /** @internal A newer meta reaching this view through the authority never reached its clients as an event. */

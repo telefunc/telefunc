@@ -1021,8 +1021,9 @@ describe('Room public behavior', () => {
       return readOpenConfig()
     })
     await first.close()
-    // A replan while the recovery reads the head.
+    // A replan, and the roster refresh it starts, while the recovery reads the head.
     observer.onLeave(() => {})
+    await subsOf(observer).ensureRoster()
     headRead.resolve()
     await vi.advanceTimersByTimeAsync(100)
     expect(opens).toBe(2)
@@ -4635,6 +4636,24 @@ describe('room protocol validation', () => {
     // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
   })
+  it('keeps the event loop turning through a replan of 100,000 members', async () => {
+    const room = (await Room.create('replan-turns')) as ServerRoom
+    await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
+    const longestGap = async () => {
+      let last = performance.now()
+      let longest = 0
+      const timer = setInterval(() => {
+        const now = performance.now()
+        longest = Math.max(longest, now - last)
+        last = now
+      }, 1)
+      await subsOf(room).replan()
+      clearInterval(timer)
+      return Math.max(longest, performance.now() - last)
+    }
+    // The shorter of two passes, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
+  }, 60_000)
   it('renews 10,000 owned members in a heartbeat tick whose every cell read and write takes a round trip, well within the interval', async () => {
     const room = (await Room.create('heartbeat-round-trips')) as ServerRoom
     await Promise.all(Array.from({ length: 10_000 }, () => room.join()))
@@ -4651,7 +4670,7 @@ describe('room protocol validation', () => {
     expect(performance.now() - started).toBeLessThanOrEqual(2_000)
     expect(await Room.getParticipants(room.id)).toHaveLength(10_000)
   }, 60_000)
-  it('tells a watched track of each of 20,000 members wanted once while a heartbeat tick replans between two slices of telling it', async () => {
+  it('tells a watched track of each of 20,000 members wanted once while each member is replanned between two slices of telling it', async () => {
     const room = (await Room.create('demand-told-whole')) as ServerRoom
     const members = await Promise.all(Array.from({ length: 20_000 }, () => room.join()))
     const told = new Map<string, boolean[]>()
@@ -4664,23 +4683,20 @@ describe('room protocol validation', () => {
     const stubs = Array.from({ length: Math.ceil(members.length / ROOM_TRACK_WANTS_MAX) }, () => register(room))
     const demand = (room as unknown as { _demand: { tellUntil(deadline: number): boolean } })._demand
     const tellUntil = demand.tellUntil.bind(demand)
-    let tick: Promise<void> | null = null
-    let ticked = false
+    let replanned = false
     vi.spyOn(demand, 'tellUntil').mockImplementation((deadline) => {
-      if (tick !== null) return ticked && tellUntil(deadline)
       const done = tellUntil(deadline)
-      if (done) return true
-      // Between two slices: the client names cam of every member, and a heartbeat tick moves each member to it.
+      if (done || replanned) return done
+      // Between two slices: the client names cam of every member, and a replan of each member moves it to that want.
+      replanned = true
       declare(stubs[0]!, { __r: 'sub-binary', member: null, track: 'cam', on: true })
-      tick = subsOf(room)
-        ._heartbeatTick()
-        .finally(() => (ticked = true))
+      for (const member of members) subsOf(room).memberChanged(member.id)
       return false
     })
     members.forEach((member, i) =>
       declare(stubs[i % stubs.length]!, { __r: 'sub-binary', member: member.id, track: 'cam', on: true }),
     )
-    await vi.waitFor(() => expect(ticked).toBe(true), { timeout: 15_000 })
+    await vi.waitFor(() => expect(replanned).toBe(true), { timeout: 15_000 })
     await subsOf(room).binaryReady()
     const sequences = new Set(members.map((member) => JSON.stringify(told.get(member.id))))
     expect([...sequences]).toEqual(['[true]'])
@@ -5144,8 +5160,10 @@ function subsOf(room: Room | ServerRoom): {
   _everyTrack: Map<string, LaneSubscription>
   _inbox: Map<string, LaneSubscription>
   memberOwned(member: string): void
+  memberChanged(member: string): void
   _refreshMembers(): Promise<void>
   _heartbeatTick(): Promise<void>
+  replan(): Promise<void>
   binaryReady(): Promise<void>
   ensureRoster(): Promise<void>
   reconcileAuthority(): Promise<void>

@@ -106,19 +106,12 @@ class RoomSubscriptions {
     return this._inbox.get(member)
   }
 
-  /** Plans everything: the heartbeat's pass, which also retries every still-wanted lane whose recovery failed. */
-  replan(): void {
-    this._replanAround(() => {
-      const state = this._host._state
-      const members = state.closed ? [] : state.listMemberIds()
-      const present = new Set(members)
-      for (const member of new Set([...this._binaryTracks.keys(), ...this._everyTrack.keys()]))
-        if (!present.has(member)) this._syncMemberBinary(member)
-      for (const member of members) this._syncMemberBinary(member)
-      const owned = new Set(state.closed ? [] : this._host._ownedMembers().all)
-      for (const member of [...this._inbox.keys()]) if (!owned.has(member)) this._closeInbox(member)
-      for (const member of owned) this._openInbox(member)
-    })
+  /** Plans everything in the next planning pass, resolving once it ends: the heartbeat's pass, which also retries every
+   *  still-wanted lane whose recovery failed. */
+  replan(): Promise<void> {
+    this._queued.all = true
+    this._replanAround(() => this._schedulePlan())
+    return this._planning!
   }
 
   /** What the room-wide lanes depend on changed: observers, listeners, the tail. */
@@ -289,16 +282,16 @@ class RoomSubscriptions {
           const members = new Set([...plan.members, ...plan.pairs.keys()])
           if (plan.all || plan.tracks.size > 0)
             for (const member of this._host._state.listMemberIds()) members.add(member)
-          const pending = members.values()
-          for (let done = false; !done; ) {
-            this._replanAround(() => {
-              const deadline = performance.now() + ROOM_PLAN_SLICE_MS
-              for (let next = pending.next(); !(done = next.done === true); next = pending.next()) {
-                this._planMember(next.value, plan)
-                if (performance.now() >= deadline) return
-              }
-            })
-            if (!done) await nextTurnOf()
+          // Lanes of members no longer present close too.
+          if (plan.all)
+            for (const member of [...this._binaryTracks.keys(), ...this._everyTrack.keys()]) members.add(member)
+          await this._replanEach(members, (member) => this._planMember(member, plan))
+          if (plan.all) {
+            const host = this._host
+            const inboxes = new Set([...this._inbox.keys(), ...host._ownedMembers().all])
+            await this._replanEach(inboxes, (member) =>
+              !host._state.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
+            )
           }
         } else if (this._demand.changed) {
           while (!this._demand.tellUntil(performance.now() + ROOM_PLAN_SLICE_MS)) await nextTurnOf()
@@ -307,6 +300,21 @@ class RoomSubscriptions {
     } finally {
       this._planning = null
       this._syncHeartbeat()
+    }
+  }
+
+  /** Runs `step` on each item, `ROOM_PLAN_SLICE_MS` at a time, each slice planned around. */
+  private async _replanEach<T>(items: Iterable<T>, step: (item: T) => void): Promise<void> {
+    const pending = items[Symbol.iterator]()
+    for (let done = false; !done; ) {
+      this._replanAround(() => {
+        const deadline = performance.now() + ROOM_PLAN_SLICE_MS
+        for (let next = pending.next(); !(done = next.done === true); next = pending.next()) {
+          step(next.value)
+          if (performance.now() >= deadline) return
+        }
+      })
+      if (!done) await nextTurnOf()
     }
   }
 
@@ -555,7 +563,7 @@ class RoomSubscriptions {
         return true
       },
     )
-    if (read) this.replan()
+    if (read) await this.replan()
   }
 
   // Graceful departures use events; heartbeats renew owned members and reap records orphaned by hard crashes.
@@ -585,14 +593,12 @@ class RoomSubscriptions {
       } catch (error) {
         renewalFailure = { error }
       }
-      const deadline = performance.now() + ROOM_PLAN_SLICE_MS
       try {
         await host._renewViews()
       } catch (error) {
         renewalFailure ??= { error }
       }
-      this.replan() // bounded retry trigger for still-wanted terminal lanes
-      if (performance.now() >= deadline) await nextTurnOf() // the roster read starts its own slices
+      await this.replan() // bounded retry trigger for still-wanted terminal lanes
       await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views
       if (!host._state.closed) await maintainHold(host._incarnation)
       if (renewalFailure) throw renewalFailure.error
