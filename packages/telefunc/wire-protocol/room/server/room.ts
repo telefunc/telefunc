@@ -143,6 +143,9 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _views = new Map<RoomStubChannel, Promise<void>>()
   /** Stubs whose first roster read failed: the next successful refresh sends them one. */
   private readonly _rosterOwed = new Set<RoomStubChannel>()
+  /** Each roster part's text for the clients that see no hidden member, at one roster version: one roster's text at
+   *  most, until the first stream after a change or the room's teardown. */
+  private _rosterTexts: { version: number; parts: Array<{ text: string; hidden: boolean }> } | null = null
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** The local participants that joined with `selfDelivery: false`. */
   private readonly _localSuppressed = new Set<string>()
@@ -654,6 +657,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _teardown(): void {
     this._pendingDmAcks.settleAll(DM_FAILURE.roomClosed) // no recipient will reply now
     this._teardownTail()
+    this._rosterTexts = null
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
     this._localSuppressed.clear()
@@ -689,20 +693,25 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
   /** The roster to `stubs`, `ROOM_ROSTER_PART_MEMBERS` live members per part and a `ROOM_PLAN_SLICE_MS` slice per turn, so
-   *  each event relayed between two parts is one the parts after it reflect. A stub sent a newer roster drops out. */
+   *  each event relayed between two parts is one the parts after it reflect. A stub sent a newer roster drops out. While
+   *  the roster is unchanged since the stream began, each part's text is the one another stream built for it. */
   private async _streamRoster(stubs: RoomStubChannel[]): Promise<void> {
     const stream = {}
     for (const stub of stubs) {
       stub._rosterStream = stream
       stub._rosterSent = false
     }
-    const members = this._state.memberSnapshots()
+    const state = this._state
+    const version = state.version
+    if (this._rosterTexts?.version !== version) this._rosterTexts = { version, parts: [] }
+    const texts = this._rosterTexts.parts
+    const ids = state.memberIds()
     let deadline = performance.now() + ROOM_PLAN_SLICE_MS
     for (let part = 0; ; part++) {
-      const chunk: MemberSnapshot[] = []
+      const chunk: string[] = []
       let more = true
       while (chunk.length < ROOM_ROSTER_PART_MEMBERS) {
-        const next = members.next()
+        const next = ids.next()
         if (next.done === true) {
           more = false
           break
@@ -710,17 +719,25 @@ class ServerRoom extends RoomStateView implements Room {
         chunk.push(next.value)
       }
       const receiving = stubs.filter((stub) => stub._rosterStream === stream && this._stubs.has(stub))
-      if (receiving.length === 0 || this._state.closed) return
-      const visible = chunk.filter(({ hidden }) => !hidden)
-      let visibleText: string | undefined
-      for (const stub of receiving) {
-        const listed = stub._rosterMembers(chunk, visible)
+      if (receiving.length === 0 || state.closed) return
+      // The first roster read adds its members without a change.
+      const unchanged = state.rosterKnown && state.version === version
+      const built = unchanged ? texts[part] : undefined
+      // Any stub's listing is the visible one in a part with no hidden member.
+      const members = built?.hidden === false ? null : chunk.map((id) => state.memberSnapshot(id))
+      const visible = members?.filter(({ hidden }) => !hidden)
+      let visibleText = built?.text
+      const textOf = (listed: MemberSnapshot[]) => {
         const event: RoomRosterEvent = { __r: 'roster', members: listed, part, ...(more ? { more } : {}) }
-        stub._relayEventText(
-          listed === visible ? (visibleText ??= unorderedEventText(event)) : unorderedEventText(event),
-        )
+        return unorderedEventText(event)
+      }
+      for (const stub of receiving) {
+        const listed = members && stub._rosterMembers(members, visible!)
+        stub._relayEventText(!listed || listed === visible ? (visibleText ??= textOf(visible!)) : textOf(listed))
         if (!more) stub._rosterSent = true
       }
+      if (unchanged && built === undefined && visibleText !== undefined)
+        texts[part] = { text: visibleText, hidden: visible!.length < chunk.length }
       if (!more) return
       if (performance.now() < deadline) continue
       await nextTurnOf()

@@ -280,10 +280,14 @@ class RoomState {
   memberIds(): IterableIterator<string> {
     return this._members.keys()
   }
-  /** The members, live: one that joins before the iteration reaches the end comes too, one that leaves before it is reached doesn't. */
-  *memberSnapshots(): Generator<MemberSnapshot> {
-    for (const { id, meta, joinedAt, identity, hidden } of this._members.values())
-      yield { id, meta: meta.object, joinedAt, metaSeq: meta.seq, identity, ...(hidden ? { hidden: true } : {}) }
+  /** A member `memberIds()` listed, as a roster carries it. */
+  memberSnapshot(id: string): MemberSnapshot {
+    const { meta, joinedAt, identity, hidden } = this._members.get(id)!
+    return { id, meta: meta.object, joinedAt, metaSeq: meta.seq, identity, ...(hidden ? { hidden: true } : {}) }
+  }
+  /** Bumped on every observable change: a roster read at one version lists the same members as any other read at it. */
+  get version(): number {
+    return this._stateVersion
   }
   /** A revived `RemoteParticipant`: the live entry if known, else seeded silently from the snapshot (its seed count already includes it). */
   ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {

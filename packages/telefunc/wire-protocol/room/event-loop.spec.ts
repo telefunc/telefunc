@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { setFlagsFromString } from 'node:v8'
+import { getHeapStatistics, setFlagsFromString } from 'node:v8'
 import { runInNewContext } from 'node:vm'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -121,6 +121,24 @@ describe('Room at 100,000 members', () => {
     expect(ids.sort()).toEqual((await observer.getParticipants()).map(({ id }) => id).sort())
     expect(ids).toHaveLength(99_999)
   }, 60_000)
+  it('streams an unchanged roster of 100,000 members to 200 clients attaching one after another, each reusing the text one built', async () => {
+    const room = (await Room.create('serial-rosters')) as ServerRoom
+    await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
+    const attach = async () => {
+      const before = allocatedBytes()
+      const stub = register(room)
+      attachPeer(stub, { keep: false })
+      await vi.waitFor(() => expect(stub._rosterSent).toBe(true), { timeout: 30_000, interval: 1 })
+      return allocatedBytes() - before
+    }
+    const built = await attach()
+    const allocated: number[] = []
+    for (let i = 0; i < 200; i++) allocated.push(await attach())
+    const median = (bytes: number[]) => bytes.toSorted((a, b) => a - b)[bytes.length >> 1]!
+    // About 330 MB built the text, most of it the serializer's; about 3 MB each after.
+    expect(median(allocated)).toBeLessThan(built / 10)
+    expect(median(allocated.slice(100))).toBeLessThanOrEqual(median(allocated.slice(0, 100)) * 1.25)
+  }, 120_000)
   it('holds at most 5,500 bytes per owned member, measured over 20,000 joins after a full collection', async () => {
     const room = await Room.create('member-footprint')
     await room.join()
@@ -302,6 +320,11 @@ async function settled(): Promise<void> {
     onTime = performance.now() - turn < 30 ? onTime + 1 : 0
   }
 }
+/** The bytes V8 allocated so far; this @types/node predates `total_allocated_bytes`. */
+function allocatedBytes(): number {
+  return (getHeapStatistics() as ReturnType<typeof getHeapStatistics> & { total_allocated_bytes: number })
+    .total_allocated_bytes
+}
 /** A full collection, as `node --expose-gc` gives it. */
 function collectGarbage(): void {
   setFlagsFromString('--expose-gc')
@@ -336,12 +359,13 @@ function register(room: ServerRoom): RoomStubChannel {
   room._attachStub(stub)
   return stub
 }
-function attachPeer(stub: RoomStubChannel) {
+/** `keep: false` drops the frames sent. */
+function attachPeer(stub: RoomStubChannel, { keep = true } = {}) {
   const frames: Uint8Array[] = []
   const peer = new IndexedPeer(
     {
       send: (frame, onCommit) => {
-        frames.push(frame)
+        if (keep) frames.push(frame)
         onCommit?.()
       },
       bufferedAmount: () => 0,

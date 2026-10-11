@@ -4724,7 +4724,7 @@ describe('RoomState', () => {
     const state = newState({ roomId: 'reconcile-change-count', seed: { members: [alice] } })
     const observed: string[][] = []
     const joins: string[] = []
-    state.onChange(() => observed.push([...state.memberSnapshots()].map((member) => member.id)))
+    state.onChange(() => observed.push([...state.memberIds()]))
     state.onJoin((member) => joins.push(member.id))
     await state.reconcileRoster({ members: [alice, bob, carol], departing: new Set() }, [])
     expect(observed.at(-1)).toEqual([alice.id, bob.id, carol.id])
