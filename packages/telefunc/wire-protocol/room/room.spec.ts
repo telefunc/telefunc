@@ -18,6 +18,7 @@ import {
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
   ROOM_TRACK_WANTS_MAX,
+  ROOM_MEMBER_NAMED_LANES_MAX,
   ROOM_EMPTY_TIMEOUT_MS,
   ROOM_DEPARTURE_TIMEOUT_MS,
 } from './constants.js'
@@ -3162,6 +3163,62 @@ describe('Room public behavior', () => {
       await vi.waitFor(() => expect(named).toEqual([1, 2]))
     },
   )
+  it("serves a member past ROOM_MEMBER_NAMED_LANES_MAX named tracks from its every-track lane and back, each track's frames once and in order", async () => {
+    const room = (await Room.create('named-lanes-max')) as ServerRoom
+    const publisher = await room.join()
+    const observer = (await Room.get(room.id)) as ServerRoom
+    const remote = (await observer.getParticipant(publisher.id))!
+    const tracks = trackNames(ROOM_MEMBER_NAMED_LANES_MAX + 1)
+    const extra = tracks.pop()!
+    const got = new Map<string, number[]>()
+    const record = (track: string) => (data: Uint8Array) => got.set(track, [...(got.get(track) ?? []), data[0]!])
+    for (const track of tracks) remote.subscribeBinary(record(track), { track })
+    const named = tracks.map((track) => encodeLaneKey({ kind: 'binary', member: publisher.id, track })).sort()
+    await vi.waitFor(() => expect(binaryLanes(observer)).toEqual(named))
+    await subsOf(observer).binaryReady()
+    // Committed as at another instance, so not held behind this one's establishing lane.
+    const commit = async (n: number, on: string[]) => {
+      for (const track of on)
+        await driver.commitLane(
+          room.id,
+          room._inc,
+          { kind: 'binary', member: publisher.id, track },
+          encodeBinaryFrame(publisher.id, new Uint8Array([n]), { track }),
+        )
+    }
+    let release = delayDriverLane((lane) => lane.kind === 'binary-all')
+    const offExtra = remote.subscribeBinary(record(extra), { track: extra })
+    await commit(1, tracks)
+    release()
+    await vi.waitFor(() => expect(binaryLanes(observer)).toEqual([everyTrackLaneKey(publisher.id)]))
+    await subsOf(observer).binaryReady()
+    await commit(2, [...tracks, extra, 'unnamed'])
+    release = delayDriverLane((lane) => lane.kind === 'binary')
+    offExtra()
+    await commit(3, [...tracks, extra])
+    release()
+    await vi.waitFor(() => expect(binaryLanes(observer)).toEqual(named))
+    await subsOf(observer).binaryReady()
+    await commit(4, [...tracks, extra])
+    await vi.waitFor(() => expect(got.get(tracks[0]!)).toEqual([1, 2, 3, 4]))
+    expect(Object.fromEntries(got)).toEqual({
+      ...Object.fromEntries(tracks.map((track) => [track, [1, 2, 3, 4]])),
+      [extra]: [2],
+    })
+  })
+  it('keeps named lanes for a few tracks wanted of each of 100 members', async () => {
+    const room = (await Room.create('few-tracks-many-members')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 100 }, () => room.join()))
+    const observer = (await Room.get(room.id)) as ServerRoom
+    await observer.getParticipants()
+    const subscribed = countBinarySubscriptions()
+    const tracks = ['mic', 'camera', 'screen', 'screen-audio']
+    for (const track of tracks) observer.subscribeBinary(() => {}, { track })
+    await vi.waitFor(() => expect(binaryLanes(observer)).toHaveLength(members.length * tracks.length))
+    await subsOf(observer).binaryReady()
+    expect(subscribed.filter((lane) => lane.kind === 'binary-all')).toEqual([])
+    expect(subscribed).toHaveLength(members.length * tracks.length)
+  })
   it("replays a retained frame on one of a member's 1,000 tracks once to a late every-track subscriber, and drops it when the member leaves", async () => {
     const room = await Room.create('retained-of-thousand')
     const publisher = await room.join()
@@ -4267,9 +4324,11 @@ describe('room demand lifecycle', () => {
   })
 })
 describe('room protocol validation', () => {
-  it('refuses as a protocol violation a client naming more than ROOM_TRACK_WANTS_MAX tracks, opening no lane for it', async () => {
+  it('refuses as a protocol violation a client naming more than ROOM_TRACK_WANTS_MAX tracks, wanting nothing for it', async () => {
     const room = (await Room.create('track-wants-bound')) as ServerRoom
     const publisher = await room.join()
+    const demanded = new Set<string | null>()
+    publisher.onDemand((track, wanted) => (wanted ? demanded.add(track) : demanded.delete(track)))
     const stub = register(room)
     const want = (track: string, member: string | null, on = true) =>
       declare(stub, { __r: 'sub-binary', member, track, on })
@@ -4278,12 +4337,26 @@ describe('room protocol validation', () => {
     want('t0', null)
     expect(() => want('past', publisher.id)).toThrow(ProtocolViolationError)
     expect(() => want('past', null)).toThrow(ProtocolViolationError)
-    await subsOf(room).binaryReady()
-    expect(binaryLanes(room)).toHaveLength(ROOM_TRACK_WANTS_MAX)
+    await vi.waitFor(() => expect(demanded.size).toBe(ROOM_TRACK_WANTS_MAX))
+    expect(demanded.has('past')).toBe(false)
     want('t0', null, false)
     want('past', null)
-    await subsOf(room).binaryReady()
-    expect(binaryLanes(room)).toContain(encodeLaneKey({ kind: 'binary', member: publisher.id, track: 'past' }))
+    await vi.waitFor(() => expect(demanded.has('past')).toBe(true))
+    expect(demanded.has('t0')).toBe(false)
+  })
+  it('opens at most ROOM_MEMBER_NAMED_LANES_MAX + 1 lanes per member for a client naming ROOM_TRACK_WANTS_MAX tracks room-wide', async () => {
+    const room = (await Room.create('room-wide-track-wants')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 50 }, () => room.join()))
+    const bound = members.length * (ROOM_MEMBER_NAMED_LANES_MAX + 1)
+    const stub = register(room)
+    const subscribed = countBinarySubscriptions()
+    const subs = subsOf(room)
+    for (const track of trackNames(ROOM_TRACK_WANTS_MAX)) {
+      declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+      expect(subs._binary.size + subs._everyTrack.size).toBeLessThanOrEqual(bound)
+    }
+    await vi.waitFor(() => expect(binaryLanes(room)).toEqual(members.map(({ id }) => everyTrackLaneKey(id)).sort()))
+    expect(subscribed.length).toBeLessThanOrEqual(bound)
   })
   it('bounds tails by count and serialized code units at every cap edge', () => {
     const entry = (serialized: string, seq = 0) => ({ serialized, ord: { seq, timestamp: 0 }, from: '' })

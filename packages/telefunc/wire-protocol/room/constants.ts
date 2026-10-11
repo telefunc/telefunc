@@ -10,6 +10,7 @@ export {
   ROOM_EMPTY_TIMEOUT_MS,
   ROOM_DEPARTURE_TIMEOUT_MS,
   ROOM_TRACK_WANTS_MAX,
+  ROOM_MEMBER_NAMED_LANES_MAX,
 }
 import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
 
@@ -32,3 +33,5 @@ const ROOM_EMPTY_TIMEOUT_MS = 300_000
 const ROOM_DEPARTURE_TIMEOUT_MS = 20_000
 // Each named track a room handle subscribes to is a substream, as a channel is: as many as one connection carries.
 const ROOM_TRACK_WANTS_MAX = MAX_CHANNELS_PER_CONNECTION
+// An instance serves a member from its every-track lane once its holders name more than this many of its tracks.
+const ROOM_MEMBER_NAMED_LANES_MAX = 16

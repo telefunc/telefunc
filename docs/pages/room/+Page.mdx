@@ -323,7 +323,7 @@ captureAndEncode(camera, (frame, isKey) => me.publishBinary(frame, { track: 'cam
 member.subscribeBinary((data, { meta, track }) => video.decode(data, { key: meta?.key, track }), { track: 'camera' })
 ```
 
-**Subscribe only to what you render.** Watching 9 of 500 cameras? Subscribe to those 9 members, and the other 491 streams never reach you; your server never fetches them at all. The same holds per track: stop watching a screen share and its bytes stop flowing to you.
+**Subscribe only to what you render.** Watching 9 of 500 cameras? Subscribe to those 9 members, and the other 491 streams never reach you; your server never fetches them at all. The same holds per track: stop watching a screen share and its bytes stop flowing to you. Once subscriptions on your server name more than 16 tracks of one member, it fetches all of that member's tracks as one stream; each subscriber still receives only the tracks it named.
 
 **Pause the encoder when nobody's watching.** `onDemand` fires when a track of yours goes watched or unwatched. `wanted` is `false` when nobody anywhere is watching; `true` when a viewer returns:
 
