@@ -12,7 +12,7 @@ import {
 } from '../../telefunc/dist/wire-protocol/backend/install.js'
 import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
 import { broadcastSequenceKey, channelKey, generationKeysKey, headKey, orderKey } from './keys.js'
-import { REDIS_COMMANDS, REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
+import { REDIS_COMMANDS, REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 type RedisClusterNode = { host: string; port: number }
 type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; client: Redis }
 type CommandCall = { name: string; keyCount: number; args: unknown[] }
@@ -490,27 +490,29 @@ process.exit(0)`,
     setHolding(true)
     const lateFirst = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('late-first')))
     const lateSecond = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('late-second')))
-    await waitFor(() => held.length === 4)
+    await waitFor(() => held.length === 2)
     setHolding(false)
-    for (const [channel, frame] of held
-      .filter(([, frame]) => frame[0] !== REDIS_DELIVERY_FENCE_BYTE)
-      .sort((left, right) => decodeOrderingFrame(right[1]).info.seq - decodeOrderingFrame(left[1]).info.seq)) {
-      dispatch(channel, frame)
-    }
-    for (const [channel, frame] of held.filter(([, frame]) => frame[0] === REDIS_DELIVERY_FENCE_BYTE)) {
-      dispatch(channel, frame)
-    }
+    // Each commit's message carries the fence token this instance armed, ahead of its frame.
+    const seqOf = (message: Buffer) =>
+      decodeOrderingFrame(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)).info.seq
+    expect(held.map(([, message]) => message[0])).toEqual([REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_BYTE])
+    // The later frame first: the earlier one is dropped, and its fence still settles.
+    for (const [channel, message] of held.sort(([, left], [, right]) => seqOf(right) - seqOf(left)))
+      dispatch(channel, message)
     await Promise.all([lateFirst.delivery, lateSecond.delivery])
     expect(observed).toEqual(['late-second'])
     held.length = 0
     setHolding(true)
     const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('old-epoch')))
     const deliveryOutcome = committed.delivery.catch((error: unknown) => error)
-    await waitFor(() => held.length === 2)
+    await waitFor(() => held.length === 1)
     const expectedChannel = channelKey(prefix, roomId, inc, encodeLaneKey(SEMANTIC_LANE))
-    expect(held.map(([channel]) => channel.toString())).toEqual([expectedChannel, expectedChannel])
-    expect(Buffer.from(decodeOrderingFrame(held[0]![1]).payload).toString()).toBe('old-epoch')
-    expect(held[1]?.[1][0]).toBe(REDIS_DELIVERY_FENCE_BYTE)
+    expect(held[0]![0].toString()).toBe(expectedChannel)
+    const message = held[0]![1]
+    expect(message[0]).toBe(REDIS_DELIVERY_FENCE_BYTE)
+    expect(
+      Buffer.from(decodeOrderingFrame(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)).payload).toString(),
+    ).toBe('old-epoch')
     expect(await settlesWithin(committed.delivery, 100)).toBe(false)
     const first = await waitForValue(async () =>
       (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),

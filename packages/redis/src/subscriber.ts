@@ -13,7 +13,7 @@ import type {
 } from 'telefunc/__internal'
 import { DriverAttempt, createDeferred, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import { broadcastChannel, channelKey, generationInvalidationChannel, type CommitChannels } from './keys.js'
-import { REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
+import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
 
 type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
@@ -323,13 +323,20 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     this.transition('lost')
   }
 
-  receive(channel: string, frame: Buffer): void {
+  receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel)
       return this.terminate(new Error('Redis generation subscription was invalidated'))
     if (this.state() !== 'ready') return
-    if (frame[0] === REDIS_DELIVERY_FENCE_BYTE) {
-      return this.settleFence(frame.subarray(1).toString())
+    if (message[0] !== REDIS_DELIVERY_FENCE_BYTE) return this._deliver(message)
+    // The commit's fence settles once its frame was handled, delivered or dropped.
+    try {
+      this._deliver(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH))
+    } finally {
+      this.settleFence(message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH))
     }
+  }
+
+  private _deliver(frame: Buffer): void {
     let lane = ''
     if (this._everyTrack) {
       const end = 2 + frame.readUInt16BE(0)

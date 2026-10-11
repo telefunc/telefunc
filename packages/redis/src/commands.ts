@@ -1,4 +1,4 @@
-export { REDIS_DELIVERY_FENCE_BYTE, REDIS_COMMANDS }
+export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, REDIS_COMMANDS }
 export type { RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
@@ -38,6 +38,8 @@ import {
 } from './keys.js'
 
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
+/** A fence token is a UUID. */
+const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 // Redis 4 refuses a script's write after TIME unless the script replicates its effects, the default since Redis 5.
@@ -248,7 +250,7 @@ return reply
 
 // COMMIT: while the room is closing, only the close's control commit under its lease lands. A binary commit is also
 // published on its member's every-track channel, after its lane key's two-byte length and the key, so a receiver orders
-// it by its own lane; no lane key is long enough for that length's first byte to read as a fence.
+// it by its own lane; no lane key is long enough for that length's first byte to read as the fence byte.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6]=cell values
 //         [7]=a binary lane's member's every-track channel (another lane repeats [4])
 //         [8]=a retained binary lane's member's retained lanes (another commit repeats [3])
@@ -299,15 +301,17 @@ if ARGV[4] == '1' then
     redis.call('SADD', generation_keys_key, KEYS[8])
   end
 end
-local receivers = redis.call('PUBLISH', channel_key, frame)
-if ARGV[2] == 'binary' then
-  receivers = receivers + redis.call('PUBLISH', KEYS[7], struct.pack('>I2', #ARGV[8]) .. ARGV[8] .. frame)
-end
--- A Cluster forwards every publication from this slot owner over the same ordered bus link. The
--- impossible ordering-frame prefix makes a channel's later publication an internal local-dispatch fence.
+-- A channel's local attempts awaiting the commit find their fence token ahead of its frame, after a byte no frame
+-- starts with.
 local fence = string.char(${REDIS_DELIVERY_FENCE_BYTE})
-if ARGV[6] ~= '' then redis.call('PUBLISH', channel_key, fence .. ARGV[6]) end
-if ARGV[7] ~= '' then redis.call('PUBLISH', KEYS[7], fence .. ARGV[7]) end
+local lane_message = frame
+if ARGV[6] ~= '' then lane_message = fence .. ARGV[6] .. frame end
+local receivers = redis.call('PUBLISH', channel_key, lane_message)
+if ARGV[2] == 'binary' then
+  local every_track_prefix = struct.pack('>I2', #ARGV[8]) .. ARGV[8]
+  if ARGV[7] ~= '' then every_track_prefix = fence .. ARGV[7] .. every_track_prefix end
+  receivers = receivers + redis.call('PUBLISH', KEYS[7], every_track_prefix .. frame)
+end
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
 

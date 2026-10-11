@@ -152,7 +152,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
       fence.cancel()
       return reply
     }
-    // Data and fence leave the same slot owner in order, so observing the fence proves local dispatch.
+    // The frame carries the fence token, so observing the fence proves local dispatch.
     return {
       accepted: true,
       seq: reply.seq,
