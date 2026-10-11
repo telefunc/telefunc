@@ -3126,6 +3126,42 @@ describe('Room public behavior', () => {
     offNamed()
     await vi.waitFor(() => expect(demand).toEqual([true, false]))
   })
+  it.each([
+    ['widens to every track', 'binary-all', false],
+    ['narrows back to it', 'binary', true],
+  ] as const)(
+    "keeps a named track's frames while the want %s and the replacing lane establishes",
+    async (_, replacing, wide) => {
+      const room = (await Room.create(`make-before-break-${replacing}`)) as ServerRoom
+      const publisher = await room.join()
+      const observer = (await Room.get(room.id)) as ServerRoom
+      const remote = (await observer.getParticipant(publisher.id))!
+      const offAll = wide ? remote.subscribeBinary(() => {}) : null
+      const named: number[] = []
+      remote.subscribeBinary((data) => named.push(data[0]!), { track: 't1' })
+      const t1 = encodeLaneKey({ kind: 'binary', member: publisher.id, track: 't1' })
+      const all = everyTrackLaneKey(publisher.id)
+      await vi.waitFor(() => expect(binaryLanes(observer)).toEqual([wide ? all : t1]))
+      await subsOf(observer).binaryReady()
+      // Committed as at another instance, so not held behind this one's establishing lane.
+      const commit = (n: number) =>
+        driver.commitLane(
+          room.id,
+          room._inc,
+          { kind: 'binary', member: publisher.id, track: 't1' },
+          encodeBinaryFrame(publisher.id, new Uint8Array([n]), { track: 't1' }),
+        )
+      const release = delayDriverLane((lane) => lane.kind === replacing)
+      if (offAll) offAll()
+      else remote.subscribeBinary(() => {})
+      await commit(1)
+      release()
+      await vi.waitFor(() => expect(binaryLanes(observer)).toEqual([wide ? t1 : all]))
+      await subsOf(observer).binaryReady()
+      await commit(2)
+      await vi.waitFor(() => expect(named).toEqual([1, 2]))
+    },
+  )
   it("replays a retained frame on one of a member's 1,000 tracks once to a late every-track subscriber, and drops it when the member leaves", async () => {
     const room = await Room.create('retained-of-thousand')
     const publisher = await room.join()
