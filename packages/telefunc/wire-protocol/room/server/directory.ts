@@ -5,7 +5,8 @@ export { directoryCheckAt, repairRoomIndex, sweepLapsedRoomsSoon }
 
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
+import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS, ROOM_PLAN_SLICE_MS } from '../constants.js'
 import type { HoldConfig } from '../protocol.js'
 import { configFromHead, openConfig } from './lanes.js'
 import { reportRoomError } from './errors.js'
@@ -44,13 +45,18 @@ function sweepLapsedRoomsSoon(): void {
   void sweepLapsedRooms(getRoomBackend()).catch(reportRoomError)
 }
 
-/** Each due room leaves the due ones: due again under the head that still names it, or repaired. */
+/** Each due room leaves the due ones: due again under the head that still names it, or repaired. A page and a
+ *  `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function sweepLapsedRooms(backend: RoomBackend): Promise<void> {
+  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
   for (let due = await backend.directoryDue(Date.now()); due.length > 0; due = await backend.directoryDue(Date.now())) {
     for (const { roomId, incTag } of due) {
       const head = await backend.readHead(roomId)
       if (head?.currentInc !== incTag) await repairRoomIndex(backend, roomId, incTag, head)
       else await backend.directoryPut(roomId, incTag, directoryCheckAt(configFromHead(head).hold, head.expiresAt))
     }
+    if (performance.now() < deadline) continue
+    await nextTurnOf()
+    deadline = performance.now() + ROOM_PLAN_SLICE_MS
   }
 }

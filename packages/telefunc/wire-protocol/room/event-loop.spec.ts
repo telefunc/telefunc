@@ -229,6 +229,25 @@ describe('Room at 100,000 members', () => {
     expect(gap).toBeLessThanOrEqual(50)
     expect(binaryLanesOf(observer)).toBe(0)
   }, 60_000)
+  it('keeps the event loop turning through a sweep of 100,000 lapsed rooms', async () => {
+    const backend = getRoomBackend()
+    const sweep = async (pass: number) => {
+      for (let i = 0; i < 100_000; i++) await backend.directoryPut(`lapsed-${pass}-${i}`, 'inc', 0)
+      // Past this process's last sweep, so the room's creation sweeps.
+      vi.setSystemTime(Date.now() + 60_000)
+      return await longestGapWhile(async () => {
+        await create(`after-lapses-${pass}`)
+        await vi.waitFor(async () => expect(await backend.directoryDue(Date.now())).toEqual([]), { timeout: 30_000 })
+      })
+    }
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      // The shorter of two sweeps, so a scheduling hiccup in one is not read as a stall.
+      expect(Math.min((await sweep(1)).gap, (await sweep(2)).gap)).toBeLessThanOrEqual(50)
+    } finally {
+      vi.useRealTimers()
+    }
+  }, 60_000)
   it('keeps the event loop turning through a heartbeat replan of one member with 100,000 named tracks', async () => {
     const room = await create('member-replan-turns')
     const publisher = await room.join()
