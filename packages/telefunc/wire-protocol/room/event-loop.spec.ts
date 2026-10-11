@@ -163,11 +163,12 @@ describe('Room at 100,000 members', () => {
     })
     await subsOf(observer).binaryReady()
     expect(binaryLanesOf(observer)).toBeGreaterThan(0)
-    // Each declaration replays the retained frames of its track, so the specs' declarations in one turn leave work
-    // behind them: wait it out.
-    for (let turn = performance.now(); ; turn = performance.now()) {
+    // Each declaration replays the retained frames of its track, so the spec's declarations in one turn leave work
+    // behind them: wait it out, until five timers in a row come on time.
+    for (let onTime = 0; onTime < 5; ) {
+      const turn = performance.now()
       await new Promise((resolve) => setTimeout(resolve, 20))
-      if (performance.now() - turn < 30) break
+      onTime = performance.now() - turn < 30 ? onTime + 1 : 0
     }
     const { gap } = await longestGapWhile(async () => {
       const closed = held.map(({ stub }) => new Promise<void>((resolve) => stub.onClose(() => resolve())))
