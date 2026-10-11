@@ -4577,6 +4577,23 @@ describe('room protocol validation', () => {
     expect(published.mock.calls.length).toBeGreaterThan(ROOM_GOSSIP_IN_FLIGHT_MAX)
     expect(most).toBeLessThanOrEqual(ROOM_GOSSIP_IN_FLIGHT_MAX)
   })
+  it('commits none of the demand gossip still waiting once its room closed', async () => {
+    const room = (await Room.create('gossip-after-close')) as ServerRoom
+    const member = await room.join()
+    const backend = getRoomBackend()
+    const commitLane = backend.commitLane.bind(backend)
+    let afterClose = 0
+    vi.spyOn(backend, 'commitLane').mockImplementation((...args) => {
+      if (room.isClosed && args[0] === room.id && args[2].kind === 'control') afterClose++
+      return commitLane(...args)
+    })
+    const { demand } = spyGossip(room)
+    for (const track of trackNames(100 * ROOM_GOSSIP_IN_FLIGHT_MAX))
+      demand._publishWant({ __r: 'want', member: member.id, track, instance: 'elsewhere', on: true })
+    await Room.close(room.id)
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(afterClose).toBe(0)
+  })
   it('bounds tails by count and serialized code units at every cap edge', () => {
     const entry = (serialized: string, seq = 0) => ({ serialized, ord: { seq, timestamp: 0 }, from: '' })
     const byCount = new TailHold(() => {})

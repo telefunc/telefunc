@@ -13,8 +13,9 @@ assertIsNotBrowser()
 /** Commits a room's demand gossip in order, `ROOM_GOSSIP_IN_FLIGHT_MAX` at a time, so a burst waits as events rather
  *  than as commits. Each goes to the backend installed when it was told. */
 class GossipOutbox {
-  private readonly _waiting = new Fifo<{ backend: RoomBackend; event: RoomCtrlEnvelope }>()
+  private _waiting = new Fifo<{ backend: RoomBackend; event: RoomCtrlEnvelope }>()
   private _inFlight = 0
+  private _closed = false
 
   constructor(
     private readonly _roomId: string,
@@ -22,8 +23,15 @@ class GossipOutbox {
   ) {}
 
   push(event: RoomCtrlEnvelope): void {
+    if (this._closed) return
     this._waiting.push({ backend: getRoomBackend(), event })
     this._send()
+  }
+
+  /** A closed room's gossip has no reader: what waits is dropped, and nothing more is told. */
+  close(): void {
+    this._closed = true
+    this._waiting = new Fifo()
   }
 
   private _send(): void {

@@ -148,6 +148,7 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _publishTurns = new Map<string, Promise<void>>()
   /** Binary demand across instances (`onDemand`). */
   private readonly _demand: RoomDemand
+  private readonly _gossip: GossipOutbox
   private readonly _subs: RoomSubscriptions
 
   constructor(
@@ -173,7 +174,7 @@ class ServerRoom extends RoomStateView implements Room {
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._local = new LocalHolder(this._state, this._localSuppressed)
-    const gossip = new GossipOutbox(roomId, inc)
+    const gossip = (this._gossip = new GossipOutbox(roomId, inc))
     this._demand = new RoomDemand(
       (event) => gossip.push(event),
       (id) => this._holderOf(id) !== undefined,
@@ -628,6 +629,7 @@ class ServerRoom extends RoomStateView implements Room {
     // A client back while its channel still holds it gets `closed`.
     const timeout = reconnectWindow()
     for (const stub of this._stubs) void stub.close({ timeout }).catch(() => {})
+    this._gossip.close()
     this._subs.replan()
   }
 
