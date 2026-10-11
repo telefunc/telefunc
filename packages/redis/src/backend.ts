@@ -37,6 +37,7 @@ import {
   retainedKey,
   retainedKeyPrefix,
   retainedOfKey,
+  commitChannels,
 } from './keys.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
 import { RedisSubscriptionDriver } from './subscriber.js'
@@ -126,13 +127,17 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    const fence = this.subscriptions.prepareFence({ roomId, inc, lane })
+    const laneKey = encodeLaneKey(lane)
+    const channels = commitChannels(this._prefix, roomId, inc, lane, laneKey)
+    const fence = this.subscriptions.prepareFence(channels)
     let reply
     try {
       reply = await this._run(REDIS_COMMANDS.commit, {
         roomId,
         inc,
         lane,
+        laneKey,
+        channels,
         payload,
         retain: opts?.retain === true,
         closingLease: opts?.closingLease,

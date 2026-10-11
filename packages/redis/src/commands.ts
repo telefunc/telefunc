@@ -5,7 +5,6 @@ export type { RedisCommand }
 
 import {
   encodeLaneKey,
-  everyTrackLaneKey,
   type BroadcastPayload,
   type BroadcastRoute,
   type CellCounter,
@@ -26,7 +25,6 @@ import {
   cellIndexKey,
   cellValuesKey,
   cellVersionsKey,
-  channelKey,
   directoryIndexKey,
   directoryTagsKey,
   generationInvalidationChannel,
@@ -36,6 +34,7 @@ import {
   retainedKey,
   retainedOfKey,
   revKey,
+  type CommitChannels,
 } from './keys.js'
 
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
@@ -251,7 +250,8 @@ return reply
 // published on its member's every-track channel, after its lane key's two-byte length and the key, so a receiver orders
 // it by its own lane; no lane key is long enough for that length's first byte to read as a fence.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6]=cell values
-//         [7]=the member's every-track channel [8]=the member's retained lanes (another lane repeats [4] and [3])
+//         [7]=a binary lane's member's every-track channel (another lane repeats [4])
+//         [8]=a retained binary lane's member's retained lanes (another commit repeats [3])
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
 //         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9..]=required live cells
 const COMMIT_LUA = `${HEAD_PRELUDE}
@@ -362,6 +362,8 @@ const command = <Input, Output>(spec: RedisCommand<Input, Output>): RedisCommand
 type RoomInc = { roomId: string; inc: string }
 type CommitInput = RoomInc & {
   lane: LaneId
+  laneKey: string
+  channels: CommitChannels
   payload: Uint8Array
   retain: boolean
   closingLease: string | undefined
@@ -513,21 +515,18 @@ const REDIS_COMMANDS = {
     lua: COMMIT_LUA,
     numberOfKeys: 8,
     invoke: (prefix, input: CommitInput) => {
-      const { roomId, inc, lane } = input
-      const laneKey = encodeLaneKey(lane)
-      const channel = channelKey(prefix, roomId, inc, laneKey)
+      const { roomId, inc, lane, laneKey, channels } = input
       const retained = retainedKey(prefix, roomId, inc, laneKey)
-      const binary = lane.kind === 'binary'
       return {
         keys: [
           headKey(prefix, roomId),
           orderKey(prefix, roomId, inc, laneKey),
           retained,
-          channel,
+          channels.lane,
           generationKeysKey(prefix, roomId, inc),
           cellValuesKey(prefix, roomId, inc),
-          binary ? channelKey(prefix, roomId, inc, everyTrackLaneKey(lane.member)) : channel,
-          binary ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
+          channels.everyTrack ?? channels.lane,
+          lane.kind === 'binary' && input.retain ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
         ],
         argv: [
           inc,

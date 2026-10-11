@@ -6,20 +6,13 @@ import type {
   BackendReceiver,
   BroadcastRoute,
   Deferred,
-  LaneId,
   RoomSubscriptionSource,
   SubscriptionAttempt,
   SubscriptionBinding,
   SubscriptionDriver,
 } from 'telefunc/__internal'
-import {
-  DriverAttempt,
-  createDeferred,
-  decodeOrderingFrame,
-  encodeLaneKey,
-  everyTrackLaneKey,
-} from 'telefunc/__internal'
-import { broadcastChannel, channelKey, generationInvalidationChannel } from './keys.js'
+import { DriverAttempt, createDeferred, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
+import { broadcastChannel, channelKey, generationInvalidationChannel, type CommitChannels } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
 
@@ -83,9 +76,9 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     return ''
   }
 
-  /** Arms a delivery fence on the ready attempts of each channel the commit is published on, its lane's and, for a
-   *  binary lane, its member's every-track one: `delivery` settles once each saw the commit. */
-  prepareFence(source: RoomSubscriptionSource & { lane: LaneId }): {
+  /** Arms a delivery fence on the ready attempts of each channel the commit is published on: `delivery` settles once
+   *  each saw the commit. */
+  prepareFence(channels: CommitChannels): {
     tokens: { lane: string; everyTrack: string }
     delivery: Promise<void>
     cancel(): void
@@ -95,12 +88,8 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
       const attempts = [...(this._byChannel.get(channel) ?? [])]
       return { attempts, armed: attempts.flatMap((attempt) => attempt.prepareFence(token) ?? []) }
     }
-    const { roomId, inc, lane } = source
-    const own = arm(laneChannel(this._prefix, source))
-    const everyTrack =
-      lane.kind === 'binary'
-        ? arm(channelKey(this._prefix, roomId, inc, everyTrackLaneKey(lane.member)))
-        : { attempts: [], armed: [] }
+    const own = arm(channels.lane)
+    const everyTrack = channels.everyTrack === null ? { attempts: [], armed: [] } : arm(channels.everyTrack)
     const delivery = Promise.all([...own.armed, ...everyTrack.armed]).then(() => {})
     // A subscriber can drop before the commit awaiting this delivery returns.
     void delivery.catch(() => {})

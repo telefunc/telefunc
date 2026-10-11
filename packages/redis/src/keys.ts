@@ -14,14 +14,19 @@ export {
   retainedKey,
   retainedOfKey,
   channelKey,
+  commitChannels,
   generationInvalidationChannel,
   directoryIndexKey,
   directoryTagsKey,
 }
+export type { CommitChannels }
 
 // Redis keys. Every per-room key shares `{rid}`, so a room is one Cluster slot.
 
-import type { BroadcastRoute } from 'telefunc/__internal'
+import { everyTrackLaneKey, type BroadcastRoute, type LaneId } from 'telefunc/__internal'
+
+/** The channels a commit publishes on: its lane's, and a binary lane's member's every-track one. */
+type CommitChannels = { lane: string; everyTrack: string | null }
 
 const DEFAULT_PREFIX = 'tf:'
 
@@ -85,6 +90,13 @@ function retainedOfKey(prefix: string, roomId: string, inc: string, member: stri
 }
 function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`
+}
+function commitChannels(prefix: string, roomId: string, inc: string, lane: LaneId, laneKey: string): CommitChannels {
+  const channels = `${roomTag(prefix, roomId)}:ch:${inc}:`
+  return {
+    lane: channels + laneKey,
+    everyTrack: lane.kind === 'binary' ? channels + everyTrackLaneKey(lane.member) : null,
+  }
 }
 function generationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:invalidate:${inc}`

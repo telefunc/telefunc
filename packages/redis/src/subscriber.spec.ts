@@ -1,9 +1,15 @@
 import { EventEmitter } from 'node:events'
 import type { SubscriberSocket } from './ioredis.js'
 import { expect, onTestFinished, test, vi } from 'vitest'
-import type { BackendPayload, BackendReceiver, SubscriptionAttempt, SubscriptionState } from 'telefunc/__internal'
+import {
+  encodeLaneKey,
+  type BackendPayload,
+  type BackendReceiver,
+  type SubscriptionAttempt,
+  type SubscriptionState,
+} from 'telefunc/__internal'
 import { RedisSubscriptionDriver } from './subscriber.js'
-import { channelKey } from './keys.js'
+import { channelKey, commitChannels } from './keys.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
 function untilReady(attempt: SubscriptionAttempt): Promise<void> {
@@ -176,7 +182,9 @@ test("a fence resolves when its subscription's owner releases it: no receiver is
   const source = { roomId: 'room', inc: 'inc', lane: { kind: 'control' } } as const
   const attempt = openAttempt(driver, source)
   await untilReady(attempt)
-  const fence = driver.prepareFence(source)
+  const fence = driver.prepareFence(
+    commitChannels('tf:', source.roomId, source.inc, source.lane, encodeLaneKey(source.lane)),
+  )
   await attempt.unsubscribe()
   await expect(fence.delivery).resolves.toBeUndefined()
 })
@@ -214,7 +222,9 @@ test('a subscriber dropping before the commit returns rejects its delivery witho
   const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const
   const attempt = openAttempt(driver, source)
   await untilReady(attempt)
-  const fence = driver.prepareFence(source)
+  const fence = driver.prepareFence(
+    commitChannels('tf:', source.roomId, source.inc, source.lane, encodeLaneKey(source.lane)),
+  )
   sockets[0]!.socket.emit('close')
   await new Promise((resolve) => setTimeout(resolve, 10))
   expect(unhandled).toEqual([])
