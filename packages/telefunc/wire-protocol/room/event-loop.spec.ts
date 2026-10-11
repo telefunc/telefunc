@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { setFlagsFromString } from 'node:v8'
+import { runInNewContext } from 'node:vm'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { IndexedPeer } from '../server/IndexedPeer.js'
@@ -119,6 +121,24 @@ describe('Room at 100,000 members', () => {
     expect(ids.sort()).toEqual((await observer.getParticipants()).map(({ id }) => id).sort())
     expect(ids).toHaveLength(99_999)
   }, 60_000)
+  it('holds at most 5,500 bytes per owned member, measured over 20,000 joins after a full collection', async () => {
+    const room = await Room.create('member-footprint')
+    await room.join()
+    const live = async () => {
+      for (let i = 0; i < 4; i++) {
+        collectGarbage()
+        await new Promise((resolve) => setTimeout(resolve, 10))
+      }
+      return process.memoryUsage().heapUsed
+    }
+    const before = await live()
+    const members = await Promise.all(Array.from({ length: 20_000 }, () => room.join()))
+    const perMember = ((await live()) - before) / members.length
+    // About 4,300 measured, most of it the member's inbox lane subscription; 7,700 before its listener lists and
+    // participant view were made on demand.
+    expect(perMember).toBeLessThanOrEqual(5_500)
+    expect(members).toHaveLength(20_000)
+  }, 60_000)
   it('reads no page of a room meta of 100,000 keys in a heartbeat tick while the view holds every write', async () => {
     const room = await Room.create('meta-steady-tick')
     for (let from = 0; from < 100_000; from += 10_000)
@@ -219,6 +239,11 @@ function binaryLanesOf(room: ServerRoom): number {
   const subs = (room as unknown as { _subs: { _binary: Map<string, unknown>; _everyTrack: Map<string, unknown> } })
     ._subs
   return subs._binary.size + subs._everyTrack.size
+}
+/** A full collection, as `node --expose-gc` gives it. */
+function collectGarbage(): void {
+  setFlagsFromString('--expose-gc')
+  ;(runInNewContext('gc') as () => void)()
 }
 function subsOf(room: ServerRoom): {
   _heartbeatTick(): Promise<void>

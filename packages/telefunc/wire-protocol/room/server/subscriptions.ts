@@ -79,6 +79,14 @@ type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pai
  *  recovered within Room's horizon, and renewed by the heartbeat. */
 class RoomSubscriptions {
   private readonly _wants = new WantsIndex((track, named) => this._demand.setTrack(track, named))
+  // Every lane shares these, so an owned member's inbox lane makes none; declared before the lanes made here.
+  private readonly _onLaneTerminal = (slot: LaneSubscription, error?: unknown) => this._onTerminal(slot, error)
+  private readonly _onLaneRecovered = () => void this.reconcileAuthority().catch(reportRoomError)
+  private readonly _onBinaryPending = (slot: LaneSubscription, pending: boolean) => {
+    if (!pending) return void this._binaryPending.delete(slot)
+    this._binaryPending.add(slot)
+    this._binaryReady = null
+  }
   private readonly _control = this._newLaneSubscription()
   private readonly _semantic = this._newLaneSubscription()
   /** Named lanes, keyed by (member, track); `_binaryTracks` lists each member's. */
@@ -572,16 +580,7 @@ class RoomSubscriptions {
   }
 
   private _newLaneSubscription(binary = false): LaneSubscription {
-    return new LaneSubscription(
-      (slot, error) => this._onTerminal(slot, error),
-      () => void this.reconcileAuthority().catch(reportRoomError),
-      (slot, pending) => {
-        if (!binary) return
-        if (!pending) return void this._binaryPending.delete(slot)
-        this._binaryPending.add(slot)
-        this._binaryReady = null
-      },
-    )
+    return new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered, binary ? this._onBinaryPending : undefined)
   }
 
   private _onTerminal(slot: LaneSubscription, failure?: unknown): void {

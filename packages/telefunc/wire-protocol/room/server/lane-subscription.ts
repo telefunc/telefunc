@@ -4,6 +4,8 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
 assertIsNotBrowser()
 
+function ignorePending(): void {}
+
 /** A lane subscription the room wants: holder-facing readiness survives failed attempts, and Room's recovery policy replaces them. */
 class LaneSubscription {
   private _subscription: BackendSubscription | null = null
@@ -15,7 +17,7 @@ class LaneSubscription {
   constructor(
     private readonly _onTerminal: (slot: LaneSubscription, error?: unknown) => void,
     private readonly _onRecovered: () => void,
-    private readonly _onPending: (slot: LaneSubscription, pending: boolean) => void = () => {},
+    private readonly _onPending: (slot: LaneSubscription, pending: boolean) => void = ignorePending,
   ) {}
 
   get active(): boolean {

@@ -51,14 +51,17 @@ type MemberEntry = {
   remote: RemoteParticipant | null
   left: boolean
   leaveCause?: LeaveCause
-  dataCbs: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown>
-  binaryCbs: Listeners<{
-    cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
-    track: TrackFilter
-  }>
-  binaryTracks: TrackCounts
-  updateCbs: Listeners<(meta: ParticipantMeta, prev: ParticipantMeta) => void>
-  leaveCbs: Listeners<(cause: LeaveCause) => void>
+  // Each list is made when its first listener is added: most members never get one.
+  dataCbs: Listeners<(data: unknown, info: ChannelPublishInfo) => unknown> | null
+  binary: {
+    cbs: Listeners<{
+      cb: (data: Uint8Array, info: ChannelPublishInfo & BinaryFrameInfo) => unknown
+      track: TrackFilter
+    }>
+    tracks: TrackCounts
+  } | null
+  updateCbs: Listeners<(meta: ParticipantMeta, prev: ParticipantMeta) => void> | null
+  leaveCbs: Listeners<(cause: LeaveCause) => void> | null
 }
 type RoomStateOptions = {
   owner: RoomStateView
@@ -389,7 +392,7 @@ class RoomState {
     }
     if (!this._rosterKnown) this._seedCount++ // pre-roster, `count` is the seed adjusted by applied events
     this._bumpState()
-    this._fireAll(this._joinCbs, this._remote(entry))
+    if (this._joinCbs.size > 0) this._fireAll(this._joinCbs, this._remote(entry))
     return true
   }
   applyLeave(id: string, cause: LeaveCause): void {
@@ -401,14 +404,13 @@ class RoomState {
   private _removeEntry(entry: MemberEntry, cause: LeaveCause): void {
     entry.left = true
     entry.leaveCause = cause
-    const remote = this._remote(entry)
     this._members.delete(entry.id)
     if (entry.hidden) this._hiddenMembers--
     // A hidden participant's leave is no presence event either; its own handlers and listener release still run.
     if (!entry.hidden && !this._rosterKnown) this._seedCount = Math.max(0, this._seedCount - 1)
     this._bumpState()
-    this._fireAll(entry.leaveCbs, cause)
-    if (!entry.hidden) this._fireAll(this._leaveCbs, remote, cause)
+    if (entry.leaveCbs) this._fireAll(entry.leaveCbs, cause)
+    if (!entry.hidden && this._leaveCbs.size > 0) this._fireAll(this._leaveCbs, this._remote(entry), cause)
     this._releaseEntryListeners(entry)
     if (entry.hidden) return
     if (this.count === 0) this._fireAll(this._emptyCbs)
@@ -429,7 +431,7 @@ class RoomState {
     const next = ownMetadata(meta)
     entry.meta = next
     this._bumpState()
-    this._fireAll(entry.updateCbs, next, prev)
+    if (entry.updateCbs) this._fireAll(entry.updateCbs, next, prev)
     this._fireAll(this._participantUpdateCbs, this._remote(entry), next, prev)
     return true
   }
@@ -474,7 +476,7 @@ class RoomState {
     for (const entry of departed) {
       entry.left = true
       entry.leaveCause = cause
-      this._fireAll(entry.leaveCbs, cause)
+      if (entry.leaveCbs) this._fireAll(entry.leaveCbs, cause)
       this._releaseEntryListeners(entry)
     }
     this._fireAll(this._closeCbs)
@@ -489,7 +491,7 @@ class RoomState {
     const entry = this._members.get(event.from)
     const sender = entry ? this._remote(entry) : senderOf(event.from, event.fromMeta, event.fromIdentity ?? null)
     this._fireAll(this._roomDataCbs, event.data, info, sender)
-    if (entry) this._fireAll(entry.dataCbs, event.data, info)
+    if (entry?.dataCbs) this._fireAll(entry.dataCbs, event.data, info)
   }
   /** A binary frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
   applyBinary({ from, payload, track, meta }: BinaryFrame, info: ChannelPublishInfo): void {
@@ -497,7 +499,7 @@ class RoomState {
     const entry = this._members.get(from)
     const sender = entry ? this._remote(entry) : senderOf(from, {}, null)
     this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))
-    if (entry) this._fireTrackFiltered(entry.binaryCbs, track, (cb) => cb(payload, frameInfo))
+    if (entry?.binary) this._fireTrackFiltered(entry.binary.cbs, track, (cb) => cb(payload, frameInfo))
   }
   /** Fire the listeners whose track filter admits `track` (`undefined` = every track). */
   private _fireTrackFiltered<CB>(
@@ -616,11 +618,10 @@ class RoomState {
       hidden: entrySeed.hidden === true,
       remote: null,
       left: false,
-      dataCbs: new Listeners(),
-      binaryCbs: new Listeners(),
-      binaryTracks: newTrackCounts(),
-      updateCbs: new Listeners(),
-      leaveCbs: new Listeners(),
+      dataCbs: null,
+      binary: null,
+      updateCbs: null,
+      leaveCbs: null,
     }
     return entry
   }
@@ -638,17 +639,15 @@ class RoomState {
         get identity() {
           return entry.identity
         },
-        subscribe: (cb) => this._registerLive(entry, entry.dataCbs, cb),
+        subscribe: (cb) => this._registerLive(entry, (entry.dataCbs ??= new Listeners()), cb),
         subscribeBinary: (cb, opts) => {
           const listener = binaryListener(cb, opts)
-          return this._registerLive(entry, entry.binaryCbs, listener, {
-            counts: entry.binaryTracks,
-            track: listener.track,
-          })
+          const binary = (entry.binary ??= { cbs: new Listeners(), tracks: newTrackCounts() })
+          return this._registerLive(entry, binary.cbs, listener, { counts: binary.tracks, track: listener.track })
         },
-        onUpdate: (cb) => this._registerLive(entry, entry.updateCbs, cb),
+        onUpdate: (cb) => this._registerLive(entry, (entry.updateCbs ??= new Listeners()), cb),
         onLeave: (cb: (cause: LeaveCause) => void) => {
-          if (!entry.left) return this._register(entry.leaveCbs, cb, entry)
+          if (!entry.left) return this._register((entry.leaveCbs ??= new Listeners()), cb, entry)
           assert(entry.leaveCause)
           invokeChannelListener(cb, [entry.leaveCause], this._onCallbackError)
           return makeDisposer()
@@ -692,7 +691,8 @@ class RoomState {
   }
   /** A discarded entry's listeners die with it, so the counters let owners drop what it held open. */
   private _releaseEntryListeners(entry: MemberEntry): void {
-    for (const list of [entry.dataCbs, entry.binaryCbs, entry.updateCbs, entry.leaveCbs]) {
+    for (const list of [entry.dataCbs, entry.binary?.cbs, entry.updateCbs, entry.leaveCbs]) {
+      if (!list) continue
       for (const unlisten of [...(this._listenerCleanups.get(list) ?? [])]) unlisten()
       this._listenerCleanups.delete(list)
     }
@@ -704,7 +704,7 @@ class RoomState {
     this._listenerCount += delta
     if (binary !== null && binary.track !== null) this._trackWants += binary.on ? 1 : -1
     if (entry !== null) {
-      if (entry.dataCbs.size > 0) this._textWanted.add(entry.id)
+      if ((entry.dataCbs?.size ?? 0) > 0) this._textWanted.add(entry.id)
       else this._textWanted.delete(entry.id)
     }
     this._onListenersChanged(entry?.id ?? null, binary)
