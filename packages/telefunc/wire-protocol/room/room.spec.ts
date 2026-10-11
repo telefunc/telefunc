@@ -1039,6 +1039,9 @@ describe('Room public behavior', () => {
       return attempts < 3 ? rejectedSubscription(`attempt ${attempts}`) : subscribeLane(roomId, inc, lane, receiver)
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+    // The roster is read first, so the lane's own pass is the only one before the heartbeat.
+    observer.onJoin(() => {})
+    await subsOf(observer).ensureRoster()
     observer.subscribe(() => {})
     await vi.advanceTimersByTimeAsync(100)
     // The lane and its one replacement; the next attempt waits for the heartbeat.
@@ -4632,6 +4635,22 @@ describe('room protocol validation', () => {
     // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
   })
+  it('renews 10,000 owned members in a heartbeat tick whose every cell read and write takes a round trip, well within the interval', async () => {
+    const room = (await Room.create('heartbeat-round-trips')) as ServerRoom
+    await Promise.all(Array.from({ length: 10_000 }, () => room.join()))
+    const roundTrip = () => new Promise((resolve) => setTimeout(resolve, 1))
+    const readCells = driver.readCells.bind(driver)
+    vi.spyOn(driver, 'readCells').mockImplementation(async (...args) => (await roundTrip(), readCells(...args)))
+    const exchange = driver.compareExchangeCells.bind(driver)
+    vi.spyOn(driver, 'compareExchangeCells').mockImplementation(
+      async (...args) => (await roundTrip(), exchange(...args)),
+    )
+    const started = performance.now()
+    await subsOf(room)._heartbeatTick()
+    // One renewal after another, the renewals alone take 20,000 round trips.
+    expect(performance.now() - started).toBeLessThanOrEqual(2_000)
+    expect(await Room.getParticipants(room.id)).toHaveLength(10_000)
+  }, 60_000)
   it('tells a watched track of each of 20,000 members wanted once while a heartbeat tick replans between two slices of telling it', async () => {
     const room = (await Room.create('demand-told-whole')) as ServerRoom
     const members = await Promise.all(Array.from({ length: 20_000 }, () => room.join()))

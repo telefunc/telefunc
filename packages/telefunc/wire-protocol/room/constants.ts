@@ -12,6 +12,7 @@ export {
   ROOM_TRACK_WANTS_MAX,
   ROOM_MEMBER_NAMED_LANES_MAX,
   ROOM_GOSSIP_IN_FLIGHT_MAX,
+  ROOM_MEMBER_WRITES_IN_FLIGHT_MAX,
   ROOM_PLAN_SLICE_MS,
 }
 import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
@@ -39,6 +40,8 @@ const ROOM_TRACK_WANTS_MAX = MAX_CHANNELS_PER_CONNECTION
 const ROOM_MEMBER_NAMED_LANES_MAX = 16
 // Demand gossip commits an instance keeps in flight; the rest wait as events.
 const ROOM_GOSSIP_IN_FLIGHT_MAX = 64
+// Member lease renewals, or a roster read's evictions, kept in flight: a pass costs a round trip per 64 members.
+const ROOM_MEMBER_WRITES_IN_FLIGHT_MAX = 64
 // Lane planning, demand telling, or a heartbeat's renewals and roster read: what one event-loop turn runs before timers
 // and I/O get theirs.
 const ROOM_PLAN_SLICE_MS = 10

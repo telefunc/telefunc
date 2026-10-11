@@ -18,7 +18,7 @@ import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey, type LaneHolder } from './replay.js'
 import { WantsIndex } from './wants-index.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
-import { reapAndReadRoster, renewMemberLease } from './membership.js'
+import { reapAndReadRoster, renewMemberLeases } from './membership.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
 import { readRoomMeta, type StoredRoomMeta } from './meta.js'
 assertIsNotBrowser()
@@ -580,18 +580,12 @@ class RoomSubscriptions {
       // No cell I/O, so member-cell latency never delays demand renewal.
       this._demand.heartbeat()
       let renewalFailure: { error: unknown } | null = null
-      let deadline = performance.now() + ROOM_PLAN_SLICE_MS
-      for (const id of host._ownedMembers().renewable) {
-        if (performance.now() >= deadline) {
-          await nextTurnOf()
-          deadline = performance.now() + ROOM_PLAN_SLICE_MS
-        }
-        try {
-          await renewMemberLease(host.id, host._inc, id)
-        } catch (error) {
-          renewalFailure ??= { error }
-        }
+      try {
+        await renewMemberLeases(host.id, host._inc, host._ownedMembers().renewable)
+      } catch (error) {
+        renewalFailure = { error }
       }
+      const deadline = performance.now() + ROOM_PLAN_SLICE_MS
       try {
         await host._renewViews()
       } catch (error) {

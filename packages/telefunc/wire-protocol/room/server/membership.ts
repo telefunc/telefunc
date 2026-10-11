@@ -3,7 +3,7 @@ export {
   removeView,
   createMember,
   updateMemberRecord,
-  renewMemberLease,
+  renewMemberLeases,
   evictMember,
   reapAndReadRoster,
   reapAndReadMembersById,
@@ -15,7 +15,7 @@ import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
 import type { CellCount, CellCounter, CellMutation, CellSelector } from '../../backend/room/contract.js'
-import { ROOM_MEMBER_TTL_MS, ROOM_PLAN_SLICE_MS } from '../constants.js'
+import { ROOM_MEMBER_TTL_MS, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX, ROOM_PLAN_SLICE_MS } from '../constants.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import {
   leaveCauseToWire,
@@ -150,10 +150,38 @@ async function updateMemberRecord<T>(
   })
 }
 
-async function renewMemberLease(roomId: string, inc: string, id: string): Promise<void> {
-  await mutateMember(roomId, inc, id, (record) =>
-    record === null ? { value: undefined } : { value: undefined, next: record },
+/** Each renewal is its own compare-exchange; a failed one fails the call once all are tried. */
+async function renewMemberLeases(roomId: string, inc: string, ids: readonly string[]): Promise<void> {
+  await eachInFlight(ids, (id) =>
+    mutateMember(roomId, inc, id, (record) =>
+      record === null ? { value: undefined } : { value: undefined, next: record },
+    ),
   )
+}
+
+/** Runs `task` on each item, `ROOM_MEMBER_WRITES_IN_FLIGHT_MAX` at a time and a `ROOM_PLAN_SLICE_MS` slice per turn;
+ *  throws the first failure once every task ran. */
+async function eachInFlight<T>(items: readonly T[], task: (item: T) => Promise<unknown>): Promise<void> {
+  const pending = items.values()
+  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  let turn: Promise<void> | null = null
+  let failure = null as { error: unknown } | null
+  const worker = async () => {
+    for (let next = pending.next(); next.done !== true; next = pending.next()) {
+      if (performance.now() >= deadline)
+        await (turn ??= nextTurnOf().then(() => {
+          turn = null
+          deadline = performance.now() + ROOM_PLAN_SLICE_MS
+        }))
+      try {
+        await task(next.value)
+      } catch (error) {
+        failure ??= { error }
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(items.length, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX) }, worker))
+  if (failure) throw failure.error
 }
 
 /** Remove a member and record the cleanup in one write, then finish the cleanup. With `onlyIfLapsed`, a member whose
@@ -220,16 +248,13 @@ async function reapAndReadRoster(
   const cells = await readCells(room.id, room.inc, { prefix: MEMBER_CELL_PREFIX })
   // After the member read, so an eviction committing in between shows up as departing.
   const cleanups = await readCells(room.id, room.inc, { prefix: CLEANUP_CELL_PREFIX })
-  const departing = new Set<string>()
-  for (const [key, raw] of cleanups) {
-    const id = memberIdOfCleanupKey(key)
-    departing.add(id)
-    await completeCleanup(room.id, room.inc, id, raw)
-  }
-  for (const [key, raw] of await readCells(room.id, room.inc, { prefix: VIEW_CELL_PREFIX })) {
+  const departing = new Set([...cleanups.keys()].map(memberIdOfCleanupKey))
+  await eachInFlight([...cleanups], ([key, raw]) => completeCleanup(room.id, room.inc, memberIdOfCleanupKey(key), raw))
+  const views = await readCells(room.id, room.inc, { prefix: VIEW_CELL_PREFIX })
+  await eachInFlight([...views], async ([key, raw]) => {
     if (isLapsed(decodeRoomRecord<ViewRecord>(raw)))
       await removeView(room, viewIdOfCellKey(key), { onlyIfLapsed: true })
-  }
+  })
   const members = await liveMembers(
     room,
     [...cells].map(([key, raw]) => [memberIdOfCellKey(key), raw] as const).filter(([id]) => !departing.has(id)),
@@ -252,20 +277,16 @@ async function liveMembers(
   room: RoomIncarnation,
   entries: ReadonlyArray<readonly [string, Uint8Array]>,
 ): Promise<MemberSnapshot[]> {
-  const members: MemberSnapshot[] = []
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
-  for (const [id, raw] of entries) {
-    if (performance.now() >= deadline) {
-      await nextTurnOf()
-      deadline = performance.now() + ROOM_PLAN_SLICE_MS
-    }
+  const members: (MemberSnapshot | null)[] = []
+  await eachInFlight([...entries.keys()], async (i) => {
+    const [id, raw] = entries[i]!
     const candidate = decodeRoomRecord<RoomMemberRecord>(raw)
     const record = isLapsed(candidate)
       ? await evictMember(room, id, candidate.identity ?? null, { type: 'disconnected' }, { onlyIfLapsed: true })
       : candidate
-    if (record !== null) members.push(memberSnapshot(id, record))
-  }
-  return members
+    members[i] = record && memberSnapshot(id, record)
+  })
+  return members.filter((member) => member !== null)
 }
 
 function memberSnapshot(id: string, record: RoomMemberRecord): MemberSnapshot {
