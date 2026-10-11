@@ -97,6 +97,8 @@ class RoomSubscriptions {
   /** What the next planning pass replans: binary want changes and lane readiness wait for it, so a burst of them is
    *  planned from the whole want set before any lane opens. */
   private _queued = newBinaryPlan()
+  /** The holders gone whose wants the next planning pass drops. */
+  private readonly _gone = new Set<LaneHolder>()
   private _planning: Promise<void> | null = null
   private _pendingRefresh: Promise<void> | null = null
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
@@ -129,19 +131,17 @@ class RoomSubscriptions {
     this._replanAround(() => {})
   }
 
-  /** A holder attached or is gone, or its wants changed wholesale: its room-wide ones, and those of `members` when
-   *  given. The next planning pass recounts each member it may have changed. */
-  holderChanged(holder: LaneHolder, gone = false, members?: Iterable<string>): void {
-    const affected = this._wants.update(holder, gone, members)
-    const queued = this._queued
-    if (affected === 'all') {
-      this._counts.clear()
-      queued.all = true
-    } else
-      for (const member of affected) {
-        this._counts.delete(member)
-        queued.members.add(member)
-      }
+  /** A holder attached, or its wants changed wholesale: its room-wide ones, and those of `members` when given. The next
+   *  planning pass recounts each member it may have changed. */
+  holderChanged(holder: LaneHolder, members?: Iterable<string>): void {
+    this._indexHolder(holder, false, members)
+    this._replanAround(() => this._schedulePlan())
+  }
+
+  /** A holder is gone. A planning pass in a later turn drops its wants, so the holders gone in one turn (the clients of
+   *  a mass expiry) are dropped together, a slice at a time. */
+  holderGone(holder: LaneHolder): void {
+    this._gone.add(holder)
     this._replanAround(() => this._schedulePlan())
   }
 
@@ -291,6 +291,19 @@ class RoomSubscriptions {
     this._syncHeartbeat()
   }
 
+  private _indexHolder(holder: LaneHolder, gone: boolean, members?: Iterable<string>): void {
+    const affected = this._wants.update(holder, gone, members)
+    const queued = this._queued
+    if (affected === 'all') {
+      this._counts.clear()
+      queued.all = true
+    } else
+      for (const member of affected) {
+        this._counts.delete(member)
+        queued.members.add(member)
+      }
+  }
+
   private _queuePair(member: string, track: string): void {
     const pairs = this._queued.pairs
     let tracks = pairs.get(member)
@@ -310,7 +323,10 @@ class RoomSubscriptions {
       await Promise.resolve()
       for (;;) {
         const plan = this._queued
-        if (!isEmpty(plan)) {
+        if (this._gone.size > 0) {
+          await nextTurnOf()
+          await this._replanEach(drain(this._gone), (holder) => this._indexHolder(holder, true))
+        } else if (!isEmpty(plan)) {
           this._queued = newBinaryPlan()
           const host = this._host
           const members = chain(
@@ -654,6 +670,13 @@ function once<T>(step: (item: T) => void): (item: T) => void {
     if (seen.has(item)) return
     seen.add(item)
     step(item)
+  }
+}
+/** Each item, removed as it is taken; one added meanwhile comes too. */
+function* drain<T>(items: Set<T>): Generator<T> {
+  for (const item of items) {
+    items.delete(item)
+    yield item
   }
 }
 function newBinaryPlan(): BinaryPlan {

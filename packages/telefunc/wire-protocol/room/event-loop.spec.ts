@@ -12,6 +12,7 @@ import type { ServerRoom } from './server/room.js'
 import { ResponseRoomGrants, RoomStubChannel } from './server/stub.js'
 import { disposeBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
+import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 
 // Each spec here times a stall at 100,000 members, so it runs in a worker of its own: room.spec's other specs leave
 // rooms reachable (vitest keeps every spy, and a stub no client connects to waits out its TTL), and collecting them
@@ -118,6 +119,35 @@ describe('Room at 100,000 members', () => {
     expect(ids.sort()).toEqual((await observer.getParticipants()).map(({ id }) => id).sort())
     expect(ids).toHaveLength(99_999)
   }, 60_000)
+  it("drops the 409,600 track wants of 100 clients whose reconnect windows end in one timer turn with the event loop turning, the publisher's lanes released", async () => {
+    const room = await Room.create('mass-expiry')
+    const publisher = await room.join()
+    const observer = (await Room.get(room.id)) as ServerRoom
+    await observer.getParticipant(publisher.id)
+    const held = Array.from({ length: 100 }, () => {
+      const stub = register(observer)
+      const { peer } = attachPeer(stub)
+      for (let i = 0; i < ROOM_TRACK_WANTS_MAX; i++)
+        stub._onPeerMessage(stringify({ __r: 'sub-binary', member: publisher.id, track: `t${i}`, on: true }), 0)
+      return { stub, peer }
+    })
+    await subsOf(observer).binaryReady()
+    expect(binaryLanesOf(observer)).toBeGreaterThan(0)
+    // Each declaration replays the retained frames of its track, so the specs' declarations in one turn leave work
+    // behind them: wait it out.
+    for (let turn = performance.now(); ; turn = performance.now()) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      if (performance.now() - turn < 30) break
+    }
+    const { gap } = await longestGapWhile(async () => {
+      const closed = held.map(({ stub }) => new Promise<void>((resolve) => stub.onClose(() => resolve())))
+      for (const { stub, peer } of held) stub._onPeerDisconnect(peer, 100)
+      await Promise.all(closed)
+      await subsOf(observer).binaryReady()
+    })
+    expect(gap).toBeLessThanOrEqual(50)
+    expect(binaryLanesOf(observer)).toBe(0)
+  }, 60_000)
   it('merges one key into a room meta of 100,000 keys with both event loops turning, a view and a client applying it', async () => {
     const room = await Room.create('meta-merge-turns')
     for (let from = 0; from < 100_000; from += 10_000)
@@ -153,7 +183,17 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
   }, 60_000)
 })
-function subsOf(room: ServerRoom): { _heartbeatTick(): Promise<void>; replan(): Promise<void> } {
+/** How many binary lanes the room holds: per track and every-track. */
+function binaryLanesOf(room: ServerRoom): number {
+  const subs = (room as unknown as { _subs: { _binary: Map<string, unknown>; _everyTrack: Map<string, unknown> } })
+    ._subs
+  return subs._binary.size + subs._everyTrack.size
+}
+function subsOf(room: ServerRoom): {
+  _heartbeatTick(): Promise<void>
+  replan(): Promise<void>
+  binaryReady(): Promise<void>
+} {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
 }
 /** The longest event-loop gap while `run` runs, and what it returned. */

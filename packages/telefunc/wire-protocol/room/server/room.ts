@@ -621,7 +621,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._stubOf.delete(id)
     this._local.forgetMember(id)
     this._demand.forgetMember(id)
-    for (const stub of this._stubs) if (stub._forgetWantsOf(id)) this._subs.holderChanged(stub, false, [id])
+    for (const stub of this._stubs) if (stub._forgetWantsOf(id)) this._subs.holderChanged(stub, [id])
     this._subs.memberReleased(id)
   }
   /** The room closed. Runs once, after the `closed` event has been applied and relayed. */
@@ -767,7 +767,7 @@ class ServerRoom extends RoomStateView implements Room {
     void view?.then(() => removeView(this._incarnation, stub.id)).catch(reportRoomError)
     this._rosterOwed.delete(stub)
     stub._endTail()
-    this._subs.holderChanged(stub, true)
+    this._subs.holderGone(stub)
     for (const id of stub._heldMembers()) {
       this._stubOf.delete(id)
       this._subs.memberReleased(id)
