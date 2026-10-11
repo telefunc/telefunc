@@ -552,8 +552,11 @@ async function rejectionOf(promise: Promise<unknown>, label: string): Promise<st
 /** A fresh authority whose first SQL use is a write SQLite refuses keeps its tables for the next calls. */
 async function refusedFirstWrite(env: Env, suffix: string) {
   const authority = env.ROOM.get(env.ROOM.idFromName(`refused-first-write-${suffix}`)) as unknown as Authority
-  const refused = await rejectionOf(authority.directoryPut('x'.repeat(3 * 1024 * 1024), 'inc'), 'oversized id')
-  await authority.directoryPut('room', 'inc')
+  const refused = await rejectionOf(
+    authority.directoryPut('x'.repeat(3 * 1024 * 1024), 'inc', Infinity),
+    'oversized id',
+  )
+  await authority.directoryPut('room', 'inc', Infinity)
   return {
     refused: refused.includes('SQLITE_TOOBIG'),
     listed: (await authority.directoryList('')).entries.map(({ roomId }) => roomId),
