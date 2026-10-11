@@ -248,7 +248,7 @@ class ClientRoom extends RoomStateView implements Room {
         this._acceptParticipantMeta(event.id, event)
         return
       case 'update':
-        this._state.applyRoomUpdate(event.meta, event.seq)
+        this._state.applyRoomUpdate(event)
         return
       case 'closed':
         this._applyClosed('closed')

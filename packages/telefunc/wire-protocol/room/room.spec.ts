@@ -273,7 +273,7 @@ describe('Room public behavior', () => {
     await subsOf(room).reconcileAuthority()
     const updates = relayed(peer).filter((event) => event.__r === 'update')
     // The first is the attach's own resend.
-    expect(updates.map((event) => event.meta)).toEqual([{ topic: 'old' }, { topic: 'new' }])
+    expect(updates.map((event) => event.meta)).toEqual([[['topic', 'old', 0, 0]], [['topic', 'new', 0, 0]]])
   })
   it('tells its clients about its own join, meta change and leave even when the lane loses their echoes', async () => {
     const control = loseLaneFrames((lane) => lane.kind === 'control')
@@ -755,8 +755,8 @@ describe('Room public behavior', () => {
     const room = await Room.create('control-seq-restart')
     room.onUpdate(() => {})
     const at = Date.now() + 1000
-    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 1 }, seq: 1 }), { seq: 5, timestamp: at })
-    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 2 }, seq: 2 }), { seq: 1, timestamp: at + 1 })
+    deliver(encodeRoomRecord({ __r: 'update', meta: [['step', 1, 0, 0]], seq: 1 }), { seq: 5, timestamp: at })
+    deliver(encodeRoomRecord({ __r: 'update', meta: [['step', 2, 1, 0]], seq: 2 }), { seq: 1, timestamp: at + 1 })
     expect(room.meta).toEqual({ step: 2 })
   })
   it('keeps the newest room meta when an older update arrives after it', async () => {
@@ -768,8 +768,8 @@ describe('Room public behavior', () => {
     const room = await Room.create('control-late-update')
     const updates: unknown[] = []
     room.onUpdate((meta) => updates.push(meta))
-    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 2 }, seq: 2 }), { seq: 1, timestamp: 1 })
-    deliver(encodeRoomRecord({ __r: 'update', meta: { step: 1 }, seq: 1 }), { seq: 2, timestamp: 2 })
+    deliver(encodeRoomRecord({ __r: 'update', meta: [['step', 2, 1, 0]], seq: 2 }), { seq: 1, timestamp: 1 })
+    deliver(encodeRoomRecord({ __r: 'update', meta: [['step', 1, 0, 0]], seq: 1 }), { seq: 2, timestamp: 2 })
     expect({ meta: room.meta, updates }).toEqual({ meta: { step: 2 }, updates: [{ step: 2 }] })
   })
   it('reconciles authority after a same-attempt recovery', async () => {
@@ -1666,6 +1666,70 @@ describe('Room public behavior', () => {
       ['topic', 'first', 'y', 'z'],
       ['topic', 'first', 'y', 'z'],
     ])
+  })
+  it('grows a room meta to 20,000 keys one Room.setAttributes() at a time, each write taking about as long at 20,000 keys as at 1,000', async () => {
+    const room = await Room.create('meta-growth')
+    const observer = await Room.get(room.id)
+    observer.onJoin(() => {}) // a live view: it applies every write, and builds its meta only when read
+    const windows: number[] = []
+    let started = 0
+    for (let i = 1; i <= 20_000; i++) {
+      if (i % 1_000 === 501) started = performance.now()
+      await Room.setAttributes(room.id, { [`k${i}`]: i })
+      if (i === 1_000 || i === 10_000 || i === 20_000) windows.push(performance.now() - started)
+    }
+    await vi.waitFor(() => expect(Object.keys(observer.meta)).toHaveLength(20_000))
+    // The last 500 writes before each size.
+    const [at1k, at10k, at20k] = windows as [number, number, number]
+    expect(Math.max(at10k, at20k)).toBeLessThanOrEqual(3 * at1k)
+  }, 60_000)
+  it('ends every view, a client too, on the stored meta, its key order and its seq under concurrent Room.setAttributes() and Room.setMeta() calls', async () => {
+    const room = (await Room.create('meta-converge', { meta: { topic: 'start' } })) as unknown as ServerRoom
+    const other = (await Room.get(room.id)) as ServerRoom
+    for (const view of [room, other]) view.onUpdate(() => {})
+    const { peer } = serve(room)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    yieldAfterEachReadAndCountWrites()
+    await Promise.all(
+      Array.from({ length: 120 }, (_, i) =>
+        i % 12 === 11
+          ? Room.setMeta(room.id, { [`r${i}`]: i, topic: i })
+          : Room.setAttributes(room.id, { [`k${i % 7}`]: i, [`n${i}`]: i, [`n${i - 3}`]: undefined }),
+      ),
+    )
+    const stored = (await Room.get(room.id)) as ServerRoom
+    const viewOf = (view: ServerRoom | ClientRoom) => ({
+      keys: Object.keys(view.meta),
+      meta: view.meta,
+      seq: (view as unknown as { _state: RoomState })._state.metaSeq,
+    })
+    const expected = viewOf(stored)
+    expect(expected.seq).toBeGreaterThan(100)
+    await vi.waitFor(() => expect([room, other].map(viewOf)).toEqual([expected, expected]))
+    expect(viewOf(clientView(peer, room.id))).toEqual(expected)
+  })
+  it('repairs a room meta update a view never got from the next one it gets, well within a heartbeat', async () => {
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
+    const room = await Room.create('meta-gap')
+    const observer = await Room.get(room.id)
+    observer.onUpdate(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    control.next()
+    await Room.setAttributes(room.id, { a: 1 })
+    await Room.setAttributes(room.id, { b: 2 })
+    await vi.waitFor(() => expect(observer.meta).toEqual({ a: 1, b: 2 }), { timeout: 5_000 })
+  })
+  it('repairs a room meta write whose writer crashed between its exchange and its publish', async () => {
+    const room = await Room.create('meta-crash')
+    const observer = await Room.get(room.id)
+    observer.onUpdate(() => {})
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await Room.setAttributes(room.id, { a: 1 })
+    await vi.waitFor(() => expect(observer.meta).toEqual({ a: 1 }))
+    vi.spyOn(driver, 'commitLane').mockImplementationOnce(() => Promise.reject(new Error('crashed')))
+    await expect(Room.setAttributes(room.id, { b: 2 })).rejects.toThrow('crashed')
+    await Room.setAttributes(room.id, { c: 3 })
+    await vi.waitFor(() => expect(observer.meta).toEqual({ a: 1, b: 2, c: 3 }), { timeout: 5_000 })
   })
   it('takes meta as it was at the call, nested values included', async () => {
     const created = { topic: { name: 'a' } }
@@ -3504,7 +3568,7 @@ describe('Room public behavior', () => {
       const peer = attachPeer(stub)
       await vi.waitFor(() =>
         expect(relayed(peer)).toEqual([
-          expect.objectContaining({ __r: 'update', meta }),
+          expect.objectContaining({ __r: 'update', meta: [['pad', meta.pad, expect.any(Number), 0]] }),
           { __r: 'demand-state', member: wanted, tracks: [null] },
           { __r: 'demand-state', member: idle, tracks: [] },
           expect.objectContaining({
@@ -5465,7 +5529,7 @@ function newState(options: Partial<ConstructorParameters<typeof RoomState>[0]>):
   return new RoomState({
     owner: {} as RoomStateView, // read only by the serializer
     roomId: 'state',
-    meta: {},
+    meta: [],
     seed: { members: [] },
     metaSeq: 0,
     onListenersChanged: () => {},
@@ -5478,7 +5542,7 @@ function snapshot(roomId: string): RoomSnapshotMetadata {
   return {
     channelId: 'channel',
     roomId,
-    meta: {},
+    meta: [],
     closed: false,
     count: 0,
     metaSeq: 0,

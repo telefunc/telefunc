@@ -8,7 +8,12 @@ import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
 import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX, ROOM_PLAN_SLICE_MS } from '../constants.js'
+import {
+  ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_MEMBER_NAMED_LANES_MAX,
+  ROOM_META_REPAIR_MS,
+  ROOM_PLAN_SLICE_MS,
+} from '../constants.js'
 import type { BinaryWantChange } from '../binary.js'
 import type { RoomDemand } from '../demand.js'
 import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
@@ -31,7 +36,7 @@ type SubscriptionHost = {
   /** Read-only here: every change goes through the host's methods. */
   readonly _state: Pick<
     RoomState,
-    'closed' | 'rosterKnown' | 'listenerCount' | 'recordingMembership' | 'memberIds' | 'hasMember'
+    'closed' | 'metaWaiting' | 'rosterKnown' | 'listenerCount' | 'recordingMembership' | 'memberIds' | 'hasMember'
   >
   /** Whether anything here observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean
@@ -95,6 +100,7 @@ class RoomSubscriptions {
   private _planning: Promise<void> | null = null
   private _pendingRefresh: Promise<void> | null = null
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
+  private _metaRepair: ReturnType<typeof setTimeout> | null = null
   private _heartbeatBusy = false
 
   constructor(
@@ -229,12 +235,34 @@ class RoomSubscriptions {
 
   async reconcileAuthority(): Promise<void> {
     const host = this._host
-    if (host._state.closed) return
+    if (host._state.closed || !(await this._reconcileMeta())) return
+    await this._refreshMembers()
+  }
+
+  /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
+   *  `ROOM_META_REPAIR_MS` after the first wait rather than at the next heartbeat. */
+  metaWaiting(): void {
+    if (this._metaRepair !== null) return
+    this._metaRepair = unrefTimer(
+      setTimeout(() => {
+        this._metaRepair = null
+        const state = this._host._state
+        if (state.metaWaiting && !state.closed) void this._reconcileMeta().catch(reportRoomError)
+      }, ROOM_META_REPAIR_MS),
+    )
+  }
+
+  /** The stored meta, applied if newer; false once the room is gone. */
+  private async _reconcileMeta(): Promise<boolean> {
+    const host = this._host
     const config = await host._readOpenConfig()
     const stored = config && (await readRoomMeta(host.id, config))
-    if (stored === null) return host._closeFromAuthority()
+    if (stored === null) {
+      host._closeFromAuthority()
+      return false
+    }
     host._applyAuthorityMeta(stored)
-    await this._refreshMembers()
+    return true
   }
 
   /** The room-wide lanes are planned around a change, and the heartbeat after it. */

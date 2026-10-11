@@ -165,9 +165,10 @@ class ServerRoom extends RoomStateView implements Room {
     this._state = new RoomState({
       owner: this,
       roomId,
-      meta: stored.meta,
+      meta: stored.entries,
       seed,
       metaSeq: stored.seq,
+      onMetaWaiting: () => this._subs.metaWaiting(),
       onListenersChanged: (member, binary) => {
         this._onHolderTextChanged(this._local, this._local.refreshText(member))
         if (binary !== null && this._local.applyBinary(binary)) this._onHolderBinaryChanged(this._local, binary)
@@ -587,7 +588,9 @@ class ServerRoom extends RoomStateView implements Room {
         return applied
       }
       case 'update':
-        return this._state.applyRoomUpdate(event.meta, event.seq)
+        // Relayed here: each update this one let apply, in seq order.
+        for (const applied of this._state.applyRoomUpdate(event)) this._relayApplied(applied)
+        return false
       case 'closed':
         return this._state.applyClosed()
     }
@@ -636,8 +639,9 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal A newer meta reaching this view through the authority never reached its clients as an event. */
-  _applyAuthorityMeta(stored: StoredRoomMeta): void {
-    if (this._state.applyRoomUpdate(stored.meta, stored.seq)) this._relayApplied({ __r: 'update', ...stored })
+  _applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {
+    for (const applied of this._state.applyRoomUpdate({ __r: 'update', seq, meta: entries }))
+      this._relayApplied(applied)
   }
   /** @internal Reconciles with a roster read in `ROOM_PLAN_SLICE_MS` slices, replaying `events`, which grow until it
    *  ends; false if the room closed first. Every client gets a roster that corrected a drift; otherwise only the clients
@@ -718,7 +722,7 @@ class ServerRoom extends RoomStateView implements Room {
       metadata: {
         channelId: stub.id,
         roomId: this.id,
-        meta: this.meta,
+        meta: this._state.metaEntries(),
         closed: this.isClosed,
         metaSeq: this._state.metaSeq,
         bufferLimit: getServerConfig().channel.bufferLimit,
@@ -739,7 +743,7 @@ class ServerRoom extends RoomStateView implements Room {
   _onStubAttached(stub: RoomStubChannel): void {
     if (!this._stubs.has(stub)) return
     this._sendRosterTo(stub)
-    stub._relayEvent({ __r: 'update', meta: this.meta, seq: this._state.metaSeq })
+    stub._relayEvent({ __r: 'update', seq: this._state.metaSeq, meta: this._state.metaEntries() })
     for (const member of stub._heldMembers())
       stub._relayEvent({ __r: 'demand-state', member, tracks: this._demandOf(member) })
   }

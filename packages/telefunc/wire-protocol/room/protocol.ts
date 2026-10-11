@@ -12,6 +12,8 @@ export type {
   RoomRosterEvent,
   RoomDemandEvent,
   RoomCtrlEnvelope,
+  RoomMetaEntry,
+  RoomMetaUpdate,
   RoomDataEnvelope,
   RoomDataPublish,
   RoomDmEnvelope,
@@ -65,7 +67,7 @@ type MemberSnapshot = {
 type RoomSnapshotMetadata = {
   channelId: string
   roomId: string
-  meta: RoomMeta
+  meta: RoomMetaEntry[]
   closed: boolean
   count: number
   /** How many meta writes `meta` reflects, which orders later updates. */
@@ -93,7 +95,7 @@ type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number; hidden?: boolean }
-  | { __r: 'update'; meta: RoomMeta; seq: number }
+  | RoomMetaUpdate
   // Demand gossip between instances, never relayed to clients: a track of a member, every track the member publishes
   // (`track: null`), or a track of every member (`member: null`), which the instance receives from the members it covers.
   | { __r: 'want'; member: string; track: string | null; instance: string; on: boolean }
@@ -101,6 +103,12 @@ type RoomCtrlEnvelope =
   | { __r: 'covers'; member: string; instance: string; on: boolean }
   | { __r: 'closed' }
 
+/** A room meta key with its place: the `meta:seq` the write that added it read, and its index in that write. */
+type RoomMetaEntry = [key: string, value: unknown, placeSeq: number, placeIndex: number]
+/** The room meta at `seq`, whole, or as the write at `seq` changed it: a key it removed as `[key]`. */
+type RoomMetaUpdate =
+  | { __r: 'update'; seq: number; meta: RoomMetaEntry[] }
+  | { __r: 'update'; seq: number; changes: (RoomMetaEntry | [key: string])[] }
 /** A `LeaveCause` on the wire: no `cause` means the member left on its own. */
 type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
 /** A member's message; its order rides the transport frame. `fromMeta` is stamped by the sender's instance, never the client, so a receiver behind on the roster still names the sender. */

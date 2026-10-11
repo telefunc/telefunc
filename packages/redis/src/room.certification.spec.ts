@@ -317,6 +317,68 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
   })
 
+  it('merges one key into a room meta of 100,000 keys with the event loop turning, a view applying it, and no Redis command over 20 ms', async () => {
+    const prefix = uniquePrefix('meta-merge')
+    const redis = ownClient(connect())
+    installRedis(redis, { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('meta-merge')
+    for (let from = 0; from < 100_000; from += 10_000)
+      await Room.setAttributes(
+        room.id,
+        Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
+      )
+    const observer = await Room.get(room.id)
+    // Ended before the backend is, so nothing of this view reaches for a backend after it.
+    onTestFinished(observer.onUpdate(() => {}))
+    const merge = async (value: number) => {
+      let last = performance.now()
+      let longest = 0
+      const timer = setInterval(() => {
+        const now = performance.now()
+        longest = Math.max(longest, now - last)
+        last = now
+      }, 1)
+      await Room.setAttributes(room.id, { k0: value })
+      await vi.waitFor(() => expect(observer.meta.k0).toBe(value))
+      clearInterval(timer)
+      return Math.max(longest, performance.now() - last)
+    }
+    await merge(-1)
+    const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
+    await Promise.all(nodes.map((node) => node.slowlog('RESET')))
+    // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
+    const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
+      number,
+      number,
+      number,
+      string[],
+    ][]
+    const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
+    expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+  }, 60_000)
+  it('ends the views of two servers on the stored meta, its key order and its seq while both merge into and replace it at once', async () => {
+    const prefix = uniquePrefix('meta-converge')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('meta-converge', { meta: { topic: 'start' } })
+    const view = await Room.get(room.id)
+    onTestFinished(view.onUpdate(() => {}))
+    const startAt = Date.now() + 2_000
+    const other = metaWriterFrom({ ...env, PREFIX: prefix, ROOM: room.id, SIDE: 'b', START_AT: `${startAt}` })
+    await new Promise((resolve) => setTimeout(resolve, startAt - Date.now()))
+    await writeMetaBurst(Room, room.id, 'a')
+    await other.written
+    const stored = await Room.get(room.id)
+    const seqOf = (room: object) => (room as { _state: { metaSeq: number } })._state.metaSeq
+    const expected = { keys: Object.keys(stored.meta), meta: stored.meta, seq: seqOf(stored) }
+    await vi.waitFor(() =>
+      expect({ keys: Object.keys(view.meta), meta: view.meta, seq: seqOf(view) }).toEqual(expected),
+    )
+    expect(await other.viewAt(expected.seq)).toEqual(expected)
+  }, 30_000)
+
   it('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
     installRedis(ownClient(connect()), { prefix: uniquePrefix('meta-order') })
     onTestFinished(() => disposeBackend())
@@ -396,6 +458,70 @@ process.exit(0)`,
   return new Promise((resolve, reject) =>
     server.on('exit', (code) => (code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`exit ${code}`)))),
   )
+}
+
+/** Merges into and replaces a room meta at once, keys named by `side`. `Room` is a parameter, so a server process can
+ *  run this function's source. */
+async function writeMetaBurst(room: typeof Room, roomId: string, side: string): Promise<void> {
+  await Promise.all(
+    Array.from({ length: 60 }, (_, i) =>
+      i % 10 === 9
+        ? room.setMeta(roomId, { [`${side}r${i}`]: i, topic: side })
+        : room.setAttributes(roomId, { [`${side}${i % 5}`]: i, [`${side}n${i}`]: i, [`${side}n${i - 2}`]: undefined }),
+    ),
+  )
+}
+
+/** A server viewing ROOM that runs `writeMetaBurst` at START_AT, then reports its view once it reaches a seq. */
+function metaWriterFrom(env: Record<string, string>): {
+  written: Promise<void>
+  viewAt: (seq: number) => Promise<unknown>
+} {
+  const server = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { Cluster, Redis } from 'ioredis'
+import { createInterface } from 'node:readline'
+import { Room } from 'telefunc'
+import { installRedis } from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)}
+const { REDIS_URL, NODES, PREFIX, ROOM, SIDE, START_AT } = process.env
+installRedis(NODES ? new Cluster(JSON.parse(NODES)) : new Redis(REDIS_URL), { prefix: PREFIX })
+const view = await Room.get(ROOM)
+view.onUpdate(() => {})
+await new Promise((resolve) => setTimeout(resolve, Number(START_AT) - Date.now()))
+await (${writeMetaBurst.toString().replace(/^async function writeMetaBurst/, 'async function')})(Room, ROOM, SIDE)
+process.stdout.write('written\\n')
+const [line] = await createInterface({ input: process.stdin })[Symbol.asyncIterator]().next().then((r) => [r.value])
+const seq = Number(line)
+while (view._state.metaSeq < seq) await new Promise((resolve) => setTimeout(resolve, 10))
+process.stdout.write(JSON.stringify({ keys: Object.keys(view.meta), meta: view.meta, seq: view._state.metaSeq }) + '\\n')
+process.exit(0)`,
+    ],
+    { cwd: new URL('..', import.meta.url), env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'inherit'] },
+  )
+  const lines: string[] = []
+  const waiting: Array<() => void> = []
+  let buffered = ''
+  server.stdout.on('data', (chunk) => {
+    buffered += chunk
+    const parts = buffered.split('\n')
+    buffered = parts.pop()!
+    lines.push(...parts)
+    for (const wake of waiting.splice(0)) wake()
+  })
+  const line = async (index: number): Promise<string> => {
+    while (lines.length <= index) await new Promise<void>((resolve) => waiting.push(resolve))
+    return lines[index]!
+  }
+  return {
+    written: line(0).then(() => {}),
+    viewAt: async (seq) => {
+      server.stdin.write(`${seq}\n`)
+      return JSON.parse(await line(1))
+    },
+  }
 }
 
 function ownClient<Client extends Redis | Cluster>(client: Client): Client {

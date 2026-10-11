@@ -11,7 +11,15 @@ import { nextTurnOf } from '../flow-control/macrotask-yield.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { isNamedTrack, laneTrack, type BinaryFrame, type BinaryWantChange } from './binary.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
-import type { AcceptedMeta, MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
+import { RoomMetaState } from './meta-state.js'
+import type {
+  AcceptedMeta,
+  MemberSnapshot,
+  MemberWants,
+  RoomDataEnvelope,
+  RoomMetaEntry,
+  RoomMetaUpdate,
+} from './protocol.js'
 import type {
   BinaryFrameInfo,
   LeaveCause,
@@ -55,7 +63,8 @@ type MemberEntry = {
 type RoomStateOptions = {
   owner: RoomStateView
   roomId: string
-  meta: RoomMeta
+  /** In key order. */
+  meta: readonly RoomMetaEntry[]
   /** Either the authoritative roster, or just its member count. A lazy view seeds with `{ count }` and learns the members from its first roster (read on the server, streamed to the client). */
   seed: { members: MemberSnapshot[] } | { count: number }
   /** How many meta writes `meta` reflects (see `applyRoomUpdate`). */
@@ -70,6 +79,8 @@ type RoomStateOptions = {
   /** Every leave, from an event or a reconciled roster, after this view's callbacks; `hidden` is null for a member
    *  this view didn't know. */
   onLeave: (id: string, cause: LeaveCause, hidden: boolean | null) => void
+  /** A room meta change arrived ahead of one before it, and waits for it. */
+  onMetaWaiting?: () => void
   /** How many tracks its binary listeners may name, each `(member or room, track)` pair once; unbounded if omitted. */
   trackWantsMax?: number
 }
@@ -142,7 +153,6 @@ class RoomState {
   /** @internal The owning `ServerRoom`/`ClientRoom`, for serialization backing. */
   readonly _owner: RoomStateView
   readonly roomId: string
-  meta: RoomMeta
   closed: boolean
   /** Bumped on every observable change (membership, participant meta, room config, closure). Drives `onChange`/`snapshot()` cache invalidation. */
   private _stateVersion = 0
@@ -178,7 +188,8 @@ class RoomState {
   /** The tracks its binary listeners name, each `(member or room, track)` pair once. */
   private _trackWants = 0
   private readonly _trackWantsMax: number
-  private _metaSeq: number
+  private readonly _meta: RoomMetaState
+  private readonly _onMetaWaiting: () => void
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
@@ -187,9 +198,9 @@ class RoomState {
   constructor(opts: RoomStateOptions) {
     this._owner = opts.owner
     this.roomId = opts.roomId
-    this.meta = ownMetadata(opts.meta)
+    this._meta = new RoomMetaState(opts.meta, opts.metaSeq)
     this.closed = opts.closed === true
-    this._metaSeq = opts.metaSeq
+    this._onMetaWaiting = opts.onMetaWaiting ?? (() => {})
     this._onListenersChanged = opts.onListenersChanged
     this._onCallbackError = opts.onCallbackError
     this._onLeave = opts.onLeave
@@ -422,21 +433,31 @@ class RoomState {
     this._fireAll(this._participantUpdateCbs, this._remote(entry), next, prev)
     return true
   }
-  /** The newest by `seq` wins, so every instance converges; `prev` is this view's own previous meta, which can differ
-   *  per instance. `true` when the update applied. */
-  applyRoomUpdate(meta: RoomMeta, seq: number): boolean {
-    if (seq <= this._metaSeq) return false
-    const prev = this.meta
-    this._metaSeq = seq
-    const next = ownMetadata(meta)
-    this.meta = next
+  /** Applies updates in `seq` order (see `RoomMetaState.apply`), so every instance converges; returns the ones applied.
+   *  `prev` is this view's own previous meta, which can differ per instance. */
+  applyRoomUpdate(update: RoomMetaUpdate): RoomMetaUpdate[] {
+    const prev = this._updateCbs.size > 0 ? this._meta.object : null
+    const applied = this._meta.apply(update)
+    if (this._meta.waiting) this._onMetaWaiting()
+    if (applied.length === 0) return applied
     this._bumpState()
-    this._fireAll(this._updateCbs, next, prev)
-    return true
+    if (prev !== null) this._fireAll(this._updateCbs, this._meta.object, prev)
+    return applied
+  }
+  /** Built when read, and kept until the next change. */
+  get meta(): RoomMeta {
+    return this._meta.object
+  }
+  /** In key order, as a snapshot or a whole `update` carries it. */
+  metaEntries(): RoomMetaEntry[] {
+    return this._meta.entries()
   }
   /** How many meta writes this view's meta reflects (serialized into room snapshots). */
   get metaSeq(): number {
-    return this._metaSeq
+    return this._meta.seq
+  }
+  get metaWaiting(): boolean {
+    return this._meta.waiting
   }
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty` intentionally don't fire: `onClose` is the signal. */
   applyClosed(cause: LeaveCause = { type: 'closed' }): boolean {

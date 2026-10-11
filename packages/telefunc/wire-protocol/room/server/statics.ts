@@ -53,6 +53,7 @@ import {
 } from './lanes.js'
 import { ServerRoom } from './room.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
+import { metaEntriesAt, metaObjectOf } from '../meta-state.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
 import { createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
@@ -186,7 +187,10 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
     if (lapsed !== undefined) await backend.dropGeneration(id, lapsed.incTag)
     await backend.directoryPut(id, created.inc)
-    return { kind: 'created', room: new ServerRoom(id, created, { meta, seq: 0 }, { members: [] }) }
+    return {
+      kind: 'created',
+      room: new ServerRoom(id, created, { entries: metaEntriesAt(meta, 0), seq: 0 }, { members: [] }),
+    }
   })
 }
 
@@ -291,7 +295,7 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
       if (count === null) continue
       const stored = await readRoomMeta(roomId, config)
       if (stored === null) continue
-      rooms.push({ id: roomId, meta: stored.meta, count, isEmpty: count === 0 })
+      rooms.push({ id: roomId, meta: metaObjectOf(stored.entries), count, isEmpty: count === 0 })
     }
   } while (cursor !== undefined)
   return rooms

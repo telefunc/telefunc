@@ -118,6 +118,40 @@ describe('Room at 100,000 members', () => {
     expect(ids.sort()).toEqual((await observer.getParticipants()).map(({ id }) => id).sort())
     expect(ids).toHaveLength(99_999)
   }, 60_000)
+  it('merges one key into a room meta of 100,000 keys with both event loops turning, a view and a client applying it', async () => {
+    const room = await Room.create('meta-merge-turns')
+    for (let from = 0; from < 100_000; from += 10_000)
+      await Room.setAttributes(
+        room.id,
+        Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
+      )
+    const observer = (await Room.get(room.id)) as ServerRoom
+    observer.onUpdate(() => {})
+    const peer = attachPeer(register(observer))
+    await vi.waitFor(() => expect(peer.decoded().length).toBeGreaterThan(0))
+    const { client, emit } = fakeClient(room.id)
+    client.onUpdate(() => {})
+    let fed = 0
+    const feed = () => {
+      for (const frame of peer.decoded().slice(fed))
+        if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
+      fed = peer.decoded().length
+    }
+    feed()
+    expect(Object.keys(client.meta)).toHaveLength(100_000)
+    const merge = async (value: number) => {
+      const server = await longestGapWhile(async () => {
+        await Room.setAttributes(room.id, { k0: value })
+        await vi.waitFor(() => expect(observer.meta.k0).toBe(value))
+      })
+      const { gap } = await longestGapWhile(async () => feed())
+      expect(client.meta.k0).toBe(value)
+      return Math.max(server.gap, gap)
+    }
+    await merge(-1)
+    // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
+  }, 60_000)
 })
 function subsOf(room: ServerRoom): { _heartbeatTick(): Promise<void>; replan(): Promise<void> } {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
@@ -179,7 +213,7 @@ function fakeClient(roomId: string) {
   const snapshot = {
     channelId: 'channel',
     roomId,
-    meta: {},
+    meta: [],
     closed: false,
     count: 0,
     metaSeq: 0,

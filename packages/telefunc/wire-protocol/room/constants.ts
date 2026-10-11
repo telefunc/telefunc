@@ -15,6 +15,7 @@ export {
   ROOM_MEMBER_WRITES_IN_FLIGHT_MAX,
   ROOM_PLAN_SLICE_MS,
   ROOM_ROSTER_PART_MEMBERS,
+  ROOM_META_REPAIR_MS,
 }
 import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
 
@@ -48,3 +49,6 @@ const ROOM_MEMBER_WRITES_IN_FLIGHT_MAX = 64
 const ROOM_PLAN_SLICE_MS = 10
 // The members in one frame of a roster, so neither end stringifies or parses a whole room in one turn.
 const ROOM_ROSTER_PART_MEMBERS = 1024
+// A meta change waiting this long for the one before it: that one's writer crashed between its exchange and its
+// publish, or the lane lost it, so a whole read repairs it.
+const ROOM_META_REPAIR_MS = 1_000
