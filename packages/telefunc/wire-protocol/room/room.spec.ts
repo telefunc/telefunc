@@ -1731,6 +1731,37 @@ describe('Room public behavior', () => {
     await Room.setAttributes(room.id, { c: 3 })
     await vi.waitFor(() => expect(observer.meta).toEqual({ a: 1, b: 2, c: 3 }), { timeout: 5_000 })
   })
+  it('drops the keys of a meta generation whose replace crashed before dropping them, at the next heartbeat or the next replace', async () => {
+    const room = (await Room.create('meta-leftover')) as ServerRoom
+    const observer = (await Room.get(room.id)) as ServerRoom
+    observer.onUpdate(() => {})
+    const generations = async () => {
+      const read = await driver.readCells(room.id, room._inc, { prefix: 'meta:k:' })
+      if ('staleInc' in read) throw new Error('the room is gone')
+      return new Set([...read.cells.keys()].map((key) => key.split(':')[2]))
+    }
+    const exchange = driver.compareExchangeCells.bind(driver)
+    const crashDrops = () =>
+      vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, cx) => {
+        const drop = cx.mutations.some((m) => m.bytes === null && m.key.startsWith('meta:k:'))
+        if (drop) throw new Error('crashed')
+        return exchange(roomId, inc, cx)
+      })
+    await Room.setMeta(room.id, { a: 1 })
+    let crashing = crashDrops()
+    await expect(Room.setMeta(room.id, { b: 1 })).rejects.toThrow('crashed')
+    crashing.mockRestore()
+    expect((await generations()).size).toBe(2)
+    await subsOf(observer).reconcileAuthority() // the heartbeat's
+    expect((await generations()).size).toBe(1)
+    crashing = crashDrops()
+    await expect(Room.setMeta(room.id, { c: 1 })).rejects.toThrow('crashed')
+    crashing.mockRestore()
+    expect((await generations()).size).toBe(2)
+    await Room.setMeta(room.id, { d: 1 })
+    expect((await generations()).size).toBe(1)
+    expect((await Room.get(room.id)).meta).toEqual({ d: 1 })
+  })
   it('takes meta as it was at the call, nested values included', async () => {
     const created = { topic: { name: 'a' } }
     const creating = Room.create('nested-meta', { meta: created })

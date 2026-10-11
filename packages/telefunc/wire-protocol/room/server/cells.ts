@@ -15,6 +15,8 @@ export {
   META_CELL_PREFIX,
   META_SEQ_CELL_KEY,
   META_GEN_CELL_KEY,
+  META_DROP_CELL_PREFIX,
+  metaDropCellKey,
   metaKeyCellPrefix,
   metaKeyCellKey,
   metaKeyOfCellKey,
@@ -55,10 +57,14 @@ function viewIdOfCellKey(key: string): string {
   return key.slice(VIEW_CELL_PREFIX.length)
 }
 /** The room's meta once first written (see `meta.ts`): a counter of the writes, the generation the last replace
- *  started, and a cell per top-level key in that generation. */
+ *  started, a cell per top-level key in that generation, and a mark per generation a replace left to drop. */
 const META_CELL_PREFIX = 'meta:'
 const META_SEQ_CELL_KEY = 'meta:seq'
 const META_GEN_CELL_KEY = 'meta:gen'
+const META_DROP_CELL_PREFIX = 'meta:drop:'
+function metaDropCellKey(gen: number): string {
+  return META_DROP_CELL_PREFIX + gen
+}
 function metaKeyCellPrefix(gen: number): string {
   return `meta:k:${gen}:`
 }

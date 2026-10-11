@@ -25,7 +25,7 @@ import { WantsIndex } from './wants-index.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import { reapAndReadRoster, renewMemberLeases } from './membership.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
-import { readRoomMeta, type StoredRoomMeta } from './meta.js'
+import { dropReplacedMetaGenerations, readRoomMeta, type StoredRoomMeta } from './meta.js'
 assertIsNotBrowser()
 
 /** The room side these subscriptions serve: it aggregates its holders and applies what the lanes and the authority carry. */
@@ -236,6 +236,7 @@ class RoomSubscriptions {
   async reconcileAuthority(): Promise<void> {
     const host = this._host
     if (host._state.closed || !(await this._reconcileMeta())) return
+    await dropReplacedMetaGenerations(host.id, host._inc)
     await this._refreshMembers()
   }
 

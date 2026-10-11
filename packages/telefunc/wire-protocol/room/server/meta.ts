@@ -1,4 +1,4 @@
-export { readRoomMeta, writeRoomMeta }
+export { readRoomMeta, writeRoomMeta, dropReplacedMetaGenerations }
 export type { StoredRoomMeta, RoomMetaWrite }
 
 import { getRoomBackend } from '../../backend/install.js'
@@ -13,8 +13,10 @@ import type { RoomConfigRecord, RoomMetaEntry, RoomMetaUpdate } from '../protoco
 import type { RoomMeta } from '../types.js'
 import {
   META_CELL_PREFIX,
+  META_DROP_CELL_PREFIX,
   META_GEN_CELL_KEY,
   META_SEQ_CELL_KEY,
+  metaDropCellKey,
   metaKeyCellKey,
   metaKeyCellPrefix,
   metaKeyOfCellKey,
@@ -119,14 +121,12 @@ async function mergeRuns(runs: RoomMetaEntry[][]): Promise<RoomMetaEntry[]> {
 /** Once the room's meta was first written, a write is one exchange that expects only `meta:gen`, which only a replace
  *  writes, so concurrent merges never conflict; the first write stores the whole meta, and only the writes racing it
  *  conflict, once. A merge reads its keys with `meta:seq`, so a key already there keeps its place, and retries once a
- *  replace landed. A replace writes its keys into a new generation and drops the old one's a page at a time; one that
- *  finds a replace landed since its read is ordered just before it, so it is overwritten whole and writes nothing. A
- *  generation a crashed replace left goes with its incarnation. Each write that commits publishes what it changed with
- *  the `meta:seq` it left, so a view applies it in what it changed. */
+ *  replace landed. A replace writes its keys into a new generation and marks the old one to drop; one that finds a
+ *  replace landed since its read is ordered just before it, so it is overwritten whole and writes nothing. Each write
+ *  that commits publishes what it changed with the `meta:seq` it left, so a view applies it in what it changed. */
 async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: RoomMetaWrite): Promise<void> {
   const { inc } = config
   const backend = getRoomBackend()
-  let replaced: number | null = null
   const update = await retryCompareExchange(async (): Promise<RoomMetaUpdate | null | typeof CX_CONFLICT> => {
     const read = await readMetaCells(roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY])
     const seq = read.cells.get(META_SEQ_CELL_KEY)
@@ -145,11 +145,10 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
     const gen = decodeRoomRecord<number>(read.cells.get(META_GEN_CELL_KEY)!)
     if ('replace' in write) {
       const meta = metaEntriesAt(write.replace, count)
-      const mutations = [genMutation(count), ...meta.map((entry) => keyMutation(count, entry))]
+      const drop = { key: metaDropCellKey(gen), bytes: encodeRoomRecord(gen) }
+      const mutations = [genMutation(count), drop, ...meta.map((entry) => keyMutation(count, entry))]
       const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
-      if (result === 'conflict') return null
-      replaced = gen
-      return committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
+      return result === 'conflict' ? null : committed(roomId, result, (seq) => ({ __r: 'update', seq, meta }))
     }
     const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(gen, key))
     const merging = keys.length === 0 ? new Map() : (await readMetaCells(roomId, inc, keys)).cells
@@ -162,7 +161,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
   })
   if (update === null) return
   await publishCtrl(roomId, inc, update)
-  if (replaced !== null) await dropMetaGeneration(roomId, inc, replaced)
+  if ('replace' in write) await dropReplacedMetaGenerations(roomId, inc)
 }
 
 /** The update a committed exchange made, at the `meta:seq` it left. */
@@ -186,17 +185,26 @@ async function readMetaCells(
   return read
 }
 
-/** The generation a replace left, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn. */
-async function dropMetaGeneration(roomId: string, inc: string, gen: number): Promise<void> {
+/** Each generation a replace marked, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn, its mark going with
+ *  its last page. A marked generation stopped being `meta:gen` in the exchange that marked it, so whoever finishes a
+ *  mark, a later replace or the heartbeat, drops no live key. */
+async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise<void> {
   const backend = getRoomBackend()
+  const marks = await backend.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
+  if ('staleInc' in marks) return
+  const drop = async (mutations: CellMutation[]) =>
+    (await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
   let deadline = performance.now() + ROOM_PLAN_SLICE_MS
-  for await (const page of backend.readCellPages(roomId, inc, metaKeyCellPrefix(gen))) {
-    if ('staleInc' in page) return
-    const mutations = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
-    if ((await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) === 'stale-inc') return
-    if (performance.now() < deadline) continue
-    await nextTurnOf()
-    deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  for (const [mark, raw] of marks.cells) {
+    let held: CellMutation[] = []
+    for await (const page of backend.readCellPages(roomId, inc, metaKeyCellPrefix(decodeRoomRecord<number>(raw)))) {
+      if ('staleInc' in page || (held.length > 0 && !(await drop(held)))) return
+      held = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
+      if (performance.now() < deadline) continue
+      await nextTurnOf()
+      deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    }
+    if (!(await drop([...held, { key: mark, bytes: null }]))) return
   }
 }
 
