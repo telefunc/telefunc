@@ -27,6 +27,8 @@ class WantsIndex {
   private readonly _everyMember: TrackCover = new Map()
   private _everyMemberTracks = 0
   private readonly _members = new Map<string, TrackCover>()
+  /** Per named track, the members some holder names it of alone. */
+  private readonly _trackMembers = new Map<string, Set<string>>()
 
   /** `onEveryMemberTrack` hears each track some holder starts or stops naming of every member. */
   constructor(private readonly _onEveryMemberTrack: (track: string, named: boolean) => void) {}
@@ -105,6 +107,11 @@ class WantsIndex {
       if (track !== null && !this._everyMember.has(track)) yield track
   }
 
+  /** The members some holder names `track` of alone. */
+  membersNaming(track: string): Iterable<string> {
+    return this._trackMembers.get(track) ?? []
+  }
+
   /** Whether some holder names `track` of every member. */
   namesEveryMember(track: string): boolean {
     return this._everyMember.has(track)
@@ -175,6 +182,13 @@ class WantsIndex {
       if (!cover) this._members.set(scope, (cover = new Map()))
       setCover(cover, key, holder, on)
       if (cover.size === 0) this._members.delete(scope)
+      if (key !== null) {
+        let members = this._trackMembers.get(key)
+        if (cover.has(key)) {
+          if (!members) this._trackMembers.set(key, (members = new Set()))
+          members.add(scope)
+        } else if (members?.delete(scope) && members.size === 0) this._trackMembers.delete(key)
+      }
       return new Set([scope])
     }
     // A pair a room-wide coverer adds or drops is one every other coverer of the key suppresses, so any one names it.

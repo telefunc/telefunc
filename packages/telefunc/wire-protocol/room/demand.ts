@@ -29,6 +29,8 @@ class RoomDemand {
   /** What the planner set; `flush()` tells the changes since the last one. */
   private readonly _planned = new Receives()
   private _changed = new Receives()
+  /** A telling a deadline stopped, resumed by the next one. */
+  private _telling: Iterator<void> | null = null
   /** What the other instances were told, and this one's owner side reads. */
   private readonly _told = new Receives()
   /** Owner side: the other instances' pairs of the members this instance owns. */
@@ -76,25 +78,46 @@ class RoomDemand {
     return [...(this._planned.pairs.get(member)?.keys() ?? [])].filter((track) => track !== null)
   }
 
-  /** Tells the planned changes, each once. Ons go before offs; a member stops being covered before a track is wanted
-   *  of every member and starts after one stops, so no pair reads as received that neither state receives. */
+  /** Tells the planned changes, each once. */
   flush(): void {
+    this.tellUntil(Infinity)
+  }
+
+  /** Whether some planned change isn't told yet. */
+  get changed(): boolean {
+    return this._telling !== null || !this._changed.empty
+  }
+
+  /** Tells the planned changes until `deadline`, a `performance.now()` time, and whether all are told; a call after
+   *  one the deadline stopped resumes it, so their order holds. */
+  tellUntil(deadline: number): boolean {
+    const telling = (this._telling ??= this._tellChanges())
+    for (let step = telling.next(); !step.done; step = telling.next()) if (performance.now() >= deadline) return false
+    this._telling = null
+    return true
+  }
+
+  /** Ons go before offs; a member stops being covered before a track is wanted of every member and starts after one
+   *  stops, so no pair reads as received that neither state receives. */
+  private *_tellChanges(): Generator<void, void, void> {
     const { pairs, tracks, members } = this._changed
     this._changed = new Receives()
     const planned = this._planned
     const told = this._told
     for (const [member, track] of entriesOf(pairs))
       if (hasEntry(planned.pairs, member, track) && !hasEntry(told.pairs, member, track))
-        this._tellPair(member, track, true)
+        yield this._tellPair(member, track, true)
     for (const member of members)
-      if (!planned.members.has(member) && told.members.has(member)) this._tellCovers(member, false)
-    for (const track of tracks) if (!planned.tracks.has(track) && told.tracks.has(track)) this._tellTrack(track, false)
-    for (const track of tracks) if (planned.tracks.has(track) && !told.tracks.has(track)) this._tellTrack(track, true)
+      if (!planned.members.has(member) && told.members.has(member)) yield this._tellCovers(member, false)
+    for (const track of tracks)
+      if (!planned.tracks.has(track) && told.tracks.has(track)) yield this._tellTrack(track, false)
+    for (const track of tracks)
+      if (planned.tracks.has(track) && !told.tracks.has(track)) yield this._tellTrack(track, true)
     for (const member of members)
-      if (planned.members.has(member) && !told.members.has(member)) this._tellCovers(member, true)
+      if (planned.members.has(member) && !told.members.has(member)) yield this._tellCovers(member, true)
     for (const [member, track] of entriesOf(pairs))
       if (!hasEntry(planned.pairs, member, track) && hasEntry(told.pairs, member, track))
-        this._tellPair(member, track, false)
+        yield this._tellPair(member, track, false)
   }
 
   /** Owner side: the member publishes on `track`, which its every-track demand covers from now on. */

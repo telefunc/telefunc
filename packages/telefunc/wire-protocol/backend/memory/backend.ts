@@ -38,7 +38,7 @@ import type { BroadcastKind } from '../../shared-ws.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
-import { macrotaskYield } from '../../flow-control/macrotask-yield.js'
+import { nextTurn } from '../../flow-control/macrotask-yield.js'
 
 type MemoryBackendOptions = {
   /** @internal For specs: storage to inspect, or to share with another backend. */
@@ -94,12 +94,6 @@ const copyLane = (lane: LaneId): LaneId => ({ ...lane })
 const sumReceiverCounts = (targets: readonly MemorySubscriptionAttempt[]): number =>
   targets.reduce((total, target) => total + target.receiverCount(), 0)
 const isExpired = (entry: Expiring, now: number): boolean => entry.expiresAt !== null && entry.expiresAt <= now
-
-/** A later macrotask; setImmediate keeps the process alive for it, where the runtime has one. */
-function nextTurn(callback: () => void): void {
-  if (typeof setImmediate === 'function') setImmediate(callback)
-  else void macrotaskYield.yield().then(callback)
-}
 
 function newGeneration(): Generation {
   return {

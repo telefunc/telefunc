@@ -2290,6 +2290,7 @@ describe('Room public behavior', () => {
       ]),
     )
     b.abort()
+    await subsOf(room).binaryReady()
     expect(demand.at(-1)).toEqual([null, false])
     declare(b, { __r: 'sub-binary', ...EVERY_TRACK }) // a closed stub's late declaration
     await subsOf(room).binaryReady()
@@ -3352,6 +3353,8 @@ describe('Room public behavior', () => {
           await subsOf(observer).binaryReady()
         })
         await Room.close(room.id)
+        // Its last planning pass runs in slices, which stay out of the next run's time.
+        await subsOf(observer).binaryReady()
         return elapsed
       }
       // The faster of two runs at each count, so a scheduling hiccup in one run is not read as growth.
@@ -4583,6 +4586,31 @@ describe('room protocol validation', () => {
       expect((peak - before) / count).toBeLessThanOrEqual(64 * 1024)
     },
   )
+  it('keeps the event loop turning while a client names 64 tracks room-wide one by one among 10,000 members, and as it goes', async () => {
+    const longestGap = async () => {
+      const room = (await Room.create(`room-wide-turns-${crypto.randomUUID()}`)) as ServerRoom
+      const members = await Promise.all(Array.from({ length: 10_000 }, () => room.join()))
+      let demanded = 0
+      for (const member of members) member.onDemand((_, wanted) => (demanded += wanted ? 1 : -1))
+      const stub = register(room)
+      let last = performance.now()
+      let longest = 0
+      const timer = setInterval(() => {
+        const now = performance.now()
+        longest = Math.max(longest, now - last)
+        last = now
+      }, 1)
+      for (const track of trackNames(64)) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+      await vi.waitFor(() => expect(demanded).toBe(64 * members.length), { timeout: 15_000 })
+      stub.abort()
+      await vi.waitFor(() => expect(demanded).toBe(0), { timeout: 15_000 })
+      clearInterval(timer)
+      await Room.close(room.id)
+      return longest
+    }
+    // The shorter of two runs, so a scheduling hiccup in one run is not read as a stall.
+    expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(100)
+  })
   it('keeps ROOM_GOSSIP_IN_FLIGHT_MAX gossip commits in flight at most while a client names tracks of 200 members', async () => {
     const room = (await Room.create('gossip-in-flight')) as ServerRoom
     const members = await Promise.all(Array.from({ length: 200 }, () => room.join()))

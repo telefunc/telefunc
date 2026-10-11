@@ -5,9 +5,10 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
 import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
+import { nextTurn } from '../../flow-control/macrotask-yield.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX, ROOM_PLAN_SLICE_MS } from '../constants.js'
 import type { BinaryWantChange } from '../binary.js'
 import type { RoomDemand } from '../demand.js'
 import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
@@ -15,7 +16,7 @@ import { replayMembership, type RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey, type LaneHolder } from './replay.js'
-import { WantsIndex, type Affected } from './wants-index.js'
+import { WantsIndex } from './wants-index.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import { reapAndReadRoster, renewMemberLease } from './membership.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
@@ -51,8 +52,9 @@ type SubscriptionHost = {
   _closeFromAuthority(): void
 }
 
-/** Of one member: the named tracks some holder here receives, and the tracks named of every member none does. */
-type NamedCounts = { named: number; unreached: number }
+/** Of one member: the tracks named of it alone that some holder here receives, and the tracks named of every member
+ *  none does. Its named tracks received here are `everyMemberTracks - unreached + own`. */
+type NamedCounts = { own: number; unreached: number }
 /** Binary pairs a planning pass replans: each member's, or every pair of each of `tracks` when `all`, the pairs of
  *  each of `tracks` named of every member, and some members' named pairs. */
 type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pairs: Map<string, Set<string>> }
@@ -69,8 +71,7 @@ class RoomSubscriptions {
   /** Each member's every-track lane, while some holder here receives all of its tracks or more than
    *  `ROOM_MEMBER_NAMED_LANES_MAX` named ones. */
   private readonly _everyTrack = new Map<string, LaneSubscription>()
-  /** Per present member, how many named tracks some holder here receives of it, and how many of the tracks named of
-   *  every member none does. */
+  /** Per present member, its named tracks received here, counted apart from the tracks named of every member. */
   private readonly _counts = new Map<string, NamedCounts>()
   /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
   private readonly _overflowing = new Set<string>()
@@ -80,6 +81,8 @@ class RoomSubscriptions {
   private readonly _releasing = new Set<string>()
   /** The binary lanes not ready yet, so a readiness wait never visits the ready ones. */
   private readonly _binaryPending = new Set<LaneSubscription>()
+  /** The wait for `_binaryPending`, until another lane starts pending. */
+  private _binaryReady: Promise<void> | null = null
   private readonly _inbox = new Map<string, LaneSubscription>()
   private readonly _recovering = new Set<LaneSubscription>()
   /** What the next planning pass replans: binary want changes and lane readiness wait for it, so a burst of them is
@@ -124,12 +127,19 @@ class RoomSubscriptions {
   }
 
   /** A holder attached or is gone, or its wants changed wholesale: its room-wide ones, and those of `members` when
-   *  given. */
+   *  given. The next planning pass recounts each member it may have changed. */
   holderChanged(holder: LaneHolder, gone = false, members?: Iterable<string>): void {
     const affected = this._wants.update(holder, gone, members)
-    this._replanAround(() => {
-      for (const member of this._membersOf(affected)) this._syncMemberBinary(member, true)
-    })
+    const queued = this._queued
+    if (affected === 'all') {
+      this._counts.clear()
+      queued.all = true
+    } else
+      for (const member of affected) {
+        this._counts.delete(member)
+        queued.members.add(member)
+      }
+    this._replanAround(() => this._schedulePlan())
   }
 
   /** A holder's text wants changed: its room-wide ones, and those of `members`. */
@@ -149,12 +159,16 @@ class RoomSubscriptions {
       if (affected === 'all') queued.all = true
       else for (const member of affected) queued.members.add(member)
     } else {
-      for (const member of this._membersOf(affected)) {
+      const everyMember = this._wants.namesEveryMember(track)
+      // A track that starts or stops being named of every member counts in `everyMemberTracks`, but apart for a member
+      // the holder doesn't receive or that some holder names it of alone.
+      const recounted =
+        affected === 'all' ? new Set([...holder._suppressedMembers(), ...this._wants.membersNaming(track)]) : affected
+      for (const member of recounted) {
         const counts = this._counts.get(member)
         if (counts === undefined) continue
         const [before, after] = this._wants.namedPairChange(holder, { ...change, track }, member)
-        const everyMember = this._wants.namesEveryMember(track)
-        counts.named += Number(after) - Number(before)
+        counts.own += Number(!everyMember && after) - Number(!wasEveryMember && before)
         counts.unreached += Number(everyMember && !after) - Number(wasEveryMember && !before)
       }
       if (affected === 'all') queued.tracks.add(track)
@@ -181,26 +195,32 @@ class RoomSubscriptions {
     })
   }
 
-  /** The lanes delivering `track` (`null`: every track) of each of `members` are ready, so a retained read after this
-   *  misses no live frame. */
-  async pairsReady(members: Iterable<string>, track: string | null): Promise<void> {
+  /** The lanes delivering the member's `track` (`null`: every track) are ready, so a retained read after this misses
+   *  no live frame. */
+  async pairsReady(member: string, track: string | null): Promise<void> {
     await this._planning
     const pending: Promise<void>[] = []
-    const add = (lane: LaneSubscription | undefined) => {
+    for (const lane of [
+      this._everyTrack.get(member),
+      track === null ? undefined : this._binary.get(binaryLaneKey(member, track)),
+    ])
       if (lane !== undefined && this._binaryPending.has(lane)) pending.push(lane.ready)
-    }
-    for (const member of members) {
-      add(this._everyTrack.get(member))
-      if (track !== null) add(this._binary.get(binaryLaneKey(member, track)))
-    }
     if (pending.length > 0) await withinRoomHorizon(Promise.all(pending))
   }
 
+  /** Every binary lane planned so far is ready; concurrent callers share one wait. */
   async binaryReady(): Promise<void> {
     await this._planning
-    const pending: Promise<void>[] = []
-    for (const subscription of this._binaryPending) pending.push(subscription.ready)
-    if (pending.length > 0) await withinRoomHorizon(Promise.all(pending))
+    if (this._binaryPending.size === 0) return
+    if (this._binaryReady === null) {
+      const ready = withinRoomHorizon(Promise.all([...this._binaryPending].map((lane) => lane.ready))).then(() => {})
+      const clear = () => {
+        if (this._binaryReady === ready) this._binaryReady = null
+      }
+      ready.then(clear, clear)
+      this._binaryReady = ready
+    }
+    await this._binaryReady
   }
 
   ensureRoster(): Promise<void> {
@@ -245,10 +265,6 @@ class RoomSubscriptions {
     this._syncHeartbeat()
   }
 
-  private _membersOf(affected: Affected): Iterable<string> {
-    return affected === 'all' ? this._host._state.listMemberIds() : affected
-  }
-
   private _queuePair(member: string, track: string): void {
     const pairs = this._queued.pairs
     let tracks = pairs.get(member)
@@ -260,21 +276,36 @@ class RoomSubscriptions {
     this._planning ??= this._runPlan().catch(reportRoomError)
   }
 
-  /** Plans what is queued once the current turn's changes are in, then tells the demand it changed. No other demand
-   *  is told meanwhile, so no owner sees a want's change before the pairs it changed. */
+  /** Plans what is queued once the current turn's changes are in, then tells the demand it changed, each
+   *  `ROOM_PLAN_SLICE_MS` at a time so timers and I/O run between slices; what is queued meanwhile gets the next round.
+   *  No other demand is told until it ends, so no owner sees the demand between two of its slices. */
   private async _runPlan(): Promise<void> {
     try {
       await Promise.resolve()
-      const plan = this._queued
-      this._queued = newBinaryPlan()
-      const members = new Set([...plan.members, ...plan.pairs.keys()])
-      if (plan.all || plan.tracks.size > 0) for (const member of this._host._state.listMemberIds()) members.add(member)
-      this._replanAround(() => {
-        for (const member of members) this._planMember(member, plan)
-      })
+      for (;;) {
+        const plan = this._queued
+        if (!isEmpty(plan)) {
+          this._queued = newBinaryPlan()
+          const members = new Set([...plan.members, ...plan.pairs.keys()])
+          if (plan.all || plan.tracks.size > 0)
+            for (const member of this._host._state.listMemberIds()) members.add(member)
+          const pending = members.values()
+          for (let done = false; !done; ) {
+            this._replanAround(() => {
+              const deadline = performance.now() + ROOM_PLAN_SLICE_MS
+              for (let next = pending.next(); !(done = next.done === true); next = pending.next()) {
+                this._planMember(next.value, plan)
+                if (performance.now() >= deadline) return
+              }
+            })
+            if (!done) await nextTurnOf()
+          }
+        } else if (this._demand.changed) {
+          while (!this._demand.tellUntil(performance.now() + ROOM_PLAN_SLICE_MS)) await nextTurnOf()
+        } else return
+      }
     } finally {
       this._planning = null
-      this._demand.flush()
       this._syncHeartbeat()
     }
   }
@@ -355,15 +386,20 @@ class RoomSubscriptions {
   }
 
   private _countNamed(member: string): NamedCounts {
-    const counts = { named: 0, unreached: 0 }
-    for (const track of this._wants.namedTracksOf(member))
-      if (this._wants.wantsNamedPair(member, track)) counts.named++
-      else if (this._wants.namesEveryMember(track)) counts.unreached++
+    const counts = { own: 0, unreached: 0 }
+    for (const track of this._wants.namedTracksOf(member)) {
+      const received = this._wants.wantsNamedPair(member, track)
+      if (!this._wants.namesEveryMember(track)) counts.own += Number(received)
+      else counts.unreached += Number(!received)
+    }
     return counts
   }
 
   private _overflows(counts: NamedCounts | undefined): boolean {
-    return counts !== undefined && counts.named > ROOM_MEMBER_NAMED_LANES_MAX
+    return (
+      counts !== undefined &&
+      this._wants.everyMemberTracks - counts.unreached + counts.own > ROOM_MEMBER_NAMED_LANES_MAX
+    )
   }
 
   /** Whether some holder here receives from the member each track named of every member. */
@@ -374,7 +410,7 @@ class RoomSubscriptions {
   private _openEveryTrack(member: string): void {
     if (this._everyTrack.has(member)) return
     const host = this._host
-    const lane = this._newLaneSubscription(this._binaryPending)
+    const lane = this._newLaneSubscription(true)
     this._everyTrack.set(member, lane)
     lane.sync(true, () =>
       getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary-all', member }, (framed, info) =>
@@ -391,7 +427,7 @@ class RoomSubscriptions {
   private _openNamedLane(member: string, track: string): LaneSubscription {
     const host = this._host
     const key = binaryLaneKey(member, track)
-    const lane = this._newLaneSubscription(this._binaryPending)
+    const lane = this._newLaneSubscription(true)
     this._binary.set(key, lane)
     let tracks = this._binaryTracks.get(member)
     if (!tracks) this._binaryTracks.set(member, (tracks = new Set()))
@@ -459,13 +495,15 @@ class RoomSubscriptions {
     this._inbox.delete(member)
   }
 
-  private _newLaneSubscription(pendingSlots?: Set<LaneSubscription>): LaneSubscription {
+  private _newLaneSubscription(binary = false): LaneSubscription {
     return new LaneSubscription(
       (slot, error) => this._onTerminal(slot, error),
       () => void this.reconcileAuthority().catch(reportRoomError),
       (slot, pending) => {
-        if (pending) pendingSlots?.add(slot)
-        else pendingSlots?.delete(slot)
+        if (!binary) return
+        if (!pending) return void this._binaryPending.delete(slot)
+        this._binaryPending.add(slot)
+        this._binaryReady = null
       },
     )
   }
@@ -561,4 +599,12 @@ class RoomSubscriptions {
 
 function newBinaryPlan(): BinaryPlan {
   return { all: false, members: new Set(), tracks: new Set(), pairs: new Map() }
+}
+
+function isEmpty(plan: BinaryPlan): boolean {
+  return !plan.all && plan.members.size === 0 && plan.tracks.size === 0 && plan.pairs.size === 0
+}
+
+function nextTurnOf(): Promise<void> {
+  return new Promise((resolve) => nextTurn(resolve))
 }
