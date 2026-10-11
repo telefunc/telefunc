@@ -2274,6 +2274,7 @@ describe('Room public behavior', () => {
     declare(a, { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
     declare(a, { __r: 'sub-binary', ...NO_TRACK })
+    await subsOf(room).binaryReady()
     expect(demand).toEqual([
       [null, true],
       [null, false],
@@ -2315,12 +2316,15 @@ describe('Room public behavior', () => {
       text: subsOf(room)._semantic.wanted,
       binary: binaryLanes(room).filter((key) => key.includes(me.id)),
     })
+    await subsOf(room).binaryReady()
     expect(lanes()).toEqual({ text: true, binary: [`binary:${me.id}:screen`] })
     text[0]!()
     screen[0]!()
+    await subsOf(room).binaryReady()
     expect(lanes()).toEqual({ text: true, binary: [`binary:${me.id}:screen`] })
     text[1]!()
     screen[1]!()
+    await subsOf(room).binaryReady()
     expect(lanes()).toEqual({ text: false, binary: [] })
   })
   it('waits for a binary lane that is still establishing before it reports binary readiness', async () => {
@@ -2359,6 +2363,7 @@ describe('Room public behavior', () => {
     declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
     declare(stub, { __r: 'sub-binary', ...NO_TRACK })
+    await subsOf(room).binaryReady()
     expect(demand).toEqual([
       [null, true],
       [null, false],
@@ -2855,8 +2860,10 @@ describe('Room public behavior', () => {
     const stub = register(room)
     declare(stub, { __r: 'sub-binary', member: a.id, track: null, on: true })
     declare(stub, { __r: 'sub-binary', member: b.id, track: null, on: true })
+    await subsOf(room).binaryReady()
     expect(binaryLanes(room)).toEqual([`binary-all:${a.id}`, `binary-all:${b.id}`].sort())
     declare(stub, { __r: 'sub-binary', member: a.id, track: null, on: false })
+    await subsOf(room).binaryReady()
     expect(binaryLanes(room)).toEqual([`binary-all:${b.id}`])
   })
   it("reopens a member's binary lane wanted again after its want stopped", async () => {
@@ -2866,6 +2873,7 @@ describe('Room public behavior', () => {
     const lanes: number[] = []
     for (const on of [true, false, true]) {
       declare(stub, { __r: 'sub-binary', member: member.id, track: null, on })
+      await subsOf(room).binaryReady()
       lanes.push(binaryLanes(room).length)
     }
     expect(lanes).toEqual([1, 0, 1])
@@ -4544,6 +4552,35 @@ describe('room protocol validation', () => {
       published.mockClear()
       demand.heartbeat()
       expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
+    },
+  )
+  it.each([1_000, 10_000])(
+    'opens no named lane for a client naming 64 tracks room-wide one by one among %i members, and gossips each track and each member once',
+    async (count) => {
+      const room = (await Room.create(`room-wide-burst-${count}`)) as ServerRoom
+      const members = await Promise.all(Array.from({ length: count }, () => room.join()))
+      const demanded = members.map((member) => {
+        const tracks = new Set<string | null>()
+        member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+        return tracks
+      })
+      const stub = register(room)
+      const subscribed = countBinarySubscriptions()
+      const { published } = spyGossip(room)
+      const tracks = trackNames(64)
+      const before = process.memoryUsage().heapUsed
+      let peak = before
+      const sampler = setInterval(() => (peak = Math.max(peak, process.memoryUsage().heapUsed)), 1)
+      for (const track of tracks) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+      await vi.waitFor(() => expect(demanded.every((wanted) => wanted.size === tracks.length)).toBe(true), {
+        timeout: 15_000,
+      })
+      clearInterval(sampler)
+      expect(subscribed.filter((lane) => lane.kind === 'binary')).toEqual([])
+      expect(subscribed).toHaveLength(count)
+      expect(published.mock.calls.length).toBeLessThanOrEqual(tracks.length + count)
+      // About 10 KB per member at 10,000 members, garbage included; a named lane per pair costs about 5 KB.
+      expect((peak - before) / count).toBeLessThanOrEqual(64 * 1024)
     },
   )
   it('keeps ROOM_GOSSIP_IN_FLIGHT_MAX gossip commits in flight at most while a client names tracks of 200 members', async () => {
