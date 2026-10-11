@@ -32,13 +32,13 @@ import {
 import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import {
+  applyBinaryWantChange,
   binaryWantsCovers,
   emptyBinaryWants,
   laneTrack,
-  sameTrackWants,
   type BinaryFrame,
+  type BinaryWantChange,
   type BinaryWants,
-  type TrackWants,
 } from '../binary.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import {
@@ -192,17 +192,17 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
     if (kind === 'binary' || on === this._wantsText) return
-    const previous = on ? { text: { all: this._wantsText, members: new Map<string, boolean>() } } : {}
+    const before = on ? { all: this._wantsText, members: new Map<string, boolean>() } : null
     this._wantsText = on
     // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
     if (on) this._flushTail()
-    this._room._onHolderWantsChanged(this, previous)
+    this._room._onHolderTextChanged(this, before)
   }
 
   private _applyDeclaration(declaration: RoomDeclaration): void {
     switch (declaration.__r) {
       case 'sub-binary':
-        return this._declareBinaryWants(declaration.everyMember, declaration.members)
+        return this._declareBinaryWant(declaration)
       case 'sub-text':
         return this._declareTextWants(declaration.members, declaration.announce)
       case 'dm-reply':
@@ -211,19 +211,10 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   // A client learns its members from this view alone, so a want naming any other id names one that left or never was.
-  private _declareBinaryWants(everyMember: TrackWants, changes: Record<string, TrackWants | null>): void {
-    const wants = this._binary
-    const members = new Map<string, TrackWants | undefined>()
-    for (const [id, next] of Object.entries(changes)) {
-      const prev = wants.members[id]
-      if (sameTrackWants(prev, next ?? undefined) || (next !== null && !this._room._state.hasMember(id))) continue
-      members.set(id, prev)
-      if (next === null) delete wants.members[id]
-      else wants.members[id] = next
-    }
-    const before = { everyMember: wants.everyMember, members }
-    wants.everyMember = everyMember
-    this._room._onHolderWantsChanged(this, { binary: before })
+  private _declareBinaryWant({ member, track, on }: BinaryWantChange): void {
+    if (on && member !== null && !this._room._state.hasMember(member)) return
+    const change = { member, track, on }
+    if (applyBinaryWantChange(this._binary, change)) this._room._onHolderBinaryChanged(this, change)
   }
 
   private _declareTextWants(changes: Record<string, boolean>, announce: boolean): void {
@@ -236,7 +227,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     }
     this._announce = announce
     this._flushTail()
-    this._room._onHolderWantsChanged(this, { text: { all: this._wantsText, members } })
+    this._room._onHolderTextChanged(this, { all: this._wantsText, members })
   }
 
   private async _publishText(publish: RoomDataPublish): Promise<ChannelPublishAck> {
@@ -278,9 +269,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   /** Drops its wants naming `id`; returns whether it held any. */
   _forgetWantsOf(id: string): boolean {
-    const held = this._textMemberWants.delete(id) || id in this._binary.members
-    delete this._binary.members[id]
-    return held
+    const text = this._textMemberWants.delete(id)
+    return this._binary.members.delete(id) || text
   }
 
   // Wants, as the room's subscription planner reads them

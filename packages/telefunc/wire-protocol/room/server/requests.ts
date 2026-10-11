@@ -6,13 +6,13 @@ export {
   decodeParticipantRequest,
   decodeParticipantFrame,
   decodeDmReply,
-  decodeBinaryWantsChange,
+  decodeBinaryWantChange,
 }
 export type { RoomRequest, RoomDeclaration }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ProtocolViolationError } from '../../shared-ws.js'
-import { decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type TrackWants } from '../binary.js'
+import { decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { isRecord } from '../model.js'
 import type { DmReply, ParticipantStubRequest, RoomDataPublish, RoomStubRequest } from '../protocol.js'
 assertIsNotBrowser()
@@ -78,7 +78,7 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
         reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
       }
     case 'sub-binary':
-      return { __r: 'sub-binary', ...decodeBinaryWantsChange(decl) }
+      return { __r: 'sub-binary', ...decodeBinaryWantChange(decl) }
     case 'sub-text':
       return {
         __r: 'sub-text',
@@ -99,16 +99,10 @@ function decodeDmReply(reply: unknown): DmReply | null {
 }
 
 /** A client-declared `sub-binary` change. */
-function decodeBinaryWantsChange(change: Record<string, unknown>): {
-  everyMember: TrackWants
-  members: Record<string, TrackWants | null>
-} {
-  return {
-    everyMember: decodeTrackWants(change.everyMember),
-    members: decodeMemberChanges(change.members, 'binary wants', (wants) =>
-      wants === null ? null : decodeTrackWants(wants),
-    ),
-  }
+function decodeBinaryWantChange({ member, track, on }: Record<string, unknown>): BinaryWantChange {
+  if (member !== null && !isMemberId(member)) malformed('binary wants')
+  if (track !== null && !isRoomTrack(track)) malformed('binary wants')
+  return { member, track, on: flag(on, 'binary wants') }
 }
 /** A declared change per member id, into a record no key can reach the prototype of. */
 function decodeMemberChanges<T>(changes: unknown, what: string, decode: (change: unknown) => T): Record<string, T> {
@@ -119,11 +113,6 @@ function decodeMemberChanges<T>(changes: unknown, what: string, decode: (change:
     members[memberId] = decode(change)
   }
   return members
-}
-function decodeTrackWants(wants: unknown): TrackWants {
-  if (!isRecord(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) malformed('binary wants')
-  if (!wants.tracks.every(isRoomTrack)) malformed('binary wants')
-  return { all: wants.all, tracks: wants.tracks as string[] }
 }
 
 function decodeRoomPublish(value: unknown): RoomDataPublish {

@@ -17,10 +17,8 @@ import {
   decodeBinaryFrame,
   laneTrack,
   publicTrack,
-  wantsTrack,
   type BinaryFrame,
-  type BinaryWants,
-  type TrackWants,
+  type BinaryWantChange,
 } from '../binary.js'
 import { DM_FAILURE, participantGoneError, participantLeftError, roomClosedError, roomFailureError } from '../errors.js'
 import {
@@ -55,7 +53,7 @@ import { RoomDemand } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
 import { RoomStubChannel, unorderedEventText } from './stub.js'
 import type { RoomRequest } from './requests.js'
-import { LocalHolder, binaryLaneKey, type LaneHolder, type WantsChange } from './replay.js'
+import { LocalHolder, binaryLaneKey, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
 import { PendingDmAcks } from './dm-acks.js'
 import { RoomSubscriptions } from './subscriptions.js'
@@ -166,7 +164,10 @@ class ServerRoom extends RoomStateView implements Room {
       meta: stored.meta,
       seed,
       metaSeq: stored.seq,
-      onListenersChanged: (member) => this._onHolderWantsChanged(this._local, this._local.refreshWants(member)),
+      onListenersChanged: (member, binary) => {
+        this._onHolderTextChanged(this._local, this._local.refreshText(member))
+        if (binary !== null && this._local.applyBinary(binary)) this._onHolderBinaryChanged(this._local, binary)
+      },
       onCallbackError: reportServerChannelError,
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
@@ -741,7 +742,7 @@ class ServerRoom extends RoomStateView implements Room {
     })
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
-  async _replayRetainedText(holder: LaneHolder, before: NonNullable<WantsChange['text']>): Promise<void> {
+  async _replayRetainedText(holder: LaneHolder, before: TextWantsChange): Promise<void> {
     if (before.all) return
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._subs.semanticReady)
@@ -755,41 +756,26 @@ class ServerRoom extends RoomStateView implements Room {
     // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
-  async _replayRetainedBinary(holder: LaneHolder, before: NonNullable<WantsChange['binary']>): Promise<void> {
-    const wants = holder._binaryWants
-    // A binary lane is keyed by its frames' sender and track: a new room-wide want lists the room's retained lanes, a
-    // new member want reads only that member's.
-    const roomWide = gainsTracks(before.everyMember, wants.everyMember)
-    const gained = roomWide
-      ? []
-      : [...before.members].flatMap(([member, prev]) => {
-          const next = wants.members[member]
-          return next !== undefined && gainsTracks(prev, next) ? [{ member, next }] : []
-        })
-    if (!roomWide && gained.length === 0) return
-    if (roomWide) await this._subs.ensureRoster()
-    // Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane.
-    await this._subs.binaryReady()
+  /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so a
+   *  frame it already has is not delivered again. A want for every track lists the retained lanes of its scope, a want
+   *  for one track of a member reads that lane. */
+  /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so a
+   *  frame it already has is not delivered again. A want for every track lists the retained lanes it covers, a want for
+   *  one track reads that track's lane of each member it covers. */
+  async _replayRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange): Promise<void> {
+    if (member === null) await this._subs.ensureRoster()
+    const members = member === null ? this._state.listMemberIds() : [member]
+    await (member === null && track === null
+      ? this._subs.binaryReady()
+      : Promise.all(members.map((id) => this._subs.pairReady(id, track))))
     const backend = getRoomBackend()
-    const candidates = roomWide
-      ? await backend.listRetained(this.id, this._inc)
-      : (
-          await Promise.all(
-            gained.map(({ member, next }) =>
-              next.all
-                ? backend.listRetained(this.id, this._inc, { member })
-                : next.tracks.map((track): LaneId => ({ kind: 'binary', member, track })),
-            ),
-          )
-        ).flat()
-    for (const lane of candidates) {
-      if (lane.kind !== 'binary') continue
-      const { member, track } = lane
-      // A member whose own want didn't change had the one it has now.
-      const prev = before.members.has(member) ? before.members.get(member) : wants.members[member]
-      if (wantsTrack(before.everyMember, track) || (prev !== undefined && wantsTrack(prev, track))) continue
-      if (!holder._wantsBinary(member, track)) continue
-      const stored = await backend.readRetained(this.id, this._inc, { kind: 'binary', member, track })
+    const lanes: LaneId[] =
+      track === null
+        ? await backend.listRetained(this.id, this._inc, member === null ? undefined : { member })
+        : members.map((id) => ({ kind: 'binary', member: id, track }))
+    for (const lane of lanes) {
+      if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
+      const stored = await backend.readRetained(this.id, this._inc, lane)
       if (stored === null) continue
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
@@ -798,16 +784,22 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  /** @internal A holder's wants changed: replan, then replay the retained frames it now wants. */
-  _onHolderWantsChanged(holder: LaneHolder, before: WantsChange): void {
-    // A stub that is not attached holds no lanes.
-    if (holder === this._local || this._stubs.has(holder as RoomStubChannel))
-      this._subs.holderChanged(holder, false, [
-        ...(before.text?.members.keys() ?? []),
-        ...(before.binary?.members.keys() ?? []),
-      ])
-    if (before.text) void this._replayRetainedText(holder, before.text).catch(reportRoomError)
-    if (before.binary) void this._replayRetainedBinary(holder, before.binary).catch(reportRoomError)
+  /** @internal A holder's text wants changed (`before` is `null` when none did): replan, then replay the retained
+   *  frame it now wants. */
+  _onHolderTextChanged(holder: LaneHolder, before: TextWantsChange | null): void {
+    if (this._holdsLanes(holder)) this._subs.textChanged(holder, [...(before?.members.keys() ?? [])])
+    if (before) void this._replayRetainedText(holder, before).catch(reportRoomError)
+  }
+
+  /** @internal One of a holder's binary wants changed: replan the pairs it covers, then replay what it now wants. */
+  _onHolderBinaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
+    if (this._holdsLanes(holder)) this._subs.binaryChanged(holder, change)
+    if (change.on) void this._replayRetainedBinary(holder, change).catch(reportRoomError)
+  }
+
+  /** A stub that is not attached holds no lanes. */
+  private _holdsLanes(holder: LaneHolder): boolean {
+    return holder === this._local || this._stubs.has(holder as RoomStubChannel)
   }
 
   /** @internal */
@@ -958,12 +950,6 @@ class ServerLocalParticipant extends ParticipantBase {
   protected _inboxBufferLimit(): number {
     return getServerConfig().channel.bufferLimit
   }
-}
-
-/** Whether `next` wants a track `prev` doesn't. */
-function gainsTracks(prev: TrackWants | undefined, next: TrackWants): boolean {
-  if (prev?.all) return false
-  return next.all || next.tracks.some((track) => !prev?.tracks.includes(track))
 }
 
 async function runAfterHook(hook: () => unknown): Promise<void> {

@@ -6,14 +6,7 @@ import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
 import { untether } from '../wrapProxy.js'
 import { makeDisposer } from './disposer.js'
 import { Listeners } from '../../utils/Listeners.js'
-import {
-  emptyTrackWants,
-  isNamedTrack,
-  laneTrack,
-  type BinaryFrame,
-  type BinaryWants,
-  type TrackWants,
-} from './binary.js'
+import { isNamedTrack, laneTrack, type BinaryFrame, type BinaryWantChange } from './binary.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
 import type { AcceptedMeta, MemberSnapshot, MemberWants, RoomDataEnvelope } from './protocol.js'
 import type {
@@ -66,8 +59,9 @@ type RoomStateOptions = {
   metaSeq: number
   closed?: boolean
   /** Fired whenever the number of attached listeners changes, with the member whose own listeners changed (`null` for
-   *  a room-level one). Lets the owner (de)activate its event source (adapter subscription, wire subscription). */
-  onListenersChanged: (member: string | null) => void
+   *  a room-level one), and the binary want it turned on or off, if any. Lets the owner (de)activate its event source
+   *  (adapter subscription, wire subscription). */
+  onListenersChanged: (member: string | null, binary: BinaryWantChange | null) => void
   /** A user callback threw. The owner decides how to report it. */
   onCallbackError: (err: unknown) => void
   /** Every leave, from an event or a reconciled roster, after this view's callbacks; `hidden` is null for a member
@@ -154,7 +148,7 @@ class RoomState {
   private readonly _changeCbs: Listeners<() => void> = new Listeners()
   private readonly _members = new Map<string, MemberEntry>()
   private _hiddenMembers = 0
-  private readonly _onListenersChanged: (member: string | null) => void
+  private readonly _onListenersChanged: RoomStateOptions['onListenersChanged']
   private readonly _onCallbackError: (err: unknown) => void
   private readonly _onLeave: RoomStateOptions['onLeave']
   private readonly _roomDataCbs: Listeners<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> =
@@ -164,9 +158,8 @@ class RoomState {
     track: TrackFilter
   }> = new Listeners()
   private readonly _roomBinaryTracks: TrackCounts = newTrackCounts()
-  /** The members with a `subscribe()` listener, and the binary wants of those with a `subscribeBinary()` one. */
+  /** The members with a `subscribe()` listener. */
   private readonly _textWanted = new Set<string>()
-  private readonly _binaryWanted: Record<string, TrackWants> = Object.create(null)
   private readonly _joinCbs: Listeners<(member: RemoteParticipant) => void> = new Listeners()
   private readonly _leaveCbs: Listeners<(member: RemoteParticipant, cause: LeaveCause) => void> = new Listeners()
   private readonly _participantUpdateCbs: Listeners<
@@ -226,10 +219,6 @@ class RoomState {
   get wantsAnnounce(): boolean {
     return this._announceCbs.size > 0
   }
-  /** Which (member, track) binary streams this holder needs delivered. Drives the wire/adapter subscriptions on both sides (client declares it, server aggregates it per stub). */
-  binaryWants(): BinaryWants {
-    return { everyMember: trackWantsOf(this._roomBinaryTracks), members: this._binaryWanted }
-  }
   /** A member's meta with the revision it was accepted at. */
   acceptedMeta(id: string): AcceptedMeta | null {
     const entry = this._members.get(id)
@@ -238,7 +227,7 @@ class RoomState {
   hasMember(id: string): boolean {
     return this._members.has(id)
   }
-  /** The text-lane twin of `binaryWants()`: `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
+  /** `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
   textWants(): MemberWants {
     return { all: this._roomDataCbs.size > 0, members: this._textWanted }
   }
@@ -609,15 +598,20 @@ class RoomState {
   /** `entry` owns the list (`null`: the room); a binary listener's `filter` is counted in its list's counts. */
   private _register<T>(list: Listeners<T>, cb: T, entry: MemberEntry | null = null, filter?: CountedTrack): () => void {
     const remove = list.add(cb)
-    if (filter) countTrack(filter.counts, filter.track, 1)
-    this._bumpListenerCount(1, entry)
+    this._bumpListenerCount(
+      1,
+      entry,
+      filter && countTrack(filter.counts, filter.track, 1) ? wantOf(entry, filter, true) : null,
+    )
     let cleanups = this._listenerCleanups.get(list)
     if (!cleanups) this._listenerCleanups.set(list, (cleanups = new Set()))
     const unlisten = makeDisposer(() => {
-      if (remove()) {
-        if (filter) countTrack(filter.counts, filter.track, -1)
-        this._bumpListenerCount(-1, entry)
-      }
+      if (remove())
+        this._bumpListenerCount(
+          -1,
+          entry,
+          filter && countTrack(filter.counts, filter.track, -1) ? wantOf(entry, filter, false) : null,
+        )
     }, cleanups)
     return unlisten
   }
@@ -631,15 +625,13 @@ class RoomState {
   private _releaseAllListeners(): void {
     for (const cleanups of [...this._listenerCleanups.values()]) for (const unlisten of [...cleanups]) unlisten()
   }
-  private _bumpListenerCount(delta: number, entry: MemberEntry | null): void {
+  private _bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {
     this._listenerCount += delta
     if (entry !== null) {
       if (entry.dataCbs.size > 0) this._textWanted.add(entry.id)
       else this._textWanted.delete(entry.id)
-      if (entry.binaryCbs.size > 0) this._binaryWanted[entry.id] = trackWantsOf(entry.binaryTracks)
-      else delete this._binaryWanted[entry.id]
     }
-    this._onListenersChanged(entry?.id ?? null)
+    this._onListenersChanged(entry?.id ?? null, binary)
   }
   private _fireAll<Args extends unknown[]>(cbs: Listeners<(...args: Args) => unknown>, ...args: Args): void {
     for (const cb of cbs.list()) invokeChannelListener(cb, args, this._onCallbackError)
@@ -684,17 +676,18 @@ function binaryListener<CB>(cb: CB, opts: { track?: string | null } | undefined)
 function newTrackCounts(): TrackCounts {
   return { all: 0, named: new Map() }
 }
-function countTrack(counts: TrackCounts, track: TrackFilter, delta: 1 | -1): void {
+/** Whether the count crossed zero, turning a want on or off. */
+function countTrack(counts: TrackCounts, track: TrackFilter, delta: 1 | -1): boolean {
   if (track === undefined) {
     counts.all += delta
-    return
+    return counts.all === (delta === 1 ? 1 : 0)
   }
   const key = laneTrack(track)
   const count = (counts.named.get(key) ?? 0) + delta
   if (count === 0) counts.named.delete(key)
   else counts.named.set(key, count)
+  return count === (delta === 1 ? 1 : 0)
 }
-/** The `TrackWants` a listener list's track filters add up to. */
-function trackWantsOf(counts: TrackCounts): TrackWants {
-  return counts.all > 0 ? { all: true, tracks: [] } : { all: false, tracks: [...counts.named.keys()] }
+function wantOf(entry: MemberEntry | null, { track }: CountedTrack, on: boolean): BinaryWantChange {
+  return { member: entry?.id ?? null, track: track === undefined ? null : laneTrack(track), on }
 }

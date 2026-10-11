@@ -8,13 +8,14 @@ import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../constants.js'
+import type { BinaryWantChange } from '../binary.js'
 import type { RoomDemand } from '../demand.js'
 import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
 import { replayMembership, type RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { binaryLaneKey, type LaneHolder } from './replay.js'
-import { WantsIndex } from './wants-index.js'
+import { WantsIndex, type Affected } from './wants-index.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import { reapAndReadRoster, renewMemberLease } from './membership.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
@@ -106,12 +107,29 @@ class RoomSubscriptions {
     this._replanAround(() => {})
   }
 
-  /** A holder attached, changed its wants (its room-wide ones, and those of `members` when given), or is gone. */
+  /** A holder attached or is gone, or its wants changed wholesale: its room-wide ones, and those of `members` when
+   *  given. */
   holderChanged(holder: LaneHolder, gone = false, members?: Iterable<string>): void {
     const affected = this._wants.update(holder, gone, members)
     this._replanAround(() => {
-      if (affected !== 'all') for (const member of affected) this._syncMemberBinary(member)
-      else for (const member of this._host._state.listMemberIds()) this._syncMemberBinary(member)
+      for (const member of this._membersOf(affected)) this._syncMemberBinary(member)
+    })
+  }
+
+  /** A holder's text wants changed: its room-wide ones, and those of `members`. */
+  textChanged(holder: LaneHolder, members: Iterable<string>): void {
+    this._wants.updateText(holder, false, members)
+    this._replanAround(() => {})
+  }
+
+  /** One of a holder's binary wants changed: a want of one track replans only that track's pairs. */
+  binaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
+    const affected = this._wants.applyBinary(holder, change)
+    const { track } = change
+    this._replanAround(() => {
+      for (const member of this._membersOf(affected))
+        if (track === null) this._syncMemberBinary(member)
+        else this._syncNamedLane(member, track)
     })
   }
 
@@ -131,6 +149,18 @@ class RoomSubscriptions {
       this._syncMemberBinary(member)
       this._closeInbox(member)
     })
+  }
+
+  /** The lanes delivering `track` of `member` (`null`: every track) are ready, so a retained read after this misses no
+   *  live frame. */
+  pairReady(member: string, track: string | null): Promise<void> {
+    const pending: Promise<void>[] = []
+    for (const lane of [
+      this._everyTrack.get(member),
+      track === null ? undefined : this._binary.get(binaryLaneKey(member, track)),
+    ])
+      if (lane !== undefined && this._binaryPending.has(lane)) pending.push(lane.ready)
+    return pending.length === 0 ? Promise.resolve() : withinRoomHorizon(Promise.all(pending)).then(() => undefined)
   }
 
   binaryReady(): Promise<void> {
@@ -178,6 +208,10 @@ class RoomSubscriptions {
       void this._refreshMembers().catch(reportRoomError)
     change()
     this._syncHeartbeat()
+  }
+
+  private _membersOf(affected: Affected): Iterable<string> {
+    return affected === 'all' ? this._host._state.listMemberIds() : affected
   }
 
   /** A member's binary lanes: its every-track lane while some holder here receives all of its tracks, else a lane per

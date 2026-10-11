@@ -28,7 +28,7 @@ export type {
 }
 
 import { isRecord, ownLeaveCause, removedCause } from './model.js'
-import type { TrackWants } from './binary.js'
+import type { BinaryWantChange } from './binary.js'
 import type { LeaveCause, ParticipantMeta, RoomMeta } from './types.js'
 
 /** The head's config. `meta` is the one the room was created with, until its first meta write (see `meta.ts`). `inc` is random, not a counter: a room recreated after its tombstone lapses can't reuse an id a stale handle holds. */
@@ -149,8 +149,7 @@ type RoomStubRequest =
   | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown; ack?: boolean }
   | { __r: 'dm-reply'; ackId: string; reply: DmReply }
-  /** Changes only: the room-wide want, and each member whose own want changed (`null`: it has none now). */
-  | { __r: 'sub-binary'; everyMember: TrackWants; members: Record<string, TrackWants | null> }
+  | ({ __r: 'sub-binary' } & BinaryWantChange)
   /** Changes only: announcements, and each member whose own want changed. */
   | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
 

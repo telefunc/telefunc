@@ -7,14 +7,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
-import {
-  decodeBinaryFrame,
-  emptyBinaryWants,
-  encodeBinaryFrame,
-  sameTrackWants,
-  type BinaryWants,
-  type TrackWants,
-} from './binary.js'
+import { decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange } from './binary.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from './model.js'
 import {
   hasRoomTag,
@@ -82,7 +75,6 @@ class ClientRoom extends RoomStateView implements Room {
   /** The wants the server stub holds, as last declared; a fresh stub holds none. */
   private _declaredAnnounce = false
   private readonly _declaredText = new Set<string>()
-  private readonly _declaredBinary: BinaryWants = emptyBinaryWants()
   /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
   private readonly _roster = createDeferred()
   /** @internal */
@@ -99,7 +91,7 @@ class ClientRoom extends RoomStateView implements Room {
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
       metaSeq: snapshot.metaSeq,
       closed: snapshot.closed,
-      onListenersChanged: (member) => this._syncWants(member),
+      onListenersChanged: (member, binary) => this._syncWants(member, binary),
       onCallbackError: reportClientCallbackError,
       onLeave: (id, cause) => this._onLeave(id, cause),
     })
@@ -307,18 +299,15 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** Room-wide text wants ride the Broadcast subscription, which reattaches before the stub's `onOpen`. Declarations
    *  are replayed channel messages, so the server keeps them across reconnects: each one carries only what changed,
-   *  the room-wide wants and those of `member`, whose listeners changed. */
-  private _syncWants(member: string | null): void {
+   *  the room-wide text wants and those of `member`, whose listeners changed, or the one binary want that did. */
+  private _syncWants(member: string | null, binary: BinaryWantChange | null): void {
     const state = this._state
     if (state.closed) return this._stub._setWireSubscribed('text', false) // a closed room takes no declaration
     const text = state.textWants()
     this._stub._setWireSubscribed('text', text.all)
-    const binary = state.binaryWants()
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
     const textChanges: Record<string, boolean> = Object.create(null)
-    const binaryChanges: Record<string, TrackWants | null> = Object.create(null)
     let memberText = false
-    let memberBinary = false
     if (member !== null) {
       const wanted = text.members.has(member)
       if (wanted !== this._declaredText.has(member)) {
@@ -327,22 +316,12 @@ class ClientRoom extends RoomStateView implements Room {
         if (wanted) this._declaredText.add(member)
         else this._declaredText.delete(member)
       }
-      const next = binary.members[member]
-      if (!sameTrackWants(this._declaredBinary.members[member], next)) {
-        memberBinary = true
-        binaryChanges[member] = next ?? null
-        if (next) this._declaredBinary.members[member] = next
-        else delete this._declaredBinary.members[member]
-      }
     }
     if (memberText || state.wantsAnnounce !== this._declaredAnnounce) {
       this._declaredAnnounce = state.wantsAnnounce
       this._notify({ __r: 'sub-text', announce: state.wantsAnnounce, members: textChanges })
     }
-    if (memberBinary || !sameTrackWants(this._declaredBinary.everyMember, binary.everyMember)) {
-      this._declaredBinary.everyMember = binary.everyMember
-      this._notify({ __r: 'sub-binary', everyMember: binary.everyMember, members: binaryChanges })
-    }
+    if (binary !== null) this._notify({ __r: 'sub-binary', ...binary })
   }
 
   /** A closed stub's server side is gone with its wants, and a DM reply to it times out as any lost reply does. */
