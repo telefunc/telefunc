@@ -347,6 +347,43 @@ describe('memory backend behind the supervised consumer', () => {
     const subscription = getRoomBackend().subscribeLane('refused-room', 'refused-inc', semanticLane, () => {})
     await expect(subscription.ready).rejects.toThrow("has no open incarnation 'refused-inc'")
   })
+  it('reads a prefix a page of at most 1,024 cells at a time: each cell there throughout exactly once, whatever is written or removed between pages', async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'pages',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    const write = (keys: string[], bytes: Uint8Array | null) =>
+      backend.compareExchangeCells('pages', 'inc-1', { expect: [], mutations: keys.map((key) => ({ key, bytes })) })
+    const pages = async (between?: (page: number) => Promise<unknown>) => {
+      const read: string[][] = []
+      for await (const page of backend.readCellPages('pages', 'inc-1', 'p:')) {
+        if ('staleInc' in page) throw new Error('cell read fenced unexpectedly')
+        read.push([...page.cells.keys()])
+        await between?.(read.length)
+      }
+      expect(read.every((page) => page.length <= 1_024)).toBe(true)
+      return read.flat()
+    }
+    const keys = (count: number, from = 0) =>
+      Array.from({ length: count }, (_, i) => `p:${String(from + i).padStart(5, '0')}`)
+    expect(await pages()).toEqual([])
+    await write([...keys(1_024), 'pq', 'q'], encoder.encode('v'))
+    expect((await pages()).sort()).toEqual(keys(1_024))
+    await write(keys(1_476, 1_024), encoder.encode('v'))
+    const removed = ['p:00010', 'p:02400']
+    const added = ['p:00005x', 'p:02450x']
+    const read = await pages(async (page) => {
+      if (page !== 1) return
+      await write(removed, null)
+      await write(added, encoder.encode('v'))
+    })
+    expect(new Set(read).size).toBe(read.length)
+    const unchanged = keys(2_500).filter((key) => !removed.includes(key))
+    expect(read.filter((key) => unchanged.includes(key)).sort()).toEqual(unchanged)
+    expect(read.every((key) => [...unchanged, ...removed, ...added].includes(key))).toBe(true)
+  })
   it('reads a prefix without scanning the other cells, and drops its index entries with its cells', async () => {
     const backend = getRoomBackend()
     await backend.compareExchangeHead(

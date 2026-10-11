@@ -81,6 +81,16 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     return this.#stub(roomId).readCells(inc, sel)
   }
 
+  async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
+    let cursor: string | undefined
+    do {
+      const page = await this.#stub(roomId).readCellPage(inc, prefix, cursor)
+      yield page
+      if ('staleInc' in page) return
+      cursor = page.cursor
+    } while (cursor !== undefined)
+  }
+
   async compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
     return this.#stub(roomId).compareExchangeCells(inc, cx)
   }

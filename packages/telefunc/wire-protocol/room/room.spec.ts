@@ -359,15 +359,15 @@ describe('Room public behavior', () => {
     const causes: unknown[] = []
     observer.onLeave((_, cause) => causes.push(cause))
     await subsOf(observer).reconcileAuthority()
-    const readCells = driver.readCells.bind(driver)
+    const readCellPages = driver.readCellPages.bind(driver)
     const memberRead = { started: createDeferred(), release: createDeferred(), held: false }
-    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
-      if (!memberRead.held && 'prefix' in selector && selector.prefix === MEMBER_CELL_PREFIX) {
+    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+      if (!memberRead.held && prefix === MEMBER_CELL_PREFIX) {
         memberRead.held = true
         memberRead.started.resolve()
         await memberRead.release.promise
       }
-      return readCells(roomId, inc, selector)
+      yield* readCellPages(roomId, inc, prefix)
     })
     const listRetained = driver.listRetained.bind(driver)
     const committed = createDeferred()
@@ -902,14 +902,12 @@ describe('Room public behavior', () => {
     const authority = await Room.create('first-roster-meta-traffic')
     const player = await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
-    const readCells = driver.readCells.bind(driver)
+    const readCellPages = driver.readCellPages.bind(driver)
     let score = 0
-    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
-      const result = await readCells(roomId, inc, selector)
+    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+      yield* readCellPages(roomId, inc, prefix)
       // A member's meta change reaches this view during every roster read.
-      if ('prefix' in selector && selector.prefix === MEMBER_CELL_PREFIX && score < 100)
-        await player.setAttributes({ score: ++score })
-      return result
+      if (prefix === MEMBER_CELL_PREFIX && score < 100) await player.setAttributes({ score: ++score })
     })
     vi.spyOn(console, 'error').mockImplementation(() => {})
     observer.onJoin(() => {})
@@ -926,17 +924,17 @@ describe('Room public behavior', () => {
     await observer.getParticipants()
     await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
     expect(observer._state.rosterKnown).toBe(true)
-    const readCells = driver.readCells.bind(driver)
+    const readCellPages = driver.readCellPages.bind(driver)
     const started = createDeferred()
     const release = createDeferred()
     let held = false
-    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
-      if (!held && 'prefix' in selector && selector.prefix === MEMBER_CELL_PREFIX) {
+    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+      if (!held && prefix === MEMBER_CELL_PREFIX) {
         held = true
         started.resolve()
         await release.promise
       }
-      return await readCells(roomId, inc, selector)
+      yield* readCellPages(roomId, inc, prefix)
     })
     const refresh = subsOf(observer)._refreshMembers()
     await started.promise
@@ -961,13 +959,13 @@ describe('Room public behavior', () => {
     observer.onParticipantUpdate((member, meta) => narrated.push(`meta ${member.id} ${JSON.stringify(meta)}`))
     await observer.getParticipants()
     await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
-    const readCells = driver.readCells.bind(driver)
+    const readCellPages = driver.readCellPages.bind(driver)
     let rosterReads = 0
     const expected: string[] = []
     const kept: string[] = []
-    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
-      const read = await readCells(roomId, inc, selector)
-      if (!('prefix' in selector) || selector.prefix !== MEMBER_CELL_PREFIX || ++rosterReads > 6) return read
+    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+      yield* readCellPages(roomId, inc, prefix)
+      if (prefix !== MEMBER_CELL_PREFIX || ++rosterReads > 6) return
       // Six membership events reach this view after the read: three joins, a meta change and two leaves.
       const [left, updated, gone] = [await authority.join(), await authority.join(), await authority.join()]
       await updated.setAttributes({ read: rosterReads })
@@ -983,7 +981,6 @@ describe('Room public behavior', () => {
       )
       kept.push(updated.id)
       await vi.waitFor(() => expect(narrated).toEqual(expected))
-      return read
     })
     await subsOf(observer)._refreshMembers()
     expect(rosterReads).toBe(1)
@@ -2917,10 +2914,10 @@ describe('Room public behavior', () => {
   it('holds no want naming an id the view does not hold while every roster read fails', async () => {
     const authority = await Room.create('declared-before-roster')
     const observer = (await Room.get(authority.id)) as ServerRoom
-    const readCells = driver.readCells.bind(driver)
-    vi.spyOn(driver, 'readCells').mockImplementation(async (roomId, inc, selector) => {
-      if (roomId === authority.id && 'prefix' in selector) throw new Error('backend roster read failed')
-      return readCells(roomId, inc, selector)
+    const readCellPages = driver.readCellPages.bind(driver)
+    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+      if (roomId === authority.id) throw new Error('backend roster read failed')
+      yield* readCellPages(roomId, inc, prefix)
     })
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const member = await observer.join()
@@ -5308,14 +5305,14 @@ function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
 }
 
 function delayRosterRead(roomId: string): { started: Promise<void>; release: () => void } {
-  const readCells = driver.readCells.bind(driver)
+  const readCellPages = driver.readCellPages.bind(driver)
   const roster = { started: createDeferred(), release: createDeferred() }
-  vi.spyOn(driver, 'readCells').mockImplementation(async (candidateRoomId, inc, selector) => {
-    if (candidateRoomId === roomId && 'prefix' in selector) {
+  vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (candidateRoomId, inc, prefix) {
+    if (candidateRoomId === roomId) {
       roster.started.resolve()
       await roster.release.promise
     }
-    return readCells(candidateRoomId, inc, selector)
+    yield* readCellPages(candidateRoomId, inc, prefix)
   })
   return { started: roster.started.promise, release: roster.release.resolve }
 }

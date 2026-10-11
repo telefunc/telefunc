@@ -133,6 +133,8 @@ describe('Redis real three-master Cluster CI certification', () => {
           counts: [{ key: 'count} escape', delta: 1, create: true }],
         }),
       ).toEqual({ committed: new Map([['count} escape', { value: 1, changedAt: expect.any(Number) }]]) })
+      for await (const page of backend.readCellPages(roomId, inc, 'cell}'))
+        expect('cells' in page && [...page.cells.keys()]).toEqual(['cell} escape'])
       const firstSubscription = subscribe(backend, roomId, inc, () => {})
       await firstSubscription.ready
       await accepted(

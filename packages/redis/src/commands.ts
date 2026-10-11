@@ -41,6 +41,8 @@ import {
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
 /** A fence token is a UUID. */
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
+/** The cells a prefix read's page holds. */
+const CELL_PAGE_SIZE = 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 // Redis 4 refuses a script's write after TIME unless the script replicates its effects, the default since Redis 5.
@@ -148,23 +150,42 @@ return '{"head":' .. cjson.encode(head) .. '}'
 //   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
 //   ARGV: [1]=inc [2]='keys' then the cell keys, or 'prefix' then the prefix
 // No UTF-8 text holds the byte 0xFF, so a prefix's range ends past every key under it.
-const READ_CELLS_LUA = `${HEAD_PRELUDE}
+// Appends each of keys[first..] that has a value, with its value and version, to reply.
+const CELLS_REPLY_LUA = `
+local function tf_cells_reply(reply, keys, first)
+  for i = first, #keys do
+    local value = redis.call('HGET', KEYS[3], keys[i])
+    if value then
+      reply[#reply + 1] = keys[i]
+      reply[#reply + 1] = value
+      reply[#reply + 1] = redis.call('HGET', KEYS[4], keys[i])
+    end
+  end
+  return reply
+end
+`
+
+const READ_CELLS_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
 local head = tf_live_head(KEYS[1], tf_now())
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
 local keys, first = ARGV, 3
 if ARGV[2] == 'prefix' then
   keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[3], '(' .. ARGV[3] .. '\\255'), 1
 end
-local reply = {'cells'}
-for i = first, #keys do
-  local value = redis.call('HGET', KEYS[3], keys[i])
-  if value then
-    reply[#reply + 1] = keys[i]
-    reply[#reply + 1] = value
-    reply[#reply + 1] = redis.call('HGET', KEYS[4], keys[i])
-  end
-end
-return reply
+return tf_cells_reply({'cells'}, keys, first)
+`
+
+// A prefix read's page: up to ARGV[4] cells of the index range from ARGV[2] ('[' then the prefix, or '(' then the
+// previous page's last key) to past the prefix ARGV[3]. A full page is tagged 'more' with its last key.
+//   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
+//   ARGV: [1]=inc [2]=range start [3]=prefix [4]=page size
+const READ_CELL_PAGE_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
+local head = tf_live_head(KEYS[1], tf_now())
+if not head or head.inc ~= ARGV[1] then return {'stale'} end
+local limit = tonumber(ARGV[4])
+local keys = redis.call('ZRANGEBYLEX', KEYS[2], ARGV[2], '(' .. ARGV[3] .. '\\255', 'LIMIT', 0, limit)
+if #keys < limit then return tf_cells_reply({'cells'}, keys, 1) end
+return tf_cells_reply({'more', keys[#keys]}, keys, 1)
 `
 
 // Checked once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the
@@ -449,15 +470,28 @@ const REDIS_COMMANDS = {
     }),
     parse: (reply): CellsRead => {
       const [tag, ...found] = reply as Buffer[]
+      return tag!.toString() === 'stale' ? { staleInc: true } : parseCells(found)
+    },
+  }),
+  readCellPage: command({
+    name: 'tfRoomReadCellPage',
+    lua: READ_CELL_PAGE_LUA,
+    numberOfKeys: 4,
+    binaryReply: true,
+    invoke: (prefix, { roomId, inc, cellPrefix, after }: RoomInc & { cellPrefix: string; after?: string }) => ({
+      keys: [
+        headKey(prefix, roomId),
+        cellIndexKey(prefix, roomId, inc),
+        cellValuesKey(prefix, roomId, inc),
+        cellVersionsKey(prefix, roomId, inc),
+      ],
+      argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(CELL_PAGE_SIZE)],
+    }),
+    parse: (reply): CellsRead & { after?: string } => {
+      const [tag, ...found] = reply as Buffer[]
       if (tag!.toString() === 'stale') return { staleInc: true }
-      const cells = new Map<string, Uint8Array>()
-      const versions = new Map<string, string>()
-      for (let i = 0; i < found.length; i += 3) {
-        const key = found[i]!.toString()
-        cells.set(key, Uint8Array.from(found[i + 1]!))
-        versions.set(key, found[i + 2]!.toString())
-      }
-      return { cells, versions }
+      if (tag!.toString() === 'cells') return parseCells(found)
+      return { ...parseCells(found.slice(1)), after: found[0]!.toString() }
     },
   }),
   validateGeneration: command({
@@ -636,6 +670,18 @@ function encodeNext(next: HeadNext): string {
   if (head.closeLease !== undefined) payload.lease = { id: head.closeLease.id, durationMs: head.closeLease.durationMs }
   if (ttlMs !== undefined) payload.ttlMs = ttlMs
   return JSON.stringify(payload)
+}
+
+// Key, value and version triples.
+function parseCells(found: Buffer[]): { cells: Map<string, Uint8Array>; versions: Map<string, string> } {
+  const cells = new Map<string, Uint8Array>()
+  const versions = new Map<string, string>()
+  for (let i = 0; i < found.length; i += 3) {
+    const key = found[i]!.toString()
+    cells.set(key, Uint8Array.from(found[i + 1]!))
+    versions.set(key, found[i + 2]!.toString())
+  }
+  return { cells, versions }
 }
 
 function toBuffer(bytes: Uint8Array): Buffer {

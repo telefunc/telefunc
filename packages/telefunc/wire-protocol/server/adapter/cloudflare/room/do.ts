@@ -46,7 +46,9 @@ import {
   deleteLapsedHead,
   listOrphanGenerations,
   readCells,
+  readCellPage,
   readLiveHead,
+  type CellPage,
 } from './storage.js'
 
 type CommitWire =
@@ -94,6 +96,10 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async readCells(inc: string, sel: CellSelector): Promise<CellsRead> {
     return readCells(this.#sql(), inc, sel, Date.now())
+  }
+
+  async readCellPage(inc: string, prefix: string, cursor?: string): Promise<CellPage> {
+    return readCellPage(this.#sql(), inc, prefix, cursor, Date.now())
   }
 
   async compareExchangeCells(inc: string, cx: CellsCx): Promise<CxResult> {

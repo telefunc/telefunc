@@ -14,7 +14,7 @@ export {
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
-import type { CellCount, CellCounter, CellMutation, CellSelector } from '../../backend/room/contract.js'
+import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX, ROOM_PLAN_SLICE_MS } from '../constants.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import {
@@ -53,10 +53,24 @@ function isLapsed(record: { seenAt: number }): boolean {
   return Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS
 }
 
-async function readCells(roomId: string, inc: string, selector: CellSelector): Promise<Map<string, Uint8Array>> {
-  const result = await getRoomBackend().readCells(roomId, inc, selector)
+async function readCells(roomId: string, inc: string, keys: string[]): Promise<Map<string, Uint8Array>> {
+  const result = await getRoomBackend().readCells(roomId, inc, { keys })
   if ('staleInc' in result) throw roomClosedError(roomId)
   return result.cells
+}
+
+/** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
+async function readPrefix(roomId: string, inc: string, prefix: string): Promise<Map<string, Uint8Array>> {
+  const cells = new Map<string, Uint8Array>()
+  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
+    if ('staleInc' in page) throw roomClosedError(roomId)
+    for (const [key, raw] of page.cells) cells.set(key, raw)
+    if (performance.now() < deadline) continue
+    await nextTurnOf()
+    deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  }
+  return cells
 }
 
 /** Reads `keys`, plans, and commits only while each of them is still as read. */
@@ -159,15 +173,15 @@ async function renewMemberLeases(roomId: string, inc: string, ids: readonly stri
   )
 }
 
-/** Runs `task` on each item, `ROOM_MEMBER_WRITES_IN_FLIGHT_MAX` at a time and a `ROOM_PLAN_SLICE_MS` slice per turn;
- *  throws the first failure once every task ran. */
-async function eachInFlight<T>(items: readonly T[], task: (item: T) => Promise<unknown>): Promise<void> {
-  const pending = items.values()
+/** Runs `task` on each item in turn, `ROOM_MEMBER_WRITES_IN_FLIGHT_MAX` at a time and a `ROOM_PLAN_SLICE_MS` slice per
+ *  turn; throws the first failure once every task ran. */
+async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<unknown>): Promise<void> {
+  const pending = items[Symbol.iterator]()
   let deadline = performance.now() + ROOM_PLAN_SLICE_MS
   let turn: Promise<void> | null = null
   let failure = null as { error: unknown } | null
-  const worker = async () => {
-    for (let next = pending.next(); next.done !== true; next = pending.next()) {
+  const worker = async (first: T) => {
+    for (let next: IteratorResult<T> = { value: first }; next.done !== true; next = pending.next()) {
       if (performance.now() >= deadline)
         await (turn ??= nextTurnOf().then(() => {
           turn = null
@@ -180,7 +194,12 @@ async function eachInFlight<T>(items: readonly T[], task: (item: T) => Promise<u
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(items.length, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX) }, worker))
+  const workers: Promise<void>[] = []
+  for (let next = pending.next(); next.done !== true; next = pending.next()) {
+    workers.push(worker(next.value))
+    if (workers.length === ROOM_MEMBER_WRITES_IN_FLIGHT_MAX) break
+  }
+  await Promise.all(workers)
   if (failure) throw failure.error
 }
 
@@ -245,25 +264,32 @@ async function removeMemberCells(
 async function reapAndReadRoster(
   room: RoomIncarnation,
 ): Promise<{ members: MemberSnapshot[]; departing: Set<string> }> {
-  const cells = await readCells(room.id, room.inc, { prefix: MEMBER_CELL_PREFIX })
+  const cells = await readPrefix(room.id, room.inc, MEMBER_CELL_PREFIX)
   // After the member read, so an eviction committing in between shows up as departing.
-  const cleanups = await readCells(room.id, room.inc, { prefix: CLEANUP_CELL_PREFIX })
+  const cleanups = await readPrefix(room.id, room.inc, CLEANUP_CELL_PREFIX)
   const departing = new Set([...cleanups.keys()].map(memberIdOfCleanupKey))
-  await eachInFlight([...cleanups], ([key, raw]) => completeCleanup(room.id, room.inc, memberIdOfCleanupKey(key), raw))
-  const views = await readCells(room.id, room.inc, { prefix: VIEW_CELL_PREFIX })
-  await eachInFlight([...views], async ([key, raw]) => {
+  await eachInFlight(cleanups, ([key, raw]) => completeCleanup(room.id, room.inc, memberIdOfCleanupKey(key), raw))
+  const views = await readPrefix(room.id, room.inc, VIEW_CELL_PREFIX)
+  await eachInFlight(views, async ([key, raw]) => {
     if (isLapsed(decodeRoomRecord<ViewRecord>(raw)))
       await removeView(room, viewIdOfCellKey(key), { onlyIfLapsed: true })
   })
-  const members = await liveMembers(
-    room,
-    [...cells].map(([key, raw]) => [memberIdOfCellKey(key), raw] as const).filter(([id]) => !departing.has(id)),
-  )
+  const members = await liveMembers(room, stayingMembers(cells, departing))
   return { members, departing }
 }
 
+function* stayingMembers(
+  cells: ReadonlyMap<string, Uint8Array>,
+  departing: ReadonlySet<string>,
+): Generator<readonly [string, Uint8Array]> {
+  for (const [key, raw] of cells) {
+    const id = memberIdOfCellKey(key)
+    if (!departing.has(id)) yield [id, raw]
+  }
+}
+
 async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
-  const cells = await readCells(room.id, room.inc, { keys: ids.map(memberCellKey) })
+  const cells = await readCells(room.id, room.inc, ids.map(memberCellKey))
   return await liveMembers(
     room,
     ids.flatMap((id) => {
@@ -273,13 +299,13 @@ async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Pro
   )
 }
 
+/** In the order of `entries`. */
 async function liveMembers(
   room: RoomIncarnation,
-  entries: ReadonlyArray<readonly [string, Uint8Array]>,
+  entries: Iterable<readonly [string, Uint8Array]>,
 ): Promise<MemberSnapshot[]> {
   const members: (MemberSnapshot | null)[] = []
-  await eachInFlight([...entries.keys()], async (i) => {
-    const [id, raw] = entries[i]!
+  await eachInFlight(numbered(entries), async ([i, [id, raw]]) => {
     const candidate = decodeRoomRecord<RoomMemberRecord>(raw)
     const record = isLapsed(candidate)
       ? await evictMember(room, id, candidate.identity ?? null, { type: 'disconnected' }, { onlyIfLapsed: true })
@@ -287,6 +313,11 @@ async function liveMembers(
     members[i] = record && memberSnapshot(id, record)
   })
   return members.filter((member) => member !== null)
+}
+
+function* numbered<T>(items: Iterable<T>): Generator<readonly [number, T]> {
+  let i = 0
+  for (const item of items) yield [i++, item]
 }
 
 function memberSnapshot(id: string, record: RoomMemberRecord): MemberSnapshot {
@@ -306,7 +337,7 @@ async function reapAndCountPresence(room: RoomIncarnation): Promise<number> {
 
 async function reapAndResolveIdentity(room: RoomIncarnation, identity: string): Promise<MemberSnapshot[]> {
   const prefix = identityCellPrefix(identity)
-  const markers = await readCells(room.id, room.inc, { prefix })
+  const markers = await readPrefix(room.id, room.inc, prefix)
   const ids = [...markers.keys()].map((key) => key.slice(prefix.length))
   const members = await reapAndReadMembersById(room, ids)
   // A member and its identity marker are written and removed in one compare-exchange.
@@ -325,7 +356,7 @@ async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string
 
 async function finishPendingMemberCleanup(roomId: string, inc: string, memberId: string): Promise<void> {
   const key = cleanupCellKey(memberId)
-  const raw = (await readCells(roomId, inc, { keys: [key] })).get(key)
+  const raw = (await readCells(roomId, inc, [key])).get(key)
   if (raw !== undefined) await completeCleanup(roomId, inc, memberId, raw)
 }
 

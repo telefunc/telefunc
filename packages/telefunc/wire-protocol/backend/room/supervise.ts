@@ -27,6 +27,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
       return driver.compareExchangeHead(roomId, cx, next)
     },
     readCells: (roomId, inc, sel) => driver.readCells(roomId, inc, sel),
+    readCellPages: (roomId, inc, prefix) => driver.readCellPages(roomId, inc, prefix),
     compareExchangeCells: (roomId, inc, cx) => driver.compareExchangeCells(roomId, inc, cx),
     commitLane: async (roomId, inc, lane, payload, opts) => {
       const source = { roomId, inc, lane }

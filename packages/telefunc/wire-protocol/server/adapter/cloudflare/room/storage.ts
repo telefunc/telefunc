@@ -9,11 +9,14 @@ export {
   listOrphanGenerations,
   compareExchangeHead,
   readCells,
+  readCellPage,
   compareExchangeCells,
   advanceOrder,
   dropGenerationRows,
   prefixEnd,
 }
+
+export type { CellPage }
 
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
@@ -74,6 +77,7 @@ function initSchema(sql: SqlStorage): void {
 }
 
 const DIRECTORY_PAGE_SIZE = 100
+const CELL_PAGE_SIZE = 1024
 
 function directoryPut(sql: SqlStorage, roomId: string, incTag: string): void {
   sql.exec('INSERT OR REPLACE INTO directory (room_id, inc_tag) VALUES (?, ?)', roomId, incTag)
@@ -199,6 +203,28 @@ function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number)
     cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
     versions: new Map(rows.map((row) => [row.key, String(row.version)])),
   }
+}
+
+/** A prefix read's page, with the cursor its next page reads after while cells may remain. */
+type CellPage = { cells: Map<string, Uint8Array>; versions: Map<string, string>; cursor?: string } | { staleInc: true }
+
+function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
+  const head = readLiveHead(sql, now)
+  if (head === null || head.currentInc !== inc) return { staleInc: true }
+  const end = prefixEnd(prefix)
+  const range = [cursor === undefined ? 'key >= ?' : 'key > ?', ...(end === null ? [] : ['key < ?'])]
+  const rows = sql
+    .exec<CellRow>(
+      `SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.join(' AND ')} ORDER BY key LIMIT ?`,
+      inc,
+      cursor ?? prefix,
+      ...(end === null ? [] : [end]),
+      CELL_PAGE_SIZE,
+    )
+    .toArray()
+  const cells = new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)]))
+  const versions = new Map(rows.map((row) => [row.key, String(row.version)]))
+  return rows.length === CELL_PAGE_SIZE ? { cells, versions, cursor: rows[rows.length - 1]!.key } : { cells, versions }
 }
 
 function readRevision(sql: SqlStorage, inc: string): number {

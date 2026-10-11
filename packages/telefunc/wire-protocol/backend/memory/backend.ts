@@ -87,6 +87,8 @@ class MemoryBackendState {
 
 /** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself can't starve the loop. */
 const DELIVERIES_PER_TURN = 1024
+/** The cells a prefix read's page holds. */
+const CELL_PAGE_SIZE = 1024
 
 const NO_TARGETS: readonly MemorySubscriptionAttempt[] = []
 const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
@@ -117,6 +119,18 @@ function cellKeysWithPrefix(gen: Generation, prefix: string): Iterable<string> {
   const indexed = prefix.slice(0, prefix.lastIndexOf(':') + 1)
   const keys = indexed === '' ? gen.cells.keys() : (gen.cellsByPrefix.get(indexed) ?? [])
   return indexed === prefix ? keys : [...keys].filter((key) => key.startsWith(prefix))
+}
+
+function readCellsOf(gen: Generation, keys: Iterable<string>): CellsRead {
+  const cells = new Map<string, Uint8Array>()
+  const versions = new Map<string, string>()
+  for (const key of keys) {
+    const cell = gen.cells.get(key)
+    if (cell === undefined) continue
+    cells.set(key, copyBytes(cell.bytes))
+    versions.set(key, cell.version)
+  }
+  return { cells, versions }
 }
 
 function setCell(gen: Generation, key: string, bytes: Uint8Array | null, version: string): void {
@@ -259,21 +273,31 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
+    const gen = this._readableGeneration(roomId, inc)
+    if (gen === null) return { staleInc: true }
+    return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix))
+  }
+
+  // The prefix's keys as the read starts, so a page costs its own size and a join adds nothing to the read.
+  async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
+    let keys: string[] | null = null
+    for (let at = 0; keys === null || at < keys.length; at += CELL_PAGE_SIZE) {
+      const gen = this._readableGeneration(roomId, inc)
+      if (gen === null) {
+        yield { staleInc: true }
+        return
+      }
+      keys ??= [...cellKeysWithPrefix(gen, prefix)]
+      yield readCellsOf(gen, keys.slice(at, at + CELL_PAGE_SIZE))
+    }
+  }
+
+  // Closing tails may read; only writes require an open head.
+  private _readableGeneration(roomId: string, inc: string): Generation | null {
     const room = this._state.rooms.get(roomId)
     const head = this._liveHead(room)
-    // Closing tails may read; only writes require an open head.
-    if (room === undefined || head === null || head.currentInc !== inc) return { staleInc: true }
-    const gen = this._generation(room, inc)
-    const keys = 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix)
-    const cells = new Map<string, Uint8Array>()
-    const versions = new Map<string, string>()
-    for (const key of keys) {
-      const cell = gen.cells.get(key)
-      if (cell === undefined) continue
-      cells.set(key, copyBytes(cell.bytes))
-      versions.set(key, cell.version)
-    }
-    return { cells, versions }
+    if (room === undefined || head === null || head.currentInc !== inc) return null
+    return this._generation(room, inc)
   }
 
   async compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {

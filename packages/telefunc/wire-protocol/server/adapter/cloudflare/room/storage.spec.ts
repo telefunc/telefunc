@@ -9,6 +9,7 @@ import {
   dropGenerationRows,
   initSchema,
   readCells,
+  readCellPage,
 } from './storage.js'
 import { snapshotRoutes, upsertRoute } from './routes.js'
 import { deleteRetained, installRetained, listRetained } from './retained.js'
@@ -95,6 +96,50 @@ test("a prefix read selects the incarnation's cells under it as a primary-key ra
   expect(listed('identity:')).toEqual(['identity:a:1', 'identity:a:2', 'identity:ab:3'])
   expect(listed('x\u{10ffff}')).toEqual(['x\u{10ffff}y'])
   expect(listed('')).toHaveLength(keys.length)
+})
+
+test('a prefix read pages at most 1,024 cells from the cursor it hands back: each cell there throughout exactly once, whatever is written or removed between pages', () => {
+  const { sql, plans } = sqlStorage()
+  const now = Date.now()
+  const config = new TextEncoder().encode('config')
+  compareExchangeHead(sql, { form: 'absent' }, { head: { state: 'open', currentInc: 'pages', config } }, now)
+  const write = (keys: string[], bytes: Uint8Array | null) =>
+    compareExchangeCells(sql, 'pages', { expect: [], mutations: keys.map((key) => ({ key, bytes })) }, now)
+  const pages = (between?: (page: number) => void) => {
+    const read: string[][] = []
+    let cursor: string | undefined
+    do {
+      const page = readCellPage(sql, 'pages', 'p:', cursor, now)
+      if ('staleInc' in page) throw new Error('cell read fenced unexpectedly')
+      read.push([...page.cells.keys()])
+      between?.(read.length)
+      cursor = page.cursor
+    } while (cursor !== undefined)
+    expect(read.every((page) => page.length <= 1_024)).toBe(true)
+    return read.flat()
+  }
+  const keys = (count: number, from = 0) =>
+    Array.from({ length: count }, (_, i) => `p:${String(from + i).padStart(5, '0')}`)
+  expect(pages()).toEqual([])
+  write([...keys(1_024), 'pq', 'q'], new Uint8Array([1]))
+  plans.length = 0
+  expect(pages()).toEqual(keys(1_024))
+  expect(plans.filter((plan) => plan.includes(' cell '))).toEqual([
+    expect.stringMatching(/^SEARCH cell USING .*INDEX \w+ \(inc=\? AND key>\? AND key<\?\)$/),
+    expect.stringMatching(/^SEARCH cell USING .*INDEX \w+ \(inc=\? AND key>\? AND key<\?\)$/),
+  ])
+  write(keys(1_476, 1_024), new Uint8Array([1]))
+  const removed = ['p:00010', 'p:02400']
+  const added = ['p:00005x', 'p:02450x']
+  const read = pages((page) => {
+    if (page !== 1) return
+    write(removed, null)
+    write(added, new Uint8Array([1]))
+  })
+  expect(new Set(read).size).toBe(read.length)
+  const unchanged = keys(2_500).filter((key) => !removed.includes(key))
+  expect(read.filter((key) => unchanged.includes(key))).toEqual(unchanged)
+  expect(read.every((key) => [...unchanged, ...removed, ...added].includes(key))).toBe(true)
 })
 
 test('an exchange deletes every cell under a cleared prefix before its mutations, only when it commits', () => {

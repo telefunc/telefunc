@@ -93,6 +93,75 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect([...read.cells.keys()].sort()).toEqual(['p:b', 'pq', 'q'])
   })
 
+  it('reads a prefix a page of at most 1,024 cells at a time: each cell there throughout exactly once, whatever is written or removed between pages', async () => {
+    const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('pages') })
+    await backend.compareExchangeHead(
+      'pages',
+      { form: 'absent' },
+      { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
+    )
+    const write = (keys: string[], value: Uint8Array | null) =>
+      backend.compareExchangeCells('pages', 'inc', {
+        expect: [],
+        mutations: keys.map((key) => ({ key, bytes: value })),
+      })
+    const pages = async (between?: (page: number) => Promise<unknown>) => {
+      const read: string[][] = []
+      for await (const page of backend.readCellPages('pages', 'inc', 'p:')) {
+        if ('staleInc' in page) throw new Error('the room is gone')
+        read.push([...page.cells.keys()])
+        await between?.(read.length)
+      }
+      expect(read.every((page) => page.length <= 1_024)).toBe(true)
+      return read.flat()
+    }
+    const keys = (count: number, from = 0) =>
+      Array.from({ length: count }, (_, i) => `p:${String(from + i).padStart(5, '0')}`)
+    expect(await pages()).toEqual([])
+    await write([...keys(1_024), 'pq', 'q'], bytes('v'))
+    expect((await pages()).sort()).toEqual(keys(1_024))
+    await write(keys(1_476, 1_024), bytes('v'))
+    const removed = ['p:00010', 'p:02400']
+    const added = ['p:00005x', 'p:02450x']
+    const read = await pages(async (page) => {
+      if (page !== 1) return
+      await write(removed, null)
+      await write(added, bytes('v'))
+    })
+    expect(new Set(read).size).toBe(read.length)
+    const unchanged = keys(2_500).filter((key) => !removed.includes(key))
+    expect(read.filter((key) => unchanged.includes(key)).sort()).toEqual(unchanged)
+    expect(read.every((key) => [...unchanged, ...removed, ...added].includes(key))).toBe(true)
+  })
+
+  it('reads the roster of 100,000 members in a heartbeat tick with no Redis command over 20 ms', async () => {
+    const prefix = uniquePrefix('roster-pages')
+    const redis = ownClient(connect())
+    installRedis(redis, { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('roster-pages')
+    const backend = new RedisBackend({ redis, prefix })
+    const inc = (await backend.readHead(room.id))!.currentInc!
+    const record = bytes(JSON.stringify({ meta: {}, joinedAt: Date.now(), seenAt: Date.now(), metaSeq: 0 }))
+    for (let from = 0; from < 100_000; from += 5_000) {
+      const mutations = Array.from({ length: 5_000 }, (_, i) => ({ key: `m:member-${from + i}`, bytes: record }))
+      await backend.compareExchangeCells(room.id, inc, { expect: [], mutations })
+    }
+    const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
+    await Promise.all(nodes.map((node) => node.slowlog('RESET')))
+    await (room as unknown as { _subs: { _heartbeatTick(): Promise<void> } })._subs._heartbeatTick()
+    expect(room.count).toBe(100_000)
+    // Each entry: id, time, microseconds, then the command and its arguments.
+    const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
+      number,
+      number,
+      number,
+      string[],
+    ][]
+    const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
+    expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+  })
+
   it("delivers each of a member's binary commits to its every-track subscription with its own track's seq before the commit's delivery settles", async () => {
     installRedis(ownClient(connect()), { prefix: uniquePrefix('every-track') })
     onTestFinished(() => disposeBackend())

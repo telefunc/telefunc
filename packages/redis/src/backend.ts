@@ -93,6 +93,16 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return this._run(REDIS_COMMANDS.readCells, { roomId, inc, sel })
   }
 
+  async *readCellPages(roomId: string, inc: string, cellPrefix: string): AsyncGenerator<CellsRead> {
+    let after: string | undefined
+    do {
+      const page = await this._run(REDIS_COMMANDS.readCellPage, { roomId, inc, cellPrefix, after })
+      yield page
+      if ('staleInc' in page) return
+      after = page.after
+    } while (after !== undefined)
+  }
+
   compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
     return this._run(REDIS_COMMANDS.cellsCx, { roomId, inc, cx })
   }
