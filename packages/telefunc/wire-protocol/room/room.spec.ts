@@ -4611,6 +4611,40 @@ describe('room protocol validation', () => {
     // The shorter of two runs, so a scheduling hiccup in one run is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(100)
   })
+  it('tells a watched track of each of 20,000 members wanted once while a heartbeat tick replans between two slices of telling it', async () => {
+    const room = (await Room.create('demand-told-whole')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 20_000 }, () => room.join()))
+    const told = new Map<string, boolean[]>()
+    for (const member of members)
+      member.onDemand((track, wanted) => {
+        if (track === 'cam') told.set(member.id, [...(told.get(member.id) ?? []), wanted])
+      })
+    room.subscribeBinary(() => {})
+    await subsOf(room).binaryReady()
+    const stubs = Array.from({ length: Math.ceil(members.length / ROOM_TRACK_WANTS_MAX) }, () => register(room))
+    const demand = (room as unknown as { _demand: { tellUntil(deadline: number): boolean } })._demand
+    const tellUntil = demand.tellUntil.bind(demand)
+    let tick: Promise<void> | null = null
+    let ticked = false
+    vi.spyOn(demand, 'tellUntil').mockImplementation((deadline) => {
+      if (tick !== null) return ticked && tellUntil(deadline)
+      const done = tellUntil(deadline)
+      if (done) return true
+      // Between two slices: the client names cam of every member, and a heartbeat tick moves each member to it.
+      declare(stubs[0]!, { __r: 'sub-binary', member: null, track: 'cam', on: true })
+      tick = subsOf(room)
+        ._heartbeatTick()
+        .finally(() => (ticked = true))
+      return false
+    })
+    members.forEach((member, i) =>
+      declare(stubs[i % stubs.length]!, { __r: 'sub-binary', member: member.id, track: 'cam', on: true }),
+    )
+    await vi.waitFor(() => expect(ticked).toBe(true), { timeout: 15_000 })
+    await subsOf(room).binaryReady()
+    const sequences = new Set(members.map((member) => JSON.stringify(told.get(member.id))))
+    expect([...sequences]).toEqual(['[true]'])
+  })
   it('keeps ROOM_GOSSIP_IN_FLIGHT_MAX gossip commits in flight at most while a client names tracks of 200 members', async () => {
     const room = (await Room.create('gossip-in-flight')) as ServerRoom
     const members = await Promise.all(Array.from({ length: 200 }, () => room.join()))

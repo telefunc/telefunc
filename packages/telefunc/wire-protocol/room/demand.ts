@@ -98,26 +98,26 @@ class RoomDemand {
   }
 
   /** Ons go before offs; a member stops being covered before a track is wanted of every member and starts after one
-   *  stops, so no pair reads as received that neither state receives. */
+   *  stops, so no pair reads as received that neither state receives. It tells the plan as it was when it started: a
+   *  planner running between two of its slices is told by the next telling. */
   private *_tellChanges(): Generator<void, void, void> {
     const { pairs, tracks, members } = this._changed
     this._changed = new Receives()
     const planned = this._planned
     const told = this._told
-    for (const [member, track] of entriesOf(pairs))
-      if (hasEntry(planned.pairs, member, track) && !hasEntry(told.pairs, member, track))
-        yield this._tellPair(member, track, true)
-    for (const member of members)
-      if (!planned.members.has(member) && told.members.has(member)) yield this._tellCovers(member, false)
-    for (const track of tracks)
-      if (!planned.tracks.has(track) && told.tracks.has(track)) yield this._tellTrack(track, false)
-    for (const track of tracks)
-      if (planned.tracks.has(track) && !told.tracks.has(track)) yield this._tellTrack(track, true)
-    for (const member of members)
-      if (planned.members.has(member) && !told.members.has(member)) yield this._tellCovers(member, true)
-    for (const [member, track] of entriesOf(pairs))
-      if (!hasEntry(planned.pairs, member, track) && hasEntry(told.pairs, member, track))
-        yield this._tellPair(member, track, false)
+    const pairsOn = [...entriesOf(pairs)].map(
+      ([member, track]) => [member, track, hasEntry(planned.pairs, member, track)] as const,
+    )
+    const membersOn = [...members].map((member) => [member, planned.members.has(member)] as const)
+    const tracksOn = [...tracks].map((track) => [track, planned.tracks.has(track)] as const)
+    for (const [member, track, on] of pairsOn)
+      if (on && !hasEntry(told.pairs, member, track)) yield this._tellPair(member, track, true)
+    for (const [member, on] of membersOn) if (!on && told.members.has(member)) yield this._tellCovers(member, false)
+    for (const [track, on] of tracksOn) if (!on && told.tracks.has(track)) yield this._tellTrack(track, false)
+    for (const [track, on] of tracksOn) if (on && !told.tracks.has(track)) yield this._tellTrack(track, true)
+    for (const [member, on] of membersOn) if (on && !told.members.has(member)) yield this._tellCovers(member, true)
+    for (const [member, track, on] of pairsOn)
+      if (!on && hasEntry(told.pairs, member, track)) yield this._tellPair(member, track, false)
   }
 
   /** Owner side: the member publishes on `track`, which its every-track demand covers from now on. */
