@@ -3637,7 +3637,7 @@ describe('Room public behavior', () => {
     60_000,
   )
   it.each(['listeners on this instance', "clients' declarations"])(
-    'names tracks of one member one by one, through %s, in time linear in their count from 5,000 to 50,000',
+    'names tracks of one member one by one, through %s, in time linear in their count from 50,000 to 200,000',
     async (through) => {
       const name = async (count: number) => {
         const room = await Room.create(`named-one-by-one-${count}-${crypto.randomUUID()}`)
@@ -3667,10 +3667,12 @@ describe('Room public behavior', () => {
       }
       // The faster of two runs at each count, so a scheduling hiccup in one run is not read as growth.
       const fastest = async (count: number) => Math.min(await name(count), await name(count))
-      await name(5_000)
-      // Both counts hold more lanes than a CPU cache does. A linear path measures about 10 to 15 here, the marking
-      // that grows with the live heap included; a path whose every change costs the tracks already named, about 100.
-      expect((await fastest(50_000)) / (await fastest(5_000))).toBeLessThanOrEqual(20)
+      await name(50_000)
+      // An insert into a hash table holding every track named so far costs more as the table outgrows the CPU's caches,
+      // which from 5,000 to 50,000 tracks reads as growth (14 to 26 here). From 50,000 to 200,000 a linear path measures
+      // about 4 to 6, the marking that grows with the live heap included; a path whose every change costs the tracks
+      // already named, about 16.
+      expect((await fastest(200_000)) / (await fastest(50_000))).toBeLessThanOrEqual(8)
     },
     60_000,
   )
