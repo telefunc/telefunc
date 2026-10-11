@@ -172,15 +172,17 @@ class RoomSubscriptions {
     })
   }
 
-  /** The lanes delivering `track` of `member` (`null`: every track) are ready, so a retained read after this misses no
-   *  live frame. */
-  pairReady(member: string, track: string | null): Promise<void> {
+  /** The lanes delivering `track` (`null`: every track) of each of `members` are ready, so a retained read after this
+   *  misses no live frame. */
+  pairsReady(members: Iterable<string>, track: string | null): Promise<void> {
     const pending: Promise<void>[] = []
-    for (const lane of [
-      this._everyTrack.get(member),
-      track === null ? undefined : this._binary.get(binaryLaneKey(member, track)),
-    ])
+    const add = (lane: LaneSubscription | undefined) => {
       if (lane !== undefined && this._binaryPending.has(lane)) pending.push(lane.ready)
+    }
+    for (const member of members) {
+      add(this._everyTrack.get(member))
+      if (track !== null) add(this._binary.get(binaryLaneKey(member, track)))
+    }
     return pending.length === 0 ? Promise.resolve() : withinRoomHorizon(Promise.all(pending)).then(() => undefined)
   }
 

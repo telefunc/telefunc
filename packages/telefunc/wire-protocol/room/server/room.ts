@@ -763,9 +763,7 @@ class ServerRoom extends RoomStateView implements Room {
   async _replayRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange): Promise<void> {
     if (member === null) await this._subs.ensureRoster()
     const members = member === null ? this._state.listMemberIds() : [member]
-    await (member === null && track === null
-      ? this._subs.binaryReady()
-      : Promise.all(members.map((id) => this._subs.pairReady(id, track))))
+    await (member === null && track === null ? this._subs.binaryReady() : this._subs.pairsReady(members, track))
     const backend = getRoomBackend()
     const lanes: LaneId[] =
       track === null
