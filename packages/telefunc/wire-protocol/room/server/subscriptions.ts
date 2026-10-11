@@ -386,7 +386,9 @@ class RoomSubscriptions {
           )
           await this._replanEach(
             members,
-            once((member) => this._planMember(member, plan)),
+            once((member) =>
+              this._unconcerned(member) ? void this._counts.delete(member) : this._planMember(member, plan),
+            ),
           )
           if (plan.all) {
             await this._replanEach(
@@ -454,6 +456,18 @@ class RoomSubscriptions {
     const stillServed = present && (this._wants.wantsEveryTrack(member) || this._overflows(counts))
     if (!servedByAll && !stillServed && all !== undefined && this._everyTrack.get(member) === all)
       this._releaseEveryTrack(member, all)
+  }
+
+  /** No want, lane or demand concerns the member, so its plan has nothing to do; the change that concerns it next
+   *  counts it again. */
+  private _unconcerned(member: string): boolean {
+    return (
+      !this._wants.concerns(member) &&
+      !this._binaryTracks.has(member) &&
+      !this._everyTrack.has(member) &&
+      !this._overflowing.has(member) &&
+      !this._demand.receivesFrom(member)
+    )
   }
 
   /** The member's queued pairs; a change that moved it across `ROOM_MEMBER_NAMED_LANES_MAX`, or into or out of being

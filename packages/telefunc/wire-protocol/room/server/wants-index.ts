@@ -89,6 +89,11 @@ class WantsIndex {
     return this._cover(holder, member, track, on)
   }
 
+  /** Whether some holder names a binary want of the member, or of every member. */
+  concerns(member: string): boolean {
+    return this._everyMember.size > 0 || this._members.has(member)
+  }
+
   /** Whether some holder receives every track of the member: a publisher's own suppressed frames are no demand. */
   wantsEveryTrack(member: string): boolean {
     // A holder covering every track wants the default one unless it suppresses the member.

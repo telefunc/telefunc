@@ -64,6 +64,16 @@ describe('Room at 100,000 members', () => {
     // The shorter of two passes, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
   }, 60_000)
+  it('replans 100,000 members no holder wants binary of, allocating at most 700 bytes each', async () => {
+    const room = (await Room.create('replan-allocation')) as ServerRoom
+    await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
+    await subsOf(room).replan()
+    const before = allocatedBytes()
+    await subsOf(room).replan()
+    // About 450 measured, the inbox renewal included; 1,400 when every member's plan walked its empty want lists.
+    expect((allocatedBytes() - before) / 100_000).toBeLessThanOrEqual(700)
+    await closed(room)
+  }, 60_000)
   it('streams a roster of 100,000 members to a client a part at a time, with the join and leave landing between two parts each once', async () => {
     const authority = await Room.create('roster-parts')
     const members = await Promise.all(Array.from({ length: 100_000 }, () => authority.join()))
@@ -138,6 +148,7 @@ describe('Room at 100,000 members', () => {
     // About 330 MB built the text, most of it the serializer's; about 3 MB each after.
     expect(median(allocated)).toBeLessThan(built / 10)
     expect(median(allocated.slice(100))).toBeLessThanOrEqual(median(allocated.slice(0, 100)) * 1.25)
+    await closed(room)
   }, 120_000)
   it('holds at most 5,500 bytes per owned member, measured over 20,000 joins after a full collection', async () => {
     const room = await Room.create('member-footprint')
@@ -310,6 +321,11 @@ function binaryLanesOf(room: ServerRoom): number {
   const subs = (room as unknown as { _subs: { _binary: Map<string, unknown>; _everyTrack: Map<string, unknown> } })
     ._subs
   return subs._binary.size + subs._everyTrack.size
+}
+/** Closes the room and waits out what its close leaves behind, so a later spec times none of it. */
+async function closed(room: ServerRoom): Promise<void> {
+  await Room.close(room.id)
+  await settled()
 }
 /** Each declaration replays the retained frames of its track, so a spec's declarations in one turn leave work behind
  *  them: waits it out, until five timers in a row come on time. */

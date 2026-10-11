@@ -69,6 +69,11 @@ class RoomDemand {
     this._changed.members.add(member)
   }
 
+  /** Whether this instance receives a pair of the member, or is covered by it. */
+  receivesFrom(member: string): boolean {
+    return this._planned.pairs.has(member) || this._planned.members.has(member)
+  }
+
   covers(member: string): boolean {
     return this._planned.members.has(member)
   }
