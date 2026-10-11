@@ -212,19 +212,18 @@ redis.call('PUBLISH', KEYS[1], ARGV[1])
 // CELLS CX: all mutations and counts or none, while each expected cell is at its version; success implies the head
 // precondition (open + inc) held at apply time. A commit's writes take the generation's next revision as version.
 //   KEYS: [1]=head [2]=rev [3]=generation-keys [4]=cell-index [5]=values [6]=versions
-//   ARGV: [1]=inc [2..5]=how many mutated, expected, counted cells and cleared prefixes, then per mutated cell its key,
-//         op('set'|'del') and value, per expected cell its key and version ('' while absent), per counted cell its key,
-//         delta and create ('1' or ''), and the cleared prefixes
+//   ARGV: [1]=inc [2..4]=how many mutated, expected and counted cells, then per mutated cell its key, op('set'|'del')
+//         and value, per expected cell its key and version ('' while absent), and per counted cell its key, delta and
+//         create ('1' or '')
 const CELLS_CX_LUA = `${HEAD_PRELUDE}
 local head_key, rev_key, generation_keys_key, cell_index_key, values_key, versions_key =
   KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5], KEYS[6]
 local now = tf_now()
 local head = tf_live_head(head_key, now)
 if (not head) or head.inc ~= ARGV[1] or head.state ~= 'open' then return {'stale-inc'} end
-local mutated, expected, counted, cleared = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4]), tonumber(ARGV[5])
-local first_expected = 6 + 3 * mutated
+local mutated, expected, counted = tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
+local first_expected = 5 + 3 * mutated
 local first_counted = first_expected + 2 * expected
-local first_cleared = first_counted + 3 * counted
 for at = first_expected, first_counted - 1, 2 do
   if (redis.call('HGET', versions_key, ARGV[at]) or '') ~= ARGV[at + 1] then return {'conflict'} end
 end
@@ -240,13 +239,7 @@ local function write(key, value)
     redis.call('ZREM', cell_index_key, key)
   end
 end
-for at = first_cleared, first_cleared + cleared - 1 do
-  local prefix = ARGV[at]
-  for _, key in ipairs(redis.call('ZRANGEBYLEX', cell_index_key, '[' .. prefix, '(' .. prefix .. '\\255')) do
-    write(key, nil)
-  end
-end
-for at = 6, first_expected - 1, 3 do
+for at = 5, first_expected - 1, 3 do
   write(ARGV[at], ARGV[at + 1] == 'set' and ARGV[at + 2] or nil)
 end
 local reply = {'committed'}
@@ -523,7 +516,7 @@ const REDIS_COMMANDS = {
     lua: CELLS_CX_LUA,
     numberOfKeys: 6,
     invoke: (prefix, { roomId, inc, cx }: RoomInc & { cx: CellsCx }) => {
-      const { counts = [], clear = [] } = cx
+      const { counts = [] } = cx
       return {
         keys: [
           headKey(prefix, roomId),
@@ -538,13 +531,11 @@ const REDIS_COMMANDS = {
           String(cx.mutations.length),
           String(cx.expect.length),
           String(counts.length),
-          String(clear.length),
           ...cx.mutations.flatMap(({ key, bytes }) =>
             bytes === null ? [key, 'del', ''] : [key, 'set', toBuffer(bytes)],
           ),
           ...cx.expect.flatMap(({ key, version }) => [key, version ?? '']),
           ...counts.flatMap(({ key, delta, create }) => [key, String(delta), create ? '1' : '']),
-          ...clear,
         ],
       }
     },

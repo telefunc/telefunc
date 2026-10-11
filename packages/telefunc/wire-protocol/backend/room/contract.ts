@@ -91,9 +91,8 @@ type CellCounter = { value: number; changedAt: number }
 /** Adds `delta` to a counter cell. An absent counter stays absent, unless `create` makes it at `delta`. */
 type CellCount = { key: string; delta: number; create?: true }
 
-/** Commits only while every expectation holds: first deletes every cell under each `clear` prefix, then applies the
- *  mutations and the counts, which never conflict. */
-type CellsCx = { expect: CellExpectation[]; clear?: string[]; mutations: CellMutation[]; counts?: CellCount[] }
+/** Commits only while every expectation holds: applies the mutations and the counts, which never conflict. */
+type CellsCx = { expect: CellExpectation[]; mutations: CellMutation[]; counts?: CellCount[] }
 
 /** A commit returns each counted counter as it left it. */
 type CxResult = { committed: Map<string, CellCounter> } | 'conflict' | 'stale-inc'

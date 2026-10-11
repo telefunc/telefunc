@@ -13,8 +13,9 @@ export {
   viewCellKey,
   viewIdOfCellKey,
   META_CELL_PREFIX,
-  META_KEY_CELL_PREFIX,
   META_SEQ_CELL_KEY,
+  META_GEN_CELL_KEY,
+  metaKeyCellPrefix,
   metaKeyCellKey,
   metaKeyOfCellKey,
 }
@@ -53,14 +54,18 @@ function viewCellKey(viewId: string): string {
 function viewIdOfCellKey(key: string): string {
   return key.slice(VIEW_CELL_PREFIX.length)
 }
-/** The room's meta once first written (see `meta.ts`): a cell per top-level key, and a counter of the writes. */
+/** The room's meta once first written (see `meta.ts`): a counter of the writes, the generation the last replace
+ *  started, and a cell per top-level key in that generation. */
 const META_CELL_PREFIX = 'meta:'
-const META_KEY_CELL_PREFIX = 'meta:k:'
 const META_SEQ_CELL_KEY = 'meta:seq'
-// JSON keeps any string, lone surrogates included, as a well-formed one.
-function metaKeyCellKey(key: string): string {
-  return META_KEY_CELL_PREFIX + JSON.stringify(key)
+const META_GEN_CELL_KEY = 'meta:gen'
+function metaKeyCellPrefix(gen: number): string {
+  return `meta:k:${gen}:`
 }
-function metaKeyOfCellKey(cellKey: string): string {
-  return JSON.parse(cellKey.slice(META_KEY_CELL_PREFIX.length)) as string
+// JSON keeps any string, lone surrogates included, as a well-formed one.
+function metaKeyCellKey(gen: number, key: string): string {
+  return metaKeyCellPrefix(gen) + JSON.stringify(key)
+}
+function metaKeyOfCellKey(gen: number, cellKey: string): string {
+  return JSON.parse(cellKey.slice(metaKeyCellPrefix(gen).length)) as string
 }

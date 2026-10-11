@@ -1589,6 +1589,47 @@ describe('Room public behavior', () => {
     expect(metas).toContainEqual(stored)
     await vi.waitFor(() => expect(observer.meta).toEqual(stored))
   })
+  it('reads a room meta that a Room.setMeta() lands in the middle of as the meta before it or after it, never a mix', async () => {
+    const room = await Room.create('meta-paged-replace')
+    const before = Object.fromEntries(Array.from({ length: 1_100 }, (_, i) => [`k${i}`, i]))
+    await Room.setMeta(room.id, before)
+    const readCellPages = driver.readCellPages.bind(driver)
+    let landed = false
+    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+      for await (const page of readCellPages(roomId, inc, prefix)) {
+        yield page
+        if (!landed && prefix.startsWith('meta:')) {
+          landed = true
+          await Room.setMeta(room.id, { after: true })
+        }
+      }
+    })
+    const read = (await Room.get(room.id)).meta
+    expect(landed).toBe(true)
+    expect([before, { after: true }]).toContainEqual(read)
+  })
+  it('reads a room meta while a Room.setAttributes() lands in every read of its pages, as it stands after the last', async () => {
+    const room = await Room.create('meta-paged-merges')
+    const before = Object.fromEntries(Array.from({ length: 1_100 }, (_, i) => [`k${i}`, i]))
+    await Room.setMeta(room.id, before)
+    const readCellPages = driver.readCellPages.bind(driver)
+    let merges = 0
+    let merging = false
+    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+      let first = true
+      for await (const page of readCellPages(roomId, inc, prefix)) {
+        yield page
+        if (!first || merging || !prefix.startsWith('meta:')) continue
+        first = false
+        merging = true
+        await Room.setAttributes(room.id, { k0: 'merged', merges: ++merges })
+        merging = false
+      }
+    })
+    const read = (await Room.get(room.id)).meta
+    expect(merges).toBeGreaterThanOrEqual(2)
+    expect(read).toEqual({ ...before, k0: 'merged', merges })
+  })
   it('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
     const room = await Room.create('meta-order', { meta: { b: 1, a: 1 } })
     const seen: string[][] = []

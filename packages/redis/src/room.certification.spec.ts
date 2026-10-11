@@ -75,24 +75,6 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     ])
   })
 
-  it('deletes every cell under a cleared prefix before its mutations, only when the exchange commits', async () => {
-    const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('clear') })
-    await backend.compareExchangeHead(
-      'clear',
-      { form: 'absent' },
-      { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
-    )
-    const exchange = (cx: Parameters<RedisBackend['compareExchangeCells']>[2]) =>
-      backend.compareExchangeCells('clear', 'inc', cx)
-    const set = (key: string) => ({ key, bytes: bytes(key) })
-    await exchange({ expect: [], mutations: [set('p:a'), set('p:b'), set('p:\u{10ffff}'), set('pq'), set('q')] })
-    expect(await exchange({ expect: [{ key: 'q', version: null }], clear: ['p:'], mutations: [] })).toBe('conflict')
-    expect(await exchange({ expect: [], clear: ['p:'], mutations: [set('p:b')] })).toEqual({ committed: new Map() })
-    const read = await backend.readCells('clear', 'inc', { prefix: '' })
-    if ('staleInc' in read) throw new Error('the room is gone')
-    expect([...read.cells.keys()].sort()).toEqual(['p:b', 'pq', 'q'])
-  })
-
   it('reads a prefix a page of at most 1,024 cells at a time: each cell there throughout exactly once, whatever is written or removed between pages', async () => {
     const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('pages') })
     await backend.compareExchangeHead(
@@ -307,6 +289,34 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     if ('staleInc' in read) throw new Error('the room is gone')
     expect(JSON.parse(Buffer.from(read.cells.get('holds')!).toString())).toMatchObject({ value: 1_000 })
   })
+  it('reads, merges into and replaces a room meta of 100,000 keys with no Redis command over 20 ms', async () => {
+    const prefix = uniquePrefix('meta-pages')
+    const redis = ownClient(connect())
+    installRedis(redis, { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('meta-pages')
+    for (let from = 0; from < 100_000; from += 10_000)
+      await Room.setAttributes(
+        room.id,
+        Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
+      )
+    const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
+    await Promise.all(nodes.map((node) => node.slowlog('RESET')))
+    expect(Object.keys((await Room.get(room.id)).meta)).toHaveLength(100_000)
+    await Room.setAttributes(room.id, { k0: 'merged' })
+    await Room.setMeta(room.id, { only: true })
+    expect((await Room.get(room.id)).meta).toEqual({ only: true })
+    // Each entry: id, time, microseconds, then the command and its arguments.
+    const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
+      number,
+      number,
+      number,
+      string[],
+    ][]
+    const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
+    expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+  })
+
   it('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
     installRedis(ownClient(connect()), { prefix: uniquePrefix('meta-order') })
     onTestFinished(() => disposeBackend())
