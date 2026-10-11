@@ -25,6 +25,7 @@ import { WantsIndex } from './wants-index.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import { reapAndReadRoster, renewMemberLeases } from './membership.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
+import { sweepLapsedRoomsSoon } from './directory.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
 assertIsNotBrowser()
 
@@ -721,6 +722,7 @@ class RoomSubscriptions {
       await this.replan() // bounded retry trigger for still-wanted terminal lanes
       await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views
       if (!host._state.closed) await maintainHold(host._incarnation)
+      sweepLapsedRoomsSoon()
       if (renewalFailure) throw renewalFailure.error
     } finally {
       this._heartbeatBusy = false

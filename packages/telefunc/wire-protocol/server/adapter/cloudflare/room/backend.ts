@@ -133,8 +133,8 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     return this.#stub(roomId).dropGeneration(inc)
   }
 
-  async directoryPut(roomId: string, incTag: string): Promise<void> {
-    return this.#directory().directoryPut(roomId, incTag)
+  async directoryPut(roomId: string, incTag: string, checkAt: number): Promise<void> {
+    return this.#directory().directoryPut(roomId, incTag, checkAt)
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
@@ -143,6 +143,10 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     return this.#directory().directoryList(prefix, cursor)
+  }
+
+  async directoryDue(now: number): Promise<DirectoryPage['entries']> {
+    return this.#directory().directoryDue(now)
   }
 
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {

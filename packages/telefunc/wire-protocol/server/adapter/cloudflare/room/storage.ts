@@ -4,6 +4,7 @@ export {
   directoryPut,
   directoryDelete,
   directoryList,
+  directoryDue,
   readLiveHead,
   deleteLapsedHead,
   listOrphanGenerations,
@@ -74,15 +75,22 @@ function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS route
       (room_id TEXT NOT NULL, inc TEXT NOT NULL, lane_key TEXT NOT NULL, session_do_id TEXT NOT NULL, lease_id TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (inc, lane_key, session_do_id));
     CREATE INDEX IF NOT EXISTS route_expires_at ON route(expires_at);
-    CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS directory (room_id TEXT PRIMARY KEY, inc_tag TEXT NOT NULL, check_at INTEGER);
+    CREATE INDEX IF NOT EXISTS directory_check_at ON directory(check_at);
   `)
 }
 
 const DIRECTORY_PAGE_SIZE = 100
 const CELL_PAGE_SIZE = 1024
 
-function directoryPut(sql: SqlStorage, roomId: string, incTag: string): void {
-  sql.exec('INSERT OR REPLACE INTO directory (room_id, inc_tag) VALUES (?, ?)', roomId, incTag)
+// A NULL check_at is never due.
+function directoryPut(sql: SqlStorage, roomId: string, incTag: string, checkAt: number): void {
+  sql.exec(
+    'INSERT OR REPLACE INTO directory (room_id, inc_tag, check_at) VALUES (?, ?, ?)',
+    roomId,
+    incTag,
+    checkAt === Infinity ? null : checkAt,
+  )
 }
 
 function directoryDelete(sql: SqlStorage, roomId: string, incTag: string): void {
@@ -107,6 +115,18 @@ function directoryList(sql: SqlStorage, prefix: string, cursor?: string): Direct
   const last = page[page.length - 1]
   const more = last !== undefined && matching.length > DIRECTORY_PAGE_SIZE
   return more ? { entries, cursor: last.room_id } : { entries }
+}
+
+// A check_at range, so a page seeks its index instead of scanning every room.
+function directoryDue(sql: SqlStorage, now: number): DirectoryPage['entries'] {
+  return sql
+    .exec<{ room_id: string; inc_tag: string }>(
+      'SELECT room_id, inc_tag FROM directory WHERE check_at <= ? ORDER BY check_at LIMIT ?',
+      now,
+      DIRECTORY_PAGE_SIZE,
+    )
+    .toArray()
+    .map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
 }
 
 /** The least string above every string starting with `prefix` (TEXT compares by code point), or null for none. */

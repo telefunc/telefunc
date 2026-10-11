@@ -156,7 +156,7 @@ describe('Redis real three-master Cluster CI certification', () => {
         await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), { requiredCellKeys: ['cell} escape'] }),
       ).toEqual({ stale: 'cell', key: 'cell} escape' })
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
-      await backend.directoryPut(roomId, inc)
+      await backend.directoryPut(roomId, inc, Infinity)
       const hmget = commandClient.hmget.bind(commandClient)
       const hmgetMock = vi.spyOn(commandClient, 'hmget').mockImplementation((async (
         key: string,
@@ -167,7 +167,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       }) as never)
       expect(await backend.directoryList(roomId)).toEqual({ entries: [] })
       hmgetMock.mockRestore()
-      await backend.directoryPut(roomId, inc)
+      await backend.directoryPut(roomId, inc, Infinity)
       await backend.directoryDelete(roomId, inc)
       expect(
         (await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))).receivers,
@@ -590,7 +590,7 @@ process.exit(0)`,
       const roomId = `room-${String(index).padStart(3, '0')}`
       return { roomId, incTag: `${roomId}-inc` }
     })
-    for (const { roomId, incTag } of entries) await backend.directoryPut(roomId, incTag)
+    for (const { roomId, incTag } of entries) await backend.directoryPut(roomId, incTag, Infinity)
     const first = await backend.directoryList('room-')
     expect(first).toEqual({ entries: entries.slice(0, 100), cursor: 'room-099' })
     expect(await backend.directoryList('room-', first.cursor)).toEqual({ entries: entries.slice(100) })

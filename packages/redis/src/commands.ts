@@ -25,6 +25,7 @@ import {
   cellIndexKey,
   cellValuesKey,
   cellVersionsKey,
+  directoryChecksKey,
   directoryIndexKey,
   directoryTagsKey,
   generationInvalidationChannel,
@@ -371,11 +372,14 @@ redis.call('SREM', KEYS[1], KEYS[2])
 redis.call('UNLINK', KEYS[2])
 `
 
-// Directory records use two co-slotted global keys. Put and compare-delete are each one atomic record,
+// Directory records use three co-slotted global keys. Put and compare-delete are each one atomic record,
 // so stale cleanup cannot erase (or de-index) a concurrent newer tag.
+//   KEYS: [1]=index [2]=tags [3]=checks
+//   ARGV: [1]=room id [2]=tag [3]=when it is due, '' for never (put only)
 const DIRECTORY_PUT_LUA = `
 redis.call('ZADD', KEYS[1], 0, ARGV[1])
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
+if ARGV[3] == '' then redis.call('ZREM', KEYS[3], ARGV[1]) else redis.call('ZADD', KEYS[3], ARGV[3], ARGV[1]) end
 return 1
 `
 
@@ -383,7 +387,19 @@ const DIRECTORY_DELETE_LUA = `
 if redis.call('HGET', KEYS[2], ARGV[1]) ~= ARGV[2] then return 0 end
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[1], ARGV[1])
+redis.call('ZREM', KEYS[3], ARGV[1])
 return 1
+`
+
+// Up to ARGV[2] entries due at ARGV[1], earliest first: each room id, then its tag.
+//   KEYS: [1]=checks [2]=tags
+const DIRECTORY_DUE_LUA = `
+local reply = {}
+for _, roomId in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))) do
+  reply[#reply + 1] = roomId
+  reply[#reply + 1] = redis.call('HGET', KEYS[2], roomId)
+end
+return reply
 `
 
 type Invocation = { keys: string[]; argv: Array<string | Buffer> }
@@ -639,22 +655,37 @@ const REDIS_COMMANDS = {
   directoryPut: command({
     name: 'tfRoomDirectoryPut',
     lua: DIRECTORY_PUT_LUA,
-    numberOfKeys: 2,
-    invoke: (prefix, { roomId, incTag }: { roomId: string; incTag: string }) => ({
-      keys: [directoryIndexKey(prefix), directoryTagsKey(prefix)],
-      argv: [roomId, incTag],
+    numberOfKeys: 3,
+    invoke: (prefix, { roomId, incTag, checkAt }: { roomId: string; incTag: string; checkAt: number }) => ({
+      keys: [directoryIndexKey(prefix), directoryTagsKey(prefix), directoryChecksKey(prefix)],
+      argv: [roomId, incTag, checkAt === Infinity ? '' : String(checkAt)],
     }),
     parse: () => {},
   }),
   directoryDelete: command({
     name: 'tfRoomDirectoryDelete',
     lua: DIRECTORY_DELETE_LUA,
-    numberOfKeys: 2,
+    numberOfKeys: 3,
     invoke: (prefix, { roomId, incTag }: { roomId: string; incTag: string }) => ({
-      keys: [directoryIndexKey(prefix), directoryTagsKey(prefix)],
+      keys: [directoryIndexKey(prefix), directoryTagsKey(prefix), directoryChecksKey(prefix)],
       argv: [roomId, incTag],
     }),
     parse: () => {},
+  }),
+  directoryDue: command({
+    name: 'tfRoomDirectoryDue',
+    lua: DIRECTORY_DUE_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { now, limit }: { now: number; limit: number }) => ({
+      keys: [directoryChecksKey(prefix), directoryTagsKey(prefix)],
+      argv: [String(now), String(limit)],
+    }),
+    parse: (reply) => {
+      const found = reply as string[]
+      const entries: { roomId: string; incTag: string }[] = []
+      for (let i = 0; i < found.length; i += 2) entries.push({ roomId: found[i]!, incTag: found[i + 1]! })
+      return entries
+    },
   }),
 }
 

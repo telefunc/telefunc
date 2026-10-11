@@ -20,6 +20,7 @@ export {
   generationInvalidationChannel,
   directoryIndexKey,
   directoryTagsKey,
+  directoryChecksKey,
 }
 export type { CommitChannels }
 
@@ -117,4 +118,8 @@ function directoryIndexKey(prefix: string): string {
 }
 function directoryTagsKey(prefix: string): string {
   return `${prefix}room-dir:{${prefix}dir}:tags`
+}
+/** Each listed room scored by when it is due, if ever. */
+function directoryChecksKey(prefix: string): string {
+  return `${prefix}room-dir:{${prefix}dir}:checks`
 }

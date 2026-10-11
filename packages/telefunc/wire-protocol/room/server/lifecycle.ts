@@ -8,7 +8,7 @@ import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { CellCount, CellCounter } from '../../backend/room/contract.js'
+import type { CellCount, CellCounter, RoomHead } from '../../backend/room/contract.js'
 import { decodeCellCounter } from '../../backend/room/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
@@ -120,16 +120,17 @@ async function maintainHold(room: RoomIncarnation): Promise<void> {
 }
 
 /** Once its creation is counted, a new room nothing holds yet lapses just past its close. The record is read under
- *  the head's revision, which a first hold's lapse write moves, so that hold's lapse wins. */
-async function lapseNewRoom(room: RoomIncarnation): Promise<void> {
-  if (room.hold === null) return
+ *  the head's revision, which a first hold's lapse write moves, so that hold's lapse wins. Returns the head it leaves,
+ *  while that is the room's open head. */
+async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
+  if (room.hold === null) return null
   const { id, inc } = room
   const backend = getRoomBackend()
-  await retryCompareExchange(async () => {
+  return await retryCompareExchange(async () => {
     const head = await backend.readHead(id)
-    if (head?.state !== 'open' || head.currentInc !== inc) return
+    if (head?.state !== 'open' || head.currentInc !== inc) return null
     const closesAt = (await readHoldRecord(room))?.closesAt
-    if (closesAt === undefined) return
+    if (closesAt === undefined) return head
     const result = await backend.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
@@ -138,7 +139,7 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<void> {
         ttlMs: closesAt - Date.now() + ROOM_LAPSE_AFTER_CLOSE_MS,
       },
     )
-    return 'conflict' in result ? CX_CONFLICT : undefined
+    return 'conflict' in result ? CX_CONFLICT : result.head
   })
 }
 

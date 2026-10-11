@@ -39,6 +39,7 @@ import {
   compareExchangeCells,
   compareExchangeHead,
   directoryDelete,
+  directoryDue,
   directoryList,
   directoryPut,
   dropGenerationRows,
@@ -184,8 +185,8 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     await this.#scheduleMaintenanceIfNeeded()
   }
 
-  async directoryPut(roomId: string, incTag: string): Promise<void> {
-    this.#transaction((sql) => directoryPut(sql, roomId, incTag))
+  async directoryPut(roomId: string, incTag: string, checkAt: number): Promise<void> {
+    this.#transaction((sql) => directoryPut(sql, roomId, incTag, checkAt))
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
@@ -194,6 +195,10 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     return directoryList(this.#sql(), prefix, cursor)
+  }
+
+  async directoryDue(now: number): Promise<DirectoryPage['entries']> {
+    return directoryDue(this.#sql(), now)
   }
 
   // Only a room authority schedules alarms.

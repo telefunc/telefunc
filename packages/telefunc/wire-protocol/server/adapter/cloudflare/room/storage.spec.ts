@@ -5,6 +5,8 @@ import {
   advanceOrder,
   compareExchangeCells,
   compareExchangeHead,
+  directoryDelete,
+  directoryDue,
   directoryList,
   directoryPut,
   dropGenerationRows,
@@ -44,7 +46,7 @@ function sqlStorage() {
 test("a directory page reads a prefix's rooms as a primary-key range, up to the next code point", () => {
   const { sql, plans } = sqlStorage()
   const rooms = ['game', 'game:', 'game:1', 'game:é', 'game;', 'x\u{10ffff}y', 'y', '\u{d7ff}a', '\u{e000}']
-  for (const roomId of rooms) directoryPut(sql, roomId, 'tag')
+  for (const roomId of rooms) directoryPut(sql, roomId, 'tag', Infinity)
   const listed = (prefix: string) => directoryList(sql, prefix).entries.map((entry) => entry.roomId)
   expect(listed('game:')).toEqual(['game:', 'game:1', 'game:é'])
   expect(plans).toEqual([expect.stringMatching(/^SEARCH directory USING .*INDEX \w+ \(room_id>\? AND room_id<\?\)$/)])
@@ -57,7 +59,7 @@ test("a directory page reads a prefix's rooms as a primary-key range, up to the 
 test('a directory lists its rooms in code point order', () => {
   const { sql } = sqlStorage()
   for (const roomId of ['order:a', 'order:\u{1f600}', 'order:é', 'order:\uff01', 'order:B', 'order:f'])
-    directoryPut(sql, roomId, 'tag')
+    directoryPut(sql, roomId, 'tag', Infinity)
   expect(directoryList(sql, 'order:').entries.map((entry) => entry.roomId)).toEqual([
     'order:B',
     'order:a',
@@ -68,10 +70,24 @@ test('a directory lists its rooms in code point order', () => {
   ])
 })
 
+test('a directory lists the rooms due, earliest first, as an index range', () => {
+  const { sql, plans } = sqlStorage()
+  for (let i = 0; i < 150; i++) directoryPut(sql, `due-${i}`, 'tag', 1_000 - i)
+  directoryPut(sql, 'never', 'tag', Infinity)
+  directoryPut(sql, 'later', 'tag', 2_000)
+  plans.length = 0
+  const due = directoryDue(sql, 1_000)
+  expect(due.map(({ roomId }) => roomId)).toEqual(Array.from({ length: 100 }, (_, i) => `due-${149 - i}`))
+  expect(plans).toEqual([expect.stringMatching(/^SEARCH directory USING INDEX directory_check_at \(check_at<\?\)$/)])
+  directoryDelete(sql, 'due-149', 'tag')
+  expect(directoryDue(sql, 1_000)[0]).toEqual({ roomId: 'due-148', incTag: 'tag' })
+  expect(directoryDue(sql, Number.MAX_SAFE_INTEGER).map(({ roomId }) => roomId)).not.toContain('never')
+})
+
 test("a directory pages a prefix's rooms from the cursor it hands back", () => {
   const { sql } = sqlStorage()
   const rooms = Array.from({ length: 150 }, (_, index) => `room:${String(index).padStart(3, '0')}`)
-  for (const roomId of ['roo', ...rooms, 'roon']) directoryPut(sql, roomId, 'tag')
+  for (const roomId of ['roo', ...rooms, 'roon']) directoryPut(sql, roomId, 'tag', Infinity)
   const first = directoryList(sql, 'room:')
   const second = directoryList(sql, 'room:', first.cursor)
   expect([...first.entries, ...second.entries].map((entry) => entry.roomId)).toEqual(rooms)

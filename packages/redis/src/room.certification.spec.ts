@@ -244,6 +244,20 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(orderKeys).toEqual([expect.stringMatching(/:o:control$/)])
   })
 
+  it('lists the directory entries due, earliest first and a page at a time, until each is put again or deleted', async () => {
+    const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('directory-due') })
+    for (let i = 0; i < 150; i++) await backend.directoryPut(`due-${i}`, 'inc', 1_000 - i)
+    await backend.directoryPut('never', 'inc', Infinity)
+    const first = await backend.directoryDue(1_000)
+    expect(first.map(({ roomId }) => roomId)).toEqual(Array.from({ length: 100 }, (_, i) => `due-${149 - i}`))
+    for (const { roomId, incTag } of first) await backend.directoryPut(roomId, incTag, 3_000)
+    await backend.directoryDelete('due-49', 'inc')
+    const second = await backend.directoryDue(1_000)
+    expect(second.map(({ roomId }) => roomId)).toEqual(Array.from({ length: 49 }, (_, i) => `due-${48 - i}`))
+    expect(second[0]).toEqual({ roomId: 'due-48', incTag: 'inc' })
+    expect((await backend.directoryDue(Number.MAX_SAFE_INTEGER)).map(({ roomId }) => roomId)).not.toContain('never')
+  })
+
   it("lists one track's retained binary lanes across members from that track's own set, until they are deleted or the generation drops", async () => {
     const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('retained-of-track') })
     await backend.compareExchangeHead(

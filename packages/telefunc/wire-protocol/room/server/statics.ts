@@ -4,7 +4,7 @@ export type { RoomGuardHooks }
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
+import type { RoomHead } from '../../backend/room/contract.js'
 import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../errors.js'
 import {
   assertKnownOptions,
@@ -57,6 +57,7 @@ import { metaEntriesAt, metaObjectOf } from '../meta-state.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
 import { createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
+import { directoryCheckAt, repairRoomIndex, sweepLapsedRoomsSoon } from './directory.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
@@ -136,21 +137,7 @@ function roomNotFoundError(id: string): RoomError {
   return new RoomError(`Room not found: ${id}`)
 }
 
-/** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
- *  tombstone lapsed), so it is dropped with its listing. */
-async function repairRoomIndex(
-  backend: RoomBackend,
-  id: string,
-  listedInc: string,
-  head: RoomHead | null,
-): Promise<void> {
-  if (head?.currentInc === listedInc) return
-  await backend.dropGeneration(id, listedInc)
-  const live = openConfig(head)
-  if (live) await backend.directoryPut(id, live.inc)
-  else await backend.directoryDelete(id, listedInc)
-}
-type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
+type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists'; head: RoomHead } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
@@ -163,7 +150,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       current = await backend.readHead(id)
     }
     if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
-    if (current !== null && current.state !== 'closed') return { kind: 'exists' }
+    if (current !== null && current.state !== 'closed') return { kind: 'exists', head: current }
     const created: RoomConfigRecord = {
       meta,
       inc: crypto.randomUUID(),
@@ -177,16 +164,17 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     if ('conflict' in result) {
       // A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again.
       if (result.current === null || result.current.state === 'closed') return CX_CONFLICT
-      return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
+      return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists', head: result.current }
     }
     assert('head' in result)
     // The head lapses only once the counters that keep it ahead are written.
     await createHold({ id, ...created })
-    await lapseNewRoom({ id, ...created })
+    const lapsing = await lapseNewRoom({ id, ...created })
     // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
     const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
     if (lapsed !== undefined) await backend.dropGeneration(id, lapsed.incTag)
-    await backend.directoryPut(id, created.inc)
+    await backend.directoryPut(id, created.inc, directoryCheckAt(created.hold, lapsing?.expiresAt))
+    sweepLapsedRoomsSoon()
     return {
       kind: 'created',
       room: new ServerRoom(id, created, { entries: metaEntriesAt(meta, 0), seq: 0 }, { members: [] }),
@@ -227,7 +215,9 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
   const room = await openRoom(id)
   // Repairs the listing of a creator that crashed between its head and directory writes.
-  await getRoomBackend().directoryPut(id, room._inc)
+  const { head } = result
+  const expiresAt = head.currentInc === room._inc ? head.expiresAt : undefined
+  await getRoomBackend().directoryPut(id, room._inc, directoryCheckAt(room._incarnation.hold, expiresAt))
   return room
 }
 

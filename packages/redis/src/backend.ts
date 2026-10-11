@@ -210,8 +210,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     await this._run(REDIS_COMMANDS.dropGeneration, { roomId, inc, generationKeys })
   }
 
-  directoryPut(roomId: string, incTag: string): Promise<void> {
-    return this._run(REDIS_COMMANDS.directoryPut, { roomId, incTag })
+  directoryPut(roomId: string, incTag: string, checkAt: number): Promise<void> {
+    return this._run(REDIS_COMMANDS.directoryPut, { roomId, incTag, checkAt })
   }
 
   directoryDelete(roomId: string, incTag: string): Promise<void> {
@@ -236,6 +236,10 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
       return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
     })
     return matching.length > DIRECTORY_PAGE_SIZE ? { entries, cursor: last } : { entries }
+  }
+
+  directoryDue(now: number): Promise<DirectoryPage['entries']> {
+    return this._run(REDIS_COMMANDS.directoryDue, { now, limit: DIRECTORY_PAGE_SIZE })
   }
 
   private _generationKeys(roomId: string, inc: string): Promise<string[]> {

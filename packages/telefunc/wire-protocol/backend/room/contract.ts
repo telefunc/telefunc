@@ -150,9 +150,12 @@ type RoomDriver = {
   /** Forgets the order of `member`'s inbox and binary lanes; called once no commit to them can land. */
   dropLaneOrders(roomId: string, inc: string, member: string): Promise<void>
   dropGeneration(roomId: string, inc: string): Promise<void>
-  directoryPut(roomId: string, incTag: string): Promise<void>
+  /** Lists `roomId` under `incTag`, due at `checkAt` (ms); an entry due at Infinity is never due. */
+  directoryPut(roomId: string, incTag: string, checkAt: number): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void>
   directoryList(prefix: string, cursor?: string): Promise<DirectoryPage>
+  /** Up to a page of the entries due at `now`, earliest first; an entry stays due until it is put again or deleted. */
+  directoryDue(now: number): Promise<DirectoryPage['entries']>
   readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource>
 }
 

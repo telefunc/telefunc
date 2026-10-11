@@ -73,13 +73,19 @@ type Generation = {
 
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
 
+type DirectoryEntry = { incTag: string; checkAt: number }
+/** A directory entry's check, current while its entry is still due at `at`. */
+type DirectoryCheck = { at: number; roomId: string }
+
 /** Subscriptions by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
 type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
 
 /** @internal The backend's storage, kept apart from it so specs can inspect it and share it between backends. */
 class MemoryBackendState {
   readonly rooms = new Map<string, RoomRecord>()
-  readonly directory = new Map<string, string>()
+  readonly directory = new Map<string, DirectoryEntry>()
+  /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
+  readonly directoryChecks: DirectoryCheck[] = []
   readonly broadcastOrder = new Map<string, OrderingInfo>()
   readonly broadcastSubs: Record<BroadcastKind, Subscriptions> = {
     text: new Map(),
@@ -92,6 +98,8 @@ class MemoryBackendState {
 const DELIVERIES_PER_TURN = 1024
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
+/** The entries a due read's page holds. */
+const DIRECTORY_PAGE_SIZE = 100
 
 const NO_TARGETS: readonly MemorySubscriptionAttempt[] = []
 const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
@@ -438,20 +446,34 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     this._releaseWhenLapsed(roomId, room)
   }
 
-  async directoryPut(roomId: string, incTag: string): Promise<void> {
-    this._state.directory.set(roomId, incTag)
+  async directoryPut(roomId: string, incTag: string, checkAt: number): Promise<void> {
+    this._state.directory.set(roomId, { incTag, checkAt })
+    if (checkAt !== Infinity) pushCheck(this._state.directoryChecks, { at: checkAt, roomId })
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    if (this._state.directory.get(roomId) === incTag) this._state.directory.delete(roomId)
+    if (this._state.directory.get(roomId)?.incTag === incTag) this._state.directory.delete(roomId)
   }
 
   async directoryList(prefix: string): Promise<DirectoryPage> {
     const entries = [...this._state.directory]
       .filter(([roomId]) => roomId.startsWith(prefix))
       .sort(([left], [right]) => compareCodePoints(left, right))
-      .map(([roomId, incTag]) => ({ roomId, incTag }))
+      .map(([roomId, { incTag }]) => ({ roomId, incTag }))
     return { entries }
+  }
+
+  async directoryDue(now: number): Promise<DirectoryPage['entries']> {
+    const { directory, directoryChecks: checks } = this._state
+    // A put twice at the same time scheduled two checks, both current.
+    const due = new Map<string, DirectoryCheck>()
+    while (due.size < DIRECTORY_PAGE_SIZE && checks.length > 0 && checks[0]!.at <= now) {
+      const check = popCheck(checks)
+      if (directory.get(check.roomId)?.checkAt === check.at) due.set(check.roomId, check)
+    }
+    // Still due until put again or deleted.
+    for (const check of due.values()) pushCheck(checks, check)
+    return [...due.keys()].map((roomId) => ({ roomId, incTag: directory.get(roomId)!.incTag }))
   }
 
   // ── internals ──
@@ -500,6 +522,34 @@ function compareCodePoints(left: string, right: string): number {
     i += a > 0xffff ? 2 : 1
   }
   return left.length - right.length
+}
+
+function pushCheck(checks: DirectoryCheck[], check: DirectoryCheck): void {
+  let at = checks.push(check) - 1
+  while (at > 0) {
+    const parent = (at - 1) >> 1
+    if (checks[parent]!.at <= check.at) break
+    checks[at] = checks[parent]!
+    at = parent
+  }
+  checks[at] = check
+}
+
+function popCheck(checks: DirectoryCheck[]): DirectoryCheck {
+  const top = checks[0]!
+  const last = checks.pop()!
+  if (checks.length === 0) return top
+  let at = 0
+  for (;;) {
+    let child = 2 * at + 1
+    if (child >= checks.length) break
+    if (child + 1 < checks.length && checks[child + 1]!.at < checks[child]!.at) child++
+    if (checks[child]!.at >= last.at) break
+    checks[at] = checks[child]!
+    at = child
+  }
+  checks[at] = last
+  return top
 }
 
 function unindex(index: Map<string, Set<string>>, of: string, key: string): void {

@@ -452,9 +452,9 @@ describe('Room public behavior', () => {
   it('reports directory registration failure and repairs the open head on getOrCreate', async () => {
     const put = driver.directoryPut.bind(driver)
     let attempts = 0
-    vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc) => {
+    vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc, checkAt) => {
       if (roomId === 'index-repair' && attempts++ === 0) throw new Error('index registration failure')
-      await put(roomId, inc)
+      await put(roomId, inc, checkAt)
     })
     await expect(Room.create('index-repair')).rejects.toThrow('index registration failure')
     const open = (await driver.readHead('index-repair'))!
@@ -1504,6 +1504,21 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     await Room.list()
     expect(memoryState.rooms.get(room.id)?.gens.has(room._inc) ?? false).toBe(false)
+  })
+  it("drops a lapsed room's data and listing once a later room is created, with no Room.list() call", async () => {
+    vi.useFakeTimers()
+    const room = (await Room.create('lapsed-unlisted', { emptyTimeout: 1_000 })) as ServerRoom
+    // The server that would close it is gone, so the room lapses.
+    const compareExchangeHead = driver.compareExchangeHead.bind(driver)
+    vi.spyOn(driver, 'compareExchangeHead').mockImplementation(async (id, cx, next) => {
+      if (id === room.id) throw new RoomError('server gone')
+      return compareExchangeHead(id, cx, next)
+    })
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(await driver.readHead(room.id)).toBeNull()
+    await Room.create('next-session')
+    await vi.waitFor(() => expect(memoryState.rooms.has(room.id)).toBe(false))
+    expect(memoryState.directory.has(room.id)).toBe(false)
   })
   it('lists a closing room without dropping the incarnation its close still owns', async () => {
     const room = (await Room.create('closing-listed')) as ServerRoom
