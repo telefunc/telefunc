@@ -23,6 +23,7 @@ import {
   type RoomDemandEvent,
   type RoomDataPublish,
   type RoomDmEnvelope,
+  type SenderStamp,
   type RoomEnvelope,
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
@@ -80,6 +81,8 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly _roster = createDeferred()
   /** The roster streaming in: its members so far and the part due next. */
   private _rosterIn: { members: MemberSnapshot[]; next: number } | null = null
+  /** The members of the rosters streaming in or applying, by id, which an unstamped message may name. */
+  private readonly _rosterPending = new Map<string, MemberSnapshot>()
   /** The rosters received and not yet applied, applied in turn. */
   private _rostersApplying = 0
   private _rosterApplied: Promise<void> = Promise.resolve()
@@ -104,6 +107,7 @@ class ClientRoom extends RoomStateView implements Room {
       onCallbackError: reportClientCallbackError,
       trackWantsMax: ROOM_TRACK_WANTS_MAX,
       onLeave: (id, cause) => this._onLeave(id, cause),
+      pendingMember: (id) => this._rosterPending.get(id),
     })
     if (snapshot.closed) this._roster.resolve()
 
@@ -266,7 +270,14 @@ class ClientRoom extends RoomStateView implements Room {
       case 'dm': {
         // Relayed from this member's private inbox: only its own stub ever receives it.
         const local = this._localParticipants.get(event.to)
-        if (local) this._deliverDm(local, inboxMessageFromWire(event))
+        if (!local) return
+        // A room-authored DM has no sender to resolve.
+        if (event.from === '') return this._deliverDm(local, inboxMessageFromWire(event))
+        const { meta, identity } = this._state.resolveSender(event as RoomDmEnvelope & Partial<SenderStamp>)
+        this._deliverDm(
+          local,
+          inboxMessageFromWire({ ...event, fromMeta: meta, ...(identity === null ? {} : { fromIdentity: identity }) }),
+        )
         return
       }
     }
@@ -296,7 +307,10 @@ class ClientRoom extends RoomStateView implements Room {
       return this._stopRosterEvents()
     }
     this._rosterEvents ??= this._state.recordMembership()
-    for (const member of members) into.members.push(member)
+    for (const member of members) {
+      into.members.push(member)
+      this._rosterPending.set(member.id, member)
+    }
     into.next++
     if (more) return
     this._rosterIn = null
@@ -319,6 +333,7 @@ class ClientRoom extends RoomStateView implements Room {
   private _stopRosterEvents(): void {
     if (this._rosterIn !== null || this._rostersApplying > 0 || this._rosterEvents === null) return
     this._rosterEvents = null
+    this._rosterPending.clear()
     this._state.stopRecordingMembership()
   }
 

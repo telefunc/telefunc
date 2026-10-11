@@ -15,6 +15,8 @@ export type {
   RoomMetaEntry,
   RoomMetaUpdate,
   RoomDataEnvelope,
+  RoomDataEvent,
+  SenderStamp,
   RoomDataPublish,
   RoomDmEnvelope,
   RoomDmAckEnvelope,
@@ -111,19 +113,18 @@ type RoomMetaUpdate =
   | { __r: 'update'; seq: number; changes: (RoomMetaEntry | [key: string])[] }
 /** A `LeaveCause` on the wire: no `cause` means the member left on its own. */
 type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
-/** A member's message; its order rides the transport frame. `fromMeta` is stamped by the sender's instance, never the client, so a receiver behind on the roster still names the sender. */
-type RoomDataEnvelope = {
-  __r: 'data'
-  from: string
-  fromMeta: ParticipantMeta
-  fromIdentity?: string
-  data: unknown
-}
+/** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the client. */
+type SenderStamp = { fromMeta: ParticipantMeta; fromMetaSeq: number; fromIdentity?: string }
+/** A member's message on the lane; its order rides the transport frame. Stamped, so a receiver behind on the roster still
+ *  names the sender. */
+type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown } & SenderStamp
+/** A member's message as a client gets it: stamped only while the client can't name the sender yet. */
+type RoomDataEvent = { __r: 'data'; from: string; data: unknown } & Partial<SenderStamp>
 /** What a client sends upward to publish. Its instance verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
 /** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
-type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
+type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent | RoomAnnounceEnvelope
 /** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it; `more`
  *  on all but the last. A failed read says so, so roster getters don't wait forever. */
 type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true } | { __r: 'roster-error' }
@@ -132,12 +133,14 @@ type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[]; part: number;
 type RoomDemandEvent =
   | { __r: 'demand'; member: string; track: string | null; wanted: boolean }
   | { __r: 'demand-state'; member: string; tracks: Array<string | null> }
-/** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. */
+/** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. A
+ *  room-authored one has no sender (`from: ''`, `fromMeta: null`); a client that names the sender gets it unstamped. */
 type RoomDmEnvelope = {
   __r: 'dm'
   to: string
   from: string
-  fromMeta: ParticipantMeta | null
+  fromMeta?: ParticipantMeta | null
+  fromMetaSeq?: number
   fromIdentity?: string
   data: unknown
   ackId?: string
@@ -196,13 +199,13 @@ type WireDm = Omit<RoomDmEnvelope, '__r' | 'to'>
 function inboxMessageFromWire(dm: WireDm): InboxMessage {
   return {
     from: dm.from,
-    fromMeta: dm.fromMeta,
+    fromMeta: dm.fromMeta ?? null,
     fromIdentity: dm.fromIdentity ?? null,
     data: dm.data,
     ...(dm.ackId ? { ackId: dm.ackId } : {}),
   }
 }
-function wireDmFromInbox(msg: InboxMessage): WireDm {
+function wireDmFromInbox(msg: InboxMessage): WireDm & { fromMeta: ParticipantMeta | null } {
   return {
     from: msg.from,
     fromMeta: msg.fromMeta,

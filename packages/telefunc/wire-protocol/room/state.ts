@@ -16,9 +16,10 @@ import type {
   AcceptedMeta,
   MemberSnapshot,
   MemberWants,
-  RoomDataEnvelope,
+  RoomDataEvent,
   RoomMetaEntry,
   RoomMetaUpdate,
+  SenderStamp,
 } from './protocol.js'
 import type {
   BinaryFrameInfo,
@@ -86,6 +87,8 @@ type RoomStateOptions = {
   onMetaWaiting?: () => void
   /** How many tracks its binary listeners may name, each `(member or room, track)` pair once; unbounded if omitted. */
   trackWantsMax?: number
+  /** A member of a roster still streaming in or applying, which an unstamped message may name. */
+  pendingMember?: (id: string) => MemberSnapshot | undefined
 }
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
@@ -193,6 +196,7 @@ class RoomState {
   private readonly _trackWantsMax: number
   private readonly _meta: RoomMetaState
   private readonly _onMetaWaiting: () => void
+  private readonly _pendingMember: (id: string) => MemberSnapshot | undefined
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
@@ -208,6 +212,7 @@ class RoomState {
     this._onCallbackError = opts.onCallbackError
     this._onLeave = opts.onLeave
     this._trackWantsMax = opts.trackWantsMax ?? Number.POSITIVE_INFINITY
+    this._pendingMember = opts.pendingMember ?? (() => undefined)
     if ('members' in opts.seed) {
       this._rosterKnown = true
       for (const member of opts.seed.members) this._createEntry(member)
@@ -249,6 +254,10 @@ class RoomState {
   }
   hasMember(id: string): boolean {
     return this._members.has(id)
+  }
+  /** Null for a member this view doesn't know. */
+  memberHidden(id: string): boolean | null {
+    return this._members.get(id)?.hidden ?? null
   }
   /** `all` while room-level `subscribe()`rs exist, and the members with participant-scoped listeners either way. */
   textWants(): MemberWants {
@@ -487,11 +496,32 @@ class RoomState {
     this._fireAll(this._announceCbs, data, info)
   }
   /** Never waits on the roster: an unknown sender (its join may be behind on the control lane) is the snapshot its instance stamped. */
-  applyData(event: RoomDataEnvelope, info: ChannelPublishInfo): void {
-    const entry = this._members.get(event.from)
-    const sender = entry ? this._remote(entry) : senderOf(event.from, event.fromMeta, event.fromIdentity ?? null)
+  applyData(event: RoomDataEvent, info: ChannelPublishInfo): void {
+    const sender = this.resolveSender(event)
     this._fireAll(this._roomDataCbs, event.data, info, sender)
+    const entry = this._members.get(event.from)
     if (entry?.dataCbs) this._fireAll(entry.dataCbs, event.data, info)
+  }
+  /** A message's sender as of its send: a stamp newer than the member's meta here applies first, as the meta update it
+   *  is. Unstamped, the sender is one this view was sent, maybe in a roster still applying. */
+  resolveSender({ from, fromMeta, fromMetaSeq, fromIdentity }: { from: string } & Partial<SenderStamp>): Sender {
+    const entry = this._members.get(from)
+    if (fromMeta !== undefined && fromMetaSeq !== undefined) {
+      if (!entry) return senderOf(from, fromMeta, fromIdentity ?? null)
+      if (entry.metaSeq < fromMetaSeq) this.applyParticipantMeta(from, fromMeta, fromMetaSeq)
+      return this._remote(entry)
+    }
+    const pending = this._pendingMember(from)
+    if (entry) {
+      if (pending !== undefined && pending.metaSeq > entry.metaSeq)
+        this.applyParticipantMeta(from, pending.meta, pending.metaSeq)
+      return this._remote(entry)
+    }
+    assert(pending !== undefined)
+    // A meta change relayed after the member's roster part.
+    const early = this._preRosterMeta.get(from)
+    const meta = early !== undefined && early.seq > pending.metaSeq ? early.meta : pending.meta
+    return senderOf(from, ownMetadata(meta), pending.identity ?? null)
   }
   /** A binary frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
   applyBinary({ from, payload, track, meta }: BinaryFrame, info: ChannelPublishInfo): void {

@@ -44,6 +44,7 @@ import {
   type RoomSnapshotMetadata,
   type RoomCtrlEnvelope,
   type RoomDataEnvelope,
+  type SenderStamp,
   type RoomDmEnvelope,
   type RoomDmAckEnvelope,
   type DmReply,
@@ -53,7 +54,7 @@ import {
 import { RoomState, RoomStateView, type MembershipEvent } from '../state.js'
 import { RoomDemand } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
-import { RoomStubChannel, unorderedEventText } from './stub.js'
+import { MemberMessageTexts, RoomStubChannel, unorderedEventText } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, binaryLaneKey, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
@@ -146,6 +147,8 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _localSuppressed = new Set<string>()
   /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
   private readonly _pendingAdmissions = new Set<string>()
+  /** A roster reconciling into this view, whose drift reaches its clients once it ends. */
+  private _reconciling = false
 
   private readonly _publishTurns = new Map<string, Promise<void>>()
   /** Binary demand across instances (`onDemand`). */
@@ -339,13 +342,7 @@ class ServerRoom extends RoomStateView implements Room {
   async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const { sender, commit } = await this._inCallOrder(from, async (sent) => {
       const sender = await this._admitPublish(from, data)
-      const envelope: RoomDataEnvelope = {
-        __r: 'data',
-        from,
-        fromMeta: sender.meta,
-        ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
-        data,
-      }
+      const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...this._stampOf(from, sender) }
       const record = encodeRoomRecord(envelope)
       const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitRoomLaneOrThrow(this.id, this._inc, SEMANTIC_LANE, record, opts)
@@ -405,6 +402,16 @@ class ServerRoom extends RoomStateView implements Room {
     return { key: this.id, ...receipt }
   }
 
+  /** `sender` with the meta seq it reflects, as `_memberSender(from)` just read it. */
+  private _stampOf(from: string, sender: Sender): SenderStamp {
+    const seq = this._state.acceptedMeta(from)?.seq ?? this._localParticipants.get(from)!._acceptedMeta.seq
+    return {
+      fromMeta: sender.meta,
+      fromMetaSeq: seq,
+      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
+    }
+  }
+
   /** A member that left while its call waited has no sender to show a guard. */
   private _memberSender(from: string): Sender {
     const known = this._state.getRemote(from) ?? this._localParticipants.get(from)
@@ -450,8 +457,7 @@ class ServerRoom extends RoomStateView implements Room {
       __r: 'dm',
       to,
       from,
-      fromMeta: sender.meta,
-      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
+      ...this._stampOf(from, sender),
       data,
       ...(ackId ? { ackId } : {}),
     }
@@ -531,15 +537,33 @@ class ServerRoom extends RoomStateView implements Room {
       this._tail?.push({ serialized, ord: rawInfo, from: event.from })
       return
     }
-    const wireText = encodePublishText(serialized, rawInfo)
-    for (const stub of this._stubs) stub._relayText(serialized, wireText, event.from, rawInfo)
+    const texts = new MemberMessageTexts(serialized, rawInfo, () => ({
+      __r: 'data',
+      from: event.from,
+      data: event.data,
+    }))
+    for (const stub of this._stubs) stub._relayText(serialized, texts, event.from, rawInfo)
   }
   /** @internal */
   _onTextData(serialized: string, rawInfo: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') return this._applyAnnouncement(envelope, serialized, rawInfo)
+    this._applyStamp(envelope.from, envelope)
     this._local.relayText(envelope, rawInfo)
     this._relayMemberData(serialized, envelope, rawInfo)
+  }
+  /** A stamp newer than the sender's meta here is the update this view missed so far: it applies and relays first, so
+   *  every client here names the sender as of the send. */
+  private _applyStamp(id: string, { fromMeta, fromMetaSeq }: SenderStamp): void {
+    const hidden = this._state.memberHidden(id)
+    if (hidden === null || this._state.acceptedMeta(id)!.seq >= fromMetaSeq) return
+    const update = { __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq, ...(hidden ? { hidden: true } : {}) } as const
+    if (this._applyCtrl(update)) this._relayApplied(update)
+  }
+  /** @internal Whether a client of this view was sent every member it holds, as it holds them: no roster reconciles
+   *  into it unsent. */
+  get _rosterSettled(): boolean {
+    return !this._reconciling
   }
   /** @internal */
   _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -559,7 +583,12 @@ class ServerRoom extends RoomStateView implements Room {
     if (envelope.__r === 'dm-ack') return this._pendingDmAcks.settle(envelope.ackId, envelope)
     const holder = this._holderOf(envelope.to)
     // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
-    if (holder instanceof RoomStubChannel) return holder._relayDm(encodePublishText(serialized, rawInfo), envelope)
+    if (holder instanceof RoomStubChannel) {
+      if (envelope.fromMetaSeq !== undefined) this._applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
+      const { fromMeta, fromMetaSeq, fromIdentity, ...unstamped } = envelope
+      const texts = new MemberMessageTexts(serialized, rawInfo, () => unstamped)
+      return holder._relayDm(texts, envelope)
+    }
     if (holder === undefined) return
     const msg = inboxMessageFromWire(envelope)
     const { ackId } = envelope
@@ -650,18 +679,26 @@ class ServerRoom extends RoomStateView implements Room {
     roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
     events: readonly MembershipEvent[],
   ): Promise<boolean> {
-    const drifted = await this._state.reconcileRoster(roster, events)
-    if (drifted === null) return false
-    const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
-    this._rosterOwed.clear()
-    if (recipients.length > 0) void this._streamRoster(recipients).catch(reportRoomError)
-    return true
+    this._reconciling = this._state.rosterKnown
+    try {
+      const drifted = await this._state.reconcileRoster(roster, events)
+      if (drifted === null) return false
+      const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
+      this._rosterOwed.clear()
+      if (recipients.length > 0) void this._streamRoster(recipients).catch(reportRoomError)
+      return true
+    } finally {
+      this._reconciling = false
+    }
   }
   /** The roster to `stubs`, `ROOM_ROSTER_PART_MEMBERS` live members per part and a `ROOM_PLAN_SLICE_MS` slice per turn, so
    *  each event relayed between two parts is one the parts after it reflect. A stub sent a newer roster drops out. */
   private async _streamRoster(stubs: RoomStubChannel[]): Promise<void> {
     const stream = {}
-    for (const stub of stubs) stub._rosterStream = stream
+    for (const stub of stubs) {
+      stub._rosterStream = stream
+      stub._rosterSent = false
+    }
     const members = this._state.memberSnapshots()
     let deadline = performance.now() + ROOM_PLAN_SLICE_MS
     for (let part = 0; ; part++) {
@@ -685,6 +722,7 @@ class ServerRoom extends RoomStateView implements Room {
         stub._relayEventText(
           listed === visible ? (visibleText ??= unorderedEventText(event)) : unorderedEventText(event),
         )
+        if (!more) stub._rosterSent = true
       }
       if (!more) return
       if (performance.now() < deadline) continue

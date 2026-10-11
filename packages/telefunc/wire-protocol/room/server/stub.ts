@@ -1,4 +1,4 @@
-export { RoomStubChannel, RoomParticipantStubChannel, ResponseRoomGrants, unorderedEventText }
+export { RoomStubChannel, RoomParticipantStubChannel, ResponseRoomGrants, MemberMessageTexts, unorderedEventText }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -105,6 +105,23 @@ function unorderedEventText(event: RoomCtrlEnvelope | RoomRosterEvent | RoomDema
   return encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() })
 }
 
+/** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. */
+class MemberMessageTexts {
+  private _stamped: string | null = null
+  private _unstamped: string | null = null
+  constructor(
+    private readonly _serialized: string,
+    private readonly _info: WirePublishInfo,
+    private readonly _unstampedEvent: () => object,
+  ) {}
+  stamped(): string {
+    return (this._stamped ??= encodePublishText(this._serialized, this._info))
+  }
+  unstamped(): string {
+    return (this._unstamped ??= encodePublishText(stringify(this._unstampedEvent()), this._info))
+  }
+}
+
 /** The publish shield validates Room data at ingress only. */
 function assertPublishShield(validate: ShieldValidator | undefined, data: unknown): void {
   if (!validate) return
@@ -134,6 +151,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _tail: TailHold | null = null
   /** @internal The roster stream this client is being sent; a newer one replaces it. */
   _rosterStream: object | null = null
+  /** @internal Whether this client was sent the whole roster since it attached. */
+  _rosterSent = false
 
   constructor(
     serverRoom: ServerRoom,
@@ -148,6 +167,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   protected override _onAttached(): void {
+    this._rosterSent = false
     this._room._onStubAttached(this)
   }
 
@@ -345,9 +365,10 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     if (this._announce) this._relayTextLive(ANNOUNCE_KEY, wireText, ord)
   }
 
-  _relayText(serialized: string, wireText: string, from: string, ord: WirePublishInfo): void {
+  _relayText(serialized: string, texts: MemberMessageTexts, from: string, ord: WirePublishInfo): void {
     if (this._tail !== null) this._tail.push({ serialized, ord, from })
-    else if (this._wantsTextFrom(from)) this._relayTextLive(from, wireText, ord)
+    else if (this._wantsTextFrom(from))
+      this._relayTextLive(from, this._namesSender(from) ? texts.unstamped() : texts.stamped(), ord)
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
@@ -355,9 +376,20 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
       this._sendPublishBinary(wireData)
   }
 
-  _relayDm(wireText: string, { from, ackId }: RoomDmEnvelope): void {
+  _relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
     if (ackId) this._recordAckDm(ackId, from)
-    this._sendPublish(wireText)
+    this._sendPublish(fromMetaSeq !== undefined && this._namesSender(from) ? texts.unstamped() : texts.stamped())
+  }
+
+  /** Whether this client names `member` as this view does: it got the whole roster since it attached, and every event
+   *  after it, none dropped while it was away. A hidden member's grant may reach the client after a message does. */
+  private _namesSender(member: string): boolean {
+    return (
+      this._peer !== null &&
+      this._rosterSent &&
+      this._room._rosterSettled &&
+      this._room._state.memberHidden(member) === false
+    )
   }
 
   _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void {

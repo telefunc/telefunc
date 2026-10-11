@@ -48,7 +48,7 @@ import { config as clientConfig } from '../../client/clientConfig.js'
 import type { LaneSubscription } from './server/lane-subscription.js'
 import { reportRoomError } from './server/errors.js'
 import { heldSendWeight } from '../backend/held-send-weight.js'
-import { ResponseRoomGrants, RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
+import { MemberMessageTexts, ResponseRoomGrants, RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { TailHold } from './server/tail.js'
 import { WantsIndex } from './server/wants-index.js'
 import { RoomDemand } from './demand.js'
@@ -1233,6 +1233,76 @@ describe('Room public behavior', () => {
     expect(loaded.isEmpty).toBe(true)
     expect((await Room.list()).find(({ id }) => id === room.id)).toMatchObject({ count: 0, isEmpty: true })
   })
+  it("relays a member's message without its meta to a client that names the member, so its size is the same at any meta size", async () => {
+    const room = (await Room.create('stamp-named')) as ServerRoom
+    const large = Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`k${i}`, 'x'.repeat(90)]))
+    const sender = await room.join({ meta: large })
+    const other = await room.join({ meta: { n: 1 } })
+    const stub = register(room)
+    const peer = attachPeer(stub, undefined, { text: true, binary: false })
+    await vi.waitFor(() => expect(rosterEnded(peer)).toBe(true))
+    const { client, emit } = fakeClient(room.id)
+    const named: unknown[] = []
+    client.subscribe((_data, _info, from) => named.push([from.id, from.meta]))
+    await sender.publish('hi')
+    await other.publish('hi')
+    await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toHaveLength(2))
+    const frames = peer.decoded().filter((frame) => frame.tag === TAG.PUBLISH)
+    for (const frame of frames) emit(parse(frame.text), frame.info.seq)
+    const data = frames.filter((frame) => (parse(frame.text) as { __r: string }).__r === 'data')
+    expect(data.map((frame) => frame.text.length)).toEqual([data[1]!.text.length, data[1]!.text.length])
+    expect(named).toEqual([
+      [sender.id, large],
+      [other.id, { n: 1 }],
+    ])
+  })
+  it('names a member to a client whose roster has not arrived as the member was when it sent', async () => {
+    const authority = await Room.create('stamp-roster-pending')
+    const sender = await authority.join({ meta: { v: 1 } })
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const roster = delayRosterRead(authority.id)
+    try {
+      const stub = register(observer)
+      const peer = attachPeer(stub, undefined, { text: true, binary: false })
+      await roster.started
+      await sender.publish('first')
+      await sender.setMeta({ v: 2 })
+      await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['first']))
+      roster.release()
+      await vi.waitFor(() => expect(rosterEnded(peer)).toBe(true))
+      await sender.publish('second')
+      await vi.waitFor(() => expect(semanticFrames(peer, 'data')).toEqual(['first', 'second']))
+      const { client, emit } = fakeClient(authority.id)
+      const named: unknown[] = []
+      client.subscribe((data, _info, from) => named.push([data, from.meta]))
+      for (const frame of peer.decoded()) if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
+      expect(named).toEqual([
+        ['first', { v: 1 }],
+        ['second', { v: 2 }],
+      ])
+    } finally {
+      roster.release()
+    }
+  })
+  it("applies a stamp newer than a view's meta of its sender before the message, so every client names the sender as it sent", async () => {
+    const room = (await Room.create('stamp-ahead')) as ServerRoom
+    const sender = await room.join({ meta: { v: 1 } })
+    const stub = register(room)
+    const peer = attachPeer(stub, undefined, { text: true, binary: false })
+    await vi.waitFor(() => expect(rosterEnded(peer)).toBe(true))
+    const updates: unknown[] = []
+    room.onParticipantUpdate((member, meta) => updates.push([member.id, meta]))
+    // A send whose meta write this view hasn't got yet, as from an instance ahead of it on the control lane.
+    const envelope = { __r: 'data', from: sender.id, data: 'hi', fromMeta: { v: 2 }, fromMetaSeq: 1 }
+    room._onTextData(stringify(envelope), { seq: 1, timestamp: 1 })
+    expect(updates).toEqual([[sender.id, { v: 2 }]])
+    const { client, emit } = fakeClient(room.id)
+    const named: unknown[] = []
+    client.subscribe((_data, _info, from) => named.push(from.meta))
+    for (const frame of peer.decoded()) if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
+    expect(named).toEqual([{ v: 2 }])
+    expect(relayed(peer).find((event) => event.__r === 'data')).not.toHaveProperty('fromMeta')
+  })
   it('keeps local and verified sender metadata at the newest accepted sequence', async () => {
     const room = (await Room.create('participant-meta-order')) as ServerRoom
     const participant = await room.join()
@@ -2162,9 +2232,10 @@ describe('Room public behavior', () => {
       data: 'ping',
       ackId,
     })
-    stub._relayDm('{}', dm('a'))
+    const texts = () => new MemberMessageTexts('{}', { seq: 0, timestamp: 0 }, () => ({}))
+    stub._relayDm(texts(), dm('a'))
     await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS + 1)
-    stub._relayDm('{}', dm('b'))
+    stub._relayDm(texts(), dm('b'))
     declare(stub, { __r: 'dm-reply', ackId: 'a', reply: { ok: true, result: 'late' } })
     declare(stub, { __r: 'dm-reply', ackId: 'b', reply: { ok: true, result: 'in time' } })
     expect(publishDmAck.mock.calls.map(([, ackId]) => ackId)).toEqual(['b'])
@@ -4166,7 +4237,10 @@ describe('client Room lifecycle', () => {
     const participant = await joining
     const answer = createDeferred<string>()
     participant.listen(() => answer.promise)
-    emit({ __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, data: 'hi', ackId: 'ack-late' }, 1)
+    emit(
+      { __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, fromMetaSeq: 0, data: 'hi', ackId: 'ack-late' },
+      1,
+    )
     Object.defineProperty(fake.stub, 'isClosed', { value: true })
     const send = vi.spyOn(fake.stub, 'send').mockImplementation(() => {
       throw new ChannelClosedError()
@@ -4196,9 +4270,23 @@ describe('client Room lifecycle', () => {
     const { id, ack, emit, joining, client } = await pendingClientJoin('pre-ack-events', (message) => {
       if ((message as { __r?: string }).__r === 'dm-reply') replies.push(message)
     })
-    emit({ __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, data: 'welcome', ackId: 'ack-welcome' }, 1)
+    emit(
+      {
+        __r: 'dm',
+        to: id,
+        from: crypto.randomUUID(),
+        fromMeta: {},
+        fromMetaSeq: 0,
+        data: 'welcome',
+        ackId: 'ack-welcome',
+      },
+      1,
+    )
     emit({ __r: 'join', id, meta: {}, joinedAt: 1 }, 2)
-    emit({ __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, data: 'again', ackId: 'ack-again' }, 3)
+    emit(
+      { __r: 'dm', to: id, from: crypto.randomUUID(), fromMeta: {}, fromMetaSeq: 0, data: 'again', ackId: 'ack-again' },
+      3,
+    )
     emit({ __r: 'demand', member: id, track: 'screen', wanted: true }, 4)
     ack.resolve({ id, joinedAt: 1 })
     const participant = await joining
@@ -5422,6 +5510,10 @@ type RelayedEvent = {
 /** Every event a Room stub relayed to its client, in order. */
 function relayed(peer: Peer): RelayedEvent[] {
   return peer.decoded().flatMap((frame) => (frame.tag === TAG.PUBLISH ? [parse(frame.text) as RelayedEvent] : []))
+}
+/** Whether the stub relayed a roster's last part. */
+function rosterEnded(peer: Peer): boolean {
+  return relayed(peer).some((event) => event.__r === 'roster' && !('more' in event))
 }
 function memberEvents(peer: Peer, id: string): RelayedEvent[] {
   return relayed(peer).filter((event) => event.id === id)
