@@ -4371,10 +4371,13 @@ describe('RoomState', () => {
   it('records the events of members it does not know for a roster read, and narrates only what a roster changes', async () => {
     const state = newState({ roomId: 'unknown-member-epoch' })
     const id = crypto.randomUUID()
-    const { events } = await state.recordingMembership(async () => {
-      state.applyParticipantMeta(id, { step: 1 }, 1)
-      state.applyLeave(id, { type: 'left' })
-    })
+    const events = await state.recordingMembership(
+      async () => {
+        state.applyParticipantMeta(id, { step: 1 }, 1)
+        state.applyLeave(id, { type: 'left' })
+      },
+      (_, events) => events,
+    )
     expect(events).toEqual([{ meta: { id, meta: { step: 1 }, seq: 1 } }, { leave: id }])
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
     expect(state.reconcileRoster([member])).toBe(true)

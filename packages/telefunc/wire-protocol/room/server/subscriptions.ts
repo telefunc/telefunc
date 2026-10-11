@@ -546,11 +546,16 @@ class RoomSubscriptions {
   private async _runMemberRefresh(): Promise<void> {
     const host = this._host
     if (host._state.closed) return
-    const read = await host._state.recordingMembership(() => reapAndReadRoster(host._incarnation))
-    if (host._state.closed) return
-    const { members, departing } = replayMembership(read.value, read.events)
-    host._applyAuthorityRoster(members, departing)
-    this.replan()
+    const read = await host._state.recordingMembership(
+      () => reapAndReadRoster(host._incarnation),
+      (roster, events) => {
+        if (host._state.closed) return false
+        const { members, departing } = replayMembership(roster, events)
+        host._applyAuthorityRoster(members, departing)
+        return true
+      },
+    )
+    if (read) this.replan()
   }
 
   // Graceful departures use events; heartbeats renew owned members and reap records orphaned by hard crashes.

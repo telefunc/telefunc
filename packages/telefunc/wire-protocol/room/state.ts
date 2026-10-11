@@ -341,16 +341,22 @@ class RoomState {
     this._stateVersion++
     this._fireAll(this._changeCbs)
   }
-  /** Runs `read`, recording the membership events this view gets meanwhile. */
-  async recordingMembership<T>(read: () => Promise<T>): Promise<{ value: T; events: MembershipEvent[] }> {
+  /** Runs `read`, recording the membership events this view gets meanwhile, and hands both to `settle` in the same
+   *  microtask, so no event lands unrecorded in between. */
+  async recordingMembership<T, R>(
+    read: () => Promise<T>,
+    settle: (value: T, events: readonly MembershipEvent[]) => R,
+  ): Promise<R> {
     assert(this._recording === null)
     const events: MembershipEvent[] = []
     this._recording = events
+    let value: T
     try {
-      return { value: await read(), events }
+      value = await read()
     } finally {
       this._recording = null
     }
+    return settle(value, events)
   }
   private _record(event: MembershipEvent): void {
     this._recording?.push(event)
