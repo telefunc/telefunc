@@ -51,10 +51,13 @@ type SubscriptionHost = {
   _closeFromAuthority(): void
 }
 
+/** Of one member: the named tracks some holder here receives, and the tracks named of every member none does. */
+type NamedCounts = { named: number; unreached: number }
+
 /** What this instance subscribes: a function of its holders' wants, ownership and membership, kept current per change,
  *  recovered within Room's horizon, and renewed by the heartbeat. */
 class RoomSubscriptions {
-  private readonly _wants = new WantsIndex()
+  private readonly _wants = new WantsIndex((track, named) => this._demand.setTrack(track, named))
   private readonly _control = this._newLaneSubscription()
   private readonly _semantic = this._newLaneSubscription()
   /** Named lanes, keyed by (member, track); `_binaryTracks` lists each member's. */
@@ -63,8 +66,11 @@ class RoomSubscriptions {
   /** Each member's every-track lane, while some holder here receives all of its tracks or more than
    *  `ROOM_MEMBER_NAMED_LANES_MAX` named ones. */
   private readonly _everyTrack = new Map<string, LaneSubscription>()
-  /** The named tracks of each member some holder here receives. */
-  private readonly _named = new Map<string, Set<string>>()
+  /** Per present member, how many named tracks some holder here receives of it, and how many of the tracks named of
+   *  every member none does. */
+  private readonly _counts = new Map<string, NamedCounts>()
+  /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
+  private readonly _overflowing = new Set<string>()
   /** The binary lanes that were ready once: what they carry is this instance's demand. */
   private readonly _delivering = new WeakSet<LaneSubscription>()
   /** The members whose every-track lane waits for the named lanes replacing it. */
@@ -115,7 +121,7 @@ class RoomSubscriptions {
   holderChanged(holder: LaneHolder, gone = false, members?: Iterable<string>): void {
     const affected = this._wants.update(holder, gone, members)
     this._replanAround(() => {
-      for (const member of this._membersOf(affected)) this._syncMemberBinary(member)
+      for (const member of this._membersOf(affected)) this._syncMemberBinary(member, true)
     })
   }
 
@@ -127,18 +133,30 @@ class RoomSubscriptions {
 
   /** One of a holder's binary wants changed: a want of one track replans only that track's pairs. */
   binaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
-    const affected = this._wants.applyBinary(holder, change)
     const { track } = change
+    const wasEveryMember = track !== null && this._wants.namesEveryMember(track)
+    const affected = this._wants.applyBinary(holder, change)
     this._replanAround(() => {
-      for (const member of this._membersOf(affected))
-        if (track === null) this._syncMemberBinary(member)
-        else this._syncNamedLane(member, track)
+      for (const member of this._membersOf(affected)) {
+        if (track === null) {
+          this._syncMemberBinary(member)
+          continue
+        }
+        const counts = this._counts.get(member)
+        if (counts !== undefined) {
+          const [before, after] = this._wants.namedPairChange(holder, { ...change, track }, member)
+          const everyMember = this._wants.namesEveryMember(track)
+          counts.named += Number(after) - Number(before)
+          counts.unreached += Number(everyMember && !after) - Number(wasEveryMember && !before)
+        }
+        this._syncNamedLane(member, track)
+      }
     })
   }
 
-  /** A member joined. */
+  /** A member joined, or which holders suppress it changed. */
   memberChanged(member: string): void {
-    this._replanAround(() => this._syncMemberBinary(member))
+    this._replanAround(() => this._syncMemberBinary(member, true))
   }
 
   /** A member this instance now owns gets its inbox. */
@@ -210,6 +228,7 @@ class RoomSubscriptions {
     if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster))
       void this._refreshMembers().catch(reportRoomError)
     change()
+    this._demand.flush()
     this._syncHeartbeat()
   }
 
@@ -219,49 +238,51 @@ class RoomSubscriptions {
 
   /** A member's binary lanes: its every-track lane while some holder here receives all of its tracks or more than
    *  `ROOM_MEMBER_NAMED_LANES_MAX` named ones, else a lane per named track. A switch between them keeps the lanes it
-   *  leaves until the lanes it takes deliver. */
-  private _syncMemberBinary(member: string): void {
-    const state = this._host._state
-    const present = !state.closed && state.hasMember(member)
-    const tracks = present ? this._wants.namedTracksOf(member) : new Set<string>()
-    for (const track of [
-      ...(this._binaryTracks.get(member) ?? []),
-      ...this._demand.localTracks(member),
-      ...(this._named.get(member) ?? []),
-    ])
-      tracks.add(track)
-    const named = new Map<string, boolean>()
-    for (const track of tracks) {
-      const wanted = present && this._wants.wantsNamedPair(member, track)
-      named.set(track, wanted)
-      this._setNamed(member, track, wanted)
-    }
+   *  leaves until the lanes it takes deliver. `recount` when the member's named wants may have changed wholesale. */
+  private _syncMemberBinary(member: string, recount = false): void {
+    const present = this._present(member)
+    if (!present) this._counts.delete(member)
+    else if (recount || !this._counts.has(member)) this._counts.set(member, this._countNamed(member))
+    const counts = this._counts.get(member)
     const wantsAll = present && this._wants.wantsEveryTrack(member)
-    const servedByAll = wantsAll || this._overflows(member)
+    const overflows = this._overflows(counts)
+    if (overflows) this._overflowing.add(member)
+    else this._overflowing.delete(member)
+    const servedByAll = wantsAll || overflows
     if (servedByAll) this._openEveryTrack(member)
     const all = this._everyTrack.get(member)
-    const everyTrackDemand = wantsAll && this._delivering.has(all!)
-    // On before off, so a pair one lane hands to another stays wanted throughout.
-    if (everyTrackDemand) this._demand.setLocal(member, null, true)
-    for (const [track, wanted] of named) this._syncLane(member, track, wanted, servedByAll)
-    if (!everyTrackDemand) this._demand.setLocal(member, null, false)
+    const allDelivers = all !== undefined && this._delivering.has(all)
+    this._demand.setPair(member, null, wantsAll && allDelivers)
+    const covered = allDelivers && this._reachesEveryMemberTrack(counts)
+    this._demand.setCovers(member, covered)
+    for (const track of [...(this._binaryTracks.get(member) ?? []), ...this._demand.localTracks(member)])
+      this._syncLane(member, track, servedByAll)
+    // A covered member gets the tracks named of every member through `covers`; an establishing every-track lane none.
+    let tracks: Iterable<string> = []
+    if (!servedByAll || (allDelivers && !covered)) tracks = this._wants.namedTracksOf(member)
+    else if (allDelivers) tracks = this._wants.memberTracksOf(member)
+    for (const track of tracks) this._syncLane(member, track, servedByAll)
     if (!servedByAll && all !== undefined) this._releaseEveryTrack(member, all)
   }
 
-  /** One named pair; a want that moves the member across `ROOM_MEMBER_NAMED_LANES_MAX` replans all of its lanes. */
+  /** One named pair, after its counts changed; a want that moves the member across `ROOM_MEMBER_NAMED_LANES_MAX`, or
+   *  into or out of being covered, replans all of its lanes. */
   private _syncNamedLane(member: string, track: string): void {
-    const state = this._host._state
-    const present = !state.closed && state.hasMember(member)
-    const wanted = present && this._wants.wantsNamedPair(member, track)
-    const overflowed = this._overflows(member)
-    this._setNamed(member, track, wanted)
-    if (this._overflows(member) !== overflowed) return this._syncMemberBinary(member)
-    this._syncLane(member, track, wanted, present && (this._wants.wantsEveryTrack(member) || overflowed))
+    const counts = this._counts.get(member)
+    if (counts === undefined && this._present(member)) return this._syncMemberBinary(member)
+    const overflows = this._overflows(counts)
+    const all = this._everyTrack.get(member)
+    const covered = all !== undefined && this._delivering.has(all) && this._reachesEveryMemberTrack(counts)
+    if (overflows !== this._overflowing.has(member) || covered !== this._demand.covers(member))
+      return this._syncMemberBinary(member)
+    this._syncLane(member, track, counts !== undefined && (this._wants.wantsEveryTrack(member) || overflows))
   }
 
   /** A named lane while some holder names the track and the every-track lane doesn't serve the member; beside that
-   *  lane, one stays until it delivers. The pair is demand while some lane here delivers it to a holder that wants it. */
-  private _syncLane(member: string, track: string, named: boolean, servedByAll: boolean): void {
+   *  lane, one stays until it delivers. The pair is demand while some lane here delivers it to a holder that wants it,
+   *  reported as a pair unless the track is named of every member and the member is covered. */
+  private _syncLane(member: string, track: string, servedByAll: boolean): void {
+    const named = this._present(member) && this._wants.wantsNamedPair(member, track)
     const all = this._everyTrack.get(member)
     const allDelivers = all !== undefined && this._delivering.has(all)
     const key = binaryLaneKey(member, track)
@@ -278,21 +299,30 @@ class RoomSubscriptions {
       lane = this._openNamedLane(member, track)
     }
     const delivers = allDelivers || (lane !== undefined && this._delivering.has(lane))
-    this._demand.setLocal(member, track, (named || lane !== undefined) && delivers)
+    const reached = this._demand.covers(member) && this._wants.namesEveryMember(track)
+    this._demand.setPair(member, track, (named || lane !== undefined) && delivers && !reached)
   }
 
-  private _setNamed(member: string, track: string, wanted: boolean): void {
-    let tracks = this._named.get(member)
-    if (wanted) {
-      if (!tracks) this._named.set(member, (tracks = new Set()))
-      tracks.add(track)
-    } else if (tracks?.delete(track) && tracks.size === 0) {
-      this._named.delete(member)
-    }
+  private _present(member: string): boolean {
+    const state = this._host._state
+    return !state.closed && state.hasMember(member)
   }
 
-  private _overflows(member: string): boolean {
-    return (this._named.get(member)?.size ?? 0) > ROOM_MEMBER_NAMED_LANES_MAX
+  private _countNamed(member: string): NamedCounts {
+    const counts = { named: 0, unreached: 0 }
+    for (const track of this._wants.namedTracksOf(member))
+      if (this._wants.wantsNamedPair(member, track)) counts.named++
+      else if (this._wants.namesEveryMember(track)) counts.unreached++
+    return counts
+  }
+
+  private _overflows(counts: NamedCounts | undefined): boolean {
+    return counts !== undefined && counts.named > ROOM_MEMBER_NAMED_LANES_MAX
+  }
+
+  /** Whether some holder here receives from the member each track named of every member. */
+  private _reachesEveryMemberTrack(counts: NamedCounts | undefined): boolean {
+    return counts !== undefined && counts.unreached === 0 && this._wants.everyMemberTracks > 0
   }
 
   private _openEveryTrack(member: string): void {

@@ -310,7 +310,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     return !this._selfSuppressed.has(memberId) && binaryWantsCovers(this._binary, memberId, track)
   }
 
-  _suppressedMembers(): Iterable<string> {
+  _suppressedMembers(): ReadonlySet<string> {
     return this._selfSuppressed
   }
 

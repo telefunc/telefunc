@@ -173,7 +173,7 @@ class ServerRoom extends RoomStateView implements Room {
     })
     this._local = new LocalHolder(this._state, this._localSuppressed)
     this._demand = new RoomDemand(
-      (event) => void publishCtrl(roomId, inc, { __r: 'want', ...event }).catch(reportRoomError),
+      (event) => void publishCtrl(roomId, inc, event).catch(reportRoomError),
       (id) => this._holderOf(id) !== undefined,
       (member, track, wanted) => this._deliverDemand(member, track, wanted),
     )
@@ -568,6 +568,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _applyCtrl(event: RoomCtrlEnvelope): boolean {
     switch (event.__r) {
       case 'want':
+      case 'covers':
         this._demand.applyWant(event) // between instances only, never relayed to clients
         return false
       case 'join':
@@ -694,7 +695,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._sendRosterTo(stub)
     stub._relayEvent({ __r: 'update', meta: this.meta, seq: this._state.metaSeq })
     for (const member of stub._heldMembers())
-      stub._relayEvent({ __r: 'demand-state', member, tracks: this._demand.wanted(member).map(publicTrack) })
+      stub._relayEvent({ __r: 'demand-state', member, tracks: this._demandOf(member) })
   }
   private _sendRosterTo(stub: RoomStubChannel): void {
     void this._subs
@@ -839,6 +840,10 @@ class ServerRoom extends RoomStateView implements Room {
   private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {
     return this._localParticipants.get(id) ?? this._stubOf.get(id)
   }
+  /** The owned member's tracks someone wants. */
+  _demandOf(member: string): Array<string | null> {
+    return this._demand.wanted(member).map(publicTrack)
+  }
   private _deliverDemand(member: string, track: string, wanted: boolean): void {
     const trackOut = publicTrack(track)
     const holder = this._holderOf(member)
@@ -863,6 +868,10 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
+  }
+  /** @internal Read from the room's demand, which holds it once. */
+  get _demandedTracks(): Array<string | null> {
+    return this._left ? [] : this._room._demandOf(this.id)
   }
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')

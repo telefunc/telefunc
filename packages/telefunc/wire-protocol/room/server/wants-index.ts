@@ -25,7 +25,11 @@ class WantsIndex {
   private readonly _textMembers = new Map<string, number>()
   private _announce = 0
   private readonly _everyMember: TrackCover = new Map()
+  private _everyMemberTracks = 0
   private readonly _members = new Map<string, TrackCover>()
+
+  /** `onEveryMemberTrack` hears each track some holder starts or stops naming of every member. */
+  constructor(private readonly _onEveryMemberTrack: (track: string, named: boolean) => void) {}
 
   get wantsText(): boolean {
     return this._textAll > 0 || this._textMembers.size > 0 || this._announce > 0
@@ -89,12 +93,26 @@ class WantsIndex {
     return this._receives(member, DEFAULT_TRACK, [this._everyMember.get(null), this._members.get(member)?.get(null)])
   }
 
-  /** The tracks some holder names for the member, `DEFAULT_TRACK` for the default one. */
-  namedTracksOf(member: string): Set<string> {
-    const tracks = new Set<string>()
-    for (const track of this._everyMember.keys()) if (track !== null) tracks.add(track)
-    for (const track of this._members.get(member)?.keys() ?? []) if (track !== null) tracks.add(track)
-    return tracks
+  /** The tracks some holder names for the member, `DEFAULT_TRACK` for the default one: those of every member first. */
+  *namedTracksOf(member: string): Generator<string> {
+    for (const track of this._everyMember.keys()) if (track !== null) yield track
+    yield* this.memberTracksOf(member)
+  }
+
+  /** The tracks some holder names of the member alone. */
+  *memberTracksOf(member: string): Generator<string> {
+    for (const track of this._members.get(member)?.keys() ?? [])
+      if (track !== null && !this._everyMember.has(track)) yield track
+  }
+
+  /** Whether some holder names `track` of every member. */
+  namesEveryMember(track: string): boolean {
+    return this._everyMember.has(track)
+  }
+
+  /** How many tracks some holder names of every member. */
+  get everyMemberTracks(): number {
+    return this._everyMemberTracks
   }
 
   /** Whether some holder that names the track receives it from the member. */
@@ -102,10 +120,34 @@ class WantsIndex {
     return this._receives(member, track, [this._everyMember.get(track), this._members.get(member)?.get(track)])
   }
 
-  private _receives(member: string, track: string, coverers: Array<Set<LaneHolder> | undefined>): boolean {
+  /** After `applyBinary(holder, change)` for a named track, whether `wantsNamedPair` held for `member` before and
+   *  after it: the change flipped it only where no other holder receives the pair. */
+  namedPairChange(
+    holder: LaneHolder,
+    { member: scope, track, on }: BinaryWantChange & { track: string },
+    member: string,
+  ): [before: boolean, after: boolean] {
+    const coverers = [this._everyMember.get(track), this._members.get(member)?.get(track)]
+    const others = this._receives(member, track, coverers, holder)
+    if (others || holder._suppressedMembers().has(member)) return [others, others]
+    // The holder may name the track of the member in the other scope too.
+    const both =
+      this._indexed
+        .get(holder)
+        ?.binary.get(scope === null ? member : null)
+        ?.has(track) === true
+    return [both || !on, both || on]
+  }
+
+  private _receives(
+    member: string,
+    track: string,
+    coverers: Array<Set<LaneHolder> | undefined>,
+    except?: LaneHolder,
+  ): boolean {
     // Each coverer suppresses only members it holds, so this stops within a few.
     for (const holders of coverers)
-      for (const holder of holders ?? []) if (holder._wantsBinary(member, track)) return true
+      for (const holder of holders ?? []) if (holder !== except && holder._wantsBinary(member, track)) return true
     return false
   }
 
@@ -139,7 +181,12 @@ class WantsIndex {
     if (!on) setCover(this._everyMember, key, holder, false)
     const [other] = this._everyMember.get(key) ?? []
     if (on) setCover(this._everyMember, key, holder, true)
-    return other === undefined ? 'all' : new Set(other._suppressedMembers())
+    if (other !== undefined) return new Set(other._suppressedMembers())
+    if (key !== null) {
+      this._everyMemberTracks += on ? 1 : -1
+      this._onEveryMemberTrack(key, on)
+    }
+    return 'all'
   }
 }
 

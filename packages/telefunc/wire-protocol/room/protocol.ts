@@ -94,8 +94,11 @@ type RoomCtrlEnvelope =
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | { __r: 'p-meta'; id: string; meta: ParticipantMeta; seq: number; hidden?: boolean }
   | { __r: 'update'; meta: RoomMeta; seq: number }
-  // Demand gossip between instances, never relayed to clients; a `null` track is every track the member publishes.
+  // Demand gossip between instances, never relayed to clients: a track of a member, every track the member publishes
+  // (`track: null`), or a track of every member (`member: null`), which the instance receives from the members it covers.
   | { __r: 'want'; member: string; track: string | null; instance: string; on: boolean }
+  | { __r: 'want'; member: null; track: string; instance: string; on: boolean }
+  | { __r: 'covers'; member: string; instance: string; on: boolean }
   | { __r: 'closed' }
 
 /** A `LeaveCause` on the wire: no `cause` means the member left on its own. */

@@ -36,7 +36,6 @@ abstract class ParticipantBase implements LocalParticipant {
   private _leaveCbs = new Listeners<(cause: LeaveCause) => unknown>()
   private readonly _messageCbs = new Listeners<(data: unknown, from: Sender | null) => unknown>()
   private readonly _demandCbs = new Listeners<(track: string | null, wanted: boolean) => unknown>()
-  private readonly _wantedTracks = new Set<string | null>()
   private readonly _listenerCleanups = new Set<() => void>()
   private _inboxAttached = false
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
@@ -162,23 +161,13 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   onDemand(callback: (track: string | null, wanted: boolean) => void): () => void {
     const unlisten = this._register(this._demandCbs, callback)
-    for (const track of this._wantedTracks) this._invoke(callback, track, true)
+    for (const track of this._demandedTracks) this._invoke(callback, track, true)
     return unlisten
   }
   /** @internal The wanted tracks, whole. */
-  get _demandedTracks(): Array<string | null> {
-    return [...this._wantedTracks]
-  }
-  /** @internal The whole wanted set, as a reattached holder hears it: only the tracks that changed fire. */
-  _applyDemandState(tracks: Array<string | null>): void {
-    const next = new Set(tracks)
-    for (const track of [...this._wantedTracks]) if (!next.has(track)) this._onDemand(track, false)
-    for (const track of next) if (!this._wantedTracks.has(track)) this._onDemand(track, true)
-  }
+  abstract get _demandedTracks(): Array<string | null>
   /** @internal Room-wide demand for one of this member's tracks changed; `null` is the default track. */
   _onDemand(track: string | null, wanted: boolean): void {
-    if (wanted) this._wantedTracks.add(track)
-    else this._wantedTracks.delete(track)
     for (const cb of this._demandCbs.list()) this._invoke(cb, track, wanted)
   }
   onLeave(callback: (cause: LeaveCause) => void): () => void {
@@ -200,7 +189,6 @@ abstract class ParticipantBase implements LocalParticipant {
     const cbs = this._leaveCbs.list()
     for (const unlisten of [...this._listenerCleanups]) unlisten()
     for (const cb of cbs) this._invoke(cb, ownedCause)
-    this._wantedTracks.clear()
   }
   protected _assertActive(): void {
     if (this._left) throw participantLeftError()

@@ -3563,6 +3563,71 @@ describe('Room public behavior', () => {
       ]),
     )
   })
+  it('tells each member, joined before or after, of the tracks another instance names of every member, beside wants of one member without a flap', async () => {
+    const room = await Room.create('every-member-demand')
+    const tracks = trackNames(ROOM_MEMBER_NAMED_LANES_MAX + 1)
+    const demanded = new Map<string, Array<[string | null, boolean]>>()
+    const join = async () => {
+      const member = await room.join()
+      const changes: Array<[string | null, boolean]> = []
+      member.onDemand((track, wanted) => changes.push([track, wanted]))
+      demanded.set(member.id, changes)
+      return member
+    }
+    const changesOf = (id: string) => [...demanded.get(id)!].sort()
+    const all = (wanted: boolean) => tracks.map((track) => [track, wanted])
+    const sorted = (changes: unknown[]) => [...changes].sort()
+    const a = await join()
+    const observer = (await Room.get(room.id)) as ServerRoom
+    await observer.getParticipants()
+    const { demand, published } = spyGossip(observer)
+    const unsubscribe = tracks.map((track) => observer.subscribeBinary(() => {}, { track }))
+    await vi.waitFor(() => expect(changesOf(a.id)).toEqual(sorted(all(true))))
+    const b = await join()
+    await vi.waitFor(() => expect(changesOf(b.id)).toEqual(sorted(all(true))))
+    // One entry per track and one per member, not one per pair.
+    published.mockClear()
+    demand.heartbeat()
+    expect(published).toHaveBeenCalledTimes(tracks.length + 2)
+    // A want of `a` alone holds t0 for it while the want of every member comes and goes.
+    const alone = (await observer.getParticipant(a.id))!.subscribeBinary(() => {}, { track: 't0' })
+    await subsOf(observer).binaryReady()
+    unsubscribe[0]!()
+    await vi.waitFor(() => expect(demanded.get(b.id)!.at(-1)).toEqual(['t0', false]))
+    unsubscribe[0] = observer.subscribeBinary(() => {}, { track: 't0' })
+    await vi.waitFor(() => expect(demanded.get(b.id)!.at(-1)).toEqual(['t0', true]))
+    alone()
+    for (const off of unsubscribe) off()
+    await vi.waitFor(() => expect(changesOf(a.id)).toEqual(sorted([...all(false), ...all(true)])))
+    await vi.waitFor(() =>
+      expect(changesOf(b.id)).toEqual(sorted([...all(false), ['t0', false], ...all(true), ['t0', true]])),
+    )
+  })
+  it("counts no demand from a selfDelivery: false member's own side among the tracks named of every member, as it names one and drops it", async () => {
+    const room = (await Room.create('self-demand-every-member')) as ServerRoom
+    const me = await room.join({ selfDelivery: false })
+    const other = await room.join()
+    const changes = (member: typeof me) => {
+      const changed: Array<[string | null, boolean]> = []
+      member.onDemand((track, wanted) => changed.push([track, wanted]))
+      return changed
+    }
+    const mine = changes(me)
+    const others = changes(other)
+    const tracks = trackNames(ROOM_MEMBER_NAMED_LANES_MAX + 1)
+    const stub = register(room)
+    for (const track of tracks) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+    // The room's own listeners, which `me`'s frames don't reach, name one more track of every member.
+    const unsubscribe = room.subscribeBinary(() => {}, { track: 'own' })
+    const on = tracks.map((track) => [track, true]).sort()
+    await vi.waitFor(() => expect([...others].sort()).toEqual([['own', true], ...on].sort()))
+    await vi.waitFor(() => expect([...mine].sort()).toEqual(on))
+    unsubscribe()
+    await vi.waitFor(() => expect(others.at(-1)).toEqual(['own', false]))
+    await subsOf(room).binaryReady()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect([...mine].sort()).toEqual(on)
+  })
   it("counts no demand from a selfDelivery: false publisher's own side", async () => {
     const room = (await Room.create('self-demand')) as ServerRoom
     const me = (await room.join({ selfDelivery: false })) as ServerLocalParticipant
@@ -4293,12 +4358,12 @@ describe('room demand lifecycle', () => {
       (id) => owned.has(id),
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
-    demand.applyWant({ member: 'elsewhere', track: 'screen', instance: 'remote-a', on: true })
+    demand.applyWant({ __r: 'want', member: 'elsewhere', track: 'screen', instance: 'remote-a', on: true })
     expect(demand.isActive()).toBe(false)
-    demand.applyWant({ member: 'member', track: 'screen', instance: 'remote-a', on: true })
+    demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'remote-a', on: true })
     owned.delete('member')
     demand.forgetMember('member')
-    demand.applyWant({ member: 'member', track: 'screen', instance: 'remote-b', on: true })
+    demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'remote-b', on: true })
     expect(delivered).toEqual([['member', 'screen', true]])
     expect(demand.isActive()).toBe(false)
   })
@@ -4310,7 +4375,7 @@ describe('room demand lifecycle', () => {
       () => true,
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
-    demand.applyWant({ member: 'member', track: 'screen', instance: 'crashed', on: true })
+    demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'crashed', on: true })
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
     demand.heartbeat()
     expect(demand.isActive()).toBe(true)
@@ -4320,6 +4385,36 @@ describe('room demand lifecycle', () => {
       ['member', 'screen', true],
       ['member', 'screen', false],
     ])
+    expect(demand.isActive()).toBe(false)
+  })
+  it("pairs a reporter's tracks named of every member only with the members it covers, until their leases lapse", () => {
+    vi.useFakeTimers()
+    const delivered: Array<[string, string, boolean]> = []
+    const demand = new RoomDemand(
+      () => {},
+      () => true,
+      (member, track, wanted) => delivered.push([member, track, wanted]),
+    )
+    demand.applyWant({ __r: 'want', member: null, track: 'screen', instance: 'crashed', on: true })
+    demand.applyWant({ __r: 'covers', member: 'a', instance: 'other', on: true })
+    expect(delivered).toEqual([])
+    demand.applyWant({ __r: 'covers', member: 'a', instance: 'crashed', on: true })
+    demand.applyWant({ __r: 'covers', member: 'b', instance: 'crashed', on: true })
+    expect(demand.wanted('a')).toEqual(['screen'])
+    vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
+    demand.applyWant({ __r: 'covers', member: 'a', instance: 'other', on: true })
+    demand.heartbeat()
+    vi.advanceTimersByTime(1)
+    demand.heartbeat()
+    expect(delivered).toEqual([
+      ['a', 'screen', true],
+      ['b', 'screen', true],
+      ['a', 'screen', false],
+      ['b', 'screen', false],
+    ])
+    expect(demand.isActive()).toBe(true)
+    vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS)
+    demand.heartbeat()
     expect(demand.isActive()).toBe(false)
   })
 })
@@ -4358,6 +4453,32 @@ describe('room protocol validation', () => {
     await vi.waitFor(() => expect(binaryLanes(room)).toEqual(members.map(({ id }) => everyTrackLaneKey(id)).sort()))
     expect(subscribed.length).toBeLessThanOrEqual(bound)
   })
+  it.each([10, 50, 100])(
+    'gossips ROOM_TRACK_WANTS_MAX tracks a client names of every member once each, and one entry per member, among %i members',
+    async (count) => {
+      const room = (await Room.create(`every-member-gossip-${count}`)) as ServerRoom
+      const members = await Promise.all(Array.from({ length: count }, () => room.join()))
+      const demanded = members.map((member) => {
+        const tracks = new Set<string | null>()
+        member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+        return tracks
+      })
+      const { demand, published } = spyGossip(room)
+      const stub = register(room)
+      for (const track of trackNames(ROOM_TRACK_WANTS_MAX))
+        declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+      await vi.waitFor(() => expect(demanded.every((tracks) => tracks.size === ROOM_TRACK_WANTS_MAX)).toBe(true), {
+        timeout: 10_000,
+      })
+      // Beside the tracks, a member's named lanes may each report its pair until the every-track lane covers it.
+      expect(published.mock.calls.length).toBeLessThanOrEqual(
+        ROOM_TRACK_WANTS_MAX + count * (2 * ROOM_MEMBER_NAMED_LANES_MAX + 1),
+      )
+      published.mockClear()
+      demand.heartbeat()
+      expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
+    },
+  )
   it('bounds tails by count and serialized code units at every cap edge', () => {
     const entry = (serialized: string, seq = 0) => ({ serialized, ord: { seq, timestamp: 0 }, from: '' })
     const byCount = new TailHold(() => {})
@@ -4805,6 +4926,11 @@ async function timeOutsideGc(run: () => Promise<void>): Promise<number> {
 }
 function trackNames(count: number): string[] {
   return Array.from({ length: count }, (_, i) => `t${i}`)
+}
+/** The room's demand, and the gossip its instance publishes from now on. */
+function spyGossip(room: Room | ServerRoom) {
+  const demand = (room as unknown as { _demand: { _publishWant(event: unknown): void; heartbeat(): void } })._demand
+  return { demand, published: vi.spyOn(demand, '_publishWant') }
 }
 /** The binary lanes opened on the backend from now on. */
 function countBinarySubscriptions(): SubscribedLane[] {

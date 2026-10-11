@@ -338,6 +338,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     string,
     { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
   >()
+  private readonly _wantedTracks = new Set<string | null>()
 
   constructor(
     id: string,
@@ -348,6 +349,21 @@ abstract class ClientParticipantBase extends ParticipantBase {
     private readonly _bufferLimit: number,
   ) {
     super(id, meta, selfDelivery, identity)
+  }
+
+  get _demandedTracks(): Array<string | null> {
+    return this._left ? [] : [...this._wantedTracks]
+  }
+  /** @internal The whole wanted set, as a reattached holder hears it: only the tracks that changed fire. */
+  _applyDemandState(tracks: Array<string | null>): void {
+    const next = new Set(tracks)
+    for (const track of [...this._wantedTracks]) if (!next.has(track)) this._onDemand(track, false)
+    for (const track of next) if (!this._wantedTracks.has(track)) this._onDemand(track, true)
+  }
+  override _onDemand(track: string | null, wanted: boolean): void {
+    if (wanted) this._wantedTracks.add(track)
+    else this._wantedTracks.delete(track)
+    super._onDemand(track, wanted)
   }
 
   /** Each flavor's wire publish; `publish()` adds conflation. */
