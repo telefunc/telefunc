@@ -62,7 +62,8 @@ function initSchema(sql: SqlStorage): void {
     CREATE TABLE IF NOT EXISTS ord
       (inc TEXT NOT NULL, domain TEXT NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, domain));
     CREATE TABLE IF NOT EXISTS rt_manifest
-      (inc TEXT NOT NULL, lane_key TEXT NOT NULL, size INTEGER NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, lane_key));
+      (inc TEXT NOT NULL, lane_key TEXT NOT NULL, track TEXT, size INTEGER NOT NULL, seq INTEGER NOT NULL, ts INTEGER NOT NULL, PRIMARY KEY (inc, lane_key));
+    CREATE INDEX IF NOT EXISTS rt_manifest_track ON rt_manifest(inc, track, lane_key);
     CREATE TABLE IF NOT EXISTS rt_chunk
       (inc TEXT NOT NULL, lane_key TEXT NOT NULL, i INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (inc, lane_key, i));
     CREATE TABLE IF NOT EXISTS route

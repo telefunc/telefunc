@@ -284,6 +284,36 @@ describe('memory backend behind the supervised consumer', () => {
     expect(await listed()).toEqual([])
     expect(scan).not.toHaveBeenCalled()
   })
+  it("lists one track's retained binary lanes across members from its own index, until they are deleted or the generation drops", async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'retained-of-track',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
+    for (let i = 0; i < 1000; i++)
+      await backend.commitLane('retained-of-track', 'inc-1', binary(`m${i}`, 'mic'), encoder.encode('frame'), {
+        retain: true,
+      })
+    for (const lane of [binary('a', 'camera'), binary('b', 'camera'), binary('a', 'camera:1'), semanticLane])
+      await backend.commitLane('retained-of-track', 'inc-1', lane, encoder.encode('frame'), { retain: true })
+    const retained = memoryState.rooms.get('retained-of-track')!.gens.get('inc-1')!.retained
+    const scan = vi.spyOn(retained, 'values')
+    const reads = vi.spyOn(retained, 'get')
+    const listed = () => backend.listRetained('retained-of-track', 'inc-1', { track: 'camera' })
+    expect(await listed()).toEqual([binary('a', 'camera'), binary('b', 'camera')])
+    expect(reads).toHaveBeenCalledTimes(2)
+    // A member's leave deletes its lanes one by one.
+    await backend.deleteRetained('retained-of-track', 'inc-1', binary('a', 'camera'))
+    expect(await listed()).toEqual([binary('b', 'camera')])
+    expect(await backend.listRetained('retained-of-track', 'inc-1', { track: 'camera:1' })).toEqual([
+      binary('a', 'camera:1'),
+    ])
+    expect(scan).not.toHaveBeenCalled()
+    await backend.dropGeneration('retained-of-track', 'inc-1')
+    expect(await listed()).toEqual([])
+  })
   it('does not retain or expose mutable lane aliases', async () => {
     await driver.compareExchangeHead(
       'retained-lane-alias',

@@ -33,6 +33,7 @@ import {
   orderKey,
   retainedKey,
   retainedOfKey,
+  retainedOfTrackKey,
   revKey,
   type CommitChannels,
 } from './keys.js'
@@ -253,7 +254,8 @@ return reply
 // it by its own lane; no lane key is long enough for that length's first byte to read as the fence byte.
 //   KEYS: [1]=head [2]=order [3]=retained [4]=channel [5]=generation-keys [6]=cell values
 //         [7]=a binary lane's member's every-track channel (another lane repeats [4])
-//         [8]=a retained binary lane's member's retained lanes (another commit repeats [3])
+//         [8]=a retained binary lane's member's retained lanes [9]=its track's retained lanes (another commit repeats
+//         [3] for both)
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
 //         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9..]=required live cells
 const COMMIT_LUA = `${HEAD_PRELUDE}
@@ -298,7 +300,8 @@ if ARGV[4] == '1' then
   redis.call('SADD', generation_keys_key, retained_key)
   if ARGV[2] == 'binary' then
     redis.call('SADD', KEYS[8], ARGV[8])
-    redis.call('SADD', generation_keys_key, KEYS[8])
+    redis.call('SADD', KEYS[9], ARGV[8])
+    redis.call('SADD', generation_keys_key, KEYS[8], KEYS[9])
   end
 end
 -- A channel's local attempts awaiting the commit find their fence token ahead of its frame, after a byte no frame
@@ -316,7 +319,8 @@ return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',
 `
 
 // Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
-//   KEYS: [1]=generation-keys [2]=retained [3]=a binary lane's member's retained lanes (another lane repeats [2])
+//   KEYS: [1]=generation-keys [2]=retained [3]=a binary lane's member's retained lanes [4]=its track's retained lanes
+//         (another lane repeats [2] for both)
 //   ARGV: [1]=ifSeq or '' [2]=a binary lane's key or ''
 const RETAINED_DELETE_LUA = `
 if ARGV[1] ~= '' then
@@ -329,6 +333,8 @@ redis.call('SREM', KEYS[1], KEYS[2])
 if ARGV[2] ~= '' then
   redis.call('SREM', KEYS[3], ARGV[2])
   if redis.call('SCARD', KEYS[3]) == 0 then redis.call('SREM', KEYS[1], KEYS[3]) end
+  redis.call('SREM', KEYS[4], ARGV[2])
+  if redis.call('SCARD', KEYS[4]) == 0 then redis.call('SREM', KEYS[1], KEYS[4]) end
 end
 return redis.call('DEL', KEYS[2])
 `
@@ -517,10 +523,11 @@ const REDIS_COMMANDS = {
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: 8,
+    numberOfKeys: 9,
     invoke: (prefix, input: CommitInput) => {
       const { roomId, inc, lane, laneKey, channels } = input
       const retained = retainedKey(prefix, roomId, inc, laneKey)
+      const indexed = lane.kind === 'binary' && input.retain
       return {
         keys: [
           headKey(prefix, roomId),
@@ -530,7 +537,8 @@ const REDIS_COMMANDS = {
           generationKeysKey(prefix, roomId, inc),
           cellValuesKey(prefix, roomId, inc),
           channels.everyTrack ?? channels.lane,
-          lane.kind === 'binary' && input.retain ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
+          indexed ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
+          indexed ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
         ],
         argv: [
           inc,
@@ -556,7 +564,7 @@ const REDIS_COMMANDS = {
   retainedDelete: command({
     name: 'tfRoomRetainedDelete',
     lua: RETAINED_DELETE_LUA,
-    numberOfKeys: 3,
+    numberOfKeys: 4,
     invoke: (prefix, { roomId, inc, lane, ifSeq }: RoomInc & { lane: LaneId; ifSeq: number | undefined }) => {
       const laneKey = encodeLaneKey(lane)
       const retained = retainedKey(prefix, roomId, inc, laneKey)
@@ -566,6 +574,7 @@ const REDIS_COMMANDS = {
           generationKeysKey(prefix, roomId, inc),
           retained,
           binary ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
+          binary ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
         ],
         argv: [ifSeq === undefined ? '' : String(ifSeq), binary ? laneKey : ''],
       }

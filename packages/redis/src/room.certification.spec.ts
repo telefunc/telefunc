@@ -157,6 +157,45 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(before.length - (await generationKeys()).length).toBe(2)
   })
 
+  it("lists one track's retained binary lanes across members from that track's own set, until they are deleted or the generation drops", async () => {
+    const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('retained-of-track') })
+    await backend.compareExchangeHead(
+      'retained-of-track',
+      { form: 'absent' },
+      { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
+    )
+    const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
+    for (let i = 0; i < 100; i++)
+      await backend.commitLane('retained-of-track', 'inc', binary(`m${i}`, 'mic'), bytes('frame'), { retain: true })
+    for (const lane of [
+      binary('a', 'camera'),
+      binary('b', 'camera'),
+      binary('a', 'camera:1'),
+      { kind: 'semantic' } as const,
+    ])
+      await backend.commitLane('retained-of-track', 'inc', lane, bytes('frame'), { retain: true })
+    const internals = backend as unknown as { _generationKeys(roomId: string, inc: string): Promise<string[]> }
+    const generationKeys = () => internals._generationKeys('retained-of-track', 'inc')
+    const scan = vi.spyOn(internals, '_generationKeys')
+    const listed = async (track: string) =>
+      (await backend.listRetained('retained-of-track', 'inc', { track })).map(encodeLaneKey).sort()
+    expect(await listed('camera')).toEqual(['binary:a:camera', 'binary:b:camera'])
+    expect(await listed('camera:1')).toEqual(['binary:a:camera%3A1'])
+    expect(await listed('mic')).toHaveLength(100)
+    expect(scan).not.toHaveBeenCalled()
+    // A member's leave deletes its lanes one by one.
+    await backend.deleteRetained('retained-of-track', 'inc', binary('a', 'camera'))
+    expect(await listed('camera')).toEqual(['binary:b:camera'])
+    const before = await generationKeys()
+    await backend.deleteRetained('retained-of-track', 'inc', binary('b', 'camera'))
+    expect(await listed('camera')).toEqual([])
+    // The retained frame, its member's set and its track's set leave the generation's keys together.
+    expect(before.length - (await generationKeys()).length).toBe(3)
+    await backend.dropGeneration('retained-of-track', 'inc')
+    expect(await listed('camera:1')).toEqual([])
+    expect(await listed('mic')).toEqual([])
+  })
+
   it('admits a thousand simultaneous joins from four servers, counting each as a hold, while roster reads never fail', async () => {
     const prefix = uniquePrefix('join-burst')
     const redis = ownClient(connect())

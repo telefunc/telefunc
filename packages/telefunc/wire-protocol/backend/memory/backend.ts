@@ -19,6 +19,7 @@ import type {
   CellsRead,
   CommitOptions,
   RetainedFrame,
+  RetainedOf,
   DirectoryPage,
 } from '../room/contract.js'
 import { encodeLaneKey } from '../room/lane-key.js'
@@ -60,6 +61,8 @@ type Generation = {
   retained: Map<string, RetainedEntry>
   /** The keys of each member's retained binary lanes. */
   retainedOf: Map<string, Set<string>>
+  /** The keys of each track's retained binary lanes. */
+  retainedOfTrack: Map<string, Set<string>>
   subs: Subscriptions
   /** Every-track subscriptions by member id, so a binary commit finds its member's without building a key. */
   everyTrackSubs: Subscriptions
@@ -106,6 +109,7 @@ function newGeneration(): Generation {
     order: new Map(),
     retained: new Map(),
     retainedOf: new Map(),
+    retainedOfTrack: new Map(),
     subs: new Map(),
     everyTrackSubs: new Map(),
   }
@@ -322,7 +326,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         payload: frame,
         ...mark,
       })
-      if (lane.kind === 'binary') getOrCreate(gen.retainedOf, lane.member, () => new Set()).add(key)
+      if (lane.kind === 'binary') {
+        getOrCreate(gen.retainedOf, lane.member, () => new Set()).add(key)
+        getOrCreate(gen.retainedOfTrack, lane.track, () => new Set()).add(key)
+      }
     }
     const targets = gen.subs.get(key) ?? NO_TARGETS
     // A binary commit also reaches its member's every-track lane.
@@ -347,14 +354,12 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
-  async listRetained(roomId: string, inc: string, of?: { member: string }): Promise<LaneId[]> {
+  async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
     const gen = this._state.rooms.get(roomId)?.gens.get(inc)
     if (gen === undefined) return []
-    const entries =
-      of === undefined
-        ? gen.retained.values()
-        : [...(gen.retainedOf.get(of.member) ?? [])].map((key) => gen.retained.get(key)!)
-    return [...entries].map((entry) => copyLane(entry.lane))
+    if (of === undefined) return [...gen.retained.values()].map((entry) => copyLane(entry.lane))
+    const keys = 'member' in of ? gen.retainedOf.get(of.member) : gen.retainedOfTrack.get(of.track)
+    return [...(keys ?? [])].map((key) => copyLane(gen.retained.get(key)!.lane))
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
@@ -363,9 +368,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (gen === undefined || (opts?.ifSeq !== undefined && gen.retained.get(key)?.seq !== opts.ifSeq)) return
     gen.retained.delete(key)
     if (lane.kind !== 'binary') return
-    const keys = gen.retainedOf.get(lane.member)
-    keys?.delete(key)
-    if (keys?.size === 0) gen.retainedOf.delete(lane.member)
+    unindex(gen.retainedOf, lane.member, key)
+    unindex(gen.retainedOfTrack, lane.track, key)
   }
 
   private _openSubscription(
@@ -467,6 +471,12 @@ function compareCodePoints(left: string, right: string): number {
     i += a > 0xffff ? 2 : 1
   }
   return left.length - right.length
+}
+
+function unindex(index: Map<string, Set<string>>, of: string, key: string): void {
+  const keys = index.get(of)
+  keys?.delete(key)
+  if (keys?.size === 0) index.delete(of)
 }
 
 function getOrCreate<Key, Value>(map: Map<Key, Value>, key: Key, create: () => Value): Value {

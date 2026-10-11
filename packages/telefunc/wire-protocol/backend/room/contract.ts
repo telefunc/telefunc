@@ -10,6 +10,7 @@ export type {
   DirectoryPage,
   EveryTrackLane,
   RetainedFrame,
+  RetainedOf,
   CommitAccepted,
   CommitResult,
   StaleCommit,
@@ -101,6 +102,9 @@ type CommitOptions = { retain?: boolean; closingLease?: string; requiredCellKeys
 
 type RetainedFrame = OrderingInfo & { payload: Uint8Array }
 
+/** One member's binary lanes, or one track's across members. */
+type RetainedOf = { member: string } | { track: string }
+
 type DirectoryPage = { entries: { roomId: string; incTag: string }[]; cursor?: string }
 
 type CommitAccepted = {
@@ -137,8 +141,9 @@ type RoomDriver = {
     opts?: CommitOptions,
   ): Promise<CommitResult>
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>
-  /** The lanes holding a retained frame; with `of`, only that member's binary lanes, at a cost of their count. */
-  listRetained(roomId: string, inc: string, of?: { member: string }): Promise<LaneId[]>
+  /** The lanes holding a retained frame; with `of`, only that member's or that track's binary lanes, at a cost of
+   *  their count. */
+  listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]>
   deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void>
   dropGeneration(roomId: string, inc: string): Promise<void>
   directoryPut(roomId: string, incTag: string): Promise<void>

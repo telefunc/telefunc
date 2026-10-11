@@ -21,6 +21,7 @@ import type {
   HeadNext,
   LaneId,
   RetainedFrame,
+  RetainedOf,
   RoomDriver,
   RoomHead,
   RoomSubscriptionSource,
@@ -106,7 +107,7 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     return this.#stub(roomId).readRetained(inc, lane)
   }
 
-  async listRetained(roomId: string, inc: string, of?: { member: string }): Promise<LaneId[]> {
+  async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
     return this.#stub(roomId).listRetained(inc, of)
   }
 

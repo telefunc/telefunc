@@ -26,6 +26,7 @@ import type {
   CellsRead,
   CommitOptions,
   RetainedFrame,
+  RetainedOf,
   DirectoryPage,
 } from 'telefunc/__internal'
 import { decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
@@ -37,6 +38,7 @@ import {
   retainedKey,
   retainedKeyPrefix,
   retainedOfKey,
+  retainedOfTrackKey,
   commitChannels,
 } from './keys.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
@@ -172,9 +174,14 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return { payload: Uint8Array.from(payload), seq, timestamp }
   }
 
-  async listRetained(roomId: string, inc: string, of?: { member: string }): Promise<LaneId[]> {
-    if (of !== undefined)
-      return (await this._publisher.smembers(retainedOfKey(this._prefix, roomId, inc, of.member))).map(decodeLaneKey)
+  async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
+    if (of !== undefined) {
+      const index =
+        'member' in of
+          ? retainedOfKey(this._prefix, roomId, inc, of.member)
+          : retainedOfTrackKey(this._prefix, roomId, inc, of.track)
+      return (await this._publisher.smembers(index)).map(decodeLaneKey)
+    }
     const prefix = retainedKeyPrefix(this._prefix, roomId, inc)
     const keys = (await this._generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
     return keys.map((physical) => decodeLaneKey(physical.slice(prefix.length)))

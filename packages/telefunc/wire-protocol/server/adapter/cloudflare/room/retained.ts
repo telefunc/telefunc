@@ -3,7 +3,7 @@ export { installRetained, readRetained, listRetained, deleteRetained }
 
 // Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap.
 
-import type { LaneId, RetainedFrame } from '../../../../backend/room/contract.js'
+import type { LaneId, RetainedFrame, RetainedOf } from '../../../../backend/room/contract.js'
 import { binaryLaneKeyPrefix, decodeLaneKey, encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
 import { prefixEnd } from './storage.js'
@@ -13,7 +13,8 @@ const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 type ManifestRow = { lane_key: string; size: number; seq: number; ts: number }
 
 // Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back.
-function installRetained(sql: SqlStorage, inc: string, key: string, payload: Uint8Array, mark: OrderingInfo): void {
+function installRetained(sql: SqlStorage, inc: string, lane: LaneId, payload: Uint8Array, mark: OrderingInfo): void {
+  const key = encodeLaneKey(lane)
   sql.exec('DELETE FROM rt_chunk WHERE inc = ? AND lane_key = ?', inc, key)
   const chunkCount = Math.max(1, Math.ceil(payload.byteLength / MAX_RETAINED_CHUNK_BYTES))
   for (let i = 0; i < chunkCount; i++) {
@@ -22,9 +23,10 @@ function installRetained(sql: SqlStorage, inc: string, key: string, payload: Uin
     sql.exec('INSERT INTO rt_chunk (inc, lane_key, i, bytes) VALUES (?, ?, ?, ?)', inc, key, i, new Uint8Array(slice))
   }
   sql.exec(
-    'INSERT OR REPLACE INTO rt_manifest (inc, lane_key, size, seq, ts) VALUES (?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO rt_manifest (inc, lane_key, track, size, seq, ts) VALUES (?, ?, ?, ?, ?, ?)',
     inc,
     key,
+    lane.kind === 'binary' ? lane.track : null,
     payload.byteLength,
     mark.seq,
     mark.timestamp,
@@ -50,19 +52,16 @@ function readRetained(sql: SqlStorage, inc: string, lane: LaneId): RetainedFrame
   return { payload, seq: manifest.seq, timestamp: manifest.ts }
 }
 
-// A member's lanes are a primary-key range: their keys share its prefix.
-function listRetained(sql: SqlStorage, inc: string, of?: { member: string }): LaneId[] {
+// A member's lanes are a primary-key range: their keys share its prefix. A track's are an rt_manifest_track range.
+function listRetained(sql: SqlStorage, inc: string, of?: RetainedOf): LaneId[] {
   const query = 'SELECT lane_key FROM rt_manifest WHERE inc = ?'
-  const prefix = of === undefined ? null : binaryLaneKeyPrefix(of.member)
-  const rows =
-    prefix === null
-      ? sql.exec<Pick<ManifestRow, 'lane_key'>>(query, inc)
-      : sql.exec<Pick<ManifestRow, 'lane_key'>>(
-          `${query} AND lane_key >= ? AND lane_key < ?`,
-          inc,
-          prefix,
-          prefixEnd(prefix)!,
-        )
+  let rows: SqlStorageCursor<Pick<ManifestRow, 'lane_key'>>
+  if (of === undefined) rows = sql.exec(query, inc)
+  else if ('track' in of) rows = sql.exec(`${query} AND track = ?`, inc, of.track)
+  else {
+    const prefix = binaryLaneKeyPrefix(of.member)
+    rows = sql.exec(`${query} AND lane_key >= ? AND lane_key < ?`, inc, prefix, prefixEnd(prefix)!)
+  }
   return rows.toArray().map((row) => decodeLaneKey(row.lane_key))
 }
 

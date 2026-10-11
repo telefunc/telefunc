@@ -6,12 +6,12 @@ import {
   compareExchangeHead,
   directoryList,
   directoryPut,
+  dropGenerationRows,
   initSchema,
   readCells,
 } from './storage.js'
 import { snapshotRoutes, upsertRoute } from './routes.js'
 import { deleteRetained, installRetained, listRetained } from './retained.js'
-import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 
 /** Cloudflare's SQL storage over node:sqlite, recording the plan of each read. */
 function sqlStorage() {
@@ -196,7 +196,7 @@ test("one member's retained binary lanes are a primary-key range of its lane key
     binary('n', ''),
     { kind: 'semantic' } as const,
   ])
-    installRetained(sql, 'inc', encodeLaneKey(lane), new Uint8Array([1]), { seq: 1, timestamp: 1 })
+    installRetained(sql, 'inc', lane, new Uint8Array([1]), { seq: 1, timestamp: 1 })
   plans.length = 0
   expect(listRetained(sql, 'inc', { member: 'm' })).toEqual([binary('m', ''), binary('m', 'camera')])
   expect(plans).toEqual([
@@ -206,4 +206,28 @@ test("one member's retained binary lanes are a primary-key range of its lane key
   ])
   deleteRetained(sql, 'inc', binary('m', 'camera'))
   expect(listRetained(sql, 'inc', { member: 'm' })).toEqual([binary('m', '')])
+})
+
+test("one track's retained binary lanes across members are an rt_manifest_track range, until they are deleted or the generation drops", () => {
+  const { sql, plans } = sqlStorage()
+  const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
+  for (const lane of [
+    binary('a', 'camera'),
+    binary('b', 'camera'),
+    binary('a', 'camera:1'),
+    binary('a', ''),
+    { kind: 'semantic' } as const,
+  ])
+    installRetained(sql, 'inc', lane, new Uint8Array([1]), { seq: 1, timestamp: 1 })
+  plans.length = 0
+  expect(listRetained(sql, 'inc', { track: 'camera' })).toEqual([binary('a', 'camera'), binary('b', 'camera')])
+  expect(plans).toEqual([
+    expect.stringMatching(/^SEARCH rt_manifest USING COVERING INDEX rt_manifest_track \(inc=\? AND track=\?\)$/),
+  ])
+  expect(listRetained(sql, 'inc', { track: '' })).toEqual([binary('a', '')])
+  // A member's leave deletes its lanes one by one.
+  deleteRetained(sql, 'inc', binary('a', 'camera'))
+  expect(listRetained(sql, 'inc', { track: 'camera' })).toEqual([binary('b', 'camera')])
+  dropGenerationRows(sql, 'inc')
+  expect(listRetained(sql, 'inc', { track: 'camera:1' })).toEqual([])
 })

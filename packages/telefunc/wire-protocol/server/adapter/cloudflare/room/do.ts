@@ -18,6 +18,7 @@ import type {
   CellsRead,
   CommitOptions,
   RetainedFrame,
+  RetainedOf,
   DirectoryPage,
 } from '../../../../backend/room/contract.js'
 import { assert } from '../../../../../utils/assert.js'
@@ -114,7 +115,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
           if (missing !== undefined) return { stale: 'cell', key: missing }
         }
         const mark = advanceOrder(sql, inc, key, now)
-        if (opts?.retain === true) installRetained(sql, inc, key, payload, mark)
+        if (opts?.retain === true) installRetained(sql, inc, lane, payload, mark)
         // A binary commit also reaches its member's every-track lane.
         const laneKeys = lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member)] : [key]
         return { ...mark, routes: snapshotRoutes(sql, inc, laneKeys, now) }
@@ -134,7 +135,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     return readRetained(this.#sql(), inc, lane)
   }
 
-  async listRetained(inc: string, of?: { member: string }): Promise<LaneId[]> {
+  async listRetained(inc: string, of?: RetainedOf): Promise<LaneId[]> {
     return listRetained(this.#sql(), inc, of)
   }
 

@@ -13,6 +13,7 @@ export {
   retainedKeyPrefix,
   retainedKey,
   retainedOfKey,
+  retainedOfTrackKey,
   channelKey,
   commitChannels,
   generationInvalidationChannel,
@@ -87,6 +88,10 @@ function retainedKey(prefix: string, roomId: string, inc: string, laneKey: strin
 /** The lane keys of one member's retained binary frames. */
 function retainedOfKey(prefix: string, roomId: string, inc: string, member: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rtm:${encodeURIComponent(member)}`
+}
+/** The lane keys of one track's retained binary frames. */
+function retainedOfTrackKey(prefix: string, roomId: string, inc: string, track: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:rtt:${encodeURIComponent(track)}`
 }
 function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return `${roomTag(prefix, roomId)}:ch:${inc}:${laneKey}`
