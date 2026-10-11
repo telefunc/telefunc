@@ -876,9 +876,12 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
-  _ownedMembers(): { all: string[]; renewable: string[] } {
-    const all = [...this._localParticipants.keys(), ...this._stubOf.keys()]
-    return { all, renewable: all.filter((id) => !this._pendingAdmissions.has(id)) }
+  *_ownedMembers(): Generator<string> {
+    yield* this._localParticipants.keys()
+    yield* this._stubOf.keys()
+  }
+  *_renewableMembers(): Generator<string> {
+    for (const id of this._ownedMembers()) if (!this._pendingAdmissions.has(id)) yield id
   }
 
   /** @internal */

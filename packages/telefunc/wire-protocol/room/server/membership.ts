@@ -165,7 +165,7 @@ async function updateMemberRecord<T>(
 }
 
 /** Each renewal is its own compare-exchange; a failed one fails the call once all are tried. */
-async function renewMemberLeases(roomId: string, inc: string, ids: readonly string[]): Promise<void> {
+async function renewMemberLeases(roomId: string, inc: string, ids: Iterable<string>): Promise<void> {
   await eachInFlight(ids, (id) =>
     mutateMember(roomId, inc, id, (record) =>
       record === null ? { value: undefined } : { value: undefined, next: record },

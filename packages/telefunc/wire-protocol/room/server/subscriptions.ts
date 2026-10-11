@@ -31,15 +31,16 @@ type SubscriptionHost = {
   /** Read-only here: every change goes through the host's methods. */
   readonly _state: Pick<
     RoomState,
-    'closed' | 'rosterKnown' | 'listenerCount' | 'recordingMembership' | 'listMemberIds' | 'hasMember'
+    'closed' | 'rosterKnown' | 'listenerCount' | 'recordingMembership' | 'memberIds' | 'hasMember'
   >
   /** Whether anything here observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean
   /** A pre-attach tail ingests all text. */
   _holdsTail(): boolean
   _ownsMember(id: string): boolean
-  /** A pending admission owns its inbox, but its record is renewed only once it commits. */
-  _ownedMembers(): { all: string[]; renewable: string[] }
+  /** Live. A pending admission owns its inbox, but its record is renewed only once it commits. */
+  _ownedMembers(): Iterable<string>
+  _renewableMembers(): Iterable<string>
   _renewViews(): Promise<void>
   _onCtrlMessage(serialized: string, info: WirePublishInfo): void
   _onTextData(serialized: string, info: WirePublishInfo): void
@@ -282,18 +283,25 @@ class RoomSubscriptions {
         const plan = this._queued
         if (!isEmpty(plan)) {
           this._queued = newBinaryPlan()
-          const members = new Set([...plan.members, ...plan.pairs.keys()])
-          if (plan.all || plan.tracks.size > 0)
-            for (const member of this._host._state.listMemberIds()) members.add(member)
-          // Lanes of members no longer present close too.
-          if (plan.all)
-            for (const member of [...this._binaryTracks.keys(), ...this._everyTrack.keys()]) members.add(member)
-          await this._replanEach(members, (member) => this._planMember(member, plan))
+          const host = this._host
+          const members = chain(
+            plan.members,
+            plan.pairs.keys(),
+            plan.all || plan.tracks.size > 0 ? host._state.memberIds() : [],
+            // Lanes of members no longer present close too.
+            plan.all ? this._binaryTracks.keys() : [],
+            plan.all ? this._everyTrack.keys() : [],
+          )
+          await this._replanEach(
+            members,
+            once((member) => this._planMember(member, plan)),
+          )
           if (plan.all) {
-            const host = this._host
-            const inboxes = new Set([...this._inbox.keys(), ...host._ownedMembers().all])
-            await this._replanEach(inboxes, (member) =>
-              !host._state.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
+            await this._replanEach(
+              chain(this._inbox.keys(), host._ownedMembers()),
+              once((member) =>
+                !host._state.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
+              ),
             )
           }
         } else if (this._demand.changed) {
@@ -587,7 +595,7 @@ class RoomSubscriptions {
       this._demand.heartbeat()
       let renewalFailure: { error: unknown } | null = null
       try {
-        await renewMemberLeases(host.id, host._inc, host._ownedMembers().renewable)
+        await renewMemberLeases(host.id, host._inc, host._renewableMembers())
       } catch (error) {
         renewalFailure = { error }
       }
@@ -606,6 +614,19 @@ class RoomSubscriptions {
   }
 }
 
+/** Each source's items in turn, each source read live as the iteration reaches it. */
+function* chain<T>(...sources: Iterable<T>[]): Generator<T> {
+  for (const source of sources) yield* source
+}
+/** `step` on each item it is called with the first time; an item seen before is still one call, so one step. */
+function once<T>(step: (item: T) => void): (item: T) => void {
+  const seen = new Set<T>()
+  return (item) => {
+    if (seen.has(item)) return
+    seen.add(item)
+    step(item)
+  }
+}
 function newBinaryPlan(): BinaryPlan {
   return { all: false, members: new Set(), tracks: new Set(), pairs: new Map() }
 }

@@ -247,9 +247,9 @@ class RoomState {
   listVisible(): RemoteParticipant[] {
     return [...this._members.values()].filter((entry) => !entry.hidden).map((entry) => this._remote(entry))
   }
-  /** Member IDs currently known. Drives the per-member binary key subscriptions. */
-  listMemberIds(): string[] {
-    return [...this._members.keys()]
+  /** Member IDs currently known, live. Drives the per-member binary key subscriptions. */
+  memberIds(): IterableIterator<string> {
+    return this._members.keys()
   }
   /** The members, live: one that joins before the iteration reaches the end comes too, one that leaves before it is reached doesn't. */
   *memberSnapshots(): Generator<MemberSnapshot> {
