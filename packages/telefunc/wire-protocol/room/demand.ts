@@ -73,9 +73,9 @@ class RoomDemand {
     return this._planned.members.has(member)
   }
 
-  /** The named and default tracks of the member this instance receives as pairs. */
-  localTracks(member: string): string[] {
-    return [...(this._planned.pairs.get(member)?.keys() ?? [])].filter((track) => track !== null)
+  /** The named and default tracks of the member this instance receives as pairs, read live. */
+  *localTracks(member: string): Generator<string> {
+    for (const track of this._planned.pairs.get(member)?.keys() ?? []) if (track !== null) yield track
   }
 
   /** Tells the planned changes, each once. */

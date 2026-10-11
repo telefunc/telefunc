@@ -183,13 +183,7 @@ describe('Room at 100,000 members', () => {
     })
     await subsOf(observer).binaryReady()
     expect(binaryLanesOf(observer)).toBeGreaterThan(0)
-    // Each declaration replays the retained frames of its track, so the spec's declarations in one turn leave work
-    // behind them: wait it out, until five timers in a row come on time.
-    for (let onTime = 0; onTime < 5; ) {
-      const turn = performance.now()
-      await new Promise((resolve) => setTimeout(resolve, 20))
-      onTime = performance.now() - turn < 30 ? onTime + 1 : 0
-    }
+    await settled()
     const { gap } = await longestGapWhile(async () => {
       const closed = held.map(({ stub }) => new Promise<void>((resolve) => stub.onClose(() => resolve())))
       for (const { stub, peer } of held) stub._onPeerDisconnect(peer, 100)
@@ -198,6 +192,23 @@ describe('Room at 100,000 members', () => {
     })
     expect(gap).toBeLessThanOrEqual(50)
     expect(binaryLanesOf(observer)).toBe(0)
+  }, 60_000)
+  it('keeps the event loop turning through a heartbeat replan of one member with 100,000 named tracks', async () => {
+    const room = await Room.create('member-replan-turns')
+    const publisher = await room.join()
+    const observer = (await Room.get(room.id)) as ServerRoom
+    await observer.getParticipant(publisher.id)
+    for (let c = 0; c < 1_000; c++) {
+      const stub = register(observer)
+      attachPeer(stub)
+      for (let i = 0; i < 100; i++)
+        stub._onPeerMessage(stringify({ __r: 'sub-binary', member: publisher.id, track: `c${c}t${i}`, on: true }), 0)
+    }
+    await subsOf(observer).binaryReady()
+    await settled()
+    const replan = async () => (await longestGapWhile(() => subsOf(observer).replan())).gap
+    // The shorter of two passes, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(await replan(), await replan())).toBeLessThanOrEqual(50)
   }, 60_000)
   it('merges one key into a room meta of 100,000 keys with both event loops turning, a view and a client applying it', async () => {
     const room = await Room.create('meta-merge-turns')
@@ -281,6 +292,15 @@ function binaryLanesOf(room: ServerRoom): number {
   const subs = (room as unknown as { _subs: { _binary: Map<string, unknown>; _everyTrack: Map<string, unknown> } })
     ._subs
   return subs._binary.size + subs._everyTrack.size
+}
+/** Each declaration replays the retained frames of its track, so a spec's declarations in one turn leave work behind
+ *  them: waits it out, until five timers in a row come on time. */
+async function settled(): Promise<void> {
+  for (let onTime = 0; onTime < 5; ) {
+    const turn = performance.now()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    onTime = performance.now() - turn < 30 ? onTime + 1 : 0
+  }
 }
 /** A full collection, as `node --expose-gc` gives it. */
 function collectGarbage(): void {

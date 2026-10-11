@@ -2706,6 +2706,8 @@ describe('Room public behavior', () => {
     declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
     roomParticipantReplacer.replace(me, context)
+    // The planning pass it starts drops the lane, not the member's next event or the next heartbeat.
+    await subsOf(room).binaryReady()
     expect(binaryLanes(room)).toEqual([])
     await vi.waitFor(() =>
       expect(demand).toEqual([

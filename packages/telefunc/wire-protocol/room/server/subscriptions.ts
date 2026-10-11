@@ -97,6 +97,8 @@ class RoomSubscriptions {
   private readonly _everyTrack = new Map<string, LaneSubscription>()
   /** Per present member, its named tracks received here, counted apart from the tracks named of every member. */
   private readonly _counts = new Map<string, NamedCounts>()
+  /** The member a planning pass counts a slice at a time, and whether a change of its wants since made the count stale. */
+  private _counting: { member: string; stale: boolean } | null = null
   /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
   private readonly _overflowing = new Set<string>()
   /** The binary lanes that were ready once: what they carry is this instance's demand. */
@@ -185,7 +187,10 @@ class RoomSubscriptions {
         affected === 'all' ? new Set([...holder._suppressedMembers(), ...this._wants.membersNaming(track)]) : affected
       for (const member of recounted) {
         const counts = this._counts.get(member)
-        if (counts === undefined) continue
+        if (counts === undefined) {
+          if (this._counting?.member === member) this._counting.stale = true
+          continue
+        }
         const [before, after] = this._wants.namedPairChange(holder, { ...change, track }, member)
         counts.own += Number(!everyMember && after) - Number(!wasEveryMember && before)
         counts.unreached += Number(everyMember && !after) - Number(wasEveryMember && !before)
@@ -196,9 +201,11 @@ class RoomSubscriptions {
     this._replanAround(() => this._schedulePlan())
   }
 
-  /** A member joined, or which holders suppress it changed. */
+  /** A member joined, or which holders suppress it changed: the next planning pass recounts it. */
   memberChanged(member: string): void {
-    this._replanAround(() => this._syncMemberBinary(member, true))
+    this._dropCounts(member)
+    this._queued.members.add(member)
+    this._replanAround(() => this._schedulePlan())
   }
 
   /** A member this instance now owns gets its inbox. */
@@ -208,9 +215,10 @@ class RoomSubscriptions {
 
   /** A member left, or this instance no longer owns it. */
   memberReleased(member: string): void {
+    this._queued.members.add(member)
     this._replanAround(() => {
-      this._syncMemberBinary(member)
       this._closeInbox(member)
+      this._schedulePlan()
     })
   }
 
@@ -329,12 +337,18 @@ class RoomSubscriptions {
     const queued = this._queued
     if (affected === 'all') {
       this._counts.clear()
+      if (this._counting) this._counting.stale = true
       queued.all = true
     } else
       for (const member of affected) {
-        this._counts.delete(member)
+        this._dropCounts(member)
         queued.members.add(member)
       }
+  }
+
+  private _dropCounts(member: string): void {
+    this._counts.delete(member)
+    if (this._counting?.member === member) this._counting.stale = true
   }
 
   private _queuePair(member: string, track: string): void {
@@ -392,16 +406,14 @@ class RoomSubscriptions {
     }
   }
 
-  /** Runs `step` on each item, `ROOM_PLAN_SLICE_MS` at a time, each slice planned around. */
-  private async _replanEach<T>(items: Iterable<T>, step: (item: T) => void): Promise<void> {
-    const pending = items[Symbol.iterator]()
+  /** Runs `step` on each item, `ROOM_PLAN_SLICE_MS` at a time, each slice planned around; a step that yields can end
+   *  a slice at each yield. */
+  private async _replanEach<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Promise<void> {
+    const pending = stepsOf(items, step)
     for (let done = false; !done; ) {
       this._replanAround(() => {
         const deadline = performance.now() + ROOM_PLAN_SLICE_MS
-        for (let next = pending.next(); !(done = next.done === true); next = pending.next()) {
-          step(next.value)
-          if (performance.now() >= deadline) return
-        }
+        while (!(done = pending.next().done === true)) if (performance.now() >= deadline) return
       })
       if (!done) await nextTurnOf()
     }
@@ -409,12 +421,12 @@ class RoomSubscriptions {
 
   /** A member's binary lanes: its every-track lane while some holder here receives all of its tracks or more than
    *  `ROOM_MEMBER_NAMED_LANES_MAX` named ones, else a lane per named track. A switch between them keeps the lanes it
-   *  leaves until the lanes it takes deliver. `recount` when the member's named wants may have changed wholesale. */
-  private _syncMemberBinary(member: string, recount = false): void {
+   *  leaves until the lanes it takes deliver. It yields between tracks, so a member's plan is resumed a slice at a time:
+   *  it plans from the counts and lanes it read first, and every change meanwhile queues the member again. */
+  private *_syncMemberBinary(member: string): Generator<void> {
     const present = this._present(member)
     if (!present) this._counts.delete(member)
-    else if (recount || !this._counts.has(member)) this._counts.set(member, this._countNamed(member))
-    const counts = this._counts.get(member)
+    const counts = present ? (this._counts.get(member) ?? (yield* this._countNamed(member))) : undefined
     const wantsAll = present && this._wants.wantsEveryTrack(member)
     const overflows = this._overflows(counts)
     if (overflows) this._overflowing.add(member)
@@ -426,30 +438,40 @@ class RoomSubscriptions {
     this._demand.setPair(member, null, wantsAll && allDelivers)
     const covered = allDelivers && this._reachesEveryMemberTrack(counts)
     this._demand.setCovers(member, covered)
-    for (const track of [...(this._binaryTracks.get(member) ?? []), ...this._demand.localTracks(member)])
+    for (const track of chain(this._binaryTracks.get(member) ?? [], this._demand.localTracks(member))) {
       this._syncLane(member, track, servedByAll)
+      yield
+    }
     // A covered member gets the tracks named of every member through `covers`; an establishing every-track lane none.
     let tracks: Iterable<string> = []
     if (!servedByAll || (allDelivers && !covered)) tracks = this._wants.namedTracksOf(member)
     else if (allDelivers) tracks = this._wants.memberTracksOf(member)
-    for (const track of tracks) this._syncLane(member, track, servedByAll)
-    if (!servedByAll && all !== undefined) this._releaseEveryTrack(member, all)
+    for (const track of tracks) {
+      this._syncLane(member, track, servedByAll)
+      yield
+    }
+    // Stopping a lane a change meanwhile wants again would only open it again.
+    const stillServed = present && (this._wants.wantsEveryTrack(member) || this._overflows(counts))
+    if (!servedByAll && !stillServed && all !== undefined && this._everyTrack.get(member) === all)
+      this._releaseEveryTrack(member, all)
   }
 
   /** The member's queued pairs; a change that moved it across `ROOM_MEMBER_NAMED_LANES_MAX`, or into or out of being
    *  covered, replans all of its lanes. */
-  private _planMember(member: string, plan: BinaryPlan): void {
+  private *_planMember(member: string, plan: BinaryPlan): Generator<void> {
     const counts = this._counts.get(member)
     if (plan.all || plan.members.has(member) || (counts === undefined && this._present(member)))
-      return this._syncMemberBinary(member)
+      return yield* this._syncMemberBinary(member)
     const overflows = this._overflows(counts)
     const all = this._everyTrack.get(member)
     const covered = all !== undefined && this._delivering.has(all) && this._reachesEveryMemberTrack(counts)
     if (overflows !== this._overflowing.has(member) || covered !== this._demand.covers(member))
-      return this._syncMemberBinary(member)
+      return yield* this._syncMemberBinary(member)
     const servedByAll = counts !== undefined && (this._wants.wantsEveryTrack(member) || overflows)
-    for (const track of plan.tracks) this._syncLane(member, track, servedByAll)
-    for (const track of plan.pairs.get(member) ?? []) this._syncLane(member, track, servedByAll)
+    for (const track of chain(plan.tracks, plan.pairs.get(member) ?? [])) {
+      this._syncLane(member, track, servedByAll)
+      yield
+    }
   }
 
   /** A named lane while some holder names the track and the every-track lane doesn't serve the member; beside that
@@ -482,13 +504,22 @@ class RoomSubscriptions {
     return !state.closed && state.hasMember(member)
   }
 
-  private _countNamed(member: string): NamedCounts {
+  /** Counted a slice at a time, and kept unless a change of the member's wants meanwhile made it stale: the change
+   *  queued the member, so the next pass counts it again. */
+  private *_countNamed(member: string): Generator<void, NamedCounts> {
     const counts = { own: 0, unreached: 0 }
-    for (const track of this._wants.namedTracksOf(member)) {
-      const received = this._wants.wantsNamedPair(member, track)
-      if (!this._wants.namesEveryMember(track)) counts.own += Number(received)
-      else counts.unreached += Number(!received)
+    const counting = (this._counting = { member, stale: false })
+    try {
+      for (const track of this._wants.namedTracksOf(member)) {
+        const received = this._wants.wantsNamedPair(member, track)
+        if (!this._wants.namesEveryMember(track)) counts.own += Number(received)
+        else counts.unreached += Number(!received)
+        yield
+      }
+    } finally {
+      this._counting = null
     }
+    if (!counting.stale) this._counts.set(member, counts)
     return counts
   }
 
@@ -687,13 +718,21 @@ class RoomSubscriptions {
 function* chain<T>(...sources: Iterable<T>[]): Generator<T> {
   for (const source of sources) yield* source
 }
+/** Each item's step, then what it yields one at a time; an item whose step yields nothing is still one step. */
+function* stepsOf<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Generator<void> {
+  for (const item of items) {
+    const parts = step(item)
+    if (parts) yield* parts
+    yield
+  }
+}
 /** `step` on each item it is called with the first time; an item seen before is still one call, so one step. */
-function once<T>(step: (item: T) => void): (item: T) => void {
+function once<T, R>(step: (item: T) => R): (item: T) => R | void {
   const seen = new Set<T>()
   return (item) => {
     if (seen.has(item)) return
     seen.add(item)
-    step(item)
+    return step(item)
   }
 }
 /** Each item, removed as it is taken; one added meanwhile comes too. */
