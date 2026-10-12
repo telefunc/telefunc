@@ -5,13 +5,9 @@ import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generate
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { markHandled } from '../../../utils/markHandled.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
-import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
+import type { LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import {
   encodeBinaryFrame,
@@ -21,16 +17,14 @@ import {
   type BinaryFrame,
   type BinaryWantChange,
 } from '../binary.js'
-import { DM_FAILURE, participantGoneError, participantLeftError, roomClosedError, roomFailureError } from '../errors.js'
+import { DM_FAILURE, participantLeftError, roomClosedError } from '../errors.js'
 import {
   assertKnownOptions,
   mergeAttributes,
   normalizeJoinOptions,
-  ownMetaArgument,
   ownMessage,
   ownMetadata,
   recipientId,
-  senderOf,
 } from '../model.js'
 import {
   inboxMessageFromWire,
@@ -44,7 +38,6 @@ import {
   type SenderStamp,
   type RoomDmEnvelope,
   type RoomDmAckEnvelope,
-  type DmReply,
   type AcceptedMeta,
   type RoomEnvelope,
 } from '../protocol.js'
@@ -59,13 +52,11 @@ import { PendingDmAcks } from './dm-acks.js'
 import { RoomSubscriptions } from './subscriptions.js'
 import { RoomReplica, type PresenceEvent } from './replica.js'
 import { RosterStream } from './roster-stream.js'
+import { RoomWrites, runAfterHook } from './writes.js'
 import {
   SEMANTIC_LANE,
-  commitToInbox,
   decodeRoomText,
-  encodeRoomRecord,
   publishCtrl,
-  commitRoomLaneOrThrow,
   openConfig,
   withinRoomHorizon,
   decodeLaneEnvelope,
@@ -73,9 +64,9 @@ import {
 import { reportRoomError } from './errors.js'
 import { reconnectWindow, reportServerChannelError } from '../../server/channel.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
-import { createMember, evictMember, holdViews, reapAndReadMembersById, removeView } from './membership.js'
+import { createMember, evictMember, holdViews, removeView } from './membership.js'
 import { memberCellKey } from './cells.js'
-import { dropMemberMetaGeneration, writeMemberMeta, type MemberMetaWrite, type StoredRoomMeta } from './meta.js'
+import type { StoredRoomMeta } from './meta.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import type {
   BinaryPublishOptions,
@@ -85,8 +76,6 @@ import type {
   ParticipantMeta,
   PublishOptions,
   RemoteParticipant,
-  RoomSendReceipt,
-  RoomAckReceipt,
   RoomSnapshotView,
   Sender,
 } from '../types.js'
@@ -131,14 +120,12 @@ class ServerRoom extends RoomStateView implements Room {
   /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
   private readonly _pendingAdmissions = new Set<string>()
 
-  /** The last publish in call order, by key: a member's id for its text, `meta:<id>` for its meta writes, and
-   *  `inProcessBinaryLaneKey` for a binary lane. */
-  private readonly _publishTurns = new Map<string, Promise<void>>()
   /** What this handle's holders receive, told to the replica's demand (`onDemand`). */
   private readonly _report = new DemandReport(() => this._replica.demand)
   private _replicaOf: RoomReplica
   private readonly _subs: RoomSubscriptions
   /** @internal */ readonly _roster: RosterStream
+  /** @internal */ readonly _writes: RoomWrites
 
   constructor(
     roomId: string,
@@ -168,6 +155,15 @@ class ServerRoom extends RoomStateView implements Room {
     this._replicaOf = RoomReplica.of(roomId, inc)
     this._subs = new RoomSubscriptions(this, this._report)
     this._roster = new RosterStream(this._state, this._stubs, () => this._subs.ensureRoster())
+    this._writes = new RoomWrites(this, {
+      guards: () => this._guards,
+      local: (id) => this._localParticipants.get(id),
+      lanePlanned: (member, track) => this._subs.lanePlanned(member, track),
+      applyOwn: (event) => {
+        if (this._applyCtrl(event)) this._relayApplied(event)
+      },
+      acks: this._pendingDmAcks,
+    })
   }
 
   /** @internal What this process shares of the incarnation; a dropped one is replaced. */
@@ -297,174 +293,6 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  /** @internal Full replace (`setMeta`). */
-  async _setMemberMeta(id: string, meta: ParticipantMeta): Promise<AcceptedMeta> {
-    return await this._writeMemberMeta(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
-  }
-
-  /** @internal Per-key merge (`setAttributes`); an `undefined` value deletes the key. */
-  async _mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<AcceptedMeta> {
-    return await this._writeMemberMeta(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
-  }
-
-  /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
-   *  seq order. */
-  private async _writeMemberMeta(id: string, write: MemberMetaWrite): Promise<AcceptedMeta> {
-    return await this._inCallOrder(`meta:${id}`, async (sent) => {
-      const { update, hidden, replaced } = await writeMemberMeta(this._incarnation, id, write)
-      const accepted = { __r: 'p-meta', id, ...update, ...(hidden ? { hidden: true } : {}) } as const
-      if (this._applyCtrl(accepted)) this._relayApplied(accepted)
-      const publishing = publishCtrl(this.id, this._inc, accepted)
-      sent()
-      await publishing
-      if (replaced !== null) await dropMemberMetaGeneration(this._incarnation, id, replaced)
-      return update
-    })
-  }
-
-  async _publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
-    const { sender, commit } = await this._inCallOrder(from, async (sent) => {
-      const sender = await this._admitPublish(from, data)
-      const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...this._stampOf(from, sender) }
-      const record = encodeRoomRecord(envelope)
-      const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitRoomLaneOrThrow(this.id, this._inc, SEMANTIC_LANE, record, opts)
-      sent()
-      return { sender, commit: await committing }
-    })
-    return this._finishPublish(sender, data, commit)
-  }
-
-  /** `frame` is `framed` decoded; receivers trust its sender id, which every caller checked is the publisher's. */
-  async _publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
-    const { from } = frame
-    const lane = { kind: 'binary', member: from, track: laneTrack(frame.track) } as const
-    const { sender, commit } = await this._inCallOrder(inProcessBinaryLaneKey(from, lane.track), async (sent) => {
-      const sender = await this._admitPublish(from, frame.payload)
-      const planned = this._subs.lanePlanned(from, lane.track)
-      if (planned !== null) await planned
-      this._replica.demand.published(from, lane.track)
-      const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitRoomLaneOrThrow(this.id, this._inc, lane, framed, opts)
-      sent()
-      return { sender, commit: await committing }
-    })
-    return await this._finishPublish(sender, frame.payload, commit)
-  }
-
-  /** A member's publishes on one lane leave in call order: each starts once the one before it was sent to the backend
-   *  (its guard ran and its commit went out) or failed, never waiting on that commit's answer, which the backend
-   *  keeps in sending order. */
-  private async _inCallOrder<T>(key: string, publish: (sent: () => void) => Promise<T>): Promise<T> {
-    const previous = this._publishTurns.get(key)
-    const turn = createDeferred()
-    this._publishTurns.set(key, turn.promise)
-    try {
-      await previous
-      return await publish(turn.resolve)
-    } finally {
-      turn.resolve()
-      if (this._publishTurns.get(key) === turn.promise) this._publishTurns.delete(key)
-    }
-  }
-
-  private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
-    if (this._state.closed) throw roomClosedError(this.id)
-    const sender = this._memberSender(from)
-    const onBeforePublish = this._guards?.onBeforePublish
-    if (onBeforePublish) await onBeforePublish(sender, payload)
-    return sender
-  }
-
-  private async _finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
-    const receipt = {
-      seq: commit.seq,
-      timestamp: commit.timestamp,
-      ...(commit.receivers === undefined ? {} : { receivers: commit.receivers }),
-    }
-    const onAfterPublish = this._guards?.onAfterPublish
-    if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, receipt))
-    return { key: this.id, ...receipt }
-  }
-
-  /** `sender` with the meta seq it reflects, as `_memberSender(from)` just read it. */
-  private _stampOf(from: string, sender: Sender): SenderStamp {
-    const seq = this._state.memberMetaSeq(from) ?? this._localParticipants.get(from)!._metaSeq
-    return {
-      fromMeta: sender.meta,
-      fromMetaSeq: seq,
-      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
-    }
-  }
-
-  /** A member that left while its call waited has no sender to show a guard. */
-  private _memberSender(from: string): Sender {
-    const known = this._state.getRemote(from) ?? this._localParticipants.get(from)
-    if (!known) throw participantLeftError()
-    return senderOf(from, known.meta, known.identity)
-  }
-
-  async _sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
-    return ack ? await this._sendDmAck(from, to, data) : await this._publishDm(from, to, data)
-  }
-  private async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
-    const ackId = crypto.randomUUID()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const reply = new Promise<DmReply>((settle) => {
-      this._pendingDmAcks.add(ackId, { from, to, settle })
-      // Bounds the wait nothing else settles: a lost DM or reply, or a recipient that never listens.
-      timer = unrefTimer(
-        setTimeout(() => this._pendingDmAcks.settle(ackId, DM_FAILURE.timeout), ROOM_DM_ACK_TIMEOUT_MS),
-      )
-    })
-    let receipt: RoomSendReceipt
-    try {
-      receipt = await this._publishDm(from, to, data, ackId)
-    } catch (err) {
-      this._pendingDmAcks.delete(ackId)
-      clearTimeout(timer)
-      throw err
-    }
-    const settled = await reply
-    clearTimeout(timer)
-    if (!settled.ok) throw roomFailureError(settled)
-    return { ...receipt, response: settled.result }
-  }
-
-  private async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
-    if (this._state.closed) throw roomClosedError(this.id)
-    const target = await this._resolveMember(to)
-    if (!target) throw participantGoneError(to)
-    const sender = this._memberSender(from)
-    const onBeforeSend = this._guards?.onBeforeSend
-    if (onBeforeSend) await onBeforeSend(sender, target, data)
-    const envelope: RoomDmEnvelope = {
-      __r: 'dm',
-      to,
-      from,
-      ...this._stampOf(from, sender),
-      data,
-      ...(ackId ? { ackId } : {}),
-    }
-    const receipt = await commitToInbox(this.id, this._inc, envelope, [from])
-    if ('gone' in receipt) throw participantGoneError(receipt.gone)
-    const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
-    const onAfterSend = this._guards?.onAfterSend
-    if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
-    return info
-  }
-
-  /** A sender that left had its wait failed by its leave; only a closed room is an error. */
-  _publishDmAck(to: string, ackId: string, reply: DmReply): Promise<unknown> {
-    return commitToInbox(this.id, this._inc, { __r: 'dm-ack', to, ackId, ...reply })
-  }
-
-  private async _resolveMember(id: string): Promise<Sender | null> {
-    const remote = this._state.getRemote(id)
-    if (remote) return senderOf(id, remote.meta, remote.identity)
-    const [member] = await reapAndReadMembersById(this._incarnation, [id])
-    return member === undefined ? null : senderOf(id, member.meta, member.identity ?? null)
-  }
   /** @internal */
   async _readOpenConfig(): Promise<RoomConfigRecord | null> {
     return openConfig(await getRoomBackend().readHead(this.id), this._inc)
@@ -562,7 +390,7 @@ class ServerRoom extends RoomStateView implements Room {
     // A server participant, or one a client holds (its forwarder answers): the reply goes to the sender's inbox.
     void holder
       ._deliverMessageAck(msg)
-      .then((reply) => this._publishDmAck(envelope.from, ackId, reply))
+      .then((reply) => this._writes.publishDmAck(envelope.from, ackId, reply))
       .catch(reportRoomError)
   }
   /** Whether the event changed this view, which is what its clients get; a leave reaches them from `_onLeave`. */
@@ -891,12 +719,12 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   private async _publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishText(this.id, data, retain)
+    return await this._room._writes.publishText(this.id, data, retain)
   }
   /** @internal */
   async _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return await this._room._publishBinaryFrame(frame, framed)
+    return await this._room._writes.publishBinaryFrame(frame, framed)
   }
   /** @internal Each meta update this participant applies, which a client holding it mirrors. */
   _onAcceptedMeta(callback: (accepted: AcceptedMeta) => void): () => void {
@@ -924,7 +752,7 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
-    return await this._room._sendDm(this.id, to, data, ack)
+    return await this._room._writes.sendDm(this.id, to, data, ack)
   }
   async setMeta(meta: ParticipantMeta): Promise<void> {
     await this._setMeta(meta)
@@ -935,12 +763,12 @@ class ServerLocalParticipant extends ParticipantBase {
   /** @internal The accepted write, which a client holder mirrors in revision order. */
   async _setMeta(meta: ParticipantMeta): Promise<AcceptedMeta> {
     this._assertActive()
-    return await this._room._setMemberMeta(this.id, meta)
+    return await this._room._writes.setMemberMeta(this.id, meta)
   }
   /** @internal */
   async _setAttributes(attrs: ParticipantMeta): Promise<AcceptedMeta> {
     this._assertActive()
-    return await this._room._mergeMemberMeta(this.id, attrs)
+    return await this._room._writes.mergeMemberMeta(this.id, attrs)
   }
   async leave(): Promise<void> {
     if (this._left) return
@@ -955,13 +783,5 @@ class ServerLocalParticipant extends ParticipantBase {
   }
   protected _inboxBufferLimit(): number {
     return getServerConfig().channel.bufferLimit
-  }
-}
-
-async function runAfterHook(hook: () => unknown): Promise<void> {
-  try {
-    await hook()
-  } catch (error) {
-    reportServerChannelError(error)
   }
 }

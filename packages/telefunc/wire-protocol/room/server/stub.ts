@@ -198,11 +198,11 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
         await room._removeMember(this._requireMember(req.id), { type: 'left' })
         return undefined
       case 'req-set-meta':
-        return await room._setMemberMeta(this._requireMember(req.id), req.meta)
+        return await room._writes.setMemberMeta(this._requireMember(req.id), req.meta)
       case 'req-set-attrs':
-        return await room._mergeMemberMeta(this._requireMember(req.id), req.attrs)
+        return await room._writes.mergeMemberMeta(this._requireMember(req.id), req.attrs)
       case 'req-dm':
-        return await room._sendDm(this._requireMember(req.id), req.to, req.data, req.ack === true)
+        return await room._writes.sendDm(this._requireMember(req.id), req.to, req.data, req.ack === true)
     }
   }
 
@@ -268,12 +268,12 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private async _publishText(publish: RoomDataPublish): Promise<ChannelPublishAck> {
     this._requireMember(publish.from)
     assertPublishShield(this._publishShield, publish.data)
-    return await this._room._publishText(publish.from, publish.data, publish.retain)
+    return await this._room._writes.publishText(publish.from, publish.data, publish.retain)
   }
 
   private async _publishBinary(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     this._requireMember(frame.from)
-    return await this._room._publishBinaryFrame(frame, framed)
+    return await this._room._writes.publishBinaryFrame(frame, framed)
   }
 
   // Membership
@@ -422,7 +422,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     // The sender drops a reply after its timeout.
     if (!entry) return
     this._pendingAckDms.delete(ackId)
-    void this._room._publishDmAck(entry.sender, ackId, reply).catch(reportRoomError)
+    void this._room._writes.publishDmAck(entry.sender, ackId, reply).catch(reportRoomError)
   }
 
   // Tail
