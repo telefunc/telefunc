@@ -1,4 +1,4 @@
-export { ReplayGate, LocalHolder, ANNOUNCE_KEY, binaryLaneKey }
+export { ReplayGate, LocalHolder, ANNOUNCE_KEY }
 export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -17,11 +17,8 @@ import type { MemberWants, RoomDataEnvelope } from '../protocol.js'
 import type { RoomState } from '../state.js'
 assertIsNotBrowser()
 
-// Text gate keys: a member's id, and for announcements a key no id takes. A binary lane's key is its id NUL track.
+// Text gate keys: a member's id, and for announcements a key no id takes.
 const ANNOUNCE_KEY = '\0announce'
-function binaryLaneKey(member: string, track: string): string {
-  return `${member}\0${track}`
-}
 
 /** One holder's order across retained replay and live frames, per sender: a frame is admitted only if it is newer than
  *  every frame the holder already has from that sender on its lane. A replayed retained frame can win the race against

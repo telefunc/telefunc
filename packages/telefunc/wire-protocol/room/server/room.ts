@@ -12,6 +12,7 @@ import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_ROSTER_PART_MEMBERS } from '../constants.j
 import { Slice } from '../slice.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
+import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import {
   encodeBinaryFrame,
@@ -54,7 +55,7 @@ import { DemandReport } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
 import { MemberMessageTexts, RoomStubChannel, unorderedEventText } from './stub.js'
 import type { RoomRequest } from './requests.js'
-import { LocalHolder, binaryLaneKey, type LaneHolder, type TextWantsChange } from './replay.js'
+import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
 import { PendingDmAcks } from './dm-acks.js'
 import { RoomSubscriptions } from './subscriptions.js'
@@ -147,6 +148,8 @@ class ServerRoom extends RoomStateView implements Room {
   /** A roster reconciling into this view, whose drift reaches its clients once it ends. */
   private _reconciling = false
 
+  /** The last publish in call order, by key: a member's id for its text, `meta:<id>` for its meta writes, and
+   *  `inProcessBinaryLaneKey` for a binary lane. */
   private readonly _publishTurns = new Map<string, Promise<void>>()
   /** What this handle's holders receive, told to the replica's demand (`onDemand`). */
   private readonly _report = new DemandReport(() => this._replica.demand)
@@ -351,7 +354,7 @@ class ServerRoom extends RoomStateView implements Room {
   async _publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     const { from } = frame
     const lane = { kind: 'binary', member: from, track: laneTrack(frame.track) } as const
-    const { sender, commit } = await this._inCallOrder(binaryLaneKey(from, lane.track), async (sent) => {
+    const { sender, commit } = await this._inCallOrder(inProcessBinaryLaneKey(from, lane.track), async (sent) => {
       const sender = await this._admitPublish(from, frame.payload)
       const planned = this._subs.lanePlanned(from, lane.track)
       if (planned !== null) await planned

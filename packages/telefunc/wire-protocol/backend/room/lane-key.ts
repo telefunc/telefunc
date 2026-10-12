@@ -1,4 +1,11 @@
-export { encodeLaneKey, decodeLaneKey, everyTrackLaneKey, binaryLaneKeyPrefix, roomSubscriptionSourceKey }
+export {
+  encodeLaneKey,
+  decodeLaneKey,
+  everyTrackLaneKey,
+  binaryLaneKeyPrefix,
+  inProcessBinaryLaneKey,
+  roomSubscriptionSourceKey,
+}
 
 import { assert } from '../../../utils/assert.js'
 import type { EveryTrackLane, LaneId, RoomSubscriptionSource } from './contract.js'
@@ -8,6 +15,12 @@ function encodeLaneKey(lane: LaneId | EveryTrackLane): string {
   if (lane.kind === 'inbox') return `inbox:${encodeURIComponent(lane.member)}`
   if (lane.kind === 'binary-all') return everyTrackLaneKey(lane.member)
   return `${binaryLaneKeyPrefix(lane.member)}${encodeURIComponent(lane.track)}`
+}
+
+/** A binary lane's key within this process, never decoded or stored: distinct per member and track, as no member id
+ *  holds a NUL, and without `encodeLaneKey`'s escaping, which a replan pays per member. */
+function inProcessBinaryLaneKey(member: string, track: string): string {
+  return `${member}\0${track}`
 }
 
 /** What the key of each binary lane of `member` starts with. */

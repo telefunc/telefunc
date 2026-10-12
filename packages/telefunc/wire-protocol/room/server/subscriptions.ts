@@ -4,6 +4,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
+import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
 import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
@@ -15,7 +16,7 @@ import type { MembershipEvent, RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { Slice } from '../slice.js'
-import { binaryLaneKey, type LaneHolder } from './replay.js'
+import type { LaneHolder } from './replay.js'
 import { WantsIndex } from './wants-index.js'
 import { SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import type { ControlObserver, PresenceEvent, RoomReplica } from './replica.js'
@@ -221,7 +222,7 @@ class RoomSubscriptions implements ControlObserver {
    *  once it ends, the lane establishes, and holds a commit on it until it delivers. */
   lanePlanned(member: string, track: string): Promise<void> | null {
     if (this._planning === null || !this._wants.wantsBinary || this._everyTrack.has(member)) return null
-    if (this._binary.has(binaryLaneKey(member, track)) || !this._wants.receives(member, track)) return null
+    if (this._binary.has(inProcessBinaryLaneKey(member, track)) || !this._wants.receives(member, track)) return null
     return this._planning
   }
 
@@ -232,7 +233,7 @@ class RoomSubscriptions implements ControlObserver {
     const pending: Promise<void>[] = []
     for (const lane of [
       this._everyTrack.get(member),
-      track === null ? undefined : this._binary.get(binaryLaneKey(member, track)),
+      track === null ? undefined : this._binary.get(inProcessBinaryLaneKey(member, track)),
     ])
       if (lane !== undefined && this._binaryPending.has(lane)) pending.push(lane.ready)
     if (pending.length > 0) await withinRoomHorizon(Promise.all(pending))
@@ -515,7 +516,7 @@ class RoomSubscriptions implements ControlObserver {
   private _syncLane(member: string, track: string, servedByAll: boolean): void {
     const named = this._present(member) && this._wants.wantsNamedPair(member, track)
     const allDelivers = this._everyTrack.get(member)?.delivering === true
-    const key = binaryLaneKey(member, track)
+    const key = inProcessBinaryLaneKey(member, track)
     let lane = this._binary.get(key)
     const keep = servedByAll ? lane !== undefined && !allDelivers : named
     if (!keep && lane !== undefined) {
@@ -590,7 +591,7 @@ class RoomSubscriptions implements ControlObserver {
     const lane = this._newLaneSubscription(() =>
       this._everyTrack.has(member) ? this._queued.members.add(member) : this._queuePair(member, track),
     )
-    this._binary.set(binaryLaneKey(member, track), lane)
+    this._binary.set(inProcessBinaryLaneKey(member, track), lane)
     let tracks = this._binaryTracks.get(member)
     if (!tracks) this._binaryTracks.set(member, (tracks = new Set()))
     tracks.add(track)
@@ -606,7 +607,7 @@ class RoomSubscriptions implements ControlObserver {
    *  one's readiness replans the member. */
   private _releaseEveryTrack(member: string, all: LaneSubscription): void {
     for (const track of this._binaryTracks.get(member) ?? [])
-      if (!this._binary.get(binaryLaneKey(member, track))!.delivering) return
+      if (!this._binary.get(inProcessBinaryLaneKey(member, track))!.delivering) return
     all.stop()
     this._everyTrack.delete(member)
   }
