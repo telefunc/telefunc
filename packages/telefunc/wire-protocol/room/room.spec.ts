@@ -5436,18 +5436,18 @@ describe('room protocol validation', () => {
     await vi.waitFor(() => expect(demanded.has('past')).toBe(true))
     expect(demanded.has('t0')).toBe(false)
   })
-  it('opens one lane per track and none per member for a client naming ROOM_TRACK_WANTS_MAX tracks room-wide', async () => {
+  it('opens one lane per member and none per track for a client naming ROOM_TRACK_WANTS_MAX tracks room-wide among 50 members', async () => {
     const room = (await Room.create('room-wide-track-wants')) as ServerRoom
-    await Promise.all(Array.from({ length: 50 }, () => room.join()))
+    const members = await Promise.all(Array.from({ length: 50 }, () => room.join()))
     const stub = register(room)
     const subscribed = countBinarySubscriptions()
     const subs = subsOf(room)
-    const tracks = trackNames(ROOM_TRACK_WANTS_MAX)
-    for (const track of tracks) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+    for (const track of trackNames(ROOM_TRACK_WANTS_MAX))
+      declare(stub, { __r: 'sub-binary', member: null, track, on: true })
     await subs.binaryReady()
-    expect(subs._binary.size + subs._everyTrack.size).toBe(0)
-    expect(binaryLanes(room)).toEqual(tracks.map(everyMemberLaneKey).sort())
-    expect(subscribed).toHaveLength(ROOM_TRACK_WANTS_MAX)
+    expect(subs._binary.size + subs._everyMember.size).toBe(0)
+    expect(binaryLanes(room)).toEqual(members.map(({ id }) => everyTrackLaneKey(id)).sort())
+    expect(subscribed).toHaveLength(50)
   })
   it.each([10, 50, 100])(
     'gossips ROOM_TRACK_WANTS_MAX tracks a client names of every member once each, and none per member, among %i members',
