@@ -5,21 +5,16 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
 import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
-import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
-import {
-  ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_NAMED_LANES_MAX,
-  ROOM_META_REPAIR_MS,
-  ROOM_PLAN_SLICE_MS,
-} from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { BinaryWantChange } from '../binary.js'
 import type { RoomDemand } from '../demand.js'
 import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
 import type { MembershipEvent, RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
+import { Slice } from './slice.js'
 import { binaryLaneKey, type LaneHolder } from './replay.js'
 import { WantsIndex } from './wants-index.js'
 import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
@@ -149,7 +144,7 @@ class RoomSubscriptions {
   /** A holder attached, or its wants changed wholesale: its room-wide ones, and those of `members` when given. The next
    *  planning pass recounts each member it may have changed. */
   holderChanged(holder: LaneHolder, members?: Iterable<string>): void {
-    this._indexHolder(holder, false, members)
+    runAll(this._indexHolder(holder, false, members))
     this._replanAround(() => this._schedulePlan())
   }
 
@@ -162,7 +157,7 @@ class RoomSubscriptions {
 
   /** A holder's text wants changed: its room-wide ones, and those of `members`. */
   textChanged(holder: LaneHolder, members: Iterable<string>): void {
-    this._wants.updateText(holder, false, members)
+    runAll(this._wants.updateText(holder, false, members))
     this._replanAround(() => {})
   }
 
@@ -329,18 +324,20 @@ class RoomSubscriptions {
     this._syncHeartbeat()
   }
 
-  private _indexHolder(holder: LaneHolder, gone: boolean, members?: Iterable<string>): void {
-    const affected = this._wants.update(holder, gone, members)
-    const queued = this._queued
-    if (affected === 'all') {
-      this._counts.clear()
-      if (this._counting) this._counting.stale = true
-      queued.all = true
-    } else
-      for (const member of affected) {
-        this._dropCounts(member)
-        queued.members.add(member)
-      }
+  /** Indexes the holder's wants a step at a time, each step queueing the members it affected. */
+  private *_indexHolder(holder: LaneHolder, gone: boolean, members?: Iterable<string>): Generator<void> {
+    for (const affected of this._wants.update(holder, gone, members)) {
+      if (affected === 'all') {
+        this._counts.clear()
+        if (this._counting) this._counting.stale = true
+        this._queued.all = true
+      } else
+        for (const member of affected) {
+          this._dropCounts(member)
+          this._queued.members.add(member)
+        }
+      yield
+    }
   }
 
   private _dropCounts(member: string): void {
@@ -359,17 +356,18 @@ class RoomSubscriptions {
     this._planning ??= this._runPlan().catch(reportRoomError)
   }
 
-  /** Plans what is queued once the current turn's changes are in, then tells the demand it changed, each
-   *  `ROOM_PLAN_SLICE_MS` at a time so timers and I/O run between slices; what is queued meanwhile gets the next round.
-   *  No other demand is told until it ends, so no owner sees the demand between two of its slices. */
+  /** Plans what is queued once the current turn's changes are in, then tells the demand it changed, each round sharing
+   *  one `ROOM_PLAN_SLICE_MS` slice at a time so timers and I/O run between slices; what is queued meanwhile gets the
+   *  next round. No other demand is told until it ends, so no owner sees the demand between two of its slices. */
   private async _runPlan(): Promise<void> {
     try {
       await Promise.resolve()
+      const slice = new Slice()
       for (;;) {
         const plan = this._queued
         if (this._gone.size > 0) {
-          await nextTurnOf()
-          await this._replanEach(drain(this._gone), (holder) => this._indexHolder(holder, true))
+          await slice.next()
+          await this._replanEach(slice, drain(this._gone), (holder) => this._indexHolder(holder, true))
         } else if (!isEmpty(plan)) {
           this._queued = newBinaryPlan()
           const host = this._host
@@ -382,6 +380,7 @@ class RoomSubscriptions {
             plan.all ? this._everyTrack.keys() : [],
           )
           await this._replanEach(
+            slice,
             members,
             once((member) =>
               this._unconcerned(member) ? void this._counts.delete(member) : this._planMember(member, plan),
@@ -389,6 +388,7 @@ class RoomSubscriptions {
           )
           if (plan.all) {
             await this._replanEach(
+              slice,
               chain(this._inbox.keys(), host._ownedMembers()),
               once((member) =>
                 !host._state.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
@@ -396,7 +396,7 @@ class RoomSubscriptions {
             )
           }
         } else if (this._demand.changed) {
-          while (!this._demand.tellUntil(performance.now() + ROOM_PLAN_SLICE_MS)) await nextTurnOf()
+          while (!this._demand.tellUntil(slice.end)) await slice.next()
         } else return
       }
     } finally {
@@ -405,16 +405,19 @@ class RoomSubscriptions {
     }
   }
 
-  /** Runs `step` on each item, `ROOM_PLAN_SLICE_MS` at a time, each slice planned around; a step that yields can end
-   *  a slice at each yield. */
-  private async _replanEach<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Promise<void> {
+  /** Runs `step` on each item within `slice`, each slice planned around; a step that yields can end a slice at each
+   *  yield. */
+  private async _replanEach<T>(
+    slice: Slice,
+    items: Iterable<T>,
+    step: (item: T) => Iterable<void> | void,
+  ): Promise<void> {
     const pending = stepsOf(items, step)
     for (let done = false; !done; ) {
+      if (slice.over) await slice.next()
       this._replanAround(() => {
-        const deadline = performance.now() + ROOM_PLAN_SLICE_MS
-        while (!(done = pending.next().done === true)) if (performance.now() >= deadline) return
+        while (!(done = pending.next().done === true)) if (slice.over) return
       })
-      if (!done) await nextTurnOf()
     }
   }
 
@@ -707,6 +710,10 @@ class RoomSubscriptions {
 /** Each source's items in turn, each source read live as the iteration reaches it. */
 function* chain<T>(...sources: Iterable<T>[]): Generator<T> {
   for (const source of sources) yield* source
+}
+/** Runs every step now. */
+function runAll(steps: Iterable<unknown>): void {
+  for (const _ of steps);
 }
 /** Each item's step, then what it yields one at a time; an item whose step yields nothing is still one step. */
 function* stepsOf<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Generator<void> {

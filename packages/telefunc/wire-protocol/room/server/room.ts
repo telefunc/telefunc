@@ -788,7 +788,8 @@ class ServerRoom extends RoomStateView implements Room {
     this._stubs.add(stub)
     this._views.set(stub, holdViews(this._incarnation, [stub.id]).catch(reportRoomError))
     if (this._tail !== null) {
-      stub._beginTail(this._tail.take(), () => this._subs.holderChanged(stub))
+      // Its expiry ends only the stub's want of all text.
+      stub._beginTail(this._tail.take(), () => this._subs.textChanged(stub, []))
       this._tail = null
     }
     stub.onClose(() => this._detachStub(stub))

@@ -229,6 +229,30 @@ describe('Room at 100,000 members', () => {
     expect(gap).toBeLessThanOrEqual(50)
     expect(binaryLanesOf(observer)).toBe(0)
   }, 60_000)
+  it('drops the text and every-track wants of 100,000 members a client held as it leaves, with the event loop turning', async () => {
+    const room = await create('holder-leaves')
+    const ids = (await Promise.all(Array.from({ length: 100_000 }, () => room.join()))).map(({ id }) => id)
+    const observer = await view(room.id)
+    await observer.getParticipants()
+    const stub = register(observer)
+    const { peer } = attachPeer(stub, { keep: false })
+    // One member per message, as the client sends them.
+    for (const id of ids) {
+      stub._onPeerMessage(stringify({ __r: 'sub-text', announce: false, members: { [id]: true } }), 0)
+      stub._onPeerMessage(stringify({ __r: 'sub-binary', member: id, track: null, on: true }), 0)
+    }
+    await subsOf(observer).binaryReady()
+    expect(binaryLanesOf(observer)).toBe(100_000)
+    await settled()
+    const { gap } = await longestGapWhile(async () => {
+      const closed = new Promise<void>((resolve) => stub.onClose(() => resolve()))
+      stub._onPeerDisconnect(peer, 1)
+      await closed
+      await subsOf(observer).binaryReady()
+    })
+    expect(gap).toBeLessThanOrEqual(50)
+    expect(binaryLanesOf(observer)).toBe(0)
+  }, 120_000)
   it('keeps the event loop turning through a sweep of 100,000 lapsed rooms', async () => {
     const backend = getRoomBackend()
     const sweep = async (pass: number) => {

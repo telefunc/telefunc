@@ -16,7 +16,8 @@ type Indexed = {
 /** The holders covering each track of a scope; the `null` key covers every track. */
 type TrackCover = Map<string | null, Set<LaneHolder>>
 /** The members whose binary pairs a change may have changed. */
-type Affected = Set<string> | 'all'
+type Affected = ReadonlySet<string> | 'all'
+const NONE: Affected = new Set()
 
 /** Every holder's wants, aggregated as each one changes, so a change costs the size of what it changed. */
 class WantsIndex {
@@ -41,32 +42,32 @@ class WantsIndex {
     return this._everyMember.size > 0 || this._members.size > 0
   }
 
-  /** Indexes all of the holder's current wants (none once it is gone): its room-wide ones, and those of `members`, or
-   *  of every member when omitted. */
-  update(holder: LaneHolder, gone = false, members?: Iterable<string>): Affected {
-    const indexed = this._indexedOf(holder)
+  /** Indexes all of the holder's current wants (none once it is gone), a text member or a scope per step: its room-wide
+   *  ones, and those of `members`, or of every member when omitted. Each step yields the members it affected. */
+  *update(holder: LaneHolder, gone = false, members?: Iterable<string>): Generator<Affected> {
     const ids = members === undefined ? undefined : new Set(members)
-    this.updateText(holder, gone, ids)
+    for (const _ of this.updateText(holder, gone, ids)) yield NONE
+    const indexed = this._indexedOf(holder)
     const wants = gone ? null : holder._binaryWants
-    const scopes = new Set<string | null>([null])
-    for (const id of ids ?? [...indexed.binary.keys(), ...(wants?.members.keys() ?? [])]) scopes.add(id)
-    const affected = new Set<string>()
-    let all = false
-    for (const scope of scopes) {
-      const next = coverKeys(scope === null ? wants?.everyMember : wants?.members.get(scope))
-      const prev = new Set(indexed.binary.get(scope))
-      for (const key of prev)
-        if (!next.has(key)) all = addAffected(this._cover(holder, scope, key, false), affected) || all
-      for (const key of next)
-        if (!prev.has(key)) all = addAffected(this._cover(holder, scope, key, true), affected) || all
-    }
+    // Read live: a scope listed twice is indexed already when its second step comes.
+    for (const scopes of ids ? [[null], ids] : [[null], indexed.binary.keys(), wants?.members.keys() ?? []])
+      for (const scope of scopes) {
+        const next = coverKeys(scope === null ? wants?.everyMember : wants?.members.get(scope))
+        const prev = new Set(indexed.binary.get(scope))
+        const affected = new Set<string>()
+        let all = false
+        for (const key of prev)
+          if (!next.has(key)) all = addAffected(this._cover(holder, scope, key, false), affected) || all
+        for (const key of next)
+          if (!prev.has(key)) all = addAffected(this._cover(holder, scope, key, true), affected) || all
+        yield all ? 'all' : affected
+      }
     if (gone) this._indexed.delete(holder)
-    return all ? 'all' : affected
   }
 
-  /** Indexes the holder's current text wants: its room-wide ones, and those of `members`, or of every member when
-   *  omitted. */
-  updateText(holder: LaneHolder, gone = false, members?: Iterable<string>): void {
+  /** Indexes the holder's current text wants, a member per step: its room-wide ones, and those of `members`, or of every
+   *  member when omitted. */
+  *updateText(holder: LaneHolder, gone = false, members?: Iterable<string>): Generator<void> {
     const indexed = this._indexedOf(holder)
     const text = gone ? null : holder._textDemand()
     const textAll = text?.all ?? false
@@ -75,13 +76,17 @@ class WantsIndex {
     const announce = !gone && holder._wantsAnnounce
     if (announce !== indexed.announce) this._announce += announce ? 1 : -1
     indexed.announce = announce
-    for (const id of members ?? new Set([...indexed.textMembers, ...(text?.members ?? [])])) {
-      const wantsText = text?.members.has(id) ?? false
-      if (wantsText === indexed.textMembers.has(id)) continue
-      addCount(this._textMembers, id, wantsText ? 1 : -1)
-      if (wantsText) indexed.textMembers.add(id)
-      else indexed.textMembers.delete(id)
-    }
+    // Read live: a member listed twice is indexed already when its second step comes.
+    for (const ids of members ? [members] : [indexed.textMembers, text?.members ?? []])
+      for (const id of ids) {
+        const wantsText = text?.members.has(id) ?? false
+        if (wantsText !== indexed.textMembers.has(id)) {
+          addCount(this._textMembers, id, wantsText ? 1 : -1)
+          if (wantsText) indexed.textMembers.add(id)
+          else indexed.textMembers.delete(id)
+        }
+        yield
+      }
   }
 
   /** Indexes one change of the holder's binary wants; the affected members' pairs of its track may have changed. */
@@ -177,7 +182,7 @@ class WantsIndex {
   private _cover(holder: LaneHolder, scope: string | null, key: string | null, on: boolean): Affected {
     const indexed = this._indexedOf(holder)
     let keys = indexed.binary.get(scope)
-    if ((keys?.has(key) ?? false) === on) return new Set()
+    if ((keys?.has(key) ?? false) === on) return NONE
     if (!keys) indexed.binary.set(scope, (keys = new Set()))
     if (on) keys.add(key)
     else keys.delete(key)
