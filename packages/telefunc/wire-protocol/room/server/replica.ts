@@ -81,9 +81,11 @@ class RoomReplica {
 
   /** Whether the observer gets the control lane's events; observing again retries a lane whose recovery gave up. */
   observe(observer: ControlObserver, on: boolean): void {
-    if (on) this._observers.add(observer)
-    else this._observers.delete(observer)
-    this._delivering = null
+    if (on !== this._observers.has(observer)) {
+      if (on) this._observers.add(observer)
+      else this._observers.delete(observer)
+      this._delivering = null
+    }
     this._control.sync(this._observers.size > 0, () =>
       getRoomBackend().subscribeLane(this._roomId, this._inc, CONTROL_LANE, (payload, info) =>
         this._onControl(decodeRoomText(payload), info),
