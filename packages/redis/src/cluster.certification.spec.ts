@@ -145,7 +145,10 @@ describe('Redis real three-master Cluster CI certification', () => {
       ).delivery
       const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
       if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
-      expect(await backend.readCells(roomId, inc, { prefix: 'cell}' })).toEqual(currentCells)
+      expect(await backend.readCells(roomId, inc, { prefix: 'cell}' })).toEqual({
+        ...currentCells,
+        now: expect.any(Number),
+      })
       expect(
         await backend.compareExchangeCells(roomId, inc, {
           expect: [{ key: 'cell} escape', version: currentCells.versions.get('cell} escape')! }],
