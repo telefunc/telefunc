@@ -8,8 +8,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_ROSTER_PART_MEMBERS } from '../constants.js'
-import { Slice } from '../slice.js'
+import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
@@ -39,7 +38,6 @@ import {
   leaveCauseFromWire,
   leaveCauseToWire,
   type MemberSnapshot,
-  type RoomRosterEvent,
   type RoomConfigRecord,
   type RoomSnapshotMetadata,
   type RoomDataEnvelope,
@@ -50,7 +48,7 @@ import {
   type AcceptedMeta,
   type RoomEnvelope,
 } from '../protocol.js'
-import { RoomState, RoomStateView, type MembershipEvent } from '../state.js'
+import { RoomState, RoomStateView } from '../state.js'
 import { DemandReport } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
 import { MemberMessageTexts, RoomStubChannel, unorderedEventText } from './stub.js'
@@ -60,6 +58,7 @@ import { TailHold } from './tail.js'
 import { PendingDmAcks } from './dm-acks.js'
 import { RoomSubscriptions } from './subscriptions.js'
 import { RoomReplica, type PresenceEvent } from './replica.js'
+import { RosterStream } from './roster-stream.js'
 import {
   SEMANTIC_LANE,
   commitToInbox,
@@ -126,18 +125,11 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _stubOf = new Map<string, RoomStubChannel>()
   /** Each stub's latest view write, from its attach or a renewal; its removal comes after it. */
   private readonly _views = new Map<RoomStubChannel, Promise<void>>()
-  /** Stubs whose first roster read failed: the next successful refresh sends them one. */
-  private readonly _rosterOwed = new Set<RoomStubChannel>()
-  /** Each roster part's text for the clients that see no hidden member, at one roster version: one roster's text at
-   *  most, until the first stream after a change or the room's teardown. */
-  private _rosterTexts: { version: number; parts: Array<{ text: string; hidden: boolean }> } | null = null
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** The local participants that joined with `selfDelivery: false`. */
   private readonly _localSuppressed = new Set<string>()
   /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
   private readonly _pendingAdmissions = new Set<string>()
-  /** A roster reconciling into this view, whose drift reaches its clients once it ends. */
-  private _reconciling = false
 
   /** The last publish in call order, by key: a member's id for its text, `meta:<id>` for its meta writes, and
    *  `inProcessBinaryLaneKey` for a binary lane. */
@@ -146,6 +138,7 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _report = new DemandReport(() => this._replica.demand)
   private _replicaOf: RoomReplica
   private readonly _subs: RoomSubscriptions
+  /** @internal */ readonly _roster: RosterStream
 
   constructor(
     roomId: string,
@@ -174,6 +167,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._local = new LocalHolder(this._state, this._localSuppressed)
     this._replicaOf = RoomReplica.of(roomId, inc)
     this._subs = new RoomSubscriptions(this, this._report)
+    this._roster = new RosterStream(this._state, this._stubs, () => this._subs.ensureRoster())
   }
 
   /** @internal What this process shares of the incarnation; a dropped one is replaced. */
@@ -537,11 +531,6 @@ class ServerRoom extends RoomStateView implements Room {
     const update = { __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq, ...(hidden ? { hidden: true } : {}) } as const
     if (this._applyCtrl(update)) this._relayApplied(update)
   }
-  /** @internal Whether a client of this view was sent every member it holds, as it holds them: no roster reconciles
-   *  into it unsent. */
-  get _rosterSettled(): boolean {
-    return !this._reconciling
-  }
   /** @internal */
   _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
     const unframed = decodeBinaryFrame(framed)
@@ -632,7 +621,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _teardown(): void {
     this._pendingDmAcks.settleAll(DM_FAILURE.roomClosed) // no recipient will reply now
     this._teardownTail()
-    this._rosterTexts = null
+    this._roster.clear()
     const replica = this._replica
     for (const id of this._ownedMembers()) replica.disown(id, this)
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
@@ -649,75 +638,6 @@ class ServerRoom extends RoomStateView implements Room {
   _applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {
     for (const applied of this._state.applyRoomUpdate({ __r: 'update', seq, meta: entries }))
       this._relayApplied(applied)
-  }
-  /** @internal Reconciles with a roster read in `ROOM_PLAN_SLICE_MS` slices, replaying `events`, which grow until it
-   *  ends; false if the room closed first. Every client gets a roster that corrected a drift; otherwise only the clients
-   *  still owed their first. */
-  async _applyAuthorityRoster(
-    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Promise<boolean> {
-    this._reconciling = this._state.rosterKnown
-    try {
-      const drifted = await this._state.reconcileRoster(roster, events)
-      if (drifted === null) return false
-      const recipients = drifted ? [...this._stubs] : [...this._rosterOwed]
-      this._rosterOwed.clear()
-      if (recipients.length > 0) void this._streamRoster(recipients).catch(reportRoomError)
-      return true
-    } finally {
-      this._reconciling = false
-    }
-  }
-  /** The roster to `stubs`, `ROOM_ROSTER_PART_MEMBERS` live members per part and a `ROOM_PLAN_SLICE_MS` slice per turn, so
-   *  each event relayed between two parts is one the parts after it reflect. A stub sent a newer roster drops out. While
-   *  the roster is unchanged since the stream began, each part's text is the one another stream built for it. */
-  private async _streamRoster(stubs: RoomStubChannel[]): Promise<void> {
-    const stream = {}
-    for (const stub of stubs) {
-      stub._rosterStream = stream
-      stub._rosterSent = false
-    }
-    const state = this._state
-    const version = state.version
-    if (this._rosterTexts?.version !== version) this._rosterTexts = { version, parts: [] }
-    const texts = this._rosterTexts.parts
-    const ids = state.memberIds()
-    const slice = new Slice()
-    for (let part = 0; ; part++) {
-      const chunk: string[] = []
-      let more = true
-      while (chunk.length < ROOM_ROSTER_PART_MEMBERS) {
-        const next = ids.next()
-        if (next.done === true) {
-          more = false
-          break
-        }
-        chunk.push(next.value)
-      }
-      const receiving = stubs.filter((stub) => stub._rosterStream === stream && this._stubs.has(stub))
-      if (receiving.length === 0 || state.closed) return
-      // The first roster read adds its members without a change.
-      const unchanged = state.rosterKnown && state.version === version
-      const built = unchanged ? texts[part] : undefined
-      // Any stub's listing is the visible one in a part with no hidden member.
-      const members = built?.hidden === false ? null : chunk.map((id) => state.memberSnapshot(id))
-      const visible = members?.filter(({ hidden }) => !hidden)
-      let visibleText = built?.text
-      const textOf = (listed: MemberSnapshot[]) => {
-        const event: RoomRosterEvent = { __r: 'roster', members: listed, part, ...(more ? { more } : {}) }
-        return unorderedEventText(event)
-      }
-      for (const stub of receiving) {
-        const listed = members && stub._rosterMembers(members, visible!)
-        stub._relayEventText(!listed || listed === visible ? (visibleText ??= textOf(visible!)) : textOf(listed))
-        if (!more) stub._rosterSent = true
-      }
-      if (unchanged && built === undefined && visibleText !== undefined)
-        texts[part] = { text: visibleText, hidden: visible!.length < chunk.length }
-      if (!more) return
-      if (slice.over) await slice.next()
-    }
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
@@ -770,30 +690,17 @@ class ServerRoom extends RoomStateView implements Room {
   }
   _onStubAttached(stub: RoomStubChannel): void {
     if (!this._stubs.has(stub)) return
-    this._sendRosterTo(stub)
+    this._roster.sendTo(stub)
     stub._relayEvent({ __r: 'update', seq: this._state.metaSeq, meta: this._state.metaEntries() })
     for (const member of stub._heldMembers())
       stub._relayEvent({ __r: 'demand-state', member, tracks: this._demandOf(member) })
-  }
-  private _sendRosterTo(stub: RoomStubChannel): void {
-    void this._subs
-      .ensureRoster()
-      .then(() => {
-        if (this._stubs.has(stub) && !this._state.closed) return this._streamRoster([stub])
-      })
-      .catch((error) => {
-        reportRoomError(error)
-        if (!this._stubs.has(stub) || this._state.closed) return
-        stub._relayEvent({ __r: 'roster-error' })
-        this._rosterOwed.add(stub)
-      })
   }
   private _detachStub(stub: RoomStubChannel): void {
     this._stubs.delete(stub)
     const view = this._views.get(stub)
     this._views.delete(stub)
     void view?.then(() => removeView(this._incarnation, stub.id)).catch(reportRoomError)
-    this._rosterOwed.delete(stub)
+    this._roster.forget(stub)
     stub._endTail()
     this._subs.holderGone(stub)
     for (const id of stub._heldMembers()) {

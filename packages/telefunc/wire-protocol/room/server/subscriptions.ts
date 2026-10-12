@@ -11,12 +11,13 @@ import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { BinaryWantChange } from '../binary.js'
 import type { DemandReport } from '../demand.js'
-import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
-import type { MembershipEvent, RoomState } from '../state.js'
+import type { RoomConfigRecord } from '../protocol.js'
+import type { RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { Slice } from '../slice.js'
 import type { LaneHolder } from './replay.js'
+import type { RosterStream } from './roster-stream.js'
 import { WantsIndex } from './wants-index.js'
 import { SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import type { ControlObserver, PresenceEvent, RoomReplica } from './replica.js'
@@ -59,11 +60,8 @@ type SubscriptionHost = {
   _onDm(serialized: string, info: WirePublishInfo): void
   _readOpenConfig(): Promise<RoomConfigRecord | null>
   _applyAuthorityMeta(stored: StoredRoomMeta): void
-  /** A complete roster read: applied, and sent to the clients it concerns. */
-  _applyAuthorityRoster(
-    roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
-    events: readonly MembershipEvent[],
-  ): Promise<boolean>
+  /** Applies a complete roster read, and sends it to the clients it concerns. */
+  readonly _roster: Pick<RosterStream, 'reconcile'>
   _closeFromAuthority(): void
 }
 
@@ -681,7 +679,7 @@ class RoomSubscriptions implements ControlObserver {
     if (host._state.closed) return
     const read = await host._state.recordingMembership(
       () => reapAndReadRoster(host._incarnation),
-      async (roster, events) => !host._state.closed && (await host._applyAuthorityRoster(roster, events)),
+      async (roster, events) => !host._state.closed && (await host._roster.reconcile(roster, events)),
     )
     if (read) await this.replan()
   }

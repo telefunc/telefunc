@@ -387,7 +387,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     return (
       this._peer !== null &&
       this._rosterSent &&
-      this._room._rosterSettled &&
+      this._room._roster.settled &&
       this._room._state.memberHidden(member) === false
     )
   }
