@@ -67,8 +67,8 @@ type HeadNext = {
     config: Uint8Array
     closeLease?: { id: string; durationMs: number }
   }
-  /** The head lapses `ttlMs` after this CX; `'keep'` keeps the current head's lapse. */
-  ttlMs?: number | 'keep'
+  /** The head lapses `ttlMs` after this CX. */
+  ttlMs?: number
 }
 
 type HeadCxResult = { head: RoomHead } | { conflict: true; current: RoomHead | null }

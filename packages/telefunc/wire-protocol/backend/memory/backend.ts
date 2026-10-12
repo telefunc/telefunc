@@ -273,11 +273,11 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
     // Only a CX that actually applies materializes a room record.
-    return { head: publicHead(this._storeHead(this._roomFor(roomId), next, current)) }
+    return { head: publicHead(this._storeHead(this._roomFor(roomId), next)) }
   }
 
-  private _storeHead(room: RoomRecord, next: HeadNext, current: StoredHead | null): StoredHead {
-    const materialized = materializeHead(next, Date.now(), `rev-${++this._state.revSeq}`, current)
+  private _storeHead(room: RoomRecord, next: HeadNext): StoredHead {
+    const materialized = materializeHead(next, Date.now(), `rev-${++this._state.revSeq}`)
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
     if (stored.currentInc !== null) this._generation(room, stored.currentInc)

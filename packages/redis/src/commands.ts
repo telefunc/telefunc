@@ -97,7 +97,7 @@ return {seq, ts, receivers}
 
 // HEAD CX: compares by form, then stores the next head.
 //   KEYS: [1]=head
-//   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs? (ms or 'keep')}
+//   ARGV: [1]=HeadCx JSON {form,rev?,lease?} [2]=nextJson{state,inc?,config,lease?,ttlMs?}
 const HEAD_CX_LUA = `${HEAD_PRELUDE}
 local head_key = KEYS[1]
 local now = tf_now()
@@ -127,11 +127,7 @@ local n = (cur and cur.n or 0) + 1
 local stored = { rev = 'rev-' .. string.format('%d', now) .. '-' .. n, n = n, state = nx.state, config = nx.config }
 if nx.inc ~= nil then stored.inc = nx.inc end
 if nx.lease ~= nil then stored.lease = { id = nx.lease.id, ['until'] = now + nx.lease.durationMs } end
-if nx.ttlMs == 'keep' then
-  if cur ~= nil then stored.exp = cur.exp end
-elseif nx.ttlMs ~= nil then
-  stored.exp = now + nx.ttlMs
-end
+if nx.ttlMs ~= nil then stored.exp = now + nx.ttlMs end
 local encoded = cjson.encode(stored)
 redis.call('SET', head_key, encoded)
 if stored.exp ~= nil then redis.call('PEXPIREAT', head_key, stored.exp) end
