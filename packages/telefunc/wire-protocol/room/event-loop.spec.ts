@@ -375,7 +375,7 @@ describe('Room at 100,000 members', () => {
       vi.useRealTimers()
     }
   }, 60_000)
-  it('keeps the event loop turning through a heartbeat replan of one member with 100,000 named tracks', async () => {
+  it('keeps the event loop turning through a replan of one member with 100,000 named tracks', async () => {
     const room = await create('member-replan-turns')
     const publisher = await room.join()
     const observer = await view(room.id)

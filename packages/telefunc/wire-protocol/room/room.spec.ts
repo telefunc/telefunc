@@ -1313,7 +1313,7 @@ describe('Room public behavior', () => {
       await named.release()
       await vi.advanceTimersByTimeAsync(100)
       expect(binaryLanes(observer)).toEqual([camera])
-      // The heartbeat's replan of the member finds nothing to do.
+      // A heartbeat finds nothing to do.
       await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
       expect(binaryLanes(observer)).toEqual([camera])
     },

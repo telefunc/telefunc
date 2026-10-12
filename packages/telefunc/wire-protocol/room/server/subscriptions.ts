@@ -59,7 +59,7 @@ type Establishing = { lanes: Set<LaneSubscription>; waiting: Set<string>; replan
 type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pairs: Map<string, Set<string>> }
 
 /** What this process subscribes of a room: a function of its holders' wants, ownership and membership, kept current
- *  per change, recovered within Room's horizon, and replanned by the heartbeat. */
+ *  per change, recovered within Room's horizon, and subscribed again by the heartbeat once a recovery gave up. */
 class RoomSubscriptions {
   private readonly _wants = new WantsIndex((track) => this._queued.tracks.add(track))
   // Every lane shares these, so an owned member's inbox lane makes none; declared before the lanes made here.
@@ -120,6 +120,8 @@ class RoomSubscriptions {
   private _binaryReady: Promise<void> | null = null
   private readonly _inbox = new Map<string, LaneSubscription>()
   private readonly _recovering = new Set<LaneSubscription>()
+  /** The lanes whose recovery gave up, which the heartbeat subscribes again while they are wanted. */
+  private readonly _dropped = new Set<LaneSubscription>()
   /** What the next planning pass replans: binary want changes and lane readiness wait for it, so a burst of them is
    *  planned from the whole want set before any lane opens. */
   private _queued = newBinaryPlan()
@@ -149,12 +151,17 @@ class RoomSubscriptions {
     return this._inbox.get(member)
   }
 
-  /** Plans everything in the next planning pass, resolving once it ends: the heartbeat's pass, which also retries every
-   *  still-wanted lane whose recovery failed. */
+  /** Plans everything in the next planning pass, resolving once it ends; it also retries every still-wanted lane whose
+   *  recovery failed. */
   replan(): Promise<void> {
     this._queued.all = true
     this._replanAround(() => this._schedulePlan())
     return this._planning!
+  }
+
+  /** Subscribes again each lane whose recovery gave up and that is still wanted, as a planning pass would. */
+  resumeDropped(): void {
+    for (const slot of drain(this._dropped)) slot.resume()
   }
 
   /** What the room-wide lanes depend on changed: observers, listeners, the tail. */
@@ -737,8 +744,8 @@ class RoomSubscriptions {
     void this._recover(slot).catch(reportRoomError)
   }
 
-  /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat's replan
-   *  subscribes it again. */
+  /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat subscribes
+   *  it again. */
   private async _recover(slot: LaneSubscription): Promise<void> {
     try {
       const config = await withinRoomHorizon(this._host._readOpenConfig())
@@ -746,7 +753,10 @@ class RoomSubscriptions {
       slot.retry()
       await withinRoomHorizon(slot.attemptReady)
     } catch (error) {
-      if (slot.wanted) slot.dropAttempt()
+      if (slot.wanted) {
+        slot.dropAttempt()
+        this._dropped.add(slot)
+      }
       throw error
     } finally {
       this._recovering.delete(slot)

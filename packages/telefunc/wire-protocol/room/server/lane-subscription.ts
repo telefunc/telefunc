@@ -55,7 +55,7 @@ class LaneSubscription {
     this.retry()
   }
 
-  /** Opens an attempt of a wanted slot that has none: the planning pass after its recovery gave up. */
+  /** Opens an attempt of a wanted slot that has none, once its recovery gave up. */
   resume(): void {
     if (this._subscription === null) this.retry()
   }
@@ -115,7 +115,7 @@ class LaneSubscription {
     this._readyPromise = Promise.resolve()
   }
 
-  /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the next planning pass. */
+  /** Exhausted policy keeps demand and holder readiness pending, but drops the dead attempt until the slot resumes. */
   dropAttempt(): void {
     const subscription = this._subscription
     this._subscription = null

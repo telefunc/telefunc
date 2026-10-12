@@ -49,7 +49,7 @@ class AuthoritySync {
 
   constructor(
     private readonly _host: SyncHost,
-    private readonly _lanes: Pick<RoomSubscriptions, 'replan' | 'observing' | 'controlEstablished'>,
+    private readonly _lanes: Pick<RoomSubscriptions, 'replan' | 'resumeDropped' | 'observing' | 'controlEstablished'>,
   ) {}
 
   ensureRoster(): Promise<void> {
@@ -119,8 +119,8 @@ class AuthoritySync {
     return this._pendingRefresh
   }
 
-  /** Runs the heartbeat while `on`. Graceful departures use events; the heartbeat renews owned members and reaps the
-   *  records hard crashes orphaned. */
+  /** Runs the heartbeat while `on`. Graceful departures use events; the heartbeat renews this server's session and
+   *  reaps the lapsed sessions whose servers crashed. */
   heartbeat(on: boolean): void {
     if (on && !this._heartbeatTimer) {
       this._heartbeatTimer = unrefTimer(
@@ -178,7 +178,7 @@ class AuthoritySync {
       } catch (error) {
         renewalFailure = { error }
       }
-      await this._lanes.replan() // bounded retry trigger for still-wanted terminal lanes
+      this._lanes.resumeDropped()
       await this._checkAuthority()
       if (!host.model.closed) await maintainHold(host._incarnation)
       sweepLapsedRoomsSoon()
