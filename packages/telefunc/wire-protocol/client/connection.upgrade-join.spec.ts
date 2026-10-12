@@ -39,6 +39,7 @@ function createChannel(dispatched: DecodedFrame[]) {
     _reattachState: () => ({}),
     _fitReplays() {},
     _acknowledge() {},
+    _answered() {},
   }
 }
 

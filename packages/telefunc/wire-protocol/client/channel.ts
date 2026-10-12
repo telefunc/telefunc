@@ -44,18 +44,19 @@ import { getSessionUrl } from './session-registry.js'
 import {
   TIMER_DELAY_MAX_MS,
   CHANNEL_CLOSE_TIMEOUT_MS,
-  CREDIT_WINDOW_MAX_BYTES,
   FC_PAGE_YIELD_BYTES,
   CHANNEL_TRANSPORT,
   WIRE_MAX_RAW_FRAME_BYTES,
   type ChannelTransports,
 } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
+import type { Link } from '../link.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { classifyTelefuncError } from '../error-classification.js'
+import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
@@ -82,7 +83,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _didFireClose = false
   private _didFireOpen = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
-  private _closeDeadline = 0
+  private _closeDeadline = DOUBLE_ZERO
   private _closeWaiters: Array<() => void> = []
   private _didReceiveCloseAck = false
   private _expectCloseAck = false
@@ -128,12 +129,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._maxFrameBytes = transports.includes(CHANNEL_TRANSPORT.WS) ? maxFrameBytes : WIRE_MAX_RAW_FRAME_BYTES
     this._flow = new FlowControl(
       {
-        byteWindowUpdate: (limit, urgent) => this._connection.sendByteWindowUpdate(this, limit, urgent),
+        byteWindowUpdate: (limit, urgent, withNext) =>
+          this._connection.sendByteWindowUpdate(this, limit, urgent, withNext),
         msgWindowUpdate: (limit, urgent) => this._connection.sendMsgWindowUpdate(this, limit, urgent),
         bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
       },
       () => this._connection.bufferedAmount(),
       FC_PAGE_YIELD_BYTES,
+      () => this._connection.sendWait(),
     )
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
@@ -162,7 +165,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -193,7 +196,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -272,9 +275,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
    *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
-  _reattachState(wire: number, batched: boolean): ReattachState {
-    const probe = batched ? undefined : this._flow.probeAttach(wire)
+  _reattachState(link: Link, batched: boolean): ReattachState {
+    const probe = batched ? undefined : this._flow.probeAttach(link)
     return probe === undefined ? {} : { probe }
+  }
+
+  /** @internal */
+  _onProbeAnswered(probe: number): void {
+    this._flow.onProbeAnswered(probe)
   }
 
   /** @internal */
@@ -287,22 +295,27 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._flow.acknowledge()
   }
 
+  /** @internal See `FlowControl.answered`. */
+  _answered(): void {
+    this._flow.answered()
+  }
+
   /** @internal */
   _onTransportBatched(): void {
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
-  _onTransportOpen(batched: boolean, wire: number): void {
+  _onTransportOpen(batched: boolean, link: Link): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
-    this._flow.attach(wire)
+    this._flow.attach(link)
     this._fireOpen()
   }
 
   _onTransportMessage(data: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
       for (const cb of this._listeners.list()) {
@@ -321,7 +334,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -337,7 +350,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     const bytes = data.byteLength
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const pending: Promise<unknown>[] = []
       for (const cb of this._binaryListeners.list()) {
         try {
@@ -355,7 +368,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -421,7 +434,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing(), this._flow.pathRtt())
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
+        this._flow.onPingAck(frame.probe, frame.backlog, frame.pathRtt, (ms) =>
+          this._connection.deliveredBeforeLast(ms),
+        )
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }
@@ -654,7 +669,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   constructor(...args: ConstructorParameters<typeof ClientChannel>) {
     super(...args)
     // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
-    this._flow.widenByteWindow(CREDIT_WINDOW_MAX_BYTES)
+    this._flow.widenByteWindow()
   }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {

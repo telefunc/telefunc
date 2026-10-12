@@ -82,7 +82,17 @@ function registeredBroadcast<T = unknown>(key: string): ServerBroadcast<T> {
 }
 
 function peer(send: (frame: Uint8Array) => void): IndexedPeer {
-  return new IndexedPeer({ send, bufferedAmount: () => 0 }, 7, new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024))
+  return new IndexedPeer(
+    {
+      send,
+      carry: send,
+      bufferedAmount: () => 0,
+      deliveredBeforeFrame: () => 0,
+      sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+    },
+    7,
+    new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
+  )
 }
 
 /** A mux, and the texts of the PUBLISH frames it sends down any wire. */
@@ -313,7 +323,17 @@ describe('keyed in-process broadcast', () => {
     const sent: DecodedFrame[] = []
     const replay = new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)
     broadcast._attachPeer(
-      new IndexedPeer({ send: (frame) => void sent.push(decode(frame)), bufferedAmount: () => 0 }, 7, replay),
+      new IndexedPeer(
+        {
+          send: (frame) => void sent.push(decode(frame)),
+          carry: (frame) => void sent.push(decode(frame)),
+          bufferedAmount: () => 0,
+          deliveredBeforeFrame: () => 0,
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+        },
+        7,
+        replay,
+      ),
     )
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })
     await broadcast.publish('on')
@@ -342,7 +362,10 @@ describe('keyed in-process broadcast', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          carry: (frame) => void frames.push(frame),
           bufferedAmount: () => 0,
+          deliveredBeforeFrame: () => 0,
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
         },
         7,
         new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
@@ -738,7 +761,10 @@ describe('Broadcast shield validation', () => {
           send: (frame) => {
             frames.push(frame)
           },
+          carry: (frame) => void frames.push(frame),
           bufferedAmount: () => 0,
+          deliveredBeforeFrame: () => 0,
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
         },
         7,
         new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
@@ -768,7 +794,17 @@ describe('Broadcast shield validation', () => {
     receiver.subscribe((m) => seen.push(m))
 
     sender._attachPeer(
-      new IndexedPeer({ send: () => {}, bufferedAmount: () => 0 }, 7, new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)),
+      new IndexedPeer(
+        {
+          send: () => {},
+          carry: () => {},
+          bufferedAmount: () => 0,
+          deliveredBeforeFrame: () => 0,
+          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
+        },
+        7,
+        new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
+      ),
     )
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 

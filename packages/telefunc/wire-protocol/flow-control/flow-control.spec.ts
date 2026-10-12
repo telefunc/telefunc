@@ -10,9 +10,16 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 import { decode, encode } from '../shared-ws.js'
+import { Deliveries } from '../deliveries.js'
+import { Link } from '../link.js'
 
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
+
+/** What a peer's wire held each time its credit ran out: a window and more. */
+const HELD = CREDIT_WINDOW_MAX_BYTES
+/** What the wire delivered before an ack: right up to it, as a queue does. */
+const upToAck = () => Infinity
 
 // The async `_waitForGates` re-check loop adds a couple of microtask hops
 // between a waiter-drain and the outer `decrement` Promise resolving. Tests
@@ -269,9 +276,9 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
 
   it('byte-refresh threshold scales with the adaptive window', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1)
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, true, Infinity)
+    flow.onReceived(1, performance.now())
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
+    flow.onPingAck(emit.probe, 0, Infinity, upToAck)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES * 2)
     // BDP growth itself emits a WINDOW with the new value; reset the spy so the
     // consumption assertions below are clean.
@@ -290,21 +297,21 @@ describe('FlowControl — BDP integration', () => {
   // The sample is bytes arriving *between* ping-send and ack-arrival. Cycle
   // fires the probe (one onReceived), accumulates (a second), settles.
   const cycle = ({ flow, emit }: { flow: FlowControl; emit: Emit }, sampleBytes: number) => {
-    flow.onReceived(1)
-    flow.onReceived(sampleBytes)
-    flow.onPingAck(emit.probe, true, Infinity)
+    flow.onReceived(1, performance.now())
+    flow.onReceived(sampleBytes, performance.now())
+    flow.onPingAck(emit.probe, 0, Infinity, upToAck)
   }
 
   it('emits BDP_PING on the first onReceived', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024)
+    flow.onReceived(1024, performance.now())
     expect(emit.bdpPingCalls).toBe(1)
   })
 
   it('does not emit a second BDP_PING while one is in flight', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024)
-    flow.onReceived(1024)
+    flow.onReceived(1024, performance.now())
+    flow.onReceived(1024, performance.now())
     expect(emit.bdpPingCalls).toBe(1)
   })
 
@@ -333,52 +340,48 @@ describe('FlowControl — BDP integration', () => {
   })
 })
 
-describe('FlowControl — whether the window starved the wire', () => {
+describe('FlowControl — what the wire held as the credit ran out', () => {
   // A probe's ack waits behind what the sender's wire holds, so its sample can't tell a window that left the wire
-  // idle from one the sender filled faster than its wire drains. The sender can: whether its wire was empty as its
-  // credit ran out.
-  it('says so when the credit ran out while the wire held nothing', () => {
-    const { flow } = makeFlow(() => 0)
+  // idle from one the sender filled faster than its wire drains. The sender can: what its wire held as its credit ran
+  // out.
+  it('says the least the wire held each time the credit ran out', () => {
+    let backlog = 64 * 1024
+    const { flow } = makeFlow(() => backlog)
     flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
     flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    expect(flow.onPing()).toBe(true)
+    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
+    backlog = 16 * 1024
+    expect(flow.onPing()).toBe(16 * 1024)
     // Answered, it starts over.
-    expect(flow.onPing()).toBe(false)
+    backlog = 32 * 1024
+    expect(flow.onPing()).toBe(32 * 1024)
   })
 
-  it('does not when the wire still held a backlog each time the credit ran out', () => {
-    const { flow } = makeFlow(() => 64 * 1024)
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(flow.onPing()).toBe(false)
-  })
-
-  it('does not while credit is left, however empty the wire', () => {
+  it('says nothing ran out while credit is left, however empty the wire', () => {
     const { flow } = makeFlow(() => 0)
     flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)
     flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    expect(flow.onPing()).toBe(false)
+    expect(flow.onPing()).toBe(Infinity)
   })
 
-  it('does when the message credit ran out on an empty wire', () => {
+  it('says what the wire held when the message credit ran out', () => {
     const { flow } = makeFlow(() => 0)
     for (let n = 0; n < CREDIT_MSG_WINDOW_INITIAL; n++) flow.decrement(1)
-    expect(flow.onPing()).toBe(true)
+    expect(flow.onPing()).toBe(0)
   })
 
   // Where the runtime can't tell what its wire holds, the window is taken to limit it once its credit runs out.
-  it('does when the credit ran out on a wire that cannot tell what it holds', () => {
+  it('says the wire held nothing when the credit ran out on a wire that cannot tell what it holds', () => {
     const { flow } = makeFlow(() => undefined)
     flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(flow.onPing()).toBe(true)
+    expect(flow.onPing()).toBe(0)
   })
 
   it('grows its own window only on an ack that says the window starved the peer', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1)
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, false, Infinity)
+    flow.onReceived(1, performance.now())
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
+    flow.onPingAck(emit.probe, HELD, Infinity, upToAck)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   })
 })
@@ -389,10 +392,11 @@ describe('FlowControl — reattach', () => {
   // receive window grown by BDP is kept too (the link's BDP doesn't change across transport hiccups).
   it('keeps credit and the grown receive window, and advertises the limits again', () => {
     const { flow, emit } = makeFlow()
+    flow.reattach() // the first wire
     // Grow W via BDP first — fire ping, accumulate saturating sample, settle.
-    flow.onReceived(1)
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, true, Infinity)
+    flow.onReceived(1, performance.now())
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
+    flow.onPingAck(emit.probe, 0, Infinity, upToAck)
     const grownWindow = flow.byteWindow
     expect(grownWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
     flow.onConsumed(100)
@@ -430,11 +434,11 @@ describe('FlowControl — reattach', () => {
   // prior wire and won't arrive). A fresh ping must be allowed to fire next.
   it('drops the in-flight BDP ping so the next receive can fire a fresh one', () => {
     const { flow, emit } = makeFlow()
-    flow.onReceived(1024) // first ping in flight
+    flow.onReceived(1024, performance.now()) // first ping in flight
     expect(emit.bdpPingCalls).toBe(1)
     flow.reattach()
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    flow.onReceived(1024)
+    flow.onReceived(1024, performance.now())
     expect(emit.bdpPingCalls).toBe(2)
   })
 
@@ -461,10 +465,9 @@ describe('FlowControl — replay buffers', () => {
     flow.fitReplays(1024 * 1024, CREDIT_WINDOW_MAX_BYTES)
     expect(flow.byteWindow).toBe(1024 * 1024)
     flow.useBatchTransportInitial()
-    flow.widenByteWindow(CREDIT_WINDOW_MAX_BYTES)
+    flow.widenByteWindow()
     expect(flow.byteWindow).toBe(1024 * 1024)
     flow.fitReplays(4 * CREDIT_WINDOW_MAX_BYTES, CREDIT_WINDOW_MAX_BYTES)
-    flow.widenByteWindow(4 * CREDIT_WINDOW_MAX_BYTES)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_MAX_BYTES)
   })
 
@@ -474,7 +477,7 @@ describe('FlowControl — replay buffers', () => {
     const emit = makeEmit()
     const flow = new FlowControl(emit, () => 0)
     expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
+    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES, performance.now())
     flow.onConsumed(CREDIT_WINDOW_INITIAL_BYTES)
     flow.reattach()
     expect(emit.windowCalls).toEqual([])
@@ -513,7 +516,7 @@ describe('FlowControl — replay buffers', () => {
     const { flow, emit } = makeFlow()
     flow.acknowledge()
     expect(emit.windowCalls).toEqual([])
-    flow.onReceived(100)
+    flow.onReceived(100, performance.now())
     flow.onConsumed(100)
     flow.acknowledge()
     flow.acknowledge()
@@ -558,7 +561,7 @@ describe('FlowControl — 32-bit wraparound', () => {
       if (!blocked) {
         const gate = sender.decrement(size)
         sent += size
-        receiver.onReceived(size)
+        receiver.onReceived(size, performance.now())
         inFlight = Math.max(inFlight, sent - consumed)
         if (gate) {
           blocked = true
@@ -599,7 +602,7 @@ async function runPath({
   attach?: boolean
   senderAttach?: boolean
 }) {
-  type Ack = { probe: number; starved: boolean; pathRtt: number }
+  type Ack = { probe: number; backlog: number; pathRtt: number }
   type Frame = { bytes: number } | Ack
   const size = (frame: Frame) => ('bytes' in frame ? frame.bytes : 0)
   const wire: Frame[] = []
@@ -611,9 +614,10 @@ async function runPath({
   let now = 0
   const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
   const sender = fitted(new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes))
-  sender.attach(0)
-  const answer = (probe: number, starved: boolean, pathRtt: number) =>
-    wire.push(decode(encode.bdpPingAck(0, probe, starved, pathRtt)) as Ack)
+  const senderLink = new Link()
+  sender.attach(senderLink)
+  const answer = (probe: number, backlog: number, pathRtt: number) =>
+    wire.push(decode(encode.bdpPingAck(0, probe, backlog, pathRtt)) as Ack)
   const receiver = fitted(
     new FlowControl(
       {
@@ -625,18 +629,21 @@ async function runPath({
     ),
   )
   let attached = false
-  const attachProbe = attach ? receiver.probeAttach(0)! : undefined
-  const senderProbe = senderAttach ? sender.probeAttach(0)! : undefined
+  const receiverLink = new Link()
+  const attachProbe = attach ? receiver.probeAttach(receiverLink)! : undefined
+  if (attach) receiver.attach(receiverLink)
+  const senderProbe = senderAttach ? sender.probeAttach(senderLink)! : undefined
   upstream(() => {
-    if (attachProbe !== undefined) answer(attachProbe, false, Infinity)
+    if (attachProbe !== undefined) answer(attachProbe, Infinity, Infinity)
     attached = true
   })
   if (senderProbe !== undefined)
-    toSender.push({ at: 2 * delayMs, deliver: () => sender.onPingAck(senderProbe, false, Infinity) })
+    toSender.push({ at: 2 * delayMs, deliver: () => sender.onPingAck(senderProbe, Infinity, Infinity, upToAck) })
   let blocked = false
   let budget = 0
   let delivered = 0
   let deliveredLastSecond = 0
+  const deliveries = new Deliveries()
   for (now = 0; now < ms; now++) {
     vi.advanceTimersByTime(1)
     while (toSender[0] && toSender[0].at <= now) toSender.shift()!.deliver()
@@ -669,11 +676,13 @@ async function runPath({
     if (hidden.length === 0 && wire.length === 0) budget = 0
     while (onLink[0] && onLink[0].at <= now) {
       const { frame } = onLink.shift()!
-      if ('starved' in frame) {
-        receiver.onPingAck(frame.probe, frame.starved, frame.pathRtt)
+      deliveries.note(now, size(frame))
+      if ('backlog' in frame) {
+        const ack = deliveries.last
+        receiver.onPingAck(frame.probe, frame.backlog, frame.pathRtt, (ms) => deliveries.before(ack, ms))
         continue
       }
-      receiver.onReceived(frame.bytes)
+      receiver.onReceived(frame.bytes, performance.now())
       receiver.onConsumed(frame.bytes)
       delivered += frame.bytes
       if (now >= ms - 1_000) deliveredLastSecond += frame.bytes

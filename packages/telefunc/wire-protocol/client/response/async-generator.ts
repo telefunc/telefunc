@@ -9,6 +9,11 @@ const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverCo
   prefix: SERIALIZER_PREFIX_GENERATOR,
   revive: (metadata, context) => {
     const { readNextChunk, cancel, abort } = context.receiveStream(metadata)
+    let onEnd = () => {}
+    const end = () => {
+      cancel()
+      onEnd()
+    }
     const gen = (async function* () {
       try {
         while (true) {
@@ -17,12 +22,12 @@ const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverCo
           yield parse(textDecoder.decode(chunk))
         }
       } finally {
-        cancel()
+        end()
       }
     })()
     const origReturn = gen.return.bind(gen)
     gen.return = (...args: Parameters<(typeof gen)['return']>) => {
-      cancel()
+      end()
       return origReturn(...args)
     }
     return {
@@ -31,6 +36,9 @@ const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverCo
         await gen.return()
       },
       abort,
+      onEnd(callback) {
+        onEnd = callback
+      },
     }
   },
 }

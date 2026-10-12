@@ -7,12 +7,14 @@ import { getRawContext } from '../../node/server/context/context.js'
 import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { GcRegistry } from '../gcRegistry.js'
+import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
   CREDIT_MSG_WINDOW_MAX,
   CREDIT_WINDOW_MAX_BYTES,
   MAX_CHANNELS_PER_CONNECTION,
+  TIMER_DELAY_MAX_MS,
   UPGRADE_MAX_ID_BYTES,
   UPGRADE_MAX_STAGED_BYTES,
   UPGRADE_MAX_STAGED_RECORDS,
@@ -27,13 +29,18 @@ import {
 import {
   TAG,
   ProtocolViolationError,
+  LENGTH_BYTES,
   assertProtocol,
   decodeClientFrame,
   encode,
+  fixedBytes,
+  isOneFrame,
+  messageFrames,
   isConnCtrlTag,
   isSequencedTag,
   peekTag,
   seqThrough,
+  withTook,
 } from '../shared-ws.js'
 import type {
   BarrierPayload,
@@ -46,6 +53,8 @@ import type {
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { PieceReceiver, PieceSender } from '../pieces.js'
+import { Deliveries } from '../deliveries.js'
+import { SocketWait } from '../link.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -80,8 +89,6 @@ type ReconcileOutcome = {
    *  when the transport sends it after that batch. */
   attached: ChannelHandle[]
   finalizeUpgrade: (() => void) | null
-  /** The link is slow, by the page's RECONCILE or by a wire of the session lost with a frame in flight. */
-  slow: boolean
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
   deliverTo: Wire
   upgradeId?: string
@@ -146,6 +153,10 @@ type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   /** When the wire last delivered a frame, or the ping deadline was last set. */
   lastReceivedAt: number
+  /** Each frame, piece and announcement the wire delivered. */
+  deliveries: Deliveries
+  /** The number of the delivery that completed the frame it's handling. */
+  frameDelivery: number
   /** When the last PONG went out. */
   pongedAt: number
   pieces: { sender: PieceSender; receiver: PieceReceiver } | null
@@ -167,6 +178,11 @@ type ConnectionState = {
   /** Channels attaching to the wire in this turn, before its session holds them: what they send as they attach (their
    *  replay, what they buffered, what `onOpen` sends) counts under their flow control too. */
   attaching: Set<ServerChannel>
+  /** How long the frames that go at once wait behind what the socket holds. */
+  wait: SocketWait
+  /** The probed entries of the RECONCILE it reads, until its RECONCILED answers them: a frame that goes ahead of that
+   *  goes behind a BDP_PING_ACK for each. */
+  probed: ReconcileOpenEntry[]
 }
 
 type ConnectionEntry = {
@@ -250,10 +266,11 @@ class ChannelMux {
   private keepEnded(channel: ServerChannel, pageAttached: boolean): void {
     const timer = this.endedChannels.get(channel)
     if (timer) clearTimeout(timer)
-    const { reconnectTimeout } = getServerConfig().channel
     this.endedChannels.set(
       channel,
-      pageAttached ? null : unrefTimer(setTimeout(() => this.releaseEnded(channel), reconnectTimeout)),
+      pageAttached
+        ? null
+        : unrefTimer(setTimeout(() => this.releaseEnded(channel), getServerConfig().channel.reconnectTimeout)),
     )
   }
 
@@ -272,20 +289,27 @@ class ChannelMux {
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
+    const wait = new SocketWait(() => this.bufferedAmount(connection))
+    const sender = transport.wholeMessages
+      ? new PieceSender(
+          (message) => transport.sendNow(connection, message),
+          () => transport.bufferedAmount(connection) ?? 0,
+        )
+      : null
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
-        lastReceivedAt: 0,
+        lastReceivedAt: DOUBLE_ZERO,
+        deliveries: new Deliveries(),
+        frameDelivery: 0,
         pongedAt: performance.now(),
-        pieces: transport.wholeMessages
-          ? {
-              sender: new PieceSender(
-                (message) => transport.sendNow(connection, message),
-                () => transport.bufferedAmount(connection) ?? 0,
-              ),
-              receiver: new PieceReceiver((frame) => this.send(connection, frame), { peerHoldsBack: true }),
-            }
-          : null,
+        pieces: sender && {
+          sender,
+          receiver: new PieceReceiver((frame) => this.send(connection, frame), {
+            peerHoldsBack: true,
+            carry: (ack) => sender.carry(ack),
+          }),
+        },
         terminatePermanently: false,
         recvChain: null,
         closed: null,
@@ -297,11 +321,23 @@ class ChannelMux {
         largestSent: 0,
         pastSendBacklog: false,
         attaching: new Set(),
+        wait,
+        probed: [],
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
+        carry: (frame) => {
+          const pieces = this.connectionEntries.get(connection)?.state.pieces
+          if (pieces) pieces.sender.carry(() => frame as Uint8Array<ArrayBuffer>)
+          else this.send(connection, frame as Uint8Array<ArrayBuffer>)
+        },
         bufferedAmount: () => this.bufferedAmount(connection),
+        sendWait: () => wait,
+        deliveredBeforeFrame: (ms) => {
+          const state = this.connectionEntries.get(connection)?.state
+          return state ? state.deliveries.before(state.frameDelivery, ms) : 0
+        },
       },
     })
     const connId = transport.getConnId(connection)
@@ -322,6 +358,8 @@ class ChannelMux {
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
+    const state = this.connectionEntries.get(outcome.deliverTo)?.state
+    if (state) state.probed = []
     this.send(
       outcome.deliverTo,
       encode.reconciled({
@@ -331,7 +369,6 @@ class ChannelMux {
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
-        ...(outcome.slow ? { slow: true as const } : {}),
         serverReplayBuffer: this.options.serverReplayBuffer,
         serverReplayBufferBinary: this.options.serverReplayBufferBinary,
         clientReplayBuffer: this.options.clientReplayBuffer,
@@ -363,31 +400,10 @@ class ChannelMux {
     if (!sessionId) return // Closed before reconciling — nothing to clean up.
     const stagedWs = this.stagedByPrevSession.get(sessionId)
     if (stagedWs !== undefined) this.abandonStage(stagedWs)
-    this.markSlowIfStalled(entry, sessionId)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down.
     this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
     if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
-  }
-
-  /** A session whose wire holds a frame its page never acknowledged, with no rate measured, is on a slow link. */
-  private markSlowIfStalled(entry: ConnectionEntry, sessionId: string): void {
-    if (entry.state.pieces?.sender.stalled) this.sessions.markSlow(sessionId)
-  }
-
-  /** Whether the link is slow, by the page's RECONCILE or by a wire of its session lost with a frame in flight; its new
-   *  wire then starts splitting. */
-  private settleSlowLink(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): boolean {
-    let slow = ctrl.slow === true
-    if (ctrl.sessionId !== undefined) {
-      // A page that found its wire dead first reconnects while the server still holds it open.
-      const prior = this.sessionWires.get(ctrl.sessionId)
-      const priorEntry = prior === connection ? undefined : this.connectionEntries.get(prior)
-      if (priorEntry !== undefined) this.markSlowIfStalled(priorEntry, ctrl.sessionId)
-      if (this.sessions.takeSlow(ctrl.sessionId)) slow = true
-    }
-    if (slow) entry.state.pieces?.sender.markSlow()
-    return slow
   }
 
   readPermanentTermination(connection: Wire): boolean {
@@ -402,11 +418,43 @@ class ChannelMux {
 
   // ── Inbound dispatch ────────────────────────────────────────────────
 
-  /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
-   *  awaitable on the connection. */
   private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
+    if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, connection, rawFrame, 'alone')
+    let frames: Uint8Array<ArrayBuffer>[]
+    try {
+      assertProtocol(entry.state.pieces, 'frames in one message on a wire that takes no pieces')
+      frames = messageFrames(rawFrame)
+    } catch (err) {
+      if (!(err instanceof ProtocolViolationError)) throw err
+      this.terminateWire(connection)
+      return Promise.resolve(null)
+    }
+    // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
+    // measures.
+    const { receiver } = entry.state.pieces
+    let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
+    const last = frames.length - 1
+    for (let i = 0; i <= last; i++) {
+      if (entry.state.closed !== null) return outcome
+      const frame = frames[i]!
+      const dispatched = this.dispatchFrame(entry, connection, frame, i < last ? 'riding' : 'alone')
+      if (frame[0] === TAG.RECONCILE) outcome = dispatched
+      if (i < last && fixedBytes(frame[0]!) === 0) receiver.tookLength(LENGTH_BYTES)
+    }
+    return outcome
+  }
+
+  /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
+   *  awaitable on the connection. A frame its pieces completed (`pieced`) was counted as they arrived; one `riding` ahead
+   *  of its message's last isn't dated apart from it (see `PieceReceiver.arrived`). */
+  private dispatchFrame(
+    entry: ConnectionEntry,
+    connection: Wire,
+    rawFrame: Uint8Array<ArrayBuffer>,
+    arrival: 'alone' | 'riding' | 'pieced',
+  ): Promise<ReconcileOutcome | null> {
     const { state } = entry
     const byteLength = rawFrame.byteLength
     if (this.isOverBudget(entry, connection, rawFrame)) {
@@ -415,14 +463,21 @@ class ChannelMux {
     }
     const tag = peekTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
+    if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, connection, rawFrame)
     const now = performance.now()
-    state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now)
+    if (arrival !== 'pieced') {
+      state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now, arrival === 'riding')
+      state.deliveries.note(now, byteLength)
+    }
     state.recvBacklogBytes += byteLength
     state.recvBacklogFrames++
+    // Taken as it arrives: it's handled once those before it were, after later ones arrived.
+    const delivery = state.deliveries.last
     state.lastReceivedAt = now
-    const exec = (): Promise<ReconcileOutcome | null> => this.runInboundTurn(entry, connection, rawFrame, byteLength)
+    const exec = (): Promise<ReconcileOutcome | null> =>
+      this.runInboundTurn(entry, connection, rawFrame, byteLength, delivery)
     if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
-    this.answerArrival(entry, connection)
+    this.answerArrival(entry, connection, now)
     return this.chainRecv(entry, exec)
   }
 
@@ -432,9 +487,10 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): Promise<ReconcileOutcome | null> {
-    // Each piece answered: the page's PINGs wait behind the rest of its frame.
-    entry.state.lastReceivedAt = performance.now()
-    this.pong(entry, connection, [])
+    const now = performance.now()
+    entry.state.lastReceivedAt = now
+    entry.state.deliveries.note(now, rawFrame.byteLength)
+    this.answerArrival(entry, connection, now)
     const { state } = entry
     let frame: Uint8Array<ArrayBuffer> | null
     try {
@@ -446,7 +502,7 @@ class ChannelMux {
       assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
       const { receiver } = state.pieces
       const heldBefore = receiver.held
-      frame = receiver.add(piece.total, piece.piece)
+      frame = receiver.add(piece.total, piece.piece, now)
       // What it holds of a frame counts in the recv backlog as the frame does once whole.
       state.recvBacklogBytes += receiver.held - heldBefore
       state.recvBacklogFrames += Number(receiver.held > 0) - Number(heldBefore > 0)
@@ -456,7 +512,27 @@ class ChannelMux {
       return Promise.resolve(null)
     }
     if (frame === null) return Promise.resolve(null)
-    return this.dispatchInbound(connection, frame)
+    return this.dispatchFrame(entry, connection, frame, 'pieced')
+  }
+
+  private receiveAnnounce(
+    entry: ConnectionEntry,
+    connection: Wire,
+    rawFrame: Uint8Array<ArrayBuffer>,
+  ): Promise<ReconcileOutcome | null> {
+    const now = performance.now()
+    entry.state.lastReceivedAt = now
+    entry.state.deliveries.note(now, rawFrame.byteLength)
+    try {
+      const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+      assert(announce.tag === TAG.ANNOUNCE)
+      assertProtocol(entry.state.pieces, 'ANNOUNCE on a wire that takes no pieces')
+      entry.state.pieces.receiver.announce(announce.bytes, now, announce.floor)
+    } catch (err) {
+      if (!(err instanceof ProtocolViolationError)) throw err
+      this.terminateWire(connection)
+    }
+    return Promise.resolve(null)
   }
 
   /** Bytes reached `connection`: a frame that takes longer than the ping deadline to arrive whole shows the
@@ -464,14 +540,15 @@ class ChannelMux {
   onConnectionBytes(connection: Wire): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
-    entry.state.lastReceivedAt = performance.now()
-    this.answerArrival(entry, connection)
+    const now = performance.now()
+    entry.state.lastReceivedAt = now
+    this.answerArrival(entry, connection, now)
   }
 
   // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose bytes keep arriving
   // is answered all the same, once a ping interval, so the page knows they arrive.
-  private answerArrival(entry: ConnectionEntry, connection: Wire): void {
-    if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
+  private answerArrival(entry: ConnectionEntry, connection: Wire, now: number): void {
+    if (now - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
   }
 
   /** Control frames are bounded by what the protocol itself can describe; only the data plane carries user payloads and
@@ -486,11 +563,14 @@ class ChannelMux {
     const byteLength = rawFrame.byteLength
     if (byteLength > maxFrameBytes) return true
     const { state, transport } = entry
+    const backlogBytes = state.recvBacklogBytes + byteLength
+    const backlogFrames = state.recvBacklogFrames
+    if (backlogBytes <= WIRE_RECV_BACKLOG_BASE_BYTES && backlogFrames < WIRE_RECV_BACKLOG_BASE_FRAMES) return false
     const sessionId = transport.getSessionId(connection)
     const channels = sessionId === undefined ? 0 : (this.sessions.peekSession(sessionId)?.size ?? 0)
     return (
-      state.recvBacklogBytes + byteLength > WIRE_RECV_BACKLOG_BASE_BYTES + channels * CREDIT_WINDOW_MAX_BYTES ||
-      state.recvBacklogFrames >= WIRE_RECV_BACKLOG_BASE_FRAMES + channels * CREDIT_MSG_WINDOW_MAX
+      backlogBytes > WIRE_RECV_BACKLOG_BASE_BYTES + channels * CREDIT_WINDOW_MAX_BYTES ||
+      backlogFrames >= WIRE_RECV_BACKLOG_BASE_FRAMES + channels * CREDIT_MSG_WINDOW_MAX
     )
   }
 
@@ -499,8 +579,10 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
     byteLength: number,
+    delivery: number,
   ): Promise<ReconcileOutcome | null> {
     try {
+      entry.state.frameDelivery = delivery
       return (await this.handleFrame(entry, connection, rawFrame)) ?? null
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
@@ -531,13 +613,18 @@ class ChannelMux {
   ): null | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
+      const pieces = entry.state.pieces
+      assertProtocol(!pieces || pieces.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
       this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      assertProtocol(entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs), 'PIECES_ACK for nothing sent')
+      assertProtocol(
+        entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs, frame.spanUs),
+        'PIECES_ACK for nothing sent',
+      )
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -589,7 +676,7 @@ class ChannelMux {
 
   private pong(entry: ConnectionEntry, connection: Wire, ended: PongEntry[]): void {
     entry.state.pongedAt = performance.now()
-    this.send(connection, encode.pong(ended))
+    this.send(connection, withTook(encode.pong(ended), entry.state.pieces?.receiver.took ?? 0))
   }
 
   private dispatchChannelFrame(sessionId: string, frame: ChannelFrame): void {
@@ -737,7 +824,6 @@ class ChannelMux {
     isBarrier = false,
   ): Promise<ReconcileOutcome> {
     const { state, transport } = entry
-    const slow = this.settleSlowLink(ctrl, entry, connection)
     const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
     const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
     this.resetPingTimer(connection)
@@ -773,7 +859,7 @@ class ChannelMux {
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
     state.attaching.clear()
-    return { sessionId: newSessionId, attached, finalizeUpgrade, slow, deliverTo: connection }
+    return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
   }
 
   private reconcileSession(
@@ -810,9 +896,9 @@ class ChannelMux {
     connection: Wire,
     replay: boolean,
   ): ChannelHandle | null {
-    // Ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip is the
-    // path's. It measures, so it says nothing starved, and names no round trip.
-    if (entry.probe !== undefined) conn.sender.send(encode.bdpPingAck(entry.ix, entry.probe, false, Infinity))
+    // Answered ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip
+    // is the path's.
+    if (entry.probe !== undefined) conn.state.probed.push(entry)
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry
@@ -1040,6 +1126,8 @@ class ChannelMux {
     if (!entry) return
     const { state } = entry
     if (state.pastSendBacklog) return
+    if (state.probed.length > 0 && frame[0] !== TAG.RECONCILED) this.answerProbes(connection, state)
+    if (frame[0] === TAG.ACK_RES) state.pieces?.receiver.answering()
     if (frame.byteLength > state.largestSent) state.largestSent = frame.byteLength
     if (frame.byteLength > state.sendHeadroom) {
       state.sendHeadroom = this.sendHeadroom(entry, connection)
@@ -1050,14 +1138,23 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
+    state.wait.handed(frame.byteLength, !isSequencedTag(frame[0]!))
     if (state.pieces) state.pieces.sender.send(frame, this.options.pingInterval)
     else entry.transport.sendNow(connection, frame)
+  }
+
+  /** Answers the probes of the RECONCILE it reads, ahead of a frame that would go ahead of its RECONCILED. An answer
+   *  measures, so it says no credit ran out, and names no round trip. */
+  private answerProbes(connection: Wire, state: ConnectionState): void {
+    const probed = state.probed
+    state.probed = []
+    for (const { ix, probe } of probed) this.send(connection, encode.bdpPingAck(ix, probe!, Infinity, Infinity))
   }
 
   /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't
    *  tell. */
   private sendHeadroom(entry: ConnectionEntry, connection: Wire): number {
-    const backlog = entry.transport.bufferedAmount(connection)
+    const backlog = this.bufferedAmount(connection)
     if (backlog === undefined) return Infinity
     const sessionId = entry.transport.getSessionId(connection)
     const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
@@ -1068,11 +1165,12 @@ class ChannelMux {
     return allowed - backlog
   }
 
-  /** A wire that's gone holds nothing. */
+  /** What its socket holds unsent, and what its piece sender hasn't handed it. A wire that's gone holds nothing. */
   private bufferedAmount(connection: Wire): number | undefined {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return 0
-    return entry.transport.bufferedAmount(connection)
+    const socket = entry.transport.bufferedAmount(connection)
+    return socket === undefined ? undefined : socket + (entry.state.pieces?.sender.unhandedBytes ?? 0)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {
@@ -1104,10 +1202,13 @@ class ChannelMux {
       setTimeout(() => {
         state.pingTimer = null
         // A PING arrives behind what the page queued before it, as an upload on a slow link: the wire is dead once it
-        // has delivered nothing for the deadline.
-        const quiet = performance.now() - state.lastReceivedAt
-        if (quiet < this.options.pingDeadline)
-          return this.armPingDeadline(connection, entry, this.options.pingDeadline - quiet)
+        // has delivered nothing for the deadline, and nothing of what the page announced for the time that takes.
+        const deadAt = Math.max(
+          state.lastReceivedAt + this.options.pingDeadline,
+          state.pieces?.receiver.expectedBy(this.options.pingDeadline) ?? 0,
+        )
+        const now = performance.now()
+        if (now < deadAt) return this.armPingDeadline(connection, entry, Math.min(deadAt - now, TIMER_DELAY_MAX_MS))
         // Transient close so each channel gets its `reconnectTimeout` grace via
         // `_onPeerDisconnect`. Connection-level state is rebuilt by the next reconcile.
         transport.terminateConnection(connection)
@@ -1122,8 +1223,6 @@ class ChannelMux {
 class SessionRegistry {
   private readonly bySession = new Map<string, Map<number, ChannelHandle>>()
   private readonly byChannel = new Map<string, Map<string, number>>()
-  /** Sessions whose last wire was lost with a frame in flight, before it measured a rate. */
-  private readonly slow = new Set<string>()
 
   get(sessionId: string, ix: number): ChannelHandle | undefined {
     return this.bySession.get(sessionId)?.get(ix)
@@ -1158,20 +1257,11 @@ class SessionRegistry {
     bindings.set(sessionId, h.ix)
   }
 
-  markSlow(sessionId: string): void {
-    if (this.bySession.has(sessionId)) this.slow.add(sessionId)
-  }
-
-  takeSlow(sessionId: string): boolean {
-    return this.slow.delete(sessionId)
-  }
-
   /** Returns the removed session so callers can drive per-handle lifecycle side effects. */
   removeSession(sessionId: string): Map<number, ChannelHandle> | undefined {
     const session = this.bySession.get(sessionId)
     if (!session) return undefined
     this.bySession.delete(sessionId)
-    this.slow.delete(sessionId)
     for (const handle of session.values()) {
       const bindings = this.byChannel.get(handle.channel.id)
       if (!bindings) continue
@@ -1191,10 +1281,7 @@ class SessionRegistry {
       session.delete(ix)
       // Last channel gone: drop the session, or it outlives every reconcile that could
       // ever name it (transient-closed sessions are otherwise only removed by reconcile).
-      if (session.size === 0) {
-        this.bySession.delete(sessionId)
-        this.slow.delete(sessionId)
-      }
+      if (session.size === 0) this.bySession.delete(sessionId)
     }
   }
 }

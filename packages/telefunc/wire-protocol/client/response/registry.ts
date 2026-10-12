@@ -45,6 +45,7 @@ function createStreamingReviver(
     value: unknown
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
+    onEnd?: (callback: () => void) => void
   }) => void,
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {

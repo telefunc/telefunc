@@ -1,5 +1,13 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { CREDIT_WINDOW_MAX_BYTES, WIRE_QUEUE_DELAY_MS, WIRE_SEND_AHEAD_MIN_BYTES } from './constants.js'
+import {
+  CREDIT_WINDOW_MAX_BYTES,
+  WIRE_PIECES_ACK_BYTES,
+  WIRE_PROBE_FIRST_BYTES,
+  WIRE_PROBE_PAIR_BYTES,
+  WIRE_QUEUE_DELAY_MS,
+  WIRE_SEND_AHEAD_MIN_BYTES,
+} from './constants.js'
+import { Link } from './link.js'
 import { PieceSender } from './pieces.js'
 import { SendBudget } from './send-budget.js'
 import { TAG } from './shared-ws.js'
@@ -9,44 +17,59 @@ afterEach(() => void vi.restoreAllMocks())
 const data = (bytes: number) => Object.assign(new Uint8Array(bytes), { 0: TAG.BINARY })
 const flowControl = (bytes: number) => Object.assign(new Uint8Array(bytes), { 0: TAG.WINDOW })
 
-/** A budget on a clock the test sets. */
+/** The bytes of the probe by which its sender measured its rate, so it hands the socket what it is sent at once. */
+const PROBE = 5_000
+
+/** A budget on a wire whose rate a probe measured, on a clock the test sets. */
 function open() {
   const clock = { now: 0 }
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
-  const sender = new PieceSender(
+  const link = new Link()
+  const prober = new PieceSender(
     () => {},
     () => 0,
+    link,
   )
-  const budget = new SendBudget(sender)
+  prober.send(data(PROBE), 5_000)
+  prober.acknowledged(WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, 0, 0)
+  prober.acknowledged(PROBE, 0, 0)
+  const budget = new SendBudget(
+    () => {},
+    () => 0,
+    link,
+  )
   let sent = 0
   /** Sends a data frame and has the server acknowledge it `spanMs` after the one before it. The allowance, with nothing
    *  unacknowledged. */
   const exchange = (bytes: number, spanMs: number) => {
     budget.send(data(bytes), 5_000)
+    budget.sender.flush() // as its turn ends
     sent += bytes
     clock.now += 10
     expect(budget.acknowledged(sent, 0, spanMs * 1_000)).toBe(true)
     return budget.room
   }
-  return { budget, clock, exchange }
+  return { budget, link, clock, exchange }
 }
 
-test('data goes out until the allowance is sent, and more as the server acknowledges it', () => {
+// The server acknowledges what arrived once `WIRE_PIECES_ACK_BYTES` did, so that much may have arrived unacknowledged.
+test('data goes out until the allowance and what the server holds before it acknowledges are sent, and more as it acknowledges', () => {
   const { budget } = open()
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
   budget.send(data(40_000), 5_000)
-  expect(budget.room).toBeGreaterThan(0)
+  expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES + WIRE_PIECES_ACK_BYTES - 40_000)
+  budget.send(data(40_000), 5_000)
   budget.send(data(40_000), 5_000)
   expect(budget.room).toBeLessThan(0)
-  expect(budget.acknowledged(40_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged(80_000, 0, 0)).toBe(true)
   expect(budget.room).toBeGreaterThan(0)
 })
 
 test('the frames that go at once count against the room, and are not dated', () => {
   const { budget } = open()
-  budget.send(flowControl(1_000), 5_000)
+  budget.send(flowControl(WIRE_PIECES_ACK_BYTES + 1_000), 5_000)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES - 1_000)
-  expect(budget.acknowledged(1_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged(WIRE_PIECES_ACK_BYTES + 1_000, 0, 0)).toBe(true)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 
@@ -54,8 +77,9 @@ test('the allowance grows by what each acknowledgement covers while no frame wai
   const { exchange } = open()
   expect(exchange(32_000, 0)).toBe(WIRE_SEND_AHEAD_MIN_BYTES + 32_000)
   expect(exchange(32_000, 10)).toBe(WIRE_SEND_AHEAD_MIN_BYTES + 2 * 32_000)
-  let allowance = 0
-  for (let i = 0; i < 80; i++) allowance = exchange(1_000_000, 10)
+  // A frame past the room would go in pieces as the server acknowledges it: each takes the room, up to 1 MB.
+  let allowance = WIRE_SEND_AHEAD_MIN_BYTES + 2 * 32_000
+  for (let i = 0; i < 100; i++) allowance = exchange(Math.min(allowance, 1_000_000), 10)
   expect(allowance).toBe(CREDIT_WINDOW_MAX_BYTES)
 })
 
@@ -82,4 +106,36 @@ test('a wait that stays over the target with the least allowance is the path hav
   let allowance = 0
   for (let i = 0; i < 20; i++) allowance = exchange(32_000, 10)
   expect(allowance).toBeGreaterThan(2 * WIRE_SEND_AHEAD_MIN_BYTES)
+})
+
+// A rate measured while the page sent little lags one it sends more at: the data acknowledged is out of the uplink anyway.
+test('a frame that goes at once waits behind none of the data the server acknowledged, however slow the rate measured so far', () => {
+  const { budget, link, clock, exchange } = open()
+  // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
+  for (let i = 0; i < 2; i++) exchange(10_000, 100)
+  budget.send(data(20_000), 5_000)
+  expect(link.waitNow()).toBeGreaterThan(0)
+  clock.now += 10
+  expect(budget.acknowledged(40_000, 0, 10_000)).toBe(true)
+  expect(link.waitNow()).toBe(0)
+})
+
+// A burst under the room keeps a slow uplink as busy as one past it: the frames that go at once wait behind either.
+test('the longest wait since an instant is what a frame that went at once after it waited, whether the room ran out or not', () => {
+  const { budget, link, clock, exchange } = open()
+  // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
+  for (let i = 0; i < 2; i++) exchange(10_000, 100)
+  const start = clock.now
+  budget.send(data(20_000), 5_000)
+  budget.sender.flush() // as its turn ends
+  expect(budget.room).toBeGreaterThan(0)
+  budget.send(flowControl(100), 5_000)
+  // 20 KB at 100 B/ms: it waited 200 ms, and a frame sent now waits behind its 100 B too.
+  expect(link.longestWaitSince(start)).toBe(201)
+  clock.now += 150
+  // The uplink drained 15 KB since: a frame sent now waits 51 ms, the one before still waited 200.
+  expect(link.waitNow()).toBe(51)
+  expect(link.longestWaitSince(start)).toBe(200)
+  // Since a later instant, only what a frame sent then waits.
+  expect(link.longestWaitSince(clock.now)).toBe(51)
 })

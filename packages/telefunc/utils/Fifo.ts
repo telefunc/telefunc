@@ -13,6 +13,19 @@ class Fifo<T> {
     this.items.push(item)
   }
 
+  peek(): T | undefined {
+    return this.items[this.head]
+  }
+
+  /** The newest item. */
+  peekLast(): T | undefined {
+    return this.length > 0 ? this.items[this.items.length - 1] : undefined
+  }
+
+  *[Symbol.iterator](): Iterator<T> {
+    for (let i = this.head; i < this.items.length; i++) yield this.items[i] as T
+  }
+
   shift(): T | undefined {
     if (this.head === this.items.length) return undefined
     const item = this.items[this.head] as T
@@ -22,9 +35,5 @@ class Fifo<T> {
       this.head = 0
     }
     return item
-  }
-
-  *[Symbol.iterator](): Iterator<T> {
-    for (let i = this.head; i < this.items.length; i++) yield this.items[i] as T
   }
 }

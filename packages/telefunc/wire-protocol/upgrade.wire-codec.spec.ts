@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 
 import {
   ERROR_REASON,
+  LENGTH_BYTES,
   ProtocolViolationError,
   TAG,
   decode,
@@ -11,11 +12,14 @@ import {
   encodePublishText,
   isChannelCtrlTag,
   isConnCtrlTag,
+  isOneFrame,
+  messageFrames,
   type BarrierPayload,
   type ReconcilePayload,
   type ReconciledPayload,
   seqNear,
   seqThrough,
+  withTook,
 } from './shared-ws.js'
 import {
   CHANNEL_TRANSPORT,
@@ -73,29 +77,31 @@ describe('upgrade wire vocabulary', () => {
     expect(decode(encode.attachResult(3, null))).toEqual({ tag: TAG.ATTACH_RESULT, index: 3, lastSeq: null })
   })
 
-  test("BDP_PING round-trips its probe, and BDP_PING_ACK the probe, whether the window starved its sender, and the path's round trip it measured", () => {
+  test("BDP_PING round-trips its probe, and BDP_PING_ACK the probe, the least its sender's wire held as its credit ran out, and the path's round trip it measured", () => {
     expect(decode(encode.bdpPing(3, 0xffff_ffff))).toEqual({
       tag: TAG.BDP_PING,
       index: 3,
       probe: 0xffff_ffff,
     })
-    expect(decode(encode.bdpPingAck(3, 7, true, 42.5))).toEqual({
+    expect(decode(encode.bdpPingAck(3, 7, 65_536, 42.5))).toEqual({
       tag: TAG.BDP_PING_ACK,
       index: 3,
       probe: 7,
-      starved: true,
+      backlog: 65_536,
       pathRtt: 42.5,
     })
-    // Where it measured none.
-    expect(decode(encode.bdpPingAck(3, 7, false, Infinity))).toEqual({
+    // Where the credit didn't run out, and it measured none.
+    expect(decode(encode.bdpPingAck(3, 7, Infinity, Infinity))).toEqual({
       tag: TAG.BDP_PING_ACK,
       index: 3,
       probe: 7,
-      starved: false,
+      backlog: Infinity,
       pathRtt: Infinity,
     })
+    // A wire that held 4 GiB or more held more than any window.
+    expect(decode(encode.bdpPingAck(3, 7, 2 ** 33, 1))).toMatchObject({ backlog: Infinity })
     // Under a microsecond, as on loopback, it still says it measured one.
-    expect(decode(encode.bdpPingAck(3, 7, false, 0.0001))).toMatchObject({ pathRtt: 0.001 })
+    expect(decode(encode.bdpPingAck(3, 7, 0, 0.0001))).toMatchObject({ pathRtt: 0.001 })
   })
 
   test('WINDOW round-trips its limit and the last seq its receiver has', () => {
@@ -237,18 +243,54 @@ describe('heartbeat', () => {
       { ix: 3, lastSeq: 7 },
       { ix: 65_535, lastSeq: 2 ** 31 - 1 },
     ]
-    expect(clientFrame(encode.ping(ended))).toEqual({ tag: TAG.PING, ended })
-    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, ended: [] })
+    expect(clientFrame(encode.ping(ended))).toEqual({ tag: TAG.PING, ended, took: 0 })
+    expect(clientFrame(encode.ping())).toEqual({ tag: TAG.PING, ended: [], took: 0 })
     const answers = [
       { ix: 3, lastSeq: 5 },
       { ix: 4, lastSeq: null },
     ]
-    expect(decode(encode.pong(answers))).toEqual({ tag: TAG.PONG, ended: answers })
+    expect(decode(encode.pong(answers))).toEqual({ tag: TAG.PONG, ended: answers, took: 0 })
+  })
+
+  test('a PING or PONG says what its sender took of the frames its WebSocket carried, mod 2^32', () => {
+    expect(clientFrame(withTook(encode.ping(), 2 ** 32 - 1))).toEqual({ tag: TAG.PING, ended: [], took: 2 ** 32 - 1 })
+    const answers = [{ ix: 4, lastSeq: null }]
+    expect(decode(withTook(encode.pong(answers), 4_100))).toEqual({ tag: TAG.PONG, ended: answers, took: 4_100 })
   })
 
   test('a PING whose payload splits an entry is a violation', () => {
     const ragged = encode.ping([{ ix: 1, lastSeq: 1 }]).slice(0, 12)
     expect(() => clientFrame(ragged)).toThrow(ProtocolViolationError)
+  })
+})
+
+test('an ANNOUNCE names the bytes that follow it, and the bytes per ms its sender knows the link carries at least', () => {
+  expect(clientFrame(encode.announce(4_000, 1_250))).toEqual({ tag: TAG.ANNOUNCE, bytes: 4_000, floor: 1.25 })
+  expect(clientFrame(encode.announce(4_000, 0))).toEqual({ tag: TAG.ANNOUNCE, bytes: 4_000, floor: 0 })
+})
+
+describe('several frames in one WebSocket message', () => {
+  test("hold them in order, a LENGTH ahead of each but the last whose tag doesn't fix its bytes", () => {
+    const frames = [
+      encode.window(1, 2, 3),
+      encode.text(1, 'a', 4),
+      encode.piecesAck(5, 6, 7),
+      encode.binary(2, new Uint8Array(3), 8),
+    ]
+    const message = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
+    expect(isOneFrame(message)).toBe(false)
+    expect(messageFrames(message)).toEqual(frames)
+    expect(frames.map(isOneFrame)).toEqual([true, true, true, true])
+  })
+
+  const malformed: [string, Uint8Array<ArrayBuffer>][] = [
+    ['a PIECE ahead of another frame', encode.message([encode.piece(4, new Uint8Array(4)), encode.closeAck(1)], 29)],
+    ['an ANNOUNCE ahead of another frame', encode.message([encode.announce(0, 0), encode.closeAck(1)], 18)],
+    ['a LENGTH last', encode.message([encode.closeAck(1), encode.closeAck(1)], 14).fill(TAG.LENGTH, 7, 8)],
+    ['a LENGTH past its message', encode.message([encode.text(1, 'a', 1), encode.closeAck(1)], 22).fill(0xff, 3, 7)],
+  ]
+  test.each(malformed)('with %s are a violation', (_name, message) => {
+    expect(() => messageFrames(message)).toThrow(ProtocolViolationError)
   })
 })
 
@@ -292,7 +334,7 @@ describe('decodeClientFrame — direction', () => {
     ['WINDOW', encode.window(0, 1_024, 7)],
     ['MSG_WINDOW', encode.msgWindow(0, 8)],
     ['BDP_PING', encode.bdpPing(0, 1)],
-    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, true, 50)],
+    ['BDP_PING_ACK', encode.bdpPingAck(0, 1, 0, 50)],
     ['BROADCAST_SUB', encode.broadcastSub(0, false)],
     ['BROADCAST_UNSUB', encode.broadcastUnsub(0, false)],
   ]

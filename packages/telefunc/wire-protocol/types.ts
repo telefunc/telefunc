@@ -94,7 +94,13 @@ type ReviverType<C extends TypeContract = TypeContract, Context = unknown> = {
   revive(
     metadata: C['metadata'],
     context: Context,
-  ): { value: C['result']; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }
+  ): {
+    value: C['result']
+    close: () => Promise<void> | void
+    abort: (abortError: AbortError) => void
+    /** Takes what runs once nothing is left for `close` to do. */
+    onEnd?: (callback: () => void) => void
+  }
 }
 
 // ===== Producer =====

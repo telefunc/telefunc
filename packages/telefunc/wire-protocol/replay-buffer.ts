@@ -178,10 +178,11 @@ class ReplayLane {
    * @returns `true` if the frame was stored, `false` if it was larger than the budget.
    */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
-    if (payloadBytes(frame) > this.maxBytes) return false
+    const bytes = payloadBytes(frame)
+    if (bytes > this.maxBytes) return false
     this.seqs.push(seq)
     this.frames.push(frame)
-    this.totalBytes += payloadBytes(frame)
+    this.totalBytes += bytes
     this.trim()
     return true
   }

@@ -648,7 +648,12 @@ function attachPeer(stub: RoomStubChannel, { keep = true } = {}) {
         if (keep) frames.push(frame)
         onCommit?.()
       },
+      carry: (frame) => {
+        if (keep) frames.push(frame)
+      },
       bufferedAmount: () => 0,
+      deliveredBeforeFrame: () => 0,
+      sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
     7,
     stub._replayBuffer!,

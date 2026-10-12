@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { decode, encode, TAG, type DecodedFrame } from '../shared-ws.js'
+import { decode, encode, ERROR_REASON, TAG, type DecodedFrame } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
@@ -272,9 +272,9 @@ test("what a reconnect's RECONCILE sends a channel's page, run once its wire clo
   expect(count(live, TAG.ABORT)).toBe(1)
 })
 
-// The ack of an attach's probe measures the path's round trip, so it goes out as the server reads the entry: held
-// until the channel registers, it would count the wait for its call.
-test("an attach's probe is answered as the RECONCILE naming it is read, for a channel the server awaits too", async () => {
+// The answer to an attach's probe measures the path's round trip, so nothing of the channel goes ahead of it, and it
+// doesn't wait for the channel's registration: held until then, it would count the wait for its call.
+test("an attach's probe is answered by the RECONCILED, for a channel the server awaits too", async () => {
   const mux = new ChannelMux()
   mux.registerChannel(new ServerChannel({ id: 'known' }))
   const { open, sent } = wires(mux)
@@ -288,13 +288,31 @@ test("an attach's probe is answered as the RECONCILE naming it is read, for a ch
       ],
     }),
   )
-  const acks = sent
-    .get(wire)!
-    .flatMap((frame) => (frame.tag === TAG.BDP_PING_ACK ? [[frame.index, frame.probe, frame.starved]] : []))
-  expect(acks).toEqual([
-    [0, 7, false],
-    [1, 8, false],
-  ])
+  expect(sent.get(wire)!.map((frame) => frame.tag)).toEqual([TAG.RECONCILED])
+  mux.registerChannel(new ServerChannel({ id: 'late' }))
+})
+
+test("a frame the server sends ahead of the RECONCILED goes behind the answers to the attach's probes", async () => {
+  const mux = new ChannelMux()
+  const known = new ServerChannel<unknown, string>({ id: 'known' })
+  mux.registerChannel(known)
+  void known.send('early')
+  const { open, sent } = wires(mux)
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({
+      open: [
+        { id: 'late', ix: 0, lastSeq: 0, initial: true, probe: 7 },
+        { id: 'known', ix: 1, lastSeq: 0, initial: true, probe: 8 },
+      ],
+    }),
+  )
+  expect(
+    sent
+      .get(wire)!
+      .map((frame) => (frame.tag === TAG.BDP_PING_ACK ? [frame.tag, frame.probe, frame.backlog] : frame.tag)),
+  ).toEqual([[TAG.BDP_PING_ACK, 7, Infinity], [TAG.BDP_PING_ACK, 8, Infinity], TAG.TEXT, TAG.RECONCILED])
   mux.registerChannel(new ServerChannel({ id: 'late' }))
 })
 
@@ -650,4 +668,25 @@ test("a page's PING acknowledges a channel it closed whole past 2^32, so the ser
   expect(seq).toBeGreaterThan(2 ** 32)
   await mux.onConnectionRawMessage(wire, encode.ping([{ ix: 0, lastSeq: seq }]))
   expect(channel._replayBuffer!.byteLength).toBe(0)
+})
+
+test.each([
+  ['aborts', encode.abort(0, 'null', 1)],
+  ['ends for a lost replay', encode.error(0, ERROR_REASON.LOST, 1)],
+])("a channel its page %s lets go at once of what it sent the page and the page didn't acknowledge", async (_, end) => {
+  const mux = new ChannelMux()
+  const channel = new ServerChannel<unknown, string>({ id: 'page-ended' })
+  channel.onClose(() => {})
+  mux.registerChannel(channel)
+  const { open } = wires(mux)
+  const wire = open()
+  await mux.onConnectionRawMessage(
+    wire,
+    encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }),
+  )
+  for (let n = 0; n < 3; n++) void channel.send(String(n)).catch(() => {})
+  await turn()
+  await mux.onConnectionRawMessage(wire, end)
+  expect(channel._replayBuffer).toBe(null)
+  expect(mux.hasChannels()).toBe(false)
 })

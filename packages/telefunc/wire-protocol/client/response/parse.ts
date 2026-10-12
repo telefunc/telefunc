@@ -164,7 +164,7 @@ async function reviveResponse(
   const reviver = createStreamingReviver(
     context,
     function onRevived(revived) {
-      const { value, abort, close } = revived
+      const { value, abort, close, onEnd } = revived
       // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
       if (isObjectOrFunction(value) && closeHandlers.has(value)) return
       allCloseHandlers.push(close)
@@ -185,7 +185,9 @@ async function reviveResponse(
 
       assert(isObjectOrFunction(value))
       const wrapper = wrapProxy(value)
-      globalObject.gcRegistry.register(wrapper, close)
+      const forget = globalObject.gcRegistry.register(wrapper, close)
+      // Forgotten at its value's end, as the value may keep what its wrapper returned, which keeps the wrapper.
+      onEnd?.(forget)
       closeHandlers.set(wrapper, close)
       // This is what the user gets
       revived.value = wrapper

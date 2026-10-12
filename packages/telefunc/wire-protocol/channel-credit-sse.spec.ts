@@ -20,17 +20,16 @@ const LATENCY_MS = 25
 const CHUNK_BYTES = 16 * 1024
 const KIB = 1024
 
-/** One direction of the link: delivers what it carries in order, `LATENCY_MS` after it was sent, and no faster than
- *  `bytesPerMs`. */
+/** One direction of the link: what it carries leaves at `bytesPerMs` once what was sent before it has, and arrives
+ *  `LATENCY_MS` after it left. */
 class Pipe {
   bytesPerMs = Infinity
   private lastAt = 0
   private queue: { at: number; deliver: () => void }[] = []
   private timer: ReturnType<typeof setTimeout> | null = null
   push(bytes: number, deliver: () => void): void {
-    const at = Math.max(Date.now() + LATENCY_MS, this.lastAt + bytes / this.bytesPerMs)
-    this.lastAt = at
-    this.queue.push({ at, deliver })
+    this.lastAt = Math.max(Date.now(), this.lastAt) + bytes / this.bytesPerMs
+    this.queue.push({ at: this.lastAt + LATENCY_MS, deliver })
     this.schedule()
   }
   private schedule(): void {

@@ -40,13 +40,17 @@ afterEach(() => {
 
 /** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket. `delays`: how
  *  long a frame of a tag takes to reach the page, the ones after it on its wire waiting behind it. `refusedAfter`: how
- *  long an SSE-batch page's upload request takes to be refused. */
-function page(wire: Wire, { upgrade = false, delays = {} as Partial<Record<number, number>>, refusedAfter = 0 } = {}) {
+ *  long an SSE-batch page's upload request takes to be refused. `postMs`: how long each batch POST's body takes to end
+ *  after its frames, which the server reads at once. */
+function page(
+  wire: Wire,
+  { upgrade = false, delays = {} as Partial<Record<number, number>>, refusedAfter = 0, postMs = 0 } = {},
+) {
   const traffic: Traffic = { requests: 0, toServer: [], toPage: [] }
   /** Ends a wire as a network drop does, the latest last. */
   const cuts: (() => void)[] = []
   const failing: FailingPost = { next: null, holdEnd: null }
-  const upload: Upload = { endAfterNextReconcile: false, refusedAfter }
+  const upload: Upload = { endAfterNextReconcile: false, refusedAfter, postMs }
   if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts, delays))
   if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts, delays, failing, upload)
   const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
@@ -104,7 +108,7 @@ async function searchBox(channel: ReturnType<typeof page>['channel'], keystrokes
 }
 
 type FailingPost = { next: 'read' | 'unread' | null; holdEnd: number | null }
-type Upload = { endAfterNextReconcile: boolean; refusedAfter: number }
+type Upload = { endAfterNextReconcile: boolean; refusedAfter: number; postMs: number }
 
 function sseServer(
   traffic: Traffic,
@@ -135,9 +139,11 @@ function sseServer(
         frames.some((frame) => frame[0] === TAG.RECONCILE)
       if (failing.next && reconcilePost) [fails, failing.next] = [failing.next, null]
       if (fails === 'unread') throw new TypeError('fetch failed')
-      if (failing.holdEnd !== null && reconcilePost) {
-        const [bytes, ms] = [logged, failing.holdEnd]
-        failing.holdEnd = null
+      const held = failing.holdEnd !== null && reconcilePost
+      const holdEnd = held ? failing.holdEnd! : upload.postMs
+      if (held || (holdEnd > 0 && !JSON.stringify(init.headers).includes('text/event-stream'))) {
+        if (held) failing.holdEnd = null
+        const [bytes, ms] = [logged, holdEnd]
         logged = new ReadableStream<Uint8Array>({
           start: (controller) => controller.enqueue(bytes),
           pull: async (controller) => {
@@ -569,6 +575,33 @@ describe.each(['sse', 'sse-batch'] as const)('over %s, while an upgrade attempt 
   })
 })
 
+test('on SSE batch POSTs, what the page holds for room as an upgrade attempt ends without its barrier, its WebSocket lost while the outbox drained, goes out at once, not with the next send or attempt', async () => {
+  // Each POST takes 100 ms, so the barrier waits for the outbox to drain.
+  const { channel, cut } = page('sse-batch', { upgrade: true, delays: { [TAG.READY]: 1_000 }, postMs: 100 })
+  const server = register<string, never>()
+  const received: number[] = []
+  server.listen((message) => void received.push(Number(message.slice(0, 8))))
+  const open = channel<string, never>(server.id)
+  const connection = (open as any)._connection
+  await vi.advanceTimersByTimeAsync(900)
+  // More than a POST takes, none awaited.
+  const count = 64
+  for (let n = 0; n < count; n++) void open.send(String(n).padEnd(64 * 1024), { ack: false })
+  for (let waited = 0; waited < 2_000 && connection.state.upgrade.tag !== 'committing'; waited++)
+    await vi.advanceTimersByTimeAsync(1)
+  expect(connection.state.upgrade.tag).toBe('committing')
+  expect(connection.heldForRoom.length).toBeGreaterThan(0)
+  const { attempt } = connection.state.upgrade
+  cut() // the probe WebSocket
+  for (let waited = 0; waited < 3_000 && connection.state.upgrade.attempt === attempt; waited++)
+    await vi.advanceTimersByTimeAsync(1)
+  expect(connection.state.upgrade.attempt).not.toBe(attempt)
+  // The next attempt's READY takes a second.
+  await vi.advanceTimersByTimeAsync(500)
+  expect(received).toEqual(Array.from({ length: count }, (_, n) => n))
+  expect(connection.transport.type).toBe('sse')
+})
+
 test.each([
   ['before the server read it', 'unread'],
   ['after the server read it', 'read'],
@@ -675,49 +708,23 @@ describe('with every channel registered, a page sends each message once, and no 
   })
 })
 
-const { RECONCILE, RECONCILED, TEXT, WINDOW, MSG_WINDOW, BDP_PING, BDP_PING_ACK, STREAM_REQUEST_OPEN_ACK } = TAG
+const { RECONCILE, RECONCILED, TEXT, WINDOW, BDP_PING, BDP_PING_ACK, STREAM_REQUEST_OPEN_ACK } = TAG
 /** Every frame each wire carries for two returned channels and one message each way, PING and PONG aside: no frame
  *  or request more than needed. */
 const EXPECTED_TRAFFIC: Record<Wire, Traffic> = {
   sse: {
     requests: 2,
-    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, MSG_WINDOW, RECONCILE, BDP_PING, WINDOW, MSG_WINDOW],
-    toPage: [
-      STREAM_REQUEST_OPEN_ACK,
-      WINDOW,
-      MSG_WINDOW,
-      BDP_PING,
-      RECONCILED,
-      WINDOW,
-      TEXT,
-      BDP_PING_ACK,
-      BDP_PING_ACK,
-      WINDOW,
-      MSG_WINDOW,
-      RECONCILED,
-      BDP_PING_ACK,
-    ],
+    toServer: [RECONCILE, TEXT, BDP_PING_ACK, RECONCILE, BDP_PING],
+    toPage: [STREAM_REQUEST_OPEN_ACK, BDP_PING, RECONCILED, WINDOW, TEXT, RECONCILED, BDP_PING_ACK],
   },
   'sse-batch': {
     requests: 5,
-    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, MSG_WINDOW, RECONCILE, BDP_PING, WINDOW, WINDOW, MSG_WINDOW],
-    toPage: [WINDOW, MSG_WINDOW, BDP_PING, RECONCILED, WINDOW, TEXT, WINDOW, MSG_WINDOW, BDP_PING_ACK, RECONCILED],
+    toServer: [RECONCILE, TEXT, BDP_PING_ACK, WINDOW, RECONCILE, BDP_PING, WINDOW],
+    toPage: [BDP_PING, RECONCILED, WINDOW, TEXT, BDP_PING_ACK, RECONCILED],
   },
   ws: {
     requests: 1,
-    toServer: [RECONCILE, TEXT, WINDOW, MSG_WINDOW, BDP_PING_ACK, RECONCILE, BDP_PING, WINDOW, MSG_WINDOW],
-    toPage: [
-      BDP_PING_ACK,
-      WINDOW,
-      MSG_WINDOW,
-      RECONCILED,
-      BDP_PING,
-      TEXT,
-      BDP_PING_ACK,
-      WINDOW,
-      MSG_WINDOW,
-      RECONCILED,
-      BDP_PING_ACK,
-    ],
+    toServer: [RECONCILE, TEXT, BDP_PING_ACK, RECONCILE, BDP_PING],
+    toPage: [RECONCILED, BDP_PING, TEXT, RECONCILED, BDP_PING_ACK],
   },
 }

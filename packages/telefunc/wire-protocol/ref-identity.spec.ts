@@ -16,6 +16,7 @@ import { config, getServerConfig, setAdapterMaxFrameBytes } from '../node/server
 import { Room } from './room/server/statics.js'
 import type { LocalParticipant, Room as RoomType } from './room/types.js'
 import { config as clientConfig } from '../client/clientConfig.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { ClientBroadcast, ClientChannel } from './client/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 import type {
@@ -952,6 +953,36 @@ test("a runtime's lower frame limit reaches each channel, broadcast and function
     }
   } finally {
     setAdapterMaxFrameBytes(undefined)
+    delete clientConfig.fetch
+  }
+})
+
+test("a channel, a broadcast and an async generator leave the page's GC registry once each ended, whose entry would keep it and its wrapper in memory for good", async () => {
+  // The channels' wire never opens, so their closes time out.
+  clientConfig.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
+  try {
+    const returned = {
+      channel: new ServerChannel(),
+      broadcast: new ServerBroadcast({ key: 'registry-end' }),
+      gen: (async function* () {
+        yield 1
+      })(),
+    }
+    type Revived = { channel: ClientChannel; broadcast: ClientBroadcast; gen: AsyncGenerator<number> }
+    const { channel, broadcast, gen } = (await roundTrip(returned)).ret as Revived
+    const registry = getGlobalObject<{ gcRegistry: { entries: Set<{ ref: WeakRef<object> }> } }>(
+      'wire-protocol/client/response/parse.ts',
+      () => {
+        throw new Error('parseResponse made no registry')
+      },
+    ).gcRegistry
+    const registered = (value: object) => [...registry.entries].some((entry) => entry.ref.deref() === value)
+    expect([channel, broadcast, gen].map(registered)).toEqual([true, true, true])
+
+    await Promise.all([channel.close({ timeout: 10 }), broadcast.close({ timeout: 10 })])
+    expect(await collect(gen)).toEqual([1])
+    expect([channel, broadcast, gen].map(registered)).toEqual([false, false, false])
+  } finally {
     delete clientConfig.fetch
   }
 })

@@ -1380,7 +1380,7 @@ describe.each(WIRES)('over %s, past the reconnect window,', (wire) => {
     net.cut()
     await advance(1_000)
     const kept = connection.replayBuffers.get(connection.channelIndex.get(pageChannel)).byteLength
-    const queued = connection.sendBuffer.reduce(
+    const queued = [...connection.sendBuffer, ...connection.heldForRoom].reduce(
       (bytes: number, { frame }: { frame: Uint8Array }) => bytes + frame.byteLength,
       0,
     )

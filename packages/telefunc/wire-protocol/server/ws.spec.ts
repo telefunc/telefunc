@@ -3,7 +3,7 @@ import type { Peer } from 'crossws'
 import { getTelefuncChannelHooks } from './ws.js'
 import { getChannelMux } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { encode } from '../shared-ws.js'
+import { TAG, decode, encode, isOneFrame } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
@@ -32,15 +32,26 @@ test("a client that goes silent is detached at its ping deadline, though the pee
   expect(closed).toBe(true)
 })
 
-/** A channel attached to a page that reads nothing, through a peer whose `websocket` is the runtime's socket. */
-async function attachToStalledPage(websocket: (written: () => number) => object) {
+/** A channel attached to a page that reads nothing, or, `acknowledging`, only what tells the server what arrived,
+ *  through a peer whose `websocket` is the runtime's socket. */
+async function attachToStalledPage(websocket: (written: () => number) => object, { acknowledging = false } = {}) {
   const hooks = getTelefuncChannelHooks()
   let written = 0
+  let took = 0
   const peer = {
     context: {},
     websocket: websocket(() => written),
-    send(frame: Uint8Array) {
-      written += frame.byteLength
+    send(message: Uint8Array) {
+      written += message.byteLength
+      if (!acknowledging) return
+      // A message of several frames holds whole ones.
+      const frame = isOneFrame(message) ? decode(message) : null
+      if (frame?.tag === TAG.ANNOUNCE) return
+      const bytes = frame?.tag === TAG.PIECE ? frame.piece.byteLength : message.byteLength
+      if (bytes === 0) return
+      took += bytes
+      const ack = encode.piecesAck(took, 0, 0)
+      queueMicrotask(() => void hooks.message!(peer, { uint8Array: () => ack } as never))
     },
     terminate() {},
   } as unknown as Peer
@@ -87,8 +98,8 @@ test("a Durable Object's socket reports no bufferedAmount, so the page's window 
   expect(written()).toBeLessThanOrEqual(BOUND)
 })
 
-test('a socket that writes everything out at once holds nothing for the page, so a channel refuses no send nobody awaits', async () => {
-  const { channel, written } = await attachToStalledPage(() => ({ bufferedAmount: 0 }))
+test('a socket that writes everything out at once to a page that acknowledges what arrives holds nothing for it, so a channel refuses no send nobody awaits', async () => {
+  const { channel, written } = await attachToStalledPage(() => ({ bufferedAmount: 0 }), { acknowledging: true })
   const { error } = await sendUntilRejected(channel, (3 * BOUND) / (16 * 1024))
   expect(error).toBeUndefined()
   expect(written()).toBeGreaterThan(2 * BOUND)

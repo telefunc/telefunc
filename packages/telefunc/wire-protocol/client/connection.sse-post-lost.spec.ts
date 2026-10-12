@@ -187,6 +187,7 @@ test("a POST that comes due before its wire's first RECONCILED is left out, and 
     _reattachState: () => ({}),
     _fitReplays() {},
     _acknowledge() {},
+    _answered() {},
   }
   const stalled = (async () => new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200 })) as never
   const connection = ClientConnection.getOrCreate('http://reconciling.test', channel as never, {

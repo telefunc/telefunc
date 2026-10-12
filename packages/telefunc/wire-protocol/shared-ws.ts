@@ -3,6 +3,11 @@ export {
   ACK_STATUS,
   ERROR_REASON,
   encode,
+  withTook,
+  LENGTH_BYTES,
+  fixedBytes,
+  isOneFrame,
+  messageFrames,
   decode,
   decodeClientFrame,
   assertProtocol,
@@ -55,8 +60,9 @@ import { assert } from '../utils/assert.js'
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
 // `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
-// ctrl frames carry 0. Seqs count on past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` returns
-// as they are: the frame's owner reads the whole seq from where it stands on the channel (`seqNear`, `seqThrough`).
+// ctrl frames carry 0, but a WebSocket's PING, PONG and ANNOUNCE, which say a count there. Seqs count on past 32 bits,
+// and a u32 seq on the wire is their low 32 bits, which `decode` returns as they are: the frame's owner reads the whole
+// seq from where it stands on the channel (`seqNear`, `seqThrough`).
 //
 // Tag layout — sparse ranges so range checks classify:
 //   0x01–0x0f  connection-level control (no ix, no seq)
@@ -68,6 +74,8 @@ import { assert } from '../utils/assert.js'
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
 const HEADER = 7
+/** A LENGTH is its header. */
+const LENGTH_BYTES = HEADER
 /** How many seqs a u32 tells apart. */
 const SEQ_SPAN = 2 ** 32
 const PING_ENTRY_BYTES = 6
@@ -87,10 +95,11 @@ const textDecoder = new TextDecoder()
 const TAG = {
   // ─── Connection-level control (no ix, no seq) ───
   /** Client → server heartbeat. Payload: a `PingEntry` for each closed channel the page holds that the server
-   *  attached. */
+   *  attached. On a WebSocket, its header's seq is what the page took of the frames, as a PIECES_ACK says it (see
+   *  `withTook`). */
   PING: 0x01 as const,
   /** Server → client heartbeat. Payload: a `PongEntry` for each channel the PING names, if the page's session is on this
-   *  wire. */
+   *  wire. On a WebSocket, its header's seq is what the server took of the frames, as a PING says it. */
   PONG: 0x02 as const,
   /** Server → client on old transport after upgrade drain: signals last frame on this transport. */
   FIN: 0x03 as const,
@@ -109,12 +118,20 @@ const TAG = {
    *  addressed to the staged probe. Its own tag so the size cap lands on the raw bytes. */
   BARRIER: 0x09 as const,
   /** Either way on a WebSocket, which delivers no part of a message: a piece of a frame sent in pieces (see
-   *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece. */
+   *  `pieces.ts`). Payload: u32, the frame's byte length, then the piece; an empty one, before a frame's first, asks its
+   *  receiver to acknowledge the next two at once. */
   PIECE: 0x0a as const,
-  /** Back, as `PieceReceiver` says, for the frames that arrived, whole or in pieces. Payload: u32, the bytes of the frames it took in all (mod 2^32), u32, the ms it
-   *  held the newest, then u32, the µs between the arrival of the newest data frame and of the newest the ack before
-   *  covered, 0 for the first, or where it covers none. */
+  /** Back, as `PieceReceiver` says, for the frames and pieces that arrived. Payload: u32, the bytes of them it took in
+   *  all (mod 2^32), u32, the ms it held the newest, then u32, the µs between the arrival of the newest data and of the
+   *  newest the ack before covered, 0 for the first, or where it covers none. */
   PIECES_ACK: 0x0b as const,
+  /** Either way on a WebSocket: the bytes of the frames that follow it at once, whole or in pieces, which its receiver
+   *  waits for at the rate they arrive (see `pieces.ts`). Payload: u32, their bytes. Its header's seq: the bytes per s
+   *  its sender knows the link carries at least, 0 for none. */
+  ANNOUNCE: 0x0c as const,
+  /** Either way on a WebSocket, where a message may hold several frames (see `messageFrames`): the bytes of the frame
+   *  after it, which isn't its message's last and whose tag doesn't fix them, as its header's seq. */
+  LENGTH: 0x0d as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -151,8 +168,9 @@ const TAG = {
   /** BDP probe — receiver→sender. Sender echoes `BDP_PING_ACK` immediately so the
    *  receiver can measure bytes-in-flight during one RTT and grow `WINDOW` to BDP. Payload: u32, the probe's number. */
   BDP_PING: 0x37 as const,
-  /** Payload: u32, the probe it answers, u8 1 when the sender's credit ran out while its wire held nothing, since it last
-   *  sent one, and u32, the path's round trip in µs as the sender measured it, 0 where it measured none. */
+  /** Payload: u32, the probe it answers, u32, the least bytes the sender's wire held whenever its credit ran out since it
+   *  last sent one, all ones past that or where it didn't run out, and u32, the path's round trip in µs as the sender
+   *  measured it, 0 where it measured none. */
   BDP_PING_ACK: 0x38 as const,
   /** Flow-control message-count limit. Parallel to `WINDOW` but counted in messages, not bytes,
    *  to bound receiver dispatch CPU regardless of message size. */
@@ -221,8 +239,8 @@ type ReconcileOpenEntry = {
   initial?: true
   /** A broadcast's subscriptions as of this (re)attach, applied before its `onOpen` fires. */
   broadcast?: BroadcastSubscriptions
-  /** A BDP probe's number, which the server answers as it reads the entry, ahead of what the attach sends of the
-   *  channel: on another wire than the last, the ack queues behind none of the channel's data, so its round trip is the
+  /** A BDP probe's number, which the RECONCILED answers, or a BDP_PING_ACK ahead of a frame the server sends before it:
+   *  on another wire than the last, the answer queues behind none of the channel's data, so its round trip is the
    *  path's. */
   probe?: number
 }
@@ -236,8 +254,6 @@ type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 type ReconcilePayload = {
   sessionId?: string
   open: ReconcileOpenEntry[]
-  /** A wire of the page's was lost with a frame in flight and no rate measured: the link is too slow for big frames. */
-  slow?: true
 }
 
 /** A barrier names the session it retires and the upgrade it commits — both mandatory, where a
@@ -279,8 +295,6 @@ type ReconciledPayload = {
   ssePostIdleFlushDelay: number
   transports: ChannelTransports
   upgradeId?: string
-  /** The link is slow: as `ReconcilePayload.slow` for a wire of the server's, or because the RECONCILE said it. */
-  slow?: true
 }
 
 /** Ack result outcome on the wire — same byte value in memory and on the wire.
@@ -341,8 +355,9 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
   | { tag: typeof TAG.BDP_PING; index: number; probe: number }
-  /** `pathRtt` in ms, `Infinity` where the sender measured none. */
-  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; starved: boolean; pathRtt: number }
+  /** `backlog` in bytes, `Infinity` where the credit didn't run out; `pathRtt` in ms, `Infinity` where the sender measured
+   *  none. */
+  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; backlog: number; pathRtt: number }
   /** `lastSeq` is null when the channel wasn't attached. */
   | { tag: typeof TAG.ATTACH_RESULT; index: number; lastSeq: number | null }
 
@@ -354,8 +369,8 @@ type SequencedFrame =
   | Extract<ChannelCtrlFrame, { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.ABORT | typeof TAG.ERROR }>
 
 type ConnCtrlFrame =
-  | { tag: typeof TAG.PING; ended: PingEntry[] }
-  | { tag: typeof TAG.PONG; ended: PongEntry[] }
+  | { tag: typeof TAG.PING; ended: PingEntry[]; took: number }
+  | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
   | { tag: typeof TAG.FIN }
   | { tag: typeof TAG.RECONCILE; payload: ReconcilePayload }
   | { tag: typeof TAG.BARRIER; payload: BarrierPayload }
@@ -365,6 +380,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
   | { tag: typeof TAG.PIECES_ACK; bytes: number; heldMs: number; spanUs: number }
+  | { tag: typeof TAG.ANNOUNCE; bytes: number; floor: number }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
@@ -422,7 +438,7 @@ function readU64(buf: Uint8Array, offset: number): number {
  *  (RFC 9000, appendix A.3). A seq reaches its receiver less than 2^31 frames from the next it expects: no wire or
  *  replay holds that many. */
 function seqNear(bits: number, expected: number): number {
-  const seq = expected - (expected % SEQ_SPAN) + bits
+  const seq = expected - (expected >>> 0) + bits
   if (seq <= expected - SEQ_SPAN / 2) return seq + SEQ_SPAN
   if (seq > expected + SEQ_SPAN / 2 && seq >= SEQ_SPAN) return seq - SEQ_SPAN
   return seq
@@ -431,7 +447,7 @@ function seqNear(bits: number, expected: number): number {
 /** A peer's acknowledgement of what this side sent: the latest seq with those low bits through `sent`, the last this
  *  side gave. A peer never lacks 2^32 frames of what was sent: no wire or replay holds that many. */
 function seqThrough(bits: number, sent: number): number {
-  const seq = sent - (sent % SEQ_SPAN) + bits
+  const seq = sent - (sent >>> 0) + bits
   return seq > sent && seq >= SEQ_SPAN ? seq - SEQ_SPAN : seq
 }
 
@@ -543,6 +559,33 @@ const encode = {
     writeU32(frame, HEADER + 8, spanUs)
     return frame
   },
+  announce(bytes: number, floorPerS: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 4)
+    writeHeader(frame, TAG.ANNOUNCE, 0, floorPerS)
+    writeU32(frame, HEADER, bytes)
+    return frame
+  },
+  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (see `messageFrames`), in one message,
+   *  written in `message` if given. */
+  message(
+    frames: readonly Uint8Array[],
+    bytes: number,
+    message = new Uint8Array(bytes) as Uint8Array<ArrayBuffer>,
+  ): Uint8Array<ArrayBuffer> {
+    const last = frames.length - 1
+    let at = 0
+    for (let i = 0; i <= last; i++) {
+      const frame = frames[i]!
+      if (i < last && fixedBytes(frame[0]!) === 0) {
+        writeHeader(message.subarray(at), TAG.LENGTH, 0, frame.byteLength)
+        at += HEADER
+      }
+      message.set(frame, at)
+      at += frame.byteLength
+    }
+    assert(at === bytes)
+    return message
+  },
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {
@@ -585,15 +628,16 @@ const encode = {
     writeU32(frame, HEADER, probe)
     return frame
   },
-  /** `pathRtt` in ms, `Infinity` where the sender measured none. */
-  bdpPingAck(index: number, probe: number, starved: boolean, pathRtt: number): Uint8Array<ArrayBuffer> {
-    const frame = new Uint8Array(HEADER + 9)
+  /** `backlog` in bytes, `Infinity` where the credit didn't run out; `pathRtt` in ms, `Infinity` where the sender measured
+   *  none. */
+  bdpPingAck(index: number, probe: number, backlog: number, pathRtt: number): Uint8Array<ArrayBuffer> {
+    const frame = new Uint8Array(HEADER + 12)
     writeHeader(frame, TAG.BDP_PING_ACK, index, 0)
     writeU32(frame, HEADER, probe)
-    frame[HEADER + 4] = starved ? 1 : 0
+    writeU32(frame, HEADER + 4, Math.min(0xffffffff, backlog))
     writeU32(
       frame,
-      HEADER + 5,
+      HEADER + 8,
       pathRtt === Infinity ? 0 : Math.min(0xffffffff, Math.max(1, Math.round(pathRtt * 1000))),
     )
     return frame
@@ -620,7 +664,69 @@ const encode = {
   },
 }
 
+/** `heartbeat`, a PING or PONG, saying its sender took `bytes` of the frames its WebSocket carried in all (mod 2^32):
+ *  their sender bounds the link's rate by it (see `PieceSender.heartbeat`). */
+function withTook(heartbeat: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array<ArrayBuffer> {
+  writeHeader(heartbeat, heartbeat[0]!, 0, bytes)
+  return heartbeat
+}
+
 // ===== Decode =====
+
+/** The bytes of every frame of `tag`, 0 where they vary. */
+function fixedBytes(tag: number): number {
+  return FIXED_BYTES[tag] ?? 0
+}
+
+const FIXED_BYTES: Partial<Record<number, number>> = {
+  [TAG.FIN]: encode.fin().byteLength,
+  [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
+  [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
+  [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
+  [TAG.CLOSE]: encode.close(0, 0).byteLength,
+  [TAG.CLOSE_ACK]: encode.closeAck(0).byteLength,
+  [TAG.ERROR]: encode.error(0, ERROR_REASON.LOST).byteLength,
+  [TAG.WINDOW]: encode.window(0, 0, 0).byteLength,
+  [TAG.BROADCAST_SUB]: encode.broadcastSub(0, false).byteLength,
+  [TAG.BROADCAST_UNSUB]: encode.broadcastUnsub(0, false).byteLength,
+  [TAG.BDP_PING]: encode.bdpPing(0, 0).byteLength,
+  [TAG.BDP_PING_ACK]: encode.bdpPingAck(0, 0, 0, 0).byteLength,
+  [TAG.MSG_WINDOW]: encode.msgWindow(0, 0).byteLength,
+  [TAG.ATTACH_RESULT]: encode.attachResult(0, null).byteLength,
+}
+
+/** Whether a WebSocket `message` holds one frame. */
+function isOneFrame(message: Uint8Array): boolean {
+  const bytes = fixedBytes(message[0]!)
+  return message[0] !== TAG.LENGTH && (bytes === 0 || message.byteLength <= bytes)
+}
+
+/** The frames a WebSocket message of several holds, in order. Each but the last is as long as its tag fixes, or the
+ *  LENGTH ahead of it says, and is whole; the last is the rest. */
+function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] {
+  const frames: Uint8Array<ArrayBuffer>[] = []
+  const end = message.byteLength
+  let at = 0
+  for (;;) {
+    let bytes = fixedBytes(message[at]!)
+    if (message[at] === TAG.LENGTH) {
+      assertProtocol(end - at > HEADER, 'LENGTH last in its message')
+      bytes = readU32(message, at + 3)
+      at += HEADER
+      assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at > bytes, 'LENGTH of no frame')
+    } else if (bytes === 0 || end - at <= bytes) {
+      frames.push(message.subarray(at))
+      return frames
+    }
+    const tag = message[at]
+    assertProtocol(
+      tag !== TAG.PIECE && tag !== TAG.ANNOUNCE && tag !== TAG.LENGTH,
+      'frame ahead of another it never is',
+    )
+    frames.push(message.subarray(at, at + bytes))
+    at += bytes
+  }
+}
 
 /** Raised for every malformed-bytes path. Never `assert`: that one tells the user they found a
  *  telefunc bug, and these bytes are the peer's. */
@@ -697,7 +803,7 @@ function decode(frame: Uint8Array): DecodedFrame {
         const ix = readU16(payload, offset)
         ended.push({ ix, lastSeq: readU32(payload, offset + 2) })
       }
-      return { tag: TAG.PING, ended }
+      return { tag: TAG.PING, ended, took: readU32(frame, 3) }
     }
     case TAG.PONG: {
       assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')
@@ -707,7 +813,7 @@ function decode(frame: Uint8Array): DecodedFrame {
         const held = payload[offset + 2] === 1
         ended.push({ ix, lastSeq: held ? readU32(payload, offset + 3) : null })
       }
-      return { tag: TAG.PONG, ended }
+      return { tag: TAG.PONG, ended, took: readU32(frame, 3) }
     }
     case TAG.FIN:
       return { tag: TAG.FIN }
@@ -736,6 +842,9 @@ function decode(frame: Uint8Array): DecodedFrame {
         heldMs: readU32(payload, 4),
         spanUs: readU32(payload, 8),
       }
+    case TAG.ANNOUNCE:
+      assertProtocol(payload.length >= 4, 'ANNOUNCE payload too short')
+      return { tag: TAG.ANNOUNCE, bytes: readU32(payload, 0), floor: readU32(frame, 3) / 1000 }
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')
@@ -762,13 +871,14 @@ function decode(frame: Uint8Array): DecodedFrame {
       assertProtocol(payload.length >= 4, 'BDP_PING payload too short')
       return { tag: TAG.BDP_PING, index, probe: readU32(payload, 0) }
     case TAG.BDP_PING_ACK: {
-      assertProtocol(payload.length >= 9, 'BDP_PING_ACK payload too short')
-      const pathRtt = readU32(payload, 5)
+      assertProtocol(payload.length >= 12, 'BDP_PING_ACK payload too short')
+      const backlog = readU32(payload, 4)
+      const pathRtt = readU32(payload, 8)
       return {
         tag: TAG.BDP_PING_ACK,
         index,
         probe: readU32(payload, 0),
-        starved: payload[4] === 1,
+        backlog: backlog === 0xffffffff ? Infinity : backlog,
         pathRtt: pathRtt === 0 ? Infinity : pathRtt / 1000,
       }
     }
@@ -793,6 +903,7 @@ const CLIENT_TAGS: ReadonlySet<number> = new Set([
   TAG.PING,
   TAG.PIECE,
   TAG.PIECES_ACK,
+  TAG.ANNOUNCE,
   TAG.RECONCILE,
   TAG.BARRIER,
   TAG.PREPARE,
@@ -880,7 +991,6 @@ function parseReconcilePayload(value: unknown): ReconcilePayload {
   const payload = asObject(value)
   parseOpenList(payload)
   assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
-  assertProtocol(payload.slow === undefined || payload.slow === true, 'RECONCILE slow')
   return payload as ReconcilePayload
 }
 

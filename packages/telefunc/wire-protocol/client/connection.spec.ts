@@ -35,6 +35,7 @@ function createChannel(id = crypto.randomUUID()) {
     _reattachState: () => ({}),
     _fitReplays() {},
     _acknowledge() {},
+    _answered() {},
   }
 }
 
@@ -430,6 +431,53 @@ test('a connection out of wire indexes hands a new channel to a fresh connection
   spent.dispose()
   expect(ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options)).toBe(fresh)
   fresh.dispose()
+})
+
+// A server acknowledges only what arrived: an ack of more is a broken peer, as a page's is to the server.
+test.each([
+  ['keeps', 'all it sent', 0],
+  ['closes', 'a byte more than it sent', 1],
+])('a page %s a WebSocket whose server acknowledges %s', async (_, __, excess) => {
+  vi.useFakeTimers()
+  const sockets: Socket[] = []
+  class Socket {
+    readyState = 0
+    binaryType = 'blob'
+    bufferedAmount = 0
+    sentBytes = 0
+    closed = false
+    onopen: (() => void) | null = null
+    onmessage: ((event: { data: ArrayBuffer }) => void) | null = null
+    onclose: (() => void) | null = null
+    onerror: (() => void) | null = null
+    constructor() {
+      sockets.push(this)
+      queueMicrotask(() => {
+        this.readyState = 1
+        this.onopen?.()
+      })
+    }
+    send(data: Uint8Array) {
+      this.sentBytes += data.byteLength
+    }
+    close() {
+      this.closed = true
+    }
+  }
+  vi.stubGlobal('WebSocket', Socket)
+  const connection = ClientConnection.getOrCreate('http://acks.test', createChannel() as never, {
+    ...stalledOptions(),
+    transports: [CHANNEL_TRANSPORT.WS],
+  }) as any
+  await vi.advanceTimersByTimeAsync(0)
+  const [socket] = sockets
+  // Its RECONCILE.
+  expect(socket!.sentBytes).toBeGreaterThan(0)
+  socket!.onmessage!({ data: encode.piecesAck(socket!.sentBytes + excess, 0, 0).buffer })
+  expect(socket!.closed).toBe(excess > 0)
+  connection.dispose()
+  vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 test('a buffered acked binary send is kept in the binary replay lane, not the text one', () => {

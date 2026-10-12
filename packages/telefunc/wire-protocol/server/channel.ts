@@ -40,6 +40,7 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { Listeners } from '../../utils/Listeners.js'
+import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 import {
   ACK_STATUS,
   ERROR_REASON,
@@ -116,7 +117,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _didFireClose = false
   private _didFireOpen = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
-  private _closeDeadline = 0
+  private _closeDeadline = DOUBLE_ZERO
   private _closeWaiters: Array<() => void> = []
   private _didReceiveCloseAck = false
   private _awaitingCloseAck = false
@@ -178,11 +179,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = id ?? crypto.randomUUID()
     this._flow = new FlowControl(
       {
-        byteWindowUpdate: (limit) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq),
+        byteWindowUpdate: (limit, _urgent, withNext) =>
+          this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq, withNext),
         msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
         bdpPing: (probe) => this._peer?.sendBdpPing(probe),
       },
       () => this._peer?.sender.bufferedAmount(),
+      Number.POSITIVE_INFINITY,
+      () => this._peer?.sender.sendWait() ?? null,
     )
     const c = getServerConfig().channel
     this._flow.fitReplays(
@@ -224,7 +228,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -276,7 +280,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -487,6 +491,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         void this._onPeerBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.ACK_RES:
+        this._onPageHas(frame.ackedSeq)
         this._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
         return
       case TAG.PUBLISH_ACK_REQ:
@@ -512,11 +517,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._onPeerCloseAck()
         return
       case TAG.ABORT:
-        this._shutdown(createAbortError(parsePeerText(frame.abortValue)))
+        this._shutdown(createAbortError(parsePeerText(frame.abortValue)), { pageGone: true })
         return
       case TAG.ERROR:
         assertProtocol(frame.reason === ERROR_REASON.LOST, `ERROR reason ${frame.reason} from a page`)
-        this._shutdown(replayLossError('client'))
+        this._shutdown(replayLossError('client'), { pageGone: true })
         return
       case TAG.WINDOW:
         this._flow.onPeerByteWindow(frame.bytes)
@@ -530,7 +535,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._peer?.sendBdpPingAck(frame.probe, this._flow.onPing(), Infinity)
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame.probe, frame.starved, frame.pathRtt)
+        this._flow.onPingAck(
+          frame.probe,
+          frame.backlog,
+          frame.pathRtt,
+          (ms) => this._peer?.sender.deliveredBeforeFrame(ms) ?? 0,
+        )
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:
@@ -550,10 +560,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       this._onPeerData(parsePeerText(text), bytes)
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -603,7 +613,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     const bytes = data.byteLength
     try {
-      this._flow.onReceived(bytes)
+      this._flow.onReceived(bytes, t0)
       const pending: Promise<unknown>[] = []
       for (const cb of this._binaryListeners.list()) {
         try {
@@ -621,7 +631,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._flow._recordSelfTime(t0)
     }
   }
 
@@ -852,6 +862,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     if (this._peer) {
       this._peer.sendAckRes(ackedSeq, result, status)
+      if (ackedSeq === this._lastClientSeq) this._flow.answered()
     } else {
       this._pendingAckRes.push({ ackedSeq, result, status })
     }
@@ -984,23 +995,26 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._fireClose(err)
     this._flow.shutdown()
     this._notifyCloseProgress()
-    const ackErr = err ?? new ChannelClosedError()
-    for (const { reject } of this._pendingAcks.values()) reject(ackErr)
+    // Building an error captures its stack: one is built only where an answer is awaited.
+    if (this._pendingAcks.size > 0 || this._prePeerBuffer.size > 0) {
+      const ackErr = err ?? new ChannelClosedError()
+      for (const { reject } of this._pendingAcks.values()) reject(ackErr)
+      // What it keeps for its page takes no answer.
+      this._prePeerBuffer.rejectAcks(ackErr)
+    }
     this._pendingAcks.clear()
     this._pendingAckBytes = 0
-    // What it keeps for its page takes no answer.
-    this._prePeerBuffer.rejectAcks(ackErr)
   }
 
   /** @internal Drops what the channel keeps for its page: its replay, and what it made while no peer was attached. */
   _release(): void {
     this._replayBuffer?.dispose()
     this._replayBuffer = null
-    this._dropPending(this._closeError ?? new ChannelClosedError())
+    this._dropPending(this._prePeerBuffer.size === 0 ? undefined : (this._closeError ?? new ChannelClosedError()))
   }
 
   /** What was sent while no peer was attached rejects with `err`. */
-  private _dropPending(err: Error): void {
+  private _dropPending(err?: Error): void {
     this._prePeerBuffer.clear(err)
     this._pendingAckRes.length = 0
     this._pendingEnd = NO_PENDING_END

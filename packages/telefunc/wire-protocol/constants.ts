@@ -201,19 +201,45 @@ export const TIMER_DELAY_MAX_MS = 2 ** 31 - 1
 
 // ===== WebSocket frames in pieces (see `pieces.ts`) =====
 
-/** A link that carries a piece per ping deadline keeps its wire, until it measured a faster rate (see below). */
-export const WIRE_PIECE_BYTES = 16 * 1024
-/** Until the wire has a measured rate, or the link is known slow, a frame up to this size goes whole, a larger one in
- *  pieces this size. */
-export const WIRE_UNMEASURED_WHOLE_BYTES = 256 * 1024
+/** A receiver acknowledges a frame over this size, or, where its peer holds data back, this many bytes of any frames. */
+export const WIRE_PIECES_ACK_BYTES = 16 * 1024
+/** With no rate measured, the second of the two pieces a frame starts with, sent back to back: the time between their
+ *  arrivals measures the rate the frames after it are cut by. A frame up to twice this goes whole. */
+export const WIRE_PROBE_PAIR_BYTES = 2 * 1024
+/** The most the first message a WebSocket announces carries, before its receiver dated any: what a ping deadline carries
+ *  on any link a PING crosses. */
+export const WIRE_PROBE_FIRST_BYTES = 64
+/** The least time a probe's measure takes: the coarsest clock a browser gives a page. */
+export const WIRE_PROBE_CLOCK_MS = 1
 /** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */
 export const WIRE_PIECE_RATE_MARGIN = 8
-/** How long a measured rate stands after it last rose. */
+/** The most bytes a message of the whole frames sent in one turn carries (see `PieceSender`), each copied into it once. */
+export const WIRE_GATHER_BYTES = 64 * 1024
+/** The buffer consecutive messages of several frames are carved from, at most: a new buffer costs microseconds before
+ *  its first byte, far more than copying a frame into one. */
+export const WIRE_ARENA_BYTES = 4 * WIRE_GATHER_BYTES
+/** An announced message may carry twice the one before it, or this many bytes whatever that carried. */
+export const WIRE_ANNOUNCED_MIN_BYTES = 8 * 1024
+/** A receiver waits for the next announced message this many times as long as it takes at the rate the one before came
+ *  at. */
+export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
+/** How long a measured rate stands after it last rose: past it, the next measure replaces it, lower or not. */
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
 /** The same where its peer holds data back by what it acknowledges (see `send-budget.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
+/** Where its peer holds data back, a receiver acknowledges data at most this long after it arrived, once
+ *  `WIRE_SEND_ACK_MIN_BYTES` are unacknowledged: on a slow uplink its peer learns the rate data arrives at from a few
+ *  KiB, not 16. */
+export const WIRE_SEND_ACK_MS = 25
+/** What such an acknowledgement covers at least: its own bytes stay under 1% of it. */
+export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
+/** The most of the rate a page's uplink carries its acknowledgements of what it receives take, and its window
+ *  refreshes: each waits its turn, so on a slow uplink beside a fast download they leave 99% to what it uploads. A
+ *  refresh moves the download's credit, an acknowledgement only its sender's measures. */
+export const WIRE_ACK_SHARE = 0.0025
+export const WIRE_REFRESH_SHARE = 0.0075
 /** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
  *  least (see `send-budget.ts`). */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024

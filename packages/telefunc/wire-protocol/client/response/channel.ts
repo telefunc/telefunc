@@ -19,6 +19,9 @@ const channelReviver: ReviverType<ChannelContract, ClientReviverContext> = {
       abort(abortError) {
         channel.abort(abortError.abortValue, abortError.message)
       },
+      onEnd(callback) {
+        channel.onClose(callback)
+      },
     }
   },
 }

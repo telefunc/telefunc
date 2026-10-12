@@ -6161,7 +6161,10 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
         frames.push(frame)
         onCommit?.()
       },
+      carry: (frame) => void frames.push(frame),
       bufferedAmount: () => 0,
+      deliveredBeforeFrame: () => 0,
+      sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
     7,
     replay,
