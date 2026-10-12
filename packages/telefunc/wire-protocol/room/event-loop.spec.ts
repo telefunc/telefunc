@@ -518,7 +518,7 @@ describe('Room at 100,000 members', () => {
 })
 /** The entries a demand page carries. */
 function wantsOf(payload: Uint8Array): number {
-  return (parse(new TextDecoder().decode(payload)) as RoomDemandPage).wants.length
+  return (JSON.parse(new TextDecoder().decode(payload)) as RoomDemandPage).wants.length
 }
 /** How many binary lanes the room holds: per track and every-track. */
 function binaryLanesOf(room: ServerRoom): number {

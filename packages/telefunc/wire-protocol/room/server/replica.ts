@@ -17,7 +17,6 @@ import type {
   RoomConfigRecord,
   RoomCtrlEnvelope,
   RoomDataEnvelope,
-  RoomDemandPage,
   RoomDmAckEnvelope,
   RoomDmEnvelope,
   RoomEnvelope,
@@ -34,6 +33,7 @@ import {
   CONTROL_LANE,
   SEMANTIC_LANE,
   commitRoomLane,
+  decodeDemandPage,
   decodeLaneEnvelope,
   decodeRoomText,
   encodeRoomRecord,
@@ -366,7 +366,7 @@ class RoomReplica {
   }
   /** @internal */
   _onDemand(serialized: string): void {
-    const page = decodeLaneEnvelope(serialized) as RoomDemandPage
+    const page = decodeDemandPage(serialized)
     if (page.instance !== this.report.instance) this.demand.applyPage(page)
   }
   /** @internal */

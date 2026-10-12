@@ -7,9 +7,11 @@ export {
   commitToInbox,
   openConfig,
   configFromHead,
+  decodeDemandPage,
   decodeLaneEnvelope,
   decodeRoomRecord,
   decodeRoomText,
+  encodeDemandPage,
   encodeRoomRecord,
   publishCtrl,
   withinRoomHorizon,
@@ -24,6 +26,7 @@ import {
   hasRoomTag,
   type RoomConfigRecord,
   type RoomCtrlEnvelope,
+  type RoomDemandPage,
   type RoomDmAckEnvelope,
   type RoomDmEnvelope,
 } from '../protocol.js'
@@ -45,6 +48,18 @@ function decodeRoomText(value: Uint8Array): string {
 
 function encodeRoomRecord(value: unknown): Uint8Array {
   return roomTextEncoder.encode(stringify(value))
+}
+
+/** A demand page is plain data only servers read, so it skips the room record encoding: every heartbeat tells each
+ *  entry again. */
+function encodeDemandPage(page: RoomDemandPage): Uint8Array {
+  return roomTextEncoder.encode(JSON.stringify(page))
+}
+
+function decodeDemandPage(serialized: string): RoomDemandPage {
+  const page = JSON.parse(serialized) as RoomDemandPage
+  assert(page.__r === 'demand')
+  return page
 }
 
 /** Lanes carry only Room's own encodings. */

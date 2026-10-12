@@ -5,7 +5,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ROOM_DEMAND_PAGE_ENTRIES, ROOM_GOSSIP_IN_FLIGHT_MAX } from '../constants.js'
 import type { RoomDemandPage } from '../protocol.js'
 import { reportRoomError } from './errors.js'
-import { DEMAND_LANE, commitRoomLane, encodeRoomRecord } from './lanes.js'
+import { DEMAND_LANE, commitRoomLane, encodeDemandPage } from './lanes.js'
 import { Slice } from '../slice.js'
 assertIsNotBrowser()
 
@@ -63,7 +63,7 @@ class GossipOutbox {
       while (wants.length < ROOM_DEMAND_PAGE_ENTRIES && this._waiting.length > 0) wants.push(this._waiting.shift()!)
       const page: RoomDemandPage = { __r: 'demand', instance: this._instance, wants }
       // A stale commit is a closed room's: its gossip has no reader.
-      void commitRoomLane(this._roomId, this._inc, DEMAND_LANE, encodeRoomRecord(page))
+      void commitRoomLane(this._roomId, this._inc, DEMAND_LANE, encodeDemandPage(page))
         .catch(reportRoomError)
         .finally(() => {
           this._inFlight--
