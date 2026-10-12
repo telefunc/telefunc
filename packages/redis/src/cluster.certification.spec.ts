@@ -156,7 +156,11 @@ describe('Redis real three-master Cluster CI certification', () => {
         await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('fenced'), { requiredCellKeys: ['cell} escape'] }),
       ).toEqual({ stale: 'cell', key: 'cell} escape' })
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
+      const binary: LaneId = { kind: 'binary', member: 'member} escape', track: 'track} escape' }
+      await accepted(await backend.commitLane(roomId, inc, binary, bytes('frame'))).delivery
+      await backend.dropLaneOrders(roomId, inc, 'member} escape')
       await backend.directoryPut(roomId, inc, Infinity)
+      expect(await backend.directoryDue(Number.MAX_SAFE_INTEGER)).toEqual([])
       const hmget = commandClient.hmget.bind(commandClient)
       const hmgetMock = vi.spyOn(commandClient, 'hmget').mockImplementation((async (
         key: string,

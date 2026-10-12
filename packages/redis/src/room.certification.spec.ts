@@ -139,7 +139,9 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
         longest = Math.max(longest, now - last)
         last = now
       }, 1)
-      await (room as unknown as { _subs: { _heartbeatTick(): Promise<void> } })._subs._heartbeatTick()
+      await (
+        room as unknown as { _replica: { sync: { _heartbeatTick(): Promise<void> } } }
+      )._replica.sync._heartbeatTick()
       clearInterval(timer)
       return Math.max(longest, performance.now() - last)
     }
@@ -229,6 +231,7 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     onTestFinished(() => disposeBackend())
     const room = await Room.create('lane-order-churn')
     const sender = await room.join()
+    onTestFinished(() => sender.leave())
     for (let i = 0; i < 100; i++) {
       const member = await room.join()
       await sender.send(member.id, 'hi')
@@ -406,9 +409,8 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     await new Promise((resolve) => setTimeout(resolve, startAt - Date.now()))
     await writeMetaBurst(Room, room.id, 'a')
     await other.written
-    const stored = await Room.get(room.id)
-    const seqOf = (room: object) => (room as { _state: { metaSeq: number } })._state.metaSeq
-    const expected = { keys: Object.keys(stored.meta), meta: stored.meta, seq: seqOf(stored) }
+    const seqOf = (room: object) => (room as { _state: { model: { metaSeq: number } } })._state.model.metaSeq
+    const expected = await storedFrom({ ...env, PREFIX: prefix, ROOM: room.id })
     await vi.waitFor(() =>
       expect({ keys: Object.keys(view.meta), meta: view.meta, seq: seqOf(view) }).toEqual(expected),
     )
@@ -476,18 +478,15 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     await owner.written
     const accepted = (room: object) =>
       (
-        room as { _state: { acceptedMeta(id: string): { meta: Record<string, unknown>; seq: number } } }
-      )._state.acceptedMeta(id)
-    const stored = await Room.get(room.id)
-    await stored.getParticipants()
-    const { meta, seq } = accepted(stored)
-    const expected = { keys: Object.keys(meta), meta, seq }
-    expect(seq).toBe(60)
+        room as { _state: { model: { acceptedMeta(id: string): { meta: Record<string, unknown>; seq: number } } } }
+      )._state.model.acceptedMeta(id)
+    const expected = await storedFrom({ ...env, PREFIX: prefix, ROOM: room.id, MEMBER: id })
+    expect(expected.seq).toBe(60)
     await vi.waitFor(() => {
       const { meta, seq } = accepted(view)
       expect({ keys: Object.keys(meta), meta, seq }).toEqual(expected)
     })
-    expect(await owner.viewAt(seq)).toEqual(expected)
+    expect(await owner.viewAt(expected.seq)).toEqual(expected)
   }, 30_000)
 
   it('lists room meta keys in the order its writes gave them: Room.setMeta() its own, Room.setAttributes() after the keys already there', async () => {
@@ -571,6 +570,35 @@ process.exit(0)`,
   )
 }
 
+/** A server that opens ROOM and reports the stored meta, its key order and its seq: the room's, or MEMBER's. */
+function storedFrom(
+  env: Record<string, string>,
+): Promise<{ keys: string[]; meta: Record<string, unknown>; seq: number }> {
+  const server = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { Cluster, Redis } from 'ioredis'
+import { Room } from 'telefunc'
+import { installRedis } from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)}
+const { REDIS_URL, NODES, PREFIX, ROOM, MEMBER } = process.env
+installRedis(NODES ? new Cluster(JSON.parse(NODES)) : new Redis(REDIS_URL), { prefix: PREFIX })
+const room = await Room.get(ROOM)
+if (MEMBER) await room.getParticipants()
+const { meta, seq } = MEMBER ? room._state.model.acceptedMeta(MEMBER) : { meta: room.meta, seq: room._state.model.metaSeq }
+process.stdout.write(JSON.stringify({ keys: Object.keys(meta), meta, seq }))
+process.exit(0)`,
+    ],
+    { cwd: new URL('..', import.meta.url), env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'inherit'] },
+  )
+  let output = ''
+  server.stdout.on('data', (chunk) => (output += chunk))
+  return new Promise((resolve, reject) =>
+    server.on('exit', (code) => (code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`exit ${code}`)))),
+  )
+}
+
 /** Merges into and replaces a room meta at once, keys named by `side`. `Room` is a parameter, so a server process can
  *  run this function's source. */
 async function writeMetaBurst(room: typeof Room, roomId: string, side: string): Promise<void> {
@@ -623,9 +651,9 @@ await (${writeMemberMetaBurst.toString().replace(/^async function writeMemberMet
 process.stdout.write('written\\n')
 const [line] = await createInterface({ input: process.stdin })[Symbol.asyncIterator]().next().then((r) => [r.value])
 const seq = Number(line)
-while (room._state.acceptedMeta(member.id).seq < seq) await new Promise((resolve) => setTimeout(resolve, 10))
-const { meta } = room._state.acceptedMeta(member.id)
-process.stdout.write(JSON.stringify({ keys: Object.keys(meta), meta, seq: room._state.acceptedMeta(member.id).seq }) + '\\n')
+while (room._state.model.acceptedMeta(member.id).seq < seq) await new Promise((resolve) => setTimeout(resolve, 10))
+const { meta } = room._state.model.acceptedMeta(member.id)
+process.stdout.write(JSON.stringify({ keys: Object.keys(meta), meta, seq: room._state.model.acceptedMeta(member.id).seq }) + '\\n')
 process.exit(0)`,
     ],
     { cwd: new URL('..', import.meta.url), env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'inherit'] },
@@ -677,8 +705,8 @@ await (${writeMetaBurst.toString().replace(/^async function writeMetaBurst/, 'as
 process.stdout.write('written\\n')
 const [line] = await createInterface({ input: process.stdin })[Symbol.asyncIterator]().next().then((r) => [r.value])
 const seq = Number(line)
-while (view._state.metaSeq < seq) await new Promise((resolve) => setTimeout(resolve, 10))
-process.stdout.write(JSON.stringify({ keys: Object.keys(view.meta), meta: view.meta, seq: view._state.metaSeq }) + '\\n')
+while (view._state.model.metaSeq < seq) await new Promise((resolve) => setTimeout(resolve, 10))
+process.stdout.write(JSON.stringify({ keys: Object.keys(view.meta), meta: view.meta, seq: view._state.model.metaSeq }) + '\\n')
 process.exit(0)`,
     ],
     { cwd: new URL('..', import.meta.url), env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'inherit'] },
