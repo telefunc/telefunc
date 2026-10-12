@@ -34,7 +34,6 @@ import {
   type RoomSnapshotMetadata,
 } from './protocol.js'
 import { HOLDS_CELL_KEY, JOINS_CELL_KEY, MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
-import { holdViews } from './server/membership.js'
 import type { LeaveCause, ParticipantMeta, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
@@ -88,11 +87,90 @@ afterEach(async () => {
   vi.restoreAllMocks()
   const report = vi.spyOn(console, 'error').mockImplementation(() => {})
   try {
+    for (const server of otherServers.splice(0)) await server.crash()
     await disposeBackend()
   } finally {
     report.mockRestore()
   }
 })
+/** A server running this code: its Room API, its stubs, and its connection to the store. */
+type Server = {
+  Room: typeof Room
+  ServerRoom: typeof ServerRoom
+  RoomStubChannel: typeof RoomStubChannel
+  ResponseRoomGrants: typeof ResponseRoomGrants
+  readonly driver: MemoryBackend
+  backend(): ReturnType<typeof getRoomBackend>
+  /** The server goes away: nothing it does reaches the store any more. */
+  crash(): Promise<void>
+}
+const here: Server = {
+  Room,
+  ServerRoom,
+  RoomStubChannel,
+  ResponseRoomGrants,
+  get driver() {
+    return driver
+  },
+  backend: getRoomBackend,
+  crash: disposeBackend,
+}
+const otherServers: Server[] = []
+/** Another server on this spec's store: a module graph and process state of its own, so its own replicas and lanes. */
+async function anotherServer(): Promise<Server> {
+  const globals: Record<string, unknown> = {}
+  vi.resetModules()
+  vi.doMock('../../utils/getGlobalObject.js', () => ({
+    getGlobalObject: (key: string, value: unknown) =>
+      (globals[key] ??= typeof value === 'function' ? (value as () => unknown)() : value),
+  }))
+  try {
+    const [statics, rooms, stubs, install, memory] = await Promise.all([
+      import('./server/statics.js'),
+      import('./server/room.js'),
+      import('./server/stub.js'),
+      import('../backend/install.js'),
+      import('../backend/memory/backend.js'),
+    ])
+    let crashed = false
+    const serverDriver = new Proxy(new memory.MemoryBackend({ state: memoryState }), {
+      get(target, key) {
+        const value = Reflect.get(target, key)
+        if (typeof value !== 'function') return value
+        return (...args: unknown[]) => {
+          if (!crashed) return Reflect.apply(value, target, args)
+          // A crashed server's calls, its handles' writes included, never reach the store.
+          return value.constructor.name === 'AsyncGeneratorFunction'
+            ? (async function* () {
+                await new Promise(() => {})
+              })()
+            : new Promise(() => {})
+        }
+      },
+    })
+    install.installBackend(() => serverDriver)
+    const server: Server = {
+      Room: statics.Room,
+      ServerRoom: rooms.ServerRoom,
+      RoomStubChannel: stubs.RoomStubChannel,
+      ResponseRoomGrants: stubs.ResponseRoomGrants,
+      driver: serverDriver,
+      backend: install.getRoomBackend,
+      async crash() {
+        await install.disposeBackend()
+        crashed = true
+      },
+    }
+    otherServers.push(server)
+    return server
+  } finally {
+    vi.doUnmock('../../utils/getGlobalObject.js')
+    vi.resetModules()
+  }
+}
+function serverOf(room: Room | ServerRoom): Server {
+  return otherServers.find((server) => room instanceof server.ServerRoom) ?? here
+}
 describe('Room public behavior', () => {
   it('a pending acknowledged send fails as its client-held recipient leaves, not at the ack timeout', async () => {
     const room = (await Room.create('recipient-leaves-ack')) as ServerRoom
@@ -297,11 +375,10 @@ describe('Room public behavior', () => {
     expect(clientView(peer, room.id)._getRemote(member.id)?.meta).toEqual({ v: 2 })
   })
   it("relays a hidden member's reconciled meta to the clients handed it", async () => {
-    // The handles of one server share its control lane.
-    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = (await Room.create('lost-hidden-meta')) as ServerRoom
-    const holder = await Room.get(room.id)
+    const holder = await (await anotherServer()).Room.get(room.id)
     const bot = await holder.join({ hidden: true, meta: { mood: 'old' } })
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const grants = new ResponseRoomGrants()
     grants.hidden.add(bot.id)
     const handed = new RoomStubChannel(room, { grants })
@@ -353,16 +430,17 @@ describe('Room public behavior', () => {
   it("reports a leave as 'left' on another instance whose roster read overlaps the eviction", async () => {
     const room = (await Room.create('leave-during-roster-read')) as ServerRoom
     const member = await room.join()
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const other = await anotherServer()
+    const observer = (await other.Room.get(room.id)) as ServerRoom
     await observer.getParticipants()
     // The leave reaches this instance after its roster read, as over a networked backend.
-    const observed = holdLaneDelivery((lane) => lane.kind === 'control')
+    const observed = holdLaneDelivery((lane) => lane.kind === 'control', other)
     const causes: unknown[] = []
     observer.onLeave((_, cause) => causes.push(cause))
     await subsOf(observer).reconcileAuthority()
-    const readCellPages = driver.readCellPages.bind(driver)
+    const readCellPages = other.driver.readCellPages.bind(other.driver)
     const memberRead = { started: createDeferred(), release: createDeferred(), held: false }
-    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+    vi.spyOn(other.driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
       if (!memberRead.held && prefix === MEMBER_CELL_PREFIX) {
         memberRead.held = true
         memberRead.started.resolve()
@@ -537,9 +615,10 @@ describe('Room public behavior', () => {
     expect(recreated.isClosed).toBe(false)
   })
   it('tears down an observing instance when another instance closes the room', async () => {
-    // Not observing: the handles of one server share its control lane.
-    await Room.create('remote-close-teardown')
-    const remoteBackend = getRoomBackend()
+    const authority = await Room.create('remote-close-teardown')
+    authority.onAnnounce(() => {})
+    const other = await anotherServer()
+    const remoteBackend = other.backend()
     const unsubscribed: string[] = []
     const observedLanes = new Set<string>()
     const observationReady = createDeferred()
@@ -562,7 +641,7 @@ describe('Room public behavior', () => {
         },
       }
     })
-    const observer = await Room.get('remote-close-teardown')
+    const observer = await other.Room.get('remote-close-teardown')
     observer.onAnnounce(() => {})
     const closed = createDeferred()
     observer.onClose(() => closed.resolve())
@@ -725,18 +804,22 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(semanticOpens).toBe(3))
   })
   it('closes a view and tells its clients when a terminal control lane lost the closed frame', async () => {
-    let terminal: ReturnType<typeof terminalSubscription> | undefined
-    // The handles of one server share its control lane.
-    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
-      const withoutClosed = (payload: Uint8Array, info: { seq: number; timestamp: number }) => {
-        if ((parse(decoder.decode(payload)) as { __r?: string }).__r !== 'closed') receiver(payload, info)
-      }
-      terminal ??= terminalSubscription(subscribeLane(roomId, inc, lane, withoutClosed))
-      return terminal.subscription
-    })
     const authority = await Room.create('terminal-close-relay')
     await authority.join()
-    const observer = (await Room.get(authority.id)) as ServerRoom
+    const other = await anotherServer()
+    let terminal: ReturnType<typeof terminalSubscription> | undefined
+    mockLaneSubscription(
+      'control',
+      (subscribeLane, roomId, inc, lane, receiver) => {
+        const withoutClosed = (payload: Uint8Array, info: { seq: number; timestamp: number }) => {
+          if ((parse(decoder.decode(payload)) as { __r?: string }).__r !== 'closed') receiver(payload, info)
+        }
+        terminal ??= terminalSubscription(subscribeLane(roomId, inc, lane, withoutClosed))
+        return terminal.subscription
+      },
+      other,
+    )
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
     let closes = 0
     observer.onClose(() => closes++)
     const { peer } = serve(observer)
@@ -1036,21 +1119,26 @@ describe('Room public behavior', () => {
     expect(heartbeat).toHaveBeenCalledOnce()
   })
   it("resubscribes a pure observer's control lane on the heartbeat when its recovery fails after a replan", async () => {
+    const other = await anotherServer()
     vi.useFakeTimers()
-    const observer = (await Room.get((await Room.create('observer-recovery-heartbeat')).id)) as ServerRoom
+    const observer = (await other.Room.get((await Room.create('observer-recovery-heartbeat')).id)) as ServerRoom
     const first = terminalSubscription()
     let opens = 0
-    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
-      opens++
-      if (opens === 1) return first.subscription
-      if (opens === 2) return rejectedSubscription('replacement refused')
-      return subscribeLane(roomId, inc, lane, receiver)
-    })
+    mockLaneSubscription(
+      'control',
+      (subscribeLane, roomId, inc, lane, receiver) => {
+        opens++
+        if (opens === 1) return first.subscription
+        if (opens === 2) return rejectedSubscription('replacement refused')
+        return subscribeLane(roomId, inc, lane, receiver)
+      },
+      other,
+    )
     vi.spyOn(console, 'error').mockImplementation(() => {})
     observer.onJoin(() => {})
     const headRead = createDeferred()
-    const readHead = driver.readHead.bind(driver)
-    vi.spyOn(driver, 'readHead').mockImplementationOnce(async (...args) => {
+    const readHead = other.driver.readHead.bind(other.driver)
+    vi.spyOn(other.driver, 'readHead').mockImplementationOnce(async (...args) => {
       await headRead.promise
       return readHead(...args)
     })
@@ -1363,17 +1451,21 @@ describe('Room public behavior', () => {
     }
   })
   it("applies a stamp newer than a view's meta of its sender before the message, so every client names the sender as it sent", async () => {
-    const room = (await Room.create('stamp-ahead')) as ServerRoom
-    const sender = await room.join({ meta: { v: 1 } })
+    const authority = await Room.create('stamp-ahead')
+    const sender = await authority.join({ meta: { v: 1 } })
+    const other = await anotherServer()
+    // The sender's meta write reaches this view after its send, as from a server ahead of it on the control lane.
+    holdLaneDelivery((lane) => lane.kind === 'control', other)
+    const room = (await other.Room.get(authority.id)) as ServerRoom
     const stub = register(room)
     const peer = attachPeer(stub, undefined, { text: true, binary: false })
     await vi.waitFor(() => expect(rosterEnded(peer)).toBe(true))
+    await subsOf(room)._semantic.ready
     const updates: unknown[] = []
     room.onParticipantUpdate((member, meta) => updates.push([member.id, meta]))
-    // A send whose meta write this view hasn't got yet, as from an instance ahead of it on the control lane.
-    const envelope = { __r: 'data', from: sender.id, data: 'hi', fromMeta: { v: 2 }, fromMetaSeq: 1 }
-    room._onTextData(stringify(envelope), { seq: 1, timestamp: 1 })
-    expect(updates).toEqual([[sender.id, { v: 2 }]])
+    await sender.setMeta({ v: 2 })
+    await sender.publish('hi')
+    await vi.waitFor(() => expect(updates).toEqual([[sender.id, { v: 2 }]]))
     const { client, emit } = fakeClient(room.id)
     const named: unknown[] = []
     client.subscribe((_data, _info, from) => named.push(from.meta))
@@ -1512,8 +1604,9 @@ describe('Room public behavior', () => {
   it("relays none of a hidden member's events from an instance that has not loaded the roster", async () => {
     const authority = await Room.create('hidden-pre-roster')
     const bot = await authority.join({ hidden: true })
-    const observer = (await Room.get(authority.id)) as ServerRoom
-    const roster = delayRosterRead(authority.id)
+    const other = await anotherServer()
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
+    const roster = delayRosterRead(authority.id, other)
     try {
       const { peer } = serve(observer)
       const before = await authority.join()
@@ -2892,10 +2985,11 @@ describe('Room public behavior', () => {
     expect(ackTimers[0]!.hasRef()).toBe(false)
   })
   it("removes a crashed node's member from a quiet observer's view", async () => {
+    const other = await anotherServer()
     vi.useFakeTimers()
     const owner = await Room.create('crash-reap')
     const member = await owner.join()
-    const observer = await Room.get('crash-reap')
+    const observer = await other.Room.get('crash-reap')
     const left: string[] = []
     observer.onLeave((participant) => left.push(participant.id))
     await observer.getParticipants()
@@ -2911,14 +3005,15 @@ describe('Room public behavior', () => {
     expect(left).toEqual([member.id])
   })
   it('settles closure on the next heartbeat for an owning instance that missed `closed`', async () => {
+    const closer = await anotherServer()
     vi.useFakeTimers()
     loseLaneFrames((lane) => lane.kind === 'control').where((text) => text.includes('"__r":"closed"'))
     const room = (await Room.create('missed-close')) as ServerRoom
     const member = await room.join()
     const causes: string[] = []
     member.onLeave((cause) => causes.push(cause.type))
-    vi.spyOn(driver, 'dropGeneration').mockRejectedValue(new Error('transient drop failure'))
-    await expect(Room.close('missed-close')).rejects.toThrow('transient drop failure')
+    vi.spyOn(closer.driver, 'dropGeneration').mockRejectedValue(new Error('transient drop failure'))
+    await expect(closer.Room.close('missed-close')).rejects.toThrow('transient drop failure')
     expect(room.isClosed).toBe(false)
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
     expect(room.isClosed).toBe(true)
@@ -3033,16 +3128,21 @@ describe('Room public behavior', () => {
     expect(report).toHaveBeenCalledTimes(4)
   })
   it('orders participant text and room announcements in one semantic domain', async () => {
-    const controlReady = createDeferred()
-    mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
-      const subscription = subscribeLane(roomId, inc, lane, receiver)
-      void subscription.ready.then(() => controlReady.resolve())
-      return subscription
-    })
     const room = await Room.create('announce-semantic-order')
     const member = await room.join()
-    const observer = await Room.get(room.id)
+    const other = await anotherServer()
+    const observer = await other.Room.get(room.id)
     const observed: Array<[unknown, number]> = []
+    const controlReady = createDeferred()
+    mockLaneSubscription(
+      'control',
+      (subscribeLane, roomId, inc, lane, receiver) => {
+        const subscription = subscribeLane(roomId, inc, lane, receiver)
+        void subscription.ready.then(() => controlReady.resolve())
+        return subscription
+      },
+      other,
+    )
     observer.onAnnounce((data, info) => observed.push([data, info.seq]))
     await controlReady.promise
     const first = await member.publish('one')
@@ -3501,8 +3601,9 @@ describe('Room public behavior', () => {
     const demand: Array<[string | null, boolean]> = []
     publisher.onDemand((track, wanted) => demand.push([track, wanted]))
     // Control events reach the observer only later, as over a networked backend: the new track needs none.
-    const control = holdLaneDelivery((lane) => lane.kind === 'control')
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const other = await anotherServer()
+    const control = holdLaneDelivery((lane) => lane.kind === 'control', other)
+    const observer = (await other.Room.get(room.id)) as ServerRoom
     const frames: string[] = []
     observer.subscribeBinary((data, info) => frames.push(`${info.track}:${data[0]}`))
     await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
@@ -3530,8 +3631,9 @@ describe('Room public behavior', () => {
   it('gets an every-track subscriber on another instance one frame from each of 1,000 tracks, over one backend subscription', async () => {
     const room = await Room.create('thousand-tracks')
     const publisher = await room.join()
-    const observer = (await Room.get(room.id)) as ServerRoom
-    const subscribed = countBinarySubscriptions()
+    const other = await anotherServer()
+    const observer = (await other.Room.get(room.id)) as ServerRoom
+    const subscribed = countBinarySubscriptions(other)
     const frames: string[] = []
     ;(await observer.getParticipant(publisher.id))!.subscribeBinary((_data, info) => frames.push(info.track!))
     await subsOf(observer).binaryReady()
@@ -3601,7 +3703,7 @@ describe('Room public behavior', () => {
     publisher.onDemand((track, wanted) => {
       if (track === 't900') demand.push(wanted)
     })
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const observer = (await (await anotherServer()).Room.get(room.id)) as ServerRoom
     const remote = (await observer.getParticipant(publisher.id))!
     const offAll = remote.subscribeBinary(() => {})
     await vi.waitFor(() => expect(demand).toEqual([true]))
@@ -3620,9 +3722,10 @@ describe('Room public behavior', () => {
   ] as const)(
     "keeps a named track's frames while the want %s and the replacing lane establishes",
     async (_, replacing, wide) => {
-      const room = (await Room.create(`make-before-break-${replacing}`)) as ServerRoom
+      const room = await Room.create(`make-before-break-${replacing}`)
       const publisher = await room.join()
-      const observer = (await Room.get(room.id)) as ServerRoom
+      const other = await anotherServer()
+      const observer = (await other.Room.get(room.id)) as ServerRoom
       const remote = (await observer.getParticipant(publisher.id))!
       const offAll = wide ? remote.subscribeBinary(() => {}) : null
       const named: number[] = []
@@ -3631,15 +3734,8 @@ describe('Room public behavior', () => {
       const all = everyTrackLaneKey(publisher.id)
       await vi.waitFor(() => expect(binaryLanes(observer)).toEqual([wide ? all : t1]))
       await subsOf(observer).binaryReady()
-      // Committed as at another instance, so not held behind this one's establishing lane.
-      const commit = (n: number) =>
-        driver.commitLane(
-          room.id,
-          room._inc,
-          { kind: 'binary', member: publisher.id, track: 't1' },
-          encodeBinaryFrame(publisher.id, new Uint8Array([n]), { track: 't1' }),
-        )
-      const release = delayDriverLane((lane) => lane.kind === replacing)
+      const commit = (n: number) => publisher.publishBinary(new Uint8Array([n]), { track: 't1' })
+      const release = delayDriverLane((lane) => lane.kind === replacing, other)
       if (offAll) offAll()
       else remote.subscribeBinary(() => {})
       await commit(1)
@@ -3651,9 +3747,10 @@ describe('Room public behavior', () => {
     },
   )
   it("serves a member past ROOM_MEMBER_NAMED_LANES_MAX named tracks from its every-track lane and back, each track's frames once and in order", async () => {
-    const room = (await Room.create('named-lanes-max')) as ServerRoom
+    const room = await Room.create('named-lanes-max')
     const publisher = await room.join()
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const other = await anotherServer()
+    const observer = (await other.Room.get(room.id)) as ServerRoom
     const remote = (await observer.getParticipant(publisher.id))!
     const tracks = trackNames(ROOM_MEMBER_NAMED_LANES_MAX + 1)
     const extra = tracks.pop()!
@@ -3663,24 +3760,17 @@ describe('Room public behavior', () => {
     const named = tracks.map((track) => encodeLaneKey({ kind: 'binary', member: publisher.id, track })).sort()
     await vi.waitFor(() => expect(binaryLanes(observer)).toEqual(named))
     await subsOf(observer).binaryReady()
-    // Committed as at another instance, so not held behind this one's establishing lane.
     const commit = async (n: number, on: string[]) => {
-      for (const track of on)
-        await driver.commitLane(
-          room.id,
-          room._inc,
-          { kind: 'binary', member: publisher.id, track },
-          encodeBinaryFrame(publisher.id, new Uint8Array([n]), { track }),
-        )
+      for (const track of on) await publisher.publishBinary(new Uint8Array([n]), { track })
     }
-    let release = delayDriverLane((lane) => lane.kind === 'binary-all')
+    let release = delayDriverLane((lane) => lane.kind === 'binary-all', other)
     const offExtra = remote.subscribeBinary(record(extra), { track: extra })
     await commit(1, tracks)
     release()
     await vi.waitFor(() => expect(binaryLanes(observer)).toEqual([everyTrackLaneKey(publisher.id)]))
     await subsOf(observer).binaryReady()
     await commit(2, [...tracks, extra, 'unnamed'])
-    release = delayDriverLane((lane) => lane.kind === 'binary')
+    release = delayDriverLane((lane) => lane.kind === 'binary', other)
     offExtra()
     await commit(3, [...tracks, extra])
     release()
@@ -4084,7 +4174,7 @@ describe('Room public behavior', () => {
     const all = (wanted: boolean) => tracks.map((track) => [track, wanted])
     const sorted = (changes: unknown[]) => [...changes].sort()
     const a = await join()
-    const observer = (await Room.get(room.id)) as ServerRoom
+    const observer = (await (await anotherServer()).Room.get(room.id)) as ServerRoom
     await observer.getParticipants()
     const { demand, published } = spyGossip(observer)
     const unsubscribe = tracks.map((track) => observer.subscribeBinary(() => {}, { track }))
@@ -4894,6 +4984,25 @@ describe('room demand lifecycle', () => {
     expect(delivered).toEqual([['member', 'screen', true]])
     expect(leasesHeld(demand)).toBe(0)
   })
+  it('drops the demand of a server that crashed once its lease lapses unrenewed', async () => {
+    const other = await anotherServer()
+    vi.useFakeTimers()
+    const room = await Room.create('crashed-reporter')
+    const publisher = await room.join()
+    const demand: Array<[string | null, boolean]> = []
+    publisher.onDemand((track, wanted) => demand.push([track, wanted]))
+    ;(await (await other.Room.get(room.id)).getParticipant(publisher.id))!.subscribeBinary(() => {})
+    await vi.waitFor(() => expect(demand).toEqual([[null, true]]))
+    await other.crash()
+    // Its last renewal was at most a heartbeat before it crashed.
+    await vi.advanceTimersByTimeAsync(ROOM_DEMAND_TTL_MS - ROOM_HEARTBEAT_INTERVAL_MS - 1)
+    expect(demand).toEqual([[null, true]])
+    await vi.advanceTimersByTimeAsync(2 * ROOM_HEARTBEAT_INTERVAL_MS)
+    expect(demand).toEqual([
+      [null, true],
+      [null, false],
+    ])
+  })
   it("drops a reporter's demand once its lease lapses unrenewed, as when its instance crashed", () => {
     vi.useFakeTimers()
     const delivered: Array<[string, string, boolean]> = []
@@ -5379,7 +5488,10 @@ describe('a room nothing holds closes on its own', () => {
     const room = (await Room.create('view-lapses')) as ServerRoom
     const closed = await observe(room.id)
     // A view the server holding the page wrote before it died, renewed by nothing since.
-    await holdViews(room._incarnation, ['gone-page'])
+    const other = await anotherServer()
+    const page = (await other.Room.get(room.id)) as ServerRoom
+    await (page as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views.get(register(page))
+    await other.crash()
     await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
     expect(await isListed(room.id)).toBe(true)
     await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)
@@ -5396,11 +5508,12 @@ describe('a room nothing holds closes on its own', () => {
     expect((await Room.getParticipants(room.id)).map(({ id }) => id)).toEqual([member.id])
   })
   it("counts a member who joins from another server before the new room's first cell write, closing it only after they leave", async () => {
+    const other = await anotherServer()
     const exchange = driver.compareExchangeCells.bind(driver)
     let joined: ReturnType<typeof Room.join> | undefined
     vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, cx) => {
       if (joined === undefined) {
-        joined = Room.join(roomId)
+        joined = other.Room.join(roomId)
         await joined
       }
       return await exchange(roomId, inc, cx)
@@ -5429,15 +5542,12 @@ describe('a room nothing holds closes on its own', () => {
     const closed = await observe(room.id)
     const member = await room.join()
     // Another server's member joins, and leaves 10 s after this server's; that server is gone before its timer fires.
-    const count = (counts: { key: string; delta: number }[]) =>
-      driver.compareExchangeCells(room.id, room._inc, { expect: [], mutations: [], counts })
-    await count([
-      { key: HOLDS_CELL_KEY, delta: 1 },
-      { key: JOINS_CELL_KEY, delta: 1 },
-    ])
+    const other = await anotherServer()
+    const elsewhere = await other.Room.join(room.id)
     await member.leave()
     await vi.advanceTimersByTimeAsync(10_000)
-    await count([{ key: HOLDS_CELL_KEY, delta: -1 }])
+    await elsewhere.leave()
+    await other.crash()
     // This server's heartbeat finds the room unheld, closing 60 s after that last leave.
     await vi.advanceTimersByTimeAsync(60_000 - 1)
     expect(await isListed(room.id)).toBe(true)
@@ -5447,14 +5557,20 @@ describe('a room nothing holds closes on its own', () => {
   it('waits on when its close timer fires early: another server left the room unheld later than this one armed it for', async () => {
     const room = (await Room.create('close-fires-early', { emptyTimeout: 10_000 })) as ServerRoom
     const closed = await observe(room.id)
-    // Another server's writes, 4 s in: held, then unheld again, closing 4 s after this server's timer fires.
+    // A page on another server, 4 s in: held, then unheld again, closing 4 s after this server's timer fires.
+    const other = await anotherServer()
     await vi.advanceTimersByTimeAsync(4_000)
-    for (const delta of [1, -1])
-      await driver.compareExchangeCells(room.id, room._inc, {
-        expect: [],
-        mutations: [],
-        counts: [{ key: HOLDS_CELL_KEY, delta }],
-      })
+    const page = (await other.Room.get(room.id)) as ServerRoom
+    const { stub } = serve(page)
+    await (page as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views.get(stub)
+    stub._onPeerClose()
+    const holds = async () => {
+      const read = await driver.readCells(room.id, room._inc, { keys: [HOLDS_CELL_KEY] })
+      return 'cells' in read ? JSON.parse(decoder.decode(read.cells.get(HOLDS_CELL_KEY)!)).value : null
+    }
+    await vi.advanceTimersByTimeAsync(0)
+    expect(await holds()).toBe(0)
+    await other.crash()
     await vi.advanceTimersByTimeAsync(6_000)
     expect(await isListed(room.id)).toBe(true)
     await vi.advanceTimersByTimeAsync(4_000)
@@ -5710,7 +5826,7 @@ function countControlLane(roomId: string) {
   }
 }
 /** The binary lanes opened on the backend from now on. */
-function countBinarySubscriptions(): SubscribedLane[] {
+function countBinarySubscriptions(on = here): SubscribedLane[] {
   const subscribed: SubscribedLane[] = []
   mockLaneSubscription(
     (lane) => lane.kind === 'binary' || lane.kind === 'binary-all',
@@ -5718,6 +5834,7 @@ function countBinarySubscriptions(): SubscribedLane[] {
       subscribed.push(lane)
       return subscribeLane(roomId, inc, lane, receiver)
     },
+    on,
   )
   return subscribed
 }
@@ -5760,6 +5877,7 @@ function declare(stub: RoomStubChannel, declaration: unknown): void {
   stub._onPeerMessage(stringify(declaration), 0)
 }
 function register(room: ServerRoom): RoomStubChannel {
+  const { RoomStubChannel, ResponseRoomGrants } = serverOf(room)
   const stub = new RoomStubChannel(room, { grants: new ResponseRoomGrants() })
   stub._registerChannel()
   room._attachStub(stub)
@@ -5816,7 +5934,8 @@ function semanticFrames(peer: Peer, kind: 'data' | 'announce'): unknown[] {
     .map((event) => event.data)
 }
 
-function delayRosterRead(roomId: string): { started: Promise<void>; release: () => void } {
+function delayRosterRead(roomId: string, on = here): { started: Promise<void>; release: () => void } {
+  const { driver } = on
   const readCellPages = driver.readCellPages.bind(driver)
   const roster = { started: createDeferred(), release: createDeferred() }
   vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (candidateRoomId, inc, prefix) {
@@ -6091,8 +6210,9 @@ function mockLaneSubscription(
     lane: SubscribedLane,
     receiver: BackendReceiver,
   ) => BackendSubscription,
+  on = here,
 ) {
-  const backend = getRoomBackend()
+  const backend = on.backend()
   const subscribeLane = backend.subscribeLane.bind(backend)
   const matches = typeof match === 'function' ? match : (lane: SubscribedLane) => lane.kind === match
   vi.spyOn(backend, 'subscribeLane').mockImplementation((roomId, inc, lane, receiver) =>
@@ -6113,12 +6233,15 @@ function rejectLaneSubscriptions(kind: SubscribedLane['kind'], diagnostic: strin
   return { backend, started: started.promise }
 }
 /** Loses the frames picked on matching lanes opened from now on, as a lane that stays ready. */
-function loseLaneFrames(matches: (lane: SubscribedLane) => boolean) {
+function loseLaneFrames(matches: (lane: SubscribedLane) => boolean, on = here) {
   let pick: (text: string) => boolean = () => false
-  mockLaneSubscription(matches, (subscribeLane, roomId, inc, lane, receiver) =>
-    subscribeLane(roomId, inc, lane, (payload, info) => {
-      if (!pick(decoder.decode(payload))) receiver(payload, info)
-    }),
+  mockLaneSubscription(
+    matches,
+    (subscribeLane, roomId, inc, lane, receiver) =>
+      subscribeLane(roomId, inc, lane, (payload, info) => {
+        if (!pick(decoder.decode(payload))) receiver(payload, info)
+      }),
+    on,
   )
   return {
     next() {
@@ -6130,14 +6253,17 @@ function loseLaneFrames(matches: (lane: SubscribedLane) => boolean) {
   }
 }
 /** Holds the frames delivered on matching lanes opened from now on, until released in delivery order. */
-function holdLaneDelivery(matches: (lane: SubscribedLane) => boolean) {
+function holdLaneDelivery(matches: (lane: SubscribedLane) => boolean, on = here) {
   const held: Array<() => void | Promise<void>> = []
   let holding = true
-  mockLaneSubscription(matches, (subscribeLane, roomId, inc, lane, receiver) =>
-    subscribeLane(roomId, inc, lane, (payload, info) => {
-      if (!holding) return receiver(payload, info)
-      held.push(() => receiver(payload, info))
-    }),
+  mockLaneSubscription(
+    matches,
+    (subscribeLane, roomId, inc, lane, receiver) =>
+      subscribeLane(roomId, inc, lane, (payload, info) => {
+        if (!holding) return receiver(payload, info)
+        held.push(() => receiver(payload, info))
+      }),
+    on,
   )
   return {
     async release() {
@@ -6147,7 +6273,8 @@ function holdLaneDelivery(matches: (lane: SubscribedLane) => boolean) {
   }
 }
 /** Matching lanes' driver attempts receive only once released, as a Redis SUBSCRIBE still in flight. */
-function delayDriverLane(matches: (lane: SubscribedLane) => boolean): () => void {
+function delayDriverLane(matches: (lane: SubscribedLane) => boolean, on = here): () => void {
+  const { driver } = on
   const bind = driver.subscriptions.bind.bind(driver.subscriptions)
   const releases: Array<() => void> = []
   vi.spyOn(driver.subscriptions, 'bind').mockImplementation((source) => {
