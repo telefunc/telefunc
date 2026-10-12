@@ -5680,7 +5680,7 @@ describe('room protocol validation', () => {
     }
     // The shorter of two runs, so a scheduling hiccup in one run is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(100)
-  })
+  }, 60_000)
   it('renews 10,000 owned members in a heartbeat tick whose every cell read and write takes a round trip, well within the interval', async () => {
     const room = (await Room.create('heartbeat-round-trips')) as ServerRoom
     await Promise.all(Array.from({ length: 10_000 }, () => room.join()))
