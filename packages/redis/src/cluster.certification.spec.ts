@@ -168,6 +168,14 @@ describe('Redis real three-master Cluster CI certification', () => {
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
       const binary: LaneId = { kind: 'binary', member: 'member} escape', track: 'track} escape' }
       await accepted(await backend.commitLane(roomId, inc, binary, bytes('frame'))).delivery
+      // Each reads where its lanes start as it goes live.
+      const starting = [
+        ownSubscription(backend.subscribeLane(roomId, inc, { kind: 'binary-all', member: 'member} escape' }, () => {})),
+        ownSubscription(backend.subscribeLane(roomId, inc, { kind: 'binary-track', track: 'track} escape' }, () => {})),
+        ownSubscription(backend.subscribe({ key: 'generic} escape', kind: 'binary' }, () => {})),
+      ]
+      for (const subscription of starting) await subscription.ready
+      for (const subscription of starting) await subscription.unsubscribe()
       await backend.dropLaneOrders(roomId, inc, 'member} escape')
       await backend.directoryPut(roomId, inc, Infinity)
       expect(await backend.directoryDue(Number.MAX_SAFE_INTEGER)).toEqual([])
