@@ -233,6 +233,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/alarm-policy': alarmScheduling,
   '/route-renewal': routeRenewal,
   '/every-track': everyTrackRoutes,
+  '/every-member-routes': everyMemberRoutes,
   '/native-rpc': nativeRpcRoundTrip,
   '/large-retained': largeRetainedReplay,
   '/broadcast-sessions': broadcastAcrossSessions,
@@ -343,6 +344,42 @@ async function everyTrackRoutes(env: Env, suffix: string) {
     everyMember: await arrived('every-member'),
     camera: await arrived('camera'),
   }
+}
+// The camera's every-member session from its route on, through another every-member route coming and going, its own
+// leaving, and a new route of its own.
+async function everyMemberRoutes(env: Env, suffix: string) {
+  const probe = roomProbe(env, suffix, 'every-member-routes')
+  await probe.open()
+  const route = (role: string, laneKey: string) => ({
+    roomId: probe.roomId,
+    inc: probe.inc,
+    laneKey,
+    sessionDoId: sessionOf(env, `${role}-${suffix}`).toString(),
+    leaseId: `${role}-${suffix}`,
+  })
+  const register = async (role: string, laneKey: string) => {
+    const registration = await probe.authority.registerRoute(route(role, laneKey))
+    if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
+  }
+  const receivers: number[] = []
+  const commit = async (text: string) => {
+    const frame = textEncoder.encode(text)
+    const lane = { kind: 'binary', member: 'm', track: 'camera' } as const
+    const commit = accepted(await probe.authority.commitLane(probe.inc, lane, frame), text)
+    await probe.settle(commit)
+    receivers.push(commit.receivers)
+  }
+  await commit('unrouted')
+  await register('camera', 'binary-track:camera')
+  await commit('routed')
+  await register('mic', 'binary-track:mic')
+  await probe.authority.unsubscribeRoute(route('mic', 'binary-track:mic'))
+  await commit('after-other')
+  await probe.authority.unsubscribeRoute(route('camera', 'binary-track:camera'))
+  await commit('unsubscribed')
+  await register('camera', 'binary-track:camera')
+  await commit('rerouted')
+  return { receivers, camera: await session(env, `camera-${suffix}`).arrived() }
 }
 async function alarmScheduling(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)

@@ -231,6 +231,38 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(seen).toEqual([['a-1@1'], ['a-1@1', 'b-1@1'], ['a-1@1', 'b-1@1'], ['a-1@1', 'b-1@1', 'a-2@2']])
   })
 
+  it("gives a room-wide subscriber that appears mid-stream a track's retained frame, and every frame after it", async () => {
+    const prefix = uniquePrefix('room-wide-mid-stream')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const authority = await Room.create('room-wide-mid-stream')
+    onTestFinished(() => Room.close(authority.id))
+    const retainer = await authority.join()
+    const streamer = await authority.join()
+    await retainer.publishBinary(new Uint8Array([0]), { track: 'mic', retain: true })
+    let published = 0
+    let streaming = true
+    const stream = (async () => {
+      while (streaming) await streamer.publishBinary(new Uint8Array([++published % 256]), { track: 'mic' })
+    })()
+    const observer = await Room.get(authority.id)
+    const retained: number[] = []
+    const streamed: number[] = []
+    observer.subscribeBinary((data, _info, from) => (from.id === retainer.id ? retained : streamed).push(data[0]!), {
+      track: 'mic',
+    })
+    await vi.waitFor(() => expect(retained).toEqual([0]), { timeout: 10_000 })
+    const after = published
+    await vi.waitFor(() => expect(published - after).toBeGreaterThanOrEqual(300), { timeout: 10_000 })
+    streaming = false
+    await stream
+    await vi.waitFor(() => expect(streamed.at(-1)).toBe(published % 256), { timeout: 10_000 })
+    // From the first streamed frame on, each frame once, in order, through every frame published after the retained one.
+    const first = published - streamed.length + 1
+    expect(first).toBeLessThanOrEqual(after + 1)
+    expect(streamed).toEqual(Array.from({ length: streamed.length }, (_, i) => (first + i) % 256))
+  }, 30_000)
+
   it('reads no demand on a server that only views the room, while the server owning its members takes it', async () => {
     const prefix = uniquePrefix('demand-viewer')
     installRedis(ownClient(connect()), { prefix })

@@ -3351,6 +3351,33 @@ describe('Room public behavior', () => {
     await retaining[0]!.leave()
     expect((await driver.listRetained(authority.id, authority._inc, { track: 'screen' })).length).toBe(2)
   })
+  it("gives a room-wide subscriber that appears mid-stream a track's retained frame, and every frame after it", async () => {
+    const authority = await Room.create('room-wide-mid-stream')
+    const retainer = await authority.join()
+    const streamer = await authority.join()
+    await retainer.publishBinary(new Uint8Array([0]), { track: 'mic', retain: true })
+    let published = 0
+    let streaming = true
+    const stream = (async () => {
+      while (streaming) await streamer.publishBinary(new Uint8Array([++published % 256]), { track: 'mic' })
+    })()
+    const observer = await Room.get(authority.id)
+    const retained: number[] = []
+    const streamed: number[] = []
+    observer.subscribeBinary((data, _info, from) => (from.id === retainer.id ? retained : streamed).push(data[0]!), {
+      track: 'mic',
+    })
+    await vi.waitFor(() => expect(retained).toEqual([0]))
+    const after = published
+    await vi.waitFor(() => expect(published - after).toBeGreaterThanOrEqual(300))
+    streaming = false
+    await stream
+    await vi.waitFor(() => expect(streamed.at(-1)).toBe(published % 256))
+    // From the first streamed frame on, each frame once, in order, through every frame published after the retained one.
+    const first = published - streamed.length + 1
+    expect(first).toBeLessThanOrEqual(after + 1)
+    expect(streamed).toEqual(Array.from({ length: streamed.length }, (_, i) => (first + i) % 256))
+  })
   it.each([
     ['one track', { track: 'screen' }],
     ['every track', undefined],

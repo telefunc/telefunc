@@ -23,13 +23,19 @@ import type {
 } from '../../../../backend/room/contract.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
 import { assert } from '../../../../../utils/assert.js'
-import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../../../../backend/room/lane-key.js'
+import {
+  encodeLaneKey,
+  everyMemberLaneKey,
+  everyTrackLaneKey,
+  trackOfEveryMemberLaneKey,
+} from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds, isOpenIncarnation, type StoredHead } from '../../../../backend/room/semantics.js'
 import { Fanout, type RoomSessionNamespace } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteExpiredRoutes,
   deleteRoute,
+  listEveryMemberRouteTracks,
   renewRoute,
   snapshotRoutes,
   type RouteInstallation,
@@ -78,6 +84,8 @@ function headForRpc(head: StoredHead): RoomHead {
 class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   readonly #fanout: Fanout
   #schema = false
+  /** By incarnation, the tracks whose every-member lane some route names, read again after a route may have gone. */
+  readonly #everyMemberTracks = new Map<string, Set<string>>()
 
   constructor(ctx: DurableObjectState, env: Env, sessions: RoomSessionNamespace) {
     super(ctx, env)
@@ -126,9 +134,13 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
         }
         const mark = advanceOrder(sql, inc, key, now)
         if (opts?.retain === true) installRetained(sql, inc, lane, payload, mark)
-        // A binary commit also reaches its member's every-track lane and its track's every-member lane.
-        const laneKeys =
-          lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
+        const laneKeys = [key]
+        // A binary commit also reaches its member's every-track lane, and its track's every-member lane once a route
+        // names it.
+        if (lane.kind === 'binary') {
+          laneKeys.push(everyTrackLaneKey(lane.member))
+          if (this.#everyMemberTracksOf(sql, inc).has(lane.track)) laneKeys.push(everyMemberLaneKey(lane.track))
+        }
         return { ...mark, routes: snapshotRoutes(sql, inc, laneKeys, now) }
       },
     )
@@ -164,6 +176,8 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
       if (!isOpenIncarnation(readLiveHead(sql, now), route.inc))
         return { rejected: true, reason: `room has no open incarnation '${route.inc}'` }
       upsertRoute(sql, route, now)
+      const track = trackOfEveryMemberLaneKey(route.laneKey)
+      if (track !== null) this.#everyMemberTracksOf(sql, route.inc).add(track)
       return { ok: true }
     })
     if ('ok' in result) await this.#scheduleMaintenanceIfNeeded()
@@ -180,6 +194,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {
     this.#transaction((sql) => deleteRoute(sql, route))
+    if (trackOfEveryMemberLaneKey(route.laneKey) !== null) this.#everyMemberTracks.delete(route.inc)
     await this.#scheduleMaintenanceIfNeeded()
   }
 
@@ -189,6 +204,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async dropGeneration(inc: string): Promise<void> {
     this.#transaction((sql) => dropGenerationRows(sql, inc))
+    this.#everyMemberTracks.delete(inc)
     await this.#scheduleMaintenanceIfNeeded()
   }
 
@@ -225,6 +241,13 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
       deleteExpiredRoutes(sql, now)
       for (const inc of listOrphanGenerations(sql, currentInc)) dropGenerationRows(sql, inc)
     })
+    this.#everyMemberTracks.clear()
+  }
+
+  #everyMemberTracksOf(sql: SqlStorage, inc: string): Set<string> {
+    let tracks = this.#everyMemberTracks.get(inc)
+    if (tracks === undefined) this.#everyMemberTracks.set(inc, (tracks = listEveryMemberRouteTracks(sql, inc)))
+    return tracks
   }
 
   /** The schema is created outside the transaction, so a refused first write can't roll it back. */
