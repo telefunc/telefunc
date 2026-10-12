@@ -75,17 +75,9 @@ import {
 import { reportRoomError } from './errors.js'
 import { reconnectWindow, reportServerChannelError } from '../../server/channel.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
-import {
-  createMember,
-  evictMember,
-  holdViews,
-  reapAndReadMembersById,
-  removeView,
-  writeMemberMeta,
-  dropMemberMetaGeneration,
-} from './membership.js'
+import { createMember, evictMember, holdViews, reapAndReadMembersById, removeView } from './membership.js'
 import { memberCellKey } from './cells.js'
-import type { StoredRoomMeta } from './meta.js'
+import { dropMemberMetaGeneration, writeMemberMeta, type MemberMetaWrite, type StoredRoomMeta } from './meta.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import type {
   BinaryPublishOptions,
@@ -324,7 +316,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
    *  seq order. */
-  private async _writeMemberMeta(id: string, write: Parameters<typeof writeMemberMeta>[2]): Promise<AcceptedMeta> {
+  private async _writeMemberMeta(id: string, write: MemberMetaWrite): Promise<AcceptedMeta> {
     return await this._inCallOrder(`meta:${id}`, async (sent) => {
       const { update, hidden, replaced } = await writeMemberMeta(this._incarnation, id, write)
       const accepted = { __r: 'p-meta', id, ...update, ...(hidden ? { hidden: true } : {}) } as const

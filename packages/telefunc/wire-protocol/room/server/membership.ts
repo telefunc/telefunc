@@ -2,8 +2,6 @@ export {
   holdViews,
   removeView,
   createMember,
-  writeMemberMeta,
-  dropMemberMetaGeneration,
   renewMemberLeases,
   evictMember,
   reapAndReadRoster,
@@ -17,32 +15,29 @@ import { getRoomBackend } from '../../backend/install.js'
 import { Slice } from '../slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
-import { compareMetaEntries } from '../meta-state.js'
-import { participantGoneError, roomClosedError } from '../errors.js'
+import { roomClosedError } from '../errors.js'
 import {
   leaveCauseToWire,
   type HoldConfig,
-  type MemberMetaUpdate,
   type MemberSnapshot,
-  type RoomMetaEntry,
   type RoomDataEnvelope,
   type RoomMemberRecord,
   type WireLeaveCause,
 } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
-import { META_RUN_KEYS, mergeRuns, type MetaKeyCell } from './meta.js'
+import {
+  dropMemberMeta,
+  memberMetaMutations,
+  memberMetaOf,
+  readMembersMetaCells,
+  type MemberMetaCells,
+} from './meta.js'
 import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { afterHoldChange, holdChange, holdCounts, type RoomIncarnation } from './lifecycle.js'
 import {
   CLEANUP_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
-  MEMBER_META_CELL_PREFIX,
-  memberIdOfMetaCellKey,
-  memberMetaCellKey,
-  memberMetaCellPrefix,
-  memberMetaGenPrefix,
-  memberMetaKeyOfCellKey,
   VIEW_CELL_PREFIX,
   cleanupCellKey,
   identityCellKey,
@@ -55,9 +50,6 @@ import {
 } from './cells.js'
 
 type CellPlan<T> = { value: T; mutations: CellMutation[]; counts?: CellCount[] }
-type MemberMetaWrite = { replace: ParticipantMeta } | { merge: ParticipantMeta }
-/** A member's meta cells as read, by cell key. */
-type MemberMetaCells = Array<readonly [string, Uint8Array]>
 type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
 type PendingMemberCleanup = { cause: WireLeaveCause; hidden?: true }
 /** A page's view of the room, renewed like a member record. */
@@ -114,7 +106,7 @@ async function createMember(
 ): Promise<void> {
   const mutations: CellMutation[] = [
     { key: memberCellKey(id), bytes: encodeRoomRecord(record) },
-    ...Object.entries(meta).map(([key, value], index) => metaKeyMutation(id, 0, key, value, [0, index])),
+    ...memberMetaMutations(id, meta),
   ]
   if (record.identity !== undefined)
     mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
@@ -170,122 +162,6 @@ async function mutateMember<T>(
     return { value, mutations: [{ key, bytes: encodeRoomRecord({ ...next, seenAt: Date.now() }) }] }
   })
   return value
-}
-
-/** One exchange that expects the member's record, which each meta write counts in and each renewal rewrites. A merge
- *  writes its keys, a key already there keeping its place; a replace writes its keys into a new generation and returns
- *  the one it `replaced`, for `dropMemberMetaGeneration`. Each costs the keys it was given. */
-async function writeMemberMeta(
-  room: RoomIncarnation,
-  id: string,
-  write: MemberMetaWrite,
-): Promise<{ update: MemberMetaUpdate; hidden: boolean; replaced: number | null }> {
-  const backend = getRoomBackend()
-  const memberKey = memberCellKey(id)
-  return await retryCompareExchange(async () => {
-    const read = await backend.readCells(room.id, room.inc, { keys: [memberKey] })
-    if ('staleInc' in read) throw roomClosedError(room.id)
-    const raw = read.cells.get(memberKey)
-    if (raw === undefined) throw participantGoneError(id)
-    const record = decodeRoomRecord<RoomMemberRecord>(raw)
-    const seq = record.metaSeq + 1
-    const gen = 'replace' in write ? seq : record.metaGen
-    let mutations: CellMutation[]
-    if ('replace' in write)
-      mutations = Object.entries(write.replace).map(([key, value], index) =>
-        metaKeyMutation(id, gen, key, value, [seq, index]),
-      )
-    else {
-      const keys = Object.keys(write.merge).map((key) => memberMetaCellKey(id, gen, key))
-      const merging = keys.length === 0 ? new Map<string, Uint8Array>() : await readCells(room.id, room.inc, keys)
-      mutations = Object.entries(write.merge).map(([key, value], index) => {
-        const cellKey = memberMetaCellKey(id, gen, key)
-        if (value === undefined) return { key: cellKey, bytes: null }
-        const found = merging.get(cellKey)
-        const place = found === undefined ? ([seq, index] as const) : decodeRoomRecord<MetaKeyCell>(found).place
-        return metaKeyMutation(id, gen, key, value, place)
-      })
-    }
-    const next: RoomMemberRecord = { ...record, metaSeq: seq, metaGen: gen, seenAt: Date.now() }
-    mutations.push({ key: memberKey, bytes: encodeRoomRecord(next) })
-    const expect = [{ key: memberKey, version: read.versions.get(memberKey)! }]
-    const result = await backend.compareExchangeCells(room.id, room.inc, { expect, mutations })
-    if (result === 'stale-inc') throw roomClosedError(room.id)
-    if (result === 'conflict') return CX_CONFLICT
-    const update: MemberMetaUpdate = 'replace' in write ? { seq, meta: write.replace } : { seq, attrs: write.merge }
-    return { update, hidden: record.hidden === true, replaced: gen === record.metaGen ? null : record.metaGen }
-  })
-}
-
-/** A generation a replace left, which stopped being the record's `metaGen` in its exchange. */
-async function dropMemberMetaGeneration(room: RoomIncarnation, id: string, gen: number): Promise<void> {
-  await dropCells(room.id, room.inc, memberMetaGenPrefix(id, gen))
-}
-
-function metaKeyMutation(
-  id: string,
-  gen: number,
-  key: string,
-  value: unknown,
-  place: readonly [number, number],
-): CellMutation {
-  const cell: MetaKeyCell = { value, place: [place[0], place[1]] }
-  return { key: memberMetaCellKey(id, gen, key), bytes: encodeRoomRecord(cell) }
-}
-
-/** Deletes the cells under `prefix`, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn. */
-async function dropCells(roomId: string, inc: string, prefix: string): Promise<void> {
-  const backend = getRoomBackend()
-  const slice = new Slice()
-  for await (const page of backend.readCellPages(roomId, inc, prefix)) {
-    if ('staleInc' in page) return
-    const mutations = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
-    if ((await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) === 'stale-inc') return
-    if (slice.over) await slice.next()
-  }
-}
-
-/** Every member's meta cells, by member, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
-async function readMembersMetaCells(room: RoomIncarnation): Promise<Map<string, MemberMetaCells>> {
-  const byMember = new Map<string, Array<readonly [string, Uint8Array]>>()
-  const slice = new Slice()
-  for await (const page of getRoomBackend().readCellPages(room.id, room.inc, MEMBER_META_CELL_PREFIX)) {
-    if ('staleInc' in page) throw roomClosedError(room.id)
-    for (const cell of page.cells) {
-      const id = memberIdOfMetaCellKey(cell[0])
-      const cells = byMember.get(id)
-      if (cells === undefined) byMember.set(id, [cell])
-      else cells.push(cell)
-    }
-    if (slice.over) await slice.next()
-  }
-  return byMember
-}
-
-/** The member's meta from its generation's cells, sorted a run at a time, then merged and built a slice per turn. */
-async function memberMetaOf(id: string, gen: number, cells: MemberMetaCells): Promise<ParticipantMeta> {
-  const runs: RoomMetaEntry[][] = []
-  let run: RoomMetaEntry[] = []
-  const slice = new Slice()
-  for (const [cellKey, raw] of cells) {
-    const key = memberMetaKeyOfCellKey(id, gen, cellKey)
-    if (key === null) continue
-    const { value, place } = decodeRoomRecord<MetaKeyCell>(raw)
-    run.push([key, value, place[0], place[1]])
-    if (run.length < META_RUN_KEYS) continue
-    runs.push(run.sort(compareMetaEntries))
-    run = []
-    if (slice.over) await slice.next()
-  }
-  runs.push(run.sort(compareMetaEntries))
-  const entries = runs.length === 1 ? runs[0]! : await mergeRuns(runs)
-  const meta: ParticipantMeta = {}
-  for (let i = 0; i < entries.length; i++) {
-    const [key, value] = entries[i]!
-    Object.defineProperty(meta, key, { value, enumerable: true, configurable: true, writable: true })
-    if (i % META_RUN_KEYS === 0 && slice.over) await slice.next()
-  }
-  return Object.freeze(meta)
 }
 
 /** Each renewal is its own compare-exchange; a failed one fails the call once all are tried. */
@@ -422,7 +298,7 @@ async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Pro
     return raw === undefined ? [] : [[id, raw] as const]
   })
   await eachInFlight(entries, async ([id]) => {
-    metaCells.set(id, [...(await readPrefix(room.id, room.inc, memberMetaCellPrefix(id)))])
+    metaCells.set(id, (await readMembersMetaCells(room, id)).get(id) ?? [])
   })
   return await liveMembers(room, entries, metaCells)
 }
@@ -497,7 +373,7 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
   await dropRetainedOwnedBy(roomId, inc, memberId)
   // Every commit to the member's lanes requires its cell, which the eviction removed.
   await getRoomBackend().dropLaneOrders(roomId, inc, memberId)
-  await dropCells(roomId, inc, memberMetaCellPrefix(memberId))
+  await dropMemberMeta(roomId, inc, memberId)
   await publishCtrl(roomId, inc, {
     __r: 'leave',
     id: memberId,

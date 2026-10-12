@@ -17,15 +17,13 @@ export {
   META_GEN_CELL_KEY,
   META_DROP_CELL_PREFIX,
   metaDropCellKey,
-  metaKeyCellPrefix,
-  metaKeyCellKey,
-  metaKeyOfCellKey,
+  roomMetaGenPrefix,
   MEMBER_META_CELL_PREFIX,
   memberMetaCellPrefix,
   memberMetaGenPrefix,
-  memberMetaCellKey,
-  memberMetaKeyOfCellKey,
   memberIdOfMetaCellKey,
+  metaKeyCellKey,
+  metaKeyOfCellKey,
 }
 
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
@@ -71,15 +69,8 @@ const META_DROP_CELL_PREFIX = 'meta:drop:'
 function metaDropCellKey(gen: number): string {
   return META_DROP_CELL_PREFIX + gen
 }
-function metaKeyCellPrefix(gen: number): string {
+function roomMetaGenPrefix(gen: number): string {
   return `meta:k:${gen}:`
-}
-// JSON keeps any string, lone surrogates included, as a well-formed one.
-function metaKeyCellKey(gen: number, key: string): string {
-  return metaKeyCellPrefix(gen) + JSON.stringify(key)
-}
-function metaKeyOfCellKey(gen: number, cellKey: string): string {
-  return JSON.parse(cellKey.slice(metaKeyCellPrefix(gen).length)) as string
 }
 
 /** A member's meta, a cell per top-level key in the generation its record names (`RoomMemberRecord.metaGen`). Member
@@ -91,14 +82,15 @@ function memberMetaCellPrefix(memberId: string): string {
 function memberMetaGenPrefix(memberId: string, gen: number): string {
   return `${memberMetaCellPrefix(memberId)}${gen}:`
 }
-function memberMetaCellKey(memberId: string, gen: number, key: string): string {
-  return memberMetaGenPrefix(memberId, gen) + JSON.stringify(key)
-}
 function memberIdOfMetaCellKey(cellKey: string): string {
   return cellKey.slice(MEMBER_META_CELL_PREFIX.length, cellKey.indexOf(':', MEMBER_META_CELL_PREFIX.length))
 }
-/** The key of a cell of generation `gen`, or null for another generation's. */
-function memberMetaKeyOfCellKey(memberId: string, gen: number, cellKey: string): string | null {
-  const prefix = memberMetaGenPrefix(memberId, gen)
-  return cellKey.startsWith(prefix) ? (JSON.parse(cellKey.slice(prefix.length)) as string) : null
+// A meta key's cell, the room's or a member's, under its generation's prefix. JSON keeps any string, lone surrogates
+// included, as a well-formed one.
+function metaKeyCellKey(genPrefix: string, key: string): string {
+  return genPrefix + JSON.stringify(key)
+}
+/** The key of a cell under `genPrefix`, or null for another generation's. */
+function metaKeyOfCellKey(genPrefix: string, cellKey: string): string | null {
+  return cellKey.startsWith(genPrefix) ? (JSON.parse(cellKey.slice(genPrefix.length)) as string) : null
 }

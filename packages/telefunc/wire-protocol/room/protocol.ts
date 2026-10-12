@@ -47,7 +47,7 @@ type RoomConfigRecord = {
 type HoldConfig = { emptyTimeout: number; departureTimeout: number }
 
 /** A member cell. Its owner renews `seenAt` every heartbeat; a record older than the member TTL is reaped. Its meta is
- *  a cell per key in generation `metaGen` (see `memberMetaCellKey`). */
+ *  a cell per key in generation `metaGen` (see `memberMetaGenPrefix`). */
 type RoomMemberRecord = {
   joinedAt: number
   seenAt: number
