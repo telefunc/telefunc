@@ -166,9 +166,7 @@ class ServerRoom extends RoomStateView implements Room {
       guards: () => this._guards,
       local: (id) => this._localParticipants.get(id),
       lanePlanned: (member, track) => this._subs.lanePlanned(member, track),
-      applyOwn: (event) => {
-        if (this._applyCtrl(event)) this._relayApplied(event)
-      },
+      applyOwn: (event) => this._applyControl(event),
       acks: this._pendingDmAcks,
     })
   }
@@ -254,7 +252,7 @@ class ServerRoom extends RoomStateView implements Room {
       // A member removed meanwhile gets no join after its leave, here or anywhere.
       await publishCtrl(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
       this._assertAdmitted(id)
-      if (this._applyJoin(joinedMember(join))) this._relayApplied(join)
+      this._applyControl(join)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       // In an open room the inbox closes only when the holder detached, or a removal already evicted the member.
@@ -309,9 +307,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** @internal */
   _onCtrlEvent(event: PresenceEvent, serialized: string, rawInfo: WirePublishInfo): void {
-    if (!this._applyCtrl(event)) return
-    this._relayControl(event, () => encodePublishText(serialized, rawInfo))
-    if (event.__r === 'closed') this._teardown()
+    this._applyControl(event, () => encodePublishText(serialized, rawInfo))
   }
 
   /** Relayed as this view applied it, not as a lane frame: an own event's echo may be lost with no drift to reconcile. */
@@ -363,8 +359,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _applyStamp(id: string, { fromMeta, fromMetaSeq }: SenderStamp): void {
     const hidden = this._model.memberHidden(id)
     if (hidden === null || this._model.memberMetaSeq(id)! >= fromMetaSeq) return
-    const update = { __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq, ...(hidden ? { hidden: true } : {}) } as const
-    if (this._applyCtrl(update)) this._relayApplied(update)
+    this._applyControl({ __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq, ...(hidden ? { hidden: true } : {}) })
   }
   /** @internal */
   _onBinary(framed: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -400,25 +395,31 @@ class ServerRoom extends RoomStateView implements Room {
       .then((reply) => this._writes.publishDmAck(envelope.from, ackId, reply))
       .catch(reportRoomError)
   }
-  /** Whether the event changed this view, which is what its clients get; a leave reaches them from `_onLeave`. */
-  private _applyCtrl(event: PresenceEvent): boolean {
+  /** Applies a presence event to the view and relays what it changed to the clients: as the lane carried it when
+   *  `carried` is given, else as applied. A leave reaches them from `_onLeave`, whatever applied it, and an update as
+   *  each one it let apply, in seq order. */
+  private _applyControl(event: PresenceEvent, carried?: () => string): void {
+    const relay = () => this._relayControl(event, carried ?? (() => unorderedEventText(event)))
     switch (event.__r) {
       case 'join':
-        return this._applyJoin(joinedMember(event))
+        if (this._applyJoin(joinedMember(event))) relay()
+        return
       case 'leave':
         this._model.applyLeave(event.id, leaveCauseFromWire(event))
-        return false
+        return
       case 'p-meta': {
         const applied = this._model.applyParticipantMeta(event.id, event)
         this._localParticipants.get(event.id)?._acceptMeta(event)
-        return applied
+        if (applied) relay()
+        return
       }
       case 'update':
-        // Relayed here: each update this one let apply, in seq order.
         for (const applied of this._model.applyRoomUpdate(event)) this._relayApplied(applied)
-        return false
+        return
       case 'closed':
-        return this._model.applyClosed()
+        if (!this._model.applyClosed()) return
+        relay()
+        this._teardown()
     }
   }
   private _applyJoin(member: MemberSnapshot): boolean {
@@ -471,14 +472,11 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A newer meta reaching this view through the authority never reached its clients as an event. */
   _applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {
-    for (const applied of this._model.applyRoomUpdate({ __r: 'update', seq, meta: entries }))
-      this._relayApplied(applied)
+    this._applyControl({ __r: 'update', seq, meta: entries })
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
-    if (!this._model.applyClosed()) return
-    this._relayApplied({ __r: 'closed' })
-    this._teardown()
+    this._applyControl({ __r: 'closed' })
   }
   /** Resolves once the tail receives, so it holds everything committed after it returns. */
   async _startTail(): Promise<void> {
