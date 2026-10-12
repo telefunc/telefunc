@@ -17,6 +17,9 @@
       "default": "./dist/index.js"
     }
   },
+  "engines": {
+    "node": ">=26"
+  },
   "files": [
     "dist"
   ],
