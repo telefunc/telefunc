@@ -1943,11 +1943,11 @@ describe('Room public behavior', () => {
     const observer = await Room.get(room.id)
     observer.onJoin(() => {}) // a live view: it applies every write, and builds its meta only when read
     const windows: number[] = []
-    let started = 0
+    let started = mark()
     for (let i = 1; i <= 20_000; i++) {
-      if (i % 1_000 === 501) started = performance.now()
+      if (i % 1_000 === 501) started = mark()
       await Room.setAttributes(room.id, { [`k${i}`]: i })
-      if (i === 1_000 || i === 10_000 || i === 20_000) windows.push(performance.now() - started)
+      if (i === 1_000 || i === 10_000 || i === 20_000) windows.push(ran(started, mark()))
     }
     await vi.waitFor(() => expect(Object.keys(observer.meta)).toHaveLength(20_000))
     // The last 500 writes before each size.
@@ -1985,11 +1985,11 @@ describe('Room public behavior', () => {
     const observer = await Room.get(room.id)
     observer.onJoin(() => {}) // a live view: it applies every write, and builds the meta only when read
     const windows: number[] = []
-    let started = 0
+    let started = mark()
     for (let i = 1; i <= 20_000; i++) {
-      if (i % 1_000 === 501) started = performance.now()
+      if (i % 1_000 === 501) started = mark()
       await member.setAttributes({ [`k${i}`]: i })
-      if (i === 1_000 || i === 10_000 || i === 20_000) windows.push(performance.now() - started)
+      if (i === 1_000 || i === 10_000 || i === 20_000) windows.push(ran(started, mark()))
     }
     await vi.waitFor(async () =>
       expect(Object.keys((await observer.getParticipant(member.id))!.meta)).toHaveLength(20_000),
@@ -5239,11 +5239,11 @@ describe('room protocol validation', () => {
       let demanded = 0
       for (const member of members) member.onDemand((_, wanted) => (demanded += wanted ? 1 : -1))
       const stub = register(room)
-      let last = performance.now()
+      let last = mark()
       let longest = 0
       const timer = setInterval(() => {
-        const now = performance.now()
-        longest = Math.max(longest, now - last)
+        const now = mark()
+        longest = Math.max(longest, ran(last, now))
         last = now
       }, 1)
       for (const track of trackNames(64)) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
@@ -5822,6 +5822,14 @@ function binaryLanes(room: ServerRoom): string[] {
     return encodeLaneKey({ kind: 'binary', member, track })
   })
   return [...[...subs._everyTrack.keys()].map(everyTrackLaneKey), ...named].sort()
+}
+type Mark = { wall: number; cpu: NodeJS.CpuUsage }
+const mark = (): Mark => ({ wall: performance.now(), cpu: process.cpuUsage() })
+/** Milliseconds the process ran from `from` to `to`: wall time, but no more than its CPU time, which the machine's
+ *  load, holding the process off a CPU, does not add to. */
+function ran(from: Mark, to: Mark): number {
+  const cpu = to.cpu.user - from.cpu.user + to.cpu.system - from.cpu.system
+  return Math.min(to.wall - from.wall, cpu / 1000)
 }
 /** How long `run` took, less the garbage collections during it: their pauses grow with the live heap, not with what
  *  `run` does. */

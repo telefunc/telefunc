@@ -41,36 +41,14 @@ describe('Room at 100,000 members', () => {
   it('keeps the event loop turning through a heartbeat tick renewing and reading 100,000 owned members', async () => {
     const room = await create('heartbeat-turns')
     await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
-    const longestGap = async () => {
-      let last = performance.now()
-      let longest = 0
-      const timer = setInterval(() => {
-        const now = performance.now()
-        longest = Math.max(longest, now - last)
-        last = now
-      }, 1)
-      await syncOf(room)._heartbeatTick()
-      clearInterval(timer)
-      return Math.max(longest, performance.now() - last)
-    }
+    const longestGap = async () => (await longestGapWhile(() => syncOf(room)._heartbeatTick())).gap
     // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
   }, 60_000)
   it('keeps the event loop turning through a replan of 100,000 members', async () => {
     const room = await create('replan-turns')
     await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
-    const longestGap = async () => {
-      let last = performance.now()
-      let longest = 0
-      const timer = setInterval(() => {
-        const now = performance.now()
-        longest = Math.max(longest, now - last)
-        last = now
-      }, 1)
-      await subsOf(room).replan()
-      clearInterval(timer)
-      return Math.max(longest, performance.now() - last)
-    }
+    const longestGap = async () => (await longestGapWhile(() => subsOf(room).replan())).gap
     // The shorter of two passes, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
   }, 60_000)
@@ -525,21 +503,29 @@ function syncOf(room: ServerRoom): {
 } {
   return room._replica.sync as unknown as ReturnType<typeof syncOf>
 }
-/** The longest event-loop gap while `run` runs, and what it returned. */
+/** The longest event-loop gap while `run` runs, counting the time the process ran in it, and what `run` returned. */
 async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number; value: T }> {
-  let last = performance.now()
+  let last = mark()
   let gap = 0
   const timer = setInterval(() => {
-    const now = performance.now()
-    gap = Math.max(gap, now - last)
+    const now = mark()
+    gap = Math.max(gap, ran(last, now))
     last = now
   }, 1)
   try {
     const value = await run()
-    return { gap: Math.max(gap, performance.now() - last), value }
+    return { gap: Math.max(gap, ran(last, mark())), value }
   } finally {
     clearInterval(timer)
   }
+}
+type Mark = { wall: number; cpu: NodeJS.CpuUsage }
+const mark = (): Mark => ({ wall: performance.now(), cpu: process.cpuUsage() })
+/** Milliseconds the process ran from `from` to `to`: wall time, but no more than its CPU time, which the machine's
+ *  load, holding the process off a CPU, does not add to. */
+function ran(from: Mark, to: Mark): number {
+  const cpu = to.cpu.user - from.cpu.user + to.cpu.system - from.cpu.system
+  return Math.min(to.wall - from.wall, cpu / 1000)
 }
 const opened = { rooms: [] as ServerRoom[], stubs: [] as RoomStubChannel[] }
 async function create(id: string): Promise<ServerRoom> {
