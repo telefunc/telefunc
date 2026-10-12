@@ -491,6 +491,7 @@ class RoomReplica {
   private _teardown(): void {
     this.acks.settleAll(DM_FAILURE.roomClosed) // no recipient will reply now
     this.roster.clear()
+    this.demand.close()
     for (const [id, owner] of this._owners) this.disown(id, owner)
     for (const handle of new Set([...this._observers, ...this._tails])) handle._teardown()
     this._gossip.close()
