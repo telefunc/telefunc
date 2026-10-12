@@ -92,10 +92,12 @@ class RoomReplica {
   private readonly _gossip: GossipOutbox
   /** The handle holding each member it joined. */
   private readonly _owners = new Map<string, ServerRoom>()
-  /** The handles with a client stub, a participant or a listener; those with a listener; those with a tail. */
+  /** The handles with a client stub, a participant or a listener; those with a listener; those with a tail; those with
+   *  either, which take what a lane carries. */
   private readonly _observers = new Set<ServerRoom>()
   private readonly _listening = new Set<ServerRoom>()
   private readonly _tails = new Set<ServerRoom>()
+  private readonly _receivers = new Set<ServerRoom>()
 
   private constructor(
     incarnation: RoomIncarnation,
@@ -130,6 +132,7 @@ class RoomReplica {
     toggle(this._observers, handle, handle._observed())
     toggle(this._listening, handle, handle._state.listenerCount > 0)
     toggle(this._tails, handle, handle._holdsTail())
+    toggle(this._receivers, handle, this._listening.has(handle) || this._tails.has(handle))
   }
 
   own(member: string, handle: ServerRoom): void {
@@ -311,13 +314,13 @@ class RoomReplica {
   _onTextData(serialized: string, info: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
-      for (const handle of this._receivers()) handle._local.relayAnnouncement(envelope.data, info)
+      for (const handle of this._receivers) handle._local.relayAnnouncement(envelope.data, info)
       const wireText = encodePublishText(serialized, info)
       for (const stub of this.stubs) stub._relayAnnouncement(wireText, info)
       return
     }
     this.applyStamp(envelope.from, envelope)
-    for (const handle of this._receivers()) handle._relayData(serialized, envelope, info)
+    for (const handle of this._receivers) handle._relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
     const texts = new MemberMessageTexts(serialized, info, () => ({
       __r: 'data',
@@ -330,7 +333,7 @@ class RoomReplica {
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void {
     const unframed = decodeBinaryFrame(framed)
     assert(unframed)
-    for (const handle of this._receivers()) handle._local.relayBinary(unframed, info)
+    for (const handle of this._receivers) handle._local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
     const wireData = encodePublishBinary(framed, info)
     const track = laneTrack(unframed.track)
@@ -342,12 +345,6 @@ class RoomReplica {
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
     if (envelope.__r === 'dm-ack') return this.acks.settle(envelope.ackId, envelope)
     this._owners.get(envelope.to)?._onDm(envelope, serialized, info)
-  }
-
-  /** The handles whose own listeners or tail take what a lane carries. */
-  private *_receivers(): Generator<ServerRoom> {
-    yield* this._listening
-    for (const handle of this._tails) if (!this._listening.has(handle)) yield handle
   }
 
   private _relayControl(event: PresenceEvent, wireText: () => string): void {
@@ -362,7 +359,7 @@ class RoomReplica {
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
-    for (const handle of this._receivers()) handle._local.forgetMember(id)
+    for (const handle of this._receivers) handle._local.forgetMember(id)
     const owner = this._owners.get(id)
     if (owner !== undefined) {
       this.disown(id, owner)
