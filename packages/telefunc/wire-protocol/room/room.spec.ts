@@ -2286,6 +2286,54 @@ describe('Room public behavior', () => {
       dms: [4, 5],
     })
   })
+  it("resolves an acknowledged send with its handler's reply when the reply's frame was lost, at the ack timeout", async () => {
+    loseLaneFrames((lane) => lane.kind === 'inbox').where((text) => text.includes('"__r":"dm-ack"'))
+    const room = await Room.create('dm-ack-lost')
+    const sender = await room.join()
+    const recipient = await room.join()
+    recipient.listen((data) => `handled:${String(data)}`)
+    vi.useFakeTimers()
+    const sending = sender.send(recipient.id, 'move', { ack: true })
+    await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS)
+    await expect(sending).resolves.toMatchObject({ response: 'handled:move' })
+  })
+  it("resolves an acknowledged send with its handler's reply as soon as a frame after the lost reply reaches its sender", async () => {
+    let lost = false
+    loseLaneFrames((lane) => lane.kind === 'inbox').where((text) => text.includes('"__r":"dm-ack"') && (lost = true))
+    const room = await Room.create('dm-ack-lost-gap')
+    const sender = await room.join()
+    const recipient = await room.join()
+    recipient.listen((data) => `handled:${String(data)}`)
+    let settled: unknown = null
+    void sender.send(recipient.id, 'move', { ack: true }).then((receipt) => (settled = receipt.response))
+    await vi.waitFor(() => expect(lost).toBe(true))
+    await recipient.send(sender.id, 'after')
+    await vi.waitFor(() => expect(settled).toBe('handled:move'), { timeout: 5_000 })
+  })
+  it("keeps no reply of an acknowledged send once its sender leaves, the reply's frame lost after the send timed out", async () => {
+    let lost = false
+    loseLaneFrames((lane) => lane.kind === 'inbox').where((text) => text.includes('"__r":"dm-ack"') && (lost = true))
+    const room = (await Room.create('dm-ack-late')) as ServerRoom
+    const sender = await room.join()
+    const recipient = await room.join()
+    const handled = createDeferred()
+    recipient.listen(async () => {
+      await handled.promise
+      return 'late'
+    })
+    vi.useFakeTimers()
+    const sending = sender.send(recipient.id, 'move', { ack: true }).catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(ROOM_DM_ACK_TIMEOUT_MS)
+    expect(await sending).toMatchObject({ message: expect.stringContaining('timed out') })
+    vi.useRealTimers()
+    handled.resolve()
+    await vi.waitFor(() => expect(lost).toBe(true))
+    const generation = memoryState.rooms.get(room.id)!.gens.get(room._inc)!
+    const replies = () => [...generation.cells.keys()].filter((key) => key.startsWith('ack:'))
+    expect(replies()).toHaveLength(1)
+    await sender.leave()
+    await vi.waitFor(() => expect(replies()).toEqual([]))
+  })
   it('surfaces an ack timeout as the operational RoomError at the public send boundary', async () => {
     const room = await Room.create('dm-timeout-error-class')
     const sender = await room.join()
@@ -2873,6 +2921,9 @@ describe('Room public behavior', () => {
     await joinThrough(stub)
     stub.abort()
     expect(stubIndexOf(room).size).toBe(0) // before the departed member's eviction settles
+    // Its eviction removes the member cell, and its cleanup the cleanup cell last.
+    const cells = memoryState.rooms.get(room.id)!.gens.get(room._inc)!.cells
+    await vi.waitFor(() => expect([...cells.keys()].filter((key) => /^(m|cleanup):/.test(key))).toEqual([]))
   })
   it("keeps no order for a sender that left in a stub that didn't hold it", async () => {
     const room = (await Room.create('stub-replay-forget')) as ServerRoom

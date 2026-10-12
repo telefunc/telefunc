@@ -28,6 +28,9 @@ export {
   memberIdOfMetaCellKey,
   metaKeyCellKey,
   metaKeyOfCellKey,
+  dmReplyCellPrefix,
+  dmReplyCellKey,
+  ackIdOfDmReplyCellKey,
 }
 
 // Cell keys: drivers scope cells by (room, incarnation), so a key names only what is inside the room.
@@ -113,4 +116,15 @@ function metaKeyCellKey(genPrefix: string, key: string): string {
 /** The key of a cell under `genPrefix`, or null for another generation's. */
 function metaKeyOfCellKey(genPrefix: string, cellKey: string): string | null {
   return cellKey.startsWith(genPrefix) ? (JSON.parse(cellKey.slice(genPrefix.length)) as string) : null
+}
+
+/** A recipient's reply to an acknowledged DM, under its sender's prefix until the sender settles it. */
+function dmReplyCellPrefix(senderId: string): string {
+  return `ack:${senderId}:`
+}
+function dmReplyCellKey(senderId: string, ackId: string): string {
+  return dmReplyCellPrefix(senderId) + ackId
+}
+function ackIdOfDmReplyCellKey(cellKey: string): string {
+  return cellKey.slice(cellKey.lastIndexOf(':') + 1)
 }

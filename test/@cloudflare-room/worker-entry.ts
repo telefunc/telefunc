@@ -157,6 +157,30 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
       return seen
     })
   }
+  // A recipient answers an acknowledged send whose reply's frame is lost, then sends the sender a later DM.
+  lostDmAck(roomId: string): Promise<unknown> {
+    return this.#run(async () => {
+      const room = await Room.create(roomId)
+      const sender = await room.join()
+      const recipient = await room.join()
+      recipient.listen((data) => `handled:${String(data)}`)
+      type Replica = { _onDm(serialized: string, ...rest: unknown[]): void }
+      const replica = (room as unknown as { _replica: Replica })._replica
+      const receive = replica._onDm.bind(replica)
+      const lost = Promise.withResolvers<void>()
+      replica._onDm = (serialized, ...rest) => {
+        if (serialized.includes('"__r":"dm-ack"')) return lost.resolve()
+        receive(serialized, ...rest)
+      }
+      const response = sender.send(recipient.id, 'move', { ack: true }).then((receipt) => receipt.response, String)
+      await lost.promise
+      await recipient.send(sender.id, 'after')
+      const settled = await raceTimeout(response, 5_000, () => 'not within 5 s')
+      await sender.leave()
+      await recipient.leave()
+      return settled
+    })
+  }
   // The server is gone, with the timers it set.
   die(): void {
     this.ctx.abort()
@@ -227,7 +251,7 @@ type BroadcastSession = RpcMethods<
   Pick<TelefuncProbeDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
 type CallbackSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'callWithCallback' | 'leave'>>
-type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'metaKeyOrder' | 'die'>>
+type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'metaKeyOrder' | 'lostDmAck' | 'die'>>
 type TelefuncAuthority = RpcMethods<Pick<TelefuncProbeDurableObject, 'readHead' | 'scheduledAlarm'>>
 type Env = Cloudflare.Env
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
@@ -244,6 +268,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/callback-timers': callbackTimers,
   '/auto-close': autoClose,
   '/meta-order': metaKeyOrder,
+  '/lost-dm-ack': lostDmAck,
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -505,6 +530,10 @@ async function autoClose(env: Env, suffix: string) {
 async function metaKeyOrder(env: Env, suffix: string) {
   const server = env.TELEFUNC.get(env.TELEFUNC.idFromName(`meta-order-server-${suffix}`)) as unknown as RoomServer
   return await server.metaKeyOrder(`meta-order-${suffix}`)
+}
+async function lostDmAck(env: Env, suffix: string) {
+  const server = env.TELEFUNC.get(env.TELEFUNC.idFromName(`lost-dm-ack-server-${suffix}`)) as unknown as RoomServer
+  return await server.lostDmAck(`lost-dm-ack-${suffix}`)
 }
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')

@@ -465,6 +465,31 @@ await read()`,
     await vi.waitFor(async () => expect(await observer.getParticipants()).toHaveLength(2), { timeout: 5_000 })
     expect(missed).toBe(1)
   })
+  it("resolves an acknowledged send with its handler's reply as soon as a frame after the lost reply reaches its sender", async () => {
+    const prefix = uniquePrefix('dm-ack-lost')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('dm-ack-lost')
+    const sender = await room.join()
+    const recipient = await room.join()
+    onTestFinished(() => recipient.leave())
+    recipient.listen((data) => `handled:${String(data)}`)
+    type Replica = { _onDm(serialized: string, ...rest: unknown[]): void }
+    const replica = (room as unknown as { _replica: Replica })._replica
+    const receive = replica._onDm.bind(replica)
+    let lost = false
+    replica._onDm = (serialized, ...rest) => {
+      if (!lost && serialized.includes('"__r":"dm-ack"')) return void (lost = true)
+      receive(serialized, ...rest)
+    }
+    const response = sender.send(recipient.id, 'move', { ack: true }).then((receipt) => receipt.response, String)
+    await vi.waitFor(() => expect(lost).toBe(true), { timeout: 5_000 })
+    await recipient.send(sender.id, 'after')
+    const timedOut = new Promise((resolve) => setTimeout(() => resolve('not within 5 s'), 5_000).unref())
+    const settled = await Promise.race([response, timedOut])
+    await sender.leave()
+    expect(settled).toBe('handled:move')
+  })
   it('reads, merges into and replaces a room meta of 100,000 keys with no Redis command over 20 ms', async () => {
     const prefix = uniquePrefix('meta-pages')
     const redis = ownClient(connect())

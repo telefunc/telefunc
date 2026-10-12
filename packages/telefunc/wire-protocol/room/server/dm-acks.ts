@@ -36,6 +36,11 @@ class PendingDmAcks {
     return pending
   }
 
+  /** Whether the member sends or receives a wait. */
+  waitsOn(member: string): boolean {
+    return this._byMember.has(member)
+  }
+
   /** Settles every wait the member sends or receives. */
   settleMember(member: string, reply: DmReply): void {
     for (const ackId of [...(this._byMember.get(member) ?? [])]) this.settle(ackId, reply)

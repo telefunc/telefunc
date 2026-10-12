@@ -41,7 +41,15 @@ import {
   withinRoomHorizon,
 } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
-import { evictMember, finishSessionCleanups, holdViews, removeView, renewSession } from './membership.js'
+import {
+  dropDmReply,
+  evictMember,
+  finishSessionCleanups,
+  holdViews,
+  removeView,
+  renewSession,
+  takeDmReplies,
+} from './membership.js'
 import type { StoredRoomMeta } from './meta.js'
 import type { LaneHolder, TextWantsChange } from './replay.js'
 import type { ServerRoom } from './room.js'
@@ -116,6 +124,8 @@ class RoomReplica {
   private readonly _gossip: GossipOutbox
   /** The handle holding each member it joined. */
   private readonly _owners = new Map<string, ServerRoom>()
+  /** The seq of the last frame each owned member's inbox delivered, 0 before its first. */
+  private readonly _inboxSeqs = new Map<string, number>()
   /** The handles with a client stub, a participant or a listener; those with a listener; those with a tail; those with
    *  either, which take what a lane carries. */
   private readonly _observers = new Set<ServerRoom>()
@@ -162,6 +172,8 @@ class RoomReplica {
 
   own(member: string, handle: ServerRoom): void {
     this._owners.set(member, handle)
+    // A member's id is fresh at each join, so its inbox starts before seq 1.
+    this._inboxSeqs.set(member, 0)
     this.demand.owned(member)
   }
 
@@ -169,6 +181,7 @@ class RoomReplica {
   disown(member: string, handle: ServerRoom): void {
     if (this._owners.get(member) !== handle) return
     this._owners.delete(member)
+    this._inboxSeqs.delete(member)
     this.demand.forgetMember(member)
   }
 
@@ -446,9 +459,26 @@ class RoomReplica {
   /** @internal A DM for a member a handle here owns, routed to that handle. */
   _onDm(serialized: string, info: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
+    this._inboxFrame(envelope.to, info.seq)
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
-    if (envelope.__r === 'dm-ack') return this.acks.settle(envelope.ackId, envelope)
+    if (envelope.__r === 'dm-ack') return this._dmAcked(envelope)
     this._owners.get(envelope.to)?._onDm(envelope, serialized, info)
+  }
+
+  /** A seq skipped in an owned member's inbox may have been a reply, which its recipient stored before committing. */
+  private _inboxFrame(member: string, seq: number): void {
+    const last = this._inboxSeqs.get(member)
+    if (last === undefined) return
+    this._inboxSeqs.set(member, seq)
+    if (seq <= last + 1 || !this.acks.waitsOn(member)) return
+    void takeDmReplies(this.id, this._inc, member).then((replies) => {
+      for (const [ackId, reply] of replies) this.acks.settle(ackId, reply)
+    }, reportRoomError)
+  }
+
+  private _dmAcked(envelope: RoomDmAckEnvelope): void {
+    this.acks.settle(envelope.ackId, envelope)
+    void dropDmReply(this.id, this._inc, envelope.to, envelope.ackId).catch(reportRoomError)
   }
 
   private _relayControl(event: PresenceEvent, wireText: () => string): void {

@@ -10,6 +10,10 @@ export {
   reapAndReadMembersById,
   reapAndCountPresence,
   reapAndResolveIdentity,
+  storeDmReply,
+  takeDmReply,
+  takeDmReplies,
+  dropDmReply,
 }
 
 import { assert } from '../../../utils/assert.js'
@@ -20,6 +24,7 @@ import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
 import { roomClosedError } from '../errors.js'
 import {
   leaveCauseToWire,
+  type DmReply,
   type HoldConfig,
   type MemberSnapshot,
   type RoomDataEnvelope,
@@ -28,6 +33,7 @@ import {
 } from '../protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 import {
+  dropCells,
   dropMemberMeta,
   memberMetaMutations,
   memberMetaOf,
@@ -41,7 +47,10 @@ import {
   CLEANUP_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
   SESSION_CELL_PREFIX,
+  ackIdOfDmReplyCellKey,
   cleanupCellKey,
+  dmReplyCellKey,
+  dmReplyCellPrefix,
   identityCellKey,
   identityCellPrefix,
   memberCellKey,
@@ -505,6 +514,7 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
   // Every commit to the member's lanes requires its cell, which the eviction removed.
   await getRoomBackend().dropLaneOrders(roomId, inc, memberId)
   await dropMemberMeta(roomId, inc, memberId)
+  await dropCells(roomId, inc, dmReplyCellPrefix(memberId))
   await publishCtrl(roomId, inc, {
     __r: 'leave',
     id: memberId,
@@ -517,4 +527,46 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
     value: undefined,
     mutations: [key, mark].filter((at) => cells.has(at)).map((at) => ({ key: at, bytes: null })),
   }))
+}
+
+/** Kept only while its sender is a member, whose leave drops what it never settled. */
+async function storeDmReply(roomId: string, inc: string, sender: string, ackId: string, reply: DmReply): Promise<void> {
+  const member = memberCellKey(sender)
+  await mutateCells(roomId, inc, [member], (cells) => ({
+    value: undefined,
+    mutations: cells.has(member) ? [{ key: dmReplyCellKey(sender, ackId), bytes: encodeRoomRecord(reply) }] : [],
+  }))
+}
+
+/** The reply stored for `ackId`, deleted as it is read, or null if none is. */
+async function takeDmReply(roomId: string, inc: string, sender: string, ackId: string): Promise<DmReply | null> {
+  const key = dmReplyCellKey(sender, ackId)
+  const raw = (await readCells(roomId, inc, [key])).get(key)
+  if (raw === undefined) return null
+  await dropDmReply(roomId, inc, sender, ackId)
+  return decodeRoomRecord<DmReply>(raw)
+}
+
+/** Every reply stored for `sender`, by `ackId`, deleted a page at a time as it is read. */
+async function takeDmReplies(roomId: string, inc: string, sender: string): Promise<Map<string, DmReply>> {
+  const backend = getRoomBackend()
+  const replies = new Map<string, DmReply>()
+  const slice = new Slice()
+  for await (const page of backend.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
+    if ('staleInc' in page) throw roomClosedError(roomId)
+    for (const [key, raw] of page.cells) replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<DmReply>(raw))
+    const mutations = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
+    if ((await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) === 'stale-inc') {
+      throw roomClosedError(roomId)
+    }
+    if (slice.over) await slice.next()
+  }
+  return replies
+}
+
+async function dropDmReply(roomId: string, inc: string, sender: string, ackId: string): Promise<void> {
+  const mutations = [{ key: dmReplyCellKey(sender, ackId), bytes: null }]
+  if ((await getRoomBackend().compareExchangeCells(roomId, inc, { expect: [], mutations })) === 'stale-inc') {
+    throw roomClosedError(roomId)
+  }
 }

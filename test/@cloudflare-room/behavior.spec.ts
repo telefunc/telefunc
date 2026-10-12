@@ -122,3 +122,7 @@ test('lists room meta keys in the order its writes gave them: Room.setMeta() its
     ['z', 'y', 'x', 'w'],
   ])
 })
+
+test("resolves an acknowledged send with its handler's reply as soon as a frame after the lost reply reaches its sender", async () => {
+  expect(await probe('/lost-dm-ack')).toBe('handled:move')
+})

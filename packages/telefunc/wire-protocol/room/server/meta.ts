@@ -9,6 +9,7 @@ export {
   dropMemberMeta,
   readMembersMetaCells,
   memberMetaOf,
+  dropCells,
 }
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
