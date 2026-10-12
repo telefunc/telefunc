@@ -403,11 +403,9 @@ describe('Room at 100,000 members', () => {
         Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
       )
     const observer = await view(room.id)
-    observer.onUpdate(() => {})
     const peer = attachPeer(register(observer))
     await vi.waitFor(() => expect(peer.decoded().length).toBeGreaterThan(0))
     const { client, emit } = fakeClient(room.id)
-    client.onUpdate(() => {})
     let fed = 0
     const feed = () => {
       for (const frame of peer.decoded().slice(fed))
@@ -415,19 +413,25 @@ describe('Room at 100,000 members', () => {
       fed = peer.decoded().length
     }
     feed()
-    expect(Object.keys(client.meta)).toHaveLength(100_000)
+    const changes = { server: 0, client: 0 }
+    observer.onChange(() => changes.server++)
+    client.onChange(() => changes.client++)
+    // Timed until each view applied the write. Reading the whole meta builds it, the reader's own cost (an onUpdate
+    // listener's too), so it is read once at the end, and its garbage lands in no timed merge.
     const merge = async (value: number) => {
-      const server = await longestGapWhile(async () => {
+      const { server, client } = changes
+      const written = await longestGapWhile(async () => {
         await Room.setAttributes(room.id, { k0: value })
-        await vi.waitFor(() => expect(observer.meta.k0).toBe(value))
+        await vi.waitFor(() => expect(changes.server).toBe(server + 1))
       })
       const { gap } = await longestGapWhile(async () => feed())
-      expect(client.meta.k0).toBe(value)
-      return Math.max(server.gap, gap)
+      expect(changes.client).toBe(client + 1)
+      return Math.max(written.gap, gap)
     }
     await merge(-1)
     // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
+    expect([observer.meta.k0, client.meta.k0, Object.keys(client.meta).length]).toEqual([2, 2, 100_000])
   }, 60_000)
   it("merges one key into a member's meta of 100,000 keys with both event loops turning, a view and a client applying it", async () => {
     const room = await create('member-meta-merge-turns')
