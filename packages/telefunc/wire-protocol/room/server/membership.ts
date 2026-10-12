@@ -416,8 +416,16 @@ function* stayingMembers(
   }
 }
 
+/** Read again after a lapsed session's members were removed. */
 async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
-  await reapLapsedSessions(room)
+  const [sessions, members] = await Promise.all([
+    readPrefixAt(room.id, room.inc, SESSION_CELL_PREFIX),
+    readMembersById(room, ids),
+  ])
+  return (await reapSessions(room, sessions)) ? await readMembersById(room, ids) : members
+}
+
+async function readMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
   const cells = await readCells(room.id, room.inc, ids.map(memberCellKey))
   const metaCells = new Map<string, MemberMetaCells>()
   const entries = ids.flatMap((id) => {
