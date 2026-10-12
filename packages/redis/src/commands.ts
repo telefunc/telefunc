@@ -1,9 +1,10 @@
-export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, REDIS_COMMANDS }
+export { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH, LANE_PAGE_SIZE, REDIS_COMMANDS }
 export type { RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
 import {
+  decodeLaneKey,
   encodeLaneKey,
   type BroadcastPayload,
   type BroadcastRoute,
@@ -15,7 +16,9 @@ import {
   type HeadCxResult,
   type HeadNext,
   type LaneId,
+  type OrderingInfo,
   type RoomHead,
+  type RoomSubscriptionSource,
   type CellsRead,
 } from 'telefunc/__internal'
 import { assert } from './assert.js'
@@ -37,6 +40,7 @@ import {
   retainedOfKey,
   retainedOfTrackKey,
   revKey,
+  trackLanesKey,
   type CommitChannels,
 } from './keys.js'
 
@@ -45,6 +49,8 @@ const REDIS_DELIVERY_FENCE_BYTE = 0xff
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
+/** The lanes a start read's or a leave's page holds, as a SCAN count. */
+const LANE_PAGE_SIZE = 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
 // Redis 4 refuses a script's write after TIME unless the script replicates its effects, the default since Redis 5.
@@ -197,16 +203,60 @@ if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1) end
 return tf_cells_reply({'more', time, keys[#keys]}, keys, 1)
 `
 
-// Checked once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the
-// open head, so one closed or dropped during establishment is never reported ready.
-//   KEYS: [1]=head
-//   ARGV: [1]=inc
-const VALIDATE_GENERATION_LUA = `${HEAD_PRELUDE}
+// Read once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the open head, so one
+// closed or dropped during establishment is never reported ready, and its frames start after its lane's last commit.
+//   KEYS: [1]=head [2]=order: an inbox or binary lane's member's order hash, or another lane's own key
+//   ARGV: [1]=inc [2]=an inbox or binary lane's key, or ''
+//   Reply: nil once the incarnation is not the open head, else the lane's 'seq:ts', '' before its first commit
+const LANE_START_LUA = `${HEAD_PRELUDE}
 local head = tf_live_head(KEYS[1], tf_now())
-if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then
-  return 0
-end
-return 1
+if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
+local mark
+if ARGV[2] == '' then mark = redis.call('GET', KEYS[2]) else mark = redis.call('HGET', KEYS[2], ARGV[2]) end
+return mark or ''
+`
+
+// A page of a member's lanes' last commits, read as LANE_START_LUA reads one lane's, for its every-track subscription.
+//   KEYS: [1]=head [2]=the member's order hash
+//   ARGV: [1]=inc [2]=HSCAN cursor
+//   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, 'seq:ts', ...}}
+const MEMBER_LANE_STARTS_LUA = `${HEAD_PRELUDE}
+local head = tf_live_head(KEYS[1], tf_now())
+if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
+return redis.call('HSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
+`
+
+// A page of a track's binary lanes that have a commit, read as LANE_START_LUA reads one lane, for its every-member
+// subscription.
+//   KEYS: [1]=head [2]=the track's lane set
+//   ARGV: [1]=inc [2]=SSCAN cursor
+//   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, ...}}
+const TRACK_LANES_LUA = `${HEAD_PRELUDE}
+local head = tf_live_head(KEYS[1], tf_now())
+if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
+return redis.call('SSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
+`
+
+// Each binary lane's last commit, '' for one whose member's order is gone.
+//   KEYS: [1..]=each lane's member's order hash
+//   ARGV: [1..]=the lane keys, in KEYS's order
+const LANE_MARKS_LUA = `
+local marks = {}
+for i = 1, #KEYS do marks[i] = redis.call('HGET', KEYS[i], ARGV[i]) or '' end
+return marks
+`
+
+// Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
+// time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
+//   KEYS: [1]=order ('seq:ts')
+const BROADCAST_START_LUA = `
+redis.replicate_commands()
+local mark = redis.call('GET', KEYS[1])
+if mark then return mark end
+local t = redis.call('TIME')
+mark = string.format('%.0f', tonumber(t[1]) * 1000000 + tonumber(t[2])) .. ':0'
+redis.call('SET', KEYS[1], mark)
+return mark
 `
 
 // One atomic room-slot operation; incarnation ids are never reused, so a repeated drop deletes nothing.
@@ -280,7 +330,8 @@ return reply
 //         another lane's own key [3]=retained [4]=channel [5]=generation-keys [6]=cell values
 //         [7]=a binary lane's member's every-track channel (another lane repeats [4])
 //         [8]=a retained binary lane's member's retained lanes [9]=its track's retained lanes (another commit repeats
-//         [3] for both) [10]=a binary lane's track's every-member channel (another lane repeats [4])
+//         [3] for both) [10]=a binary lane's track's every-member channel (another lane repeats [4]) [11]=a binary
+//         lane's track's lane set, which its first commit enters (another lane repeats [2])
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
 //         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9]=the same as [6] for
 //         [10] or '' [10..]=required live cells
@@ -326,6 +377,10 @@ else
   redis.call('SET', order_key, seq_text .. ':' .. ts_text)
 end
 redis.call('SADD', generation_keys_key, order_key)
+if not prev and ARGV[2] == 'binary' then
+  redis.call('SADD', KEYS[11], ARGV[8])
+  redis.call('SADD', generation_keys_key, KEYS[11])
+end
 local frame = tf_ordering_frame(seq, ts, ARGV[5])
 if ARGV[4] == '1' then
   -- A lane holding a retained frame is already indexed: its frame and index entries leave together.
@@ -374,6 +429,16 @@ if ARGV[2] ~= '' then
   if redis.call('SCARD', KEYS[4]) == 0 then redis.call('SREM', KEYS[1], KEYS[4]) end
 end
 return redis.call('DEL', KEYS[2])
+`
+
+// Takes a page of a leaving member's binary lanes out of their tracks' lane sets.
+//   KEYS: [1]=generation-keys [2..]=each lane's track's lane set
+//   ARGV: [1..]=the lane keys, in KEYS[2..]'s order
+const FORGET_TRACK_LANES_LUA = `
+for i = 2, #KEYS do
+  redis.call('SREM', KEYS[i], ARGV[i - 1])
+  if redis.call('SCARD', KEYS[i]) == 0 then redis.call('SREM', KEYS[1], KEYS[i]) end
+end
 `
 
 // Forgets one member's lane order.
@@ -529,15 +594,72 @@ const REDIS_COMMANDS = {
       return { ...parseCells(now!, found.slice(1)), after: found[0]!.toString() }
     },
   }),
-  validateGeneration: command({
-    name: 'tfRoomValidateGeneration',
-    lua: VALIDATE_GENERATION_LUA,
-    numberOfKeys: 1,
-    invoke: (prefix, { roomId, inc }: RoomInc) => ({
-      keys: [headKey(prefix, roomId)],
-      argv: [inc],
+  laneStart: command({
+    name: 'tfRoomLaneStart',
+    lua: LANE_START_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, inc, lane }: RoomSubscriptionSource) => {
+      const laneKey = encodeLaneKey(lane)
+      const memberLane = lane.kind === 'inbox' || lane.kind === 'binary'
+      return {
+        keys: [
+          headKey(prefix, roomId),
+          memberLane ? memberOrderKey(prefix, roomId, inc, lane.member) : orderKey(prefix, roomId, inc, laneKey),
+        ],
+        argv: [inc, memberLane ? laneKey : ''],
+      }
+    },
+    parse: (reply): Map<string, OrderingInfo> | null => {
+      if (reply === null) return null
+      return reply === '' ? new Map() : new Map([['', parseOrderMark(reply as string)]])
+    },
+  }),
+  memberLaneStarts: command({
+    name: 'tfRoomMemberLaneStarts',
+    lua: MEMBER_LANE_STARTS_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, inc, member, cursor }: RoomInc & { member: string; cursor: string }) => ({
+      keys: [headKey(prefix, roomId), memberOrderKey(prefix, roomId, inc, member)],
+      argv: [inc, cursor],
     }),
-    parse: (reply) => Number(reply) === 1,
+    parse: (reply): { cursor: string; starts: Array<[string, OrderingInfo]> } | null => {
+      if (reply === null) return null
+      const [cursor, fields] = reply as [string, string[]]
+      const starts: Array<[string, OrderingInfo]> = []
+      for (let i = 0; i < fields.length; i += 2) starts.push([fields[i]!, parseOrderMark(fields[i + 1]!)])
+      return { cursor, starts }
+    },
+  }),
+  trackLanes: command({
+    name: 'tfRoomTrackLanes',
+    lua: TRACK_LANES_LUA,
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, inc, track, cursor }: RoomInc & { track: string; cursor: string }) => ({
+      keys: [headKey(prefix, roomId), trackLanesKey(prefix, roomId, inc, track)],
+      argv: [inc, cursor],
+    }),
+    parse: (reply): { cursor: string; lanes: string[] } | null => {
+      if (reply === null) return null
+      const [cursor, lanes] = reply as [string, string[]]
+      return { cursor, lanes }
+    },
+  }),
+  laneMarks: command({
+    name: 'tfRoomLaneMarks',
+    lua: LANE_MARKS_LUA,
+    numberOfKeys: null,
+    invoke: (prefix, { roomId, inc, lanes }: RoomInc & { lanes: readonly string[] }) => ({
+      keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(laneKey).member)),
+      argv: [...lanes],
+    }),
+    parse: (reply) => (reply as string[]).map((mark) => (mark === '' ? null : parseOrderMark(mark))),
+  }),
+  broadcastStart: command({
+    name: 'tfBroadcastStart',
+    lua: BROADCAST_START_LUA,
+    numberOfKeys: 1,
+    invoke: (prefix, route: BroadcastRoute) => ({ keys: [broadcastSequenceKey(prefix, route.key)], argv: [] }),
+    parse: (reply) => new Map([['', parseOrderMark(reply as string)]]),
   }),
   dropGeneration: command({
     name: 'tfRoomDropGeneration',
@@ -593,17 +715,19 @@ const REDIS_COMMANDS = {
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: 10,
+    numberOfKeys: 11,
     invoke: (prefix, input: CommitInput) => {
       const { roomId, inc, lane, laneKey, channels } = input
       const retained = retainedKey(prefix, roomId, inc, laneKey)
       const indexed = lane.kind === 'binary' && input.retain
+      const order =
+        lane.kind === 'inbox' || lane.kind === 'binary'
+          ? memberOrderKey(prefix, roomId, inc, lane.member)
+          : orderKey(prefix, roomId, inc, laneKey)
       return {
         keys: [
           headKey(prefix, roomId),
-          lane.kind === 'inbox' || lane.kind === 'binary'
-            ? memberOrderKey(prefix, roomId, inc, lane.member)
-            : orderKey(prefix, roomId, inc, laneKey),
+          order,
           retained,
           channels.lane,
           generationKeysKey(prefix, roomId, inc),
@@ -612,6 +736,7 @@ const REDIS_COMMANDS = {
           indexed ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
           indexed ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
           channels.everyMember ?? channels.lane,
+          lane.kind === 'binary' ? trackLanesKey(prefix, roomId, inc, lane.track) : order,
         ],
         argv: [
           inc,
@@ -653,6 +778,19 @@ const REDIS_COMMANDS = {
         argv: [ifSeq === undefined ? '' : String(ifSeq), binary ? laneKey : ''],
       }
     },
+    parse: () => {},
+  }),
+  forgetTrackLanes: command({
+    name: 'tfRoomForgetTrackLanes',
+    lua: FORGET_TRACK_LANES_LUA,
+    numberOfKeys: null,
+    invoke: (prefix, { roomId, inc, lanes }: RoomInc & { lanes: readonly string[] }) => ({
+      keys: [
+        generationKeysKey(prefix, roomId, inc),
+        ...lanes.map((laneKey) => trackLanesKey(prefix, roomId, inc, binaryLaneOf(laneKey).track)),
+      ],
+      argv: [...lanes],
+    }),
     parse: () => {},
   }),
   dropLaneOrders: command({
@@ -751,4 +889,15 @@ function parseCells(
 
 function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+}
+
+function parseOrderMark(mark: string): OrderingInfo {
+  const [seq, timestamp] = mark.split(':').map(Number) as [number, number]
+  return { seq, timestamp }
+}
+
+function binaryLaneOf(laneKey: string): Extract<LaneId, { kind: 'binary' }> {
+  const lane = decodeLaneKey(laneKey)
+  assert(lane.kind === 'binary')
+  return lane
 }

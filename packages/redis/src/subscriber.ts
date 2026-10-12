@@ -1,4 +1,5 @@
 export { RedisSubscriptionDriver }
+export type { RedisSubscriptionSource }
 
 import { randomUUID } from 'node:crypto'
 import type {
@@ -23,8 +24,9 @@ type RedisSubscriptionDriverOptions = {
   prefix: string
   /** A fresh, unconnected subscriber socket that never retries on its own. */
   createSubscriber: () => Promise<SubscriberSocket>
-  /** Whether the source's incarnation is still the open head. */
-  validateGeneration: (source: RoomSubscriptionSource) => Promise<boolean>
+  /** Each of the source's lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on another;
+   *  null once a Room source's incarnation is not the open head. */
+  readLaneStarts: (source: RedisSubscriptionSource) => Promise<Map<string, OrderingInfo> | null>
 }
 
 /** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
@@ -62,7 +64,7 @@ const REORDER_WAIT_MS = 1_000
 class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSource> {
   private readonly _prefix: string
   private readonly _createSubscriber: () => Promise<SubscriberSocket>
-  private readonly _validateGeneration: RedisSubscriptionDriverOptions['validateGeneration']
+  private readonly _readLaneStarts: RedisSubscriptionDriverOptions['readLaneStarts']
   /** Every channel some attempt needs, with the attempts that listen on it. */
   private readonly _byChannel = new Map<string, Set<RedisSubscriptionAttempt>>()
   /** The channels some attempt started or stopped needing since the last sync read them. */
@@ -80,7 +82,7 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   constructor(options: RedisSubscriptionDriverOptions) {
     this._prefix = options.prefix
     this._createSubscriber = options.createSubscriber
-    this._validateGeneration = options.validateGeneration
+    this._readLaneStarts = options.readLaneStarts
   }
 
   bind(source: RedisSubscriptionSource): SubscriptionBinding {
@@ -275,25 +277,20 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     await Promise.all(covered.map((attempt) => this._confirm(attempt, id)))
   }
 
-  /** Its channels are subscribed on a live connection: ready, unless its incarnation is no longer open. */
+  /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is
+   *  no longer open. */
   private async _confirm(attempt: RedisSubscriptionAttempt, id: number): Promise<void> {
-    const { source } = attempt
-    if ('roomId' in source) {
-      let open: boolean
-      try {
-        open = await this._validateGeneration(source)
-      } catch (error) {
-        // A failed check (a command-connection error) fails this attempt, not the shared subscriber connection.
-        if (this._isCurrent(id)) attempt.terminate(error)
-        return
-      }
-      if (!open) {
-        if (this._isCurrent(id))
-          attempt.terminate(new Error(`subscribeLane: generation '${source.roomId}/${source.inc}' is not open`))
-        return
-      }
+    let starts: Map<string, OrderingInfo> | null
+    try {
+      starts = await this._readLaneStarts(attempt.source)
+    } catch (error) {
+      // A failed read (a command-connection error) fails this attempt, not the shared subscriber connection.
+      if (this._isCurrent(id)) attempt.terminate(error)
+      return
     }
-    if (this._isCurrent(id)) attempt.markReady()
+    if (!this._isCurrent(id)) return
+    if (starts !== null) return attempt.markReady(starts)
+    attempt.terminate(new Error(`subscribeLane: the generation of '${attempt.laneChannel}' is not open`))
   }
 
   private _attempts(): Set<RedisSubscriptionAttempt> {
@@ -310,7 +307,9 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   private readonly _fences = new Map<string, Deferred<void>>()
   /** Each lane's order: an every-track or every-member channel carries many binary lanes, keyed by lane key; any other
    *  channel one lane, keyed `''`. */
-  private readonly _orders = new Map<string, LaneOrder>()
+  private _orders = new Map<string, LaneOrder>()
+  /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
+  private _early: Buffer[] = []
   private readonly _fanIn: boolean
 
   constructor(
@@ -350,11 +349,20 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     return this.state() === 'establishing' || this.state() === 'lost'
   }
 
-  markReady(): void {
+  /** A lane missing from `starts` has no commit yet. */
+  markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
-    // Frames published while lost are gone; a Redis restarted without its data may restart the sequence.
-    this._orders.clear()
+    this._orders = new Map()
+    for (const [lane, start] of starts)
+      this._orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, held: null, release: null })
+    const early = this._early
+    this._early = []
     this.transition('ready')
+    for (const message of early) {
+      // A receiver may close the lane.
+      if (this.state() !== 'ready') return
+      this._receiveFrame(message)
+    }
   }
 
   terminate(error: unknown): void {
@@ -365,6 +373,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   }
 
   lose(error: unknown): void {
+    this._early = []
     if (this.state() !== 'ready') return
     // What arrived goes out: what it waits for can no longer arrive on this connection.
     for (const order of this._orders.values()) if (order.held !== null) this._release(order)
@@ -375,7 +384,11 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel)
       return this.terminate(new Error('Redis generation subscription was invalidated'))
-    if (this.state() !== 'ready') return
+    if (this.state() === 'ready') return this._receiveFrame(message)
+    if (this.awaitsConfirmation()) this._early.push(message)
+  }
+
+  private _receiveFrame(message: Buffer): void {
     if (message[0] !== REDIS_DELIVERY_FENCE_BYTE) return this._order(message, null)
     const token = message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)
     this._order(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH), token)
@@ -391,10 +404,11 @@ class RedisSubscriptionAttempt extends DriverAttempt {
       frame = frame.subarray(end)
     }
     const { payload, info } = decodeOrderingFrame(frame)
-    const order = this._orders.get(lane)
+    let order = this._orders.get(lane)
     if (order === undefined) {
-      this._orders.set(lane, { last: info.seq, lastTimestamp: info.timestamp, held: null, release: null })
-      return this._deliver(payload, info, token)
+      // A lane with no commit when the subscription went live: every one of its commits is after.
+      order = { last: 0, lastTimestamp: 0, held: null, release: null }
+      this._orders.set(lane, order)
     }
     if (info.seq === order.last + 1) {
       this._advance(order, payload, info, token)
@@ -452,6 +466,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   private _dropHeld(): void {
     for (const order of this._orders.values()) if (order.release !== null) clearTimeout(order.release)
     this._orders.clear()
+    this._early = []
   }
 
   private _deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {

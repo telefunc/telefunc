@@ -503,8 +503,6 @@ process.exit(0)`,
       holding = next
     }
     onTestFinished(() => setHolding(false))
-    // The lane's first frame since it was ready tells it the seq the next one has.
-    await accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('first'))).delivery
     setHolding(true)
     const lateFirst = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('late-first')))
     const lateSecond = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('late-second')))
@@ -514,13 +512,14 @@ process.exit(0)`,
     const seqOf = (message: Buffer) =>
       decodeOrderingFrame(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)).info.seq
     expect(held.map(([, message]) => message[0])).toEqual([REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_BYTE])
-    // The later frame first: it waits for the earlier one, and both go out in order, each fence settling then.
+    // The lane's first two frames since it was ready, the later first: it waits for the earlier one, and both go out in
+    // order, each fence settling then.
     const [later, earlier] = held.sort(([, left], [, right]) => seqOf(right) - seqOf(left))
     dispatch(...later!)
     expect(await settlesWithin(lateSecond.delivery, 100)).toBe(false)
     dispatch(...earlier!)
     await Promise.all([lateFirst.delivery, lateSecond.delivery])
-    expect(observed).toEqual(['first', 'late-first', 'late-second'])
+    expect(observed).toEqual(['late-first', 'late-second'])
     held.length = 0
     setHolding(true)
     const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('old-epoch')))
@@ -544,7 +543,7 @@ process.exit(0)`,
     const error = await deliveryOutcome
     expect(error).toBeInstanceOf(Error)
     expect(String(error)).toMatch(/delivery fence|connection closed/i)
-    expect(observed).toEqual(['first', 'late-first', 'late-second'])
+    expect(observed).toEqual(['late-first', 'late-second'])
   })
   it('omits unknowable receiver counts and shares empty-key text/binary ordering across nodes', async () => {
     const prefix = uniquePrefix('receivers')

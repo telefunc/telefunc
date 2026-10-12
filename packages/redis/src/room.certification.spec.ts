@@ -359,8 +359,46 @@ await read()`,
     const generationKeys = await (
       backend as unknown as { _generationKeys(roomId: string, inc: string): Promise<string[]> }
     )._generationKeys(room.id, inc)
-    const orderKeys = generationKeys.filter((key) => /:g:[^:]+:om?:/.test(key))
+    const orderKeys = generationKeys.filter((key) => /:g:[^:]+:o[mt]?:/.test(key))
     expect(orderKeys).toEqual([expect.stringMatching(/:o:control$/)])
+  })
+
+  it("reads where each lane a subscription carries stands as it goes live, and forgets a member's lanes once it leaves", async () => {
+    const prefix = uniquePrefix('lane-starts')
+    const redis = ownClient(connect())
+    installRedis(redis, { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('lane-starts')
+    const a = await room.join()
+    const b = await room.join()
+    onTestFinished(() => b.leave())
+    for (let i = 0; i < 3; i++) await a.publishBinary(new Uint8Array([i]), { track: 'mic' })
+    await a.publishBinary(new Uint8Array([0]), { track: 'camera' })
+    await b.publishBinary(new Uint8Array([0]), { track: 'mic' })
+    const backend = new RedisBackend({ redis, prefix })
+    const inc = (await backend.readHead(room.id))!.currentInc!
+    type Starts = Map<string, { seq: number }> | null
+    type Reads = { _readLaneStarts(source: { roomId: string; inc: string; lane: unknown }): Promise<Starts> }
+    const seqs = async (lane: unknown) => {
+      const starts = await (backend as unknown as Reads)._readLaneStarts({ roomId: room.id, inc, lane })
+      return Object.fromEntries([...starts!].map(([key, { seq }]) => [key, seq]))
+    }
+    const binary = (member: string, track: string) => encodeLaneKey({ kind: 'binary', member, track })
+    expect(await seqs({ kind: 'binary-track', track: 'mic' })).toEqual({
+      [binary(a.id, 'mic')]: 3,
+      [binary(b.id, 'mic')]: 1,
+    })
+    expect(await seqs({ kind: 'binary-all', member: a.id })).toEqual({
+      [binary(a.id, 'mic')]: 3,
+      [binary(a.id, 'camera')]: 1,
+    })
+    expect(await seqs({ kind: 'binary', member: a.id, track: 'mic' })).toEqual({ '': 3 })
+    expect(await seqs({ kind: 'semantic' })).toEqual({})
+    await a.leave()
+    await vi.waitFor(async () =>
+      expect(await seqs({ kind: 'binary-track', track: 'mic' })).toEqual({ [binary(b.id, 'mic')]: 1 }),
+    )
+    expect(await seqs({ kind: 'binary-track', track: 'camera' })).toEqual({})
   })
 
   it('lists the directory entries due, earliest first and a page at a time, until each is put again or deleted', async () => {

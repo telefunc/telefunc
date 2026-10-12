@@ -5,6 +5,7 @@ import {
   encodeLaneKey,
   type BackendPayload,
   type BackendReceiver,
+  type OrderingInfo,
   type SubscriptionAttempt,
   type SubscriptionState,
 } from 'telefunc/__internal'
@@ -65,17 +66,21 @@ function everyTrackFrame(laneKey: string, seq: number, payload: string): Uint8Ar
   return frame
 }
 
-function driverWith(
-  sockets: ReturnType<typeof fakeSubscriber>[],
-  validateGeneration: () => Promise<boolean> = async () => true,
-) {
+/** Where each of a source's lanes stands as it goes live, by lane key; a lane missing has no commit yet. */
+type LaneStarts = (source: Parameters<RedisSubscriptionDriver['bind']>[0]) => Promise<Map<string, OrderingInfo> | null>
+
+function startsAt(...lanes: Array<[lane: string, seq: number, timestamp?: number]>): LaneStarts {
+  return async () => new Map(lanes.map(([lane, seq, timestamp = 1]) => [lane, { seq, timestamp }]))
+}
+
+function driverWith(sockets: ReturnType<typeof fakeSubscriber>[], readLaneStarts: LaneStarts = startsAt()) {
   const createSubscriber = vi.fn(async () => {
     const next = fakeSubscriber()
     sockets.push(next)
     return next.socket as unknown as SubscriberSocket
   })
   return {
-    driver: new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration }),
+    driver: new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, readLaneStarts }),
     createSubscriber,
   }
 }
@@ -102,7 +107,9 @@ test('shares one subscriber connection across lanes', async () => {
 
 test('re-subscribes on a fresh connection and resumes delivery after a drop', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
-  const { driver } = driverWith(sockets)
+  // The Redis that comes back lost its data, and its lane starts over.
+  let starts = startsAt(['', 4])
+  const { driver } = driverWith(sockets, (source) => starts(source))
   const received: BackendPayload[] = []
   const states: SubscriptionState[] = []
   const attempt = openAttempt(driver, route, (payload) => void received.push(payload))
@@ -110,6 +117,7 @@ test('re-subscribes on a fresh connection and resumes delivery after a drop', as
   attempt.onStateChange((state) => states.push(state))
   const channel = sockets[0]!.subscribed[0]![0]!
   sockets[0]!.deliver(channel, orderingFrame(5, 'one'))
+  starts = startsAt()
   sockets[0]!.socket.emit('close')
   await vi.waitFor(() => expect(states).toEqual(['lost', 'ready']))
   expect(sockets[1]!.subscribed).toEqual([[channel]])
@@ -144,7 +152,7 @@ test('reports the outage of a connection opened after an earlier outage released
   const createSubscriber = vi.fn(async (): Promise<SubscriberSocket> => {
     throw new Error('connect ECONNREFUSED')
   })
-  const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration: async () => true })
+  const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, readLaneStarts: startsAt() })
   const first = openAttempt(driver, route)
   await vi.waitFor(() => expect(report).toHaveBeenCalledOnce())
   // Its last subscription leaves mid-outage, which releases the connection; a later one starts afresh.
@@ -156,7 +164,7 @@ test('reports the outage of a connection opened after an earlier outage released
 
 test('an every-track lane drops a frame only when it is late on its own lane, as a Cluster resharding can deliver it', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
-  const { driver } = driverWith(sockets)
+  const { driver } = driverWith(sockets, startsAt(['binary:m:camera', 4]))
   const received: string[] = []
   const attempt = openAttempt(
     driver,
@@ -179,7 +187,7 @@ test('an every-track lane drops a frame only when it is late on its own lane, as
 
 test('an every-member lane drops a frame only when it is late on its own lane, as a Cluster resharding can deliver it', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
-  const { driver } = driverWith(sockets)
+  const { driver } = driverWith(sockets, startsAt(['binary:a:mic', 4]))
   const received: string[] = []
   const attempt = openAttempt(
     driver,
@@ -202,7 +210,7 @@ test('an every-member lane drops a frame only when it is late on its own lane, a
 
 test('a frame that arrives past a missing one waits for it, and both go out in order on their own lane', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
-  const { driver } = driverWith(sockets)
+  const { driver } = driverWith(sockets, startsAt(['binary:b:mic', 6]))
   const received: string[] = []
   const attempt = openAttempt(
     driver,
@@ -261,7 +269,7 @@ test('a frame whose predecessor never arrives goes out after the wait, and the p
 
 test('a lane whose seq a failover rewound goes on from the rewound frame, and a frame older than the last is still dropped', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
-  const { driver } = driverWith(sockets)
+  const { driver } = driverWith(sockets, startsAt(['', 4, 9]))
   const received: string[] = []
   const attempt = openAttempt(driver, route, (payload, info) => void received.push(`${payload}@${info.seq}`))
   await untilReady(attempt)
@@ -276,6 +284,58 @@ test('a lane whose seq a failover rewound goes on from the rewound frame, and a 
   ] as const)
     sockets[0]!.deliver(channel, orderingFrame(seq, payload, timestamp))
   expect(received).toEqual(['a@5', 'b@6', 'c@5', 'd@6', 'e@7'])
+})
+
+test("a frame that arrives just ahead of its lane's first after subscribing waits for it, and both go out in order", async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets, startsAt(['', 4]))
+  const received: string[] = []
+  const attempt = openAttempt(driver, route, (payload, info) => void received.push(`${payload}@${info.seq}`))
+  await untilReady(attempt)
+  const channel = sockets[0]!.subscribed[0]![0]!
+  sockets[0]!.deliver(channel, orderingFrame(6, 'b'))
+  sockets[0]!.deliver(channel, orderingFrame(5, 'a'))
+  expect(received).toEqual(['a@5', 'b@6'])
+})
+
+test("a fan-in frame that arrives just ahead of its lane's first after subscribing waits for it, a lane with no commit yet starting at 1", async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets, startsAt(['binary:m:camera', 4]))
+  const received: string[] = []
+  const attempt = openAttempt(
+    driver,
+    { roomId: 'room', inc: 'inc', lane: { kind: 'binary-all', member: 'm' } },
+    (payload, info) => void received.push(`${new TextDecoder().decode(payload as Uint8Array)}@${info.seq}`),
+  )
+  await untilReady(attempt)
+  const channel = channelKey('tf:', 'room', 'inc', 'binary-all:m')
+  for (const [lane, seq] of [
+    ['camera', 6],
+    ['mic', 2],
+    ['camera', 5],
+    ['mic', 1],
+  ] as const)
+    sockets[0]!.deliver(channel, everyTrackFrame(`binary:m:${lane}`, seq, lane))
+  expect(received).toEqual(['camera@5', 'camera@6', 'mic@1', 'mic@2'])
+})
+
+test('a frame that arrives while its lane is being read goes out once the read is back, unless the read already counted it', async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const read = Promise.withResolvers<Map<string, OrderingInfo>>()
+  const { driver } = driverWith(sockets, () => read.promise)
+  const received: string[] = []
+  const attempt = openAttempt(driver, route, (payload, info) => void received.push(`${payload}@${info.seq}`))
+  await vi.waitFor(() => expect(sockets[0]?.subscribed).toHaveLength(1))
+  const channel = sockets[0]!.subscribed[0]![0]!
+  for (const [seq, payload] of [
+    [4, 'counted'],
+    [6, 'b'],
+    [5, 'a'],
+  ] as const)
+    sockets[0]!.deliver(channel, orderingFrame(seq, payload))
+  read.resolve(new Map([['', { seq: 4, timestamp: 1 }]]))
+  await untilReady(attempt)
+  expect(received).toEqual(['a@5', 'b@6'])
 })
 
 test("a fence resolves when its subscription's owner releases it: no receiver is left to hand off to", async () => {
@@ -304,7 +364,7 @@ test('a SUBSCRIBE that keeps failing backs off and is reported once', async () =
     }
     return socket as unknown as SubscriberSocket
   })
-  const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, validateGeneration: async () => true })
+  const driver = new RedisSubscriptionDriver({ prefix: 'tf:', createSubscriber, readLaneStarts: startsAt() })
   const attempt = openAttempt(driver, route)
   await vi.advanceTimersByTimeAsync(10_000)
   // The delay doubles from 50 ms to 2 s: ten connections in ten seconds, not one every 50 ms.
@@ -333,11 +393,12 @@ test('a subscriber dropping before the commit returns rejects its delivery witho
   await expect(fence.delivery).rejects.toThrow()
 })
 
-test('a failed generation check ends that Room lane only, not the shared connection', async () => {
+test('a failed start read ends that Room lane only, not the shared connection', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const failure = new Error('command connection lost')
-  const { driver } = driverWith(sockets, async () => {
-    throw failure
+  const { driver } = driverWith(sockets, async (source) => {
+    if ('roomId' in source) throw failure
+    return new Map()
   })
   const broadcast = openAttempt(driver, route)
   await untilReady(broadcast)
@@ -350,7 +411,7 @@ test('a failed generation check ends that Room lane only, not the shared connect
 test('terminates a Room lane whose incarnation closed while the connection was down', async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   let open = true
-  const { driver } = driverWith(sockets, async () => open)
+  const { driver } = driverWith(sockets, async () => (open ? new Map() : null))
   const attempt = openAttempt(driver, { roomId: 'room', inc: 'inc', lane: { kind: 'control' } })
   await untilReady(attempt)
   open = false

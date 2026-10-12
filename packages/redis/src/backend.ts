@@ -44,8 +44,8 @@ import {
   retainedOfTrackKey,
   commitChannels,
 } from './keys.js'
-import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
-import { RedisSubscriptionDriver } from './subscriber.js'
+import { LANE_PAGE_SIZE, REDIS_COMMANDS, type RedisCommand } from './commands.js'
+import { RedisSubscriptionDriver, type RedisSubscriptionSource } from './subscriber.js'
 
 const DIRECTORY_PAGE_SIZE = 100
 
@@ -75,7 +75,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
       createSubscriber: () => createSubscriberSocket(this._publisher),
-      validateGeneration: (source) => this._run(REDIS_COMMANDS.validateGeneration, source),
+      readLaneStarts: (source) => this._readLaneStarts(source),
     })
   }
 
@@ -215,8 +215,16 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return this._run(REDIS_COMMANDS.retainedDelete, { roomId, inc, lane, ifSeq: opts?.ifSeq })
   }
 
-  dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
-    return this._run(REDIS_COMMANDS.dropLaneOrders, { roomId, inc, member })
+  async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
+    const orders = memberOrderKey(this._prefix, roomId, inc, member)
+    let cursor = '0'
+    do {
+      const [next, fields] = await this._publisher.hscan(orders, cursor, 'COUNT', LANE_PAGE_SIZE)
+      cursor = next
+      const lanes = fields.filter((field, i) => i % 2 === 0 && decodeLaneKey(field).kind === 'binary')
+      if (lanes.length > 0) await this._run(REDIS_COMMANDS.forgetTrackLanes, { roomId, inc, lanes })
+    } while (cursor !== '0')
+    await this._run(REDIS_COMMANDS.dropLaneOrders, { roomId, inc, member })
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
@@ -254,6 +262,42 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
 
   directoryDue(now: number): Promise<DirectoryPage['entries']> {
     return this._run(REDIS_COMMANDS.directoryDue, { now, limit: DIRECTORY_PAGE_SIZE })
+  }
+
+  /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
+   *  on a fan-in channel and `''` on another; null once a Room source's incarnation is not the open head. */
+  private async _readLaneStarts(source: RedisSubscriptionSource): Promise<Map<string, OrderingInfo> | null> {
+    if (!('roomId' in source)) return await this._run(REDIS_COMMANDS.broadcastStart, source)
+    const { roomId, inc, lane } = source
+    if (lane.kind === 'binary-all') return await this._memberLaneStarts(roomId, inc, lane.member)
+    if (lane.kind === 'binary-track') return await this._trackLaneStarts(roomId, inc, lane.track)
+    return await this._run(REDIS_COMMANDS.laneStart, source)
+  }
+
+  private async _memberLaneStarts(roomId: string, inc: string, member: string) {
+    const starts = new Map<string, OrderingInfo>()
+    let cursor = '0'
+    do {
+      const page = await this._run(REDIS_COMMANDS.memberLaneStarts, { roomId, inc, member, cursor })
+      if (page === null) return null
+      cursor = page.cursor
+      for (const [laneKey, start] of page.starts) starts.set(laneKey, start)
+    } while (cursor !== '0')
+    return starts
+  }
+
+  private async _trackLaneStarts(roomId: string, inc: string, track: string) {
+    const starts = new Map<string, OrderingInfo>()
+    let cursor = '0'
+    do {
+      const page = await this._run(REDIS_COMMANDS.trackLanes, { roomId, inc, track, cursor })
+      if (page === null) return null
+      cursor = page.cursor
+      if (page.lanes.length === 0) continue
+      const marks = await this._run(REDIS_COMMANDS.laneMarks, { roomId, inc, lanes: page.lanes })
+      for (const [i, laneKey] of page.lanes.entries()) if (marks[i] !== null) starts.set(laneKey, marks[i]!)
+    } while (cursor !== '0')
+    return starts
   }
 
   private _generationKeys(roomId: string, inc: string): Promise<string[]> {

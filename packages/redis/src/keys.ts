@@ -11,6 +11,7 @@ export {
   cellVersionsKey,
   orderKey,
   memberOrderKey,
+  trackLanesKey,
   retainedKeyPrefix,
   retainedKey,
   retainedOfKey,
@@ -85,6 +86,10 @@ function orderKey(prefix: string, roomId: string, inc: string, laneKey: string):
 /** The order of one member's inbox and binary lanes, by lane key. */
 function memberOrderKey(prefix: string, roomId: string, inc: string, member: string): string {
   return `${genPrefix(prefix, roomId, inc)}:om:${encodeURIComponent(member)}`
+}
+/** The keys of one track's binary lanes that have a commit. */
+function trackLanesKey(prefix: string, roomId: string, inc: string, track: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:ot:${encodeURIComponent(track)}`
 }
 function retainedKeyPrefix(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rt:`

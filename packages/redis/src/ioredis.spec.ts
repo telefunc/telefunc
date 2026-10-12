@@ -172,8 +172,6 @@ test("reads integer replies as ioredis returns them, numbers or, with a shared c
       timestamp: 1_700_000_000_000,
       receivers: 2,
     })
-  for (const reply of [1, '1'])
-    expect(REDIS_COMMANDS.validateGeneration.parse(reply, { roomId: 'room', inc: 'inc' })).toBe(true)
 })
 
 test('names Pub/Sub channels per database, as Pub/Sub spans every database', async () => {
