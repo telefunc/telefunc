@@ -44,12 +44,12 @@ function fakeSubscriber() {
   }
 }
 
-function orderingFrame(seq: number, payload: string): Uint8Array {
+function orderingFrame(seq: number, payload: string, timestamp = 1): Uint8Array {
   const bytes = new TextEncoder().encode(payload)
   const frame = new Uint8Array(16 + bytes.byteLength)
   const view = new DataView(frame.buffer)
   view.setUint32(4, seq)
-  view.setUint32(12, 1)
+  view.setUint32(12, timestamp)
   frame.set(bytes, 16)
   return frame
 }
@@ -257,6 +257,25 @@ test('a frame whose predecessor never arrives goes out after the wait, and the p
   await expect(fence.delivery).resolves.toBeUndefined()
   expect(received).toEqual(['one', 'three'])
   await attempt.unsubscribe()
+})
+
+test('a lane whose seq a failover rewound goes on from the rewound frame, and a frame older than the last is still dropped', async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets)
+  const received: string[] = []
+  const attempt = openAttempt(driver, route, (payload, info) => void received.push(`${payload}@${info.seq}`))
+  await untilReady(attempt)
+  const channel = sockets[0]!.subscribed[0]![0]!
+  for (const [seq, timestamp, payload] of [
+    [5, 10, 'a'],
+    [6, 11, 'b'],
+    [5, 20, 'c'],
+    [6, 21, 'd'],
+    [4, 9, 'late'],
+    [7, 22, 'e'],
+  ] as const)
+    sockets[0]!.deliver(channel, orderingFrame(seq, payload, timestamp))
+  expect(received).toEqual(['a@5', 'b@6', 'c@5', 'd@6', 'e@7'])
 })
 
 test("a fence resolves when its subscription's owner releases it: no receiver is left to hand off to", async () => {

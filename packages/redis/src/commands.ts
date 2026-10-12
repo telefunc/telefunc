@@ -79,17 +79,24 @@ local function tf_ordering_frame(seq, ts, payload)
 end
 `
 
-// Broadcast publish: next per-key seq, authority time, one PUBLISH of the ordering frame.
-//   KEYS: [1]=sequence [2]=channel
+// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of the ordering frame.
+//   KEYS: [1]=order ('seq:ts') [2]=channel
 //   ARGV: [1]=payload
 const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
--- A missing counter (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
-if redis.call('EXISTS', KEYS[1]) == 0 then
-  local t = redis.call('TIME')
-  redis.call('SET', KEYS[1], string.format('%d', tonumber(t[1]) * 1000000 + tonumber(t[2])))
-end
-local seq = redis.call('INCR', KEYS[1])
+local prev = redis.call('GET', KEYS[1])
 local ts = tf_now()
+local seq
+if prev then
+  local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
+  if not pseq then return redis.error_reply('publish: invalid ordering watermark') end
+  seq = tonumber(pseq) + 1
+  if tonumber(pts) > ts then ts = tonumber(pts) end
+else
+  -- A missing order (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
+  local t = redis.call('TIME')
+  seq = tonumber(t[1]) * 1000000 + tonumber(t[2]) + 1
+end
+redis.call('SET', KEYS[1], string.format('%.0f', seq) .. ':' .. string.format('%.0f', ts))
 local frame = tf_ordering_frame(seq, ts, ARGV[1])
 local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}

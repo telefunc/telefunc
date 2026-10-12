@@ -25,18 +25,18 @@ const ANNOUNCE_KEY = '\0announce'
  *  live frames committed before it, so this drops its live echo and the sender's older frames, and a retained frame
  *  older than the sender's live stream. Another sender's frames are never dropped by it. */
 class ReplayGate {
-  private readonly _high = new Map<string, number>()
+  private readonly _high = new Map<string, WirePublishInfo>()
   /** Binary lanes by sender, then track, so a sender's leave forgets only its own. */
-  private readonly _binaryHigh = new Map<string, Map<string, number>>()
+  private readonly _binaryHigh = new Map<string, Map<string, WirePublishInfo>>()
 
-  admit(key: string, seq: number): boolean {
-    return admitInto(this._high, key, seq)
+  admit(key: string, info: WirePublishInfo): boolean {
+    return admitInto(this._high, key, info)
   }
 
-  admitBinary(member: string, track: string, seq: number): boolean {
+  admitBinary(member: string, track: string, info: WirePublishInfo): boolean {
     let high = this._binaryHigh.get(member)
     if (!high) this._binaryHigh.set(member, (high = new Map()))
-    return admitInto(high, track, seq)
+    return admitInto(high, track, info)
   }
 
   forgetMember(member: string): void {
@@ -45,9 +45,12 @@ class ReplayGate {
   }
 }
 
-function admitInto(high: Map<string, number>, key: string, seq: number): boolean {
-  if ((high.get(key) ?? 0) >= seq) return false
-  high.set(key, seq)
+/** A later time is newer whatever the seq: a commit never sets its lane's time back, and a failover may rewind its seq. */
+function admitInto(high: Map<string, WirePublishInfo>, key: string, info: WirePublishInfo): boolean {
+  const last = high.get(key)
+  if (last !== undefined && info.timestamp < last.timestamp) return false
+  if (last !== undefined && info.timestamp === last.timestamp && info.seq <= last.seq) return false
+  high.set(key, info)
   return true
 }
 
@@ -125,26 +128,26 @@ class LocalHolder implements LaneHolder {
   }
 
   relayText(event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._wantsTextFrom(event.from) && this._replay.admit(event.from, info.seq)) this._applyText(event, info)
+    if (this._wantsTextFrom(event.from) && this._replay.admit(event.from, info)) this._applyText(event, info)
   }
 
   relayAnnouncement(data: unknown, info: WirePublishInfo): void {
-    if (this._state.wantsAnnounce && this._replay.admit(ANNOUNCE_KEY, info.seq))
+    if (this._state.wantsAnnounce && this._replay.admit(ANNOUNCE_KEY, info))
       this._state.applyAnnounce(data, this._publishInfo(info))
   }
 
   relayBinary(frame: BinaryFrame, info: WirePublishInfo): void {
     const track = laneTrack(frame.track)
-    if (this._wantsBinary(frame.from, track) && this._replay.admitBinary(frame.from, track, info.seq))
+    if (this._wantsBinary(frame.from, track) && this._replay.admitBinary(frame.from, track, info))
       this._applyBinary(frame, info)
   }
 
   _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._replay.admit(event.from, info.seq)) this._applyText(event, info)
+    if (this._replay.admit(event.from, info)) this._applyText(event, info)
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._replay.admitBinary(frame.from, laneTrack(frame.track), info.seq)) this._applyBinary(frame, info)
+    if (this._replay.admitBinary(frame.from, laneTrack(frame.track), info)) this._applyBinary(frame, info)
   }
 
   forgetMember(member: string): void {

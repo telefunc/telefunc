@@ -80,7 +80,10 @@ class AuthoritySync {
     if (host.model.closed || !(await this._reconcileMeta())) return
     await dropReplacedMetaGenerations(host.id, host._inc)
     await reapLapsedSessions(host._incarnation)
+    const before = this._covered
     const mark = await this._controlMark()
+    // The authority's seq never goes below what a view covered, unless a failover rewound it.
+    if (mark < before) this._forgetCoverage()
     const covered = () => this._current() && mark <= this._covered
     if (covered()) return
     // A read already running may predate the mark.
@@ -91,13 +94,19 @@ class AuthoritySync {
   /** A control frame reached this view. One past a seq that didn't opens a hole, which a whole read repairs
    *  `ROOM_META_REPAIR_MS` later unless the missing frame arrives meanwhile. */
   controlDelivered(seq: number): void {
-    if (seq > this._received) {
-      if (seq !== this._received + 1) this._runStart = seq
-      this._received = seq
-    }
+    // A driver delivers a lane in order, so a seq at or below the highest one is a failover's rewind.
+    if (seq <= this._received) this._forgetCoverage()
+    if (seq !== this._received + 1) this._runStart = seq
+    this._received = seq
     if (seq <= this._covered + 1) this._covered = Math.max(this._covered, seq)
     this._joinRun()
     if (this._covered < this._received) this._controlGap()
+  }
+
+  private _forgetCoverage(): void {
+    this._covered = 0
+    this._received = 0
+    this._runStart = 0
   }
 
   private _cover(mark: number): void {

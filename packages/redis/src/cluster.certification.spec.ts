@@ -76,9 +76,16 @@ describe('Redis real three-master Cluster CI certification', () => {
       return await publish(...args)
     })
     // An existing counter isn't seeded, so it counts executions exactly.
-    await cluster.set(broadcastSequenceKey(prefix, 'once'), '0')
+    await cluster.set(broadcastSequenceKey(prefix, 'once'), '0:0')
     await expect(backend.publish({ key: 'once', kind: 'text' }, 'once')).rejects.toThrow()
-    expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toBe('1')
+    expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toMatch(/^1:\d+$/)
+  })
+  it("never sets a Broadcast key's time back, so a frame a failover rewound is told from a late one", async () => {
+    const prefix = uniquePrefix('time-clamp')
+    const backend = ownBackend(cluster, prefix)
+    const ahead = Date.now() + 60_000
+    await cluster.set(broadcastSequenceKey(prefix, 'clamp'), `5:${ahead}`)
+    expect(await backend.publish({ key: 'clamp', kind: 'text' }, 'clamped')).toMatchObject({ seq: 6, timestamp: ahead })
   })
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
     const runtime = await exerciseRuntimeSlotCommands()

@@ -36,10 +36,11 @@ type Connection =
 
 type Connected = Extract<Connection, { phase: 'connected' }>
 
-/** A lane's last seq delivered, and the frames that arrived past a missing one, by seq, until it arrives or the wait
+/** A lane's last frame delivered, and the frames that arrived past a missing one, by seq, until it arrives or the wait
  *  ends. */
 type LaneOrder = {
   last: number
+  lastTimestamp: number
   held: Map<number, HeldFrame> | null
   release: ReturnType<typeof setTimeout> | null
 }
@@ -392,16 +393,29 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     const { payload, info } = decodeOrderingFrame(frame)
     const order = this._orders.get(lane)
     if (order === undefined) {
-      this._orders.set(lane, { last: info.seq, held: null, release: null })
+      this._orders.set(lane, { last: info.seq, lastTimestamp: info.timestamp, held: null, release: null })
       return this._deliver(payload, info, token)
     }
     if (info.seq === order.last + 1) {
-      order.last = info.seq
-      this._deliver(payload, info, token)
+      this._advance(order, payload, info, token)
       if (order.held !== null) this._drain(order)
       return
     }
-    if (info.seq <= order.last || order.held?.has(info.seq)) return this._settle(token)
+    if (info.seq > order.last + 1) return this._hold(order, payload, info, token)
+    // A commit never sets its lane's time back, so a later time on a seq at or below the last is a failover's rewind.
+    if (info.timestamp <= order.lastTimestamp) return this._settle(token)
+    if (order.held !== null) this._release(order)
+    this._advance(order, payload, info, token)
+  }
+
+  private _advance(order: LaneOrder, payload: Uint8Array, info: OrderingInfo, token: string | null): void {
+    order.last = info.seq
+    order.lastTimestamp = info.timestamp
+    this._deliver(payload, info, token)
+  }
+
+  private _hold(order: LaneOrder, payload: Uint8Array, info: OrderingInfo, token: string | null): void {
+    if (order.held?.has(info.seq)) return this._settle(token)
     ;(order.held ??= new Map()).set(info.seq, { payload, info, token })
     if (order.release !== null) return
     order.release = setTimeout(() => this._release(order), REORDER_WAIT_MS)
@@ -415,8 +429,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
       // A receiver may close the lane.
       if (this.state() !== 'ready') return
       held.delete(next.info.seq)
-      order.last = next.info.seq
-      this._deliver(next.payload, next.info, next.token)
+      this._advance(order, next.payload, next.info, next.token)
     }
     if (held.size > 0) return
     clearTimeout(order.release!)
@@ -432,8 +445,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     order.release = null
     for (const frame of held) {
       if (this.state() !== 'ready') return
-      order.last = frame.info.seq
-      this._deliver(frame.payload, frame.info, frame.token)
+      this._advance(order, frame.payload, frame.info, frame.token)
     }
   }
 

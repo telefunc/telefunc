@@ -2107,6 +2107,47 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(ROOM_META_REPAIR_MS)
     expect((await observer.getParticipants()).map(({ id }) => id).sort()).toEqual([first.id, missed.id, next.id].sort())
   })
+  it('repairs a join a failover rewound the control lane past, once the next join repeats its seq', async () => {
+    const joiner = await anotherServer()
+    vi.useFakeTimers()
+    const room = (await Room.create('join-rewind')) as ServerRoom
+    const observer = await Room.get(room.id)
+    observer.onJoin(() => {})
+    const remote = await joiner.Room.get(room.id)
+    const ids = async () => (await observer.getParticipants()).map(({ id }) => id).sort()
+    const first = await remote.join()
+    await vi.waitFor(async () => expect(await ids()).toEqual([first.id]))
+    const order = memoryState.rooms.get(room.id)!.gens.get(room._inc)!.order
+    const before = order.get('control')!
+    const lost = await remote.join()
+    await vi.waitFor(async () => expect(await ids()).toContain(lost.id))
+    // The new master missed the second join: its member's cell and its control commit.
+    const removal = { expect: [], mutations: [{ key: memberCellKey(lost.id), bytes: null }] }
+    await driver.compareExchangeCells(room.id, room._inc, removal)
+    order.set('control', before)
+    vi.advanceTimersByTime(1)
+    const next = await remote.join()
+    await vi.waitFor(async () => expect(await ids()).toContain(next.id))
+    await vi.advanceTimersByTimeAsync(ROOM_META_REPAIR_MS)
+    expect(await ids()).toEqual([first.id, next.id].sort())
+  })
+  it("delivers a member's messages once a failover rewound the room's seq under them", async () => {
+    const joiner = await anotherServer()
+    const room = (await Room.create('message-rewind')) as ServerRoom
+    const observer = await Room.get(room.id)
+    const received: unknown[] = []
+    observer.subscribe((data) => received.push(data))
+    const member = await (await joiner.Room.get(room.id)).join()
+    await member.publish('one')
+    const order = memoryState.rooms.get(room.id)!.gens.get(room._inc)!.order
+    const before = order.get('semantic')!
+    await member.publish('lost')
+    await vi.waitFor(() => expect(received).toEqual(['one', 'lost']))
+    order.set('semantic', before)
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    await member.publish('after')
+    await vi.waitFor(() => expect(received).toEqual(['one', 'lost', 'after']))
+  })
   it('repairs a room meta write whose writer crashed between its exchange and its publish', async () => {
     const room = await Room.create('meta-crash')
     const observer = await Room.get(room.id)
