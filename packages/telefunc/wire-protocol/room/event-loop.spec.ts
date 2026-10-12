@@ -400,7 +400,12 @@ describe('Room at 100,000 members', () => {
       )
     const observer = await view(room.id)
     const peer = attachPeer(register(observer))
-    await vi.waitFor(() => expect(peer.decoded().length).toBeGreaterThan(0))
+    // The attach is done once its roster went out.
+    await vi.waitFor(() =>
+      expect(
+        peer.decoded().some((frame) => frame.tag === TAG.PUBLISH && frame.text.startsWith('{"__r":"roster"')),
+      ).toBe(true),
+    )
     const { client, emit } = fakeClient(room.id)
     let fed = 0
     const feed = () => {

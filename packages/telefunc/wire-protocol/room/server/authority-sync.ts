@@ -24,8 +24,6 @@ type SyncHost = {
   /** Read-only here: every change goes through the host's methods. */
   readonly model: Pick<RoomModel, 'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordingMembership'>
   _renewSession(): Promise<void>
-  /** The highest seq the control lane delivered. */
-  _controlSeen(): number
   /** Renews what the replica told of its demand. */
   _renewDemand(): Promise<void>
   _readOpenConfig(): Promise<RoomConfigRecord | null>
@@ -37,15 +35,19 @@ type SyncHost = {
 
 /** Keeps a replica's view in step with the authority: its roster and meta reads, the repairs a gap asks for, and the
  *  heartbeat, which renews the session and the demand, reaps lapsed sessions, and reads the roster again once the
- *  control lane is past what this view received. */
+ *  control lane is past what this view covers. */
 class AuthoritySync {
   private _pendingRefresh: Promise<void> | null = null
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _metaRepair: ReturnType<typeof setTimeout> | null = null
   private _memberMetaRepair: ReturnType<typeof setTimeout> | null = null
+  private _controlRepair: ReturnType<typeof setTimeout> | null = null
   private _heartbeatBusy = false
-  /** The control lane's seq a roster read here started at or after. */
-  private _rosterAt = 0
+  /** Every control seq at or below it reached this view, as a frame or through a roster read started after it. */
+  private _covered = 0
+  /** The highest control seq delivered, and the first of the delivered run that ends at it. */
+  private _received = 0
+  private _runStart = 0
 
   constructor(
     private readonly _host: SyncHost,
@@ -72,18 +74,56 @@ class AuthoritySync {
   }
 
   /** What a heartbeat reads of the authority: the meta, the lapsed sessions, and the roster only once the control lane
-   *  committed past what this view received, or doesn't deliver to it. */
+   *  committed past what this view covers, or doesn't deliver to it. */
   private async _checkAuthority(): Promise<void> {
     const host = this._host
     if (host.model.closed || !(await this._reconcileMeta())) return
     await dropReplacedMetaGenerations(host.id, host._inc)
     await reapLapsedSessions(host._incarnation)
-    const mark = (await getRoomBackend().readLaneOrder(host.id, host._inc, CONTROL_LANE))?.seq ?? 0
-    if (this._current() && mark <= Math.max(host._controlSeen(), this._rosterAt)) return
+    const mark = await this._controlMark()
+    const covered = () => this._current() && mark <= this._covered
+    if (covered()) return
     // A read already running may predate the mark.
     await this._pendingRefresh?.catch(() => {})
-    await this.refreshMembers()
-    this._rosterAt = Math.max(this._rosterAt, mark)
+    if (!covered()) await this.refreshMembers()
+  }
+
+  /** A control frame reached this view. One past a seq that didn't opens a hole, which a whole read repairs
+   *  `ROOM_META_REPAIR_MS` later unless the missing frame arrives meanwhile. */
+  controlDelivered(seq: number): void {
+    if (seq > this._received) {
+      if (seq !== this._received + 1) this._runStart = seq
+      this._received = seq
+    }
+    if (seq <= this._covered + 1) this._covered = Math.max(this._covered, seq)
+    this._joinRun()
+    if (this._covered < this._received) this._controlGap()
+  }
+
+  private _cover(mark: number): void {
+    this._covered = Math.max(this._covered, mark)
+    this._joinRun()
+  }
+
+  /** The delivered run joins what is covered once nothing is missing between them. */
+  private _joinRun(): void {
+    if (this._runStart <= this._covered + 1) this._covered = Math.max(this._covered, this._received)
+  }
+
+  private _controlGap(): void {
+    if (this._controlRepair !== null) return
+    this._controlRepair = unrefTimer(
+      setTimeout(() => {
+        this._controlRepair = null
+        if (this._covered < this._received && !this._host.model.closed)
+          void this.reconcileAuthority().catch(reportRoomError)
+      }, ROOM_META_REPAIR_MS),
+    )
+  }
+
+  private async _controlMark(): Promise<number> {
+    const host = this._host
+    return (await getRoomBackend().readLaneOrder(host.id, host._inc, CONTROL_LANE))?.seq ?? 0
   }
 
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
@@ -155,15 +195,19 @@ class AuthoritySync {
     return true
   }
 
-  /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. */
+  /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. It covers
+   *  the control lane up to the order read before it, as a frame commits after the cells it changed. */
   private async _runMemberRefresh(): Promise<void> {
     const host = this._host
     if (host.model.closed) return
+    const mark = await this._controlMark()
     const read = await host.model.recordingMembership(
       () => reapAndReadRoster(host._incarnation),
       async (roster, events) => !host.model.closed && (await host.roster.reconcile(roster, events)),
     )
-    if (read) await this._lanes.replan()
+    if (!read) return
+    this._cover(mark)
+    await this._lanes.replan()
   }
 
   private async _heartbeatTick(): Promise<void> {

@@ -12,6 +12,7 @@ import {
   ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
+  ROOM_META_REPAIR_MS,
   ROOM_SESSION_TTL_MS,
   ROOM_HORIZON_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
@@ -2088,6 +2089,23 @@ describe('Room public behavior', () => {
     await Room.setAttributes(room.id, { a: 1 })
     await Room.setAttributes(room.id, { b: 2 })
     await vi.waitFor(() => expect(observer.meta).toEqual({ a: 1, b: 2 }), { timeout: 5_000 })
+  })
+  it('repairs a join a view never got from the next control frame it gets, well within a heartbeat', async () => {
+    const joiner = await anotherServer()
+    vi.useFakeTimers()
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
+    const room = await Room.create('join-gap')
+    const observer = await Room.get(room.id)
+    observer.onJoin(() => {})
+    const remote = await joiner.Room.get(room.id)
+    const first = await remote.join()
+    await vi.waitFor(async () => expect((await observer.getParticipants()).map(({ id }) => id)).toEqual([first.id]))
+    control.next()
+    const missed = await remote.join()
+    const next = await remote.join()
+    await vi.waitFor(async () => expect((await observer.getParticipants()).map(({ id }) => id)).toContain(next.id))
+    await vi.advanceTimersByTimeAsync(ROOM_META_REPAIR_MS)
+    expect((await observer.getParticipants()).map(({ id }) => id).sort()).toEqual([first.id, missed.id, next.id].sort())
   })
   it('repairs a room meta write whose writer crashed between its exchange and its publish', async () => {
     const room = await Room.create('meta-crash')

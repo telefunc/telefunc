@@ -52,6 +52,6 @@ const ROOM_PLAN_SLICE_MS = 10
 const ROOM_ROSTER_PART_MEMBERS = 1024
 // The demand entries in one frame, likewise for a heartbeat's whole report.
 const ROOM_DEMAND_PAGE_ENTRIES = 1024
-// A meta change waiting this long for the one before it: that one's writer crashed between its exchange and its
-// publish, or the lane lost it, so a whole read repairs it.
+// A meta change or a control frame waiting this long for the one before it: that one's writer crashed between its
+// exchange and its publish, or the lane lost it, so a whole read repairs it.
 const ROOM_META_REPAIR_MS = 1_000

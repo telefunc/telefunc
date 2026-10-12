@@ -106,8 +106,6 @@ class RoomReplica {
   private readonly _views = new Map<RoomStubChannel, Promise<string | null>>()
   /** A view write failed, or the session hosting the views was lost: the heartbeat writes them again. */
   private _viewsLost = false
-  /** The highest seq the control lane delivered here. */
-  private _controlSeq = 0
   /** Members whose eviction failed, by id, with their identity: the session would host them for as long as it lives. */
   private readonly _unevicted = new Map<string, string | null>()
   /** Whether this process tells its demand again, and was asked to again meanwhile. */
@@ -348,10 +346,6 @@ class RoomReplica {
     )
     await keys
   }
-  /** @internal */
-  _controlSeen(): number {
-    return this._controlSeq
-  }
   /** This process's demand entry, to the other processes and to its own owners. */
   private _tellDemand(entry: DemandEntry, on: boolean): void {
     this._gossip.push({ on, ...entry })
@@ -411,7 +405,7 @@ class RoomReplica {
   }
   /** @internal */
   _onControl(serialized: string, info: WirePublishInfo): void {
-    if (info.seq > this._controlSeq) this._controlSeq = info.seq
+    this.sync.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') {
       const self = this.report.instance

@@ -444,6 +444,27 @@ await read()`,
     if ('staleInc' in read) throw new Error('the room is gone')
     expect(JSON.parse(Buffer.from(read.cells.get('holds')!).toString())).toMatchObject({ value: 1_000 })
   })
+  it('repairs a join a server never got from the next control frame it gets, well within a heartbeat', async () => {
+    const prefix = uniquePrefix('join-gap')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('join-gap')
+    const observer = await Room.get(room.id)
+    // Ended before the backend is, so nothing of this view reaches for a backend after it.
+    onTestFinished(observer.onJoin(() => {}))
+    await observer.getParticipants()
+    type Replica = { _onControl(serialized: string, ...rest: unknown[]): void }
+    const replica = (observer as unknown as { _replica: Replica })._replica
+    const receive = replica._onControl.bind(replica)
+    let missed = 0
+    replica._onControl = (serialized, ...rest) => {
+      if (missed === 0 && serialized.includes('"__r":"join"')) return void missed++
+      receive(serialized, ...rest)
+    }
+    expect(await joinFrom({ ...env, PREFIX: prefix, ROOM: room.id, COUNT: '2', START_AT: `${Date.now()}` })).toEqual([])
+    await vi.waitFor(async () => expect(await observer.getParticipants()).toHaveLength(2), { timeout: 5_000 })
+    expect(missed).toBe(1)
+  })
   it('reads, merges into and replaces a room meta of 100,000 keys with no Redis command over 20 ms', async () => {
     const prefix = uniquePrefix('meta-pages')
     const redis = ownClient(connect())
