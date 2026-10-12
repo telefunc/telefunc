@@ -44,6 +44,7 @@ import {
 } from './membership.js'
 import { SEMANTIC_LANE, commitToInbox, commitRoomLaneOrThrow, openConfig, encodeRoomRecord } from './lanes.js'
 import { ServerRoom } from './room.js'
+import { RoomReplica } from './replica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
 import { metaEntriesAt, metaObjectOf } from '../meta-state.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
@@ -169,7 +170,9 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     sweepLapsedRoomsSoon()
     return {
       kind: 'created',
-      room: new ServerRoom(id, created, { entries: metaEntriesAt(meta, 0), seq: 0 }, { members: [] }),
+      room: new ServerRoom(
+        RoomReplica.seeded(id, created, { entries: metaEntriesAt(meta, 0), seq: 0 }, { members: [] }),
+      ),
     }
   })
 }
@@ -188,10 +191,17 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
   return room
 }
 
+/** A handle on this process's view of the room: a held view catches up unless it is current; a new one reads the member
+ *  count and the meta. */
 async function openRoom(id: string): Promise<ServerRoom> {
   const config = await requireRoom(id)
+  const held = RoomReplica.of(config.inc)
+  if (held !== undefined) {
+    await held.sync.catchUp()
+    return new ServerRoom(held)
+  }
   const count = await reapAndCountPresence({ id, ...config })
-  return new ServerRoom(id, config, await requireRoomMeta(id, config), { count })
+  return new ServerRoom(RoomReplica.seeded(id, config, await requireRoomMeta(id, config), { count }))
 }
 
 async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {
@@ -247,8 +257,10 @@ function guardRoom(room: Room, guards: Partial<Record<keyof RoomGuardHooks, unkn
 
 async function joinRoom(id: string, options?: JoinOptions): Promise<LocalParticipant> {
   const config = await requireRoom(id)
-  const room = new ServerRoom(id, config, await requireRoomMeta(id, config), { count: 0 })
-  return await room.join(options)
+  // A view made for a join alone counts no member until a handle reads its roster.
+  const replica =
+    RoomReplica.of(config.inc) ?? RoomReplica.seeded(id, config, await requireRoomMeta(id, config), { count: 0 })
+  return await new ServerRoom(replica).join(options)
 }
 
 async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {

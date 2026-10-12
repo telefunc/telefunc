@@ -8,37 +8,37 @@ import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
 import type { BinaryWantChange } from '../binary.js'
-import type { DemandReport } from '../demand.js'
+import type { DemandReport, RoomDemand } from '../demand.js'
 import type { RoomConfigRecord } from '../protocol.js'
-import type { RoomModel, RoomState } from '../state.js'
+import type { RoomModel } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { Slice } from '../slice.js'
 import type { LaneHolder } from './replay.js'
 import type { AuthoritySync } from './authority-sync.js'
 import { WantsIndex } from './wants-index.js'
-import { SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
-import type { ControlObserver, PresenceEvent, RoomReplica } from './replica.js'
+import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 assertIsNotBrowser()
 
-/** The room side these subscriptions serve: it aggregates its holders and applies what the lanes carry. */
+/** The replica these subscriptions serve: it aggregates every handle's holders and applies what the lanes carry. */
 type SubscriptionHost = {
   readonly id: string
   readonly _inc: string
-  readonly _replica: RoomReplica
   /** Read-only here: every change goes through the host's methods. */
-  readonly _model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'hasMember'>
-  readonly _state: Pick<RoomState, 'listenerCount'>
+  readonly model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'hasMember'>
+  readonly demand: Pick<RoomDemand, 'reporting'>
   /** What keeps the view in step with the authority, and runs the heartbeat. */
-  readonly _sync: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers' | 'heartbeat'>
-  /** Whether anything here observes the room: a client stub, a participant, or a listener. */
+  readonly sync: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers' | 'heartbeat'>
+  /** Whether a handle observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean
+  /** Whether a handle has a listener. */
+  _listened(): boolean
   /** A pre-attach tail ingests all text. */
   _holdsTail(): boolean
   _ownsMember(id: string): boolean
   /** Live. A pending admission owns its inbox. */
   _ownedMembers(): Iterable<string>
-  _onCtrlEvent(event: PresenceEvent, serialized: string, info: WirePublishInfo): void
+  _onControl(serialized: string, info: WirePublishInfo): void
   _onTextData(serialized: string, info: WirePublishInfo): void
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
   _onDm(serialized: string, info: WirePublishInfo): void
@@ -53,20 +53,21 @@ type NamedCounts = { own: number; unreached: number }
  *  each of `tracks` named of every member, and some members' named pairs. */
 type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pairs: Map<string, Set<string>> }
 
-/** What this instance subscribes: a function of its holders' wants, ownership and membership, kept current per change,
- *  recovered within Room's horizon, and replanned by the heartbeat. */
-class RoomSubscriptions implements ControlObserver {
+/** What this process subscribes of a room: a function of its holders' wants, ownership and membership, kept current
+ *  per change, recovered within Room's horizon, and replanned by the heartbeat. */
+class RoomSubscriptions {
   private readonly _wants = new WantsIndex((track, named) => this._demand.setTrack(track, named))
   // Every lane shares these, so an owned member's inbox lane makes none; declared before the lanes made here.
   private readonly _onLaneTerminal = (slot: LaneSubscription, error?: unknown) => this._onTerminal(slot, error)
-  private readonly _onLaneRecovered = () => void this._host._sync.reconcileAuthority().catch(reportRoomError)
+  private readonly _onLaneRecovered = () => void this._host.sync.reconcileAuthority().catch(reportRoomError)
   private readonly _onBinaryPending = (slot: LaneSubscription, pending: boolean) => {
     if (!pending) return void this._binaryPending.delete(slot)
     this._binaryPending.add(slot)
     this._binaryReady = null
   }
-  /** Whether this handle observes the room through its replica's control lane. */
+  /** Whether some handle observes the room, which the control lane serves. */
   private _observing = false
+  private readonly _control = this._newLaneSubscription()
   private readonly _semantic = this._newLaneSubscription()
   /** Named lanes, keyed by (member, track); `_binaryTracks` lists each member's. */
   private readonly _binary = new Map<string, LaneSubscription>()
@@ -98,9 +99,13 @@ class RoomSubscriptions implements ControlObserver {
     private readonly _demand: DemandReport,
   ) {}
 
-  /** Whether this handle observes the room through its replica's control lane. */
+  /** Whether some handle observes the room through the control lane. */
   get observing(): boolean {
     return this._observing
+  }
+
+  get controlEstablished(): boolean {
+    return this._control.established
   }
 
   get semanticReady(): Promise<void> {
@@ -233,35 +238,27 @@ class RoomSubscriptions implements ControlObserver {
     await this._binaryReady
   }
 
-  onControlEvent(event: PresenceEvent, serialized: string, info: WirePublishInfo): void {
-    this._host._onCtrlEvent(event, serialized, info)
-  }
-
-  onControlClosed(): void {
-    this._host._closeFromAuthority()
-  }
-
-  onControlRecovered(): Promise<void> {
-    return this._host._sync.reconcileAuthority()
-  }
-
   /** The room-wide lanes are planned around a change, and the heartbeat after it. */
   private _replanAround(change: () => void): void {
     const host = this._host
-    const model = host._model
+    const model = host.model
     const open = !model.closed
     const observing = open && host._observed()
     const becomesObserved = observing && !this._observing
-    if (observing || this._observing) host._replica.observe(this, observing)
+    this._control.sync(observing, () =>
+      getRoomBackend().subscribeLane(host.id, host._inc, CONTROL_LANE, (payload, info) =>
+        host._onControl(decodeRoomText(payload), info),
+      ),
+    )
     this._observing = observing
     this._semantic.sync(open && (host._holdsTail() || this._wants.wantsText), () =>
       getRoomBackend().subscribeLane(host.id, host._inc, SEMANTIC_LANE, (payload, info) =>
         host._onTextData(decodeRoomText(payload), info),
       ),
     )
-    const needsRoster = host._state.listenerCount > 0 || (open && this._wants.wantsBinary)
+    const needsRoster = host._listened() || (open && this._wants.wantsBinary)
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster))
-      void host._sync.refreshMembers().catch(reportRoomError)
+      void host.sync.refreshMembers().catch(reportRoomError)
     change()
     if (this._planning === null) this._demand.flush()
     this._syncHeartbeat()
@@ -317,7 +314,7 @@ class RoomSubscriptions implements ControlObserver {
           const members = chain(
             plan.members,
             plan.pairs.keys(),
-            plan.all || plan.tracks.size > 0 ? host._model.memberIds() : [],
+            plan.all || plan.tracks.size > 0 ? host.model.memberIds() : [],
             // Lanes of members no longer present close too.
             plan.all ? this._binaryTracks.keys() : [],
             plan.all ? this._everyTrack.keys() : [],
@@ -334,7 +331,7 @@ class RoomSubscriptions implements ControlObserver {
               slice,
               chain(this._inbox.keys(), host._ownedMembers()),
               once((member) =>
-                !host._model.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
+                !host.model.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
               ),
             )
           }
@@ -456,7 +453,7 @@ class RoomSubscriptions implements ControlObserver {
   }
 
   private _present(member: string): boolean {
-    const model = this._host._model
+    const model = this._host.model
     return !model.closed && model.hasMember(member)
   }
 
@@ -535,7 +532,7 @@ class RoomSubscriptions implements ControlObserver {
 
   private _openInbox(member: string): void {
     const host = this._host
-    if (host._model.closed || !host._ownsMember(member)) return
+    if (host.model.closed || !host._ownsMember(member)) return
     let slot = this._inbox.get(member)
     if (!slot) this._inbox.set(member, (slot = this._newLaneSubscription()))
     slot.sync(true, () =>
@@ -585,12 +582,13 @@ class RoomSubscriptions implements ControlObserver {
       this._recovering.delete(slot)
     }
     // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
-    await this._host._sync.reconcileAuthority()
+    await this._host.sync.reconcileAuthority()
   }
 
-  /** The heartbeat runs while this handle observes the room or owns a member. */
+  /** The heartbeat runs while a handle observes the room or owns a member, or the demand tells anything. */
   private _syncHeartbeat(): void {
-    this._host._sync.heartbeat(!this._host._model.closed && (this._observing || this._inbox.size > 0))
+    const host = this._host
+    host.sync.heartbeat(!host.model.closed && (this._observing || this._inbox.size > 0 || host.demand.reporting))
   }
 }
 

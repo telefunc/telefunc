@@ -100,7 +100,7 @@ describe('Room at 100,000 members', () => {
       // one not sent yet.
       if (wireText.includes('\n{"__r":"roster",') && ++parts === 50) {
         const ctrl = (event: object) =>
-          observer._onCtrlEvent(event as PresenceEvent, stringify(event), { seq: 0, timestamp: 1 })
+          observer._replica._onControl(stringify(event as PresenceEvent), { seq: 0, timestamp: 1 })
         ctrl({ __r: 'join', id: joined, meta: {}, joinedAt: 1 })
         ctrl({ __r: 'leave', id: sent })
         ctrl({ __r: 'leave', id: unsent })
@@ -289,7 +289,7 @@ describe('Room at 100,000 members', () => {
       const before = renewed
       const { gap } = await longestGapWhile(async () => {
         // The server's demand heartbeat, which re-tells each of its 100,000 pairs.
-        await (observer._replica as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
+        await observer._replica._renewDemand()
         await vi.waitFor(() => expect(renewed - before >= 100_000 && inFlight === 0).toBe(true), { timeout: 30_000 })
         await settled()
       })
@@ -491,8 +491,7 @@ describe('Room at 100,000 members', () => {
 })
 /** How many binary lanes the room holds: per track and every-track. */
 function binaryLanesOf(room: ServerRoom): number {
-  const subs = (room as unknown as { _subs: { _binary: Map<string, unknown>; _everyTrack: Map<string, unknown> } })
-    ._subs
+  const subs = room._replica.plan as unknown as { _binary: Map<string, unknown>; _everyTrack: Map<string, unknown> }
   return subs._binary.size + subs._everyTrack.size
 }
 /** Each declaration replays the retained frames of its track, so a spec's declarations in one turn leave work behind
@@ -518,13 +517,13 @@ function subsOf(room: ServerRoom): {
   replan(): Promise<void>
   binaryReady(): Promise<void>
 } {
-  return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+  return room._replica.plan
 }
 function syncOf(room: ServerRoom): {
   _heartbeatTick(): Promise<void>
   reconcileAuthority(): Promise<void>
 } {
-  return (room as unknown as { _sync: ReturnType<typeof syncOf> })._sync
+  return room._replica.sync as unknown as ReturnType<typeof syncOf>
 }
 /** The longest event-loop gap while `run` runs, and what it returned. */
 async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number; value: T }> {

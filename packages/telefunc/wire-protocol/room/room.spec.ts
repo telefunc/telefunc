@@ -999,10 +999,11 @@ describe('Room public behavior', () => {
   it("loads a fresh view's first roster while members' meta changes keep arriving", async () => {
     const authority = await Room.create('first-roster-meta-traffic')
     const player = await authority.join()
-    const observer = (await Room.get(authority.id)) as ServerRoom
-    const readCellPages = driver.readCellPages.bind(driver)
+    const other = await anotherServer()
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
+    const readCellPages = other.driver.readCellPages.bind(other.driver)
     let score = 0
-    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+    vi.spyOn(other.driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
       yield* readCellPages(roomId, inc, prefix)
       // A member's meta change reaches this view during every roster read.
       if (prefix === MEMBER_CELL_PREFIX && score < 100) await player.setAttributes({ score: ++score })
@@ -1297,7 +1298,7 @@ describe('Room public behavior', () => {
     const { stub } = serve(observer)
     const { started } = rejectLaneSubscriptions('semantic', 'persistent semantic subscription failure')
     stub._onPeerSubscription('text', true)
-    const outcome = captureOutcome(observer._replayRetainedText(stub, { all: false, members: new Map() }))
+    const outcome = captureOutcome(observer._replica.replayText(stub, { all: false, members: new Map() }))
     await started
     await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 100)
     expect(outcome.value).toBeInstanceOf(RoomError)
@@ -1438,8 +1439,9 @@ describe('Room public behavior', () => {
   it('names a member to a client whose roster has not arrived as the member was when it sent', async () => {
     const authority = await Room.create('stamp-roster-pending')
     const sender = await authority.join({ meta: { v: 1 } })
-    const observer = (await Room.get(authority.id)) as ServerRoom
-    const roster = delayRosterRead(authority.id)
+    const other = await anotherServer()
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
+    const roster = delayRosterRead(authority.id, other)
     try {
       const stub = register(observer)
       const peer = attachPeer(stub, undefined, { text: true, binary: false })
@@ -1606,8 +1608,8 @@ describe('Room public behavior', () => {
     roomParticipantReplacer.replace(me, context)
     const stub = channels.find((channel) => channel instanceof RoomStubChannel) as RoomStubChannel
     const peer = attachPeer(stub)
-    const replayText = vi.spyOn(room, '_replayRetainedText')
-    const replayBinary = vi.spyOn(room, '_replayRetainedBinary')
+    const replayText = vi.spyOn(room._replica, 'replayText')
+    const replayBinary = vi.spyOn(room._replica, 'replayBinary')
     stub._onPeerSubscription('text', true)
     declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
     await Promise.all([...replayText.mock.results, ...replayBinary.mock.results].map(({ value }) => value))
@@ -2740,7 +2742,7 @@ describe('Room public behavior', () => {
   })
   it('reports a member whose client stub closed after its member write committed as disconnected, once', async () => {
     const room = (await Room.create('stub-close-after-member-write')) as ServerRoom
-    const observer = await Room.get(room.id)
+    const observer = await (await anotherServer()).Room.get(room.id)
     const stub = register(room)
     const compareExchange = driver.compareExchangeCells.bind(driver)
     const written = createDeferred()
@@ -3327,7 +3329,7 @@ describe('Room public behavior', () => {
         if (args[2].kind === 'binary' && args[2].member === leaver.id) await leaver.leave()
         return stored
       })
-      const replays = vi.spyOn(authority, '_replayRetainedBinary')
+      const replays = vi.spyOn(authority._replica, 'replayBinary')
       const frames: number[] = []
       authority.subscribeBinary((data) => void frames.push(data[0]!), options)
       await vi.waitFor(() => expect(replays).toHaveBeenCalled())
@@ -3347,7 +3349,7 @@ describe('Room public behavior', () => {
       if (args[2].kind === 'semantic' && !left) (left = true), await leaver.leave()
       return stored
     })
-    const replays = vi.spyOn(authority, '_replayRetainedText')
+    const replays = vi.spyOn(authority._replica, 'replayText')
     const texts: unknown[] = []
     authority.subscribe((data) => void texts.push(data))
     await vi.waitFor(() => expect(replays).toHaveBeenCalled())
@@ -3397,10 +3399,11 @@ describe('Room public behavior', () => {
     const authority = await Room.create('retained-binary-roster-fence')
     const publisher = await authority.join()
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
-    const observer = (await Room.get(authority.id)) as ServerRoom
+    const other = await anotherServer()
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
     const stub = register(observer)
-    const roster = delayRosterRead(authority.id)
-    const listRetained = vi.spyOn(driver, 'listRetained')
+    const roster = delayRosterRead(authority.id, other)
+    const listRetained = vi.spyOn(other.driver, 'listRetained')
     try {
       declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
       await roster.started
@@ -3469,9 +3472,10 @@ describe('Room public behavior', () => {
   })
   it('holds no want naming an id the view does not hold while every roster read fails', async () => {
     const authority = await Room.create('declared-before-roster')
-    const observer = (await Room.get(authority.id)) as ServerRoom
-    const readCellPages = driver.readCellPages.bind(driver)
-    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+    const other = await anotherServer()
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
+    const readCellPages = other.driver.readCellPages.bind(other.driver)
+    vi.spyOn(other.driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
       if (roomId === authority.id) throw new Error('backend roster read failed')
       yield* readCellPages(roomId, inc, prefix)
     })
@@ -3487,11 +3491,12 @@ describe('Room public behavior', () => {
   })
   it('opens an exact-member binary lane for a member the view holds before its roster loads', async () => {
     const authority = await Room.create('exact-binary-before-roster')
-    const observer = (await Room.get(authority.id)) as ServerRoom
+    const other = await anotherServer()
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
     const publisher = await observer.join()
     const stub = register(observer)
-    const roster = delayRosterRead(authority.id)
-    const subscribeLane = vi.spyOn(getRoomBackend(), 'subscribeLane')
+    const roster = delayRosterRead(authority.id, other)
+    const subscribeLane = vi.spyOn(other.backend(), 'subscribeLane')
     const binaryLanes = () => subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary').length
     try {
       declare(stub, { __r: 'sub-binary', member: publisher.id, track: 'screen', on: true })
@@ -5013,6 +5018,42 @@ describe('RoomState', () => {
     expect(errors).toEqual(failures)
   })
 })
+describe("a server's handles to one room", () => {
+  for (const handles of [1, 10, 100, 1_000])
+    it(`read the member list once per heartbeat and renew each member once, at ${handles} handles on 10,000 members`, async () => {
+      const heartbeats = captureHeartbeats()
+      const room = await Room.create(`shared-view-${handles}`)
+      const views = [room, ...(await Promise.all(Array.from({ length: handles - 1 }, () => Room.get(room.id))))]
+      await Promise.all(views.map((view) => Promise.all(Array.from({ length: 10_000 / handles }, () => view.join()))))
+      const reads = vi.spyOn(driver, 'readCellPages')
+      const writes = vi.spyOn(driver, 'compareExchangeCells')
+      /** No store call for five timer turns in a row. */
+      const quiet = async () => {
+        for (let still = 0, last = -1; still < 5; ) {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          const calls = reads.mock.calls.length + writes.mock.calls.length
+          still = calls === last ? still + 1 : 0
+          last = calls
+        }
+      }
+      await quiet()
+      reads.mockClear()
+      writes.mockClear()
+      heartbeats.fire()
+      await quiet()
+      const memberReads = reads.mock.calls.filter(([, , prefix]) => prefix === MEMBER_CELL_PREFIX).length
+      const renewals = new Map<string, number>()
+      for (const [, , { mutations }] of writes.mock.calls)
+        for (const { key } of mutations)
+          if (key.startsWith(MEMBER_CELL_PREFIX)) renewals.set(key, (renewals.get(key) ?? 0) + 1)
+      const counts = [...renewals.values()]
+      expect({ memberReads, renewed: renewals.size, most: Math.max(...counts) }).toEqual({
+        memberReads: 1,
+        renewed: 10_000,
+        most: 1,
+      })
+    }, 120_000)
+})
 describe('room demand lifecycle', () => {
   it("aggregates remote demand only for the members this instance owns, and forgets a departed member's", () => {
     const owned = new Set(['member'])
@@ -5243,7 +5284,7 @@ describe('room protocol validation', () => {
     room.subscribeBinary(() => {})
     await subsOf(room).binaryReady()
     const stubs = Array.from({ length: Math.ceil(members.length / ROOM_TRACK_WANTS_MAX) }, () => register(room))
-    const demand = (room as unknown as { _report: { tellUntil(deadline: number): boolean } })._report
+    const demand = (room as ServerRoom)._replica.report
     const tellUntil = demand.tellUntil.bind(demand)
     let replanned = false
     vi.spyOn(demand, 'tellUntil').mockImplementation((deadline) => {
@@ -5512,7 +5553,7 @@ describe('a room nothing holds closes on its own', () => {
   })
   it("renews the views of hundreds of pages on one server in one write, with the room's other writes alongside", async () => {
     const room = (await Room.create('many-views')) as ServerRoom
-    const views = (room as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views
+    const views = (room._replica as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views
     for (let page = 0; page < 300; page++) await views.get(register(room))
     const writes = vi.spyOn(driver, 'compareExchangeCells')
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -5537,7 +5578,7 @@ describe('a room nothing holds closes on its own', () => {
     // A view the server holding the page wrote before it died, renewed by nothing since.
     const other = await anotherServer()
     const page = (await other.Room.get(room.id)) as ServerRoom
-    await (page as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views.get(register(page))
+    await (page._replica as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views.get(register(page))
     await other.crash()
     await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
     expect(await isListed(room.id)).toBe(true)
@@ -5609,7 +5650,7 @@ describe('a room nothing holds closes on its own', () => {
     await vi.advanceTimersByTimeAsync(4_000)
     const page = (await other.Room.get(room.id)) as ServerRoom
     const { stub } = serve(page)
-    await (page as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views.get(stub)
+    await (page._replica as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views.get(stub)
     stub._onPeerClose()
     const holds = async () => {
       const read = await driver.readCells(room.id, room._inc, { keys: [HOLDS_CELL_KEY] })
@@ -5759,7 +5800,7 @@ function subsOf(room: Room | ServerRoom): {
   replan(): Promise<void>
   binaryReady(): Promise<void>
 } {
-  return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+  return (room as ServerRoom)._replica.plan as unknown as ReturnType<typeof subsOf>
 }
 function syncOf(room: Room | ServerRoom): {
   refreshMembers(): Promise<void>
@@ -5767,11 +5808,11 @@ function syncOf(room: Room | ServerRoom): {
   ensureRoster(): Promise<void>
   reconcileAuthority(): Promise<void>
 } {
-  return (room as unknown as { _sync: ReturnType<typeof syncOf> })._sync
+  return (room as ServerRoom)._replica.sync as unknown as ReturnType<typeof syncOf>
 }
 /** The control lane the room's replica subscribes. */
 function controlOf(room: Room | ServerRoom): LaneSubscription {
-  return ((room as ServerRoom)._replica as unknown as { _control: LaneSubscription })._control
+  return ((room as ServerRoom)._replica.plan as unknown as { _control: LaneSubscription })._control
 }
 /** The binary lanes a room subscribes, by their backend keys. */
 function binaryLanes(room: ServerRoom): string[] {
