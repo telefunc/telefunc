@@ -14,43 +14,19 @@ import { getChannelMux } from './server/mux.js'
 import { getTelefuncSseChannelHooks } from './server/sse.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH } from './constants.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
+import { Pipe } from './test/loopback.js'
 
 const LATENCY_MS = 25
 /** What one read of a request body hands the server, or of the event stream the page, as a socket read does. */
 const CHUNK_BYTES = 16 * 1024
 const KIB = 1024
 
-/** One direction of the link: what it carries leaves at `bytesPerMs` once what was sent before it has, and arrives
- *  `LATENCY_MS` after it left. */
-class Pipe {
-  bytesPerMs = Infinity
-  private lastAt = 0
-  private queue: { at: number; deliver: () => void }[] = []
-  private timer: ReturnType<typeof setTimeout> | null = null
-  push(bytes: number, deliver: () => void): void {
-    this.lastAt = Math.max(Date.now(), this.lastAt) + bytes / this.bytesPerMs
-    this.queue.push({ at: this.lastAt + LATENCY_MS, deliver })
-    this.schedule()
-  }
-  private schedule(): void {
-    if (this.timer || this.queue.length === 0) return
-    this.timer = setTimeout(
-      () => {
-        this.timer = null
-        while (this.queue.length > 0 && this.queue[0]!.at <= Date.now()) this.queue.shift()!.deliver()
-        this.schedule()
-      },
-      Math.max(0, this.queue[0]!.at - Date.now()),
-    )
-  }
-}
-
 /** The page's end of the link, and the server's SSE handler at the other. `batched`: the page's streaming upload is
  *  refused, as a browser that can't stream a request body gets, `refusedAfter` ms after it went out, and the page sends
  *  batch POSTs. */
 function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; refusedAfter?: number }) {
-  const up = new Pipe()
-  const down = new Pipe()
+  const up = new Pipe(LATENCY_MS)
+  const down = new Pipe(LATENCY_MS)
   const sse = getTelefuncSseChannelHooks()
   let streams = 0
   const fetch = (async (url: string, init: RequestInit) => {

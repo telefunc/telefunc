@@ -11,7 +11,7 @@ import {
 } from '../constants.js'
 import { decode, encode } from '../shared-ws.js'
 import { Deliveries } from '../deliveries.js'
-import { Link } from '../link.js'
+import { Uplink } from '../client/uplink.js'
 
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
@@ -614,8 +614,8 @@ async function runPath({
   let now = 0
   const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
   const sender = fitted(new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes))
-  const senderLink = new Link()
-  sender.attach(senderLink)
+  const senderUplink = new Uplink()
+  sender.attach(senderUplink)
   const answer = (probe: number, backlog: number, pathRtt: number) =>
     wire.push(decode(encode.bdpPingAck(0, probe, backlog, pathRtt)) as Ack)
   const receiver = fitted(
@@ -629,10 +629,10 @@ async function runPath({
     ),
   )
   let attached = false
-  const receiverLink = new Link()
-  const attachProbe = attach ? receiver.probeAttach(receiverLink)! : undefined
-  if (attach) receiver.attach(receiverLink)
-  const senderProbe = senderAttach ? sender.probeAttach(senderLink)! : undefined
+  const receiverUplink = new Uplink()
+  const attachProbe = attach ? receiver.probeAttach(receiverUplink.link)! : undefined
+  if (attach) receiver.attach(receiverUplink)
+  const senderProbe = senderAttach ? sender.probeAttach(senderUplink.link)! : undefined
   upstream(() => {
     if (attachProbe !== undefined) answer(attachProbe, Infinity, Infinity)
     attached = true

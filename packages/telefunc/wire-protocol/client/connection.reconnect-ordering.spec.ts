@@ -16,27 +16,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
-import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { muxChannelStub } from '../test/mux-channel-stub.js'
 import { ServerChannel } from '../server/channel.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import { decodeU32, concat } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
-
-function createChannel(id = crypto.randomUUID()) {
-  return {
-    id,
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame() {},
-    _onTransportClose() {},
-    _onTransportBatched() {},
-    _reattachState: () => ({}),
-    _fitReplays() {},
-    _acknowledge() {},
-    _answered() {},
-  }
-}
 
 /** SSE downstream response stream the client reads (server→client). */
 function makeSseDownstream() {
@@ -188,7 +172,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
     })
   }) as unknown as typeof fetch
 
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const conn = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
     transports: ['sse'],
     fetchImpl,

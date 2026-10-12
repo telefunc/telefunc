@@ -13,7 +13,6 @@ import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
 import { roomReviver, roomParticipantReviver, roomRemoteReviver } from '../../room/response-client.js'
 import type { ClientReviverContext, InternalClientReviverContext, ReviverType, TypeContract } from '../../types.js'
-import type { AbortError } from '../../../shared/Abort.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 
@@ -41,12 +40,7 @@ const clientTypes = [
  *  already-revived object, and server-side `===` holds on the client too. */
 function createStreamingReviver(
   context: InternalClientReviverContext,
-  onRevived: (revived: {
-    value: unknown
-    close: () => Promise<void> | void
-    abort: (abortError: AbortError) => void
-    onEnd?: (callback: () => void) => void
-  }) => void,
+  onRevived: (revived: ReturnType<ReviverType['revive']>) => void,
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
   const allTypes = [...clientTypes, ...extensionTypes]

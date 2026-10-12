@@ -7,7 +7,6 @@ import { getRawContext } from '../../node/server/context/context.js'
 import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { GcRegistry } from '../gcRegistry.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
@@ -52,9 +51,9 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceReceiver, PieceSender } from '../pieces.js'
+import { PieceSender, ServerPieceReceiver } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
-import { SocketWait } from '../link.js'
+import { SocketWait } from './socket-wait.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -159,7 +158,7 @@ type ConnectionState = {
   frameDelivery: number
   /** When the last PONG went out. */
   pongedAt: number
-  pieces: { sender: PieceSender; receiver: PieceReceiver } | null
+  pieces: { sender: PieceSender; receiver: ServerPieceReceiver } | null
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -299,16 +298,16 @@ class ChannelMux {
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
-        lastReceivedAt: DOUBLE_ZERO,
+        lastReceivedAt: 0,
         deliveries: new Deliveries(),
         frameDelivery: 0,
         pongedAt: performance.now(),
         pieces: sender && {
           sender,
-          receiver: new PieceReceiver((frame) => this.send(connection, frame), {
-            peerHoldsBack: true,
-            carry: (ack) => sender.carry(ack),
-          }),
+          receiver: new ServerPieceReceiver(
+            (frame) => this.send(connection, frame),
+            (ack) => sender.carry(ack),
+          ),
         },
         terminatePermanently: false,
         recvChain: null,

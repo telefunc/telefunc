@@ -17,6 +17,7 @@ import { base64urlToUint8Array } from '../base64url.js'
 import { config as serverConfig, getServerConfig } from '../../node/server/serverConfig.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isAbort } from '../../shared/Abort.js'
+import { lengthPrefixed } from '../test/loopback.js'
 
 type Wire = 'sse' | 'sse-batch' | 'ws'
 const WIRES: Wire[] = ['sse', 'sse-batch', 'ws']
@@ -133,6 +134,8 @@ function sseServer(
     if (body instanceof Blob) {
       logged = new Uint8Array(await body.arrayBuffer())
       const frames = lengthPrefixed(logged)
+        .slice(1)
+        .map(({ frame }) => frame)
       for (const frame of frames) traffic.toServer.push(frame[0]!)
       const reconcilePost =
         !JSON.stringify(init.headers).includes('text/event-stream') &&
@@ -167,18 +170,6 @@ function sseServer(
       headers: { 'Content-Type': response.contentType },
     })
   }) as typeof fetch
-}
-
-/** The frames after an SSE POST's metadata header. */
-function lengthPrefixed(bytes: Uint8Array): Uint8Array[] {
-  const frames: Uint8Array[] = []
-  let offset = 0
-  while (offset + 4 <= bytes.length) {
-    const length = decodeU32(bytes.subarray(offset, offset + 4) as Uint8Array<ArrayBuffer>)
-    frames.push(bytes.subarray(offset + 4, offset + 4 + length))
-    offset += 4 + length
-  }
-  return frames.slice(1)
 }
 
 /** Passes an upload POST's body through, calling `onFrame` with each frame after its metadata header. */

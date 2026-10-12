@@ -29,6 +29,7 @@ import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { createRequestContext } from '../../node/server/context/requestContext.js'
 import { parseResponse } from './response/parse.js'
+import { lengthPrefixed } from '../test/loopback.js'
 
 /** `sse-late-upload`: SSE whose upload request reaches the server 500 ms after the request that opens the wire, as one
  *  that opens a connection of its own may. */
@@ -266,21 +267,6 @@ function sseServer(net: Net, refuseUpload: boolean): typeof fetch {
       headers: { 'Content-Type': response.contentType },
     })
   }) as typeof fetch
-}
-
-/** `[u32 length][bytes]` chunks, each `prefixed` and its `frame`: an SSE POST's metadata header, then its frames. */
-function lengthPrefixed(bytes: Uint8Array): { prefixed: Uint8Array; frame: Uint8Array }[] {
-  const chunks: { prefixed: Uint8Array; frame: Uint8Array }[] = []
-  let offset = 0
-  while (offset + 4 <= bytes.length) {
-    const length = decodeU32(bytes.subarray(offset, offset + 4) as Uint8Array<ArrayBuffer>)
-    chunks.push({
-      prefixed: bytes.subarray(offset, offset + 4 + length),
-      frame: bytes.subarray(offset + 4, offset + 4 + length),
-    })
-    offset += 4 + length
-  }
-  return chunks
 }
 
 /** A POST's body on its way to the server over `pipe`: each chunk once the link carried it, and none once it died. */

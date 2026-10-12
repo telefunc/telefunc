@@ -50,13 +50,12 @@ import {
   type ChannelTransports,
 } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
-import type { Link } from '../link.js'
+import type { Uplink } from './uplink.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { classifyTelefuncError } from '../error-classification.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
@@ -83,7 +82,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _didFireClose = false
   private _didFireOpen = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
-  private _closeDeadline = DOUBLE_ZERO
+  private _closeDeadline = 0
   private _closeWaiters: Array<() => void> = []
   private _didReceiveCloseAck = false
   private _expectCloseAck = false
@@ -275,8 +274,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
    *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
-  _reattachState(link: Link, batched: boolean): ReattachState {
-    const probe = batched ? undefined : this._flow.probeAttach(link)
+  _reattachState(uplink: Uplink, batched: boolean): ReattachState {
+    const probe = batched ? undefined : this._flow.probeAttach(uplink.link)
     return probe === undefined ? {} : { probe }
   }
 
@@ -305,10 +304,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
-  _onTransportOpen(batched: boolean, link: Link): void {
+  _onTransportOpen(batched: boolean, uplink: Uplink): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
-    this._flow.attach(link)
+    this._flow.attach(uplink)
     this._fireOpen()
   }
 

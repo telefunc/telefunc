@@ -15,29 +15,12 @@ import {
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   SSE_POST_MAX_BYTES,
-  WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
+import { muxChannelStub } from '../test/mux-channel-stub.js'
 import { encodeSseRequest } from '../sse-request.js'
 import { encodeLengthPrefixedFrames } from '../frame.js'
 import { TAG, decode, encode, type ReconciledPayload } from '../shared-ws.js'
-
-/** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */
-function createChannel(id = crypto.randomUUID()) {
-  return {
-    id,
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame() {},
-    _onTransportClose() {},
-    _onTransportBatched() {},
-    _reattachState: () => ({}),
-    _fitReplays() {},
-    _acknowledge() {},
-    _answered() {},
-  }
-}
 
 /** A `fetch` whose SSE downstream body never emits a byte and never closes: a silently
  *  stalled stream (no error, no FIN), so the RECONCILED frame that clears `reconciling`
@@ -81,7 +64,7 @@ function reconciled(payload: Pick<ReconciledPayload, 'sessionId' | 'open'> & Par
 /** A connection that applied a RECONCILED whose every setting is zero. */
 function zeroConfiguredConnection() {
   const options = stalledOptions()
-  const connection = ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options) as any
+  const connection = ClientConnection.getOrCreate('http://zero.test', muxChannelStub() as never, options) as any
   const ctrl = new Proxy(
     { sessionId: 'zero', open: [], transports: [CHANNEL_TRANSPORT.SSE] },
     { get: (target, key) => Reflect.get(target, key) ?? 0 },
@@ -108,7 +91,7 @@ test('a RECONCILED of zeros keeps zero on the client', () => {
 
 test("a per-call idleTimeout is kept over the server's", () => {
   const options = { ...stalledOptions(), idleTimeout: 0 }
-  const connection = ClientConnection.getOrCreate('http://idle.test', createChannel() as never, options) as any
+  const connection = ClientConnection.getOrCreate('http://idle.test', muxChannelStub() as never, options) as any
   connection.applyReconciled(reconciled({ sessionId: 'idle', open: [] }), null)
   expect(connection.idleTimeoutMs).toBe(0)
   connection.dispose()
@@ -116,12 +99,12 @@ test("a per-call idleTimeout is kept over the server's", () => {
 
 test('a zero replay budget still registers a later channel on the connection', () => {
   const { connection, options } = zeroConfiguredConnection()
-  expect(ClientConnection.getOrCreate('http://zero.test', createChannel() as never, options)).toBe(connection)
+  expect(ClientConnection.getOrCreate('http://zero.test', muxChannelStub() as never, options)).toBe(connection)
   connection.dispose()
 })
 
 test("a reconnect declares a broadcast's subscriptions, not the toggles queued before it", () => {
-  const channel = { ...createChannel(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
+  const channel = { ...muxChannelStub(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
   const connection = ClientConnection.getOrCreate('http://toggle.test', channel as never, stalledOptions()) as any
   // Offline, the listener is swapped: an unsubscribe, then a subscribe. The reconcile entry already says subscribed.
   connection.sendBroadcastUnsubscribe(channel, false)
@@ -140,7 +123,7 @@ test("a reconnect declares a broadcast's subscriptions, not the toggles queued b
 test("an SSE reconnect sends its own reconcile and leaves a dead POST's messages to the replay, so they can't overtake the ones in flight", () => {
   const connection = ClientConnection.getOrCreate(
     'http://outbox.test',
-    createChannel() as never,
+    muxChannelStub() as never,
     stalledOptions(),
   ) as any
   // A batch POST that failed carried a message, a window update, an older reconcile and an unsubscribe.
@@ -159,7 +142,7 @@ test("an SSE reconnect sends its own reconcile and leaves a dead POST's messages
 test('a batch POST goes a flush throttle after the one before it started, whenever its first frame came', () => {
   const connection = ClientConnection.getOrCreate(
     'http://throttle.test',
-    createChannel() as never,
+    muxChannelStub() as never,
     stalledOptions(),
   ) as any
   const transport = connection.transport
@@ -174,7 +157,11 @@ test('a batch POST goes a flush throttle after the one before it started, whenev
 })
 
 test('what joins the outbox while a batch POST is out goes into the next body as it comes, and that body carries every frame in order', async () => {
-  const connection = ClientConnection.getOrCreate('http://fold.test', createChannel() as never, stalledOptions()) as any
+  const connection = ClientConnection.getOrCreate(
+    'http://fold.test',
+    muxChannelStub() as never,
+    stalledOptions(),
+  ) as any
   const transport = connection.transport
   const bodies: Blob[] = []
   let answer!: () => void
@@ -221,7 +208,7 @@ test('a frame queued with a flush timer pending does not rescan the outbox for t
 
 /** A connection whose batch POSTs are counted and stay out until `answer()`. */
 function connectionCountingPosts(url: string) {
-  const connection = ClientConnection.getOrCreate(url, createChannel() as never, stalledOptions()) as any
+  const connection = ClientConnection.getOrCreate(url, muxChannelStub() as never, stalledOptions()) as any
   const transport = connection.transport
   const out = { posts: 0, answer: () => {} }
   transport.post = () => {
@@ -294,7 +281,7 @@ test.each([
   { urgent: true, kind: 'urgent-flow-control' },
   { urgent: false, kind: 'flow-control' },
 ])('a window update made with urgent $urgent reaches the transport as a $kind frame', ({ urgent, kind }) => {
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://urgent-kind.test', channel as never, stalledOptions()) as any
   connection.canSendImmediately = () => true
   const sent: string[] = []
@@ -326,7 +313,7 @@ test.each([
     vi.useFakeTimers()
     const connection = ClientConnection.getOrCreate(
       'http://ping.test',
-      createChannel() as never,
+      muxChannelStub() as never,
       stalledOptions(),
     ) as any
     try {
@@ -354,7 +341,7 @@ test.each([
 )
 
 test('a batch POST that fails after the next wire started puts back only its window refreshes', async () => {
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://late-post.test', channel as never, stalledOptions()) as any
   const transport = connection.transport
   let fail!: () => void
@@ -382,7 +369,7 @@ test("a wire's end aborts its batch POST still in flight, which would otherwise 
     )
   }) as unknown as typeof fetch
   const options = { ...stalledOptions(), fetchImpl }
-  const connection = ClientConnection.getOrCreate('http://hung-post.test', createChannel() as never, options) as any
+  const connection = ClientConnection.getOrCreate('http://hung-post.test', muxChannelStub() as never, options) as any
   await vi.waitFor(() => expect(endWire).toBeDefined())
   const transport = connection.transport
   // A batch POST hung on a dead TCP connection settles only when its wire aborts it.
@@ -397,12 +384,12 @@ test("a wire's end aborts its batch POST still in flight, which would otherwise 
 
 test('the channel cap counts the open channels, not every channel the connection opened', () => {
   const options = stalledOptions()
-  const connection = ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options) as any
+  const connection = ClientConnection.getOrCreate('http://cap.test', muxChannelStub() as never, options) as any
   connection.nextIndex = MAX_CHANNELS_PER_CONNECTION // what 4,095 channels opened and closed on it leave
   for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++) {
-    expect(ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options)).toBe(connection)
+    expect(ClientConnection.getOrCreate('http://cap.test', muxChannelStub() as never, options)).toBe(connection)
   }
-  expect(() => ClientConnection.getOrCreate('http://cap.test', createChannel() as never, options)).toThrow(
+  expect(() => ClientConnection.getOrCreate('http://cap.test', muxChannelStub() as never, options)).toThrow(
     'Too many channels',
   )
   connection.dispose()
@@ -410,13 +397,13 @@ test('the channel cap counts the open channels, not every channel the connection
 
 test('a closed channel counts against neither the channel cap nor, when a new one needs its place, what a RECONCILE lists', () => {
   const options = stalledOptions()
-  const closing = createChannel()
+  const closing = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://cap-closed.test', closing as never, options) as any
   for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++)
-    ClientConnection.getOrCreate('http://cap-closed.test', createChannel() as never, options)
+    ClientConnection.getOrCreate('http://cap-closed.test', muxChannelStub() as never, options)
   connection.sendAbort(closing, 'null') // its abort waits for the wire
   connection.unregister(closing)
-  expect(ClientConnection.getOrCreate('http://cap-closed.test', createChannel() as never, options)).toBe(connection)
+  expect(ClientConnection.getOrCreate('http://cap-closed.test', muxChannelStub() as never, options)).toBe(connection)
   expect(connection.channels.size).toBe(MAX_CHANNELS_PER_CONNECTION)
   expect(connection.channels.has(0)).toBe(false)
   connection.dispose()
@@ -424,12 +411,12 @@ test('a closed channel counts against neither the channel cap nor, when a new on
 
 test('a connection out of wire indexes hands a new channel to a fresh connection, which its dispose leaves cached', () => {
   const options = stalledOptions()
-  const spent = ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options) as any
+  const spent = ClientConnection.getOrCreate('http://rotate.test', muxChannelStub() as never, options) as any
   spent.nextIndex = 0x10000
-  const fresh = ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options) as any
+  const fresh = ClientConnection.getOrCreate('http://rotate.test', muxChannelStub() as never, options) as any
   expect(fresh).not.toBe(spent)
   spent.dispose()
-  expect(ClientConnection.getOrCreate('http://rotate.test', createChannel() as never, options)).toBe(fresh)
+  expect(ClientConnection.getOrCreate('http://rotate.test', muxChannelStub() as never, options)).toBe(fresh)
   fresh.dispose()
 })
 
@@ -465,7 +452,7 @@ test.each([
     }
   }
   vi.stubGlobal('WebSocket', Socket)
-  const connection = ClientConnection.getOrCreate('http://acks.test', createChannel() as never, {
+  const connection = ClientConnection.getOrCreate('http://acks.test', muxChannelStub() as never, {
     ...stalledOptions(),
     transports: [CHANNEL_TRANSPORT.WS],
   }) as any
@@ -481,7 +468,7 @@ test.each([
 })
 
 test('a buffered acked binary send is kept in the binary replay lane, not the text one', () => {
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://binary-ack.test', channel as never, stalledOptions()) as any
   connection.sendBinaryAckReq(channel, new Uint8Array(1_500_000), () => {}) // over the text lane's 1 MiB, within binary's 2
   connection.drainBufferedFrames((ix: number) => ix === 0)
@@ -490,7 +477,7 @@ test('a buffered acked binary send is kept in the binary replay lane, not the te
 })
 
 test("a frame buffered before the first reconcile is stored under the server's replay budget", () => {
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://replay-drain.test', channel as never, stalledOptions()) as any
   connection.send(channel, 'x'.repeat(2 * 1024 * 1024)) // over the default 1 MiB, waiting for the wire
   connection.buildReconcileFrame()
@@ -503,7 +490,7 @@ test("a frame buffered before the first reconcile is stored under the server's r
 })
 
 test("a channel whose close timed out while its reconnect's reconcile is in flight sends its close request after that RECONCILED, which ends it on the server", () => {
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const connection = ClientConnection.getOrCreate(
     'http://closed-meanwhile.test',
     channel as never,
@@ -525,7 +512,7 @@ test("a channel whose close timed out while its reconnect's reconcile is in flig
 })
 
 test('a channel closed during a reconnect sends what the dead wire lost before what it queued', () => {
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const connection = ClientConnection.getOrCreate(
     'http://draining-replay.test',
     channel as never,
@@ -553,12 +540,12 @@ test('a channel closed during a reconnect sends what the dead wire lost before w
 })
 
 test('a channel whose abort went out with a reconcile on a wire that then died sends it again after the next RECONCILED, not what its listener answered after', () => {
-  const closing = createChannel()
+  const closing = muxChannelStub()
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://abort-lost.test', closing as never, options) as any
   connection.buildReconcileFrame()
   connection.applyReconciled(reconciled({ sessionId: 'lost', open: [{ ix: 0, lastSeq: 0 }] }), null)
-  ClientConnection.getOrCreate('http://abort-lost.test', createChannel() as never, options) // a call's callback
+  ClientConnection.getOrCreate('http://abort-lost.test', muxChannelStub() as never, options) // a call's callback
   connection.buildReconcileFrame() // its registration: sends wait for the RECONCILED
   connection.sendAbort(closing, 'null')
   connection.unregister(closing)
@@ -579,12 +566,12 @@ test('a channel whose abort went out with a reconcile on a wire that then died s
 })
 
 test("a closing channel's listener answer, held while another channel registers on a live wire, reaches the server", () => {
-  const closing = createChannel()
+  const closing = muxChannelStub()
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://answer-held.test', closing as never, options) as any
   connection.buildReconcileFrame()
   connection.applyReconciled(reconciled({ sessionId: 'answer-held', open: [{ ix: 0, lastSeq: 0 }] }), null)
-  ClientConnection.getOrCreate('http://answer-held.test', createChannel() as never, options) // the listener opens a channel
+  ClientConnection.getOrCreate('http://answer-held.test', muxChannelStub() as never, options) // the listener opens a channel
   connection.sendAckRes(closing, 1, '"answer"') // then answers; the registration holds it
   connection.unregister(closing) // its close round trip is done
   const { reconcileFrame, movedBufferedFrames } = connection.stageReconcileBatch()
@@ -597,10 +584,10 @@ test("a closing channel's listener answer, held while another channel registers 
 
 /** Two open channels; the first one's close request went down with a wire whose loss is then noticed. */
 function closeLostWithWire(url: string) {
-  const closing = createChannel()
+  const closing = muxChannelStub()
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate(url, closing as never, options) as any
-  ClientConnection.getOrCreate(url, createChannel() as never, options) // another channel on the page
+  ClientConnection.getOrCreate(url, muxChannelStub() as never, options) // another channel on the page
   connection.buildReconcileFrame()
   connection.applyReconciled(
     reconciled({
@@ -657,10 +644,10 @@ test('such a channel, closed while the reconnect listing it is in flight, sends 
 })
 
 test('a channel whose close timed out while the reconnect listing it is in flight sends its reply after the message the dead wire lost before it', () => {
-  const closing = createChannel()
+  const closing = muxChannelStub()
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://gap.test', closing as never, options) as any
-  ClientConnection.getOrCreate('http://gap.test', createChannel() as never, options) // another channel on the page
+  ClientConnection.getOrCreate('http://gap.test', muxChannelStub() as never, options) // another channel on the page
   const open = [
     { ix: 0, lastSeq: 0 },
     { ix: 1, lastSeq: 0 },
@@ -685,7 +672,7 @@ test('a channel whose close timed out while the reconnect listing it is in fligh
 })
 
 test('a channel whose ATTACH_RESULT overtakes the RECONCILED leaving it out opens with that RECONCILED', () => {
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://attach-early.test', channel as never, stalledOptions()) as any
   connection.buildReconcileFrame()
   // Its call reached the server before the end of the batch POST carrying the RECONCILE, whose RECONCILED goes then.
@@ -696,7 +683,7 @@ test('a channel whose ATTACH_RESULT overtakes the RECONCILED leaving it out open
 })
 
 test("a first connect's retry holds back a newer frame behind the ones its failed attempt sent", () => {
-  const channel = createChannel()
+  const channel = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://first-retry.test', channel as never, stalledOptions()) as any
   const replay = connection.replayBuffers.get(0)
   replay.push(replay.nextSeq(), encode.text(0, 'join', 1)) // sent by the attempt that failed before its RECONCILED
@@ -715,7 +702,7 @@ describe('SSE reconcile watchdog', () => {
     vi.useFakeTimers()
     const { fetchImpl, getSseDownstreamOpens } = createStalledTransport()
 
-    ClientConnection.getOrCreate('http://test.local/_telefunc', createChannel() as never, {
+    ClientConnection.getOrCreate('http://test.local/_telefunc', muxChannelStub() as never, {
       transports: [CHANNEL_TRANSPORT.SSE],
       fetchImpl,
       connectionKey: crypto.randomUUID(),

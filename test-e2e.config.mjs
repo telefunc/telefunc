@@ -15,11 +15,11 @@ export default {
 function getCiJobs() {
   const ubuntu = {
     os: 'ubuntu-latest',
-    node_version: '23',
+    node_version: '26',
   }
   const win = {
     os: 'windows-latest',
-    node_version: '23',
+    node_version: '26',
   }
   const setups = [ubuntu, win]
   const setupModern = [ubuntu]

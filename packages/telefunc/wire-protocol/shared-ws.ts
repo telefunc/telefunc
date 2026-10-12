@@ -74,6 +74,8 @@ import { assert } from '../utils/assert.js'
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
 const HEADER = 7
+/** Where a header's u32 starts: a frame's seq, or the bytes a LENGTH, PING, PONG or ANNOUNCE carries in its place. */
+const SEQ_OFFSET = 3
 /** A LENGTH is its header. */
 const LENGTH_BYTES = HEADER
 /** How many seqs a u32 tells apart. */
@@ -390,10 +392,7 @@ function writeHeader(frame: Uint8Array, tag: number, index: number, seq: number)
   frame[0] = tag
   frame[1] = index & 0xff
   frame[2] = (index >> 8) & 0xff
-  frame[3] = seq & 0xff
-  frame[4] = (seq >> 8) & 0xff
-  frame[5] = (seq >> 16) & 0xff
-  frame[6] = (seq >> 24) & 0xff
+  writeU32(frame, SEQ_OFFSET, seq)
 }
 
 function writeU16(frame: Uint8Array, offset: number, n: number): void {
@@ -565,13 +564,9 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
-  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (see `messageFrames`), in one message,
-   *  written in `message` if given. */
-  message(
-    frames: readonly Uint8Array[],
-    bytes: number,
-    message = new Uint8Array(bytes) as Uint8Array<ArrayBuffer>,
-  ): Uint8Array<ArrayBuffer> {
+  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (see `messageFrames`), in one message. */
+  message(frames: readonly Uint8Array[], bytes: number): Uint8Array<ArrayBuffer> {
+    const message = new Uint8Array(bytes)
     const last = frames.length - 1
     let at = 0
     for (let i = 0; i <= last; i++) {
@@ -711,7 +706,7 @@ function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer
     let bytes = fixedBytes(message[at]!)
     if (message[at] === TAG.LENGTH) {
       assertProtocol(end - at > HEADER, 'LENGTH last in its message')
-      bytes = readU32(message, at + 3)
+      bytes = readU32(message, at + SEQ_OFFSET)
       at += HEADER
       assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at > bytes, 'LENGTH of no frame')
     } else if (bytes === 0 || end - at <= bytes) {
@@ -754,7 +749,7 @@ function decode(frame: Uint8Array): DecodedFrame {
   assertProtocol(frame.length >= HEADER, 'frame too short')
   const tag = frame[0] as number
   const index = (frame[1] as number) | ((frame[2] as number) << 8)
-  const seq = isSequencedTag(tag) ? readU32(frame, 3) : 0
+  const seq = isSequencedTag(tag) ? readU32(frame, SEQ_OFFSET) : 0
   const payload = frame.subarray(HEADER)
 
   const bytes = payload.byteLength
@@ -803,7 +798,7 @@ function decode(frame: Uint8Array): DecodedFrame {
         const ix = readU16(payload, offset)
         ended.push({ ix, lastSeq: readU32(payload, offset + 2) })
       }
-      return { tag: TAG.PING, ended, took: readU32(frame, 3) }
+      return { tag: TAG.PING, ended, took: readU32(frame, SEQ_OFFSET) }
     }
     case TAG.PONG: {
       assertProtocol(payload.length % PONG_ENTRY_BYTES === 0, 'PONG payload')
@@ -813,7 +808,7 @@ function decode(frame: Uint8Array): DecodedFrame {
         const held = payload[offset + 2] === 1
         ended.push({ ix, lastSeq: held ? readU32(payload, offset + 3) : null })
       }
-      return { tag: TAG.PONG, ended, took: readU32(frame, 3) }
+      return { tag: TAG.PONG, ended, took: readU32(frame, SEQ_OFFSET) }
     }
     case TAG.FIN:
       return { tag: TAG.FIN }
@@ -844,7 +839,7 @@ function decode(frame: Uint8Array): DecodedFrame {
       }
     case TAG.ANNOUNCE:
       assertProtocol(payload.length >= 4, 'ANNOUNCE payload too short')
-      return { tag: TAG.ANNOUNCE, bytes: readU32(payload, 0), floor: readU32(frame, 3) / 1000 }
+      return { tag: TAG.ANNOUNCE, bytes: readU32(payload, 0), floor: readU32(frame, SEQ_OFFSET) / 1000 }
 
     case TAG.CLOSE:
       assertProtocol(payload.length >= 4, 'CLOSE payload too short')

@@ -40,7 +40,6 @@ import { ReplayBuffer } from '../replay-buffer.js'
 import { getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
 import { assert } from '../../utils/assert.js'
 import { Listeners } from '../../utils/Listeners.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 import {
   ACK_STATUS,
   ERROR_REASON,
@@ -117,7 +116,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _didFireClose = false
   private _didFireOpen = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
-  private _closeDeadline = DOUBLE_ZERO
+  private _closeDeadline = 0
   private _closeWaiters: Array<() => void> = []
   private _didReceiveCloseAck = false
   private _awaitingCloseAck = false

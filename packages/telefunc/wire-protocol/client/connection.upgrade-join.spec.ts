@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection } from './connection.js'
-import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { muxChannelStub } from '../test/mux-channel-stub.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import type { DecodedFrame, ReconciledPayload } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
@@ -23,25 +23,6 @@ const settle = async () => {
 }
 
 const bytes = (frame: Uint8Array) => frame as Uint8Array<ArrayBuffer>
-
-/** The frames the connection let through to the channel, in dispatch order. */
-function createChannel(dispatched: DecodedFrame[]) {
-  return {
-    id: crypto.randomUUID(),
-    isClosed: false,
-    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    _onTransportOpen() {},
-    _dispatchFrame(frame: DecodedFrame) {
-      dispatched.push(frame)
-    },
-    _onTransportClose() {},
-    _onTransportBatched() {},
-    _reattachState: () => ({}),
-    _fitReplays() {},
-    _acknowledge() {},
-    _answered() {},
-  }
-}
 
 class FakeWebSocket {
   static last: FakeWebSocket | null = null
@@ -127,14 +108,13 @@ type Harness = {
   pushOld: (frame: Uint8Array) => void
   dispatched: DecodedFrame[]
   connection: ClientConnection
-  channel: ReturnType<typeof createChannel>
+  channel: ReturnType<typeof muxChannelStub>
 }
 
 /** Connect over SSE, reconcile, let the client probe WS, answer PREPARE with READY, and stop at
  *  the moment the barrier has been emitted — the start of the join, before either limb lands. */
 async function upgradeToBarrier(): Promise<Harness> {
-  const dispatched: DecodedFrame[] = []
-  const channel = createChannel(dispatched)
+  const channel = muxChannelStub()
   const sessionId = crypto.randomUUID()
   let ix = 0
   const downstream = makeDownstream()
@@ -220,14 +200,22 @@ async function upgradeToBarrier(): Promise<Harness> {
   const barrier = await Promise.race([barrierSent, settle().then(() => null)])
   expect(barrier, 'the client should have emitted its barrier').not.toBeNull()
 
-  return { ix, probe: probe!, barrierSent, pushOld: downstream.push, dispatched, connection, channel }
+  return {
+    ix,
+    probe: probe!,
+    barrierSent,
+    pushOld: downstream.push,
+    dispatched: channel.dispatched,
+    connection,
+    channel,
+  }
 }
 
 /** Connect over SSE with every client→server frame in a batch POST (no upload stream), and stage an upgrade on the
  *  probe up to its READY, which `ready()` delivers. After `holdNextPost()`, the next batch POST stays out until
  *  `releasePost()`. */
 async function stageBatchUpgrade() {
-  const channel = createChannel([])
+  const channel = muxChannelStub()
   const downstream = makeDownstream()
   const posted: DecodedFrame[] = []
   let streams = 0

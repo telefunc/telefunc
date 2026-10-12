@@ -11,7 +11,7 @@ describe('prepare()', () => {
           "jobName": "Vitest",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
           ],
@@ -23,7 +23,7 @@ describe('prepare()', () => {
           "jobName": "TypeScript",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
           ],
@@ -47,11 +47,11 @@ describe('prepare()', () => {
           "jobName": "Vite",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "windows-latest",
             },
           ],
@@ -269,11 +269,11 @@ describe('prepare()', () => {
           "jobName": "React Native",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "windows-latest",
             },
           ],
@@ -294,7 +294,7 @@ describe('prepare()', () => {
           "jobName": "Cloudflare",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
           ],
@@ -371,11 +371,11 @@ describe('prepare()', () => {
           "jobName": "Next.js",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "windows-latest",
             },
           ],
@@ -404,11 +404,11 @@ describe('prepare()', () => {
           "jobName": "SvelteKit",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "windows-latest",
             },
           ],
@@ -437,7 +437,7 @@ describe('prepare()', () => {
           "jobName": "https://telefunc.com",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
           ],

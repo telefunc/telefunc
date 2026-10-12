@@ -1,10 +1,9 @@
-export { PieceSender, PieceReceiver }
+export { PieceSender, ServerPieceReceiver, PagePieceReceiver }
 export type { SendRoom }
 
 import {
   WIRE_ANNOUNCED_MIN_BYTES,
   WIRE_ANNOUNCED_WAIT_MARGIN,
-  WIRE_ARENA_BYTES,
   WIRE_GATHER_BYTES,
   WIRE_PIECES_ACK_BYTES,
   WIRE_PIECE_RATE_MARGIN,
@@ -17,10 +16,10 @@ import {
   WIRE_SEND_ACK_MS,
 } from './constants.js'
 import { Link } from './link.js'
+import type { Uplink } from './client/uplink.js'
 import { LENGTH_BYTES, TAG, assertProtocol, encode, fixedBytes, isSequencedTag } from './shared-ws.js'
 import { assert } from '../utils/assert.js'
 import { Fifo } from '../utils/Fifo.js'
-import { DOUBLE_ZERO } from '../utils/DOUBLE_ZERO.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
 
 /** Whether its receiver acknowledges a frame of this size. */
@@ -44,24 +43,13 @@ type SendRoom = {
   dataRoom(): number
   /** It handed the socket `bytes`, of data or not. */
   handed(bytes: number, data: boolean): void
+  /** It handed the socket a PIECES_ACK, or a window refresh, of `tag` and `bytes`. */
+  handedControl(tag: number, bytes: number): void
 }
 
-const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {} }
+const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {}, handedControl: () => {} }
 
-/** One WebSocket's: the whole frames it sends in one turn go in one message, as many bytes as a frame could carry whole
- *  and unannounced, `WIRE_GATHER_BYTES` at most; data starts a message of its own after a frame that goes at once, and
- *  where a room holds data back, after any. A frame it carries (see `carry`) rides on the next message, whatever that
- *  is. A frame that may take a ping interval to cross goes in pieces, so its receiver sees it arrive. With a rate
- *  measured, no frame or piece it sends carries more than `wholeUpTo` bytes of the frame. With none, a frame
- *  over `wholeUpTo` starts with a probe pair, whose acknowledgements measure the rate, and goes at once behind an
- *  ANNOUNCE, as does each frame sent after it in its task, and in the tasks while the probe is out, whole or in pieces as
- *  `announcedNext` allows; as each task ends, an ANNOUNCE of their bytes closes the announcement. So does a smaller
- *  data frame, unless it crosses within its ping deadline: one of `WIRE_PROBE_FIRST_BYTES` on any link, a larger one at
- *  the floor, the rate the link carries at least by what its receiver took by an answer, a heartbeat or an acknowledged
- *  announcement. A smaller control frame, such as the handshake's, goes whole. With a rate measured, a data frame past
- *  its room (see `SendRoom`) goes in pieces as far as that goes, and its rest waits for `sendHeld`: the frames after it
- *  wait too, but those that aren't data and go whole, as a window update does.
- */
+/** One WebSocket's sender: a turn's frames go in one message, one that may take a ping interval to cross in pieces. */
 class PieceSender {
   /** The frames and pieces sent and not yet acknowledged that measure the rate: the bytes that crossed before each
    *  arrived, when it was sent, the bytes sent through it, and whether it was a probe's. */
@@ -69,7 +57,7 @@ class PieceSender {
   /** The bytes the receiver has acknowledged; the first frame's, and when it was sent. */
   acknowledgedBytes = 0
   private firstBytes = 0
-  private firstAt = DOUBLE_ZERO
+  private firstAt = 0
   /** The bytes of the messages handed to the socket, headers and announcements included, as its receiver counts them. */
   transmittedBytes = 0
   /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
@@ -87,20 +75,20 @@ class PieceSender {
    *  of all it sent, and when it went; and when the newest acknowledgement came. */
   private lastAnnounced = 0
   private readonly announcedEnds = new Fifo<{ end: number; at: number }>()
-  private acknowledgedAt = DOUBLE_ZERO
+  private acknowledgedAt = 0
   /** Each announcement its receiver hasn't acknowledged: where its bytes start and end, of all it sent, and when. */
   private readonly announcements = new Fifo<{ start: number; end: number; at: number }>()
   /** In bytes per ms, the floor its newest ANNOUNCE named (see `Link.floor`). */
-  private namedFloor = DOUBLE_ZERO
+  private namedFloor = 0
   /** With no rate measured, a frame this size or smaller goes unannounced. */
-  private unannouncedUpTo = WIRE_PROBE_FIRST_BYTES + DOUBLE_ZERO
+  private unannouncedUpTo = WIRE_PROBE_FIRST_BYTES
   private pingInterval = 0
   /** A frame this size or smaller goes whole, a larger one in pieces this size: what the fastest measured rate carries
    *  in a ping interval over `WIRE_PIECE_RATE_MARGIN`; with none, what a probe carries, or what the floor carries
    *  so where no room holds data back, if more. */
-  private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES + DOUBLE_ZERO
+  private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
   /** The most bytes a message of whole frames carries: what a frame of them could, whole and unannounced. */
-  private gatherUpTo = WIRE_PROBE_FIRST_BYTES + DOUBLE_ZERO
+  private gatherUpTo = WIRE_PROBE_FIRST_BYTES
   /** The largest message sent: a browser may count a message in full while sending it. */
   private largest = 0
   /** The frames the next message it sends carries (see `carry`). */
@@ -114,9 +102,6 @@ class PieceSender {
   private gatheredSent = false
   private gatheredAtOnce = false
   private flushQueued = false
-  /** What the messages of several frames are written in, and where the next starts (see `WIRE_ARENA_BYTES`). */
-  private arena = new Uint8Array(0)
-  private arenaAt = 0
 
   constructor(
     private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
@@ -155,12 +140,10 @@ class PieceSender {
       this.setWholeUpTo()
     }
     const tag = frame[0]!
-    if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW) this.link.refreshes.handed(frame.byteLength)
-    if (tag === TAG.PIECES_ACK) {
-      this.link.acks.handed(frame.byteLength)
-      // It passes what waits: the probe its peer waits on may be its own.
-      if (this.open === null) return this.pass(frame)
-    }
+    if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW || tag === TAG.PIECES_ACK)
+      this.room.handedControl(tag, frame.byteLength)
+    // It passes what waits: the probe its peer waits on may be its own.
+    if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) {
       if (this.open === null && !this.announces(frame)) return this.pass(frame)
       return this.sendBehindAnnouncement(frame)
@@ -188,7 +171,6 @@ class PieceSender {
   /** Hands the socket `frame`, whole or in pieces. */
   private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
-    if (bytes > this.largest) this.largest = bytes
     if (bytes > this.wholeUpTo || (this.link.fastest > 0 && isSequencedTag(frame[0]!) && bytes > this.room.dataRoom()))
       return this.cut(frame, 0)
     this.gather(frame, isSequencedTag(frame[0]!))
@@ -241,7 +223,6 @@ class PieceSender {
 
   /** Hands the socket `message`, the frames carried riding ahead of it (see `handGathered`). */
   private hand(message: Uint8Array<ArrayBuffer>): void {
-    if (this.gathered.length === 0) return this.transmit(message)
     // Only what was carried rides, of bytes its tag fixes: a LENGTH ahead of it would count after `message`.
     assert(!this.lastVaries)
     this.gathered.push(message)
@@ -259,26 +240,12 @@ class PieceSender {
   flush(): void {
     const n = this.gathered.length
     if (n === 0) return
-    const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes, this.carve())
+    const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes)
     this.gathered.length = 0
     this.gatheredBytes = 0
     this.lastVaries = this.gatheredSent = this.gatheredAtOnce = false
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.transmit(message)
-  }
-
-  /** The next `gatheredBytes` of the arena; where they don't fit, of a new one twice its size or theirs,
-   *  `WIRE_ARENA_BYTES` at most. A message larger than that has its own buffer. */
-  private carve(): Uint8Array<ArrayBuffer> {
-    const bytes = this.gatheredBytes
-    if (bytes > WIRE_ARENA_BYTES) return new Uint8Array(bytes)
-    if (this.arenaAt + bytes > this.arena.byteLength) {
-      this.arena = new Uint8Array(Math.max(bytes, Math.min(WIRE_ARENA_BYTES, 2 * this.arena.byteLength)))
-      this.arenaAt = 0
-    }
-    const at = this.arenaAt
-    this.arenaAt += bytes
-    return this.arena.subarray(at, this.arenaAt)
   }
 
   /** Hands the socket `frame` from `offset` in pieces, of data as far as its room goes, and holds the rest. */
@@ -333,7 +300,6 @@ class PieceSender {
       queueMicrotask(this.closeAnnouncement)
     }
     this.open.bytes += bytes
-    if (bytes > this.largest) this.largest = bytes
     if (this.link.fastest === 0 && this.probe === null && bytes > this.wholeUpTo) this.sendProbe(frame, now)
     else this.sendAnnounced(frame, 0, now)
   }
@@ -522,7 +488,7 @@ class PieceSender {
     for (const take of this.carried.splice(0)) {
       const frame = take()
       if (frame === null) continue
-      ;(frame[0] === TAG.PIECES_ACK ? this.link.acks : this.link.refreshes).handed(frame.byteLength)
+      this.room.handedControl(frame[0]!, frame.byteLength)
       this.count(frame, false)
       this.add(frame)
     }
@@ -542,22 +508,12 @@ class PieceSender {
   }
 }
 
-/** One WebSocket's: puts a frame sent in pieces back together, whatever their sizes, and acknowledges the bytes it
- *  took. The two pieces after an empty one are acknowledged at once: their sender may measure the rate by them. While
- *  an announcement is open, the next message is waited for at the rate the newest came at, dated apart from the message
- *  before it. A receiver whose peer holds data back by what it acknowledges (`peerHoldsBack`: the server's, see
- *  `SendBudget`) acknowledges each announced message, as its peer's PINGs wait behind them, once more than
- *  `WIRE_PIECES_ACK_BYTES` of frames of any size are unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`,
- *  data within `WIRE_SEND_ACK_MS`, and what it took in the message of its side's answer to it (`answering`). Any other
- *  acknowledges when a frame over `WIRE_PIECES_ACK_BYTES` arrived or an announcement closed, at most one PIECES_ACK per
- *  `WIRE_PIECES_ACK_GAP_MS` and none before its wire's share for them allows one (`link`, see `Link.acks`), a frame in
- *  the message its side sends next: all a sender needs that cuts its pieces by the rate it measures, and stops
- *  announcing by the rate it carries. */
-class PieceReceiver {
+/** One WebSocket's receiver: puts a frame sent in pieces back together, and acknowledges the bytes it took. */
+abstract class PieceReceiver {
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
   private frame = new Uint8Array(0)
   private received = 0
-  private total = 0
+  protected total = 0
   private data = false
   /** The pieces still to acknowledge at once. */
   private probing = 0
@@ -565,20 +521,20 @@ class PieceReceiver {
    *  the ANNOUNCE before any: when it arrived, its bytes, and in bytes per ms, the rate it came at; and the floor the
    *  opening ANNOUNCE named. */
   private announced: number | null = null
-  private announcedAt = DOUBLE_ZERO
+  private announcedAt = 0
   private lastAnnounced = 0
-  private rate = DOUBLE_ZERO
-  private floor = DOUBLE_ZERO
+  private rate = 0
+  private floor = 0
   /** The bytes of the messages it took in all, headers and announcements included, and when it last acknowledged. */
   took = 0
-  private acknowledgedTook = 0
-  private newestAt = DOUBLE_ZERO
+  protected acknowledgedTook = 0
+  protected newestAt = 0
   /** When the newest data frame arrived, and when the newest the last acknowledgement covered did. */
   private newestDataAt: number | null = null
   private acknowledgedDataAt: number | null = null
-  private ackedAt = Number.NEGATIVE_INFINITY
+  protected ackedAt = Number.NEGATIVE_INFINITY
   private ackTimer: ReturnType<typeof setTimeout> | null = null
-  private ackDue = DOUBLE_ZERO
+  private ackDue = 0
   /** The acknowledgement the timer sends goes alone (see `acknowledgeIn`). */
   private ackAlone = false
 
@@ -587,25 +543,25 @@ class PieceReceiver {
 
   constructor(
     private readonly send: (frame: Uint8Array<ArrayBuffer>) => void,
-    /** `link`: the page's wire, whose share for acknowledgements they wait for. `carry`: its side's
-     *  `PieceSender.carry`. */
-    private readonly options: {
-      peerHoldsBack: boolean
-      link?: Link
-      carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
-    },
+    /** Its side's `PieceSender.carry`. */
+    private readonly carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void,
   ) {}
+
+  /** A whole frame of `bytes` arrived at `at`, as an announced message if `announced`. */
+  protected abstract tookFrame(bytes: number, data: boolean, announced: boolean, at: number): void
+  /** A piece arrived, as an announced message if `announced`, and made its frame `whole`. */
+  protected abstract tookPiece(whole: boolean, announced: boolean): void
+  /** An ANNOUNCE that arrived at `at` closed an announcement. */
+  protected abstract tookClose(at: number): void
+  /** How long an acknowledgement waits from now. */
+  protected abstract ackWait(): number
 
   /** After a whole frame of `bytes` arrived at `at`: alone in its message, or `riding` ahead of the frame its message ends
    *  with, which dates the message. A data frame dates the ack's span: it takes the queues an upload fills, where the
    *  frames that go at once pass them. */
   arrived(bytes: number, data: boolean, at: number, riding = false): void {
     this.took += bytes
-    const announced = !riding && this.paced(bytes, at)
-    if (!this.options.peerHoldsBack && !acknowledges(bytes)) return
-    this.date(data, at)
-    if (!this.options.peerHoldsBack) this.acknowledgeSoon(true)
-    else if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
+    this.tookFrame(bytes, data, !riding && this.paced(bytes, at), at)
   }
 
   /** Takes an ANNOUNCE that arrived at `at`. One of no bytes opens an announcement: frames follow it at once, over a link
@@ -621,9 +577,7 @@ class PieceReceiver {
     }
     assertProtocol(bytes === this.announced, 'ANNOUNCE of other bytes than followed the one before')
     this.announced = null
-    if (this.options.peerHoldsBack) return
-    this.date(false, at)
-    this.acknowledgeSoon()
+    this.tookClose(at)
   }
 
   /** Until when it waits for the next message of what was announced: twice the time `announcedNext` of the newest takes at
@@ -646,13 +600,6 @@ class PieceReceiver {
     this.lastAnnounced = bytes
     this.announced += bytes
     return true
-  }
-
-  /** Its side answers what arrived: where its peer holds data back, the answer's message acknowledges the data it took,
-   *  so the peer's next request doesn't wait for the acknowledgement's timer. */
-  answering(): void {
-    if (this.options.peerHoldsBack && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES)
-      this.acknowledgeWithNext()
   }
 
   /** Takes a LENGTH of `bytes`, after the frame it measures: taken, as an ANNOUNCE is, not dated. */
@@ -692,9 +639,7 @@ class PieceReceiver {
     if (this.probing > 0) {
       this.probing--
       this.acknowledge()
-    } else if (this.options.peerHoldsBack) {
-      if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
-    } else if (whole && acknowledges(total)) this.acknowledgeSoon(true)
+    } else this.tookPiece(whole, announced)
     if (!whole) return null
     const frame = this.frame
     this.frame = new Uint8Array(0)
@@ -702,22 +647,16 @@ class PieceReceiver {
     return frame
   }
 
-  private date(data: boolean, at: number): void {
+  /** Dates what arrived at `at`, as data if `data`: the newest the next acknowledgement covers. */
+  protected date(data: boolean, at: number): void {
     this.newestAt = at
-    if (!data) return
-    this.newestDataAt = at
-    if (this.options.peerHoldsBack && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES)
-      this.acknowledgeIn(WIRE_SEND_ACK_MS)
+    if (data) this.newestDataAt = at
   }
 
-  /** Acknowledges once the gap and the share allow; `withNext`, in the message its side sends next then: an
-   *  acknowledgement that only measures the rate, which its own delay dates, as a peer that holds nothing back takes
-   *  one of a frame. */
-  private acknowledgeSoon(withNext = false): void {
-    const wait = Math.max(
-      this.ackedAt + (this.options.peerHoldsBack ? WIRE_SEND_ACK_GAP_MS : WIRE_PIECES_ACK_GAP_MS) - this.newestAt,
-      this.options.link?.acks.wait() ?? 0,
-    )
+  /** Acknowledges once `ackWait` allows; `withNext`, in the message its side sends next then: an acknowledgement that
+   *  only measures the rate, which its own delay dates, as a peer that holds nothing back takes one of a frame. */
+  protected acknowledgeSoon(withNext = false): void {
+    const wait = this.ackWait()
     if (wait > 0) this.acknowledgeIn(wait, withNext)
     else if (withNext) this.acknowledgeWithNext()
     else this.acknowledge()
@@ -725,7 +664,7 @@ class PieceReceiver {
 
   /** Acknowledges `ms` from now, or sooner where it already would; `withNext`, as `acknowledgeSoon` says, unless an
    *  acknowledgement that doesn't wait is due by then too. */
-  private acknowledgeIn(ms: number, withNext = false): void {
+  protected acknowledgeIn(ms: number, withNext = false): void {
     if (!withNext) this.ackAlone = true
     const due = performance.now() + ms
     if (this.ackTimer !== null) {
@@ -747,10 +686,10 @@ class PieceReceiver {
   }
 
   /** Acknowledges in the message its side sends next. */
-  private acknowledgeWithNext(): void {
+  protected acknowledgeWithNext(): void {
     if (this.carrying) return
     this.carrying = true
-    this.options.carry(() => (this.carrying ? this.acknowledgement() : null))
+    this.carry(() => (this.carrying ? this.acknowledgement() : null))
   }
 
   private acknowledgement(): Uint8Array<ArrayBuffer> {
@@ -766,5 +705,70 @@ class PieceReceiver {
     this.acknowledgedDataAt = this.newestDataAt
     // Rounded down: its sender then dates the arrival no earlier than it was, and takes a rate no faster than the link's.
     return encode.piecesAck(this.took, Math.floor(this.ackedAt - this.newestAt), span)
+  }
+}
+
+/** The server's: its peer, the page, holds data back by what it acknowledges (see `SendBudget`), so it acknowledges each
+ *  announced message, as the page's PINGs wait behind them, once more than `WIRE_PIECES_ACK_BYTES` of frames of any size
+ *  are unacknowledged, at most one PIECES_ACK per `WIRE_SEND_ACK_GAP_MS`, data within `WIRE_SEND_ACK_MS`, and what it
+ *  took in the message of its answer to it (`answering`). */
+class ServerPieceReceiver extends PieceReceiver {
+  /** Its side answers what arrived: the answer's message acknowledges the data it took, so the page's next request
+   *  doesn't wait for the acknowledgement's timer. */
+  answering(): void {
+    if (this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeWithNext()
+  }
+
+  protected override date(data: boolean, at: number): void {
+    super.date(data, at)
+    if (data && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeIn(WIRE_SEND_ACK_MS)
+  }
+
+  protected tookFrame(_bytes: number, data: boolean, announced: boolean, at: number): void {
+    this.date(data, at)
+    if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
+  }
+
+  protected tookPiece(_whole: boolean, announced: boolean): void {
+    if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()
+  }
+
+  protected tookClose(): void {}
+
+  protected ackWait(): number {
+    return this.ackedAt + WIRE_SEND_ACK_GAP_MS - this.newestAt
+  }
+}
+
+/** The page's: it acknowledges when a frame over `WIRE_PIECES_ACK_BYTES` arrived or an announcement closed, at most one
+ *  PIECES_ACK per `WIRE_PIECES_ACK_GAP_MS` and none before its uplink's share for them allows one, a frame in the message
+ *  its side sends next: all a sender needs that cuts its pieces by the rate it measures, and stops announcing by the
+ *  rate it carries. */
+class PagePieceReceiver extends PieceReceiver {
+  constructor(
+    send: (frame: Uint8Array<ArrayBuffer>) => void,
+    carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void,
+    private readonly uplink: Uplink,
+  ) {
+    super(send, carry)
+  }
+
+  protected tookFrame(bytes: number, data: boolean, _announced: boolean, at: number): void {
+    if (!acknowledges(bytes)) return
+    this.date(data, at)
+    this.acknowledgeSoon(true)
+  }
+
+  protected tookPiece(whole: boolean): void {
+    if (whole && acknowledges(this.total)) this.acknowledgeSoon(true)
+  }
+
+  protected tookClose(at: number): void {
+    this.date(false, at)
+    this.acknowledgeSoon()
+  }
+
+  protected ackWait(): number {
+    return Math.max(this.ackedAt + WIRE_PIECES_ACK_GAP_MS - this.newestAt, this.uplink.acks.wait())
   }
 }

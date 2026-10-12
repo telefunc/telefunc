@@ -215,9 +215,6 @@ export const WIRE_PROBE_CLOCK_MS = 1
 export const WIRE_PIECE_RATE_MARGIN = 8
 /** The most bytes a message of the whole frames sent in one turn carries (see `PieceSender`), each copied into it once. */
 export const WIRE_GATHER_BYTES = 64 * 1024
-/** The buffer consecutive messages of several frames are carved from, at most: a new buffer costs microseconds before
- *  its first byte, far more than copying a frame into one. */
-export const WIRE_ARENA_BYTES = 4 * WIRE_GATHER_BYTES
 /** An announced message may carry twice the one before it, or this many bytes whatever that carried. */
 export const WIRE_ANNOUNCED_MIN_BYTES = 8 * 1024
 /** A receiver waits for the next announced message this many times as long as it takes at the rate the one before came
@@ -227,7 +224,7 @@ export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
-/** The same where its peer holds data back by what it acknowledges (see `send-budget.ts`). */
+/** The same where its peer holds data back by what it acknowledges (see `client/send-budget.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
 /** Where its peer holds data back, a receiver acknowledges data at most this long after it arrived, once
  *  `WIRE_SEND_ACK_MIN_BYTES` are unacknowledged: on a slow uplink its peer learns the rate data arrives at from a few
@@ -241,10 +238,10 @@ export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 export const WIRE_ACK_SHARE = 0.0025
 export const WIRE_REFRESH_SHARE = 0.0075
 /** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
- *  least (see `send-budget.ts`). */
+ *  least (see `client/send-budget.ts`). */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 /** How long a data frame of the page's may wait in the queues of its wire, as its server's acknowledgements measure it,
- *  before the page stops handing a WebSocket more (see `send-budget.ts`). */
+ *  before the page stops handing a WebSocket more (see `client/send-budget.ts`). */
 export const WIRE_QUEUE_DELAY_MS = 300
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
@@ -302,22 +299,9 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             count tells the server how far behind the page is,
 //                             past which it closes the channel they ride.
 //
-// Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA
-// does: what the receiver has consumed plus its window. The sender's credit is that limit
-// minus what it has sent, so what is still in flight counts against it. Each side advertises
-// its limits again on a reattach to another wire, and the receiver keeps its grown `W` across
-// one (BDP is a property of the path, not of any single wire instance: slight divergence from
-// gRPC's per-connection reset, acceptable for typical transport hiccups). A reattach on the
-// same wire lost nothing and advertises nothing.
+// Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA does.
 //
-// Replay: each end keeps what it sent on a channel until its peer acknowledges it, to replay after a reconnect. A
-// `WINDOW` carries the last seq the receiver has, so each one acknowledges: one goes out as a limit does, once a
-// quarter window of what credit doesn't count, ack requests and their answers, arrived since the last, and at each
-// heartbeat for what arrived since the last, so a quiet channel's replay empties. A receiver never grants a window past
-// half the smaller lane of its peer's replay buffer (`replayWindow`), so what credit lets be in flight, and a message
-// up to as large sent as the credit ran out, always fit it. What credit doesn't hold back, sends nobody awaits past it,
-// ack requests and their answers, takes the rest, and a reconnect that needs what a replay dropped ends the channel on
-// both ends with `NetworkError`.
+// Replay: each end keeps what it sent on a channel until a `WINDOW` acknowledges it, to replay after a reconnect.
 
 /** Initial credit window — sized so a typical ~MB-scale burst doesn't stall on
  *  the BDP ramp-up. Grows further via the estimator up to `CREDIT_WINDOW_MAX_BYTES`. */

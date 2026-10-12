@@ -1,9 +1,8 @@
 export { SSEStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { SSELineSplitter } from '../SSELineSplitter.js'
+import { SSEEvents } from '../SSEEvents.js'
 import { concatAll } from '../../frame.js'
-import { base64urlToUint8Array } from '../../base64url.js'
 import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)
@@ -11,8 +10,8 @@ const EMPTY = new Uint8Array(0)
 /** SSE transport reader — decodes `data: <base64url>\n\n` events back to
  *  binary frames.
  *
- *  `readExact` is the only method implemented here. SSE line parser state
- *  (`lines`, `pendingData`) lives as instance fields,
+ *  `readExact` is the only method implemented here. SSE parser state
+ *  (`sse`) lives as an instance field,
  *  persisted across calls. `reader.read()` is called inline — only when more
  *  bytes are needed — preserving the full pull chain through
  *  `FrameDemuxer.ensureReading` to the server generator. No separate pump. */
@@ -22,8 +21,7 @@ class SSEStreamReader extends BaseStreamReader {
   /** Events decoded since `binary`, joined once `readExact` has its bytes. */
   private events: Uint8Array<ArrayBuffer>[] = []
   private eventBytes = 0
-  private lines = new SSELineSplitter()
-  private pendingData = ''
+  private sse = new SSEEvents()
 
   constructor(
     reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
@@ -62,7 +60,7 @@ class SSEStreamReader extends BaseStreamReader {
         if (this.cancelled) return EMPTY
         throw readError ?? new Error('Connection lost — server closed the SSE stream before all data was received.')
       }
-      this.lines.push(value!, this.onLine)
+      this.sse.push(value!, this.onEvent)
     }
     if (this.events.length > 0) {
       const parts = this.binary.length > 0 ? [this.binary, ...this.events] : this.events
@@ -75,14 +73,8 @@ class SSEStreamReader extends BaseStreamReader {
     return result
   }
 
-  private onLine = (line: string) => {
-    if (line.startsWith('data: ')) {
-      this.pendingData = line.slice(6)
-    } else if (line === '' && this.pendingData !== '') {
-      const event = base64urlToUint8Array(this.pendingData)
-      this.events.push(event)
-      this.eventBytes += event.length
-      this.pendingData = ''
-    }
+  private onEvent = (event: Uint8Array<ArrayBuffer>) => {
+    this.events.push(event)
+    this.eventBytes += event.length
   }
 }

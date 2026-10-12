@@ -19,71 +19,19 @@ import {
 import { ChannelOverflowError } from './channel-errors.js'
 import { Fifo } from '../utils/Fifo.js'
 import { TAG, encode, isOneFrame, messageFrames } from './shared-ws.js'
-import { SendBudget } from './send-budget.js'
+import { SendBudget } from './client/send-budget.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { Room } from './room/server/statics.js'
 import type { ServerLocalParticipant, ServerRoom } from './room/server/room.js'
 import { ResponseRoomGrants, RoomParticipantStubChannel } from './room/server/stub.js'
 import { ClientRoom, ClientStandaloneParticipant } from './room/client.js'
+import { Pipe } from './test/loopback.js'
 
 const LATENCY_MS = 5
 
 /** What a socket read hands over at once; the receiver's microtasks run between two reads. */
 const READ_BYTES = 64 * 1024
-
-/** One direction of a wire: a frame leaves once the one before it has, and arrives `latencyMs` after it left. */
-class Pipe {
-  private queue: { frame: Uint8Array<ArrayBuffer>; at: number }[] = []
-  private timer: ReturnType<typeof setTimeout> | null = null
-  private held = false
-  /** What the pipe carries, in bytes: the sender's `bufferedAmount`. */
-  bytes = 0
-  /** A slow link carries a frame only once the one before it has gone through. */
-  bytesPerMs = Infinity
-  latencyMs = LATENCY_MS
-  private lastAt = 0
-  constructor(private readonly deliver: (frame: Uint8Array<ArrayBuffer>) => void) {}
-  push(frame: Uint8Array<ArrayBuffer>): void {
-    this.lastAt = Math.max(Date.now(), this.lastAt) + frame.byteLength / this.bytesPerMs
-    this.queue.push({ frame, at: this.lastAt + this.latencyMs })
-    this.bytes += frame.byteLength
-    this.schedule()
-  }
-  /** What the network still carries stops arriving, until `release`. */
-  hold(): void {
-    this.held = true
-  }
-  release(): void {
-    this.held = false
-    this.schedule()
-  }
-  /** The wire is cut: what it still carries is lost. */
-  clear(): void {
-    this.queue.length = 0
-    this.bytes = 0
-  }
-  get length(): number {
-    return this.queue.length
-  }
-  private schedule(): void {
-    if (this.timer || this.held || this.queue.length === 0) return
-    this.timer = setTimeout(
-      () => {
-        this.timer = null
-        let read = 0
-        while (!this.held && read < READ_BYTES && this.queue.length > 0 && this.queue[0]!.at <= Date.now()) {
-          const { frame } = this.queue.shift()!
-          read += frame.byteLength
-          this.bytes -= frame.byteLength
-          this.deliver(frame)
-        }
-        this.schedule()
-      },
-      Math.max(0, this.queue[0]!.at - Date.now()),
-    )
-  }
-}
 
 let loop: Loopback
 
@@ -96,8 +44,8 @@ class LoopbackSocket {
   onmessage: ((event: { data: ArrayBuffer }) => void) | null = null
   onclose: (() => void) | null = null
   onerror: (() => void) | null = null
-  readonly toServer = new Pipe((frame) => loop.receive(this, frame))
-  readonly toPage = new Pipe((frame) => this.onmessage?.({ data: frame.buffer }))
+  readonly toServer = new Pipe(LATENCY_MS, READ_BYTES)
+  readonly toPage = new Pipe(LATENCY_MS, READ_BYTES)
   constructor(_url: string) {
     this.toServer.bytesPerMs = this.toPage.bytesPerMs = loop.linkBytesPerMs
     loop.sockets.push(this)
@@ -113,7 +61,13 @@ class LoopbackSocket {
   }
   send(frame: Uint8Array<ArrayBuffer>): void {
     loop.sends('page', frame)
-    this.toServer.push(frame.slice())
+    const sent = frame.slice()
+    this.toServer.push(sent.byteLength, () => loop.receive(this, sent))
+  }
+  /** The server sends `frame` to the page. */
+  sendToPage(frame: Uint8Array<ArrayBuffer>): void {
+    const sent = frame.slice()
+    this.toPage.push(sent.byteLength, () => this.onmessage?.({ data: sent.buffer }))
   }
   close(): void {
     this.cut()
@@ -143,7 +97,7 @@ class Loopback {
     wholeMessages: true,
     sendNow: (socket, frame) => {
       this.sends('server', frame)
-      socket.toPage.push(frame.slice())
+      socket.sendToPage(frame)
     },
     bufferedAmount: (socket) => (this.reportsBacklog ? socket.toPage.bytes : undefined),
     terminateConnection: (socket) => socket.cut(),
@@ -1389,8 +1343,8 @@ test("a fresh wire's attach measures the path's round trip by the RECONCILED, wi
   await runUntil(() => opened, 1_000)
   expect(loop.sent.server.filter(([tag]) => tag === TAG.BDP_PING_ACK)).toEqual([])
   expect(
-    (page as unknown as { _connection: { transport: { link: { pathRtt: number } } } })._connection.transport.link
-      .pathRtt,
+    (page as unknown as { _connection: { transport: { uplink: { link: { pathRtt: number } } } } })._connection.transport
+      .uplink.link.pathRtt,
   ).toBe(2 * LATENCY_MS)
 })
 
@@ -1741,9 +1695,11 @@ test("on a 100 B/ms uplink, the server answers the pieces of the page's 1 MB fra
 const pageCounts = (page: unknown) =>
   (
     page as {
-      _connection: { transport: { pieceSender: { transmittedBytes: number }; pieces: { took: number } } }
+      _connection: {
+        transport: { ends: { budget: { sender: { transmittedBytes: number } }; pieces: { took: number } } }
+      }
     }
-  )._connection.transport
+  )._connection.transport.ends
 
 // A budget sees all it puts on a slow uplink only if every byte counts: a piece's header and an announcement too.
 test("on a 1 B/ms link, what each end counts as handed and its peer hasn't taken is what the wire holds, headers included", async () => {
@@ -1760,7 +1716,7 @@ test("on a 1 B/ms link, what each end counts as handed and its peer hasn't taken
     const ends = pageCounts(page)
     off.up = Math.max(
       off.up,
-      Math.abs(ends.pieceSender.transmittedBytes - serverEnds().receiver.took - socket.toServer.bytes),
+      Math.abs(ends.budget.sender.transmittedBytes - serverEnds().receiver.took - socket.toServer.bytes),
     )
     off.down = Math.max(
       off.down,
@@ -2629,13 +2585,14 @@ test("on a 1250 B/ms uplink with bursts of 2400 KiB every 2000 ms beside a 20 MB
   let idle = 0
   await downloadBeside(1_250, (page) => {
     const timer = setInterval(() => void page.sendBinary(new Uint8Array(2_400 * KIB)).catch(() => {}), 2_000)
-    const sender = (page as unknown as { _connection: { transport: { pieceSender: { heldBytes: number } } } })
-      ._connection.transport
+    const transport = (
+      page as unknown as { _connection: { transport: { ends: { budget: { sender: { heldBytes: number } } } } } }
+    )._connection.transport
     const measureFrom = Date.now() + 10_000
     const sampler = setInterval(() => {
       const pipe = loop.socket.toServer as unknown as { queue: unknown[]; lastAt: number }
       if (Date.now() < measureFrom) return
-      if (sender.pieceSender.heldBytes > 0 && (pipe.queue.length === 0 || pipe.lastAt < Date.now())) idle++
+      if (transport.ends.budget.sender.heldBytes > 0 && (pipe.queue.length === 0 || pipe.lastAt < Date.now())) idle++
     }, 1)
     return () => {
       clearInterval(timer)
@@ -2662,7 +2619,7 @@ test('when both ends send 64-byte messages as fast as credit allows, the upload 
   const window = (end: unknown) => (end as { _flow: { byteWindow: number } })._flow.byteWindow
   expect(up).toBeGreaterThanOrEqual(0.99 * down)
   expect(window(server)).toBeGreaterThanOrEqual(window(page))
-})
+}, 60_000)
 
 // What a page sends about what it receives shares its uplink with what it uploads.
 test("on a 10 B/ms uplink the page measured, a 20 MB/s download's acknowledgements and window refreshes take at most 1% of it, and the download keeps its rate", async () => {

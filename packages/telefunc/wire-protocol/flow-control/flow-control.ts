@@ -3,6 +3,7 @@ export type { FlowControlEmit }
 
 import { BdpEstimator } from './bdp-estimator.js'
 import type { Link, SendWait } from '../link.js'
+import type { Uplink } from '../client/uplink.js'
 import { macrotaskYield } from './macrotask-yield.js'
 import {
   CREDIT_MSG_WINDOW_INITIAL,
@@ -13,7 +14,6 @@ import {
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
 import { Fifo } from '../../utils/Fifo.js'
-import { DOUBLE_ZERO } from '../../utils/DOUBLE_ZERO.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
 /** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
@@ -34,34 +34,11 @@ function replayWindow(text: number, binary: number): number {
   return Math.max(1, Math.floor(Math.min(text, binary) / 2))
 }
 
-/**
- * Per-channel flow control. Two orthogonal credit axes coordinated by a single
- * BDP probe per RTT, plus a self-utilisation gate that applies symmetrically
- * to growth (receiver-side) and to outbound pacing (sender-side).
- *
- *   1. **Byte credit** (`WINDOW` frame) bounds in-flight memory.
- *   2. **Message-count credit** (`MSG_WINDOW` frame) bounds
- *      in-flight per-RTT *message count* regardless of size.
- *   3. **Self-utilisation gate**: `_recordSelfTime(t0)` accumulates this channel's
- *      sync work into a two-bucket rolling sum. Above `FC_SELF_UTIL_THRESHOLD`,
- *      `onPingAck` refuses to grow either window and `decrement` yields a
- *      macrotask before returning, as it does once per `yieldBytes` sent.
- *
- * Limits are cumulative, as QUIC's MAX_DATA: the receiver advertises what it has consumed plus its window, and the
- * sender's credit is that limit minus what it has sent, so what is still in flight counts against it. Totals are exact
- * here, and limits travel mod 2^32: a limit off the wire is read as its signed 32-bit distance from the one it updates.
- *
- * Senders waiting on credit get it one at a time, oldest first: while others wait, a send that leaves credit hands it
- * to the next and waits behind them. So senders that each await their sends, once waiting, pass the limit by one
- * frame together. Senders still sending freely as the credit runs out each have a frame out past it.
- *
- * Until `fitReplays` says the replay buffers that bound its windows, it advertises no byte limit, so its peer's
- * assumption of the initial one stands: its peer's replay couldn't keep what a larger window let be in flight.
- */
+/** A channel's byte and message credit both ways, as cumulative limits, as QUIC's MAX_DATA. */
 class FlowControl {
   private _bdp = new BdpEstimator()
-  /** The wire of the last `attach`. */
-  private _link: Link | null = null
+  /** The page's uplink of the last `attach`. */
+  private _uplink: Uplink | null = null
   // Sender side: what this side has sent, and the peer's limits.
   private _sentBytes = 0
   private _sentMessages = 0
@@ -86,7 +63,7 @@ class FlowControl {
   /** What had been consumed when the last urgent limit was emitted. */
   private _urgentBytes = 0
   private _urgentMessages = 0
-  /** Waits for the wire's share to refresh the limits a quarter window of consumption made due (see `Link.refreshes`). */
+  /** Waits for the wire's share to refresh the limits a quarter window of consumption made due (see `Uplink.refreshes`). */
   private _refreshTimer: ReturnType<typeof setTimeout> | null = null
   /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
   private _uncountedBytes = 0
@@ -109,8 +86,8 @@ class FlowControl {
   private _leastBacklog = Infinity
 
   // Self-utilisation rolling-sum state. Two buckets, phase-weighted blend.
-  private _prevBucket = DOUBLE_ZERO
-  private _curBucket = DOUBLE_ZERO
+  private _prevBucket = 0
+  private _curBucket = 0
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
@@ -145,7 +122,7 @@ class FlowControl {
   /** The round trip of the path of the last `attach`'s wire, as an attach's probe measured it, `Infinity` where none
    *  did: what this side's answer to a `BDP_PING` says, for a receiver with no attach of its own to probe. */
   pathRtt(): number {
-    return this._link?.pathRtt ?? Infinity
+    return this._uplink?.link.pathRtt ?? Infinity
   }
 
   /** Keeps what credit lets be in flight within the replay buffers (see `replayWindow`): this side grants its peer
@@ -228,7 +205,7 @@ class FlowControl {
   onReceived(bytes: number, at: number): void {
     this._arrived = true
     this._receivedBytes += bytes
-    this._link?.creditArrived(bytes)
+    this._uplink?.creditArrived(bytes)
     if (this._bdp.onReceive(bytes, at, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
   }
 
@@ -330,14 +307,15 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Attach on `link`. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
-  attach(link: Link): void {
-    if (link !== this._link) {
-      this._link = link
-      link.granted(this._grantedBytes - this._receivedBytes)
+  /** Attach on `uplink`'s wire. The wire of the last attach lost nothing to repair, and still answers the probe in
+   *  flight. */
+  attach(uplink: Uplink): void {
+    if (uplink !== this._uplink) {
+      this._uplink = uplink
+      uplink.granted(this._grantedBytes - this._receivedBytes)
       this.reattach()
     }
-    this._bdp.attach(link)
+    this._bdp.attach(uplink.link)
   }
 
   /** Attach on another wire than the last, or the first. The probe in flight rode the prior wire, and the limits go out
@@ -361,18 +339,20 @@ class FlowControl {
     this._widened = true
   }
 
-  // A frame counted in bytes only takes no message credit and starts no BDP probe: a publish, which nothing waits on.
-
+  /** Sender-side: counts a frame in bytes only, a broadcast's publish, which nothing waits on: it takes no message
+   *  credit. */
   countSentBytes(bytes: number): void {
     const hadCredit = !this.isPastByteCredit
     this._sentBytes += bytes
     if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
+  /** Receiver-side: a frame counted in bytes only arrived, which starts no BDP probe. */
   onArrived(): void {
     this._arrived = true
   }
 
+  /** Receiver-side: such a frame of `bytes` was consumed, which takes no message credit. */
   onConsumedBytes(bytes: number): void {
     this._consume(bytes, 0)
   }
@@ -405,9 +385,9 @@ class FlowControl {
 
   /** Sends the limits due, once the wire's share allows. */
   private _advertiseDue(bytes: boolean, messages: boolean): void {
-    const wait = this._link?.refreshes.wait() ?? 0
+    const wait = this._uplink?.refreshes.wait() ?? 0
     if (wait > 0) {
-      this._link!.noteWait(wait)
+      this._uplink!.noteWait(wait)
       this._refreshTimer ??= unrefTimer(
         setTimeout(() => {
           this._refreshTimer = null
@@ -426,7 +406,7 @@ class FlowControl {
     this._advertisedBytes = this._consumedBytes
     const limit = this._consumedBytes + this.byteWindow
     if (limit > this._grantedBytes) {
-      this._link?.granted(limit - this._grantedBytes)
+      this._uplink?.granted(limit - this._grantedBytes)
       this._grantedBytes = limit
     }
     this._uncountedBytes = 0

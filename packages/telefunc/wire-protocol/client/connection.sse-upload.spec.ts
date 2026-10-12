@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
-import { SSE_POST_TARGET_MS, STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+import { muxChannelStub } from '../test/mux-channel-stub.js'
+import { SSE_POST_TARGET_MS, STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS } from '../constants.js'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
@@ -131,21 +132,6 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
   return server
 }
 
-/** Minimal `MuxChannel`. */
-const createChannel = (id: string = crypto.randomUUID()) => ({
-  id,
-  isClosed: false,
-  _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-  _onTransportOpen() {},
-  _dispatchFrame() {},
-  _onTransportClose() {},
-  _onTransportBatched() {},
-  _reattachState: () => ({}),
-  _fitReplays() {},
-  _acknowledge() {},
-  _answered() {},
-})
-
 test('a frame written into an upload POST the server refused before its open-ack is sent again', async () => {
   const received: number[] = []
   const serverChannel = new ServerChannel<number, never>()
@@ -153,7 +139,7 @@ test('a frame written into an upload POST the server refused before its open-ack
   const server = fakeServer((frame) => {
     if (frame.tag === TAG.TEXT) serverChannel._dispatchFrame(frame)
   })
-  const channel = createChannel(serverChannel.id)
+  const channel = muxChannelStub(serverChannel.id)
   const connection = ClientConnection.getOrCreate('http://upload.test/_telefunc', channel as never, {
     transports: ['sse'],
     fetchImpl: server.fetch,
@@ -190,7 +176,7 @@ describe('an upload POST whose open-ack never comes', () => {
         })()
       return server.fetch(url, init)
     }) as typeof fetch
-    const channel = createChannel(serverChannel.id)
+    const channel = muxChannelStub(serverChannel.id)
     const connection = ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel as never, {
       transports: ['sse'],
       fetchImpl,
@@ -406,7 +392,7 @@ test("a reconnect's wire gets its own connection id, so a POST still in flight f
       connIds.push(((await parseBlobBody(init.body)).metadata as { connId: string }).connId)
     return await new Promise<Response>(() => {})
   }) as unknown as typeof fetch
-  const connection = ClientConnection.getOrCreate('http://conn-id.test/_telefunc', createChannel() as never, {
+  const connection = ClientConnection.getOrCreate('http://conn-id.test/_telefunc', muxChannelStub() as never, {
     transports: ['sse'],
     fetchImpl,
     connectionKey: crypto.randomUUID(),
@@ -547,7 +533,7 @@ test('a channel the page aborted before the server confirmed it gets none of wha
 test("an upload request the server ends after its open-ack, as Node's requestTimeout does, replaces the wire", async () => {
   vi.useFakeTimers()
   const server = fakeServer()
-  const connection = ClientConnection.getOrCreate('http://upload-cut.test/_telefunc', createChannel() as never, {
+  const connection = ClientConnection.getOrCreate('http://upload-cut.test/_telefunc', muxChannelStub() as never, {
     transports: ['sse'],
     fetchImpl: server.fetch,
     connectionKey: crypto.randomUUID(),
@@ -569,7 +555,7 @@ test("a RECONCILED that comes on an SSE wire the page gave up doesn't settle the
   const server = fakeServer()
   const connectionKey = crypto.randomUUID()
   const register = () =>
-    ClientConnection.getOrCreate('http://abandoned-reconciled.test/_telefunc', createChannel() as never, {
+    ClientConnection.getOrCreate('http://abandoned-reconciled.test/_telefunc', muxChannelStub() as never, {
       transports: ['sse'],
       fetchImpl: server.fetch,
       connectionKey,
@@ -609,9 +595,9 @@ describe('a slow uplink', () => {
     onBatchFrame: (frame: ReturnType<typeof decode>) => void,
   ) {
     const server = fakeServer(onBatchFrame, uplinkBytesPerS)
-    const channel = createChannel()
+    const channel = muxChannelStub()
     const connectionKey = crypto.randomUUID()
-    const register = (channel: ReturnType<typeof createChannel>) =>
+    const register = (channel: ReturnType<typeof muxChannelStub>) =>
       ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel as never, {
         transports: ['sse'],
         fetchImpl: server.fetch,
@@ -660,7 +646,7 @@ describe('a slow uplink', () => {
     server = page.server
     await vi.advanceTimersByTimeAsync(500)
     const openedAt = Date.now()
-    page.register(createChannel())
+    page.register(muxChannelStub())
     await advanceUntil(() => reconcileArrivals.length === 1, 10_000)
     expect(reconcileArrivals).toHaveLength(1)
     expect(reconcileArrivals[0]! - openedAt).toBeLessThan(SSE_POST_TARGET_MS + 1_000)
