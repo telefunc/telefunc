@@ -32,6 +32,7 @@ import {
   leaveCauseFromWire,
   leaveCauseToWire,
   type InboxMessage,
+  type RoomDemandPage,
   type RoomSnapshotMetadata,
 } from './protocol.js'
 import {
@@ -4424,7 +4425,7 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(changesOf(b.id)).toEqual(sorted(all(true))))
     // One entry per track, and one per member they are fetched by.
     published.mockClear()
-    heartbeat(report)
+    tellAgain(report)
     expect(published).toHaveBeenCalledTimes(tracks.length + 2)
     // A want of `a` alone holds t0 for it while the want of every member comes and goes.
     const alone = (await observer.getParticipant(a.id))!.subscribeBinary(() => {}, { track: 't0' })
@@ -5342,17 +5343,14 @@ describe('room demand lifecycle', () => {
       (id) => owned.has(id),
       () => owned,
       (member, track, wanted) => delivered.push([member, track, wanted]),
+      () => {},
     )
-    demand.applyPage({
-      __r: 'demand',
-      instance: 'remote-a',
-      wants: [{ on: true, member: 'elsewhere', track: 'screen' }],
-    })
+    applyPage(demand, 'remote-a', [{ on: true, member: 'elsewhere', track: 'screen' }])
     expect(leasesHeld(demand)).toBe(0)
-    demand.applyPage({ __r: 'demand', instance: 'remote-a', wants: [{ on: true, member: 'member', track: 'screen' }] })
+    applyPage(demand, 'remote-a', [{ on: true, member: 'member', track: 'screen' }])
     owned.delete('member')
     demand.forgetMember('member')
-    demand.applyPage({ __r: 'demand', instance: 'remote-b', wants: [{ on: true, member: 'member', track: 'screen' }] })
+    applyPage(demand, 'remote-b', [{ on: true, member: 'member', track: 'screen' }])
     expect(delivered).toEqual([['member', 'screen', true]])
     expect(leasesHeld(demand)).toBe(0)
   })
@@ -5382,8 +5380,9 @@ describe('room demand lifecycle', () => {
       () => true,
       () => ['member'],
       (member, track, wanted) => delivered.push([member, track, wanted]),
+      () => {},
     )
-    demand.applyPage({ __r: 'demand', instance: 'crashed', wants: [{ on: true, member: 'member', track: 'screen' }] })
+    applyPage(demand, 'crashed', [{ on: true, member: 'member', track: 'screen' }])
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
     expire(demand)
     expect(leasesHeld(demand)).toBeGreaterThan(0)
@@ -5403,17 +5402,18 @@ describe('room demand lifecycle', () => {
       (id) => owned.includes(id),
       () => owned,
       (member, track, wanted) => delivered.push([member, track, wanted]),
+      () => {},
     )
-    demand.applyPage({ __r: 'demand', instance: 'crashed', wants: [{ on: true, track: 'screen', except: ['c'] }] })
+    applyPage(demand, 'crashed', [{ on: true, track: 'screen', except: ['c'] }])
     expect(delivered).toEqual([
       ['a', 'screen', true],
       ['b', 'screen', true],
     ])
     expect(demand.wanted('a')).toEqual(['screen'])
-    demand.applyPage({ __r: 'demand', instance: 'other', wants: [{ on: true, track: 'screen', except: ['a', 'b'] }] })
+    applyPage(demand, 'other', [{ on: true, track: 'screen', except: ['a', 'b'] }])
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
     // Renewed, now receiving it from every member but `a`.
-    demand.applyPage({ __r: 'demand', instance: 'other', wants: [{ on: true, track: 'screen', except: ['a'] }] })
+    applyPage(demand, 'other', [{ on: true, track: 'screen', except: ['a'] }])
     expire(demand)
     vi.advanceTimersByTime(1)
     expire(demand)
@@ -5440,10 +5440,15 @@ describe('room demand lifecycle', () => {
       () => (evaluated++, true),
       () => owned,
       (member, track, wanted) => delivered.push([member, track, wanted]),
+      () => {},
     )
     const tracks = trackNames(100)
     const tell = (instance: string, on: boolean, except: string[] = []) =>
-      demand.applyPage({ __r: 'demand', instance, wants: tracks.map((track) => ({ on, track, except })) })
+      applyPage(
+        demand,
+        instance,
+        tracks.map((track) => ({ on, track, except })),
+      )
     tell('a', true)
     await vi.waitFor(() => expect(delivered).toHaveLength(100_000))
     evaluated = 0
@@ -5509,7 +5514,7 @@ describe('room protocol validation', () => {
       })
       expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
       published.mockClear()
-      heartbeat(report)
+      tellAgain(report)
       expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
     },
   )
@@ -5716,6 +5721,21 @@ describe('room protocol validation', () => {
     const member = await room.join()
     const tracks = new Set<string | null>()
     member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+    await vi.waitFor(() => expect([...tracks]).toEqual(['mic']))
+  })
+  it("tells a server that missed another server's demand page that demand by the other server's next heartbeat", async () => {
+    const room = (await Room.create('demand-missed-page')) as ServerRoom
+    let missed = false
+    loseLaneFrames((lane) => lane.kind === 'demand').where((text) => !missed && (missed = text.includes('"mic"')))
+    const member = await room.join()
+    const tracks = new Set<string | null>()
+    member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+    const viewer = (await (await anotherServer()).Room.get(room.id)) as ServerRoom
+    viewer.subscribeBinary(() => {}, { track: 'mic' })
+    await vi.waitFor(() => expect(missed).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect([...tracks]).toEqual([])
+    await viewer._replica._renewDemand()
     await vi.waitFor(() => expect([...tracks]).toEqual(['mic']))
   })
   it("drops the demand a server heard while it owned a member once it owns none, as it can't hear that demand stop", async () => {
@@ -6237,9 +6257,18 @@ function spyGossip(room: Room | ServerRoom) {
   const report = (room as ServerRoom)._replica.report
   return { report, published: vi.spyOn(report, '_publish') }
 }
-/** One heartbeat's renewal of the report, all at once. */
-function heartbeat(report: DemandReport): void {
-  for (const _ of report.heartbeat());
+/** The whole report told again, all at once. */
+function tellAgain(report: DemandReport): void {
+  for (const _ of report.all());
+}
+const pagesTold = new WeakMap<RoomDemand, Map<string, number>>()
+/** `instance`'s next page of `wants` to `demand`. */
+function applyPage(demand: RoomDemand, instance: string, wants: RoomDemandPage['wants']): void {
+  let pages = pagesTold.get(demand)
+  if (!pages) pagesTold.set(demand, (pages = new Map()))
+  const page = (pages.get(instance) ?? 0) + 1
+  pages.set(instance, page)
+  demand.applyPage({ __r: 'demand', instance, page, wants })
 }
 /** One heartbeat's drop of the reports that lapsed, all at once. */
 function expire(demand: RoomDemand): void {

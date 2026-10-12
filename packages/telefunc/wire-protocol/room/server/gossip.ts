@@ -13,9 +13,12 @@ type Want = RoomDemandPage['wants'][number]
 
 /** Commits a room's demand on its demand lane in order, the entries told in one turn sharing pages, and
  *  `ROOM_GOSSIP_IN_FLIGHT_MAX` pages at a time and a slice per turn, so a burst waits as entries rather than as commits,
- *  and its deliveries leave the event loop turning. */
+ *  and its deliveries leave the event loop turning. Its pages are counted, so a reader sees one it missed. */
 class GossipOutbox {
   private _waiting = new Fifo<Want>()
+  private _pages = 0
+  /** A page is due even with no entry waiting: each page renews this process's demand elsewhere. */
+  private _renewing = false
   private _inFlight = 0
   private _closed = false
   private _scheduled = false
@@ -32,6 +35,16 @@ class GossipOutbox {
   push(want: Want): void {
     if (this._closed) return
     this._waiting.push(want)
+    this._schedule()
+  }
+
+  renew(): void {
+    if (this._closed) return
+    this._renewing = true
+    this._schedule()
+  }
+
+  private _schedule(): void {
     this._slice ??= new Slice()
     if (this._scheduled) return
     this._scheduled = true
@@ -50,7 +63,11 @@ class GossipOutbox {
   private _send(): void {
     const slice = this._slice
     if (slice === null || this._yielding) return
-    for (; this._inFlight < ROOM_GOSSIP_IN_FLIGHT_MAX && this._waiting.length > 0; this._inFlight++) {
+    for (
+      ;
+      this._inFlight < ROOM_GOSSIP_IN_FLIGHT_MAX && (this._waiting.length > 0 || this._renewing);
+      this._inFlight++
+    ) {
       if (slice.over) {
         this._yielding = true
         void slice.next().then(() => {
@@ -59,9 +76,10 @@ class GossipOutbox {
         })
         return
       }
+      this._renewing = false
       const wants: Want[] = []
       while (wants.length < ROOM_DEMAND_PAGE_ENTRIES && this._waiting.length > 0) wants.push(this._waiting.shift()!)
-      const page: RoomDemandPage = { __r: 'demand', instance: this._instance, wants }
+      const page: RoomDemandPage = { __r: 'demand', instance: this._instance, page: ++this._pages, wants }
       // A stale commit is a closed room's: its gossip has no reader.
       void commitRoomLane(this._roomId, this._inc, DEMAND_LANE, encodeDemandPage(page))
         .catch(reportRoomError)

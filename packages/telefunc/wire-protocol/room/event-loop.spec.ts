@@ -249,7 +249,7 @@ describe('Room at 100,000 members', () => {
     // The shorter of two leaves, so a scheduling hiccup in one is not read as a stall.
     expect(Math.min(await leaves(), await leaves())).toBeLessThanOrEqual(50)
   }, 120_000)
-  it('renews the demand of a client hearing every track of 100,000 members in a heartbeat, with the event loop turning', async () => {
+  it('tells the demand of a client hearing every track of 100,000 members again when asked, with the event loop turning', async () => {
     const room = await create('demand-heartbeat-turns')
     const ids = (await Promise.all(Array.from({ length: 100_000 }, () => room.join()))).map(({ id }) => id)
     const observer = await view(room.id)
@@ -261,37 +261,37 @@ describe('Room at 100,000 members', () => {
     await settled()
     const backend = getRoomBackend()
     const commitLane = backend.commitLane
-    let renewed = 0
+    let told = 0
     let inFlight = 0
     backend.commitLane = (id, inc, lane, payload, opts) => {
       const committed = commitLane.call(backend, id, inc, lane, payload, opts)
       if (id !== room.id || lane.kind !== 'demand') return committed
-      renewed += wantsOf(payload)
+      told += wantsOf(payload)
       inFlight++
       void committed.finally(() => inFlight--).catch(() => {})
       return committed
     }
     /** No demand commit for five timer turns in a row: what the joins and the declarations told is sent. */
     const quiet = async () => {
-      for (let still = 0, last = renewed; still < 5; last = renewed) {
+      for (let still = 0, last = told; still < 5; last = told) {
         await new Promise((resolve) => setTimeout(resolve, 20))
-        still = renewed === last && inFlight === 0 ? still + 1 : 0
+        still = told === last && inFlight === 0 ? still + 1 : 0
       }
     }
-    const renewal = async () => {
+    const tellAgain = async () => {
       await quiet()
-      const before = renewed
+      const before = told
       const { gap } = await longestGapWhile(async () => {
-        // The server's demand heartbeat, which re-tells each of its 100,000 pairs.
-        await observer._replica._renewDemand()
-        await vi.waitFor(() => expect(renewed - before >= 100_000 && inFlight === 0).toBe(true), { timeout: 30_000 })
+        // What the server tells a server that asks for its demand: each of its 100,000 pairs.
+        await (observer._replica as unknown as { _tellDemandAgain(): Promise<void> })._tellDemandAgain()
+        await vi.waitFor(() => expect(told - before >= 100_000 && inFlight === 0).toBe(true), { timeout: 30_000 })
         await settled()
       })
       return gap
     }
     try {
-      // The shorter of two heartbeats, so a scheduling hiccup in one is not read as a stall.
-      expect(Math.min(await renewal(), await renewal())).toBeLessThanOrEqual(50)
+      // The shorter of two, so a scheduling hiccup in one is not read as a stall.
+      expect(Math.min(await tellAgain(), await tellAgain())).toBeLessThanOrEqual(50)
     } finally {
       backend.commitLane = commitLane
     }
@@ -326,26 +326,25 @@ describe('Room at 100,000 members', () => {
     }
     const backend = getRoomBackend()
     const commitLane = backend.commitLane
-    let renewed = 0
+    let pages = 0
     let inFlight = 0
     backend.commitLane = (id, inc, lane, payload, opts) => {
       const committed = commitLane.call(backend, id, inc, lane, payload, opts)
       if (id !== room.id || lane.kind !== 'demand') return committed
-      renewed += wantsOf(payload)
+      pages++
       inFlight++
       void committed.finally(() => inFlight--).catch(() => {})
       return committed
     }
     const all = async () => {
-      const before = renewed
+      const before = pages
       const { gap } = await longestGapWhile(async () => {
         // Every timer the room's handles and its replica run each heartbeat, in one turn.
         for (const heartbeat of heartbeats.values()) heartbeat()
         // Until the tick ends: a heartbeat fired during it would be skipped.
-        await vi.waitFor(
-          () => expect(renewed - before >= 100_000 && inFlight === 0 && !syncOf(room)._heartbeatBusy).toBe(true),
-          { timeout: 30_000 },
-        )
+        await vi.waitFor(() => expect(pages > before && inFlight === 0 && !syncOf(room)._heartbeatBusy).toBe(true), {
+          timeout: 30_000,
+        })
         await settled()
       })
       return gap
@@ -472,7 +471,7 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
     expect([remote.meta.k0, seen.meta.k0]).toEqual([2, 2])
   }, 60_000)
-  it('fetches a track another server hears of every member as one lane among 100,000 members, telling its demand as one entry and renewing it as one', async () => {
+  it('fetches a track another server hears of every member as one lane among 100,000 members, telling its demand as one entry and renewing it with one page', async () => {
     const room = await create('room-wide-track')
     const members = await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
     const wanted = members.map((member, i) => {
@@ -484,8 +483,10 @@ describe('Room at 100,000 members', () => {
     const demand = room._replica.demand
     const applyPage = demand.applyPage.bind(demand)
     let entries = 0
+    let pages = 0
     demand.applyPage = (page) => {
       entries += page.wants.length
+      pages++
       applyPage(page)
     }
     const viewer = (await (await anotherServer()).get(room.id)) as ServerRoom
@@ -496,10 +497,11 @@ describe('Room at 100,000 members', () => {
     await vi.waitFor(() => expect(heard).toEqual([7]))
     expect({ lanes: binarySubscriptions(room.id), entries }).toEqual({ lanes: 1, entries: 1 })
     entries = 0
+    pages = 0
     await viewer._replica._renewDemand()
-    await vi.waitFor(() => expect(entries).toBeGreaterThan(0))
+    await vi.waitFor(() => expect(pages).toBeGreaterThan(0))
     await settled()
-    expect(entries).toBe(1)
+    expect({ pages, entries }).toEqual({ pages: 1, entries: 0 })
   }, 120_000)
   it('reads the meta of 100,000 keys of a member another server holds into a view with the event loop turning', async () => {
     const room = await create('member-meta-read-turns')

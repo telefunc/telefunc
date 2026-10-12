@@ -50,8 +50,7 @@ function encodeRoomRecord(value: unknown): Uint8Array {
   return roomTextEncoder.encode(stringify(value))
 }
 
-/** A demand page is plain data only servers read, so it skips the room record encoding: every heartbeat tells each
- *  entry again. */
+/** A demand page is plain data only servers read, so it skips the room record encoding. */
 function encodeDemandPage(page: RoomDemandPage): Uint8Array {
   return roomTextEncoder.encode(JSON.stringify(page))
 }

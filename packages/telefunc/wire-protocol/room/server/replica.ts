@@ -110,6 +110,9 @@ class RoomReplica {
   private _controlSeq = 0
   /** Members whose eviction failed, by id, with their identity: the session would host them for as long as it lives. */
   private readonly _unevicted = new Map<string, string | null>()
+  /** Whether this process tells its demand again, and was asked to again meanwhile. */
+  private _tellingAgain = false
+  private _askedAgain = false
   /** The cleanups of the session's members pending at the last heartbeat. */
   private _pendingCleanups: ReadonlySet<string> = new Set()
   private readonly _gossip: GossipOutbox
@@ -144,6 +147,7 @@ class RoomReplica {
       (id) => this._owners.has(id),
       () => this._owners.keys(),
       (member, track, wanted) => this._owners.get(member)?._deliverDemand(member, track, wanted),
+      (instance) => this._askDemand(instance),
     )
     this.plan = new RoomSubscriptions(this, this.report)
     this.sync = new AuthoritySync(this, this.plan)
@@ -351,27 +355,41 @@ class RoomReplica {
   /** This process's demand entry, to the other processes and to its own owners. */
   private _tellDemand(entry: DemandEntry, on: boolean): void {
     this._gossip.push({ on, ...entry })
-    this.demand.take(this.report.instance, entry, on, Infinity)
+    this.demand.take(this.report.instance, entry, on)
   }
-  /** @internal Tells this process's demand again and drops the reports that lapsed, a slice at a time. */
+  /** @internal Renews this process's demand elsewhere with one page, and drops the reporters that lapsed, a slice at a
+   *  time. */
   async _renewDemand(): Promise<void> {
-    await this._tellDemandAgain()
+    if (this.report.reporting) this._gossip.renew()
     const slice = new Slice()
     for (const _ of this.demand.expire()) if (slice.over) await slice.next()
   }
-  /** Tells every entry of this process's demand again, a slice at a time, which renews it elsewhere. */
+  /** Tells every entry of this process's demand again as all it receives, a slice at a time; once more after it when
+   *  asked again meanwhile, as an asker may not have read what it told before the ask. */
   private async _tellDemandAgain(): Promise<void> {
-    const slice = new Slice()
-    for (const _ of this.report.heartbeat()) if (slice.over) await slice.next()
+    if (this._tellingAgain) return void (this._askedAgain = true)
+    this._tellingAgain = true
+    try {
+      do {
+        this._askedAgain = false
+        if (!this.report.reporting) continue
+        this._gossip.push({ again: true })
+        const slice = new Slice()
+        for (const _ of this.report.all()) if (slice.over) await slice.next()
+        this._gossip.push({ again: false })
+      } while (this._askedAgain)
+    } finally {
+      this._tellingAgain = false
+    }
   }
   /** @internal */
   _onDemand(serialized: string): void {
     const page = decodeDemandPage(serialized)
     if (page.instance !== this.report.instance) this.demand.applyPage(page)
   }
-  /** @internal */
-  _askDemand(): void {
-    const ask = { __r: 'demand-ask', instance: this.report.instance } satisfies RoomCtrlEnvelope
+  /** @internal Asks `of`, or every other process, to tell its demand again. */
+  _askDemand(of?: string): void {
+    const ask = { __r: 'demand-ask', instance: this.report.instance, ...(of && { of }) } satisfies RoomCtrlEnvelope
     // A stale commit is a closed room's, which has no demand.
     void commitRoomLane(this.id, this._inc, CONTROL_LANE, encodeRoomRecord(ask)).catch(reportRoomError)
   }
@@ -396,7 +414,8 @@ class RoomReplica {
     if (info.seq > this._controlSeq) this._controlSeq = info.seq
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') {
-      if (ctrl.instance !== this.report.instance) void this._tellDemandAgain().catch(reportRoomError)
+      const self = this.report.instance
+      if (ctrl.instance !== self && (ctrl.of ?? self) === self) void this._tellDemandAgain().catch(reportRoomError)
       return
     }
     this.applyControl(ctrl, () => encodePublishText(serialized, info))

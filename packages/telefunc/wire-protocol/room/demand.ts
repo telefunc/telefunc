@@ -5,13 +5,16 @@ import { ROOM_DEMAND_TTL_MS } from './constants.js'
 import type { DemandEntry, RoomDemandPage } from './protocol.js'
 import { Slice } from './slice.js'
 
-/** Each reporter's lease. A remote reporter tells its entries again every heartbeat, so a crashed one lapses; this
- *  process's never do. */
+/** The reporters of an entry, each with the telling of everything (`Reporter.telling`) it last told the entry in. */
 type Leases = Map<string, number>
-/** Each reporter's lease on one track of every member, the members it doesn't receive that track from, and whether it
+/** A reporter's entry of one track of every member: the members it doesn't receive that track from, and whether it
  *  receives it only of the members it fetches by member. */
-type TrackLease = { expiresAt: number; except: ReadonlySet<string>; byMember: boolean }
+type TrackLease = { telling: number; except: ReadonlySet<string>; byMember: boolean }
 type TrackLeases = Map<string, TrackLease>
+/** Another process telling demand: its lease on all it told, renewed by each of its pages, so a crashed one lapses; the
+ *  count of its last page, which skips one this process missed; how many times it told everything again; and whether
+ *  this process asked it to since. */
+type Reporter = { expiresAt: number; page: number; telling: number; asked: boolean }
 
 /** What some holder of a replica receives. */
 class Receives {
@@ -130,8 +133,8 @@ class DemandReport {
     return true
   }
 
-  /** Tells every entry told again, which renews its leases elsewhere: a step per entry. */
-  *heartbeat(): Generator<void> {
+  /** Tells every entry told again: a step per entry. */
+  *all(): Generator<void> {
     const told = this._told
     for (const [member, tracks] of told.pairs)
       for (const track of tracks) {
@@ -230,9 +233,11 @@ class DemandReport {
   }
 }
 
-/** The demand for the members a process owns: every process's reports, each leased, and one `wanted` boolean per owned
- *  member and track, told once as it flips. */
+/** The demand for the members a process owns: every process's reports, each process's leased, and one `wanted` boolean
+ *  per owned member and track, told once as it flips. */
 class RoomDemand {
+  /** The other processes telling demand; this process's entries are never leased. */
+  private readonly _reporters = new Map<string, Reporter>()
   /** Per owned member, per track, the reports of that pair. */
   private readonly _pairs = new Map<string, Map<string, Leases>>()
   /** Per owned member, the reports of its every track. */
@@ -256,40 +261,66 @@ class RoomDemand {
     /** Live. */
     private readonly _ownedMembers: () => Iterable<string>,
     private readonly _deliver: (member: string, track: string, wanted: boolean) => void,
+    /** Asks the reporter to tell everything again. */
+    private readonly _ask: (instance: string) => void,
   ) {}
 
-  /** Another process's entries. */
+  /** Another process's page, which renews its lease. A page count that skips one makes this process ask it to tell
+   *  everything again, once until it does or its next page is only a renewal; what it tells again replaces what it
+   *  told before. */
   applyPage(page: RoomDemandPage): void {
-    const expiresAt = Date.now() + ROOM_DEMAND_TTL_MS
-    for (const want of page.wants) this.take(page.instance, want, want.on, expiresAt)
+    const { instance } = page
+    let reporter = this._reporters.get(instance)
+    const continues = page.page === (reporter?.page ?? 0) + 1
+    if (!reporter) this._reporters.set(instance, (reporter = { expiresAt: 0, page: 0, telling: 0, asked: false }))
+    reporter.expiresAt = Date.now() + ROOM_DEMAND_TTL_MS
+    reporter.page = page.page
+    let tellsAgain = false
+    for (const want of page.wants)
+      if (!('again' in want)) this.take(instance, want, want.on)
+      else if (want.again) {
+        tellsAgain = true
+        reporter.telling++
+        reporter.asked = false
+      } else {
+        const telling = reporter.telling
+        runAll(this._drop((from, told) => from === instance && told < telling))
+        this._settle()
+      }
+    // A renewal while asked means the ask or its answer was lost.
+    if (tellsAgain || !(reporter.asked ? page.wants.length === 0 : !continues)) return
+    reporter.asked = true
+    this._ask(instance)
   }
 
-  /** Drops the leases another process renews, read from a demand lane this one no longer subscribes. It owns no member
+  /** Drops what the other processes told, read from a demand lane this one no longer subscribes. It owns no member
    *  then, so only track leases are held. */
   forgetLeased(): void {
     for (const [track, leases] of this._tracks) {
-      for (const [instance, { expiresAt }] of leases) if (expiresAt !== Infinity) leases.delete(instance)
+      for (const instance of leases.keys()) if (this._reporters.has(instance)) leases.delete(instance)
       if (leases.size === 0) this._tracks.delete(track)
     }
+    this._reporters.clear()
   }
 
-  /** A reporter's entry starts or stops, leased until `expiresAt`; telling it again renews it. Only a member's owner
+  /** A reporter's entry starts or stops; another process's lasts while it renews its lease. Only a member's owner
    *  keeps its pairs; ownership is fixed from before the member exists anywhere. */
-  take(instance: string, entry: DemandEntry, on: boolean, expiresAt: number): void {
-    if ('except' in entry) this._takeTrack(instance, entry, on, expiresAt)
+  take(instance: string, entry: DemandEntry, on: boolean): void {
+    const telling = this._reporters.get(instance)?.telling ?? 0
+    if ('except' in entry) this._takeTrack(instance, entry, on, telling)
     else if (!this._ownsMember(entry.member)) return
     else if ('byMember' in entry) {
       const { member } = entry
       const held = this._fetched.get(member)?.has(instance) === true
-      lease(this._fetched, member, instance, on, expiresAt)
+      lease(this._fetched, member, instance, on, telling)
       if (held !== on) this._fetchedChanged(instance, member, on)
     } else if ('track' in entry) {
       const { member, track } = entry
       let byTrack = this._pairs.get(member)
       if (!byTrack) this._pairs.set(member, (byTrack = new Map()))
-      if (lease(byTrack, track, instance, on, expiresAt)) this._queue(track, member)
+      if (lease(byTrack, track, instance, on, telling)) this._queue(track, member)
       if (byTrack.size === 0) this._pairs.delete(member)
-    } else if (lease(this._members, entry.member, instance, on, expiresAt))
+    } else if (lease(this._members, entry.member, instance, on, telling))
       for (const track of this._everyTrackOf(entry.member)) this._queue(track, entry.member)
     this._settle()
   }
@@ -312,12 +343,22 @@ class RoomDemand {
     this._settle()
   }
 
-  /** Drops the leases that lapsed: a step per entry. */
+  /** Drops the reporters whose lease lapsed, and all they told: a step per entry once one did. */
   *expire(): Generator<void> {
     const now = Date.now()
+    const lapsed = new Set<string>()
+    for (const [instance, { expiresAt }] of this._reporters) if (expiresAt <= now) lapsed.add(instance)
+    if (lapsed.size === 0) return
+    for (const instance of lapsed) this._reporters.delete(instance)
+    yield* this._drop((instance) => lapsed.has(instance))
+    this._settle()
+  }
+
+  /** Drops each entry `dropped` names by its reporter and the telling it was last told in: a step per entry. */
+  private *_drop(dropped: (instance: string, telling: number) => boolean): Generator<void> {
     for (const [member, byTrack] of this._pairs) {
       for (const [track, leases] of byTrack)
-        if (lapse(leases, now)) {
+        if (lapse(leases, dropped)) {
           byTrack.delete(track)
           this._queue(track, member)
         }
@@ -325,15 +366,15 @@ class RoomDemand {
       yield
     }
     for (const [member, leases] of this._members) {
-      if (lapse(leases, now)) {
+      if (lapse(leases, dropped)) {
         this._members.delete(member)
         for (const track of this._everyTrackOf(member)) this._queue(track, member)
       }
       yield
     }
     for (const [member, leases] of this._fetched) {
-      for (const [instance, expiresAt] of leases)
-        if (expiresAt <= now) {
+      for (const [instance, telling] of leases)
+        if (dropped(instance, telling)) {
           leases.delete(instance)
           this._fetchedChanged(instance, member, false)
         }
@@ -342,14 +383,13 @@ class RoomDemand {
     }
     for (const [track, leases] of this._tracks) {
       for (const [instance, held] of leases)
-        if (held.expiresAt <= now) {
+        if (dropped(instance, held.telling)) {
           leases.delete(instance)
           this._queueLease(track, instance, held, undefined)
         }
       if (leases.size === 0) this._tracks.delete(track)
       yield
     }
-    this._settle()
   }
 
   /** The owned member's tracks told wanted. */
@@ -371,7 +411,7 @@ class RoomDemand {
     instance: string,
     entry: Extract<DemandEntry, { except: unknown }>,
     on: boolean,
-    expiresAt: number,
+    telling: number,
   ): void {
     const { track, except } = entry
     const byMember = entry.byMember === true
@@ -384,11 +424,11 @@ class RoomDemand {
       return this._queueLease(track, instance, held, undefined)
     }
     if (held !== undefined && held.byMember === byMember && sameMembers(held.except, except)) {
-      held.expiresAt = expiresAt
+      held.telling = telling
       return
     }
     if (!leases) this._tracks.set(track, (leases = new Map()))
-    const now = { expiresAt, except: new Set(except), byMember }
+    const now = { telling, except: new Set(except), byMember }
     leases.set(instance, now)
     this._queueLease(track, instance, held, now)
   }
@@ -484,21 +524,25 @@ function trackEntry(
   return byMember ? { track, except, byMember } : { track, except }
 }
 /** Takes, renews or drops `instance`'s lease on `key`, and whether `key` went from held to not or back. */
-function lease<K>(leases: Map<K, Leases>, key: K, instance: string, on: boolean, expiresAt: number): boolean {
+function lease<K>(leases: Map<K, Leases>, key: K, instance: string, on: boolean, telling: number): boolean {
   const held = leases.get(key)
   if (on) {
-    if (held) held.set(instance, expiresAt)
-    else leases.set(key, new Map([[instance, expiresAt]]))
+    if (held) held.set(instance, telling)
+    else leases.set(key, new Map([[instance, telling]]))
     return held === undefined
   }
   if (!held?.delete(instance) || held.size > 0) return false
   leases.delete(key)
   return true
 }
-/** Drops the leases that lapsed by `now`, and whether none is left. */
-function lapse(leases: Leases, now: number): boolean {
-  for (const [instance, expiresAt] of leases) if (expiresAt <= now) leases.delete(instance)
+/** Drops the leases `dropped` names, and whether none is left. */
+function lapse(leases: Leases, dropped: (instance: string, telling: number) => boolean): boolean {
+  for (const [instance, telling] of leases) if (dropped(instance, telling)) leases.delete(instance)
   return leases.size === 0
+}
+/** Runs every step now. */
+function runAll(steps: Iterable<unknown>): void {
+  for (const _ of steps);
 }
 function sameMembers(a: ReadonlySet<string> | readonly string[], b: readonly string[]): boolean {
   const set = a instanceof Set ? a : new Set(a)

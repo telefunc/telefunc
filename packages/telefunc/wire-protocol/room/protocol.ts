@@ -104,8 +104,9 @@ type RoomCtrlEnvelope =
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | ({ __r: 'p-meta'; id: string; hidden?: boolean } & MemberMetaUpdate)
   | RoomMetaUpdate
-  // An instance whose demand lane delivers, from now on or again, asks every other one for its demand.
-  | { __r: 'demand-ask'; instance: string }
+  // An instance whose demand lane delivers, from now on or again, asks every other one for its demand; one that missed a
+  // page of another's asks that one (`of`).
+  | { __r: 'demand-ask'; instance: string; of?: string }
   | { __r: 'closed' }
 
 /** What an instance receives: one track of a member, every track of a member (no `track`), or one track of every
@@ -117,8 +118,14 @@ type DemandEntry =
   | { member: string; byMember: true }
   | { track: string; except: readonly string[]; byMember?: true }
 /** Demand between instances, on the demand lane: entries one instance starts or stops receiving, in the order it told
- *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`. */
-type RoomDemandPage = { __r: 'demand'; instance: string; wants: Array<{ on: boolean } & DemandEntry> }
+ *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`, its `page`th page. Its entries from `{ again: true }` to `{ again: false }`
+ *  are all it receives. */
+type RoomDemandPage = {
+  __r: 'demand'
+  instance: string
+  page: number
+  wants: Array<({ on: boolean } & DemandEntry) | { again: boolean }>
+}
 /** A room meta key with its place: the `meta:seq` the write that added it read, and its index in that write. */
 type RoomMetaEntry = [key: string, value: unknown, placeSeq: number, placeIndex: number]
 /** The room meta at `seq`, whole, or as the write at `seq` changed it: a key it removed as `[key]`. */
