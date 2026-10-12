@@ -5,6 +5,7 @@ export {
   commitRoomLaneOrThrow,
   openConfig,
   configFromHead,
+  decodeLaneEnvelope,
   decodeRoomRecord,
   decodeRoomText,
   encodeRoomRecord,
@@ -25,7 +26,7 @@ import type {
   StaleCommit,
   CommitOptions,
 } from '../../backend/room/contract.js'
-import type { RoomConfigRecord, RoomCtrlEnvelope } from '../protocol.js'
+import { hasRoomTag, type RoomConfigRecord, type RoomCtrlEnvelope } from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../../../utils/assert.js'
 import { ROOM_HORIZON_MS } from '../constants.js'
@@ -43,6 +44,13 @@ function decodeRoomText(value: Uint8Array): string {
 
 function encodeRoomRecord(value: unknown): Uint8Array {
   return roomTextEncoder.encode(stringify(value))
+}
+
+/** Lanes carry only Room's own encodings. */
+function decodeLaneEnvelope(serialized: string): { __r: string } {
+  const envelope: unknown = parse(serialized)
+  assert(hasRoomTag(envelope))
+  return envelope
 }
 
 function decodeRoomRecord<T>(bytes: Uint8Array): T {

@@ -33,7 +33,6 @@ import {
   senderOf,
 } from '../model.js'
 import {
-  hasRoomTag,
   inboxMessageFromWire,
   joinedMember,
   leaveCauseFromWire,
@@ -42,7 +41,6 @@ import {
   type RoomRosterEvent,
   type RoomConfigRecord,
   type RoomSnapshotMetadata,
-  type RoomCtrlEnvelope,
   type RoomDataEnvelope,
   type SenderStamp,
   type RoomDmEnvelope,
@@ -52,7 +50,7 @@ import {
   type RoomEnvelope,
 } from '../protocol.js'
 import { RoomState, RoomStateView, type MembershipEvent } from '../state.js'
-import { RoomDemand } from '../demand.js'
+import { DemandReport } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
 import { MemberMessageTexts, RoomStubChannel, unorderedEventText } from './stub.js'
 import type { RoomRequest } from './requests.js'
@@ -60,7 +58,7 @@ import { LocalHolder, binaryLaneKey, type LaneHolder, type TextWantsChange } fro
 import { TailHold } from './tail.js'
 import { PendingDmAcks } from './dm-acks.js'
 import { RoomSubscriptions } from './subscriptions.js'
-import { GossipOutbox } from './gossip.js'
+import { RoomReplica, type PresenceEvent } from './replica.js'
 import {
   SEMANTIC_LANE,
   commitRoomLane,
@@ -71,6 +69,7 @@ import {
   commitRoomLaneOrThrow,
   openConfig,
   withinRoomHorizon,
+  decodeLaneEnvelope,
 } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { reconnectWindow, reportServerChannelError } from '../../server/channel.js'
@@ -105,14 +104,8 @@ assertIsNotBrowser()
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
 
-/** Lanes carry only Room's own encodings. */
-function decodeLaneEnvelope(serialized: string): { __r: string } {
-  const envelope: unknown = parse(serialized)
-  assert(hasRoomTag(envelope))
-  return envelope
-}
 /** The owner that wrote the event flags a hidden member; room-level events always reach clients. */
-function hiddenMemberOf(event: RoomCtrlEnvelope): string | null {
+function hiddenMemberOf(event: PresenceEvent): string | null {
   if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta')
     return event.hidden === true ? event.id : null
   return null
@@ -155,9 +148,9 @@ class ServerRoom extends RoomStateView implements Room {
   private _reconciling = false
 
   private readonly _publishTurns = new Map<string, Promise<void>>()
-  /** Binary demand across instances (`onDemand`). */
-  private readonly _demand: RoomDemand
-  private readonly _gossip: GossipOutbox
+  /** What this handle's holders receive, told to the replica's demand (`onDemand`). */
+  private readonly _report = new DemandReport(() => this._replica.demand)
+  private _replicaOf: RoomReplica
   private readonly _subs: RoomSubscriptions
 
   constructor(
@@ -185,13 +178,14 @@ class ServerRoom extends RoomStateView implements Room {
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._local = new LocalHolder(this._state, this._localSuppressed)
-    const gossip = (this._gossip = new GossipOutbox(roomId, inc))
-    this._demand = new RoomDemand(
-      (event) => gossip.push(event),
-      (id) => this._holderOf(id) !== undefined,
-      (member, track, wanted) => this._deliverDemand(member, track, wanted),
-    )
-    this._subs = new RoomSubscriptions(this, this._demand)
+    this._replicaOf = RoomReplica.of(roomId, inc)
+    this._subs = new RoomSubscriptions(this, this._report)
+  }
+
+  /** @internal What this process shares of the incarnation; a dropped one is replaced. */
+  get _replica(): RoomReplica {
+    if (!this._replicaOf.live) this._replicaOf = RoomReplica.of(this.id, this._inc)
+    return this._replicaOf
   }
 
   static isServerRoom(value: unknown): value is ServerRoom {
@@ -213,6 +207,7 @@ class ServerRoom extends RoomStateView implements Room {
     const participant = new ServerLocalParticipant(this, admission.id, meta, selfDelivery, identity)
     await this._admit(admission, () => {
       this._localParticipants.set(admission.id, participant)
+      this._replica.own(admission.id, this)
       if (!selfDelivery) this._localSuppressed.add(admission.id)
     })
     return participant
@@ -358,7 +353,7 @@ class ServerRoom extends RoomStateView implements Room {
     const lane = { kind: 'binary', member: from, track: laneTrack(frame.track) } as const
     const { sender, commit } = await this._inCallOrder(binaryLaneKey(from, lane.track), async (sent) => {
       const sender = await this._admitPublish(from, frame.payload)
-      this._demand.published(from, lane.track)
+      this._replica.demand.published(from, lane.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitRoomLaneOrThrow(this.id, this._inc, lane, framed, opts)
       sent()
@@ -501,19 +496,18 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._state.closed || (await this._readOpenConfig()) === null) throw roomClosedError(this.id)
   }
   /** @internal */
-  _onCtrlMessage(serialized: string, rawInfo: WirePublishInfo): void {
-    const event = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
+  _onCtrlEvent(event: PresenceEvent, serialized: string, rawInfo: WirePublishInfo): void {
     if (!this._applyCtrl(event)) return
     this._relayControl(event, () => encodePublishText(serialized, rawInfo))
     if (event.__r === 'closed') this._teardown()
   }
 
   /** Relayed as this view applied it, not as a lane frame: an own event's echo may be lost with no drift to reconcile. */
-  private _relayApplied(event: RoomCtrlEnvelope): void {
+  private _relayApplied(event: PresenceEvent): void {
     this._relayControl(event, () => unorderedEventText(event))
   }
 
-  private _relayControl(event: RoomCtrlEnvelope, wireText: () => string): void {
+  private _relayControl(event: PresenceEvent, wireText: () => string): void {
     if (this._stubs.size === 0) return
     const text = wireText()
     const hiddenMember = hiddenMemberOf(event)
@@ -600,12 +594,8 @@ class ServerRoom extends RoomStateView implements Room {
       .catch(reportRoomError)
   }
   /** Whether the event changed this view, which is what its clients get; a leave reaches them from `_onLeave`. */
-  private _applyCtrl(event: RoomCtrlEnvelope): boolean {
+  private _applyCtrl(event: PresenceEvent): boolean {
     switch (event.__r) {
-      case 'want':
-      case 'covers':
-        this._demand.applyWant(event) // between instances only, never relayed to clients
-        return false
       case 'join':
         return this._applyJoin(joinedMember(event))
       case 'leave':
@@ -633,6 +623,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this._pendingDmAcks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
     const local = this._localParticipants.get(id)
+    if (this._holderOf(id) !== undefined) this._replica.disown(id, this)
     if (local) {
       this._localParticipants.delete(id)
       this._localSuppressed.delete(id)
@@ -648,7 +639,6 @@ class ServerRoom extends RoomStateView implements Room {
       })
     this._stubOf.delete(id)
     this._local.forgetMember(id)
-    this._demand.forgetMember(id)
     for (const stub of this._stubs) {
       stub._forgetMember(id)
       if (stub._forgetWantsOf(id)) this._subs.holderChanged(stub, [id])
@@ -660,13 +650,15 @@ class ServerRoom extends RoomStateView implements Room {
     this._pendingDmAcks.settleAll(DM_FAILURE.roomClosed) // no recipient will reply now
     this._teardownTail()
     this._rosterTexts = null
+    const replica = this._replica
+    for (const id of this._ownedMembers()) replica.disown(id, this)
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
     this._localSuppressed.clear()
     // A client back while its channel still holds it gets `closed`.
     const timeout = reconnectWindow()
     for (const stub of this._stubs) void stub.close({ timeout }).catch(() => {})
-    this._gossip.close()
+    replica.closed()
     void this._subs.replan()
   }
 
@@ -825,6 +817,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._subs.holderGone(stub)
     for (const id of stub._heldMembers()) {
       this._stubOf.delete(id)
+      this._replica.disown(id, this)
       this._subs.memberReleased(id)
       if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
       void this._removeDepartedMember(id).catch(reportRoomError)
@@ -844,7 +837,10 @@ class ServerRoom extends RoomStateView implements Room {
     }
     await this._admit(admission, () => {
       stub._addMember(admission.id, req.selfDelivery)
-      if (this._stubs.has(stub)) this._stubOf.set(admission.id, stub)
+      if (this._stubs.has(stub)) {
+        this._stubOf.set(admission.id, stub)
+        this._replica.own(admission.id, this)
+      }
     })
     return { id: admission.id, joinedAt: admission.joinedAt }
   }
@@ -953,9 +949,10 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** The owned member's tracks someone wants. */
   _demandOf(member: string): Array<string | null> {
-    return this._demand.wanted(member).map(publicTrack)
+    return this._replica.demand.wanted(member).map(publicTrack)
   }
-  private _deliverDemand(member: string, track: string, wanted: boolean): void {
+  /** @internal */
+  _deliverDemand(member: string, track: string, wanted: boolean): void {
     const trackOut = publicTrack(track)
     const holder = this._holderOf(member)
     if (holder instanceof ServerLocalParticipant) holder._onDemand(trackOut, wanted)

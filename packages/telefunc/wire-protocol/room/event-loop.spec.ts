@@ -11,6 +11,7 @@ import { ClientBroadcast } from '../client/channel.js'
 import type { ChannelPublishInfo } from '../channel.js'
 import { Room } from './server/statics.js'
 import type { ServerRoom } from './server/room.js'
+import type { PresenceEvent } from './server/replica.js'
 import { ResponseRoomGrants, RoomStubChannel } from './server/stub.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
@@ -98,7 +99,8 @@ describe('Room at 100,000 members', () => {
       // As the control lane delivers them, between two parts: a join, and the leaves of a member already sent and of
       // one not sent yet.
       if (wireText.includes('\n{"__r":"roster",') && ++parts === 50) {
-        const ctrl = (event: object) => observer._onCtrlMessage(stringify(event), { seq: 0, timestamp: 1 })
+        const ctrl = (event: object) =>
+          observer._onCtrlEvent(event as PresenceEvent, stringify(event), { seq: 0, timestamp: 1 })
         ctrl({ __r: 'join', id: joined, meta: {}, joinedAt: 1 })
         ctrl({ __r: 'leave', id: sent })
         ctrl({ __r: 'leave', id: unsent })
@@ -252,6 +254,53 @@ describe('Room at 100,000 members', () => {
     })
     expect(gap).toBeLessThanOrEqual(50)
     expect(binaryLanesOf(observer)).toBe(0)
+  }, 120_000)
+  it('renews the demand of a client hearing every track of 100,000 members in a heartbeat, with the event loop turning', async () => {
+    const room = await create('demand-heartbeat-turns')
+    const ids = (await Promise.all(Array.from({ length: 100_000 }, () => room.join()))).map(({ id }) => id)
+    const observer = await view(room.id)
+    await observer.getParticipants()
+    const stub = register(observer)
+    attachPeer(stub, { keep: false })
+    for (const id of ids) stub._onPeerMessage(stringify({ __r: 'sub-binary', member: id, track: null, on: true }), 0)
+    await subsOf(observer).binaryReady()
+    await settled()
+    const backend = getRoomBackend()
+    const commitLane = backend.commitLane
+    let renewed = 0
+    let inFlight = 0
+    backend.commitLane = (id, inc, lane, payload, opts) => {
+      const committed = commitLane.call(backend, id, inc, lane, payload, opts)
+      if (id !== room.id || lane.kind !== 'control') return committed
+      renewed++
+      inFlight++
+      void committed.finally(() => inFlight--).catch(() => {})
+      return committed
+    }
+    /** No control commit for five timer turns in a row: what the joins and the declarations told is sent. */
+    const quiet = async () => {
+      for (let still = 0, last = renewed; still < 5; last = renewed) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        still = renewed === last && inFlight === 0 ? still + 1 : 0
+      }
+    }
+    const renewal = async () => {
+      await quiet()
+      const before = renewed
+      const { gap } = await longestGapWhile(async () => {
+        // The server's demand heartbeat, which re-tells each of its 100,000 pairs.
+        await (observer._replica as unknown as { _heartbeatTick(): Promise<void> })._heartbeatTick()
+        await vi.waitFor(() => expect(renewed - before >= 100_000 && inFlight === 0).toBe(true), { timeout: 30_000 })
+        await settled()
+      })
+      return gap
+    }
+    try {
+      // The shorter of two heartbeats, so a scheduling hiccup in one is not read as a stall.
+      expect(Math.min(await renewal(), await renewal())).toBeLessThanOrEqual(50)
+    } finally {
+      backend.commitLane = commitLane
+    }
   }, 120_000)
   it('keeps the event loop turning through a sweep of 100,000 lapsed rooms', async () => {
     const backend = getRoomBackend()

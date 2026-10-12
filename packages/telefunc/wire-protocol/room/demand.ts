@@ -1,4 +1,5 @@
-export { RoomDemand }
+export { RoomDemand, DemandReport }
+export type { DemandGossip }
 
 import { DEFAULT_TRACK } from './binary.js'
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
@@ -7,12 +8,15 @@ import type { RoomCtrlEnvelope } from './protocol.js'
 type DemandGossip = Extract<RoomCtrlEnvelope, { __r: 'want' | 'covers' }>
 /** Per member, per track; a `null` track is every track the member publishes. */
 type Tracks<V, Track = string | null> = Map<string, Map<Track, V>>
-/** Each reporting instance's lease. A reporter re-gossips every heartbeat, so a crashed one lapses. */
+/** Each reporter's lease. A remote reporter re-gossips every heartbeat, so a crashed one lapses; this process's never do. */
 type Leases = Map<string, number>
 /** Each of the members with each of the tracks. */
 type Pairs = { members: string[]; tracks: string[] }
+/** Reports wanting the same tracks of every member: they tell under one reporter id, so a member one of them covers is
+ *  covered for all of those tracks. */
+type Group = { id: string; tracks: readonly string[]; reports: number; covers: Map<string, number> }
 
-/** What an instance receives: pairs, the tracks it wants of every member, and the members it receives those from. */
+/** What a handle receives: pairs, the tracks it wants of every member, and the members it receives those from. */
 class Receives {
   readonly pairs: Tracks<true> = new Map()
   readonly tracks = new Set<string>()
@@ -22,32 +26,22 @@ class Receives {
   }
 }
 
-/** Aggregates binary-track demand across instances: each gossips what it receives as it changes, and a member's owner
- *  pushes one `wanted` boolean per track. A track wanted of every member is one entry, whatever the member count. */
-class RoomDemand {
-  private readonly _instanceId = crypto.randomUUID()
+/** What one handle's planner sets, told as it changes to its process's `RoomDemand`, which tells the other processes. */
+class DemandReport {
   /** What the planner set; `flush()` tells the changes since the last one. */
   private readonly _planned = new Receives()
   private _changed = new Receives()
   /** A telling a deadline stopped, resumed by the next one. */
   private _telling: Iterator<void> | null = null
-  /** What the other instances were told, and this one's owner side reads. */
+  /** What this report told its process. */
   private readonly _told = new Receives()
-  /** Owner side: the other instances' pairs of the members this instance owns. */
-  private readonly _remote: Tracks<Leases> = new Map()
-  /** The tracks other instances want of every member, and the owned members they receive those from. */
-  private readonly _remoteTracks = new Map<string, Leases>()
-  private readonly _remoteMembers = new Map<string, Leases>()
-  /** Owner side: the named tracks each member published on; a want for every track covers them and the default one. */
-  private readonly _published = new Map<string, Set<string>>()
+  /** `_told.tracks` as the process keys them. */
+  private _toldKey = tracksKey([])
 
-  constructor(
-    private readonly _publishWant: (event: DemandGossip) => void,
-    private readonly _ownsMember: (id: string) => boolean,
-    private readonly _deliver: (member: string, track: string, wanted: boolean) => void,
-  ) {}
+  /** Its process's demand, read at each telling: it stays the same while this report has told anything. */
+  constructor(private readonly _process: () => RoomDemand) {}
 
-  /** Whether this instance receives the pair. */
+  /** Whether this handle receives the pair. */
   setPair(member: string, track: string | null, on: boolean): void {
     if (on === hasEntry(this._planned.pairs, member, track)) return
     if (on) setEntry(this._planned.pairs, member, track, true)
@@ -62,14 +56,14 @@ class RoomDemand {
     this._changed.tracks.add(track)
   }
 
-  /** Whether this instance receives from the member every track it wants of every member. */
+  /** Whether this handle receives from the member every track it wants of every member. */
   setCovers(member: string, on: boolean): void {
     if (on === this._planned.members.has(member)) return
     toggle(this._planned.members, member, on)
     this._changed.members.add(member)
   }
 
-  /** Whether this instance receives a pair of the member, or is covered by it. */
+  /** Whether this handle receives a pair of the member, or is covered by it. */
   receivesFrom(member: string): boolean {
     return this._planned.pairs.has(member) || this._planned.members.has(member)
   }
@@ -78,7 +72,7 @@ class RoomDemand {
     return this._planned.members.has(member)
   }
 
-  /** The named and default tracks of the member this instance receives as pairs, read live. */
+  /** The named and default tracks of the member this handle receives as pairs, read live. */
   *localTracks(member: string): Generator<string> {
     for (const track of this._planned.pairs.get(member)?.keys() ?? []) if (track !== null) yield track
   }
@@ -112,29 +106,118 @@ class RoomDemand {
     this._changed = new Receives()
     const planned = this._planned
     const told = this._told
-    const tracksOn = [...tracks].map((track) => [track, planned.tracks.has(track)] as const)
+    const process = this._process()
+    const tracksNext = new Set(told.tracks)
+    for (const track of tracks) toggle(tracksNext, track, planned.tracks.has(track))
     for (const [member, byTrack] of pairs)
       for (const track of byTrack.keys()) {
-        if (hasEntry(planned.pairs, member, track) && !hasEntry(told.pairs, member, track))
-          this._tellPair(member, track, true)
+        if (hasEntry(planned.pairs, member, track) && !hasEntry(told.pairs, member, track)) {
+          setEntry(told.pairs, member, track, true)
+          process.tellPair(member, track, true)
+        }
         yield
       }
     for (const member of members) {
-      if (!planned.members.has(member) && told.members.has(member)) this._tellCovers(member, false)
+      if (!planned.members.has(member) && told.members.has(member)) {
+        told.members.delete(member)
+        process.tellCovers(this._toldKey, member, false)
+      }
       yield
     }
-    for (const [track, on] of tracksOn) if (!on && told.tracks.has(track)) yield this._tellTrack(track, false)
-    for (const [track, on] of tracksOn) if (on && !told.tracks.has(track)) yield this._tellTrack(track, true)
+    if (tracksNext.size !== told.tracks.size || [...tracksNext].some((track) => !told.tracks.has(track)))
+      yield* this._tellTracks(process, tracksNext)
     for (const member of members) {
-      if (planned.members.has(member) && !told.members.has(member)) this._tellCovers(member, true)
+      if (planned.members.has(member) && !told.members.has(member)) {
+        told.members.add(member)
+        process.tellCovers(this._toldKey, member, true)
+      }
       yield
     }
     for (const [member, byTrack] of pairs)
       for (const track of byTrack.keys()) {
-        if (!hasEntry(planned.pairs, member, track) && hasEntry(told.pairs, member, track))
-          this._tellPair(member, track, false)
+        if (!hasEntry(planned.pairs, member, track) && hasEntry(told.pairs, member, track)) {
+          deleteEntry(told.pairs, member, track)
+          process.tellPair(member, track, false)
+        }
         yield
       }
+  }
+
+  /** Moves the members this report covers to the reports wanting `tracks` of every member, ons first: each covered
+   *  member receives the tracks of both, the offs having gone first. A step per member. */
+  private *_tellTracks(process: RoomDemand, tracks: Set<string>): Generator<void> {
+    const before = this._toldKey
+    const after = tracksKey(tracks)
+    if (tracks.size > 0) process.tellTracks(after, true)
+    for (const member of this._told.members) {
+      process.tellCovers(after, member, true)
+      yield
+    }
+    for (const member of this._told.members) {
+      process.tellCovers(before, member, false)
+      yield
+    }
+    if (this._told.tracks.size > 0) process.tellTracks(before, false)
+    this._told.tracks.clear()
+    for (const track of tracks) this._told.tracks.add(track)
+    this._toldKey = after
+  }
+}
+
+/** Aggregates binary-track demand across processes: each tells what its handles receive as it changes, under its own
+ *  reporter ids, and a member's owner pushes one `wanted` boolean per track. A track wanted of every member is one
+ *  entry, whatever the member count, and every entry is one whatever the number of handles telling it. */
+class RoomDemand {
+  /** The reporter id of this process's pairs; each group's extends it. */
+  private readonly _instanceId = crypto.randomUUID()
+  private _groupCount = 0
+  /** This process's pairs, with the number of reports telling each. */
+  private readonly _pairs: Tracks<number> = new Map()
+  private readonly _groups = new Map<string, Group>()
+  /** Owner side: every reporter's pairs of the members this process owns. */
+  private readonly _remote: Tracks<Leases> = new Map()
+  /** The tracks reporters want of every member, and the owned members they receive those from. */
+  private readonly _remoteTracks = new Map<string, Leases>()
+  private readonly _remoteMembers = new Map<string, Leases>()
+  /** Owner side: the named tracks each member published on; a want for every track covers them and the default one. */
+  private readonly _published = new Map<string, Set<string>>()
+
+  constructor(
+    private readonly _publishWant: (event: DemandGossip) => void,
+    private readonly _ownsMember: (id: string) => boolean,
+    private readonly _deliver: (member: string, track: string, wanted: boolean) => void,
+  ) {}
+
+  /** Whether some report here tells anything. */
+  get reporting(): boolean {
+    return this._pairs.size > 0 || this._groups.size > 0
+  }
+
+  /** One report starts or stops receiving the pair. */
+  tellPair(member: string, track: string | null, on: boolean): void {
+    const count = (this._pairs.get(member)?.get(track) ?? 0) + (on ? 1 : -1)
+    if (count > 0) setEntry(this._pairs, member, track, count)
+    else deleteEntry(this._pairs, member, track)
+    if (count === (on ? 1 : 0)) this._tell({ __r: 'want', member, track, instance: this._instanceId, on })
+  }
+
+  /** One report starts or stops wanting the tracks of `key` of every member. */
+  tellTracks(key: string, on: boolean): void {
+    const group = this._group(key)
+    group.reports += on ? 1 : -1
+    if (group.reports === (on ? 1 : 0))
+      for (const track of group.tracks) this._tell({ __r: 'want', member: null, track, instance: group.id, on })
+    this._dropIfEmpty(key, group)
+  }
+
+  /** One report wanting the tracks of `key` starts or stops receiving them all from the member. */
+  tellCovers(key: string, member: string, on: boolean): void {
+    const group = this._group(key)
+    const count = (group.covers.get(member) ?? 0) + (on ? 1 : -1)
+    if (count > 0) group.covers.set(member, count)
+    else group.covers.delete(member)
+    if (count === (on ? 1 : 0)) this._tell({ __r: 'covers', member, instance: group.id, on })
+    this._dropIfEmpty(key, group)
   }
 
   /** Owner side: the member publishes on `track`, which its every-track demand covers from now on. */
@@ -146,51 +229,53 @@ class RoomDemand {
     this._changing(this._pairsOf(member, track), () => tracks.add(track))
   }
 
-  /** Only a member's owner aggregates its demand; ownership is fixed from before the member exists anywhere. */
+  /** Another process's report. */
   applyWant(event: DemandGossip): void {
-    const { instance, on } = event
-    if (instance === this._instanceId) return
-    if (event.__r === 'want' && event.member === null) {
-      const { track } = event
-      return this._lease(this._remoteTracks, track, instance, on, () => this._reachedBy(instance, track))
-    }
-    const { member } = event
-    if (!this._ownsMember(member)) return
-    if (event.__r === 'covers')
-      return this._lease(this._remoteMembers, member, instance, on, () => this._wantedBy(instance, member))
-    let byTrack = this._remote.get(member)
-    if (!byTrack) this._remote.set(member, (byTrack = new Map()))
-    this._lease(byTrack, event.track, instance, on, () => this._pairsOf(member, event.track))
-    if (byTrack.size === 0) this._remote.delete(member)
+    if (event.instance.startsWith(this._instanceId)) return
+    this._take(event, Date.now() + ROOM_DEMAND_TTL_MS)
   }
 
-  heartbeat(): void {
+  /** Tells everything this process told again, which renews its leases elsewhere, then drops the leases that lapsed: a
+   *  step per entry. */
+  *heartbeat(): Generator<void> {
     const instance = this._instanceId
-    for (const [member, track] of entriesOf(this._told.pairs))
-      this._publishWant({ __r: 'want', member, track, instance, on: true })
-    for (const track of this._told.tracks) this._publishWant({ __r: 'want', member: null, track, instance, on: true })
-    for (const member of this._told.members) this._publishWant({ __r: 'covers', member, instance, on: true })
-    const now = Date.now()
-    for (const [member, byTrack] of [...this._remote]) {
-      this._expire(byTrack, now, (track) => this._pairsOf(member, track))
-      if (byTrack.size === 0) this._remote.delete(member)
+    for (const [member, byTrack] of this._pairs)
+      for (const track of byTrack.keys()) {
+        this._publishWant({ __r: 'want', member, track, instance, on: true })
+        yield
+      }
+    for (const group of this._groups.values()) {
+      if (group.reports > 0)
+        for (const track of group.tracks) {
+          this._publishWant({ __r: 'want', member: null, track, instance: group.id, on: true })
+          yield
+        }
+      for (const member of group.covers.keys()) {
+        this._publishWant({ __r: 'covers', member, instance: group.id, on: true })
+        yield
+      }
     }
-    this._expire(this._remoteTracks, now, (track, reporter) => this._reachedBy(reporter, track))
-    this._expire(this._remoteMembers, now, (member, reporter) => this._wantedBy(reporter, member))
-  }
-
-  /** Whether this instance has demand to keep alive or sweep: a pure observer still renews its leases. */
-  isActive(): boolean {
-    return !this._told.empty || this._remote.size > 0 || this._remoteTracks.size > 0 || this._remoteMembers.size > 0
+    const now = Date.now()
+    for (const [member, byTrack] of this._remote) {
+      for (const track of byTrack.keys()) this._expire(byTrack, track, now, () => this._pairsOf(member, track))
+      if (byTrack.size === 0) this._remote.delete(member)
+      yield
+    }
+    for (const track of this._remoteTracks.keys()) {
+      this._expire(this._remoteTracks, track, now, (reporter) => this._reachedBy(reporter, track))
+      yield
+    }
+    for (const member of this._remoteMembers.keys()) {
+      this._expire(this._remoteMembers, member, now, (reporter) => this._wantedBy(reporter, member))
+      yield
+    }
   }
 
   /** Owner side: the member's tracks someone wants. */
   wanted(member: string): string[] {
     const tracks = new Set<string>()
-    for (const byTrack of [this._told.pairs.get(member), this._remote.get(member)])
-      for (const track of byTrack?.keys() ?? []) if (track !== null) tracks.add(track)
+    for (const track of this._remote.get(member)?.keys() ?? []) if (track !== null) tracks.add(track)
     if (this._receives(member, null)) for (const track of this._everyTrackOf(member)) tracks.add(track)
-    if (this._told.members.has(member)) for (const track of this._told.tracks) tracks.add(track)
     for (const instance of this._remoteMembers.get(member)?.keys() ?? [])
       for (const [track, leases] of this._remoteTracks) if (leases.has(instance)) tracks.add(track)
     return [...tracks].filter((track) => this._wanted(member, track))
@@ -202,22 +287,40 @@ class RoomDemand {
     this._published.delete(member)
   }
 
-  private _tellPair(member: string, track: string | null, on: boolean): void {
-    this._publishWant({ __r: 'want', member, track, instance: this._instanceId, on })
-    this._changing(this._pairsOf(member, track), () => {
-      if (on) setEntry(this._told.pairs, member, track, true)
-      else deleteEntry(this._told.pairs, member, track)
-    })
+  /** This process's own entry: told to the others, and leased here for good. */
+  private _tell(event: DemandGossip): void {
+    this._publishWant(event)
+    this._take(event, Infinity)
   }
 
-  private _tellTrack(track: string, on: boolean): void {
-    this._publishWant({ __r: 'want', member: null, track, instance: this._instanceId, on })
-    this._changing(this._reachedBy(null, track), () => toggle(this._told.tracks, track, on))
+  /** Only a member's owner aggregates its demand; ownership is fixed from before the member exists anywhere. */
+  private _take(event: DemandGossip, expiresAt: number): void {
+    const { instance, on } = event
+    if (event.__r === 'want' && event.member === null) {
+      const { track } = event
+      return this._lease(this._remoteTracks, track, instance, on, expiresAt, () => this._reachedBy(instance, track))
+    }
+    const { member } = event
+    if (!this._ownsMember(member)) return
+    if (event.__r === 'covers')
+      return this._lease(this._remoteMembers, member, instance, on, expiresAt, () => this._wantedBy(instance, member))
+    let byTrack = this._remote.get(member)
+    if (!byTrack) this._remote.set(member, (byTrack = new Map()))
+    this._lease(byTrack, event.track, instance, on, expiresAt, () => this._pairsOf(member, event.track))
+    if (byTrack.size === 0) this._remote.delete(member)
   }
 
-  private _tellCovers(member: string, on: boolean): void {
-    this._publishWant({ __r: 'covers', member, instance: this._instanceId, on })
-    this._changing(this._wantedBy(null, member), () => toggle(this._told.members, member, on))
+  private _group(key: string): Group {
+    let group = this._groups.get(key)
+    if (!group) {
+      const id = `${this._instanceId}/${++this._groupCount}`
+      this._groups.set(key, (group = { id, tracks: JSON.parse(key) as string[], reports: 0, covers: new Map() }))
+    }
+    return group
+  }
+
+  private _dropIfEmpty(key: string, group: Group): void {
+    if (group.reports === 0 && group.covers.size === 0) this._groups.delete(key)
   }
 
   /** Owner side: `change` may flip `pairs`, and each one it flipped is pushed. */
@@ -234,23 +337,30 @@ class RoomDemand {
   }
 
   /** Renews `instance`'s lease on `key`, or takes it or drops it, which may flip `pairs`. */
-  private _lease<K>(leases: Map<K, Leases>, key: K, instance: string, on: boolean, pairs: () => Pairs): void {
+  private _lease<K>(
+    leases: Map<K, Leases>,
+    key: K,
+    instance: string,
+    on: boolean,
+    expiresAt: number,
+    pairs: () => Pairs,
+  ): void {
     const held = leases.get(key)
     if (on && held?.has(instance)) {
-      held.set(instance, Date.now() + ROOM_DEMAND_TTL_MS)
+      held.set(instance, expiresAt)
       return
     }
     if (!on && !held?.has(instance)) return
     this._changing(pairs(), () => {
-      if (on) leases.set(key, (held ?? new Map()).set(instance, Date.now() + ROOM_DEMAND_TTL_MS))
+      if (on) leases.set(key, (held ?? new Map()).set(instance, expiresAt))
       else if (held!.delete(instance) && held!.size === 0) leases.delete(key)
     })
   }
 
-  private _expire<K>(leases: Map<K, Leases>, now: number, pairs: (key: K, instance: string) => Pairs): void {
-    for (const [key, held] of [...leases])
-      for (const [instance, expiresAt] of [...held])
-        if (expiresAt <= now) this._lease(leases, key, instance, false, () => pairs(key, instance))
+  /** Drops the leases on `key` that lapsed by `now`. */
+  private _expire<K>(leases: Map<K, Leases>, key: K, now: number, pairs: (instance: string) => Pairs): void {
+    for (const [instance, expiresAt] of leases.get(key) ?? [])
+      if (expiresAt <= now) this._lease(leases, key, instance, false, now, () => pairs(instance))
   }
 
   /** The owned member's tracks a pair names: for every track, each one it published and the default one. */
@@ -261,22 +371,16 @@ class RoomDemand {
     }
   }
 
-  /** `track` of each owned member `instance` (this one when `null`) receives it from. */
-  private _reachedBy(instance: string | null, track: string): Pairs {
-    const members =
-      instance === null
-        ? [...this._told.members].filter((member) => this._ownsMember(member))
-        : [...this._remoteMembers].filter(([, leases]) => leases.has(instance)).map(([member]) => member)
+  /** `track` of each owned member `instance` receives it from. */
+  private _reachedBy(instance: string, track: string): Pairs {
+    const members = [...this._remoteMembers].filter(([, leases]) => leases.has(instance)).map(([member]) => member)
     return { members, tracks: [track] }
   }
 
-  /** Each track `instance` (this one when `null`) wants of every member, of the owned `member`. */
-  private _wantedBy(instance: string | null, member: string): Pairs {
+  /** Each track `instance` wants of every member, of the owned `member`. */
+  private _wantedBy(instance: string, member: string): Pairs {
     if (!this._ownsMember(member)) return { members: [], tracks: [] }
-    const tracks =
-      instance === null
-        ? [...this._told.tracks]
-        : [...this._remoteTracks].filter(([, leases]) => leases.has(instance)).map(([track]) => track)
+    const tracks = [...this._remoteTracks].filter(([, leases]) => leases.has(instance)).map(([track]) => track)
     return { members: [member], tracks }
   }
 
@@ -284,19 +388,18 @@ class RoomDemand {
     return [DEFAULT_TRACK, ...(this._published.get(member) ?? [])]
   }
 
-  /** Owner side: whether some instance receives the member's track. */
+  /** Owner side: whether some reporter receives the member's track. */
   private _wanted(member: string, track: string): boolean {
     const published = track === DEFAULT_TRACK || this._published.get(member)?.has(track) === true
     return this._receives(member, track) || (published && this._receives(member, null)) || this._reaches(member, track)
   }
 
   private _receives(member: string, track: string | null): boolean {
-    return hasEntry(this._told.pairs, member, track) || hasEntry(this._remote, member, track)
+    return hasEntry(this._remote, member, track)
   }
 
-  /** Whether some instance that wants `track` of every member receives it from the member. */
+  /** Whether some reporter that wants `track` of every member receives it from the member. */
   private _reaches(member: string, track: string): boolean {
-    if (this._told.members.has(member) && this._told.tracks.has(track)) return true
     const leases = this._remoteTracks.get(track)
     const reporters = this._remoteMembers.get(member)
     if (leases === undefined || reporters === undefined) return false
@@ -305,6 +408,10 @@ class RoomDemand {
   }
 }
 
+/** The reports wanting the same tracks of every member share this key. */
+function tracksKey(tracks: Iterable<string>): string {
+  return JSON.stringify([...tracks].sort())
+}
 function toggle<T>(set: Set<T>, value: T, on: boolean): void {
   if (on) set.add(value)
   else set.delete(value)
@@ -321,7 +428,4 @@ function deleteEntry<V, Track>(tracks: Tracks<V, Track>, member: string, track: 
   const byTrack = tracks.get(member)
   byTrack?.delete(track)
   if (byTrack?.size === 0) tracks.delete(member)
-}
-function* entriesOf<V>(tracks: Tracks<V>): Generator<[string, string | null]> {
-  for (const [member, byTrack] of [...tracks]) for (const track of [...byTrack.keys()]) yield [member, track]
 }

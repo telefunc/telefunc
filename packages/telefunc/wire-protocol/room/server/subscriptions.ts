@@ -9,7 +9,7 @@ import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { BinaryWantChange } from '../binary.js'
-import type { RoomDemand } from '../demand.js'
+import type { DemandReport } from '../demand.js'
 import type { MemberSnapshot, RoomConfigRecord } from '../protocol.js'
 import type { MembershipEvent, RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
@@ -17,7 +17,8 @@ import { LaneSubscription } from './lane-subscription.js'
 import { Slice } from './slice.js'
 import { binaryLaneKey, type LaneHolder } from './replay.js'
 import { WantsIndex } from './wants-index.js'
-import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
+import { SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
+import type { ControlObserver, PresenceEvent, RoomReplica } from './replica.js'
 import { reapAndReadRoster, renewMemberLeases } from './membership.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
 import { sweepLapsedRoomsSoon } from './directory.js'
@@ -29,6 +30,7 @@ type SubscriptionHost = {
   readonly id: string
   readonly _inc: string
   readonly _incarnation: RoomIncarnation
+  readonly _replica: RoomReplica
   /** Read-only here: every change goes through the host's methods. */
   readonly _state: Pick<
     RoomState,
@@ -50,7 +52,7 @@ type SubscriptionHost = {
   _ownedMembers(): Iterable<string>
   _renewableMembers(): Iterable<string>
   _renewViews(): Promise<void>
-  _onCtrlMessage(serialized: string, info: WirePublishInfo): void
+  _onCtrlEvent(event: PresenceEvent, serialized: string, info: WirePublishInfo): void
   _onTextData(serialized: string, info: WirePublishInfo): void
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
   _onDm(serialized: string, info: WirePublishInfo): void
@@ -73,7 +75,7 @@ type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pai
 
 /** What this instance subscribes: a function of its holders' wants, ownership and membership, kept current per change,
  *  recovered within Room's horizon, and renewed by the heartbeat. */
-class RoomSubscriptions {
+class RoomSubscriptions implements ControlObserver {
   private readonly _wants = new WantsIndex((track, named) => this._demand.setTrack(track, named))
   // Every lane shares these, so an owned member's inbox lane makes none; declared before the lanes made here.
   private readonly _onLaneTerminal = (slot: LaneSubscription, error?: unknown) => this._onTerminal(slot, error)
@@ -83,7 +85,8 @@ class RoomSubscriptions {
     this._binaryPending.add(slot)
     this._binaryReady = null
   }
-  private readonly _control = this._newLaneSubscription()
+  /** Whether this handle observes the room through its replica's control lane. */
+  private _observing = false
   private readonly _semantic = this._newLaneSubscription()
   /** Named lanes, keyed by (member, track); `_binaryTracks` lists each member's. */
   private readonly _binary = new Map<string, LaneSubscription>()
@@ -117,7 +120,7 @@ class RoomSubscriptions {
 
   constructor(
     private readonly _host: SubscriptionHost,
-    private readonly _demand: RoomDemand,
+    private readonly _demand: DemandReport,
   ) {}
 
   get semanticReady(): Promise<void> {
@@ -245,7 +248,8 @@ class RoomSubscriptions {
   ensureRoster(): Promise<void> {
     if (this._pendingRefresh !== null) return this._pendingRefresh
     const state = this._host._state
-    if (state.closed || (state.rosterKnown && this._control.established)) return Promise.resolve()
+    if (state.closed || (state.rosterKnown && this._observing && this._host._replica.controlEstablished))
+      return Promise.resolve()
     return this._refreshMembers()
   }
 
@@ -254,6 +258,18 @@ class RoomSubscriptions {
     if (host._state.closed || !(await this._reconcileMeta())) return
     await dropReplacedMetaGenerations(host.id, host._inc)
     await this._refreshMembers()
+  }
+
+  onControlEvent(event: PresenceEvent, serialized: string, info: WirePublishInfo): void {
+    this._host._onCtrlEvent(event, serialized, info)
+  }
+
+  onControlClosed(): void {
+    this._host._closeFromAuthority()
+  }
+
+  onControlRecovered(): Promise<void> {
+    return this.reconcileAuthority()
   }
 
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
@@ -304,13 +320,10 @@ class RoomSubscriptions {
     const host = this._host
     const state = host._state
     const open = !state.closed
-    const observed = host._observed()
-    const becomesObserved = open && observed && !this._control.active
-    this._control.sync(open && observed, () =>
-      getRoomBackend().subscribeLane(host.id, host._inc, CONTROL_LANE, (payload, info) =>
-        host._onCtrlMessage(decodeRoomText(payload), info),
-      ),
-    )
+    const observing = open && host._observed()
+    const becomesObserved = observing && !this._observing
+    if (observing || this._observing) host._replica.observe(this, observing)
+    this._observing = observing
     this._semantic.sync(open && (host._holdsTail() || this._wants.wantsText), () =>
       getRoomBackend().subscribeLane(host.id, host._inc, SEMANTIC_LANE, (payload, info) =>
         host._onTextData(decodeRoomText(payload), info),
@@ -667,7 +680,7 @@ class RoomSubscriptions {
   // Graceful departures use events; heartbeats renew owned members and reap records orphaned by hard crashes.
   private _syncHeartbeat(): void {
     const host = this._host
-    const want = !host._state.closed && (this._control.wanted || this._inbox.size > 0 || this._demand.isActive())
+    const want = !host._state.closed && (this._observing || this._inbox.size > 0)
     if (want && !this._heartbeatTimer) {
       this._heartbeatTimer = unrefTimer(
         setInterval(() => void this._heartbeatTick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS),
@@ -683,8 +696,6 @@ class RoomSubscriptions {
     this._heartbeatBusy = true
     const host = this._host
     try {
-      // No cell I/O, so member-cell latency never delays demand renewal.
-      this._demand.heartbeat()
       let renewalFailure: { error: unknown } | null = null
       try {
         await renewMemberLeases(host.id, host._inc, host._renewableMembers())

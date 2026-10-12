@@ -297,10 +297,11 @@ describe('Room public behavior', () => {
     expect(clientView(peer, room.id)._getRemote(member.id)?.meta).toEqual({ v: 2 })
   })
   it("relays a hidden member's reconciled meta to the clients handed it", async () => {
+    // The handles of one server share its control lane.
+    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = (await Room.create('lost-hidden-meta')) as ServerRoom
     const holder = await Room.get(room.id)
     const bot = await holder.join({ hidden: true, meta: { mood: 'old' } })
-    const control = loseLaneFrames((lane) => lane.kind === 'control')
     const grants = new ResponseRoomGrants()
     grants.hidden.add(bot.id)
     const handed = new RoomStubChannel(room, { grants })
@@ -536,8 +537,8 @@ describe('Room public behavior', () => {
     expect(recreated.isClosed).toBe(false)
   })
   it('tears down an observing instance when another instance closes the room', async () => {
-    const authority = await Room.create('remote-close-teardown')
-    authority.onAnnounce(() => {})
+    // Not observing: the handles of one server share its control lane.
+    await Room.create('remote-close-teardown')
     const remoteBackend = getRoomBackend()
     const unsubscribed: string[] = []
     const observedLanes = new Set<string>()
@@ -724,9 +725,8 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(semanticOpens).toBe(3))
   })
   it('closes a view and tells its clients when a terminal control lane lost the closed frame', async () => {
-    const authority = await Room.create('terminal-close-relay')
-    await authority.join()
     let terminal: ReturnType<typeof terminalSubscription> | undefined
+    // The handles of one server share its control lane.
     mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
       const withoutClosed = (payload: Uint8Array, info: { seq: number; timestamp: number }) => {
         if ((parse(decoder.decode(payload)) as { __r?: string }).__r !== 'closed') receiver(payload, info)
@@ -734,6 +734,8 @@ describe('Room public behavior', () => {
       terminal ??= terminalSubscription(subscribeLane(roomId, inc, lane, withoutClosed))
       return terminal.subscription
     })
+    const authority = await Room.create('terminal-close-relay')
+    await authority.join()
     const observer = (await Room.get(authority.id)) as ServerRoom
     let closes = 0
     observer.onClose(() => closes++)
@@ -886,7 +888,7 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(authority.id)) as ServerRoom
     expect(await observer.getParticipants()).toEqual([])
     const readiness = createDeferred()
-    const slot = subsOf(observer)._control
+    const slot = controlOf(observer)
     slot.sync(true, () => ({
       ready: readiness.promise,
       state: () => 'establishing',
@@ -922,7 +924,7 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(authority.id)) as ServerRoom
     observer.onJoin(() => {})
     await observer.getParticipants()
-    await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
+    await vi.waitFor(() => expect(controlOf(observer).established).toBe(true))
     expect(observer._state.rosterKnown).toBe(true)
     const readCellPages = driver.readCellPages.bind(driver)
     const started = createDeferred()
@@ -938,7 +940,7 @@ describe('Room public behavior', () => {
     })
     const refresh = subsOf(observer)._refreshMembers()
     await started.promise
-    expect(subsOf(observer)._control.established).toBe(true)
+    expect(controlOf(observer).established).toBe(true)
     const participants = observer.getParticipants()
     const status = await Promise.race([
       participants.then(() => 'settled' as const),
@@ -957,7 +959,7 @@ describe('Room public behavior', () => {
     observer.onJoin((member) => narrated.push(`join ${member.id}`))
     observer.onLeave((member) => narrated.push(`leave ${member.id}`))
     await observer.getParticipants()
-    await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
+    await vi.waitFor(() => expect(controlOf(observer).established).toBe(true))
     const expected: string[] = []
     const race = async (leaving: (typeof members)[number]) => {
       const joined = await authority.join()
@@ -993,7 +995,7 @@ describe('Room public behavior', () => {
     observer.onLeave((member) => narrated.push(`leave ${member.id}`))
     observer.onParticipantUpdate((member, meta) => narrated.push(`meta ${member.id} ${JSON.stringify(meta)}`))
     await observer.getParticipants()
-    await vi.waitFor(() => expect(subsOf(observer)._control.established).toBe(true))
+    await vi.waitFor(() => expect(controlOf(observer).established).toBe(true))
     const readCellPages = driver.readCellPages.bind(driver)
     let rosterReads = 0
     const expected: string[] = []
@@ -1047,10 +1049,10 @@ describe('Room public behavior', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     observer.onJoin(() => {})
     const headRead = createDeferred()
-    const readOpenConfig = observer._readOpenConfig.bind(observer)
-    vi.spyOn(observer, '_readOpenConfig').mockImplementationOnce(async () => {
+    const readHead = driver.readHead.bind(driver)
+    vi.spyOn(driver, 'readHead').mockImplementationOnce(async (...args) => {
       await headRead.promise
-      return readOpenConfig()
+      return readHead(...args)
     })
     await first.close()
     // A replan, and the roster refresh it starts, while the recovery reads the head.
@@ -1061,7 +1063,7 @@ describe('Room public behavior', () => {
     expect(opens).toBe(2)
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
     expect(opens).toBe(3)
-    expect(subsOf(observer)._control.established).toBe(true)
+    expect(controlOf(observer).established).toBe(true)
   })
   it('retries a still-wanted lost subscription on the next planning pass', async () => {
     vi.useFakeTimers()
@@ -3031,16 +3033,16 @@ describe('Room public behavior', () => {
     expect(report).toHaveBeenCalledTimes(4)
   })
   it('orders participant text and room announcements in one semantic domain', async () => {
-    const room = await Room.create('announce-semantic-order')
-    const member = await room.join()
-    const observer = await Room.get(room.id)
-    const observed: Array<[unknown, number]> = []
     const controlReady = createDeferred()
     mockLaneSubscription('control', (subscribeLane, roomId, inc, lane, receiver) => {
       const subscription = subscribeLane(roomId, inc, lane, receiver)
       void subscription.ready.then(() => controlReady.resolve())
       return subscription
     })
+    const room = await Room.create('announce-semantic-order')
+    const member = await room.join()
+    const observer = await Room.get(room.id)
+    const observed: Array<[unknown, number]> = []
     observer.onAnnounce((data, info) => observed.push([data, info.seq]))
     await controlReady.promise
     const first = await member.publish('one')
@@ -3434,7 +3436,7 @@ describe('Room public behavior', () => {
     const seen: string[] = []
     room.onJoin(() => seen.push('join'))
     room.onLeave((_member, cause) => seen.push(cause.type))
-    await vi.waitFor(() => expect(subsOf(room)._control.established).toBe(true))
+    await vi.waitFor(() => expect(controlOf(room).established).toBe(true))
     const backend = getRoomBackend()
     const commitLane = backend.commitLane.bind(backend)
     let kicked = false
@@ -4091,7 +4093,7 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(changesOf(b.id)).toEqual(sorted(all(true))))
     // One entry per track and one per member, not one per pair.
     published.mockClear()
-    demand.heartbeat()
+    heartbeat(demand)
     expect(published).toHaveBeenCalledTimes(tracks.length + 2)
     // A want of `a` alone holds t0 for it while the want of every member comes and goes.
     const alone = (await observer.getParticipant(a.id))!.subscribeBinary(() => {}, { track: 't0' })
@@ -4884,13 +4886,13 @@ describe('room demand lifecycle', () => {
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
     demand.applyWant({ __r: 'want', member: 'elsewhere', track: 'screen', instance: 'remote-a', on: true })
-    expect(demand.isActive()).toBe(false)
+    expect(leasesHeld(demand)).toBe(0)
     demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'remote-a', on: true })
     owned.delete('member')
     demand.forgetMember('member')
     demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'remote-b', on: true })
     expect(delivered).toEqual([['member', 'screen', true]])
-    expect(demand.isActive()).toBe(false)
+    expect(leasesHeld(demand)).toBe(0)
   })
   it("drops a reporter's demand once its lease lapses unrenewed, as when its instance crashed", () => {
     vi.useFakeTimers()
@@ -4902,15 +4904,15 @@ describe('room demand lifecycle', () => {
     )
     demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'crashed', on: true })
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
-    demand.heartbeat()
-    expect(demand.isActive()).toBe(true)
+    heartbeat(demand)
+    expect(leasesHeld(demand)).toBeGreaterThan(0)
     vi.advanceTimersByTime(1)
-    demand.heartbeat()
+    heartbeat(demand)
     expect(delivered).toEqual([
       ['member', 'screen', true],
       ['member', 'screen', false],
     ])
-    expect(demand.isActive()).toBe(false)
+    expect(leasesHeld(demand)).toBe(0)
   })
   it("pairs a reporter's tracks named of every member only with the members it covers, until their leases lapse", () => {
     vi.useFakeTimers()
@@ -4928,19 +4930,19 @@ describe('room demand lifecycle', () => {
     expect(demand.wanted('a')).toEqual(['screen'])
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
     demand.applyWant({ __r: 'covers', member: 'a', instance: 'other', on: true })
-    demand.heartbeat()
+    heartbeat(demand)
     vi.advanceTimersByTime(1)
-    demand.heartbeat()
+    heartbeat(demand)
     expect(delivered).toEqual([
       ['a', 'screen', true],
       ['b', 'screen', true],
       ['a', 'screen', false],
       ['b', 'screen', false],
     ])
-    expect(demand.isActive()).toBe(true)
+    expect(leasesHeld(demand)).toBeGreaterThan(0)
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS)
-    demand.heartbeat()
-    expect(demand.isActive()).toBe(false)
+    heartbeat(demand)
+    expect(leasesHeld(demand)).toBe(0)
   })
 })
 describe('room protocol validation', () => {
@@ -5000,7 +5002,7 @@ describe('room protocol validation', () => {
         ROOM_TRACK_WANTS_MAX + count * (2 * ROOM_MEMBER_NAMED_LANES_MAX + 1),
       )
       published.mockClear()
-      demand.heartbeat()
+      heartbeat(demand)
       expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
     },
   )
@@ -5085,7 +5087,7 @@ describe('room protocol validation', () => {
     room.subscribeBinary(() => {})
     await subsOf(room).binaryReady()
     const stubs = Array.from({ length: Math.ceil(members.length / ROOM_TRACK_WANTS_MAX) }, () => register(room))
-    const demand = (room as unknown as { _demand: { tellUntil(deadline: number): boolean } })._demand
+    const demand = (room as unknown as { _report: { tellUntil(deadline: number): boolean } })._report
     const tellUntil = demand.tellUntil.bind(demand)
     let replanned = false
     vi.spyOn(demand, 'tellUntil').mockImplementation((deadline) => {
@@ -5136,6 +5138,33 @@ describe('room protocol validation', () => {
     expect(published.mock.calls.length).toBeGreaterThan(ROOM_GOSSIP_IN_FLIGHT_MAX)
     expect(most).toBeLessThanOrEqual(ROOM_GOSSIP_IN_FLIGHT_MAX)
   })
+  it.each([10, 30, 100])(
+    "renews the demand of %i Room.get() handles hearing every member's mic once per server each heartbeat, and parses each control frame once",
+    async (handles) => {
+      const heartbeats = captureHeartbeats()
+      const counted = countControlLane(`gossip-handles-${handles}`)
+      const room = (await Room.create(`gossip-handles-${handles}`)) as ServerRoom
+      const members = await Promise.all(Array.from({ length: 100 }, () => room.join()))
+      const hearing = members.map((member) => {
+        const tracks = new Set<string | null>()
+        member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+        return tracks
+      })
+      for (let i = 0; i < handles; i++) {
+        const view = (await Room.get(room.id)) as ServerRoom
+        declare(serve(view).stub, { __r: 'sub-binary', member: null, track: 'mic', on: true })
+      }
+      await vi.waitFor(() => expect(hearing.every((tracks) => tracks.has('mic'))).toBe(true), { timeout: 30_000 })
+      await counted.quiet()
+      counted.reset()
+      heartbeats.fire()
+      await counted.quiet()
+      // One pair per member and the track, whatever the number of handles.
+      expect(counted.commits).toBe(members.length + 1)
+      expect(counted.parsed).toBe(counted.commits)
+    },
+    120_000,
+  )
   it('commits none of the demand gossip still waiting once its room closed', async () => {
     const room = (await Room.create('gossip-after-close')) as ServerRoom
     const member = await room.join()
@@ -5146,9 +5175,9 @@ describe('room protocol validation', () => {
       if (room.isClosed && args[0] === room.id && args[2].kind === 'control') afterClose++
       return commitLane(...args)
     })
-    const { demand } = spyGossip(room)
+    const { gossip } = spyGossip(room)
     for (const track of trackNames(100 * ROOM_GOSSIP_IN_FLIGHT_MAX))
-      demand._publishWant({ __r: 'want', member: member.id, track, instance: 'elsewhere', on: true })
+      gossip._publishWant({ __r: 'want', member: member.id, track, instance: 'elsewhere', on: true })
     await Room.close(room.id)
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(afterClose).toBe(0)
@@ -5558,7 +5587,6 @@ function yieldAfterEachReadAndCountWrites(): () => number {
   return () => writes.reduce((total, write) => total + write.mock.calls.length, 0)
 }
 function subsOf(room: Room | ServerRoom): {
-  _control: LaneSubscription
   _semantic: LaneSubscription
   _binary: Map<string, LaneSubscription>
   _everyTrack: Map<string, LaneSubscription>
@@ -5573,6 +5601,10 @@ function subsOf(room: Room | ServerRoom): {
   reconcileAuthority(): Promise<void>
 } {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+}
+/** The control lane the room's replica subscribes. */
+function controlOf(room: Room | ServerRoom): LaneSubscription {
+  return ((room as ServerRoom)._replica as unknown as { _control: LaneSubscription })._control
 }
 /** The binary lanes a room subscribes, by their backend keys. */
 function binaryLanes(room: ServerRoom): string[] {
@@ -5605,8 +5637,77 @@ function trackNames(count: number): string[] {
 }
 /** The room's demand, and the gossip its instance publishes from now on. */
 function spyGossip(room: Room | ServerRoom) {
-  const demand = (room as unknown as { _demand: { _publishWant(event: unknown): void; heartbeat(): void } })._demand
-  return { demand, published: vi.spyOn(demand, '_publishWant') }
+  const demand = (room as ServerRoom)._replica.demand
+  const gossip = demand as unknown as { _publishWant(event: unknown): void }
+  return { demand, gossip, published: vi.spyOn(gossip, '_publishWant') }
+}
+/** One heartbeat's renewal of the demand, all at once. */
+function heartbeat(demand: RoomDemand): void {
+  for (const _ of demand.heartbeat());
+}
+/** The leases the demand holds on other processes' reports. */
+function leasesHeld(demand: RoomDemand): number {
+  const { _remote, _remoteTracks, _remoteMembers } = demand as unknown as Record<string, Map<unknown, unknown>>
+  return _remote!.size + _remoteTracks!.size + _remoteMembers!.size
+}
+/** The room heartbeats started from now on; `fire()` runs each still running once, as one interval passing would. */
+function captureHeartbeats(): { fire(): void } {
+  const running = new Map<unknown, () => void>()
+  const setInterval = globalThis.setInterval
+  const clearInterval = globalThis.clearInterval
+  vi.spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, ms?: number) => {
+    const timer = setInterval(callback, ms)
+    if (ms === ROOM_HEARTBEAT_INTERVAL_MS) running.set(timer, callback)
+    return timer
+  }) as typeof globalThis.setInterval)
+  vi.spyOn(globalThis, 'clearInterval').mockImplementation((timer) => {
+    running.delete(timer)
+    clearInterval(timer)
+  })
+  return { fire: () => [...running.values()].forEach((callback) => callback()) }
+}
+/** The room's control-lane commits, and the frames this process's receivers took off the lane, from now on. */
+function countControlLane(roomId: string) {
+  const backend = getRoomBackend()
+  const commitLane = backend.commitLane.bind(backend)
+  const subscribeLane = backend.subscribeLane.bind(backend)
+  const counts = { commits: 0, parsed: 0, inFlight: 0 }
+  vi.spyOn(backend, 'commitLane').mockImplementation((...args) => {
+    const committed = commitLane(...args)
+    if (args[0] !== roomId || args[2].kind !== 'control') return committed
+    counts.commits++
+    counts.inFlight++
+    void committed
+      .then((result) => ('stale' in result ? undefined : result.delivery))
+      .catch(() => {})
+      .finally(() => counts.inFlight--)
+    return committed
+  })
+  vi.spyOn(backend, 'subscribeLane').mockImplementation((id, inc, lane, receiver) =>
+    subscribeLane(id, inc, lane, (payload, info) => {
+      if (id === roomId && lane.kind === 'control') counts.parsed++
+      return receiver(payload, info)
+    }),
+  )
+  return {
+    get commits() {
+      return counts.commits
+    },
+    get parsed() {
+      return counts.parsed
+    },
+    reset() {
+      counts.commits = counts.parsed = 0
+    },
+    /** No commit in flight for five timer turns in a row, each on time. */
+    async quiet() {
+      for (let quiet = 0; quiet < 5; ) {
+        const turn = performance.now()
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        quiet = counts.inFlight === 0 && performance.now() - turn < 30 ? quiet + 1 : 0
+      }
+    },
+  }
 }
 /** The binary lanes opened on the backend from now on. */
 function countBinarySubscriptions(): SubscribedLane[] {
