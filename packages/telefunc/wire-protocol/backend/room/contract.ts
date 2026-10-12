@@ -83,9 +83,9 @@ type CellMutation = { key: string; bytes: Uint8Array | null }
 
 type CellSelector = { keys: string[] } | { prefix: string }
 
-/** The cells found, each with its version, or the incarnation is no longer the head's. A write gives each cell it
- *  writes a version that cell never had in its incarnation. */
-type CellsRead = { cells: Map<string, Uint8Array>; versions: Map<string, string> } | { staleInc: true }
+/** The cells found, each with its version, and the authority time of the read; or the incarnation is no longer the
+ *  head's. A write gives each cell it writes a version that cell never had in its incarnation. */
+type CellsRead = { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number } | { staleInc: true }
 
 /** A cell still at the version read; `null`: still absent. */
 type CellExpectation = { key: string; version: string | null }
@@ -147,6 +147,8 @@ type RoomDriver = {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult>
+  /** The lane's last commit's seq and timestamp; null before its first, or once its incarnation or member is gone. */
+  readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null>
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>
   /** The lanes holding a retained frame; with `of`, only that member's or that track's binary lanes, at a cost of
    *  their count. */

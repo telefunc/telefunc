@@ -11,6 +11,7 @@ export {
   compareExchangeHead,
   readCells,
   readCellPage,
+  readOrder,
   compareExchangeCells,
   advanceOrder,
   dropLaneOrderRows,
@@ -224,11 +225,14 @@ function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number)
   return {
     cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
     versions: new Map(rows.map((row) => [row.key, String(row.version)])),
+    now,
   }
 }
 
 /** A prefix read's page, with the cursor its next page reads after while cells may remain. */
-type CellPage = { cells: Map<string, Uint8Array>; versions: Map<string, string>; cursor?: string } | { staleInc: true }
+type CellPage =
+  | { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number; cursor?: string }
+  | { staleInc: true }
 
 function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
   const head = readLiveHead(sql, now)
@@ -246,7 +250,8 @@ function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: stri
     .toArray()
   const cells = new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)]))
   const versions = new Map(rows.map((row) => [row.key, String(row.version)]))
-  return rows.length === CELL_PAGE_SIZE ? { cells, versions, cursor: rows[rows.length - 1]!.key } : { cells, versions }
+  const page = { cells, versions, now }
+  return rows.length === CELL_PAGE_SIZE ? { ...page, cursor: rows[rows.length - 1]!.key } : page
 }
 
 function readRevision(sql: SqlStorage, inc: string): number {
@@ -283,12 +288,16 @@ function compareExchangeCells(sql: SqlStorage, inc: string, cx: CellsCx, now: nu
   return { committed: counters }
 }
 
-// `seq` strictly increases for the lifetime of a domain instance.
-function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderingInfo {
+function readOrder(sql: SqlStorage, inc: string, domain: string): OrderingInfo | null {
   const row = sql
     .exec<{ seq: number; ts: number }>('SELECT seq, ts FROM ord WHERE inc = ? AND domain = ?', inc, domain)
     .toArray()[0]
-  const mark = nextOrderMark(row === undefined ? undefined : { seq: row.seq, timestamp: row.ts }, now)
+  return row === undefined ? null : { seq: row.seq, timestamp: row.ts }
+}
+
+// `seq` strictly increases for the lifetime of a domain instance.
+function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderingInfo {
+  const mark = nextOrderMark(readOrder(sql, inc, domain) ?? undefined, now)
   sql.exec(
     'INSERT OR REPLACE INTO ord (inc, domain, seq, ts) VALUES (?, ?, ?, ?)',
     inc,

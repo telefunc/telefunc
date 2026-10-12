@@ -47,7 +47,7 @@ Telefunc runs its commands on its own connection, duplicated from your client wi
 
 Room keeps its state (rooms, members, lane order) in Redis keys with no expiry, so Redis must never evict them: use `maxmemory-policy noeviction`, or a `volatile-*` policy, which evicts only keys with an expiry. An `allkeys-*` policy can silently break a room.
 
-Keep your Redis masters' clocks synchronized. Broadcast timestamps, the `seq` a key restarts at when Redis lost its counter, and the moment a room whose server is gone lapses all come from the clock of the master that holds the key, so a failover or a Cluster reshard onto a master whose clock is off shifts them.
+Keep your Redis masters' clocks synchronized. Broadcast timestamps, the `seq` a key restarts at when Redis lost its counter, the moment a room whose server is gone lapses, and the moment the members of a server that stopped leave all come from the clock of the master that holds the key, so a failover or a Cluster reshard onto a master whose clock is off shifts them.
 
 On a Redis Cluster, a server sends a room's room-wide messages one at a time, each once Redis has answered the one before, and the same for the direct messages to one member and for each member's binary track. Each of these carries at most one message per round trip to Redis from that server.
 

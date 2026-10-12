@@ -41,11 +41,12 @@ import {
   withinRoomHorizon,
 } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
-import { holdViews, removeView } from './membership.js'
+import { evictMember, finishSessionCleanups, holdViews, removeView, renewSession } from './membership.js'
 import type { StoredRoomMeta } from './meta.js'
 import type { LaneHolder, TextWantsChange } from './replay.js'
 import type { ServerRoom } from './room.js'
 import { RosterStream } from './roster-stream.js'
+import { RoomSession } from './session.js'
 import { MemberMessageTexts, type RoomStubChannel, unorderedEventText } from './stub.js'
 import { RoomSubscriptions } from './subscriptions.js'
 assertIsNotBrowser()
@@ -54,8 +55,8 @@ assertIsNotBrowser()
 type PresenceEvent = Exclude<RoomCtrlEnvelope, { __r: 'demand-ask' }>
 
 /** This process's one view of a room incarnation, whatever the number of its handles: the model, the lanes planned
- *  from the wants of every handle's holders, the demand, and the heartbeat that renews the members and pages the
- *  handles hold and reads the authority again. Each handle keeps its guards, its tail, the stubs it opened and its
+ *  from the wants of every handle's holders, the demand, the session hosting the members and pages the handles hold,
+ *  and the heartbeat that renews it and checks the authority again. Each handle keeps its guards, its tail, the stubs it opened and its
  *  listeners. A replica no handle observes, owns a member through or tails runs no heartbeat and holds no lane; it
  *  lives while a handle holds it. */
 class RoomReplica {
@@ -94,12 +95,23 @@ class RoomReplica {
   readonly plan: RoomSubscriptions
   readonly sync: AuthoritySync
   readonly roster: RosterStream
+  /** Hosts the members the handles join and the pages' views. */
+  readonly session = new RoomSession()
   /** In-flight `send(…, { ack: true })`s; a leave of either end, or a close, fails the ones it strands. */
   readonly acks = new PendingDmAcks()
   /** Every handle's attached stubs. */
   readonly stubs = new Set<RoomStubChannel>()
-  /** Each stub's latest view write, from its attach or a renewal; its removal comes after it. */
-  private readonly _views = new Map<RoomStubChannel, Promise<void>>()
+  /** Each stub's latest view write, from its attach or a rewrite, to the key it wrote, null if it failed; its removal
+   *  comes after it. */
+  private readonly _views = new Map<RoomStubChannel, Promise<string | null>>()
+  /** A view write failed, or the session hosting the views was lost: the heartbeat writes them again. */
+  private _viewsLost = false
+  /** The highest seq the control lane delivered here. */
+  private _controlSeq = 0
+  /** Members whose eviction failed, by id, with their identity: the session would host them for as long as it lives. */
+  private readonly _unevicted = new Map<string, string | null>()
+  /** The cleanups of the session's members pending at the last heartbeat. */
+  private _pendingCleanups: ReadonlySet<string> = new Set()
   private readonly _gossip: GossipOutbox
   /** The handle holding each member it joined. */
   private readonly _owners = new Map<string, ServerRoom>()
@@ -160,15 +172,38 @@ class RoomReplica {
 
   attachStub(stub: RoomStubChannel): void {
     this.stubs.add(stub)
-    this._views.set(stub, holdViews(this._incarnation, [stub.id]).catch(reportRoomError))
+    this._views.set(
+      stub,
+      this._holdViews([stub]).then(([key]) => key!),
+    )
   }
 
   detachStub(stub: RoomStubChannel): void {
     this.stubs.delete(stub)
     const view = this._views.get(stub)
     this._views.delete(stub)
-    void view?.then(() => removeView(this._incarnation, stub.id)).catch(reportRoomError)
+    void view
+      ?.then(async (key) => {
+        if (key !== null) await removeView(this._incarnation, key)
+      })
+      .catch(reportRoomError)
     this.roster.forget(stub)
+  }
+
+  /** The stubs' views' keys, in order; each null and the views lost if the write failed. */
+  private async _holdViews(stubs: RoomStubChannel[]): Promise<(string | null)[]> {
+    try {
+      const keys = await holdViews(
+        this._incarnation,
+        this.session,
+        stubs.map((stub) => stub.id),
+      )
+      return stubs.map((_, i) => keys[i] ?? null)
+    } catch (error) {
+      this._viewsLost = true
+      reportRoomError(error)
+      return stubs.map(() => null)
+    }
   }
 
   /** The owned member's tracks someone wants. */
@@ -280,24 +315,38 @@ class RoomReplica {
   _ownedMembers(): Iterable<string> {
     return this._owners.keys()
   }
-  /** @internal Live: the owned members whose records committed; a pending admission's is renewed once it commits. */
-  *_renewableMembers(): Generator<string> {
-    for (const [id, owner] of this._owners) if (owner._renewable(id)) yield id
+  /** The heartbeat evicts the member again, as `disconnected`. */
+  evictLater(id: string, identity: string | null): void {
+    this._unevicted.set(id, identity)
   }
-  /** @internal Renews every stub's view in one write, after each one's earlier write; the caller reports a failure. */
-  _renewViews(): Promise<void> {
+
+  /** @internal Renews the session, evicts again whom it failed to, and finishes the leaves its members' evicting
+   *  servers left unfinished; once the session was lost, or a view write failed, writes every stub's view again in one
+   *  write, after each one's earlier write. */
+  async _renewSession(): Promise<void> {
+    if (!(await renewSession(this._incarnation, this.session))) this._viewsLost = true
+    for (const [id, identity] of this._unevicted) {
+      await evictMember(this._incarnation, id, identity, { type: 'disconnected' })
+      this._unevicted.delete(id)
+    }
+    this._pendingCleanups = await finishSessionCleanups(this._incarnation, this.session, this._pendingCleanups)
+    if (!this._viewsLost) return
+    this._viewsLost = false
     const stubs = [...this._views.keys()]
-    if (stubs.length === 0) return Promise.resolve()
+    if (stubs.length === 0) return
     const previous = Promise.all(this._views.values())
-    const renewed = previous.then(() =>
-      holdViews(
-        this._incarnation,
-        stubs.map((stub) => stub.id),
+    const keys = previous.then(() => this._holdViews(stubs))
+    stubs.forEach((stub, i) =>
+      this._views.set(
+        stub,
+        keys.then((written) => written[i]!),
       ),
     )
-    const settled = renewed.catch(() => {})
-    for (const stub of stubs) this._views.set(stub, settled)
-    return renewed
+    await keys
+  }
+  /** @internal */
+  _controlSeen(): number {
+    return this._controlSeq
   }
   /** This process's demand entry, to the other processes and to its own owners. */
   private _tellDemand(entry: DemandEntry, on: boolean): void {
@@ -344,6 +393,7 @@ class RoomReplica {
   }
   /** @internal */
   _onControl(serialized: string, info: WirePublishInfo): void {
+    if (info.seq > this._controlSeq) this._controlSeq = info.seq
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') {
       if (ctrl.instance !== this.report.instance) void this._tellDemandAgain().catch(reportRoomError)

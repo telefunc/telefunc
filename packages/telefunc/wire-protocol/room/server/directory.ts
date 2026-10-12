@@ -6,17 +6,17 @@ export { directoryCheckAt, repairRoomIndex, sweepLapsedRoomsSoon }
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { Slice } from '../slice.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SESSION_TTL_MS } from '../constants.js'
 import type { HoldConfig } from '../protocol.js'
 import { configFromHead, openConfig } from './lanes.js'
 import { reportRoomError } from './errors.js'
 
 /** When to look at a listed room again: once its head lapses, and a heartbeat from now at the earliest. A room
  *  without hold timeouts never lapses; one with them but no lapse yet gets one once held, so it is looked at again a
- *  member's lease from now. */
+ *  session's lease from now. */
 function directoryCheckAt(hold: HoldConfig | null, expiresAt: number | undefined): number {
   if (hold === null) return Infinity
-  if (expiresAt === undefined) return Date.now() + ROOM_MEMBER_TTL_MS
+  if (expiresAt === undefined) return Date.now() + ROOM_SESSION_TTL_MS
   return Math.max(expiresAt, Date.now() + ROOM_HEARTBEAT_INTERVAL_MS)
 }
 

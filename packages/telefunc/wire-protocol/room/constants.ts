@@ -1,6 +1,6 @@
 export {
   ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_TTL_MS,
+  ROOM_SESSION_TTL_MS,
   ROOM_TAIL_HOLD_MAX,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
@@ -21,8 +21,8 @@ export {
 import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
 
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
-// Four heartbeats: a member is reaped only after several renewals in a row were missed.
-const ROOM_MEMBER_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
+// Four heartbeats: a server's session in a room lapses only after several renewals in a row were missed.
+const ROOM_SESSION_TTL_MS = ROOM_HEARTBEAT_INTERVAL_MS * 4
 // A tail is a bounded recent suffix, not history: enforce both entry count and serialized code units.
 const ROOM_TAIL_HOLD_MAX = 256
 const ROOM_TAIL_HOLD_CODE_UNITS_MAX = 1024 * 1024

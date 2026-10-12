@@ -21,6 +21,7 @@ import type {
   RetainedOf,
   DirectoryPage,
 } from '../../../../backend/room/contract.js'
+import type { OrderingInfo } from '../../../../ordering-frame.js'
 import { assert } from '../../../../../utils/assert.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds, isOpenIncarnation, type StoredHead } from '../../../../backend/room/semantics.js'
@@ -50,6 +51,7 @@ import {
   readCells,
   readCellPage,
   readLiveHead,
+  readOrder,
   type CellPage,
 } from './storage.js'
 
@@ -138,6 +140,10 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async awaitDelivery(token: string): Promise<void> {
     await this.#fanout.awaitDelivery(token)
+  }
+
+  async readLaneOrder(inc: string, lane: LaneId): Promise<OrderingInfo | null> {
+    return readOrder(this.#sql(), inc, encodeLaneKey(lane))
   }
 
   async readRetained(inc: string, lane: LaneId): Promise<RetainedFrame | null> {

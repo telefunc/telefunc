@@ -1,6 +1,6 @@
 export { MemoryBackendState, MemoryBackend }
 
-// The in-process backend, and the reference for Room SPI semantics: this process's clock is authority time.
+// The in-process backend, and the reference for Room SPI semantics: its state's clock is authority time.
 
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
 import type {
@@ -82,8 +82,13 @@ type DirectoryCheck = { at: number; roomId: string }
 /** Subscriptions by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
 type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
 
-/** @internal The backend's storage, kept apart from it so specs can inspect it and share it between backends. */
+/** @internal The backend's storage, kept apart from it so specs can inspect it and share it between backends. `now` is
+ *  its authority time; a spec gives it a clock of its own to set the app servers' apart from it. */
 class MemoryBackendState {
+  readonly now: () => number
+  constructor({ now = () => Date.now() }: { now?: () => number } = {}) {
+    this.now = now
+  }
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, DirectoryEntry>()
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
@@ -136,7 +141,7 @@ function cellKeysWithPrefix(gen: Generation, prefix: string): Iterable<string> {
   return indexed === prefix ? keys : [...keys].filter((key) => key.startsWith(prefix))
 }
 
-function readCellsOf(gen: Generation, keys: Iterable<string>): CellsRead {
+function readCellsOf(gen: Generation, keys: Iterable<string>, now: number): CellsRead {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
   for (const key of keys) {
@@ -145,7 +150,7 @@ function readCellsOf(gen: Generation, keys: Iterable<string>): CellsRead {
     cells.set(key, copyBytes(cell.bytes))
     versions.set(key, cell.version)
   }
-  return { cells, versions }
+  return { cells, versions, now }
 }
 
 function setCell(gen: Generation, key: string, bytes: Uint8Array | null, version: string): void {
@@ -231,7 +236,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult {
-    const mark = advanceOrder(this._state.broadcastOrder, route.key, Date.now())
+    const mark = advanceOrder(this._state.broadcastOrder, route.key, this._state.now())
     const targets = this._state.broadcastSubs[route.kind].get(route.key) ?? []
     // Counted before delivery, which may unsubscribe or subscribe.
     const receivers = sumReceiverCounts(targets)
@@ -272,7 +277,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const current = this._liveHead(this._state.rooms.get(roomId))
-    if (!headCxMatches(cx, current, Date.now())) {
+    if (!headCxMatches(cx, current, this._state.now())) {
       return { conflict: true, current: current === null ? null : publicHead(current) }
     }
     // Only a CX that actually applies materializes a room record.
@@ -280,7 +285,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   private _storeHead(room: RoomRecord, next: HeadNext): StoredHead {
-    const materialized = materializeHead(next, Date.now(), `rev-${++this._state.revSeq}`)
+    const materialized = materializeHead(next, this._state.now(), `rev-${++this._state.revSeq}`)
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
     if (stored.currentInc !== null) this._generation(room, stored.currentInc)
@@ -290,7 +295,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     const gen = this._readableGeneration(roomId, inc)
     if (gen === null) return { staleInc: true }
-    return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix))
+    return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix), this._state.now())
   }
 
   // The prefix's keys as the read starts, so a page costs its own size and a join adds nothing to the read.
@@ -303,7 +308,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         return
       }
       keys ??= [...cellKeysWithPrefix(gen, prefix)]
-      yield readCellsOf(gen, keys.slice(at, at + CELL_PAGE_SIZE))
+      yield readCellsOf(gen, keys.slice(at, at + CELL_PAGE_SIZE), this._state.now())
     }
   }
 
@@ -325,7 +330,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     for (const mutation of cx.mutations) setCell(gen, mutation.key, mutation.bytes, version)
     const counters = new Map<string, CellCounter>()
     for (const count of cx.counts ?? []) {
-      const counted = countCell(gen.cells.get(count.key)?.bytes, count, Date.now())
+      const counted = countCell(gen.cells.get(count.key)?.bytes, count, this._state.now())
       if (counted === null) continue
       if (counted.written) setCell(gen, count.key, encodeCellCounter(counted.counter), version)
       counters.set(count.key, counted.counter)
@@ -342,7 +347,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   ): Promise<CommitResult> {
     const room = this._state.rooms.get(roomId)
     const head = this._liveHead(room)
-    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
+    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, this._state.now())) {
       return { stale: 'incarnation' }
     }
     const gen = this._generation(room, inc)
@@ -354,7 +359,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       lane.kind === 'inbox' || lane.kind === 'binary'
         ? getOrCreate(gen.memberOrders, lane.member, () => new Map())
         : gen.order
-    const mark = advanceOrder(order, key, Date.now())
+    const mark = advanceOrder(order, key, this._state.now())
     if (opts?.retain) {
       // A lane holding a retained frame is already indexed: its frame and index entries leave together.
       if (lane.kind === 'binary' && !gen.retained.has(key)) {
@@ -385,6 +390,13 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     )
     const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack) + sumReceiverCounts(everyMember)
     return { accepted: true, ...mark, receivers, delivery }
+  }
+
+  async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
+    const gen = this._state.rooms.get(roomId)?.gens.get(inc)
+    const order = lane.kind === 'inbox' || lane.kind === 'binary' ? gen?.memberOrders.get(lane.member) : gen?.order
+    const mark = order?.get(encodeLaneKey(lane))
+    return mark === undefined ? null : { ...mark }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
@@ -505,7 +517,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       return
     }
     if (head.expiresAt === null) return
-    unrefTimer(setTimeout(() => this._releaseWhenLapsed(roomId, room), head.expiresAt - Date.now()))
+    unrefTimer(setTimeout(() => this._releaseWhenLapsed(roomId, room), head.expiresAt - this._state.now()))
   }
 
   private _generation(room: RoomRecord, inc: string): Generation {
@@ -515,7 +527,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch.
   private _liveHead(room: RoomRecord | undefined): StoredHead | null {
     const head = room?.head ?? null
-    return head === null || isExpired(head, Date.now()) ? null : head
+    return head === null || isExpired(head, this._state.now()) ? null : head
   }
 }
 

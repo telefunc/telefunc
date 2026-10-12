@@ -10,5 +10,6 @@ export {
   everyTrackLaneKey,
 } from '../../wire-protocol/backend/room/lane-key.js'
 export { decodeOrderingFrame } from '../../wire-protocol/ordering-frame.js'
+export type { OrderingInfo } from '../../wire-protocol/ordering-frame.js'
 export type * from '../../wire-protocol/backend/room/contract.js'
 export type * from '../../wire-protocol/backend/subscription.js'

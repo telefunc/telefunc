@@ -124,7 +124,7 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     const room = await Room.create('roster-pages')
     const backend = new RedisBackend({ redis, prefix })
     const inc = (await backend.readHead(room.id))!.currentInc!
-    const record = bytes(JSON.stringify({ meta: {}, joinedAt: Date.now(), seenAt: Date.now(), metaSeq: 0 }))
+    const record = bytes(JSON.stringify({ meta: {}, joinedAt: Date.now(), session: 'seeded', metaSeq: 0 }))
     for (let from = 0; from < 100_000; from += 5_000) {
       const mutations = Array.from({ length: 5_000 }, (_, i) => ({ key: `m:member-${from + i}`, bytes: record }))
       await backend.compareExchangeCells(room.id, inc, { expect: [], mutations })
@@ -589,6 +589,113 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(await Room.getParticipants(room.id)).toEqual([])
     await vi.waitFor(() => expect(Room.get(room.id)).rejects.toThrow('Room not found'), { timeout: 5_000 })
   })
+  it('lets each member of a server that crashed holding 10,000 across two rooms leave once, within three minutes', async () => {
+    const prefix = uniquePrefix('session-crash')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const ids = ['crash-a', 'crash-b']
+    const leaves = new Map<string, number>()
+    let lastLeaveAt = 0
+    for (const id of ids) {
+      const room = await Room.create(id)
+      onTestFinished(() => Room.close(id))
+      room.onLeave(() => {})
+      await room.getParticipants()
+      const inc = (room as unknown as { _inc: string })._inc
+      const control = getRoomBackend().subscribeLane(id, inc, { kind: 'control' }, (payload) => {
+        const event = JSON.parse(Buffer.from(payload as Uint8Array).toString()) as { __r: string; id?: string }
+        if (event.__r !== 'leave') return
+        leaves.set(event.id!, (leaves.get(event.id!) ?? 0) + 1)
+        lastLeaveAt = Date.now()
+      })
+      onTestFinished(() => control.unsubscribe())
+      await control.ready
+    }
+    // A second server watches both rooms, its heartbeats as able to claim the crashed server's session as this one's.
+    const watcher = serverFrom(
+      { ...env, PREFIX: prefix, ROOMS: ids.join() },
+      `for (const id of process.env.ROOMS.split(',')) {
+  const room = await Room.get(id)
+  room.onLeave(() => {})
+  await room.getParticipants()
+}
+write('watching')
+await read()`,
+    )
+    await watcher.line(0)
+    const crashing = serverFrom(
+      { ...env, PREFIX: prefix, ROOMS: ids.join() },
+      `const joined = []
+for (const id of process.env.ROOMS.split(',')) {
+  const room = await Room.get(id)
+  joined.push(...(await Promise.all(Array.from({ length: 5_000 }, () => room.join()))).map(({ id }) => id))
+}
+write(joined)
+await read()`,
+    )
+    const joined = JSON.parse(await crashing.line(0)) as string[]
+    crashing.kill()
+    const crashedAt = Date.now()
+    await vi.waitFor(() => expect(joined.filter((id) => !leaves.has(id))).toEqual([]), {
+      timeout: 200_000,
+      interval: 1_000,
+    })
+    expect([...new Set(leaves.values())]).toEqual([1])
+    expect(lastLeaveAt - crashedAt).toBeLessThanOrEqual(180_000)
+  }, 240_000)
+
+  it('writes Redis once per server in an idle heartbeat, whatever its members', async () => {
+    const prefix = uniquePrefix('idle-writes')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('idle-writes')
+    onTestFinished(() => Room.close(room.id))
+    await Promise.all(Array.from({ length: 1_000 }, () => room.join()))
+    room.onLeave(() => {})
+    const other = serverFrom(
+      { ...env, PREFIX: prefix, ROOM: room.id },
+      `const room = await Room.get(process.env.ROOM)
+await Promise.all(Array.from({ length: 1_000 }, () => room.join()))
+room.onLeave(() => {})
+const writes = countWrites()
+write('joined')
+await read()
+writes.length = 0
+await room._replica.sync._heartbeatTick()
+write(writes)
+await read()`,
+    )
+    await other.line(0)
+    const writes = countWrites()
+    await (
+      room as unknown as { _replica: { sync: { _heartbeatTick(): Promise<void> } } }
+    )._replica.sync._heartbeatTick()
+    other.send('tick')
+    expect([writes, JSON.parse(await other.line(1))]).toEqual([['session'], ['session']])
+  }, 60_000)
+
+  it("evicts nobody when an app server's clock runs 120 seconds ahead of Redis's", async () => {
+    const prefix = uniquePrefix('skewed-clock')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('skewed-clock')
+    onTestFinished(() => Room.close(room.id))
+    const members = await Promise.all(Array.from({ length: 100 }, () => room.join()))
+    const skewed = serverFrom(
+      { ...env, PREFIX: prefix, ROOM: room.id },
+      `const now = Date.now
+Date.now = () => now() + 120_000
+const room = await Room.get(process.env.ROOM)
+const left = []
+room.onLeave((member) => left.push(member.id))
+await room.getParticipants()
+await room._replica.sync._heartbeatTick()
+write({ left, count: (await Room.getParticipants(process.env.ROOM)).length })
+await read()`,
+    )
+    expect(JSON.parse(await skewed.line(0))).toEqual({ left: [], count: 100 })
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id).sort()).toEqual(members.map(({ id }) => id).sort())
+  }, 60_000)
 })
 
 /** A server that joins the room COUNT times at START_AT, and reports each join's failure. */
@@ -841,6 +948,80 @@ process.exit(0)`,
       server.stdin.write(`${seq}\n`)
       return JSON.parse(await line(1))
     },
+  }
+}
+
+/** The cell writes of this process's Redis backends from now on, each as its first key's kind, or the method's name. */
+function countWrites(): string[] {
+  const writes: string[] = []
+  for (const name of ['compareExchangeCells', 'compareExchangeHead', 'commitLane'] as const) {
+    const write = RedisBackend.prototype[name] as (...args: unknown[]) => unknown
+    vi.spyOn(RedisBackend.prototype, name).mockImplementation(function (this: RedisBackend, ...args: unknown[]) {
+      const cx = args[2] as { mutations?: { key: string }[] }
+      writes.push(name === 'compareExchangeCells' ? cx.mutations!.map(({ key }) => key.split(':')[0]).join() : name)
+      return write.apply(this, args)
+    } as never)
+  }
+  return writes
+}
+
+/** A server running `body` with Redis installed: it may `write(value)` a line to the spec and `await read()` one from
+ *  it, and has `countWrites()`, as above. It ends with the spec's test, or at `kill()`, which stops it at once. */
+function serverFrom(
+  env: Record<string, string>,
+  body: string,
+): { line: (index: number) => Promise<string>; send: (text: string) => void; kill: () => void } {
+  const server = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { Cluster, Redis } from 'ioredis'
+import { createInterface } from 'node:readline'
+import { Room } from 'telefunc'
+import { installRedis } from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)}
+import { RedisBackend } from ${JSON.stringify(new URL('../dist/backend.js', import.meta.url).href)}
+const { REDIS_URL, NODES, PREFIX } = process.env
+installRedis(NODES ? new Cluster(JSON.parse(NODES)) : new Redis(REDIS_URL), { prefix: PREFIX })
+const input = createInterface({ input: process.stdin })[Symbol.asyncIterator]()
+const read = async () => (await input.next()).value
+const write = (value) => process.stdout.write(JSON.stringify(value) + '\\n')
+function countWrites() {
+  const writes = []
+  for (const name of ['compareExchangeCells', 'compareExchangeHead', 'commitLane']) {
+    const original = RedisBackend.prototype[name]
+    RedisBackend.prototype[name] = function (...args) {
+      writes.push(name === 'compareExchangeCells' ? args[2].mutations.map(({ key }) => key.split(':')[0]).join() : name)
+      return original.apply(this, args)
+    }
+  }
+  return writes
+}
+${body}
+process.exit(0)`,
+    ],
+    { cwd: new URL('..', import.meta.url), env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'inherit'] },
+  )
+  onTestFinished(() => void server.kill('SIGKILL'))
+  const lines: string[] = []
+  const waiting: Array<() => void> = []
+  let buffered = ''
+  server.stdout.on('data', (chunk) => {
+    buffered += chunk
+    const parts = buffered.split('\n')
+    buffered = parts.pop()!
+    lines.push(...parts)
+    for (const wake of waiting.splice(0)) wake()
+  })
+  const exited = new Promise<never>((_, reject) => server.on('exit', (code) => reject(new Error(`exit ${code}`))))
+  exited.catch(() => {})
+  return {
+    line: async (index) => {
+      while (lines.length <= index) await Promise.race([new Promise<void>((resolve) => waiting.push(resolve)), exited])
+      return lines[index]!
+    },
+    send: (text) => void server.stdin.write(`${text}\n`),
+    kill: () => void server.kill('SIGKILL'),
   }
 }
 

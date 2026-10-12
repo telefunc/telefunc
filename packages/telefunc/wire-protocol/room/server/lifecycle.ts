@@ -11,7 +11,7 @@ import { getRoomBackend } from '../../backend/install.js'
 import type { CellCount, CellCounter, RoomHead } from '../../backend/room/contract.js'
 import { decodeCellCounter } from '../../backend/room/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../constants.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_TTL_MS } from '../constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SESSION_TTL_MS } from '../constants.js'
 import type { HoldConfig } from '../protocol.js'
 import { roomClosedError } from '../errors.js'
 import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from './cells.js'
@@ -110,7 +110,7 @@ async function createHold(room: RoomIncarnation): Promise<void> {
   if (closesAt !== undefined) scheduleClose(room, closesAt)
 }
 
-/** Each heartbeat, after its roster read reaped lapsed holds: keeps a held room's lapse ahead, or arms the close of
+/** Each heartbeat, after it reaped lapsed sessions: keeps a held room's lapse ahead, or arms the close of
  *  an unheld one, whose timer's server may be gone. */
 async function maintainHold(room: RoomIncarnation): Promise<void> {
   const record = await readHoldRecord(room)
@@ -148,7 +148,7 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
  *  always writes, which fences a new room's lapse (`lapseNewRoom`) it raced. */
 async function extendLapse({ id, inc }: RoomIncarnation, record: HoldRecord, firstHold = false): Promise<void> {
   const timeout = unheldTimeout(record)
-  const ttlMs = timeout === Infinity ? undefined : ROOM_MEMBER_TTL_MS + timeout + 2 * ROOM_HEARTBEAT_INTERVAL_MS
+  const ttlMs = timeout === Infinity ? undefined : ROOM_SESSION_TTL_MS + timeout + 2 * ROOM_HEARTBEAT_INTERVAL_MS
   const backend = getRoomBackend()
   await retryCompareExchange(async () => {
     const head = await backend.readHead(id)

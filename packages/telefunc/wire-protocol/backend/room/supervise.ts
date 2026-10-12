@@ -52,6 +52,11 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
       if ('accepted' in result) assertDriverPosition(result)
       return result
     },
+    readLaneOrder: async (roomId, inc, lane) => {
+      const order = await driver.readLaneOrder(roomId, inc, lane)
+      if (order !== null) assertDriverPosition(order)
+      return order
+    },
     readRetained: async (roomId, inc, lane) => {
       const retained = await driver.readRetained(roomId, inc, lane)
       if (retained !== null) assertDriverPosition(retained)

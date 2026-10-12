@@ -2,13 +2,15 @@ export { AuthoritySync }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { getRoomBackend } from '../../backend/install.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { RoomConfigRecord } from '../protocol.js'
 import type { RoomModel } from '../state.js'
 import { sweepLapsedRoomsSoon } from './directory.js'
 import { reportRoomError } from './errors.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
-import { reapAndReadRoster, renewMemberLeases } from './membership.js'
+import { CONTROL_LANE } from './lanes.js'
+import { reapAndReadRoster, reapLapsedSessions } from './membership.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
 import type { RosterStream } from './roster-stream.js'
 import type { RoomSubscriptions } from './subscriptions.js'
@@ -21,9 +23,9 @@ type SyncHost = {
   readonly _incarnation: RoomIncarnation
   /** Read-only here: every change goes through the host's methods. */
   readonly model: Pick<RoomModel, 'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordingMembership'>
-  /** Live: the owned members whose records committed; a pending admission's is renewed once it commits. */
-  _renewableMembers(): Iterable<string>
-  _renewViews(): Promise<void>
+  _renewSession(): Promise<void>
+  /** The highest seq the control lane delivered. */
+  _controlSeen(): number
   /** Renews what the replica told of its demand. */
   _renewDemand(): Promise<void>
   _readOpenConfig(): Promise<RoomConfigRecord | null>
@@ -34,13 +36,16 @@ type SyncHost = {
 }
 
 /** Keeps a replica's view in step with the authority: its roster and meta reads, the repairs a gap asks for, and the
- *  heartbeat, which renews the members, views and demand of every handle and reads both again. */
+ *  heartbeat, which renews the session and the demand, reaps lapsed sessions, and reads the roster again once the
+ *  control lane is past what this view received. */
 class AuthoritySync {
   private _pendingRefresh: Promise<void> | null = null
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   private _metaRepair: ReturnType<typeof setTimeout> | null = null
   private _memberMetaRepair: ReturnType<typeof setTimeout> | null = null
   private _heartbeatBusy = false
+  /** The control lane's seq a roster read here started at or after. */
+  private _rosterAt = 0
 
   constructor(
     private readonly _host: SyncHost,
@@ -64,6 +69,21 @@ class AuthoritySync {
     if (host.model.closed || !(await this._reconcileMeta())) return
     await dropReplacedMetaGenerations(host.id, host._inc)
     await this.refreshMembers()
+  }
+
+  /** What a heartbeat reads of the authority: the meta, the lapsed sessions, and the roster only once the control lane
+   *  committed past what this view received, or doesn't deliver to it. */
+  private async _checkAuthority(): Promise<void> {
+    const host = this._host
+    if (host.model.closed || !(await this._reconcileMeta())) return
+    await dropReplacedMetaGenerations(host.id, host._inc)
+    await reapLapsedSessions(host._incarnation)
+    const mark = (await getRoomBackend().readLaneOrder(host.id, host._inc, CONTROL_LANE))?.seq ?? 0
+    if (this._current() && mark <= Math.max(host._controlSeen(), this._rosterAt)) return
+    // A read already running may predate the mark.
+    await this._pendingRefresh?.catch(() => {})
+    await this.refreshMembers()
+    this._rosterAt = Math.max(this._rosterAt, mark)
   }
 
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
@@ -154,17 +174,12 @@ class AuthoritySync {
       await host._renewDemand()
       let renewalFailure: { error: unknown } | null = null
       try {
-        await renewMemberLeases(host.id, host._inc, host._renewableMembers())
+        await host._renewSession()
       } catch (error) {
         renewalFailure = { error }
       }
-      try {
-        await host._renewViews()
-      } catch (error) {
-        renewalFailure ??= { error }
-      }
       await this._lanes.replan() // bounded retry trigger for still-wanted terminal lanes
-      await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views
+      await this._checkAuthority()
       if (!host.model.closed) await maintainHold(host._incarnation)
       sweepLapsedRoomsSoon()
       if (renewalFailure) throw renewalFailure.error

@@ -28,12 +28,15 @@ import type {
   RetainedFrame,
   RetainedOf,
   DirectoryPage,
+  OrderingInfo,
 } from 'telefunc/__internal'
 import { decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import {
   directoryIndexKey,
   directoryTagsKey,
   generationKeysKey,
+  memberOrderKey,
+  orderKey,
   assertKeyPrefix,
   retainedKey,
   retainedKeyPrefix,
@@ -172,6 +175,17 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
       ...(this._reportsReceivers ? { receivers: reply.receivers } : {}),
       delivery: fence.delivery,
     }
+  }
+
+  async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
+    const laneKey = encodeLaneKey(lane)
+    const mark =
+      lane.kind === 'inbox' || lane.kind === 'binary'
+        ? await this._publisher.hget(memberOrderKey(this._prefix, roomId, inc, lane.member), laneKey)
+        : await this._publisher.get(orderKey(this._prefix, roomId, inc, laneKey))
+    if (mark === null) return null
+    const [seq, timestamp] = mark.split(':').map(Number) as [number, number]
+    return { seq, timestamp }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {

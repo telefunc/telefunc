@@ -41,12 +41,11 @@ afterEach(async () => {
   await disposeBackend()
 })
 describe('Room at 100,000 members', () => {
-  it('keeps the event loop turning through a heartbeat tick renewing and reading 100,000 owned members', async () => {
+  it('keeps the event loop turning through each heartbeat tick of a room of 100,000 owned members', async () => {
     const room = await create('heartbeat-turns')
     await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
     const longestGap = async () => (await longestGapWhile(() => syncOf(room)._heartbeatTick())).gap
-    // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
-    expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(50)
+    for (const gap of [await longestGap(), await longestGap()]) expect(gap).toBeLessThanOrEqual(50)
   }, 60_000)
   it('keeps the event loop turning through a replan of 100,000 members', async () => {
     const room = await create('replan-turns')
@@ -342,14 +341,17 @@ describe('Room at 100,000 members', () => {
       const { gap } = await longestGapWhile(async () => {
         // Every timer the room's handles and its replica run each heartbeat, in one turn.
         for (const heartbeat of heartbeats.values()) heartbeat()
-        await vi.waitFor(() => expect(renewed - before >= 100_000 && inFlight === 0).toBe(true), { timeout: 30_000 })
+        // Until the tick ends: a heartbeat fired during it would be skipped.
+        await vi.waitFor(
+          () => expect(renewed - before >= 100_000 && inFlight === 0 && !syncOf(room)._heartbeatBusy).toBe(true),
+          { timeout: 30_000 },
+        )
         await settled()
       })
       return gap
     }
     try {
-      // The shorter of two heartbeats, so a scheduling hiccup in one is not read as a stall.
-      expect(Math.min(await all(), await all())).toBeLessThanOrEqual(50)
+      for (const gap of [await all(), await all()]) expect(gap).toBeLessThanOrEqual(50)
     } finally {
       backend.commitLane = commitLane
     }
@@ -564,6 +566,7 @@ function subsOf(room: ServerRoom): {
 }
 function syncOf(room: ServerRoom): {
   _heartbeatTick(): Promise<void>
+  readonly _heartbeatBusy: boolean
   reconcileAuthority(): Promise<void>
 } {
   return room._replica.sync as unknown as ReturnType<typeof syncOf>

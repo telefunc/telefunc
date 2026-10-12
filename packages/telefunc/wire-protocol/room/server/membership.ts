@@ -2,8 +2,10 @@ export {
   holdViews,
   removeView,
   createMember,
-  renewMemberLeases,
+  renewSession,
+  finishSessionCleanups,
   evictMember,
+  reapLapsedSessions,
   reapAndReadRoster,
   reapAndReadMembersById,
   reapAndCountPresence,
@@ -14,7 +16,7 @@ import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import { Slice } from '../slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
-import { ROOM_MEMBER_TTL_MS, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
+import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
 import { roomClosedError } from '../errors.js'
 import {
   leaveCauseToWire,
@@ -38,26 +40,28 @@ import { afterHoldChange, holdChange, holdCounts, type RoomIncarnation } from '.
 import {
   CLEANUP_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
-  VIEW_CELL_PREFIX,
+  SESSION_CELL_PREFIX,
   cleanupCellKey,
   identityCellKey,
   identityCellPrefix,
   memberCellKey,
   memberIdOfCellKey,
   memberIdOfCleanupKey,
+  memberIdOfSessionMemberKey,
+  sessionCellKey,
+  sessionMemberCellKey,
+  sessionMemberCellPrefix,
+  sessionViewCellPrefix,
   viewCellKey,
-  viewIdOfCellKey,
 } from './cells.js'
+import { decodeSessionRecord, sessionRecordBytes, type RoomSession } from './session.js'
 
 type CellPlan<T> = { value: T; mutations: CellMutation[]; counts?: CellCount[] }
 type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
-type PendingMemberCleanup = { cause: WireLeaveCause; hidden?: true }
-/** A page's view of the room, renewed like a member record. */
-type ViewRecord = { seenAt: number }
-
-function isLapsed(record: { seenAt: number }): boolean {
-  return Date.now() - record.seenAt > ROOM_MEMBER_TTL_MS
-}
+/** `session` hosted the member: its mark goes with the cleanup. */
+type PendingMemberCleanup = { cause: WireLeaveCause; session: string; hidden?: true }
+/** An exchange hosting something under a session found it lost. */
+const SESSION_LOST: unique symbol = Symbol('telefunc.RoomSessionLost')
 
 async function readCells(roomId: string, inc: string, keys: string[]): Promise<Map<string, Uint8Array>> {
   const result = await getRoomBackend().readCells(roomId, inc, { keys })
@@ -67,28 +71,38 @@ async function readCells(roomId: string, inc: string, keys: string[]): Promise<M
 
 /** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function readPrefix(roomId: string, inc: string, prefix: string): Promise<Map<string, Uint8Array>> {
+  return (await readPrefixAt(roomId, inc, prefix)).cells
+}
+
+/** `now` is the authority time of the last page. */
+/** Cells read, and the authority time of the last page's read. */
+type CellsAt = { cells: Map<string, Uint8Array>; now: number }
+
+async function readPrefixAt(roomId: string, inc: string, prefix: string): Promise<CellsAt> {
   const cells = new Map<string, Uint8Array>()
+  let now = 0
   const slice = new Slice()
   for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
     if ('staleInc' in page) throw roomClosedError(roomId)
     for (const [key, raw] of page.cells) cells.set(key, raw)
+    now = page.now
     if (slice.over) await slice.next()
   }
-  return cells
+  return { cells, now }
 }
 
-/** Reads `keys`, plans, and commits only while each of them is still as read. */
+/** Reads `keys`, plans from them and the read's authority time, and commits only while each is still as read. */
 async function mutateCells<T>(
   roomId: string,
   inc: string,
   keys: string[],
-  plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T>,
+  plan: (cells: ReadonlyMap<string, Uint8Array>, now: number) => CellPlan<T>,
 ): Promise<CellCommit<T>> {
   const backend = getRoomBackend()
   return await retryCompareExchange(async () => {
     const read = await backend.readCells(roomId, inc, { keys })
     if ('staleInc' in read) throw roomClosedError(roomId)
-    const { value, mutations, counts = [] } = plan(read.cells)
+    const { value, mutations, counts = [] } = plan(read.cells, read.now)
     if (mutations.length === 0 && counts.length === 0) return { value, counters: new Map() }
     const expect = keys.map((key) => ({ key, version: read.versions.get(key) ?? null }))
     const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
@@ -97,80 +111,192 @@ async function mutateCells<T>(
   })
 }
 
-/** Persist a join's member record, its meta's keys and identity marker; a non-hidden member holds the room. */
+/** Commits what `writesOf` plans under the session in one exchange with its cell, which it only expects while live: a
+ *  session found lost is replaced, and the write planned again under the new one. */
+async function mutateHosted<T>(
+  room: RoomIncarnation,
+  session: RoomSession,
+  writesOf: (id: string) => { keys: string[]; plan: (cells: ReadonlyMap<string, Uint8Array>) => CellPlan<T> },
+): Promise<CellCommit<T>> {
+  for (;;) {
+    if (!session.created) await createSession(room, session)
+    const id = session.id
+    const { keys, plan } = writesOf(id)
+    const committed = await mutateCells<T | typeof SESSION_LOST>(
+      room.id,
+      room.inc,
+      [sessionCellKey(id), ...keys],
+      (cells, now) => {
+        const lease = session.hosting(id, cells, now)
+        if (lease === null) return { value: SESSION_LOST, mutations: [] }
+        const planned = plan(cells)
+        return lease.length === 0 ? planned : { ...planned, mutations: [...lease, ...planned.mutations] }
+      },
+    )
+    if (committed.value !== SESSION_LOST) {
+      session.hosted(id)
+      return committed as CellCommit<T>
+    }
+    session.lost(id)
+  }
+}
+
+/** Writes the session's cell alone, once however many writes wait to host something under it, so they don't conflict
+ *  on it. */
+function createSession(room: RoomIncarnation, session: RoomSession): Promise<void> {
+  const id = session.id
+  const key = sessionCellKey(id)
+  session.creating ??= mutateCells(room.id, room.inc, [key], (cells, now) => {
+    const lease = session.hosting(id, cells, now)
+    return { value: lease !== null, mutations: lease ?? [] }
+  })
+    .then(({ value: hosted }) => (hosted ? session.hosted(id) : session.lost(id)))
+    .finally(() => {
+      session.creating = null
+    })
+  return session.creating
+}
+
+/** Persist a join's member record under the session, its mark, its meta's keys and identity marker; a non-hidden
+ *  member holds the room. */
 async function createMember(
   room: RoomIncarnation,
+  session: RoomSession,
   id: string,
-  record: RoomMemberRecord,
+  record: Omit<RoomMemberRecord, 'session'>,
   meta: ParticipantMeta,
 ): Promise<void> {
-  const mutations: CellMutation[] = [
-    { key: memberCellKey(id), bytes: encodeRoomRecord(record) },
-    ...memberMetaMutations(id, meta),
-  ]
-  if (record.identity !== undefined)
-    mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
   const config = record.hidden ? null : room.hold
-  const keys = mutations.map(({ key }) => key)
-  const { counters } = await mutateCells(room.id, room.inc, keys, () => ({
-    value: undefined,
-    mutations,
-    counts: holdCounts(config, 1, true),
-  }))
+  const { counters } = await mutateHosted(room, session, (hostId) => {
+    const mutations: CellMutation[] = [
+      { key: memberCellKey(id), bytes: encodeRoomRecord({ ...record, session: hostId } satisfies RoomMemberRecord) },
+      { key: sessionMemberCellKey(hostId, id), bytes: new TextEncoder().encode(record.identity ?? '') },
+      ...memberMetaMutations(id, meta),
+    ]
+    if (record.identity !== undefined)
+      mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
+    const plan = () => ({ value: undefined, mutations, counts: holdCounts(config, 1, true) })
+    return { keys: mutations.map(({ key }) => key), plan }
+  })
   afterHoldChange(room, holdChange(config, counters, 1, true))
 }
 
-/** Writes or renews pages' views in one write; each holds the room, and a room without hold timeouts keeps none. A
- *  renewal also restores a view whose write failed or that was reaped while its page held on. */
-async function holdViews(room: RoomIncarnation, ids: string[]): Promise<void> {
+/** Writes pages' views under the session in one write, and returns their cells' keys; each holds the room, and a room
+ *  without hold timeouts keeps none. Writing views already held changes nothing. */
+async function holdViews(room: RoomIncarnation, session: RoomSession, ids: string[]): Promise<string[]> {
   const { hold } = room
-  if (hold === null) return
-  const keys = ids.map(viewCellKey)
-  const { value: added, counters } = await mutateCells(room.id, room.inc, keys, (cells) => {
-    const added = keys.filter((key) => !cells.has(key)).length
-    const view = encodeRoomRecord({ seenAt: Date.now() } satisfies ViewRecord)
-    const views = keys.map((key) => ({ key, bytes: view }))
-    return { value: added, mutations: views, counts: holdCounts(hold, added) }
+  if (hold === null) return []
+  const { value, counters } = await mutateHosted(room, session, (hostId) => {
+    const keys = ids.map((id) => viewCellKey(hostId, id))
+    const plan = (cells: ReadonlyMap<string, Uint8Array>) => {
+      const added = keys.filter((key) => !cells.has(key))
+      const views = added.map((key) => ({ key, bytes: new Uint8Array() }))
+      return { value: { keys, added: added.length }, mutations: views, counts: holdCounts(hold, added.length) }
+    }
+    return { keys, plan }
   })
-  if (added > 0) afterHoldChange(room, holdChange(hold, counters, added))
+  if (value.added > 0) afterHoldChange(room, holdChange(hold, counters, value.added))
+  return value.keys
 }
 
-/** With `onlyIfLapsed`, a view renewed meanwhile stays. */
-async function removeView(room: RoomIncarnation, id: string, opts?: { onlyIfLapsed: true }): Promise<void> {
-  const key = viewCellKey(id)
+/** Removes a view by the key `holdViews` returned. */
+async function removeView(room: RoomIncarnation, key: string): Promise<void> {
   const { value: config, counters } = await mutateCells(room.id, room.inc, [key], (cells) => {
-    const raw = cells.get(key)
-    if (raw === undefined || (opts?.onlyIfLapsed && !isLapsed(decodeRoomRecord<ViewRecord>(raw))))
-      return { value: null, mutations: [] }
+    if (!cells.has(key)) return { value: null, mutations: [] }
     return { value: room.hold, mutations: [{ key, bytes: null }], counts: holdCounts(room.hold, -1) }
   })
   afterHoldChange(room, holdChange(config, counters, -1))
 }
 
-/** Read-modify-write one member record; a returned `next` is stored with a renewed lease. */
-async function mutateMember<T>(
-  roomId: string,
-  inc: string,
-  id: string,
-  update: (record: RoomMemberRecord | null) => { value: T; next?: RoomMemberRecord },
-): Promise<T> {
-  const key = memberCellKey(id)
-  const { value } = await mutateCells(roomId, inc, [key], (cells) => {
+/** Renews the session's lease once a write created it; false once the session was lost. */
+async function renewSession(room: RoomIncarnation, session: RoomSession): Promise<boolean> {
+  if (!session.created) return true
+  const id = session.id
+  const key = sessionCellKey(id)
+  const { value: renewed } = await mutateCells(room.id, room.inc, [key], (cells, now) => {
     const raw = cells.get(key)
-    const { value, next } = update(raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw))
-    if (next === undefined) return { value, mutations: [] }
-    return { value, mutations: [{ key, bytes: encodeRoomRecord({ ...next, seenAt: Date.now() }) }] }
+    if (raw === undefined || decodeSessionRecord(raw).cleaner !== undefined) return { value: false, mutations: [] }
+    return { value: true, mutations: [{ key, bytes: sessionRecordBytes(now) }] }
   })
-  return value
+  if (!renewed) session.lost(id)
+  return renewed
 }
 
-/** Each renewal is its own compare-exchange; a failed one fails the call once all are tried. */
-async function renewMemberLeases(roomId: string, inc: string, ids: Iterable<string>): Promise<void> {
-  await eachInFlight(ids, (id) =>
-    mutateMember(roomId, inc, id, (record) =>
-      record === null ? { value: undefined } : { value: undefined, next: record },
+/** Finishes the cleanups of the session's members that were pending at the last call too: their evicting server, this
+ *  one or another, stopped before finishing them. Returns the ones pending now, for the next call. */
+async function finishSessionCleanups(
+  room: RoomIncarnation,
+  session: RoomSession,
+  pendingBefore: ReadonlySet<string>,
+): Promise<Set<string>> {
+  const pending = new Set<string>()
+  if (!session.created) return pending
+  const cleanups = await readPrefix(room.id, room.inc, CLEANUP_CELL_PREFIX)
+  await eachInFlight(cleanups, async ([key, raw]) => {
+    if (decodeRoomRecord<PendingMemberCleanup>(raw).session !== session.id) return
+    if (pendingBefore.has(key)) await completeCleanup(room.id, room.inc, memberIdOfCleanupKey(key), raw)
+    else pending.add(key)
+  })
+  return pending
+}
+
+/** Claims each lapsed session and removes what it hosted: its members, each leaving `'disconnected'`, their cleanups
+ *  its server left unfinished, and its pages' views; then the session. A claim lapses as a session does, so a claimant
+ *  that stops leaves the rest to the next. */
+async function reapLapsedSessions(room: RoomIncarnation): Promise<void> {
+  await reapSessions(room, await readPrefixAt(room.id, room.inc, SESSION_CELL_PREFIX))
+}
+
+/** False once none of the sessions read had lapsed. */
+async function reapSessions(room: RoomIncarnation, { cells, now }: CellsAt): Promise<boolean> {
+  const cleaner = crypto.randomUUID()
+  let lapsed = false
+  for (const [key, raw] of cells) {
+    if (decodeSessionRecord(raw).until >= now) continue
+    lapsed = true
+    const { value: claimed } = await mutateCells(room.id, room.inc, [key], (current, at) => {
+      const record = current.has(key) ? decodeSessionRecord(current.get(key)!) : null
+      if (record === null || record.until >= at) return { value: false, mutations: [] }
+      return { value: true, mutations: [{ key, bytes: sessionRecordBytes(at, cleaner) }] }
+    })
+    if (claimed) await cleanSession(room, key.slice(SESSION_CELL_PREFIX.length), cleaner)
+  }
+  return lapsed
+}
+
+async function cleanSession(room: RoomIncarnation, session: string, cleaner: string): Promise<void> {
+  const marks = await readPrefix(room.id, room.inc, sessionMemberCellPrefix(session))
+  await eachInFlight(marks, ([key, raw]) =>
+    finishSessionMember(
+      room,
+      session,
+      memberIdOfSessionMemberKey(key),
+      raw.length > 0 ? new TextDecoder().decode(raw) : null,
     ),
   )
+  const views = await readPrefix(room.id, room.inc, sessionViewCellPrefix(session))
+  await eachInFlight(views.keys(), (key) => removeView(room, key))
+  const key = sessionCellKey(session)
+  await mutateCells(room.id, room.inc, [key], (cells) => {
+    const raw = cells.get(key)
+    const ours = raw !== undefined && decodeSessionRecord(raw).cleaner === cleaner
+    return { value: undefined, mutations: ours ? [{ key, bytes: null }] : [] }
+  })
+}
+
+/** A member of a lapsed session leaves, or finishes leaving; its mark names its identity. */
+async function finishSessionMember(
+  room: RoomIncarnation,
+  session: string,
+  id: string,
+  identity: string | null,
+): Promise<void> {
+  if (await evictMember(room, id, identity, { type: 'disconnected' })) return
+  const mark = sessionMemberCellKey(session, id)
+  await mutateCells(room.id, room.inc, [mark], (current) => ({
+    value: undefined,
+    mutations: current.has(mark) ? [{ key: mark, bytes: null }] : [],
+  }))
 }
 
 /** Runs `task` on each item in turn, `ROOM_MEMBER_WRITES_IN_FLIGHT_MAX` at a time and a `ROOM_PLAN_SLICE_MS` slice per
@@ -202,21 +328,20 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
   if (failure) throw failure.error
 }
 
-/** Remove a member and record the cleanup in one write, then finish the cleanup. With `onlyIfLapsed`, a member whose
- *  lease was renewed meanwhile stays, and its record is returned. */
+/** Remove a member and record the cleanup in one write, then finish the cleanup; false once neither the member nor
+ *  its cleanup was there. */
 async function evictMember(
   room: RoomIncarnation,
   id: string,
   identity: string | null,
   cause: LeaveCause,
-  opts?: { onlyIfLapsed: true },
-): Promise<RoomMemberRecord | null> {
+): Promise<boolean> {
   try {
-    return await removeMemberCells(room, id, identity, cause, opts)
+    return await removeMemberCells(room, id, identity, cause)
   } catch (error) {
     // A room that closed under the eviction ended the member with everyone else.
     const head = await getRoomBackend().readHead(room.id)
-    if (head?.state !== 'open' || head.currentInc !== room.inc) return null
+    if (head?.state !== 'open' || head.currentInc !== room.inc) return true
     throw error
   }
 }
@@ -226,57 +351,58 @@ async function removeMemberCells(
   id: string,
   identity: string | null,
   cause: LeaveCause,
-  opts?: { onlyIfLapsed: true },
-): Promise<RoomMemberRecord | null> {
+): Promise<boolean> {
   const memberKey = memberCellKey(id)
   const cleanupKey = cleanupCellKey(id)
   const removedKeys = identity === null ? [memberKey] : [memberKey, identityCellKey(identity, id)]
-  const { value: outcome, counters } = await mutateCells<
-    { live: RoomMemberRecord } | { cleanup: boolean; config: HoldConfig | null }
-  >(room.id, room.inc, [...removedKeys, cleanupKey], (cells) => {
-    const pending = cells.has(cleanupKey)
-    const raw = cells.get(memberKey)
-    const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
-    if (record !== null && opts?.onlyIfLapsed && !isLapsed(record)) return { value: { live: record }, mutations: [] }
-    if (record === null) return { value: { cleanup: pending, config: null }, mutations: [] }
-    const cleanup: PendingMemberCleanup = {
-      cause: leaveCauseToWire(cause),
-      ...(record.hidden ? { hidden: true } : {}),
-    }
-    const config = record.hidden ? null : room.hold
-    return {
-      value: { cleanup: true, config },
-      mutations: [
-        ...removedKeys.map((key) => ({ key, bytes: null })),
-        ...(pending ? [] : [{ key: cleanupKey, bytes: encodeRoomRecord(cleanup) }]),
-      ],
-      counts: holdCounts(config, -1),
-    }
-  })
-  if ('live' in outcome) return outcome.live
+  const { value: outcome, counters } = await mutateCells<{ cleanup: boolean; config: HoldConfig | null }>(
+    room.id,
+    room.inc,
+    [...removedKeys, cleanupKey],
+    (cells) => {
+      const pending = cells.has(cleanupKey)
+      const raw = cells.get(memberKey)
+      const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
+      if (record === null) return { value: { cleanup: pending, config: null }, mutations: [] }
+      const cleanup: PendingMemberCleanup = {
+        cause: leaveCauseToWire(cause),
+        session: record.session,
+        ...(record.hidden ? { hidden: true } : {}),
+      }
+      const config = record.hidden ? null : room.hold
+      return {
+        value: { cleanup: true, config },
+        mutations: [
+          ...removedKeys.map((key) => ({ key, bytes: null })),
+          ...(pending ? [] : [{ key: cleanupKey, bytes: encodeRoomRecord(cleanup) }]),
+        ],
+        counts: holdCounts(config, -1),
+      }
+    },
+  )
   afterHoldChange(room, holdChange(outcome.config, counters, -1))
   if (outcome.cleanup) await finishPendingMemberCleanup(room.id, room.inc, id)
-  return null
+  return outcome.cleanup
 }
 
-/** Live members, and departing ones whose eviction the read completes; lapsed members and views are reaped on the way. */
-async function reapAndReadRoster(
-  room: RoomIncarnation,
-): Promise<{ members: MemberSnapshot[]; departing: Set<string> }> {
+type Roster = { members: MemberSnapshot[]; departing: Set<string> }
+
+/** Live members, and departing ones, whose leave their evicting server finishes; read again after a lapsed session's
+ *  were removed. */
+async function reapAndReadRoster(room: RoomIncarnation): Promise<Roster> {
+  const [sessions, roster] = await Promise.all([readPrefixAt(room.id, room.inc, SESSION_CELL_PREFIX), readRoster(room)])
+  return (await reapSessions(room, sessions)) ? await readRoster(room) : roster
+}
+
+async function readRoster(room: RoomIncarnation): Promise<Roster> {
   const cells = await readPrefix(room.id, room.inc, MEMBER_CELL_PREFIX)
   // After the member read, so an eviction committing in between shows up as departing.
   const cleanups = await readPrefix(room.id, room.inc, CLEANUP_CELL_PREFIX)
   const departing = new Set([...cleanups.keys()].map(memberIdOfCleanupKey))
-  await eachInFlight(cleanups, ([key, raw]) => completeCleanup(room.id, room.inc, memberIdOfCleanupKey(key), raw))
-  const views = await readPrefix(room.id, room.inc, VIEW_CELL_PREFIX)
-  await eachInFlight(views, async ([key, raw]) => {
-    if (isLapsed(decodeRoomRecord<ViewRecord>(raw)))
-      await removeView(room, viewIdOfCellKey(key), { onlyIfLapsed: true })
-  })
   // After the member read, so each member's cells are as new as its record or newer, and the updates after the record's
   // seq bring a view to them.
   const metaCells = await readMembersMetaCells(room)
-  const members = await liveMembers(room, stayingMembers(cells, departing), metaCells)
+  const members = await liveMembers(stayingMembers(cells, departing), metaCells)
   return { members, departing }
 }
 
@@ -291,6 +417,7 @@ function* stayingMembers(
 }
 
 async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
+  await reapLapsedSessions(room)
   const cells = await readCells(room.id, room.inc, ids.map(memberCellKey))
   const metaCells = new Map<string, MemberMetaCells>()
   const entries = ids.flatMap((id) => {
@@ -300,26 +427,22 @@ async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Pro
   await eachInFlight(entries, async ([id]) => {
     metaCells.set(id, (await readMembersMetaCells(room, id)).get(id) ?? [])
   })
-  return await liveMembers(room, entries, metaCells)
+  return await liveMembers(entries, metaCells)
 }
 
 /** In the order of `entries`. */
 async function liveMembers(
-  room: RoomIncarnation,
   entries: Iterable<readonly [string, Uint8Array]>,
   metaCells: ReadonlyMap<string, MemberMetaCells>,
 ): Promise<MemberSnapshot[]> {
-  const members: (MemberSnapshot | null)[] = []
+  const members: MemberSnapshot[] = []
   await eachInFlight(numbered(entries), async ([i, [id, raw]]) => {
-    const candidate = decodeRoomRecord<RoomMemberRecord>(raw)
-    const record = isLapsed(candidate)
-      ? await evictMember(room, id, candidate.identity ?? null, { type: 'disconnected' }, { onlyIfLapsed: true })
-      : candidate
+    const record = decodeRoomRecord<RoomMemberRecord>(raw)
     const cells = metaCells.get(id)
-    const meta = record && cells !== undefined ? await memberMetaOf(id, record.metaGen, cells) : {}
-    members[i] = record && memberSnapshot(id, record, meta)
+    const meta = cells !== undefined ? await memberMetaOf(id, record.metaGen, cells) : {}
+    members[i] = memberSnapshot(id, record, meta)
   })
-  return members.filter((member) => member !== null)
+  return members
 }
 
 function* numbered<T>(items: Iterable<T>): Generator<readonly [number, T]> {
@@ -380,8 +503,10 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
     ...cleanup.cause,
     ...(cleanup.hidden ? { hidden: true } : {}),
   })
-  await mutateCells(roomId, inc, [key], (cells) => ({
+  // The mark goes last, so a session's cleaner finds the member until its leave is out.
+  const mark = sessionMemberCellKey(cleanup.session, memberId)
+  await mutateCells(roomId, inc, [key, mark], (cells) => ({
     value: undefined,
-    mutations: cells.has(key) ? [{ key, bytes: null }] : [],
+    mutations: [key, mark].filter((at) => cells.has(at)).map((at) => ({ key: at, bytes: null })),
   }))
 }

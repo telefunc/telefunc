@@ -12,7 +12,7 @@ import {
   ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
-  ROOM_MEMBER_TTL_MS,
+  ROOM_SESSION_TTL_MS,
   ROOM_HORIZON_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
@@ -34,7 +34,14 @@ import {
   type InboxMessage,
   type RoomSnapshotMetadata,
 } from './protocol.js'
-import { HOLDS_CELL_KEY, JOINS_CELL_KEY, MEMBER_CELL_PREFIX, memberCellKey } from './server/cells.js'
+import {
+  HOLDS_CELL_KEY,
+  JOINS_CELL_KEY,
+  MEMBER_CELL_PREFIX,
+  SESSION_CELL_PREFIX,
+  memberCellKey,
+  sessionCellKey,
+} from './server/cells.js'
 import type { LeaveCause, ParticipantMeta, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
@@ -171,6 +178,20 @@ async function anotherServer(): Promise<Server> {
 }
 function serverOf(room: Room | ServerRoom): Server {
   return otherServers.find((server) => room instanceof server.ServerRoom) ?? here
+}
+/** Lapses the session hosting the member, as its server's crash does once the session's lease runs out; returns the
+ *  session's cell key. */
+async function lapseSessionOf(room: ServerRoom, memberId: string): Promise<string> {
+  const memberKey = memberCellKey(memberId)
+  const member = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
+  if ('staleInc' in member) throw new Error('unexpected stale generation')
+  const key = sessionCellKey((parse(decoder.decode(member.cells.get(memberKey)!)) as { session: string }).session)
+  const session = await driver.readCells(room.id, room._inc, { keys: [key] })
+  if ('staleInc' in session) throw new Error('unexpected stale generation')
+  const lapsed = { key, bytes: encoder.encode(stringify({ until: session.now - 1 })) }
+  const cx = { expect: [{ key, version: session.versions.get(key)! }], mutations: [lapsed] }
+  expect(await driver.compareExchangeCells(room.id, room._inc, cx)).toEqual({ committed: new Map() })
+  return key
 }
 describe('Room public behavior', () => {
   it('a pending acknowledged send fails as its client-held recipient leaves, not at the ack timeout', async () => {
@@ -1442,25 +1463,10 @@ describe('Room public behavior', () => {
     await expect(Room.removeParticipant('never-created', { id: 'member' })).rejects.toThrow('Room not found')
     await expect(Room.removeParticipant('never-created', { identity: '\udc00' })).rejects.toThrow('well-formed')
   })
-  it('rejects exact sends to an expired member and excludes it from static presence', async () => {
+  it("rejects exact sends to a member whose server's session lapsed and excludes it from static presence", async () => {
     const room = (await Room.create('expired-static-presence')) as ServerRoom
     const member = await room.join()
-    const memberKey = memberCellKey(member.id)
-    const read = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
-    expect('staleInc' in read).toBe(false)
-    if ('staleInc' in read) throw new Error('unexpected stale generation')
-    const record = parse(decoder.decode(read.cells.get(memberKey)!)) as Record<string, unknown>
-    await expect(
-      driver.compareExchangeCells(room.id, room._inc, {
-        expect: [{ key: memberKey, version: read.versions.get(memberKey)! }],
-        mutations: [
-          {
-            key: memberKey,
-            bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
-          },
-        ],
-      }),
-    ).resolves.toEqual({ committed: new Map() })
+    await lapseSessionOf(room, member.id)
     const commitLane = vi.spyOn(driver, 'commitLane')
     await expect(Room.send(room.id, { id: member.id }, 'post-crash')).rejects.toThrow('Participant not found')
     expect(commitLane.mock.calls.some(([, , lane]) => lane.kind === 'inbox')).toBe(false)
@@ -1572,44 +1578,19 @@ describe('Room public behavior', () => {
     await participant.publish('metadata-check')
     expect(senderMeta).toEqual([{ version: 2 }])
   })
-  it('keeps a member whose heartbeat wins the expired-record reap race', async () => {
+  it('keeps the members of a session whose renewal wins the race with its claim', async () => {
     const room = (await Room.create('reap-heartbeat-race')) as ServerRoom
     const member = await room.join()
-    const memberKey = memberCellKey(member.id)
+    const sessionKey = await lapseSessionOf(room, member.id)
     const compareExchange = driver.compareExchangeCells.bind(driver)
-    const initial = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
-    expect('staleInc' in initial).toBe(false)
-    if ('staleInc' in initial) throw new Error('unexpected stale generation')
-    const initialRaw = initial.cells.get(memberKey)
-    expect(initialRaw).toBeDefined()
-    const initialRecord = parse(decoder.decode(initialRaw!)) as Record<string, unknown>
-    await expect(
-      compareExchange(room.id, room._inc, {
-        expect: [{ key: memberKey, version: initial.versions.get(memberKey)! }],
-        mutations: [
-          {
-            key: memberKey,
-            bytes: encoder.encode(stringify({ ...initialRecord, seenAt: Date.now() - ROOM_MEMBER_TTL_MS - 1 })),
-          },
-        ],
-      }),
-    ).resolves.toEqual({ committed: new Map() })
     let raced = false
     vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, cx) => {
-      if (!raced && cx.mutations.some(({ key, bytes }) => key === memberKey && bytes === null)) {
+      const claim = cx.mutations.some(
+        ({ key, bytes }) => key === sessionKey && decoder.decode(bytes!).includes('cleaner'),
+      )
+      if (!raced && claim) {
         raced = true
-        const fresh = await driver.readCells(roomId, inc, { keys: [memberKey] })
-        expect('staleInc' in fresh).toBe(false)
-        if ('staleInc' in fresh) throw new Error('unexpected stale generation')
-        const raw = fresh.cells.get(memberKey)
-        expect(raw).toBeDefined()
-        const record = parse(decoder.decode(raw!)) as Record<string, unknown>
-        await expect(
-          compareExchange(roomId, inc, {
-            expect: [{ key: memberKey, version: fresh.versions.get(memberKey)! }],
-            mutations: [{ key: memberKey, bytes: encoder.encode(stringify({ ...record, seenAt: Date.now() })) }],
-          }),
-        ).resolves.toEqual({ committed: new Map() })
+        await syncOf(room)._heartbeatTick()
       }
       return compareExchange(roomId, inc, cx)
     })
@@ -2609,7 +2590,7 @@ describe('Room public behavior', () => {
     await sender.leave()
     await vi.waitFor(() => expect(outcome).toBe('Participant left the room'))
   })
-  it('stops renewing a client-held participant whose removal failed after its client went away', async () => {
+  it('removes a client-held participant whose removal failed after its client went away', async () => {
     vi.useFakeTimers()
     const room = await Room.create('standalone-expire')
     const holder = (await room.join()) as ServerLocalParticipant
@@ -2617,7 +2598,7 @@ describe('Room public behavior', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(new Error('backend unavailable'))
     channel.abort()
-    await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
+    await vi.advanceTimersByTimeAsync(ROOM_SESSION_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
     const observer = await Room.get('standalone-expire')
     expect((await observer.getParticipants()).map((member) => member.id)).not.toContain(holder.id)
   })
@@ -2683,7 +2664,7 @@ describe('Room public behavior', () => {
         throw new Error('backend unavailable')
       })
     await expect(room.join()).rejects.toThrow('Connection is closed.')
-    await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS - ROOM_HEARTBEAT_INTERVAL_MS + 1)
+    await vi.advanceTimersByTimeAsync(ROOM_SESSION_TTL_MS - ROOM_HEARTBEAT_INTERVAL_MS + 1)
     expect(await Room.getParticipants(room.id)).toEqual([])
   })
   it('rejects a join whose member was removed before its join event committed, leaving no member behind', async () => {
@@ -3098,15 +3079,14 @@ describe('Room public behavior', () => {
     const left: string[] = []
     observer.onLeave((participant) => left.push(participant.id))
     await observer.getParticipants()
-    const memberKey = memberCellKey(member.id)
     const compareExchange = driver.compareExchangeCells.bind(driver)
+    // The owner's renewals no longer land, as once it crashed.
     vi.spyOn(driver, 'compareExchangeCells').mockImplementation(async (roomId, inc, cx) => {
-      if (cx.mutations.some((mutation) => mutation.key === memberKey && mutation.bytes !== null))
-        throw new Error('crashed')
+      if (cx.mutations.some(({ key }) => key.startsWith(SESSION_CELL_PREFIX))) throw new Error('crashed')
       return compareExchange(roomId, inc, cx)
     })
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
+    await vi.advanceTimersByTimeAsync(ROOM_SESSION_TTL_MS + 2 * ROOM_HEARTBEAT_INTERVAL_MS)
     expect(left).toEqual([member.id])
   })
   it('settles closure on the next heartbeat for an owning instance that missed `closed`', async () => {
@@ -3301,6 +3281,9 @@ describe('Room public behavior', () => {
     await expect(member.leave()).rejects.toThrow('transient retained cleanup failure')
     expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
+    // A cleanup still pending a heartbeat later was left behind.
+    await syncOf(room)._heartbeatTick()
+    await syncOf(room)._heartbeatTick()
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
   })
   it('names why a commit was stale, so callers need no diagnosis reads', async () => {
@@ -3597,7 +3580,7 @@ describe('Room public behavior', () => {
     await publisher.publish('text', { retain: true })
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
-    vi.setSystemTime(1_000_000 + ROOM_MEMBER_TTL_MS + 1)
+    vi.setSystemTime(1_000_000 + ROOM_SESSION_TTL_MS + 1)
     expect(await Room.getParticipants(room.id)).toEqual([])
     expect(await driver.listRetained(room.id, room._inc)).toEqual([])
     expect(leaves).toEqual([publisher.id])
@@ -5114,7 +5097,7 @@ describe('RoomState', () => {
 })
 describe("a server's handles to one room", () => {
   for (const handles of [1, 10, 100, 1_000])
-    it(`read the member list once per heartbeat and renew each member once, at ${handles} handles on 10,000 members`, async () => {
+    it(`read no member list and write once per heartbeat, at ${handles} handles on 10,000 members`, async () => {
       const heartbeats = captureHeartbeats()
       const room = await Room.create(`shared-view-${handles}`)
       const views = [room, ...(await Promise.all(Array.from({ length: handles - 1 }, () => Room.get(room.id))))]
@@ -5136,16 +5119,8 @@ describe("a server's handles to one room", () => {
       heartbeats.fire()
       await quiet()
       const memberReads = reads.mock.calls.filter(([, , prefix]) => prefix === MEMBER_CELL_PREFIX).length
-      const renewals = new Map<string, number>()
-      for (const [, , { mutations }] of writes.mock.calls)
-        for (const { key } of mutations)
-          if (key.startsWith(MEMBER_CELL_PREFIX)) renewals.set(key, (renewals.get(key) ?? 0) + 1)
-      const counts = [...renewals.values()]
-      expect({ memberReads, renewed: renewals.size, most: Math.max(...counts) }).toEqual({
-        memberReads: 1,
-        renewed: 10_000,
-        most: 1,
-      })
+      const written = writes.mock.calls.flatMap(([, , { mutations }]) => mutations.map(({ key }) => key))
+      expect({ memberReads, written }).toEqual({ memberReads: 0, written: [expect.stringMatching(/^session:/)] })
     }, 120_000)
   it('let their view go once no handle holds it, while a member keeps another view, and a Room.get() after that opens a new one', async () => {
     const id = 'shared-view-dropped'
@@ -5163,6 +5138,87 @@ describe("a server's handles to one room", () => {
     await forceRoomGc()
     expect([dropped.deref(), owning.deref() === undefined]).toEqual([undefined, false])
     expect((await Room.get(id)).count).toBe(0)
+  })
+})
+describe("a server's session in a room", () => {
+  it('lets each member of a server that crashed holding 10,000 across two rooms leave once, within three minutes', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const crashing = await anotherServer()
+    const watching = await anotherServer()
+    const leaves = new Map<string, number>()
+    const joined: string[] = []
+    for (const id of ['crash-a', 'crash-b']) {
+      const room = (await Room.create(id)) as ServerRoom
+      const held = await crashing.Room.get(id)
+      joined.push(...(await Promise.all(Array.from({ length: 5_000 }, () => held.join()))).map(({ id }) => id))
+      // Two servers watch the room, each heartbeat of each able to claim the crashed server's session.
+      for (const view of [room, await watching.Room.get(id)]) {
+        view.onLeave(() => {})
+        await view.getParticipants()
+      }
+      getRoomBackend().subscribeLane(id, room._inc, { kind: 'control' }, (payload) => {
+        const event = parse(decodeRoomText(payload as Uint8Array)) as { __r: string; id?: string }
+        if (event.__r === 'leave') leaves.set(event.id!, (leaves.get(event.id!) ?? 0) + 1)
+      })
+    }
+    await crashing.crash()
+    await vi.advanceTimersByTimeAsync(180_000)
+    expect([...new Set(leaves.values())]).toEqual([1])
+    expect(joined.filter((id) => !leaves.has(id))).toEqual([])
+  }, 120_000)
+  it('writes the store once per server in an idle heartbeat, whatever its members', async () => {
+    const heartbeats = captureHeartbeats()
+    const other = await anotherServer()
+    const room = (await Room.create('idle-writes')) as ServerRoom
+    const views = [room, await other.Room.get(room.id)]
+    for (const view of views) {
+      await Promise.all(Array.from({ length: 1_000 }, () => view.join()))
+      view.onLeave(() => {})
+    }
+    const writes = [driver, other.driver].map((store) => ({
+      cells: vi.spyOn(store, 'compareExchangeCells'),
+      head: vi.spyOn(store, 'compareExchangeHead'),
+      lanes: vi.spyOn(store, 'commitLane'),
+    }))
+    const calls = () => writes.flatMap((spies) => Object.values(spies).map((spy) => spy.mock.calls.length))
+    /** No store write for five timer turns in a row. */
+    const quiet = async () => {
+      for (let still = 0, last = ''; still < 5; ) {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        const now = calls().join()
+        still = now === last ? still + 1 : 0
+        last = now
+      }
+    }
+    await quiet()
+    for (const spies of writes) for (const spy of Object.values(spies)) spy.mockClear()
+    heartbeats.fire()
+    await quiet()
+    const cellWrites = writes.map(({ cells }) =>
+      cells.mock.calls.flatMap(([, , { mutations }]) => mutations.map(({ key }) => key.split(':')[0])),
+    )
+    expect(cellWrites).toEqual([['session'], ['session']])
+    expect(writes.map(({ head, lanes }) => head.mock.calls.length + lanes.mock.calls.length)).toEqual([0, 0])
+  }, 60_000)
+  it("evicts nobody when the app servers' clocks run 120 seconds ahead of the store's", async () => {
+    const storeNow = Date.now
+    await disposeBackend()
+    memoryState = new MemoryBackendState({ now: () => storeNow() })
+    driver = new MemoryBackend({ state: memoryState })
+    installBackend(() => driver)
+    const other = await anotherServer()
+    const room = (await Room.create('skewed-clocks')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 100 }, () => room.join()))
+    const observer = (await other.Room.get(room.id)) as ServerRoom
+    const left: string[] = []
+    observer.onLeave((member) => left.push(member.id))
+    await observer.getParticipants()
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(storeNow() + 120_000)
+    await syncOf(observer)._heartbeatTick()
+    await syncOf(room)._heartbeatTick()
+    expect(left).toEqual([])
+    expect((await Room.getParticipants(room.id)).map(({ id }) => id).sort()).toEqual(members.map(({ id }) => id).sort())
   })
 })
 describe('room demand lifecycle', () => {
@@ -5763,7 +5819,7 @@ describe('a room nothing holds closes on its own', () => {
     const page = (await other.Room.get(room.id)) as ServerRoom
     await (page._replica as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views.get(register(page))
     await other.crash()
-    await vi.advanceTimersByTimeAsync(ROOM_MEMBER_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
+    await vi.advanceTimersByTimeAsync(ROOM_SESSION_TTL_MS + ROOM_HEARTBEAT_INTERVAL_MS)
     expect(await isListed(room.id)).toBe(true)
     await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)
     await expectClosed(room.id, closed)

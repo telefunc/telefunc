@@ -190,8 +190,9 @@ class ServerRoom extends RoomStateView implements Room {
       await this._inboxReady(id)
       await createMember(
         this._incarnation,
+        this._replica.session,
         id,
-        { joinedAt, seenAt: joinedAt, metaSeq: 0, metaGen: 0, ...optional },
+        { joinedAt, metaSeq: 0, metaGen: 0, ...optional },
         meta,
       )
       this._assertAdmitted(id)
@@ -207,7 +208,10 @@ class ServerRoom extends RoomStateView implements Room {
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
       const lost = this._admissions.get(id) === 'abandoned' && !this._model.closed
       const cause = lost ? ({ type: 'disconnected' } as const) : ({ type: 'left' } as const)
-      await evictMember(this._incarnation, id, identity, cause).catch(reportRoomError)
+      await evictMember(this._incarnation, id, identity, cause).catch((error: unknown) => {
+        reportRoomError(error)
+        this._replica.evictLater(id, identity)
+      })
       this._abandonAdmission(id, cause)
       throw error
     }
@@ -235,12 +239,14 @@ class ServerRoom extends RoomStateView implements Room {
     this._model.applyLeave(id, cause)
   }
 
-  /** @internal The member's holder is gone and nothing will retry: ownership ends even if eviction fails, leaving a record whose lease expires. */
+  /** @internal The member's holder is gone: ownership ends even if eviction fails, which the heartbeat then retries. */
   async _removeDepartedMember(id: string): Promise<void> {
     const cause = { type: 'disconnected' } as const
+    const identity = this._state.getRemote(id)?.identity ?? null
     try {
       await this._removeMember(id, cause)
     } catch (error) {
+      this._replica.evictLater(id, identity)
       this._model.applyLeave(id, cause)
       throw error
     }
@@ -426,11 +432,6 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal */
   _holdsTail(): boolean {
     return this._tail !== null
-  }
-
-  /** @internal Whether the member's record committed, so the heartbeat renews it. */
-  _renewable(id: string): boolean {
-    return this._admissions.get(id) !== 'owned'
   }
 
   private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {

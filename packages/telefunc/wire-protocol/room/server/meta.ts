@@ -277,7 +277,7 @@ function memberMetaMutations(id: string, meta: ParticipantMeta): CellMutation[] 
   return metaEntriesAt(meta, 0).map((entry) => metaKeyMutation(prefix, entry))
 }
 
-/** One exchange that expects the member's record, which counts each meta write in `metaSeq` and each renewal rewrites.
+/** One exchange that expects the member's record, which counts each meta write in `metaSeq`.
  *  A merge writes its keys, a key already there keeping its place; a replace writes its keys into a new generation and
  *  returns the one it `replaced`, for `dropMemberMetaGeneration`. New keys are placed at the write's own `metaSeq`. Each
  *  costs the keys it was given. */
@@ -303,7 +303,7 @@ async function writeMemberMeta(
       const merging = keys.length === 0 ? new Map() : (await readMetaCells(room.id, room.inc, keys)).cells
       mutations = metaChanges(write.merge, prefix, seq, merging).map((change) => changeMutation(prefix, change))
     }
-    const next: RoomMemberRecord = { ...record, metaSeq: seq, metaGen: gen, seenAt: Date.now() }
+    const next: RoomMemberRecord = { ...record, metaSeq: seq, metaGen: gen }
     mutations.push({ key: memberKey, bytes: encodeRoomRecord(next) })
     const expect = [{ key: memberKey, version: read.versions.get(memberKey)! }]
     const result = await backend.compareExchangeCells(room.id, room.inc, { expect, mutations })

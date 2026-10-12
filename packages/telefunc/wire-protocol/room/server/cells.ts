@@ -9,9 +9,13 @@ export {
   identityCellPrefix,
   HOLDS_CELL_KEY,
   JOINS_CELL_KEY,
-  VIEW_CELL_PREFIX,
+  SESSION_CELL_PREFIX,
+  sessionCellKey,
+  sessionMemberCellPrefix,
+  sessionMemberCellKey,
+  memberIdOfSessionMemberKey,
+  sessionViewCellPrefix,
   viewCellKey,
-  viewIdOfCellKey,
   META_CELL_PREFIX,
   META_SEQ_CELL_KEY,
   META_GEN_CELL_KEY,
@@ -52,13 +56,29 @@ function identityCellKey(identity: string, memberId: string): string {
 /** Counters: what holds the room, counted in the compare-exchange that adds or removes a hold, and its joins. */
 const HOLDS_CELL_KEY = 'holds'
 const JOINS_CELL_KEY = 'joins'
-/** One per page holding the room: its view, renewed like a member and reaped once it lapses. */
-const VIEW_CELL_PREFIX = 'v:'
-function viewCellKey(viewId: string): string {
-  return VIEW_CELL_PREFIX + viewId
+/** One per server hosting a member or a page's view in the room: its lease (see `session.ts`). Session ids hold no
+ *  `:`. */
+const SESSION_CELL_PREFIX = 'session:'
+function sessionCellKey(session: string): string {
+  return SESSION_CELL_PREFIX + session
 }
-function viewIdOfCellKey(key: string): string {
-  return key.slice(VIEW_CELL_PREFIX.length)
+/** A member's mark under its session, written with its record and removed with its cleanup, so the session's cleaner
+ *  finds it. */
+function sessionMemberCellPrefix(session: string): string {
+  return `sm:${session}:`
+}
+function sessionMemberCellKey(session: string, memberId: string): string {
+  return sessionMemberCellPrefix(session) + memberId
+}
+function memberIdOfSessionMemberKey(key: string): string {
+  return key.slice(key.indexOf(':', 3) + 1)
+}
+/** One per page holding the room: its view, under the session that wrote it. */
+function sessionViewCellPrefix(session: string): string {
+  return `v:${session}:`
+}
+function viewCellKey(session: string, viewId: string): string {
+  return sessionViewCellPrefix(session) + viewId
 }
 /** The room's meta once first written (see `meta.ts`): a counter of the writes, the generation the last replace
  *  started, a cell per top-level key in that generation, and a mark per generation a replace left to drop. */

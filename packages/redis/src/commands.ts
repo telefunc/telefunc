@@ -144,7 +144,7 @@ return '{"head":' .. cjson.encode(head) .. '}'
 `
 
 // Reads the named cells, or every cell under a prefix, each with its version, while the head still names the
-// incarnation (closing tails may read). A missing cell is left out.
+// incarnation (closing tails may read), after the authority time of the read. A missing cell is left out.
 //   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
 //   ARGV: [1]=inc [2]='keys' then the cell keys, or 'prefix' then the prefix
 // No UTF-8 text holds the byte 0xFF, so a prefix's range ends past every key under it.
@@ -164,26 +164,30 @@ end
 `
 
 const READ_CELLS_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
-local head = tf_live_head(KEYS[1], tf_now())
+local now = tf_now()
+local head = tf_live_head(KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
 local keys, first = ARGV, 3
 if ARGV[2] == 'prefix' then
   keys, first = redis.call('ZRANGEBYLEX', KEYS[2], '[' .. ARGV[3], '(' .. ARGV[3] .. '\\255'), 1
 end
-return tf_cells_reply({'cells'}, keys, first)
+return tf_cells_reply({'cells', string.format('%.0f', now)}, keys, first)
 `
 
 // A prefix read's page: up to ARGV[4] cells of the index range from ARGV[2] ('[' then the prefix, or '(' then the
-// previous page's last key) to past the prefix ARGV[3]. A full page is tagged 'more' with its last key.
+// previous page's last key) to past the prefix ARGV[3], after the authority time of the read. A full page is tagged
+// 'more', with its last key after the time.
 //   KEYS: [1]=head [2]=cell-index [3]=values [4]=versions
 //   ARGV: [1]=inc [2]=range start [3]=prefix [4]=page size
 const READ_CELL_PAGE_LUA = `${HEAD_PRELUDE}${CELLS_REPLY_LUA}
-local head = tf_live_head(KEYS[1], tf_now())
+local now = tf_now()
+local head = tf_live_head(KEYS[1], now)
 if not head or head.inc ~= ARGV[1] then return {'stale'} end
 local limit = tonumber(ARGV[4])
 local keys = redis.call('ZRANGEBYLEX', KEYS[2], ARGV[2], '(' .. ARGV[3] .. '\\255', 'LIMIT', 0, limit)
-if #keys < limit then return tf_cells_reply({'cells'}, keys, 1) end
-return tf_cells_reply({'more', keys[#keys]}, keys, 1)
+local time = string.format('%.0f', now)
+if #keys < limit then return tf_cells_reply({'cells', time}, keys, 1) end
+return tf_cells_reply({'more', time, keys[#keys]}, keys, 1)
 `
 
 // Checked once SUBSCRIBE is acknowledged: a lane subscription is live only while its incarnation is the
@@ -493,8 +497,8 @@ const REDIS_COMMANDS = {
       argv: [inc, ...('keys' in sel ? ['keys', ...sel.keys] : ['prefix', sel.prefix])],
     }),
     parse: (reply): CellsRead => {
-      const [tag, ...found] = reply as Buffer[]
-      return tag!.toString() === 'stale' ? { staleInc: true } : parseCells(found)
+      const [tag, now, ...found] = reply as Buffer[]
+      return tag!.toString() === 'stale' ? { staleInc: true } : parseCells(now!, found)
     },
   }),
   readCellPage: command({
@@ -512,10 +516,10 @@ const REDIS_COMMANDS = {
       argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(CELL_PAGE_SIZE)],
     }),
     parse: (reply): CellsRead & { after?: string } => {
-      const [tag, ...found] = reply as Buffer[]
+      const [tag, now, ...found] = reply as Buffer[]
       if (tag!.toString() === 'stale') return { staleInc: true }
-      if (tag!.toString() === 'cells') return parseCells(found)
-      return { ...parseCells(found.slice(1)), after: found[0]!.toString() }
+      if (tag!.toString() === 'cells') return parseCells(now!, found)
+      return { ...parseCells(now!, found.slice(1)), after: found[0]!.toString() }
     },
   }),
   validateGeneration: command({
@@ -723,8 +727,11 @@ function encodeNext(next: HeadNext): string {
   return JSON.stringify(payload)
 }
 
-// Key, value and version triples.
-function parseCells(found: Buffer[]): { cells: Map<string, Uint8Array>; versions: Map<string, string> } {
+// The read's time, then key, value and version triples.
+function parseCells(
+  now: Buffer,
+  found: Buffer[],
+): { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number } {
   const cells = new Map<string, Uint8Array>()
   const versions = new Map<string, string>()
   for (let i = 0; i < found.length; i += 3) {
@@ -732,7 +739,7 @@ function parseCells(found: Buffer[]): { cells: Map<string, Uint8Array>; versions
     cells.set(key, Uint8Array.from(found[i + 1]!))
     versions.set(key, found[i + 2]!.toString())
   }
-  return { cells, versions }
+  return { cells, versions, now: Number(now.toString()) }
 }
 
 function toBuffer(bytes: Uint8Array): Buffer {

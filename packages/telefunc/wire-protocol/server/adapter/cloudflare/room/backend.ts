@@ -27,6 +27,7 @@ import type {
   RoomSubscriptionSource,
 } from '../../../../backend/room/contract.js'
 import type { SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
+import type { OrderingInfo } from '../../../../ordering-frame.js'
 import { CloudflareBroadcast } from '../broadcast.js'
 import type { RoomAuthority } from './do.js'
 import type { DurableObject } from 'cloudflare:workers'
@@ -111,6 +112,10 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     if ('stale' in wire) return wire
     const delivery = this.#stub(roomId).awaitDelivery(wire.deliveryToken)
     return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
+  }
+
+  async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
+    return this.#stub(roomId).readLaneOrder(inc, lane)
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
