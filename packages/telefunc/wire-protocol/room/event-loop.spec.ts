@@ -22,7 +22,8 @@ import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_TRACK_WANTS_MAX } from './constants.js
 // lands in the timed turns.
 beforeEach(async () => {
   await disposeBackend()
-  const driver = new MemoryBackend({ state: new MemoryBackendState() })
+  state = new MemoryBackendState()
+  const driver = new MemoryBackend({ state })
   installBackend(() => driver)
 })
 // A spec's stubs and rooms end after it, and what ending them sets off finishes before the next spec: a closed room's
@@ -35,6 +36,7 @@ afterEach(async () => {
   await Promise.all(rooms.map((room) => syncOf(room).reconcileAuthority()))
   await Promise.all(rooms.map((room) => subsOf(room).binaryReady()))
   await settled()
+  for (const dispose of otherServers.splice(0)) await dispose()
   await disposeBackend()
 })
 describe('Room at 100,000 members', () => {
@@ -453,9 +455,10 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
     expect([remote.meta.k0, seen.meta.k0]).toEqual([2, 2])
   }, 60_000)
-  it("reads a member's meta of 100,000 keys into a fresh view with the event loop turning", async () => {
+  it('reads the meta of 100,000 keys of a member another server holds into a view with the event loop turning', async () => {
     const room = await create('member-meta-read-turns')
-    const member = await room.join({
+    // Joined here, the member would keep this server's view current, and a read would read nothing.
+    const member = await (await (await anotherServer()).get(room.id)).join({
       meta: Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`k${i}`, i])),
     })
     const read = async () => {
@@ -528,6 +531,30 @@ function ran(from: Mark, to: Mark): number {
   return Math.min(to.wall - from.wall, cpu / 1000)
 }
 const opened = { rooms: [] as ServerRoom[], stubs: [] as RoomStubChannel[] }
+let state: MemoryBackendState
+const otherServers: (() => Promise<void>)[] = []
+/** Another server on this spec's store: a module graph and process state of its own, so its own view of each room. */
+async function anotherServer(): Promise<typeof Room> {
+  const globals: Record<string, unknown> = {}
+  vi.resetModules()
+  vi.doMock('../../utils/getGlobalObject.js', () => ({
+    getGlobalObject: (key: string, value: unknown) =>
+      (globals[key] ??= typeof value === 'function' ? (value as () => unknown)() : value),
+  }))
+  try {
+    const [statics, install, memory] = await Promise.all([
+      import('./server/statics.js'),
+      import('../backend/install.js'),
+      import('../backend/memory/backend.js'),
+    ])
+    install.installBackend(() => new memory.MemoryBackend({ state }))
+    otherServers.push(install.disposeBackend)
+    return statics.Room
+  } finally {
+    vi.doUnmock('../../utils/getGlobalObject.js')
+    vi.resetModules()
+  }
+}
 async function create(id: string): Promise<ServerRoom> {
   const room = (await Room.create(id)) as ServerRoom
   opened.rooms.push(room)
