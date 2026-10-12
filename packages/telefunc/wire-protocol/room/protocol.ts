@@ -109,8 +109,13 @@ type RoomCtrlEnvelope =
   | { __r: 'closed' }
 
 /** What an instance receives: one track of a member, every track of a member (no `track`), or one track of every
- *  member but `except`. `''` is the default track. */
-type DemandEntry = { member: string; track: string } | { member: string } | { track: string; except: readonly string[] }
+ *  member but `except`. A track it fetches by member (`byMember`) covers only the members it tells `{ member, byMember }`
+ *  for, each told once that member's tracks reach it. `''` is the default track. */
+type DemandEntry =
+  | { member: string; track: string }
+  | { member: string }
+  | { member: string; byMember: true }
+  | { track: string; except: readonly string[]; byMember?: true }
 /** Demand between instances, on the demand lane: entries one instance starts or stops receiving, in the order it told
  *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`. */
 type RoomDemandPage = { __r: 'demand'; instance: string; wants: Array<{ on: boolean } & DemandEntry> }

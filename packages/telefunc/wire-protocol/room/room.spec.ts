@@ -3424,6 +3424,24 @@ describe('Room public behavior', () => {
     expect(streamed).toEqual(Array.from({ length: published }, (_, i) => (i + 1) % 256))
     expect(withdrawn).toEqual([])
   })
+  it("delivers a member joining while another server fetches the tracks named of every member by member its first frame after the member's demand turns on", async () => {
+    const room = (await Room.create('room-wide-by-member-late')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 10 }, () => room.join()))
+    const other = await anotherServer()
+    const viewer = (await other.Room.get(room.id)) as ServerRoom
+    const frames: string[] = []
+    for (const track of trackNames(17))
+      viewer.subscribeBinary((data, info) => frames.push(`${info.track}:${data[0]}`), { track })
+    const everyTrack = (ids: string[]) => ids.map(everyTrackLaneKey).sort()
+    await vi.waitFor(() => expect(binaryLanes(viewer)).toEqual(everyTrack(members.map(({ id }) => id))))
+    const release = delayDriverLane((lane) => lane.kind === 'binary-all', other)
+    const joiner = await room.join()
+    joiner.onDemand((track, on) => void (on && track === 't0' && joiner.publishBinary(new Uint8Array([1]), { track })))
+    await vi.waitFor(() => expect(binaryLanes(viewer)).toContain(everyTrackLaneKey(joiner.id)))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    release()
+    await vi.waitFor(() => expect(frames).toEqual(['t0:1']))
+  })
   it.each([
     [50, [1, 17, 50, 50, 17]],
     [200, [1, 17, 100, 200, 17]],
@@ -4404,10 +4422,10 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(changesOf(a.id)).toEqual(sorted(all(true))))
     const b = await join()
     await vi.waitFor(() => expect(changesOf(b.id)).toEqual(sorted(all(true))))
-    // One entry per track, none per member.
+    // One entry per track, and one per member they are fetched by.
     published.mockClear()
     heartbeat(report)
-    expect(published).toHaveBeenCalledTimes(tracks.length)
+    expect(published).toHaveBeenCalledTimes(tracks.length + 2)
     // A want of `a` alone holds t0 for it while the want of every member comes and goes.
     const alone = (await observer.getParticipant(a.id))!.subscribeBinary(() => {}, { track: 't0' })
     await subsOf(observer).binaryReady()
@@ -5450,7 +5468,7 @@ describe('room protocol validation', () => {
     expect(subscribed).toHaveLength(50)
   })
   it.each([10, 50, 100])(
-    'gossips ROOM_TRACK_WANTS_MAX tracks a client names of every member once each, and none per member, among %i members',
+    'gossips ROOM_TRACK_WANTS_MAX tracks a client names of every member once each, and each member they are fetched by once, among %i members',
     async (count) => {
       const room = (await Room.create(`every-member-gossip-${count}`)) as ServerRoom
       const members = await Promise.all(Array.from({ length: count }, () => room.join()))
@@ -5466,10 +5484,10 @@ describe('room protocol validation', () => {
       await vi.waitFor(() => expect(demanded.every((tracks) => tracks.size === ROOM_TRACK_WANTS_MAX)).toBe(true), {
         timeout: 10_000,
       })
-      expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX)
+      expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
       published.mockClear()
       heartbeat(report)
-      expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX)
+      expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
     },
   )
   it.each([1_000, 10_000])(

@@ -453,6 +453,7 @@ class RoomSubscriptions {
     const all = this._everyTrack.get(member)
     const allDelivers = all?.delivering === true
     this._demand.setMember(member, wantsAll && allDelivers)
+    this._demand.setFetched(member, present && allDelivers && (this._byMember || this._byMemberTracks.size > 0))
     for (const track of chain(this._binaryTracks.get(member) ?? [], this._demand.localTracks(member))) {
       this._syncLane(member, track, servedByAll)
       yield
@@ -532,7 +533,8 @@ class RoomSubscriptions {
     const lane = this._everyMember.get(track) ?? this._openEveryMember(track)
     lane.resume()
     if (lane.delivering) this._byMemberTracks.delete(track)
-    this._demand.setTrack(track, lane.delivering || this._byMemberTracks.has(track))
+    const byMember = this._byMemberTracks.has(track)
+    this._demand.setTrack(track, lane.delivering || byMember, byMember)
   }
 
   /** An every-member lane that serves no holder here stops once the lanes replacing it deliver: the named lanes and
@@ -551,7 +553,7 @@ class RoomSubscriptions {
       this._stopFanIn(lane, this._establishingEveryMember)
     }
     toggle(this._byMemberTracks, track, named)
-    if (named) this._demand.setTrack(track, true)
+    if (named) this._demand.setTrack(track, true, true)
     else this._demand.forgetTrack(track)
   }
 
@@ -674,6 +676,7 @@ class RoomSubscriptions {
     if (this._waitsFor(this._establishingEveryMember, member)) return
     this._everyTrack.delete(member)
     this._stopFanIn(all, this._establishingEveryTrack)
+    this._demand.setFetched(member, false)
   }
 
   /** Whether `item`'s lane stays while a lane of the other kind is not delivering yet: a closed room waits for none. */

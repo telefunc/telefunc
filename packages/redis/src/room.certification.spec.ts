@@ -263,6 +263,40 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(streamed).toEqual(Array.from({ length: streamed.length }, (_, i) => (first + i) % 256))
   }, 30_000)
 
+  it("delivers a member joining while another server fetches the tracks named of every member by member its first frame after the member's demand turns on", async () => {
+    const prefix = uniquePrefix('by-member-late')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('by-member-late')
+    onTestFinished(() => Room.close(room.id))
+    const members = await Promise.all(Array.from({ length: 10 }, () => room.join()))
+    const wanted = members.map((member) => {
+      const tracks = new Set<string | null>()
+      member.onDemand((track, on) => (on ? tracks.add(track) : tracks.delete(track)))
+      return tracks
+    })
+    // 17 tracks of 10 members: the viewer fetches them on each member's every-track lane.
+    const viewer = serverFrom(
+      { ...env, PREFIX: prefix, ROOM: room.id },
+      `const room = await Room.get(process.env.ROOM)
+for (let i = 0; i < 17; i++) room.subscribeBinary((data, info) => write(info.track + ':' + data[0]), { track: 't' + i })
+await read()
+// It reads the next join 200 ms after its control event arrives, as a loaded server does.
+const replica = room._replica
+const onControl = replica._onControl.bind(replica)
+replica._onControl = (...args) => void setTimeout(() => onControl(...args), 200)
+write('slow')
+await read()`,
+    )
+    await vi.waitFor(() => expect(wanted.every((tracks) => tracks.size === 17)).toBe(true), { timeout: 10_000 })
+    viewer.send('slow')
+    expect(JSON.parse(await viewer.line(0))).toBe('slow')
+    const joiner = await room.join()
+    joiner.onDemand((track, on) => void (on && track === 't0' && joiner.publishBinary(new Uint8Array([1]), { track })))
+    const first = await Promise.race([viewer.line(1).then((line) => JSON.parse(line)), sleep(5_000).then(() => null)])
+    expect(first).toBe('t0:1')
+  }, 30_000)
+
   it('reads no demand on a server that only views the room, while the server owning its members takes it', async () => {
     const prefix = uniquePrefix('demand-viewer')
     installRedis(ownClient(connect()), { prefix })

@@ -8,8 +8,9 @@ import { Slice } from './slice.js'
 /** Each reporter's lease. A remote reporter tells its entries again every heartbeat, so a crashed one lapses; this
  *  process's never do. */
 type Leases = Map<string, number>
-/** Each reporter's lease on one track of every member, and the members it doesn't receive that track from. */
-type TrackLeases = Map<string, { expiresAt: number; except: ReadonlySet<string> }>
+/** Each reporter's lease on one track of every member, the members it doesn't receive that track from, and whether it
+ *  receives it only of the members it fetches by member. */
+type TrackLeases = Map<string, { expiresAt: number; except: ReadonlySet<string>; byMember: boolean }>
 
 /** What some holder of a replica receives. */
 class Receives {
@@ -18,6 +19,8 @@ class Receives {
   readonly members = new Set<string>()
   /** The tracks of every member. */
   readonly tracks = new Set<string>()
+  /** The members whose tracks fetched by member reach this process. */
+  readonly fetched = new Set<string>()
 }
 
 /** What a replica's planner sets, told as it changes: one track of a member, every track of a member, and one track of
@@ -28,14 +31,17 @@ class DemandReport {
   private readonly _planned = new Receives()
   /** Per track of every member, the members it isn't received from, set whether or not the track is planned. */
   private readonly _except = new Map<string, Set<string>>()
+  /** The planned tracks of every member that are fetched by member. */
+  private readonly _byMember = new Set<string>()
   private _changed = new Receives()
   /** A telling a deadline stopped, resumed by the next one. */
   private _telling: Iterator<void> | null = null
   private readonly _told = {
     pairs: new Map<string, Set<string>>(),
     members: new Set<string>(),
-    /** Each track told, with the members it was told without. */
-    tracks: new Map<string, readonly string[]>(),
+    /** Each track told, with the members it was told without and whether it was told fetched by member. */
+    tracks: new Map<string, { except: readonly string[]; byMember: boolean }>(),
+    fetched: new Set<string>(),
   }
 
   constructor(private readonly _tell: (entry: DemandEntry, on: boolean) => void) {}
@@ -53,11 +59,19 @@ class DemandReport {
     this._changed.members.add(member)
   }
 
-  /** Whether some holder here receives `track` of every member. */
-  setTrack(track: string, on: boolean): void {
-    if (on === this._planned.tracks.has(track)) return
+  /** Whether some holder here receives `track` of every member, and whether only of the members it is fetched by. */
+  setTrack(track: string, on: boolean, byMember = false): void {
+    if (on === this._planned.tracks.has(track) && (on && byMember) === this._byMember.has(track)) return
     toggle(this._planned.tracks, track, on)
+    toggle(this._byMember, track, on && byMember)
     this._changed.tracks.add(track)
+  }
+
+  /** Whether the member's tracks fetched by member reach this process. */
+  setFetched(member: string, on: boolean): void {
+    if (on === this._planned.fetched.has(member)) return
+    toggle(this._planned.fetched, member, on)
+    this._changed.fetched.add(member)
   }
 
   /** Whether no holder here receives `track` from the member, though some holder names it of every member. */
@@ -86,7 +100,7 @@ class DemandReport {
   /** Whether some entry is told. */
   get reporting(): boolean {
     const told = this._told
-    return told.pairs.size > 0 || told.members.size > 0 || told.tracks.size > 0
+    return told.pairs.size > 0 || told.members.size > 0 || told.tracks.size > 0 || told.fetched.size > 0
   }
 
   /** Tells the planned changes, each once. */
@@ -97,7 +111,13 @@ class DemandReport {
   /** Whether some planned change isn't told yet. */
   get changed(): boolean {
     const changed = this._changed
-    return this._telling !== null || changed.pairs.size > 0 || changed.members.size > 0 || changed.tracks.size > 0
+    return (
+      this._telling !== null ||
+      changed.pairs.size > 0 ||
+      changed.members.size > 0 ||
+      changed.tracks.size > 0 ||
+      changed.fetched.size > 0
+    )
   }
 
   /** Tells the planned changes until `deadline`, a `performance.now()` time, and whether all are told; a call after
@@ -121,8 +141,12 @@ class DemandReport {
       this._publish({ member }, true)
       yield
     }
-    for (const [track, except] of told.tracks) {
-      this._publish({ track, except }, true)
+    for (const member of told.fetched) {
+      this._publish({ member, byMember: true }, true)
+      yield
+    }
+    for (const [track, entry] of told.tracks) {
+      this._publish(trackEntry(track, entry), true)
       yield
     }
   }
@@ -133,11 +157,12 @@ class DemandReport {
   }
 
   /** Ons go before offs, so no pair reads as unreceived while one state hands over to another: a track of every member
-   *  is told before the pairs it replaces stop, and after the pairs replacing it start. A track whose `except` changed
-   *  is told again with it. Only a planning round sets what this reads, and none runs until the telling ends, so it is
-   *  read as it goes. Each change it reads is a step. */
+   *  is told before the pairs it replaces stop, and after the pairs replacing it start; a member it is fetched by is
+   *  told before it, and stops after it. A track whose `except` or fetching changed is told again with it. Only a
+   *  planning round sets what this reads, and none runs until the telling ends, so it is read as it goes. Each change it
+   *  reads is a step. */
   private *_tellChanges(): Generator<void, void, void> {
-    const { pairs, members, tracks } = this._changed
+    const { pairs, members, tracks, fetched } = this._changed
     this._changed = new Receives()
     const planned = this._planned
     const told = this._told
@@ -156,23 +181,34 @@ class DemandReport {
       }
       yield
     }
+    for (const member of fetched) {
+      if (planned.fetched.has(member) && !told.fetched.has(member)) {
+        told.fetched.add(member)
+        this._publish({ member, byMember: true }, true)
+      }
+      yield
+    }
     for (const track of tracks) {
       if (planned.tracks.has(track)) {
-        const except = [...(this._except.get(track) ?? [])]
+        const entry = { except: [...(this._except.get(track) ?? [])], byMember: this._byMember.has(track) }
         const was = told.tracks.get(track)
-        if (was === undefined || !sameMembers(was, except)) {
-          told.tracks.set(track, except)
-          this._publish({ track, except }, true)
+        if (was === undefined || was.byMember !== entry.byMember || !sameMembers(was.except, entry.except)) {
+          told.tracks.set(track, entry)
+          this._publish(trackEntry(track, entry), true)
         }
       }
       yield
     }
     for (const track of tracks) {
-      const except = told.tracks.get(track)
-      if (!planned.tracks.has(track) && except !== undefined) {
+      const was = told.tracks.get(track)
+      if (!planned.tracks.has(track) && was !== undefined) {
         told.tracks.delete(track)
-        this._publish({ track, except }, false)
+        this._publish(trackEntry(track, was), false)
       }
+      yield
+    }
+    for (const member of fetched) {
+      if (!planned.fetched.has(member) && told.fetched.delete(member)) this._publish({ member, byMember: true }, false)
       yield
     }
     for (const member of members) {
@@ -200,6 +236,8 @@ class RoomDemand {
   private readonly _pairs = new Map<string, Map<string, Leases>>()
   /** Per owned member, the reports of its every track. */
   private readonly _members = new Map<string, Leases>()
+  /** Per owned member, the reporters that fetch its tracks by member. */
+  private readonly _fetched = new Map<string, Leases>()
   /** Per track, the reports of it of every member, whoever owns them. */
   private readonly _tracks = new Map<string, TrackLeases>()
   /** The named tracks each member published on; a report of its every track covers them and the default one. */
@@ -235,9 +273,14 @@ class RoomDemand {
   /** A reporter's entry starts or stops, leased until `expiresAt`; telling it again renews it. Only a member's owner
    *  keeps its pairs; ownership is fixed from before the member exists anywhere. */
   take(instance: string, entry: DemandEntry, on: boolean, expiresAt: number): void {
-    if ('except' in entry) this._takeTrack(instance, entry.track, entry.except, on, expiresAt)
+    if ('except' in entry) this._takeTrack(instance, entry, on, expiresAt)
     else if (!this._ownsMember(entry.member)) return
-    else if ('track' in entry) {
+    else if ('byMember' in entry) {
+      const { member } = entry
+      const held = this._fetched.get(member)?.has(instance) === true
+      lease(this._fetched, member, instance, on, expiresAt)
+      if (held !== on) this._queueFetched(instance, member)
+    } else if ('track' in entry) {
       const { member, track } = entry
       let byTrack = this._pairs.get(member)
       if (!byTrack) this._pairs.set(member, (byTrack = new Map()))
@@ -285,6 +328,15 @@ class RoomDemand {
       }
       yield
     }
+    for (const [member, leases] of this._fetched) {
+      for (const [instance, expiresAt] of leases)
+        if (expiresAt <= now) {
+          leases.delete(instance)
+          this._queueFetched(instance, member)
+        }
+      if (leases.size === 0) this._fetched.delete(member)
+      yield
+    }
     for (const [track, leases] of this._tracks) {
       const before = leases.size
       for (const [instance, { expiresAt }] of leases) if (expiresAt <= now) leases.delete(instance)
@@ -305,12 +357,20 @@ class RoomDemand {
   forgetMember(member: string): void {
     this._pairs.delete(member)
     this._members.delete(member)
+    this._fetched.delete(member)
     this._published.delete(member)
     for (const [track, members] of this._told)
       if (members.delete(member) && members.size === 0) this._told.delete(track)
   }
 
-  private _takeTrack(instance: string, track: string, except: readonly string[], on: boolean, expiresAt: number): void {
+  private _takeTrack(
+    instance: string,
+    entry: Extract<DemandEntry, { except: unknown }>,
+    on: boolean,
+    expiresAt: number,
+  ): void {
+    const { track, except } = entry
+    const byMember = entry.byMember === true
     let leases = this._tracks.get(track)
     const held = leases?.get(instance)
     if (!on) {
@@ -319,15 +379,20 @@ class RoomDemand {
       if (leases!.size === 0) this._tracks.delete(track)
       return this._queue(track, null)
     }
-    if (held !== undefined && sameMembers(held.except, except)) {
+    if (held !== undefined && held.byMember === byMember && sameMembers(held.except, except)) {
       held.expiresAt = expiresAt
       return
     }
     if (!leases) this._tracks.set(track, (leases = new Map()))
-    leases.set(instance, { expiresAt, except: new Set(except) })
-    if (held === undefined) return this._queue(track, null)
+    leases.set(instance, { expiresAt, except: new Set(except), byMember })
+    if (held === undefined || held.byMember !== byMember) return this._queue(track, null)
     for (const member of held.except) if (!except.includes(member)) this._queue(track, member)
     for (const member of except) if (!held.except.has(member)) this._queue(track, member)
+  }
+
+  /** The member, on each track `instance` fetches by member. */
+  private _queueFetched(instance: string, member: string): void {
+    for (const [track, leases] of this._tracks) if (leases.get(instance)?.byMember) this._queue(track, member)
   }
 
   private _queue(track: string, member: string | null): void {
@@ -384,7 +449,9 @@ class RoomDemand {
     if (this._pairs.get(member)?.has(track)) return true
     const published = track === DEFAULT_TRACK || this._published.get(member)?.has(track) === true
     if (published && this._members.has(member)) return true
-    for (const { except } of this._tracks.get(track)?.values() ?? []) if (!except.has(member)) return true
+    const fetched = this._fetched.get(member)
+    for (const [instance, { except, byMember }] of this._tracks.get(track) ?? [])
+      if (!except.has(member) && (!byMember || fetched?.has(instance) === true)) return true
     return false
   }
 
@@ -393,6 +460,12 @@ class RoomDemand {
   }
 }
 
+function trackEntry(
+  track: string,
+  { except, byMember }: { except: readonly string[]; byMember: boolean },
+): DemandEntry {
+  return byMember ? { track, except, byMember } : { track, except }
+}
 /** Takes, renews or drops `instance`'s lease on `key`, and whether `key` went from held to not or back. */
 function lease<K>(leases: Map<K, Leases>, key: K, instance: string, on: boolean, expiresAt: number): boolean {
   const held = leases.get(key)
