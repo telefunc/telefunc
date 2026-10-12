@@ -64,7 +64,7 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
   readonly #member: CloudflareBroadcastMember
   readonly #mux = new ChannelMux()
   constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env, env.TelefuncDurableObject)
+    super(ctx, env, env.TELEFUNC)
     this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
     this.#broadcastAuthority = new CloudflareBroadcastAuthorityState(ctx)
     this.#member = broadcast.member(ctx.id.toString(), this.#calls)
@@ -175,6 +175,9 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
   }
   telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
     return this.#broadcastAuthority.setPresence(request)
+  }
+  telefuncRoomDeliver(request: RoomSessionDeliveryRequest) {
+    return this.#run(() => this.#manager.deliver(request))
   }
   #run<T>(fn: () => T): T {
     return withCloudflareSession({ room: this.#manager, broadcast: this.#member, mux: this.#mux }, fn)
