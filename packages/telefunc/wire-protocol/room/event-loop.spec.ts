@@ -32,7 +32,7 @@ afterEach(async () => {
   const rooms = opened.rooms.splice(0)
   for (const id of new Set(rooms.map((room) => room.id))) await Room.close(id)
   // A view no lane tells of the close learns it as its next heartbeat would.
-  await Promise.all(rooms.map((room) => subsOf(room).reconcileAuthority()))
+  await Promise.all(rooms.map((room) => syncOf(room).reconcileAuthority()))
   await Promise.all(rooms.map((room) => subsOf(room).binaryReady()))
   await settled()
   await disposeBackend()
@@ -49,7 +49,7 @@ describe('Room at 100,000 members', () => {
         longest = Math.max(longest, now - last)
         last = now
       }, 1)
-      await subsOf(room)._heartbeatTick()
+      await syncOf(room)._heartbeatTick()
       clearInterval(timer)
       return Math.max(longest, performance.now() - last)
     }
@@ -186,7 +186,7 @@ describe('Room at 100,000 members', () => {
       )
     const observer = await view(room.id)
     observer.onUpdate(() => {})
-    await subsOf(observer)._heartbeatTick()
+    await syncOf(observer)._heartbeatTick()
     expect(Object.keys(observer.meta)).toHaveLength(100_000)
     const backend = getRoomBackend()
     const { readCells, readCellPages } = backend
@@ -200,7 +200,7 @@ describe('Room at 100,000 members', () => {
       return readCellPages.call(backend, roomId, inc, prefix)
     }
     try {
-      await subsOf(observer)._heartbeatTick()
+      await syncOf(observer)._heartbeatTick()
     } finally {
       Object.assign(backend, { readCells, readCellPages })
     }
@@ -515,12 +515,16 @@ function collectGarbage(): void {
   ;(runInNewContext('gc') as () => void)()
 }
 function subsOf(room: ServerRoom): {
-  _heartbeatTick(): Promise<void>
   replan(): Promise<void>
   binaryReady(): Promise<void>
-  reconcileAuthority(): Promise<void>
 } {
   return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+}
+function syncOf(room: ServerRoom): {
+  _heartbeatTick(): Promise<void>
+  reconcileAuthority(): Promise<void>
+} {
+  return (room as unknown as { _sync: ReturnType<typeof syncOf> })._sync
 }
 /** The longest event-loop gap while `run` runs, and what it returned. */
 async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number; value: T }> {

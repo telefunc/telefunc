@@ -1,14 +1,12 @@
 export { RoomSubscriptions }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { LaneId } from '../../backend/room/contract.js'
 import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
 import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_MEMBER_NAMED_LANES_MAX, ROOM_META_REPAIR_MS } from '../constants.js'
+import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
 import type { BinaryWantChange } from '../binary.js'
 import type { DemandReport } from '../demand.js'
 import type { RoomConfigRecord } from '../protocol.js'
@@ -17,51 +15,33 @@ import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { Slice } from '../slice.js'
 import type { LaneHolder } from './replay.js'
-import type { RosterStream } from './roster-stream.js'
+import type { AuthoritySync } from './authority-sync.js'
 import { WantsIndex } from './wants-index.js'
 import { SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 import type { ControlObserver, PresenceEvent, RoomReplica } from './replica.js'
-import { reapAndReadRoster, renewMemberLeases } from './membership.js'
-import { maintainHold, type RoomIncarnation } from './lifecycle.js'
-import { sweepLapsedRoomsSoon } from './directory.js'
-import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
 assertIsNotBrowser()
 
-/** The room side these subscriptions serve: it aggregates its holders and applies what the lanes and the authority carry. */
+/** The room side these subscriptions serve: it aggregates its holders and applies what the lanes carry. */
 type SubscriptionHost = {
   readonly id: string
   readonly _inc: string
-  readonly _incarnation: RoomIncarnation
   readonly _replica: RoomReplica
   /** Read-only here: every change goes through the host's methods. */
-  readonly _state: Pick<
-    RoomState,
-    | 'closed'
-    | 'metaWaiting'
-    | 'metaSeq'
-    | 'rosterKnown'
-    | 'listenerCount'
-    | 'recordingMembership'
-    | 'memberIds'
-    | 'hasMember'
-  >
+  readonly _state: Pick<RoomState, 'closed' | 'rosterKnown' | 'listenerCount' | 'memberIds' | 'hasMember'>
+  /** What keeps the view in step with the authority, and runs the heartbeat. */
+  readonly _sync: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers' | 'heartbeat'>
   /** Whether anything here observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean
   /** A pre-attach tail ingests all text. */
   _holdsTail(): boolean
   _ownsMember(id: string): boolean
-  /** Live. A pending admission owns its inbox, but its record is renewed only once it commits. */
+  /** Live. A pending admission owns its inbox. */
   _ownedMembers(): Iterable<string>
-  _renewableMembers(): Iterable<string>
-  _renewViews(): Promise<void>
   _onCtrlEvent(event: PresenceEvent, serialized: string, info: WirePublishInfo): void
   _onTextData(serialized: string, info: WirePublishInfo): void
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
   _onDm(serialized: string, info: WirePublishInfo): void
   _readOpenConfig(): Promise<RoomConfigRecord | null>
-  _applyAuthorityMeta(stored: StoredRoomMeta): void
-  /** Applies a complete roster read, and sends it to the clients it concerns. */
-  readonly _roster: Pick<RosterStream, 'reconcile'>
   _closeFromAuthority(): void
 }
 
@@ -73,12 +53,12 @@ type NamedCounts = { own: number; unreached: number }
 type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pairs: Map<string, Set<string>> }
 
 /** What this instance subscribes: a function of its holders' wants, ownership and membership, kept current per change,
- *  recovered within Room's horizon, and renewed by the heartbeat. */
+ *  recovered within Room's horizon, and replanned by the heartbeat. */
 class RoomSubscriptions implements ControlObserver {
   private readonly _wants = new WantsIndex((track, named) => this._demand.setTrack(track, named))
   // Every lane shares these, so an owned member's inbox lane makes none; declared before the lanes made here.
   private readonly _onLaneTerminal = (slot: LaneSubscription, error?: unknown) => this._onTerminal(slot, error)
-  private readonly _onLaneRecovered = () => void this.reconcileAuthority().catch(reportRoomError)
+  private readonly _onLaneRecovered = () => void this._host._sync.reconcileAuthority().catch(reportRoomError)
   private readonly _onBinaryPending = (slot: LaneSubscription, pending: boolean) => {
     if (!pending) return void this._binaryPending.delete(slot)
     this._binaryPending.add(slot)
@@ -111,16 +91,16 @@ class RoomSubscriptions implements ControlObserver {
   /** The holders gone whose wants the next planning pass drops. */
   private readonly _gone = new Set<LaneHolder>()
   private _planning: Promise<void> | null = null
-  private _pendingRefresh: Promise<void> | null = null
-  private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  private _metaRepair: ReturnType<typeof setTimeout> | null = null
-  private _memberMetaRepair: ReturnType<typeof setTimeout> | null = null
-  private _heartbeatBusy = false
 
   constructor(
     private readonly _host: SubscriptionHost,
     private readonly _demand: DemandReport,
   ) {}
+
+  /** Whether this handle observes the room through its replica's control lane. */
+  get observing(): boolean {
+    return this._observing
+  }
 
   get semanticReady(): Promise<void> {
     return this._semantic.ready
@@ -252,21 +232,6 @@ class RoomSubscriptions implements ControlObserver {
     await this._binaryReady
   }
 
-  ensureRoster(): Promise<void> {
-    if (this._pendingRefresh !== null) return this._pendingRefresh
-    const state = this._host._state
-    if (state.closed || (state.rosterKnown && this._observing && this._host._replica.controlEstablished))
-      return Promise.resolve()
-    return this._refreshMembers()
-  }
-
-  async reconcileAuthority(): Promise<void> {
-    const host = this._host
-    if (host._state.closed || !(await this._reconcileMeta())) return
-    await dropReplacedMetaGenerations(host.id, host._inc)
-    await this._refreshMembers()
-  }
-
   onControlEvent(event: PresenceEvent, serialized: string, info: WirePublishInfo): void {
     this._host._onCtrlEvent(event, serialized, info)
   }
@@ -276,50 +241,7 @@ class RoomSubscriptions implements ControlObserver {
   }
 
   onControlRecovered(): Promise<void> {
-    return this.reconcileAuthority()
-  }
-
-  /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
-   *  `ROOM_META_REPAIR_MS` after the first wait rather than at the next heartbeat. */
-  metaWaiting(): void {
-    if (this._metaRepair !== null) return
-    this._metaRepair = unrefTimer(
-      setTimeout(() => {
-        this._metaRepair = null
-        const state = this._host._state
-        if (state.metaWaiting && !state.closed) void this._reconcileMeta().catch(reportRoomError)
-      }, ROOM_META_REPAIR_MS),
-    )
-  }
-
-  /** A member's meta change arrived past a gap and was dropped: a roster read `ROOM_META_REPAIR_MS` after it repairs the
-   *  member rather than the next heartbeat's. */
-  memberMetaGap(): void {
-    if (this._memberMetaRepair !== null) return
-    this._memberMetaRepair = unrefTimer(
-      setTimeout(() => {
-        this._memberMetaRepair = null
-        if (!this._host._state.closed) void this._refreshMembers().catch(reportRoomError)
-      }, ROOM_META_REPAIR_MS),
-    )
-  }
-
-  /** The stored meta, applied if newer, and read whole only when it holds a write the view lacks or one waits; false
-   *  once the room is gone. */
-  private async _reconcileMeta(): Promise<boolean> {
-    const host = this._host
-    const config = await host._readOpenConfig()
-    if (config !== null && !host._state.metaWaiting) {
-      const seq = await readRoomMetaSeq(host.id, config.inc)
-      if (seq !== null && seq <= host._state.metaSeq) return true
-    }
-    const stored = config && (await readRoomMeta(host.id, config))
-    if (stored === null) {
-      host._closeFromAuthority()
-      return false
-    }
-    host._applyAuthorityMeta(stored)
-    return true
+    return this._host._sync.reconcileAuthority()
   }
 
   /** The room-wide lanes are planned around a change, and the heartbeat after it. */
@@ -338,7 +260,7 @@ class RoomSubscriptions implements ControlObserver {
     )
     const needsRoster = state.listenerCount > 0 || (open && this._wants.wantsBinary)
     if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster))
-      void this._refreshMembers().catch(reportRoomError)
+      void host._sync.refreshMembers().catch(reportRoomError)
     change()
     if (this._planning === null) this._demand.flush()
     this._syncHeartbeat()
@@ -662,66 +584,12 @@ class RoomSubscriptions implements ControlObserver {
       this._recovering.delete(slot)
     }
     // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
-    await this.reconcileAuthority()
+    await this._host._sync.reconcileAuthority()
   }
 
-  /** One roster refresh at a time; concurrent callers join it. */
-  private _refreshMembers(): Promise<void> {
-    this._pendingRefresh ??= this._runMemberRefresh().finally(() => {
-      this._pendingRefresh = null
-    })
-    return this._pendingRefresh
-  }
-
-  /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. */
-  private async _runMemberRefresh(): Promise<void> {
-    const host = this._host
-    if (host._state.closed) return
-    const read = await host._state.recordingMembership(
-      () => reapAndReadRoster(host._incarnation),
-      async (roster, events) => !host._state.closed && (await host._roster.reconcile(roster, events)),
-    )
-    if (read) await this.replan()
-  }
-
-  // Graceful departures use events; heartbeats renew owned members and reap records orphaned by hard crashes.
+  /** The heartbeat runs while this handle observes the room or owns a member. */
   private _syncHeartbeat(): void {
-    const host = this._host
-    const want = !host._state.closed && (this._observing || this._inbox.size > 0)
-    if (want && !this._heartbeatTimer) {
-      this._heartbeatTimer = unrefTimer(
-        setInterval(() => void this._heartbeatTick().catch(reportRoomError), ROOM_HEARTBEAT_INTERVAL_MS),
-      )
-    } else if (!want && this._heartbeatTimer) {
-      clearInterval(this._heartbeatTimer)
-      this._heartbeatTimer = null
-    }
-  }
-
-  private async _heartbeatTick(): Promise<void> {
-    if (this._heartbeatBusy) return // a slow backend must not pile up overlapping ticks
-    this._heartbeatBusy = true
-    const host = this._host
-    try {
-      let renewalFailure: { error: unknown } | null = null
-      try {
-        await renewMemberLeases(host.id, host._inc, host._renewableMembers())
-      } catch (error) {
-        renewalFailure = { error }
-      }
-      try {
-        await host._renewViews()
-      } catch (error) {
-        renewalFailure ??= { error }
-      }
-      await this.replan() // bounded retry trigger for still-wanted terminal lanes
-      await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views
-      if (!host._state.closed) await maintainHold(host._incarnation)
-      sweepLapsedRoomsSoon()
-      if (renewalFailure) throw renewalFailure.error
-    } finally {
-      this._heartbeatBusy = false
-    }
+    this._host._sync.heartbeat(!this._host._state.closed && (this._observing || this._inbox.size > 0))
   }
 }
 

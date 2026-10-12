@@ -332,12 +332,12 @@ describe('Room public behavior', () => {
     const leaves = (id: string) => memberEvents(peer, id).filter((event) => event.__r === 'leave')
     control.next()
     await Room.removeParticipant(room.id, { id: reconciled })
-    await subsOf(room).reconcileAuthority()
+    await syncOf(room).reconcileAuthority()
     expect(leaves(reconciled)).toEqual([{ __r: 'leave', id: reconciled, cause: 'removed' }])
     expect(stub._holds(reconciled)).toBe(false)
     control.next()
     await Room.removeParticipant(room.id, { id: vanished })
-    await subsOf(room)._heartbeatTick()
+    await syncOf(room)._heartbeatTick()
     expect(leaves(vanished)).toEqual([{ __r: 'leave', id: vanished, cause: 'removed' }])
     expect(causes).toEqual([{ type: 'removed' }, { type: 'removed' }])
   })
@@ -348,7 +348,7 @@ describe('Room public behavior', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     control.next()
     await Room.setMeta(room.id, { topic: 'new' })
-    await subsOf(room).reconcileAuthority()
+    await syncOf(room).reconcileAuthority()
     const updates = relayed(peer).filter((event) => event.__r === 'update')
     // The first is the attach's own resend.
     expect(updates.map((event) => event.meta)).toEqual([[['topic', 'old', 0, 0]], [['topic', 'new', 0, 0]]])
@@ -357,7 +357,7 @@ describe('Room public behavior', () => {
     const control = loseLaneFrames((lane) => lane.kind === 'control')
     const room = (await Room.create('own-events-lost-echo')) as ServerRoom
     const { peer } = serve(room)
-    await subsOf(room).reconcileAuthority()
+    await syncOf(room).reconcileAuthority()
     control.where(() => true)
     const member = await room.join({ meta: { v: 1 } })
     expect(clientView(peer, room.id)._getRemote(member.id)?.meta).toEqual({ v: 1 })
@@ -385,10 +385,10 @@ describe('Room public behavior', () => {
     handed._registerChannel()
     room._attachStub(handed)
     const peer = attachPeer(handed)
-    await subsOf(room).reconcileAuthority()
+    await syncOf(room).reconcileAuthority()
     control.next()
     await bot.setMeta({ mood: 'new' })
-    await subsOf(room).reconcileAuthority()
+    await syncOf(room).reconcileAuthority()
     const metas = relayed(peer)
       .flatMap((event) => (event.__r === 'roster' ? event.members! : []))
       .filter((member) => member.id === bot.id)
@@ -405,7 +405,7 @@ describe('Room public behavior', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     control.next()
     await Room.removeParticipant(room.id, { id: bot.id })
-    await subsOf(room)._heartbeatTick()
+    await syncOf(room)._heartbeatTick()
     expect(causes).toEqual(['removed'])
     expect(memberEvents(peer, bot.id)).toEqual([])
   })
@@ -419,7 +419,7 @@ describe('Room public behavior', () => {
     const ticked = createDeferred()
     // The eviction's retained listing: its member delete committed, its leave isn't published.
     vi.spyOn(driver, 'listRetained').mockImplementationOnce(async (...args) => {
-      await subsOf(room)._heartbeatTick()
+      await syncOf(room)._heartbeatTick()
       ticked.resolve()
       return listRetained(...args)
     })
@@ -437,7 +437,7 @@ describe('Room public behavior', () => {
     const observed = holdLaneDelivery((lane) => lane.kind === 'control', other)
     const causes: unknown[] = []
     observer.onLeave((_, cause) => causes.push(cause))
-    await subsOf(observer).reconcileAuthority()
+    await syncOf(observer).reconcileAuthority()
     const readCellPages = other.driver.readCellPages.bind(other.driver)
     const memberRead = { started: createDeferred(), release: createDeferred(), held: false }
     vi.spyOn(other.driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
@@ -456,7 +456,7 @@ describe('Room public behavior', () => {
       await publish.promise
       return listRetained(...args)
     })
-    const refresh = subsOf(observer).reconcileAuthority()
+    const refresh = syncOf(observer).reconcileAuthority()
     await memberRead.started.promise
     const leaving = member.leave()
     await committed.promise
@@ -767,7 +767,7 @@ describe('Room public behavior', () => {
     await terminal.subscription.ready
     await observer.getParticipants()
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const reconcile = vi.spyOn(subsOf(observer), 'reconcileAuthority').mockRejectedValue(new Error('contention'))
+    const reconcile = vi.spyOn(syncOf(observer), 'reconcileAuthority').mockRejectedValue(new Error('contention'))
     await terminal.close()
     await vi.waitFor(() => expect(reconcile).toHaveBeenCalled())
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -788,11 +788,11 @@ describe('Room public behavior', () => {
     observer.subscribe(() => {})
     await observer.getParticipants()
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    const subs = subsOf(observer)
-    const reconcile = subs.reconcileAuthority.bind(subs)
+    const sync = syncOf(observer)
+    const reconcile = sync.reconcileAuthority.bind(sync)
     const catchingUp = createDeferred()
     const release = createDeferred()
-    vi.spyOn(subs, 'reconcileAuthority').mockImplementationOnce(async () => {
+    vi.spyOn(sync, 'reconcileAuthority').mockImplementationOnce(async () => {
       catchingUp.resolve()
       await release.promise
       await reconcile()
@@ -1034,7 +1034,7 @@ describe('Room public behavior', () => {
       }
       yield* readCellPages(roomId, inc, prefix)
     })
-    const refresh = subsOf(observer)._refreshMembers()
+    const refresh = syncOf(observer).refreshMembers()
     await started.promise
     expect(controlOf(observer).established).toBe(true)
     const participants = observer.getParticipants()
@@ -1078,7 +1078,7 @@ describe('Room public behavior', () => {
         while (!landed)
       }
     })
-    await subsOf(observer)._refreshMembers()
+    await syncOf(observer).refreshMembers()
     expect(narrated).toEqual(expected)
     expect((await observer.getParticipants()).length).toBe(100_000)
   }, 60_000)
@@ -1115,7 +1115,7 @@ describe('Room public behavior', () => {
       kept.push(updated.id)
       await vi.waitFor(() => expect(narrated).toEqual(expected))
     })
-    await subsOf(observer)._refreshMembers()
+    await syncOf(observer).refreshMembers()
     expect(rosterReads).toBe(1)
     expect(narrated).toEqual(expected)
     expect((await observer.getParticipants()).map(({ id, meta }) => ({ id, meta }))).toEqual([
@@ -1126,7 +1126,7 @@ describe('Room public behavior', () => {
   it('heartbeats pure control observers without owned members or binary demand', async () => {
     vi.useFakeTimers()
     const observer = (await Room.get((await Room.create('observer-heartbeat')).id)) as ServerRoom
-    const heartbeat = vi.spyOn(subsOf(observer), '_heartbeatTick').mockResolvedValue()
+    const heartbeat = vi.spyOn(syncOf(observer), '_heartbeatTick').mockResolvedValue()
     observer.onJoin(() => {})
     await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
     expect(heartbeat).toHaveBeenCalledOnce()
@@ -1158,7 +1158,7 @@ describe('Room public behavior', () => {
     await first.close()
     // A replan, and the roster refresh it starts, while the recovery reads the head.
     observer.onLeave(() => {})
-    await subsOf(observer).ensureRoster()
+    await syncOf(observer).ensureRoster()
     headRead.resolve()
     await vi.advanceTimersByTimeAsync(100)
     expect(opens).toBe(2)
@@ -1177,7 +1177,7 @@ describe('Room public behavior', () => {
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
     // The roster is read first, so the lane's own pass is the only one before the heartbeat.
     observer.onJoin(() => {})
-    await subsOf(observer).ensureRoster()
+    await syncOf(observer).ensureRoster()
     observer.subscribe(() => {})
     await vi.advanceTimersByTimeAsync(100)
     // The lane and its one replacement; the next attempt waits for the heartbeat.
@@ -2082,7 +2082,7 @@ describe('Room public behavior', () => {
     await expect(Room.setMeta(room.id, { b: 1 })).rejects.toThrow('crashed')
     crashing.mockRestore()
     expect((await generations()).size).toBe(2)
-    await subsOf(observer).reconcileAuthority() // the heartbeat's
+    await syncOf(observer).reconcileAuthority() // the heartbeat's
     expect((await generations()).size).toBe(1)
     crashing = crashDrops()
     await expect(Room.setMeta(room.id, { c: 1 })).rejects.toThrow('crashed')
@@ -2621,7 +2621,7 @@ describe('Room public behavior', () => {
       })
       .mockImplementationOnce(async () => {
         vi.setSystemTime(Date.now() + ROOM_HEARTBEAT_INTERVAL_MS)
-        await subsOf(room)._heartbeatTick()
+        await syncOf(room)._heartbeatTick()
         throw new Error('backend unavailable')
       })
     await expect(room.join()).rejects.toThrow('Connection is closed.')
@@ -2645,7 +2645,7 @@ describe('Room public behavior', () => {
     await Room.removeParticipant(room.id, { identity: 'user-1' })
     kicked.resolve()
     expect(isRoomError(await joining)).toBe(true)
-    await subsOf(observer).reconcileAuthority()
+    await syncOf(observer).reconcileAuthority()
     expect([room.count, observer.count]).toEqual([0, 0])
   })
   it("leaves no unhandled rejection behind a participant's un-awaited publish, binary publish or DM that fails", async () => {
@@ -3974,7 +3974,7 @@ describe('Room public behavior', () => {
     const room = (await Room.create('roster-error-event')) as ServerRoom
     const stub = register(room)
     const failure = new Error('backend roster read failed')
-    const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValue(failure)
+    const ensureRoster = vi.spyOn(syncOf(room), 'ensureRoster').mockRejectedValue(failure)
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const peer = attachPeer(stub)
     const rosterError = () => relayed(peer).find(({ __r }) => __r === 'roster-error')
@@ -3988,18 +3988,18 @@ describe('Room public behavior', () => {
   it('sends a stub its roster after the next successful refresh once its first roster read failed', async () => {
     const room = (await Room.create('roster-error-recovery')) as ServerRoom
     const stub = register(room)
-    vi.spyOn(subsOf(room), 'ensureRoster').mockRejectedValueOnce(new Error('backend roster read failed'))
+    vi.spyOn(syncOf(room), 'ensureRoster').mockRejectedValueOnce(new Error('backend roster read failed'))
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const peer = attachPeer(stub)
     const events = () => relayed(peer).map(({ __r }) => __r)
     await vi.waitFor(() => expect(events()).toContain('roster-error'))
-    await subsOf(room)._refreshMembers()
+    await syncOf(room).refreshMembers()
     expect(events()).toEqual(['update', 'roster-error', 'roster'])
   })
   it('replays a committed server-pushed roster after reconnect, then sends a fresh one', async () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
     const stub = register(room)
-    const ensureRoster = vi.spyOn(subsOf(room), 'ensureRoster')
+    const ensureRoster = vi.spyOn(syncOf(room), 'ensureRoster')
     const first = attachPeer(stub)
     await vi.waitFor(() => expect(relayed(first).map(({ __r }) => __r)).toContain('roster'))
     stub._onPeerDisconnect(first.peer, 1_000)
@@ -5193,7 +5193,7 @@ describe('room protocol validation', () => {
       async (...args) => (await roundTrip(), exchange(...args)),
     )
     const started = performance.now()
-    await subsOf(room)._heartbeatTick()
+    await syncOf(room)._heartbeatTick()
     // One renewal after another, the renewals alone take 20,000 round trips.
     expect(performance.now() - started).toBeLessThanOrEqual(2_000)
     expect(await Room.getParticipants(room.id)).toHaveLength(10_000)
@@ -5482,7 +5482,7 @@ describe('a room nothing holds closes on its own', () => {
     for (let page = 0; page < 300; page++) await views.get(register(room))
     const writes = vi.spyOn(driver, 'compareExchangeCells')
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const tick = captureOutcome(subsOf(room)._heartbeatTick())
+    const tick = captureOutcome(syncOf(room)._heartbeatTick())
     const join = captureOutcome(room.join())
     await vi.advanceTimersByTimeAsync(5_000)
     const viewWrites = writes.mock.calls.filter(([, , cx]) => cx.mutations.some(({ key }) => key.startsWith('v:')))
@@ -5722,14 +5722,18 @@ function subsOf(room: Room | ServerRoom): {
   _inbox: Map<string, LaneSubscription>
   memberOwned(member: string): void
   memberChanged(member: string): void
-  _refreshMembers(): Promise<void>
-  _heartbeatTick(): Promise<void>
   replan(): Promise<void>
   binaryReady(): Promise<void>
+} {
+  return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+}
+function syncOf(room: Room | ServerRoom): {
+  refreshMembers(): Promise<void>
+  _heartbeatTick(): Promise<void>
   ensureRoster(): Promise<void>
   reconcileAuthority(): Promise<void>
 } {
-  return (room as unknown as { _subs: ReturnType<typeof subsOf> })._subs
+  return (room as unknown as { _sync: ReturnType<typeof syncOf> })._sync
 }
 /** The control lane the room's replica subscribes. */
 function controlOf(room: Room | ServerRoom): LaneSubscription {

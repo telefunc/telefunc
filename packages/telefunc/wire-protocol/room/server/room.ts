@@ -50,6 +50,7 @@ import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
 import { PendingDmAcks } from './dm-acks.js'
 import { RoomSubscriptions } from './subscriptions.js'
+import { AuthoritySync } from './authority-sync.js'
 import { RoomReplica, type PresenceEvent } from './replica.js'
 import { RosterStream } from './roster-stream.js'
 import { RoomWrites, runAfterHook } from './writes.js'
@@ -124,6 +125,7 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _report = new DemandReport(() => this._replica.demand)
   private _replicaOf: RoomReplica
   private readonly _subs: RoomSubscriptions
+  /** @internal */ readonly _sync: AuthoritySync
   /** @internal */ readonly _roster: RosterStream
   /** @internal */ readonly _writes: RoomWrites
 
@@ -142,8 +144,8 @@ class ServerRoom extends RoomStateView implements Room {
       meta: stored.entries,
       seed,
       metaSeq: stored.seq,
-      onMetaWaiting: () => this._subs.metaWaiting(),
-      onMemberMetaGap: () => this._subs.memberMetaGap(),
+      onMetaWaiting: () => this._sync.metaWaiting(),
+      onMemberMetaGap: () => this._sync.memberMetaGap(),
       onListenersChanged: (member, binary) => {
         this._onHolderTextChanged(this._local, this._local.refreshText(member))
         if (binary !== null && this._local.applyBinary(binary)) this._onHolderBinaryChanged(this._local, binary)
@@ -154,7 +156,8 @@ class ServerRoom extends RoomStateView implements Room {
     this._local = new LocalHolder(this._state, this._localSuppressed)
     this._replicaOf = RoomReplica.of(roomId, inc)
     this._subs = new RoomSubscriptions(this, this._report)
-    this._roster = new RosterStream(this._state, this._stubs, () => this._subs.ensureRoster())
+    this._sync = new AuthoritySync(this, this._subs)
+    this._roster = new RosterStream(this._state, this._stubs, () => this._sync.ensureRoster())
     this._writes = new RoomWrites(this, {
       guards: () => this._guards,
       local: (id) => this._localParticipants.get(id),
@@ -199,18 +202,18 @@ class ServerRoom extends RoomStateView implements Room {
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
     assertKnownOptions(options, ['hidden'], 'getParticipants()')
-    await this._subs.ensureRoster()
+    await this._sync.ensureRoster()
     return options?.hidden ? this._state.listHidden() : this._state.listVisible()
   }
 
   async getParticipant(id: string): Promise<RemoteParticipant | null> {
-    await this._subs.ensureRoster()
+    await this._sync.ensureRoster()
     return this._state.getRemote(id)
   }
 
   snapshot(): RoomSnapshotView {
     // Loads the members for the next snapshot; their arrival fires onChange.
-    if (!this._state.rosterKnown) void this._subs.ensureRoster().catch(reportRoomError)
+    if (!this._state.rosterKnown) void this._sync.ensureRoster().catch(reportRoomError)
     return this._state.snapshot()
   }
 
@@ -562,7 +565,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
   async _replayRetainedText(holder: LaneHolder, before: TextWantsChange): Promise<void> {
     if (before.all) return
-    await this._subs.ensureRoster()
+    await this._sync.ensureRoster()
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this._subs.semanticReady)
     const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
@@ -580,7 +583,7 @@ class ServerRoom extends RoomStateView implements Room {
    *  retained lanes it covers. As with text, a frame replays only while its member is in the roster: a leave clears the
    *  member's retained frames, and one read just before that is gone with it. */
   async _replayRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange): Promise<void> {
-    await this._subs.ensureRoster()
+    await this._sync.ensureRoster()
     await (member === null ? this._subs.binaryReady() : this._subs.pairsReady(member, track))
     const backend = getRoomBackend()
     const lanes: LaneId[] =
