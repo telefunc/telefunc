@@ -6,6 +6,7 @@ import type {
   BackendReceiver,
   BroadcastRoute,
   Deferred,
+  OrderingInfo,
   RoomSubscriptionSource,
   SubscriptionAttempt,
   SubscriptionBinding,
@@ -35,10 +36,22 @@ type Connection =
 
 type Connected = Extract<Connection, { phase: 'connected' }>
 
+/** A lane's last seq delivered, and the frames that arrived past a missing one, by seq, until it arrives or the wait
+ *  ends. */
+type LaneOrder = {
+  last: number
+  held: Map<number, HeldFrame> | null
+  release: ReturnType<typeof setTimeout> | null
+}
+type HeldFrame = { payload: Uint8Array; info: OrderingInfo; token: string | null }
+
 const textDecoder = new TextDecoder()
 
 const RECONNECT_DELAY_MIN_MS = 50
 const RECONNECT_DELAY_MAX_MS = 2_000
+// Redis Cluster forwards a channel's frames from the old and the new slot owner over separate bus links during a
+// reshard or a failover, so the old owner's last frame can arrive after the new owner's first.
+const REORDER_WAIT_MS = 1_000
 
 /**
  * Redis's only backend-specific subscription edge: one subscriber connection, its channels refcounted
@@ -294,9 +307,9 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
 class RedisSubscriptionAttempt extends DriverAttempt {
   readonly channels: readonly string[]
   private readonly _fences = new Map<string, Deferred<void>>()
-  /** The last seq delivered per lane: an every-track or every-member channel carries many binary lanes, keyed by lane
-   *  key; any other channel one lane, keyed `''`. */
-  private readonly _lastSequence = new Map<string, number>()
+  /** Each lane's order: an every-track or every-member channel carries many binary lanes, keyed by lane key; any other
+   *  channel one lane, keyed `''`. */
+  private readonly _orders = new Map<string, LaneOrder>()
   private readonly _fanIn: boolean
 
   constructor(
@@ -313,6 +326,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   }
 
   async unsubscribe(): Promise<void> {
+    this._dropHeld()
     for (const token of [...this._fences.keys()]) this.settleFence(token)
     this.transition('closed', new Error(`Redis subscription '${this.laneChannel}' was closed`))
     this._onDetach()
@@ -338,18 +352,21 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   markReady(): void {
     if (!this.awaitsConfirmation()) return
     // Frames published while lost are gone; a Redis restarted without its data may restart the sequence.
-    this._lastSequence.clear()
+    this._orders.clear()
     this.transition('ready')
   }
 
   terminate(error: unknown): void {
     if (this.ended) return
+    this._dropHeld()
     this._rejectFences(error)
     this.transition('closed', error)
   }
 
   lose(error: unknown): void {
     if (this.state() !== 'ready') return
+    // What arrived goes out: what it waits for can no longer arrive on this connection.
+    for (const order of this._orders.values()) if (order.held !== null) this._release(order)
     this._rejectFences(error)
     this.transition('lost')
   }
@@ -358,16 +375,14 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     if (channel === this.invalidationChannel)
       return this.terminate(new Error('Redis generation subscription was invalidated'))
     if (this.state() !== 'ready') return
-    if (message[0] !== REDIS_DELIVERY_FENCE_BYTE) return this._deliver(message)
-    // The commit's fence settles once its frame was handled, delivered or dropped.
-    try {
-      this._deliver(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH))
-    } finally {
-      this.settleFence(message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH))
-    }
+    if (message[0] !== REDIS_DELIVERY_FENCE_BYTE) return this._order(message, null)
+    const token = message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)
+    this._order(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH), token)
   }
 
-  private _deliver(frame: Buffer): void {
+  /** Delivers each lane in seq order: a frame past a missing seq waits `REORDER_WAIT_MS` for it, and one at or below
+   *  the last delivered is dropped. Its commit's fence settles once it is delivered or dropped. */
+  private _order(frame: Buffer, token: string | null): void {
     let lane = ''
     if (this._fanIn) {
       const end = 2 + frame.readUInt16BE(0)
@@ -375,13 +390,69 @@ class RedisSubscriptionAttempt extends DriverAttempt {
       frame = frame.subarray(end)
     }
     const { payload, info } = decodeOrderingFrame(frame)
-    // Redis Cluster can forward publications from the old and new slot owners over independent bus
-    // paths during resharding. Preserve ordered at-most-once delivery by dropping a frame late on its
-    // own lane; gaps remain loss, never replay.
-    if (info.seq <= (this._lastSequence.get(lane) ?? 0)) return
-    this._lastSequence.set(lane, info.seq)
-    const text = !('roomId' in this.source) && this.source.kind === 'text'
-    this._receiver(text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
+    const order = this._orders.get(lane)
+    if (order === undefined) {
+      this._orders.set(lane, { last: info.seq, held: null, release: null })
+      return this._deliver(payload, info, token)
+    }
+    if (info.seq === order.last + 1) {
+      order.last = info.seq
+      this._deliver(payload, info, token)
+      if (order.held !== null) this._drain(order)
+      return
+    }
+    if (info.seq <= order.last || order.held?.has(info.seq)) return this._settle(token)
+    ;(order.held ??= new Map()).set(info.seq, { payload, info, token })
+    if (order.release !== null) return
+    order.release = setTimeout(() => this._release(order), REORDER_WAIT_MS)
+    order.release.unref()
+  }
+
+  /** The held frames that now follow in order. */
+  private _drain(order: LaneOrder): void {
+    const held = order.held!
+    for (let next = held.get(order.last + 1); next !== undefined; next = held.get(order.last + 1)) {
+      // A receiver may close the lane.
+      if (this.state() !== 'ready') return
+      held.delete(next.info.seq)
+      order.last = next.info.seq
+      this._deliver(next.payload, next.info, next.token)
+    }
+    if (held.size > 0) return
+    clearTimeout(order.release!)
+    order.held = null
+    order.release = null
+  }
+
+  /** The wait ended: every held frame goes out in seq order, past what never arrived. */
+  private _release(order: LaneOrder): void {
+    clearTimeout(order.release!)
+    const held = [...order.held!.values()].sort((a, b) => a.info.seq - b.info.seq)
+    order.held = null
+    order.release = null
+    for (const frame of held) {
+      if (this.state() !== 'ready') return
+      order.last = frame.info.seq
+      this._deliver(frame.payload, frame.info, frame.token)
+    }
+  }
+
+  private _dropHeld(): void {
+    for (const order of this._orders.values()) if (order.release !== null) clearTimeout(order.release)
+    this._orders.clear()
+  }
+
+  private _deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
+    try {
+      const text = !('roomId' in this.source) && this.source.kind === 'text'
+      this._receiver(text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
+    } finally {
+      this._settle(token)
+    }
+  }
+
+  private _settle(token: string | null): void {
+    if (token !== null) this.settleFence(token)
   }
 
   private _rejectFences(error: unknown): void {

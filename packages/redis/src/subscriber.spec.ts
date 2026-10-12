@@ -10,6 +10,7 @@ import {
 } from 'telefunc/__internal'
 import { RedisSubscriptionDriver } from './subscriber.js'
 import { channelKey, commitChannels } from './keys.js'
+import { REDIS_DELIVERY_FENCE_BYTE } from './commands.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
 function untilReady(attempt: SubscriptionAttempt): Promise<void> {
@@ -197,6 +198,65 @@ test('an every-member lane drops a frame only when it is late on its own lane, a
   ] as const)
     sockets[0]!.deliver(channel, everyTrackFrame(`binary:${member}:mic`, seq, member))
   expect(received).toEqual(['a@5', 'b@1', 'b@2', 'a@6'])
+})
+
+test('a frame that arrives past a missing one waits for it, and both go out in order on their own lane', async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets)
+  const received: string[] = []
+  const attempt = openAttempt(
+    driver,
+    { roomId: 'room', inc: 'inc', lane: { kind: 'binary-track', track: 'mic' } },
+    (payload, info) => void received.push(`${new TextDecoder().decode(payload as Uint8Array)}@${info.seq}`),
+  )
+  await untilReady(attempt)
+  const channel = channelKey('tf:', 'room', 'inc', 'binary-track:mic')
+  for (const [member, seq] of [
+    ['a', 1],
+    ['a', 3],
+    ['b', 7],
+    ['a', 4],
+    ['b', 8],
+    ['a', 2],
+  ] as const)
+    sockets[0]!.deliver(channel, everyTrackFrame(`binary:${member}:mic`, seq, member))
+  expect(received).toEqual(['a@1', 'b@7', 'b@8', 'a@2', 'a@3', 'a@4'])
+})
+
+test('a frame whose predecessor never arrives goes out after the wait, and the predecessor arriving later is dropped', async () => {
+  vi.useFakeTimers()
+  onTestFinished(() => void vi.useRealTimers())
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets)
+  const received: string[] = []
+  const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const
+  const attempt = openAttempt(
+    driver,
+    source,
+    (payload) => void received.push(new TextDecoder().decode(payload as Uint8Array)),
+  )
+  await vi.advanceTimersByTimeAsync(0)
+  await untilReady(attempt)
+  const channel = sockets[0]!.subscribed[0]![0]!
+  sockets[0]!.deliver(channel, orderingFrame(1, 'one'))
+  sockets[0]!.deliver(channel, orderingFrame(3, 'three'))
+  await vi.advanceTimersByTimeAsync(999)
+  expect(received).toEqual(['one'])
+  await vi.advanceTimersByTimeAsync(1)
+  expect(received).toEqual(['one', 'three'])
+  const fence = driver.prepareFence(
+    commitChannels('tf:', source.roomId, source.inc, source.lane, encodeLaneKey(source.lane)),
+  )
+  const token = fence.tokens.lane
+  const late = orderingFrame(2, 'two')
+  const fenced = new Uint8Array(1 + token.length + late.byteLength)
+  fenced[0] = REDIS_DELIVERY_FENCE_BYTE
+  fenced.set(new TextEncoder().encode(token), 1)
+  fenced.set(late, 1 + token.length)
+  sockets[0]!.deliver(channel, fenced)
+  await expect(fence.delivery).resolves.toBeUndefined()
+  expect(received).toEqual(['one', 'three'])
+  await attempt.unsubscribe()
 })
 
 test("a fence resolves when its subscription's owner releases it: no receiver is left to hand off to", async () => {
