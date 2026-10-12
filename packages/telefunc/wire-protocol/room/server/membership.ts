@@ -17,7 +17,7 @@ import { getRoomBackend } from '../../backend/install.js'
 import { Slice } from '../slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_TTL_MS, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
-import { compareMetaEntries, metaObjectOf } from '../meta-state.js'
+import { compareMetaEntries } from '../meta-state.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import {
   leaveCauseToWire,
@@ -262,7 +262,7 @@ async function readMembersMetaCells(room: RoomIncarnation): Promise<Map<string, 
   return byMember
 }
 
-/** The member's meta from its generation's cells, sorted a run at a time and merged a slice per turn. */
+/** The member's meta from its generation's cells, sorted a run at a time, then merged and built a slice per turn. */
 async function memberMetaOf(id: string, gen: number, cells: MemberMetaCells): Promise<ParticipantMeta> {
   const runs: RoomMetaEntry[][] = []
   let run: RoomMetaEntry[] = []
@@ -278,7 +278,14 @@ async function memberMetaOf(id: string, gen: number, cells: MemberMetaCells): Pr
     if (slice.over) await slice.next()
   }
   runs.push(run.sort(compareMetaEntries))
-  return metaObjectOf(runs.length === 1 ? runs[0]! : await mergeRuns(runs))
+  const entries = runs.length === 1 ? runs[0]! : await mergeRuns(runs)
+  const meta: ParticipantMeta = {}
+  for (let i = 0; i < entries.length; i++) {
+    const [key, value] = entries[i]!
+    Object.defineProperty(meta, key, { value, enumerable: true, configurable: true, writable: true })
+    if (i % META_RUN_KEYS === 0 && slice.over) await slice.next()
+  }
+  return Object.freeze(meta)
 }
 
 /** Each renewal is its own compare-exchange; a failed one fails the call once all are tried. */

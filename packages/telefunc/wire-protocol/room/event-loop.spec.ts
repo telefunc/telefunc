@@ -475,6 +475,19 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
     expect([remote.meta.k0, seen.meta.k0]).toEqual([2, 2])
   }, 60_000)
+  it("reads a member's meta of 100,000 keys into a fresh view with the event loop turning", async () => {
+    const room = await create('member-meta-read-turns')
+    const member = await room.join({
+      meta: Object.fromEntries(Array.from({ length: 100_000 }, (_, i) => [`k${i}`, i])),
+    })
+    const read = async () => {
+      const { gap, value } = await longestGapWhile(async () => (await view(room.id)).getParticipant(member.id))
+      expect([Object.keys(value!.meta).length, value!.meta.k99999]).toEqual([100_000, 99_999])
+      return gap
+    }
+    // The shorter of two reads, so a scheduling hiccup in one is not read as a stall.
+    expect(Math.min(await read(), await read())).toBeLessThanOrEqual(50)
+  }, 60_000)
 })
 /** How many binary lanes the room holds: per track and every-track. */
 function binaryLanesOf(room: ServerRoom): number {

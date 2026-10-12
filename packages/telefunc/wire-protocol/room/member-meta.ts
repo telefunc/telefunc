@@ -1,6 +1,5 @@
 export { MemberMeta }
 
-import { ownMetadata } from './model.js'
 import type { MemberMetaUpdate } from './protocol.js'
 import type { ParticipantMeta } from './types.js'
 
@@ -9,7 +8,7 @@ import type { ParticipantMeta } from './types.js'
 const MEMBER_META_MERGES_HELD_MIN = 64
 
 /** A member's meta as a view keeps it: its updates apply in `seq` order, a merge in what it changed, and the object is
- *  built when read. */
+ *  built when read. What it is given is owned already, as an API argument copied or a frame or record decoded. */
 class MemberMeta {
   private _object: ParticipantMeta
   private _keys: number
@@ -19,7 +18,7 @@ class MemberMeta {
   private _seq: number
 
   constructor(meta: ParticipantMeta, seq: number) {
-    this._object = ownMetadata(meta)
+    this._object = Object.freeze(meta)
     this._keys = Object.keys(this._object).length
     this._seq = seq
   }
@@ -55,7 +54,7 @@ class MemberMeta {
   apply(update: MemberMetaUpdate): 'applied' | 'stale' | 'gap' {
     if (update.seq <= this._seq) return 'stale'
     if ('meta' in update) {
-      this._object = ownMetadata(update.meta)
+      this._object = Object.freeze(update.meta)
       this._keys = Object.keys(this._object).length
       this._merges = null
       this._mergedKeys = 0
@@ -63,9 +62,8 @@ class MemberMeta {
       return 'applied'
     }
     if (update.seq > this._seq + 1) return 'gap'
-    const attrs = ownMetadata(update.attrs)
-    ;(this._merges ??= []).push(attrs)
-    this._mergedKeys += Object.keys(attrs).length
+    ;(this._merges ??= []).push(update.attrs)
+    this._mergedKeys += Object.keys(update.attrs).length
     this._seq = update.seq
     if (this._mergedKeys > Math.max(MEMBER_META_MERGES_HELD_MIN, this._keys)) void this.object
     return 'applied'
