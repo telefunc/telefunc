@@ -22,7 +22,7 @@ import type {
   DirectoryPage,
 } from '../../../../backend/room/contract.js'
 import { assert } from '../../../../../utils/assert.js'
-import { encodeLaneKey, everyTrackLaneKey } from '../../../../backend/room/lane-key.js'
+import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds, isOpenIncarnation, type StoredHead } from '../../../../backend/room/semantics.js'
 import { Fanout, type RoomSessionNamespace } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
@@ -124,8 +124,9 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
         }
         const mark = advanceOrder(sql, inc, key, now)
         if (opts?.retain === true) installRetained(sql, inc, lane, payload, mark)
-        // A binary commit also reaches its member's every-track lane.
-        const laneKeys = lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member)] : [key]
+        // A binary commit also reaches its member's every-track lane and its track's every-member lane.
+        const laneKeys =
+          lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
         return { ...mark, routes: snapshotRoutes(sql, inc, laneKeys, now) }
       },
     )

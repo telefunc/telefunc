@@ -198,6 +198,39 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     ])
   })
 
+  it("delivers each member's binary commits on a track to its every-member subscription with its own lane's seq before the commit's delivery settles", async () => {
+    installRedis(ownClient(connect()), { prefix: uniquePrefix('every-member') })
+    onTestFinished(() => disposeBackend())
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'every-member',
+      { form: 'absent' },
+      { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
+    )
+    const received: string[] = []
+    const everyMember = backend.subscribeLane(
+      'every-member',
+      'inc',
+      { kind: 'binary-track', track: 'mic' },
+      (payload, info) => void received.push(`${Buffer.from(payload).toString()}@${info.seq}`),
+    )
+    onTestFinished(() => everyMember.unsubscribe())
+    await everyMember.ready
+    const seen: string[][] = []
+    for (const [member, track, text] of [
+      ['a', 'mic', 'a-1'],
+      ['b', 'mic', 'b-1'],
+      ['a', 'camera', 'camera'],
+      ['a', 'mic', 'a-2'],
+    ] as const) {
+      const commit = await backend.commitLane('every-member', 'inc', { kind: 'binary', member, track }, bytes(text))
+      if (!('accepted' in commit)) throw new Error('the room is gone')
+      await commit.delivery
+      seen.push([...received])
+    }
+    expect(seen).toEqual([['a-1@1'], ['a-1@1', 'b-1@1'], ['a-1@1', 'b-1@1'], ['a-1@1', 'b-1@1', 'a-2@2']])
+  })
+
   it("lists one member's retained binary lanes from that member's own set, which leaves the generation's keys once empty", async () => {
     const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('retained-of') })
     await backend.compareExchangeHead(

@@ -38,11 +38,13 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
             const key = roomSubscriptionSourceKey(source)
             if (lane.kind !== 'binary')
               return { key, sources: [source], weight: heldSendWeight('text', key, () => payload.byteLength, 'Room') }
-            // A binary commit also reaches its member's every-track lane, and its held bytes count against its member's.
+            // A binary commit also reaches its member's every-track lane and its track's every-member lane, and its held
+            // bytes count against its member's.
             const everyTrack = { roomId, inc, lane: { kind: 'binary-all', member: lane.member } } as const
+            const everyMember = { roomId, inc, lane: { kind: 'binary-track', track: lane.track } } as const
             return {
               key,
-              sources: [source, everyTrack],
+              sources: [source, everyTrack, everyMember],
               weight: heldSendWeight('binary', roomSubscriptionSourceKey(everyTrack), () => payload.byteLength, 'Room'),
             }
           })

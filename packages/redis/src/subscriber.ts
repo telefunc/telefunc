@@ -83,25 +83,28 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   /** Arms a delivery fence on the ready attempts of each channel the commit is published on: `delivery` settles once
    *  each saw the commit. */
   prepareFence(channels: CommitChannels): {
-    tokens: { lane: string; everyTrack: string }
+    tokens: { lane: string; everyTrack: string; everyMember: string }
     delivery: Promise<void>
     cancel(): void
   } {
     const token = randomUUID()
-    const arm = (channel: string) => {
-      const attempts = [...(this._byChannel.get(channel) ?? [])]
+    const arm = (channel: string | null) => {
+      const attempts = channel === null ? [] : [...(this._byChannel.get(channel) ?? [])]
       return { attempts, armed: attempts.flatMap((attempt) => attempt.prepareFence(token) ?? []) }
     }
-    const own = arm(channels.lane)
-    const everyTrack = channels.everyTrack === null ? { attempts: [], armed: [] } : arm(channels.everyTrack)
-    const delivery = Promise.all([...own.armed, ...everyTrack.armed]).then(() => {})
+    const lane = arm(channels.lane)
+    const everyTrack = arm(channels.everyTrack)
+    const everyMember = arm(channels.everyMember)
+    const all = [lane, everyTrack, everyMember]
+    const delivery = Promise.all(all.flatMap((channel) => channel.armed)).then(() => {})
     // A subscriber can drop before the commit awaiting this delivery returns.
     void delivery.catch(() => {})
+    const tokenOf = (channel: { armed: unknown[] }) => (channel.armed.length === 0 ? '' : token)
     return {
-      tokens: { lane: own.armed.length === 0 ? '' : token, everyTrack: everyTrack.armed.length === 0 ? '' : token },
+      tokens: { lane: tokenOf(lane), everyTrack: tokenOf(everyTrack), everyMember: tokenOf(everyMember) },
       delivery,
       cancel: () => {
-        for (const attempt of [...own.attempts, ...everyTrack.attempts]) attempt.settleFence(token)
+        for (const channel of all) for (const attempt of channel.attempts) attempt.settleFence(token)
       },
     }
   }
@@ -291,10 +294,10 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
 class RedisSubscriptionAttempt extends DriverAttempt {
   readonly channels: readonly string[]
   private readonly _fences = new Map<string, Deferred<void>>()
-  /** The last seq delivered per lane: an every-track channel carries each of its member's binary lanes, keyed by lane
+  /** The last seq delivered per lane: an every-track or every-member channel carries many binary lanes, keyed by lane
    *  key; any other channel one lane, keyed `''`. */
   private readonly _lastSequence = new Map<string, number>()
-  private readonly _everyTrack: boolean
+  private readonly _fanIn: boolean
 
   constructor(
     readonly source: RedisSubscriptionSource,
@@ -306,7 +309,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   ) {
     super()
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
-    this._everyTrack = 'roomId' in source && source.lane.kind === 'binary-all'
+    this._fanIn = 'roomId' in source && (source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track')
   }
 
   async unsubscribe(): Promise<void> {
@@ -366,7 +369,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
 
   private _deliver(frame: Buffer): void {
     let lane = ''
-    if (this._everyTrack) {
+    if (this._fanIn) {
       const end = 2 + frame.readUInt16BE(0)
       lane = frame.toString('latin1', 2, end)
       frame = frame.subarray(end)

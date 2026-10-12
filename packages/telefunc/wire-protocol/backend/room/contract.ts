@@ -8,6 +8,7 @@ export type {
   CellsRead,
   CommitOptions,
   DirectoryPage,
+  EveryMemberLane,
   EveryTrackLane,
   RetainedFrame,
   RetainedOf,
@@ -38,6 +39,9 @@ type LaneId =
 
 /** Subscribe-only: every binary commit of `member`, each with the seq of its own (member, track) lane. */
 type EveryTrackLane = { kind: 'binary-all'; member: string }
+
+/** Subscribe-only: every binary commit on `track`, of any member, each with the seq of its own (member, track) lane. */
+type EveryMemberLane = { kind: 'binary-track'; track: string }
 
 type RoomHead = {
   rev: string
@@ -123,7 +127,7 @@ type CommitResult = CommitAccepted | StaleCommit
 type RoomSubscriptionSource = {
   roomId: string
   inc: string
-  lane: LaneId | EveryTrackLane
+  lane: LaneId | EveryTrackLane | EveryMemberLane
 }
 
 /** What a backend implements for Room: durable heads, cells, lanes and retained frames, and lane subscriptions. */
@@ -164,7 +168,7 @@ type RoomBackend = Omit<RoomDriver, 'subscriptions'> & {
   subscribeLane(
     roomId: string,
     inc: string,
-    lane: LaneId | EveryTrackLane,
+    lane: LaneId | EveryTrackLane | EveryMemberLane,
     receiver: BackendReceiver,
   ): BackendSubscription
   dispose(): Promise<void>

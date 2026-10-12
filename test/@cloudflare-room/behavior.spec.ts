@@ -52,10 +52,11 @@ test('a room authority arms its alarm while it holds a route or an orphaned gene
   })
 })
 
-test("a binary commit reaches its lane's sessions and its member's every-track sessions", async () => {
+test("a binary commit reaches its lane's sessions, its member's every-track sessions and its track's every-member sessions", async () => {
   expect(await probe('/every-track')).toEqual({
-    receivers: [2, 1, 0, 2],
+    receivers: [3, 1, 1, 3],
     everyTrack: ['camera-1', 'mic-1', 'camera-2'],
+    everyMember: ['camera-1', 'other', 'camera-2'],
     camera: ['camera-1', 'camera-2'],
   })
 })

@@ -176,6 +176,29 @@ test('an every-track lane drops a frame only when it is late on its own lane, as
   expect(received).toEqual(['camera@5', 'mic@1', 'mic@2', 'camera@6'])
 })
 
+test('an every-member lane drops a frame only when it is late on its own lane, as a Cluster resharding can deliver it', async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets)
+  const received: string[] = []
+  const attempt = openAttempt(
+    driver,
+    { roomId: 'room', inc: 'inc', lane: { kind: 'binary-track', track: 'mic' } },
+    (payload, info) => void received.push(`${new TextDecoder().decode(payload as Uint8Array)}@${info.seq}`),
+  )
+  await untilReady(attempt)
+  const channel = channelKey('tf:', 'room', 'inc', 'binary-track:mic')
+  for (const [member, seq] of [
+    ['a', 5],
+    ['b', 1],
+    ['a', 4],
+    ['b', 2],
+    ['b', 2],
+    ['a', 6],
+  ] as const)
+    sockets[0]!.deliver(channel, everyTrackFrame(`binary:${member}:mic`, seq, member))
+  expect(received).toEqual(['a@5', 'b@1', 'b@2', 'a@6'])
+})
+
 test("a fence resolves when its subscription's owner releases it: no receiver is left to hand off to", async () => {
   const sockets: ReturnType<typeof fakeSubscriber>[] = []
   const { driver } = driverWith(sockets)

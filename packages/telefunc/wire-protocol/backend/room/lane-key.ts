@@ -2,18 +2,20 @@ export {
   encodeLaneKey,
   decodeLaneKey,
   everyTrackLaneKey,
+  everyMemberLaneKey,
   binaryLaneKeyPrefix,
   inProcessBinaryLaneKey,
   roomSubscriptionSourceKey,
 }
 
 import { assert } from '../../../utils/assert.js'
-import type { EveryTrackLane, LaneId, RoomSubscriptionSource } from './contract.js'
+import type { EveryMemberLane, EveryTrackLane, LaneId, RoomSubscriptionSource } from './contract.js'
 
-function encodeLaneKey(lane: LaneId | EveryTrackLane): string {
+function encodeLaneKey(lane: LaneId | EveryTrackLane | EveryMemberLane): string {
   if (lane.kind === 'semantic' || lane.kind === 'control') return lane.kind
   if (lane.kind === 'inbox') return `inbox:${encodeURIComponent(lane.member)}`
   if (lane.kind === 'binary-all') return everyTrackLaneKey(lane.member)
+  if (lane.kind === 'binary-track') return everyMemberLaneKey(lane.track)
   return `${binaryLaneKeyPrefix(lane.member)}${encodeURIComponent(lane.track)}`
 }
 
@@ -33,7 +35,12 @@ function everyTrackLaneKey(member: string): string {
   return `binary-all:${encodeURIComponent(member)}`
 }
 
-/** A committed lane's key back to its lane; an every-track lane holds no commits of its own. */
+/** The key of the lane that receives every member's binary commits on `track`. */
+function everyMemberLaneKey(track: string): string {
+  return `binary-track:${encodeURIComponent(track)}`
+}
+
+/** A committed lane's key back to its lane; an every-track or every-member lane holds no commits of its own. */
 function decodeLaneKey(key: string): LaneId {
   if (key === 'semantic' || key === 'control') return { kind: key }
   const [kind, member = '', track = ''] = key.split(':')

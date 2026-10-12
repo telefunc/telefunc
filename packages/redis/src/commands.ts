@@ -262,15 +262,17 @@ return reply
 `
 
 // COMMIT: while the room is closing, only the close's control commit under its lease lands. A binary commit is also
-// published on its member's every-track channel, after its lane key's two-byte length and the key, so a receiver orders
-// it by its own lane; no lane key is long enough for that length's first byte to read as the fence byte.
+// published on its member's every-track channel and its track's every-member channel, after its lane key's two-byte
+// length and the key, so a receiver orders it by its own lane; no lane key is long enough for that length's first byte
+// to read as the fence byte.
 //   KEYS: [1]=head [2]=order: an inbox or binary lane's member's order hash, which holds it under its lane key, or
 //         another lane's own key [3]=retained [4]=channel [5]=generation-keys [6]=cell values
 //         [7]=a binary lane's member's every-track channel (another lane repeats [4])
 //         [8]=a retained binary lane's member's retained lanes [9]=its track's retained lanes (another commit repeats
-//         [3] for both)
+//         [3] for both) [10]=a binary lane's track's every-member channel (another lane repeats [4])
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
-//         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9..]=required live cells
+//         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9]=the same as [6] for
+//         [10] or '' [10..]=required live cells
 const COMMIT_LUA = `${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, generation_keys_key =
@@ -287,8 +289,8 @@ if head and head.inc == ARGV[1] then
   end
 end
 if not ok then return '{"stale":"incarnation"}' end
-for i = 9, #ARGV do
-  if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - 9) .. '}' end
+for i = 10, #ARGV do
+  if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - 10) .. '}' end
 end
 
 local member_lane = ARGV[2] == 'inbox' or ARGV[2] == 'binary'
@@ -333,9 +335,11 @@ local lane_message = frame
 if ARGV[6] ~= '' then lane_message = fence .. ARGV[6] .. frame end
 local receivers = redis.call('PUBLISH', channel_key, lane_message)
 if ARGV[2] == 'binary' then
-  local every_track_prefix = struct.pack('>I2', #ARGV[8]) .. ARGV[8]
-  if ARGV[7] ~= '' then every_track_prefix = fence .. ARGV[7] .. every_track_prefix end
-  receivers = receivers + redis.call('PUBLISH', KEYS[7], every_track_prefix .. frame)
+  local fan_in = struct.pack('>I2', #ARGV[8]) .. ARGV[8] .. frame
+  local every_track, every_member = fan_in, fan_in
+  if ARGV[7] ~= '' then every_track = fence .. ARGV[7] .. fan_in end
+  if ARGV[9] ~= '' then every_member = fence .. ARGV[9] .. fan_in end
+  receivers = receivers + redis.call('PUBLISH', KEYS[7], every_track) + redis.call('PUBLISH', KEYS[10], every_member)
 end
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
@@ -423,7 +427,7 @@ type CommitInput = RoomInc & {
   closingLease: string | undefined
   requiredCellKeys: readonly string[]
   /** Each channel's fence token, `''` where no local attempt awaits the commit. */
-  fenceTokens: { lane: string; everyTrack: string }
+  fenceTokens: { lane: string; everyTrack: string; everyMember: string }
 }
 type CommitReply =
   | { stale: 'incarnation' }
@@ -578,7 +582,7 @@ const REDIS_COMMANDS = {
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: 9,
+    numberOfKeys: 10,
     invoke: (prefix, input: CommitInput) => {
       const { roomId, inc, lane, laneKey, channels } = input
       const retained = retainedKey(prefix, roomId, inc, laneKey)
@@ -596,6 +600,7 @@ const REDIS_COMMANDS = {
           channels.everyTrack ?? channels.lane,
           indexed ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
           indexed ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
+          channels.everyMember ?? channels.lane,
         ],
         argv: [
           inc,
@@ -606,6 +611,7 @@ const REDIS_COMMANDS = {
           input.fenceTokens.lane,
           input.fenceTokens.everyTrack,
           laneKey,
+          input.fenceTokens.everyMember,
           ...input.requiredCellKeys,
         ],
       }

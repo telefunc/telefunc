@@ -310,13 +310,14 @@ async function pipelinedDelivery(env: Env, suffix: string) {
     settlements: await Promise.all(commits.map((commit) => rejectionOf(probe.settle(commit), 'pipelined settlement'))),
   }
 }
-// One session holds the camera lane of `m`, another its every-track lane.
+// One session holds the camera lane of `m`, another its every-track lane, a third the camera's every-member lane.
 async function everyTrackRoutes(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'every-track')
   await probe.open()
   for (const [role, laneKey] of [
     ['camera', 'binary:m:camera'],
     ['every-track', 'binary-all:m'],
+    ['every-member', 'binary-track:camera'],
   ] as const) {
     const sessionDoId = sessionOf(env, `${role}-${suffix}`).toString()
     const route = { roomId: probe.roomId, inc: probe.inc, laneKey, sessionDoId, leaseId: `${role}-${suffix}` }
@@ -336,7 +337,12 @@ async function everyTrackRoutes(env: Env, suffix: string) {
     receivers.push(commit.receivers)
   }
   const arrived = (role: string) => session(env, `${role}-${suffix}`).arrived()
-  return { receivers, everyTrack: await arrived('every-track'), camera: await arrived('camera') }
+  return {
+    receivers,
+    everyTrack: await arrived('every-track'),
+    everyMember: await arrived('every-member'),
+    camera: await arrived('camera'),
+  }
 }
 async function alarmScheduling(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)

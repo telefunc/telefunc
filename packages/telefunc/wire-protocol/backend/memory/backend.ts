@@ -69,6 +69,8 @@ type Generation = {
   subs: Subscriptions
   /** Every-track subscriptions by member id, so a binary commit finds its member's without building a key. */
   everyTrackSubs: Subscriptions
+  /** Every-member subscriptions by track, likewise. */
+  everyMemberSubs: Subscriptions
 }
 
 type RoomRecord = { head: StoredHead | null; gens: Map<string, Generation> }
@@ -120,6 +122,7 @@ function newGeneration(): Generation {
     retainedOfTrack: new Map(),
     subs: new Map(),
     everyTrackSubs: new Map(),
+    everyMemberSubs: new Map(),
   }
 }
 
@@ -365,19 +368,22 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       })
     }
     const targets = gen.subs.get(key) ?? NO_TARGETS
-    // A binary commit also reaches its member's every-track lane.
-    const everyTrack = lane.kind === 'binary' ? (gen.everyTrackSubs.get(lane.member) ?? NO_TARGETS) : NO_TARGETS
+    // A binary commit also reaches its member's every-track lane and its track's every-member lane.
+    const binary = lane.kind === 'binary'
+    const everyTrack = binary ? (gen.everyTrackSubs.get(lane.member) ?? NO_TARGETS) : NO_TARGETS
+    const everyMember = binary ? (gen.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
     // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
     const delivery = new Promise<void>((resolve) =>
       queueMicrotask(() =>
         this._deliver(() => {
           for (const target of targets) target.deliver(copyBytes(frame), mark)
           for (const target of everyTrack) target.deliver(copyBytes(frame), mark)
+          for (const target of everyMember) target.deliver(copyBytes(frame), mark)
           resolve()
         }),
       ),
     )
-    const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack)
+    const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack) + sumReceiverCounts(everyMember)
     return { accepted: true, ...mark, receivers, delivery }
   }
 
@@ -424,8 +430,16 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
       // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
       const gen = this._generation(room, inc)
-      subs = lane.kind === 'binary-all' ? gen.everyTrackSubs : gen.subs
-      key = lane.kind === 'binary-all' ? lane.member : encodeLaneKey(lane)
+      if (lane.kind === 'binary-all') {
+        subs = gen.everyTrackSubs
+        key = lane.member
+      } else if (lane.kind === 'binary-track') {
+        subs = gen.everyMemberSubs
+        key = lane.track
+      } else {
+        subs = gen.subs
+        key = encodeLaneKey(lane)
+      }
     } else {
       subs = this._state.broadcastSubs[source.kind]
       key = source.key
