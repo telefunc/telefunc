@@ -2,8 +2,6 @@ export { GossipOutbox }
 
 import { Fifo } from '../../../utils/Fifo.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { getRoomBackend } from '../../backend/install.js'
-import type { RoomBackend } from '../../backend/room/contract.js'
 import { ROOM_GOSSIP_IN_FLIGHT_MAX } from '../constants.js'
 import type { RoomCtrlEnvelope } from '../protocol.js'
 import { reportRoomError } from './errors.js'
@@ -12,10 +10,9 @@ import { Slice } from '../slice.js'
 assertIsNotBrowser()
 
 /** Commits a room's demand gossip in order, `ROOM_GOSSIP_IN_FLIGHT_MAX` at a time and a slice per turn, so a burst
- *  waits as events rather than as commits, and its deliveries leave the event loop turning. Each goes to the backend
- *  installed when it was told. */
+ *  waits as events rather than as commits, and its deliveries leave the event loop turning. */
 class GossipOutbox {
-  private _waiting = new Fifo<{ backend: RoomBackend; event: RoomCtrlEnvelope }>()
+  private _waiting = new Fifo<RoomCtrlEnvelope>()
   private _inFlight = 0
   private _closed = false
   /** While a burst is sent; `_yielding` while it waits for the next turn. */
@@ -29,7 +26,7 @@ class GossipOutbox {
 
   push(event: RoomCtrlEnvelope): void {
     if (this._closed) return
-    this._waiting.push({ backend: getRoomBackend(), event })
+    this._waiting.push(event)
     this._slice ??= new Slice()
     this._send()
   }
@@ -52,9 +49,9 @@ class GossipOutbox {
         })
         return
       }
-      const { backend, event } = this._waiting.shift()!
+      const event = this._waiting.shift()!
       // A stale commit is a closed room's: its gossip has no reader.
-      void commitRoomLane(this._roomId, this._inc, CONTROL_LANE, encodeRoomRecord(event), undefined, backend)
+      void commitRoomLane(this._roomId, this._inc, CONTROL_LANE, encodeRoomRecord(event))
         .catch(reportRoomError)
         .finally(() => {
           this._inFlight--
