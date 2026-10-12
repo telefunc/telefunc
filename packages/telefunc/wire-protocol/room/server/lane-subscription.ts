@@ -13,6 +13,7 @@ class LaneSubscription {
   private _unobserve: (() => void) | null = null
   private _readyPromise = Promise.resolve()
   private _resolveReady: (() => void) | null = null
+  private _delivering = false
 
   constructor(
     private readonly _onTerminal: (slot: LaneSubscription, error?: unknown) => void,
@@ -32,6 +33,11 @@ class LaneSubscription {
     return this._subscribe !== null
   }
 
+  /** Whether an attempt was ready since the slot started; a loss or a dropped attempt keeps it. */
+  get delivering(): boolean {
+    return this._delivering
+  }
+
   get ready(): Promise<void> {
     return this._readyPromise
   }
@@ -47,6 +53,11 @@ class LaneSubscription {
     this._subscribe = subscribe
     if (this._subscription !== null) return
     this.retry()
+  }
+
+  /** Opens an attempt of a wanted slot that has none: the planning pass after its recovery gave up. */
+  resume(): void {
+    if (this._subscription === null) this.retry()
   }
 
   retry(): void {
@@ -98,6 +109,7 @@ class LaneSubscription {
 
   stop(): void {
     this._subscribe = null
+    this._delivering = false
     this.dropAttempt()
     this._settleReady()
     this._readyPromise = Promise.resolve()
@@ -121,6 +133,7 @@ class LaneSubscription {
   }
 
   private _settleReady(): void {
+    if (this._subscribe !== null) this._delivering = true
     if (this._resolveReady === null) return
     this._resolveReady()
     this._resolveReady = null

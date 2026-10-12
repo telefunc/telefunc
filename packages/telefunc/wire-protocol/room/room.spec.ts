@@ -1088,6 +1088,82 @@ describe('Room public behavior', () => {
     expect(subsOf(observer as ServerRoom)._semantic.established).toBe(true)
     expect(observer.isClosed).toBe(false)
   })
+  it.each([
+    ['a named track', 'binary', { track: 'camera' }],
+    ['every track', 'binary-all', {}],
+  ] as const)(
+    'resubscribes the binary lane of %s on the heartbeat when its one replacement fails',
+    async (_, kind, options) => {
+      vi.useFakeTimers()
+      const authority = await Room.create(`binary-recovery-heartbeat-${kind}`)
+      const publisher = await authority.join()
+      const observer = (await Room.get(authority.id)) as ServerRoom
+      let first: ReturnType<typeof terminalSubscription> | undefined
+      let opens = 0
+      mockLaneSubscription(kind, (subscribeLane, roomId, inc, lane, receiver) => {
+        opens++
+        if (opens === 1) return (first = terminalSubscription(subscribeLane(roomId, inc, lane, receiver))).subscription
+        if (opens === 2) return rejectedSubscription('replacement refused')
+        return subscribeLane(roomId, inc, lane, receiver)
+      })
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const received: number[] = []
+      observer.subscribeBinary((data) => received.push(data[0]!), options)
+      await vi.advanceTimersByTimeAsync(100)
+      await first!.close()
+      await vi.advanceTimersByTimeAsync(100)
+      // The lane and its one replacement; the next attempt waits for the heartbeat.
+      expect(opens).toBe(2)
+      await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+      expect(opens).toBe(3)
+      await publisher.publishBinary(new Uint8Array([2]), options)
+      await vi.advanceTimersByTimeAsync(100)
+      expect(received).toEqual([2])
+    },
+  )
+  it.each([
+    ['a named track', 'binary', { track: 'camera' }, 'camera'],
+    ['every track', 'binary-all', {}, null],
+  ] as const)(
+    "reports the demand for %s once its lane delivers, first ready after Room's horizon",
+    async (_, kind, options, track) => {
+      vi.useFakeTimers()
+      const authority = await Room.create(`late-binary-demand-${kind}`)
+      const publisher = await authority.join()
+      const observer = (await Room.get(authority.id)) as ServerRoom
+      const lane = delayLaneSubscription((subscribed) => subscribed.kind === kind)
+      const demand: Array<[string | null, boolean]> = []
+      publisher.onDemand((changed, wanted) => demand.push([changed, wanted]))
+      observer.subscribeBinary(() => {}, options)
+      await lane.started
+      await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 1000)
+      expect(demand).toEqual([])
+      await lane.release()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(demand).toEqual([[track, true]])
+    },
+  )
+  it("releases a member's every-track lane once the named lane replacing it delivers, first ready after Room's horizon", async () => {
+    vi.useFakeTimers()
+    const authority = await Room.create('late-named-lane-release')
+    const publisher = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const stopEveryTrack = observer.subscribeBinary(() => {})
+    await vi.advanceTimersByTimeAsync(100)
+    const named = delayLaneSubscription((lane) => lane.kind === 'binary')
+    observer.subscribeBinary(() => {}, { track: 'camera' })
+    stopEveryTrack()
+    await named.started
+    await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 1000)
+    const camera = encodeLaneKey({ kind: 'binary', member: publisher.id, track: 'camera' })
+    expect(binaryLanes(observer)).toEqual([everyTrackLaneKey(publisher.id), camera].sort())
+    await named.release()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(binaryLanes(observer)).toEqual([camera])
+    // The heartbeat's replan of the member finds nothing to do.
+    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+    expect(binaryLanes(observer)).toEqual([camera])
+  })
   it('keeps an authoritative open Room open after subscription recovery exhausts', async () => {
     const observer = (await Room.get((await Room.create('open-recovery-exhaustion')).id)) as ServerRoom
     const { backend } = rejectLaneSubscriptions('semantic', 'persistent subscription failure')
