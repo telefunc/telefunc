@@ -12,6 +12,7 @@ export type {
   RoomRosterEvent,
   RoomDemandEvent,
   RoomCtrlEnvelope,
+  DemandEntry,
   RoomMetaEntry,
   RoomMetaUpdate,
   RoomDataEnvelope,
@@ -101,13 +102,13 @@ type RoomCtrlEnvelope =
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | ({ __r: 'p-meta'; id: string; hidden?: boolean } & MemberMetaUpdate)
   | RoomMetaUpdate
-  // Demand gossip between instances, never relayed to clients: a track of a member, every track the member publishes
-  // (`track: null`), or a track of every member (`member: null`), which the instance receives from the members it covers.
-  | { __r: 'want'; member: string; track: string | null; instance: string; on: boolean }
-  | { __r: 'want'; member: null; track: string; instance: string; on: boolean }
-  | { __r: 'covers'; member: string; instance: string; on: boolean }
+  // Demand between instances, never relayed to clients.
+  | ({ __r: 'want'; instance: string; on: boolean } & DemandEntry)
   | { __r: 'closed' }
 
+/** What an instance receives: one track of a member, every track of a member (no `track`), or one track of every
+ *  member but `except`. `''` is the default track. */
+type DemandEntry = { member: string; track: string } | { member: string } | { track: string; except: readonly string[] }
 /** A room meta key with its place: the `meta:seq` the write that added it read, and its index in that write. */
 type RoomMetaEntry = [key: string, value: unknown, placeSeq: number, placeIndex: number]
 /** The room meta at `seq`, whole, or as the write at `seq` changed it: a key it removed as `[key]`. */

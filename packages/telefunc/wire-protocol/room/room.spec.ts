@@ -50,7 +50,7 @@ import { heldSendWeight } from '../backend/held-send-weight.js'
 import { MemberMessageTexts, ResponseRoomGrants, RoomParticipantStubChannel, RoomStubChannel } from './server/stub.js'
 import { TailHold } from './server/tail.js'
 import { WantsIndex } from './server/wants-index.js'
-import { RoomDemand } from './demand.js'
+import { type DemandReport, RoomDemand } from './demand.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from './response-server.js'
 import { roomRemoteReviver } from './response-client.js'
 import type { InternalClientReviverContext, InternalServerReplacerContext } from '../types.js'
@@ -59,7 +59,7 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId, RoomSubscriptionSource } from '../backend/room/contract.js'
-import { encodeLaneKey, everyTrackLaneKey } from '../backend/room/lane-key.js'
+import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/room/lane-key.js'
 import type {
   BackendReceiver,
   BackendSubscription,
@@ -930,7 +930,7 @@ describe('Room public behavior', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(flood.at(-1)!.value).toBeInstanceOf(ChannelOverflowError)
     release1()
-    const release2 = delayDriverLane((lane) => lane.kind === 'binary')
+    const release2 = delayDriverLane((lane) => lane.kind === 'binary-track')
     room.subscribeBinary(() => {}, { track: 'camera' })
     const pastBytes = captureOutcome(
       member.publishBinary(new Uint8Array(getServerConfig().channel.bufferLimitBinary + 1), { track: 'camera' }),
@@ -959,8 +959,23 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect([...received].sort()).toEqual(['camera:1', 'null:2']))
   })
   it.each([
-    ['its every-track lane', 'binary-all', (room: ServerRoom) => void room.subscribeBinary(() => {})],
-    ['its named lanes', 'binary', (room: ServerRoom, track: string) => void room.subscribeBinary(() => {}, { track })],
+    [
+      'its every-track lane',
+      'binary-all',
+      async (room: ServerRoom): Promise<void> => void room.subscribeBinary(() => {}),
+    ],
+    [
+      'its named lanes',
+      'binary',
+      async (room: ServerRoom, member: string, track: string): Promise<void> =>
+        void (await room.getParticipant(member))!.subscribeBinary(() => {}, { track }),
+    ],
+    [
+      'the every-member lanes of its tracks',
+      'binary-track',
+      async (room: ServerRoom, _member: string, track: string): Promise<void> =>
+        void room.subscribeBinary(() => {}, { track }),
+    ],
   ] as const)(
     'holds at most bufferLimitBinary of one member across its tracks behind %s',
     async (_, kind, subscribe) => {
@@ -968,7 +983,7 @@ describe('Room public behavior', () => {
       const member = await room.join()
       const tracks = trackNames(8)
       const release = delayDriverLane((lane) => lane.kind === kind)
-      for (const track of tracks) subscribe(room, track)
+      for (const track of tracks) await subscribe(room, member.id, track)
       // One frame of half the bound fits it; the other seven are past it.
       const half = new Uint8Array(getServerConfig().channel.bufferLimitBinary / 2)
       const outcomes = tracks.map((track) => captureOutcome(member.publishBinary(half, { track })))
@@ -1193,11 +1208,12 @@ describe('Room public behavior', () => {
     expect(observer.isClosed).toBe(false)
   })
   it.each([
-    ['a named track', 'binary', { track: 'camera' }],
-    ['every track', 'binary-all', {}],
+    ['a track of one member', 'binary', { track: 'camera' }, true],
+    ['a track of every member', 'binary-track', { track: 'camera' }, false],
+    ['every track', 'binary-all', {}, false],
   ] as const)(
     'resubscribes the binary lane of %s on the heartbeat when its one replacement fails',
-    async (_, kind, options) => {
+    async (_, kind, options, ofMember) => {
       vi.useFakeTimers()
       const authority = await Room.create(`binary-recovery-heartbeat-${kind}`)
       const publisher = await authority.join()
@@ -1212,7 +1228,8 @@ describe('Room public behavior', () => {
       })
       vi.spyOn(console, 'error').mockImplementation(() => {})
       const received: number[] = []
-      observer.subscribeBinary((data) => received.push(data[0]!), options)
+      const scope = ofMember ? (await observer.getParticipant(publisher.id))! : observer
+      scope.subscribeBinary((data) => received.push(data[0]!), options)
       await vi.advanceTimersByTimeAsync(100)
       await first!.close()
       await vi.advanceTimersByTimeAsync(100)
@@ -1226,11 +1243,12 @@ describe('Room public behavior', () => {
     },
   )
   it.each([
-    ['a named track', 'binary', { track: 'camera' }, 'camera'],
-    ['every track', 'binary-all', {}, null],
+    ['a track of one member', 'binary', { track: 'camera' }, 'camera', true],
+    ['a track of every member', 'binary-track', { track: 'camera' }, 'camera', false],
+    ['every track', 'binary-all', {}, null, false],
   ] as const)(
     "reports the demand for %s once its lane delivers, first ready after Room's horizon",
-    async (_, kind, options, track) => {
+    async (_, kind, options, track, ofMember) => {
       vi.useFakeTimers()
       const authority = await Room.create(`late-binary-demand-${kind}`)
       const publisher = await authority.join()
@@ -1238,7 +1256,8 @@ describe('Room public behavior', () => {
       const lane = delayLaneSubscription((subscribed) => subscribed.kind === kind)
       const demand: Array<[string | null, boolean]> = []
       publisher.onDemand((changed, wanted) => demand.push([changed, wanted]))
-      observer.subscribeBinary(() => {}, options)
+      const scope = ofMember ? (await observer.getParticipant(publisher.id))! : observer
+      scope.subscribeBinary(() => {}, options)
       await lane.started
       await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 1000)
       expect(demand).toEqual([])
@@ -1247,27 +1266,63 @@ describe('Room public behavior', () => {
       expect(demand).toEqual([[track, true]])
     },
   )
-  it("releases a member's every-track lane once the named lane replacing it delivers, first ready after Room's horizon", async () => {
-    vi.useFakeTimers()
-    const authority = await Room.create('late-named-lane-release')
-    const publisher = await authority.join()
-    const observer = (await Room.get(authority.id)) as ServerRoom
-    const stopEveryTrack = observer.subscribeBinary(() => {})
-    await vi.advanceTimersByTimeAsync(100)
-    const named = delayLaneSubscription((lane) => lane.kind === 'binary')
-    observer.subscribeBinary(() => {}, { track: 'camera' })
-    stopEveryTrack()
-    await named.started
-    await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 1000)
-    const camera = encodeLaneKey({ kind: 'binary', member: publisher.id, track: 'camera' })
-    expect(binaryLanes(observer)).toEqual([everyTrackLaneKey(publisher.id), camera].sort())
-    await named.release()
-    await vi.advanceTimersByTimeAsync(100)
-    expect(binaryLanes(observer)).toEqual([camera])
-    // The heartbeat's replan of the member finds nothing to do.
-    await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
-    expect(binaryLanes(observer)).toEqual([camera])
-  })
+  it.each([
+    ['the named lane', 'binary', true],
+    ['the every-member lane', 'binary-track', false],
+  ] as const)(
+    "releases a member's every-track lane once %s replacing it delivers, first ready after Room's horizon",
+    async (_, kind, ofMember) => {
+      vi.useFakeTimers()
+      const authority = await Room.create(`late-${kind}-lane-release`)
+      const publisher = await authority.join()
+      const observer = (await Room.get(authority.id)) as ServerRoom
+      const stopEveryTrack = observer.subscribeBinary(() => {})
+      await vi.advanceTimersByTimeAsync(100)
+      const named = delayLaneSubscription((lane) => lane.kind === kind)
+      const scope = ofMember ? (await observer.getParticipant(publisher.id))! : observer
+      scope.subscribeBinary(() => {}, { track: 'camera' })
+      stopEveryTrack()
+      await named.started
+      await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 1000)
+      const camera = ofMember
+        ? encodeLaneKey({ kind: 'binary', member: publisher.id, track: 'camera' })
+        : everyMemberLaneKey('camera')
+      expect(binaryLanes(observer)).toEqual([everyTrackLaneKey(publisher.id), camera].sort())
+      await named.release()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(binaryLanes(observer)).toEqual([camera])
+      // The heartbeat's replan of the member finds nothing to do.
+      await vi.advanceTimersByTimeAsync(ROOM_HEARTBEAT_INTERVAL_MS)
+      expect(binaryLanes(observer)).toEqual([camera])
+    },
+  )
+  it.each([
+    ['the named lane', 'binary', true],
+    ['the every-track lane', 'binary-all', false],
+  ] as const)(
+    "releases a track's every-member lane once %s replacing it delivers, first ready after Room's horizon",
+    async (_, kind, ofMember) => {
+      vi.useFakeTimers()
+      const authority = await Room.create(`late-every-member-${kind}-release`)
+      const publisher = await authority.join()
+      const observer = (await Room.get(authority.id)) as ServerRoom
+      const stopEveryMember = observer.subscribeBinary(() => {}, { track: 'camera' })
+      await vi.advanceTimersByTimeAsync(100)
+      const replacing = delayLaneSubscription((lane) => lane.kind === kind)
+      if (ofMember) (await observer.getParticipant(publisher.id))!.subscribeBinary(() => {}, { track: 'camera' })
+      else observer.subscribeBinary(() => {})
+      stopEveryMember()
+      await replacing.started
+      await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS + 1000)
+      const replacement = ofMember
+        ? encodeLaneKey({ kind: 'binary', member: publisher.id, track: 'camera' })
+        : everyTrackLaneKey(publisher.id)
+      expect(binaryLanes(observer)).toEqual([everyMemberLaneKey('camera'), replacement].sort())
+      await replacing.release()
+      await vi.advanceTimersByTimeAsync(100)
+      expect(binaryLanes(observer)).toEqual([replacement])
+    },
+  )
   it('keeps an authoritative open Room open after subscription recovery exhausts', async () => {
     const observer = (await Room.get((await Room.create('open-recovery-exhaustion')).id)) as ServerRoom
     const { backend } = rejectLaneSubscriptions('semantic', 'persistent subscription failure')
@@ -3501,8 +3556,8 @@ describe('Room public behavior', () => {
     try {
       declare(stub, { __r: 'sub-binary', member: publisher.id, track: 'screen', on: true })
       await roster.started
+      await vi.waitFor(() => expect(binaryLanes()).toBe(1))
       expect(observer._model.rosterKnown).toBe(false)
-      expect(binaryLanes()).toBe(1)
       await subsOf(observer).binaryReady()
       await publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
       const frame = attachPeer(stub)
@@ -3841,11 +3896,48 @@ describe('Room public behavior', () => {
     await observer.getParticipants()
     const subscribed = countBinarySubscriptions()
     const tracks = ['mic', 'camera', 'screen', 'screen-audio']
-    for (const track of tracks) observer.subscribeBinary(() => {}, { track })
+    for (const { id } of members) {
+      const participant = (await observer.getParticipant(id))!
+      for (const track of tracks) participant.subscribeBinary(() => {}, { track })
+    }
     await vi.waitFor(() => expect(binaryLanes(observer)).toHaveLength(members.length * tracks.length))
     await subsOf(observer).binaryReady()
-    expect(subscribed.filter((lane) => lane.kind === 'binary-all')).toEqual([])
+    expect(subscribed.filter((lane) => lane.kind !== 'binary')).toEqual([])
     expect(subscribed).toHaveLength(members.length * tracks.length)
+  })
+  it('fetches a few tracks wanted of every one of 100 members as one lane each', async () => {
+    const room = (await Room.create('few-tracks-every-member')) as ServerRoom
+    await Promise.all(Array.from({ length: 100 }, () => room.join()))
+    const observer = (await Room.get(room.id)) as ServerRoom
+    await observer.getParticipants()
+    const subscribed = countBinarySubscriptions()
+    const tracks = ['mic', 'camera', 'screen', 'screen-audio']
+    for (const track of tracks) observer.subscribeBinary(() => {}, { track })
+    await subsOf(observer).binaryReady()
+    expect(binaryLanes(observer)).toEqual(tracks.map(everyMemberLaneKey).sort())
+    expect(subscribed).toEqual(tracks.map((track) => ({ kind: 'binary-track', track })))
+  })
+  it("delivers a room-wide track's frames from a member whose join this view hasn't applied yet", async () => {
+    const authority = await Room.create('every-member-before-join')
+    const other = await anotherServer()
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
+    await observer.getParticipants()
+    const received: string[] = []
+    observer.subscribeBinary((data, _, from) => received.push(`${from.id}:${data[0]}`), { track: 'mic' })
+    await subsOf(observer).binaryReady()
+    const replica = observer._replica
+    const onControl = replica._onControl.bind(replica)
+    const joins: Array<() => void> = []
+    replica._onControl = (serialized, info) => {
+      if (serialized.includes('"__r":"join"')) joins.push(() => onControl(serialized, info))
+      else onControl(serialized, info)
+    }
+    const member = await authority.join()
+    await member.publishBinary(new Uint8Array([1]), { track: 'mic' })
+    await vi.waitFor(() => expect(received).toEqual([`${member.id}:1`]))
+    expect(joins).toHaveLength(1)
+    replica._onControl = onControl
+    for (const join of joins) join()
   })
   it("replays a retained frame on one of a member's 1,000 tracks once to a late every-track subscriber, and drops it when the member leaves", async () => {
     const room = await Room.create('retained-of-thousand')
@@ -4227,15 +4319,15 @@ describe('Room public behavior', () => {
     const a = await join()
     const observer = (await (await anotherServer()).Room.get(room.id)) as ServerRoom
     await observer.getParticipants()
-    const { demand, published } = spyGossip(observer)
+    const { report, published } = spyGossip(observer)
     const unsubscribe = tracks.map((track) => observer.subscribeBinary(() => {}, { track }))
     await vi.waitFor(() => expect(changesOf(a.id)).toEqual(sorted(all(true))))
     const b = await join()
     await vi.waitFor(() => expect(changesOf(b.id)).toEqual(sorted(all(true))))
-    // One entry per track and one per member, not one per pair.
+    // One entry per track, none per member.
     published.mockClear()
-    heartbeat(demand)
-    expect(published).toHaveBeenCalledTimes(tracks.length + 2)
+    heartbeat(report)
+    expect(published).toHaveBeenCalledTimes(tracks.length)
     // A want of `a` alone holds t0 for it while the want of every member comes and goes.
     const alone = (await observer.getParticipant(a.id))!.subscribeBinary(() => {}, { track: 't0' })
     await subsOf(observer).binaryReady()
@@ -5076,8 +5168,8 @@ describe('room demand lifecycle', () => {
     const owned = new Set(['member'])
     const delivered: Array<[string, string, boolean]> = []
     const demand = new RoomDemand(
-      () => {},
       (id) => owned.has(id),
+      () => owned,
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
     demand.applyWant({ __r: 'want', member: 'elsewhere', track: 'screen', instance: 'remote-a', on: true })
@@ -5112,51 +5204,58 @@ describe('room demand lifecycle', () => {
     vi.useFakeTimers()
     const delivered: Array<[string, string, boolean]> = []
     const demand = new RoomDemand(
-      () => {},
       () => true,
+      () => ['member'],
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
     demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'crashed', on: true })
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
-    heartbeat(demand)
+    expire(demand)
     expect(leasesHeld(demand)).toBeGreaterThan(0)
     vi.advanceTimersByTime(1)
-    heartbeat(demand)
+    expire(demand)
     expect(delivered).toEqual([
       ['member', 'screen', true],
       ['member', 'screen', false],
     ])
     expect(leasesHeld(demand)).toBe(0)
   })
-  it("pairs a reporter's tracks named of every member only with the members it covers, until their leases lapse", () => {
+  it("wants a reporter's track of every member of each owned member but those it receives it from none of, until its lease lapses", () => {
     vi.useFakeTimers()
+    const owned = ['a', 'b', 'c']
     const delivered: Array<[string, string, boolean]> = []
     const demand = new RoomDemand(
-      () => {},
-      () => true,
+      (id) => owned.includes(id),
+      () => owned,
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
-    demand.applyWant({ __r: 'want', member: null, track: 'screen', instance: 'crashed', on: true })
-    demand.applyWant({ __r: 'covers', member: 'a', instance: 'other', on: true })
-    expect(delivered).toEqual([])
-    demand.applyWant({ __r: 'covers', member: 'a', instance: 'crashed', on: true })
-    demand.applyWant({ __r: 'covers', member: 'b', instance: 'crashed', on: true })
-    expect(demand.wanted('a')).toEqual(['screen'])
-    vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
-    demand.applyWant({ __r: 'covers', member: 'a', instance: 'other', on: true })
-    heartbeat(demand)
-    vi.advanceTimersByTime(1)
-    heartbeat(demand)
+    demand.applyWant({ __r: 'want', track: 'screen', except: ['c'], instance: 'crashed', on: true })
     expect(delivered).toEqual([
       ['a', 'screen', true],
       ['b', 'screen', true],
+    ])
+    expect(demand.wanted('a')).toEqual(['screen'])
+    demand.applyWant({ __r: 'want', track: 'screen', except: ['a', 'b'], instance: 'other', on: true })
+    vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
+    // Renewed, now receiving it from every member but `a`.
+    demand.applyWant({ __r: 'want', track: 'screen', except: ['a'], instance: 'other', on: true })
+    expire(demand)
+    vi.advanceTimersByTime(1)
+    expire(demand)
+    expect(delivered).toEqual([
+      ['a', 'screen', true],
+      ['b', 'screen', true],
+      ['c', 'screen', true],
       ['a', 'screen', false],
-      ['b', 'screen', false],
     ])
     expect(leasesHeld(demand)).toBeGreaterThan(0)
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS)
-    heartbeat(demand)
+    expire(demand)
     expect(leasesHeld(demand)).toBe(0)
+    expect(delivered.slice(4)).toEqual([
+      ['b', 'screen', false],
+      ['c', 'screen', false],
+    ])
   })
 })
 describe('room protocol validation', () => {
@@ -5180,22 +5279,21 @@ describe('room protocol validation', () => {
     await vi.waitFor(() => expect(demanded.has('past')).toBe(true))
     expect(demanded.has('t0')).toBe(false)
   })
-  it('opens at most ROOM_MEMBER_NAMED_LANES_MAX + 1 lanes per member for a client naming ROOM_TRACK_WANTS_MAX tracks room-wide', async () => {
+  it('opens one lane per track and none per member for a client naming ROOM_TRACK_WANTS_MAX tracks room-wide', async () => {
     const room = (await Room.create('room-wide-track-wants')) as ServerRoom
-    const members = await Promise.all(Array.from({ length: 50 }, () => room.join()))
-    const bound = members.length * (ROOM_MEMBER_NAMED_LANES_MAX + 1)
+    await Promise.all(Array.from({ length: 50 }, () => room.join()))
     const stub = register(room)
     const subscribed = countBinarySubscriptions()
     const subs = subsOf(room)
-    for (const track of trackNames(ROOM_TRACK_WANTS_MAX)) {
-      declare(stub, { __r: 'sub-binary', member: null, track, on: true })
-      expect(subs._binary.size + subs._everyTrack.size).toBeLessThanOrEqual(bound)
-    }
-    await vi.waitFor(() => expect(binaryLanes(room)).toEqual(members.map(({ id }) => everyTrackLaneKey(id)).sort()))
-    expect(subscribed.length).toBeLessThanOrEqual(bound)
+    const tracks = trackNames(ROOM_TRACK_WANTS_MAX)
+    for (const track of tracks) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+    await subs.binaryReady()
+    expect(subs._binary.size + subs._everyTrack.size).toBe(0)
+    expect(binaryLanes(room)).toEqual(tracks.map(everyMemberLaneKey).sort())
+    expect(subscribed).toHaveLength(ROOM_TRACK_WANTS_MAX)
   })
   it.each([10, 50, 100])(
-    'gossips ROOM_TRACK_WANTS_MAX tracks a client names of every member once each, and one entry per member, among %i members',
+    'gossips ROOM_TRACK_WANTS_MAX tracks a client names of every member once each, and none per member, among %i members',
     async (count) => {
       const room = (await Room.create(`every-member-gossip-${count}`)) as ServerRoom
       const members = await Promise.all(Array.from({ length: count }, () => room.join()))
@@ -5204,24 +5302,21 @@ describe('room protocol validation', () => {
         member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
         return tracks
       })
-      const { demand, published } = spyGossip(room)
+      const { report, published } = spyGossip(room)
       const stub = register(room)
       for (const track of trackNames(ROOM_TRACK_WANTS_MAX))
         declare(stub, { __r: 'sub-binary', member: null, track, on: true })
       await vi.waitFor(() => expect(demanded.every((tracks) => tracks.size === ROOM_TRACK_WANTS_MAX)).toBe(true), {
         timeout: 10_000,
       })
-      // Beside the tracks, a member's named lanes may each report its pair until the every-track lane covers it.
-      expect(published.mock.calls.length).toBeLessThanOrEqual(
-        ROOM_TRACK_WANTS_MAX + count * (2 * ROOM_MEMBER_NAMED_LANES_MAX + 1),
-      )
+      expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX)
       published.mockClear()
-      heartbeat(demand)
-      expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX + count)
+      heartbeat(report)
+      expect(published).toHaveBeenCalledTimes(ROOM_TRACK_WANTS_MAX)
     },
   )
   it.each([1_000, 10_000])(
-    'opens no named lane for a client naming 64 tracks room-wide one by one among %i members, and gossips each track and each member once',
+    'opens one lane per track and none per member for a client naming 64 tracks room-wide one by one among %i members, and gossips each track once',
     async (count) => {
       const room = (await Room.create(`room-wide-burst-${count}`)) as ServerRoom
       const members = await Promise.all(Array.from({ length: count }, () => room.join()))
@@ -5242,9 +5337,8 @@ describe('room protocol validation', () => {
         timeout: 15_000,
       })
       clearInterval(sampler)
-      expect(subscribed.filter((lane) => lane.kind === 'binary')).toEqual([])
-      expect(subscribed).toHaveLength(count)
-      expect(published.mock.calls.length).toBeLessThanOrEqual(tracks.length + count)
+      expect(subscribed).toEqual(tracks.map((track) => ({ kind: 'binary-track', track })))
+      expect(published).toHaveBeenCalledTimes(tracks.length)
       // About 10 KB per member at 10,000 members, garbage included; a named lane per pair costs about 5 KB.
       expect((peak - before) / count).toBeLessThanOrEqual(64 * 1024)
     },
@@ -5345,9 +5439,8 @@ describe('room protocol validation', () => {
     })
     const { published } = spyGossip(room)
     const stub = register(room)
-    const tracks = trackNames(2 * ROOM_MEMBER_NAMED_LANES_MAX)
-    for (const track of tracks) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
-    await vi.waitFor(() => expect(demanded.every((wanted) => wanted.size === tracks.length)).toBe(true))
+    for (const member of members) declare(stub, { __r: 'sub-binary', member: member.id, track: 'mic', on: true })
+    await vi.waitFor(() => expect(demanded.every((wanted) => wanted.has('mic'))).toBe(true))
     await vi.waitFor(() => expect(inFlight).toBe(0))
     expect(published.mock.calls.length).toBeGreaterThan(ROOM_GOSSIP_IN_FLIGHT_MAX)
     expect(most).toBeLessThanOrEqual(ROOM_GOSSIP_IN_FLIGHT_MAX)
@@ -5373,8 +5466,8 @@ describe('room protocol validation', () => {
       counted.reset()
       heartbeats.fire()
       await counted.quiet()
-      // One pair per member and the track, whatever the number of handles.
-      expect(counted.commits).toBe(members.length + 1)
+      // One entry for the track, whatever the number of handles and members.
+      expect(counted.commits).toBe(1)
       expect(counted.parsed).toBe(counted.commits)
     },
     120_000,
@@ -5389,9 +5482,8 @@ describe('room protocol validation', () => {
       if (room.isClosed && args[0] === room.id && args[2].kind === 'control') afterClose++
       return commitLane(...args)
     })
-    const { gossip } = spyGossip(room)
-    for (const track of trackNames(100 * ROOM_GOSSIP_IN_FLIGHT_MAX))
-      gossip._publishWant({ __r: 'want', member: member.id, track, instance: 'elsewhere', on: true })
+    const { report } = spyGossip(room)
+    for (const track of trackNames(100 * ROOM_GOSSIP_IN_FLIGHT_MAX)) report._publish({ member: member.id, track }, true)
     await Room.close(room.id)
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(afterClose).toBe(0)
@@ -5811,6 +5903,7 @@ function subsOf(room: Room | ServerRoom): {
   _semantic: LaneSubscription
   _binary: Map<string, LaneSubscription>
   _everyTrack: Map<string, LaneSubscription>
+  _everyMember: Map<string, LaneSubscription>
   _inbox: Map<string, LaneSubscription>
   memberOwned(member: string): void
   memberChanged(member: string): void
@@ -5838,7 +5931,11 @@ function binaryLanes(room: ServerRoom): string[] {
     const [member, track] = key.split('\0') as [string, string]
     return encodeLaneKey({ kind: 'binary', member, track })
   })
-  return [...[...subs._everyTrack.keys()].map(everyTrackLaneKey), ...named].sort()
+  const fanIn = [
+    ...[...subs._everyTrack.keys()].map(everyTrackLaneKey),
+    ...[...subs._everyMember.keys()].map(everyMemberLaneKey),
+  ]
+  return [...fanIn, ...named].sort()
 }
 type Mark = { wall: number; cpu: NodeJS.CpuUsage }
 const mark = (): Mark => ({ wall: performance.now(), cpu: process.cpuUsage() })
@@ -5868,20 +5965,23 @@ async function timeOutsideGc(run: () => Promise<void>): Promise<number> {
 function trackNames(count: number): string[] {
   return Array.from({ length: count }, (_, i) => `t${i}`)
 }
-/** The room's demand, and the gossip its instance publishes from now on. */
+/** The room's demand report, and the entries its instance tells from now on. */
 function spyGossip(room: Room | ServerRoom) {
-  const demand = (room as ServerRoom)._replica.demand
-  const gossip = demand as unknown as { _publishWant(event: unknown): void }
-  return { demand, gossip, published: vi.spyOn(gossip, '_publishWant') }
+  const report = (room as ServerRoom)._replica.report
+  return { report, published: vi.spyOn(report, '_publish') }
 }
-/** One heartbeat's renewal of the demand, all at once. */
-function heartbeat(demand: RoomDemand): void {
-  for (const _ of demand.heartbeat());
+/** One heartbeat's renewal of the report, all at once. */
+function heartbeat(report: DemandReport): void {
+  for (const _ of report.heartbeat());
+}
+/** One heartbeat's drop of the reports that lapsed, all at once. */
+function expire(demand: RoomDemand): void {
+  for (const _ of demand.expire());
 }
 /** The leases the demand holds on other processes' reports. */
 function leasesHeld(demand: RoomDemand): number {
-  const { _remote, _remoteTracks, _remoteMembers } = demand as unknown as Record<string, Map<unknown, unknown>>
-  return _remote!.size + _remoteTracks!.size + _remoteMembers!.size
+  const { _pairs, _members, _tracks } = demand as unknown as Record<string, Map<unknown, unknown>>
+  return _pairs!.size + _members!.size + _tracks!.size
 }
 /** The room heartbeats started from now on; `fire()` runs each still running once, as one interval passing would. */
 function captureHeartbeats(): { fire(): void } {
@@ -5946,7 +6046,7 @@ function countControlLane(roomId: string) {
 function countBinarySubscriptions(on = here): SubscribedLane[] {
   const subscribed: SubscribedLane[] = []
   mockLaneSubscription(
-    (lane) => lane.kind === 'binary' || lane.kind === 'binary-all',
+    (lane) => lane.kind === 'binary' || lane.kind === 'binary-all' || lane.kind === 'binary-track',
     (subscribeLane, roomId, inc, lane, receiver) => {
       subscribed.push(lane)
       return subscribeLane(roomId, inc, lane, receiver)

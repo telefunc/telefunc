@@ -26,13 +26,12 @@ class WantsIndex {
   private readonly _textMembers = new Map<string, number>()
   private _announce = 0
   private readonly _everyMember: TrackCover = new Map()
-  private _everyMemberTracks = 0
   private readonly _members = new Map<string, TrackCover>()
   /** Per named track, the members some holder names it of alone. */
   private readonly _trackMembers = new Map<string, Set<string>>()
 
-  /** `onEveryMemberTrack` hears each track some holder starts or stops naming of every member. */
-  constructor(private readonly _onEveryMemberTrack: (track: string, named: boolean) => void) {}
+  /** `onEveryMemberCover` hears each track whose holders naming it of every member changed. */
+  constructor(private readonly _onEveryMemberCover: (track: string) => void) {}
 
   get wantsText(): boolean {
     return this._textAll > 0 || this._textMembers.size > 0 || this._announce > 0
@@ -94,9 +93,10 @@ class WantsIndex {
     return this._cover(holder, member, track, on)
   }
 
-  /** Whether some holder names a binary want of the member, or of every member. */
+  /** Whether some holder names a binary want of the member, or wants every track of every member: a track named of
+   *  every member is fetched for all of them on one lane. */
   concerns(member: string): boolean {
-    return this._everyMember.size > 0 || this._members.has(member)
+    return this._everyMember.has(null) || this._members.has(member)
   }
 
   /** Whether some holder receives every track of the member: a publisher's own suppressed frames are no demand. */
@@ -105,13 +105,12 @@ class WantsIndex {
     return this._receives(member, DEFAULT_TRACK, [this._everyMember.get(null), this._members.get(member)?.get(null)])
   }
 
-  /** The tracks some holder names for the member, `DEFAULT_TRACK` for the default one: those of every member first. */
-  *namedTracksOf(member: string): Generator<string> {
+  /** The tracks some holder names of every member, `DEFAULT_TRACK` for the default one. */
+  *everyMemberTracks(): Generator<string> {
     for (const track of this._everyMember.keys()) if (track !== null) yield track
-    yield* this.memberTracksOf(member)
   }
 
-  /** The tracks some holder names of the member alone. */
+  /** The tracks some holder names of the member alone and none names of every member. */
   *memberTracksOf(member: string): Generator<string> {
     for (const track of this._members.get(member)?.keys() ?? [])
       if (track !== null && !this._everyMember.has(track)) yield track
@@ -125,11 +124,6 @@ class WantsIndex {
   /** Whether some holder names `track` of every member. */
   namesEveryMember(track: string): boolean {
     return this._everyMember.has(track)
-  }
-
-  /** How many tracks some holder names of every member. */
-  get everyMemberTracks(): number {
-    return this._everyMemberTracks
   }
 
   /** Whether some holder receives the member's `track`, named or with every track. */
@@ -216,12 +210,11 @@ class WantsIndex {
     if (!on) setCover(this._everyMember, key, holder, false)
     const [other] = this._everyMember.get(key) ?? []
     if (on) setCover(this._everyMember, key, holder, true)
+    if (key === null) return other !== undefined ? new Set(other._suppressedMembers()) : 'all'
+    this._onEveryMemberCover(key)
     if (other !== undefined) return new Set(other._suppressedMembers())
-    if (key !== null) {
-      this._everyMemberTracks += on ? 1 : -1
-      this._onEveryMemberTrack(key, on)
-    }
-    return 'all'
+    // Only the members it is named of alone change lanes; the holder's own may stop or start being received.
+    return new Set([...this.membersNaming(key), ...holder._suppressedMembers()])
   }
 }
 

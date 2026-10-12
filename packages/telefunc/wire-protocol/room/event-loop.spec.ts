@@ -463,6 +463,35 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
     expect([remote.meta.k0, seen.meta.k0]).toEqual([2, 2])
   }, 60_000)
+  it('fetches a track another server hears of every member as one lane among 100,000 members, telling its demand as one entry and renewing it as one', async () => {
+    const room = await create('room-wide-track')
+    const members = await Promise.all(Array.from({ length: 100_000 }, () => room.join()))
+    const wanted = members.map((member, i) => {
+      const tracks = new Set<string | null>()
+      if (i % 1_000 === 999) member.onDemand((track, on) => (on ? tracks.add(track) : tracks.delete(track)))
+      return tracks
+    })
+    // The reports this server, which owns every member, receives from the other.
+    const demand = room._replica.demand
+    const applyWant = demand.applyWant.bind(demand)
+    let entries = 0
+    demand.applyWant = (...report) => {
+      entries++
+      applyWant(...report)
+    }
+    const viewer = (await (await anotherServer()).get(room.id)) as ServerRoom
+    const heard: number[] = []
+    viewer.subscribeBinary((data) => heard.push(data[0]!), { track: 'mic' })
+    await vi.waitFor(() => expect(wanted.filter((tracks) => tracks.has('mic'))).toHaveLength(100), { timeout: 60_000 })
+    await members[99_999]!.publishBinary(new Uint8Array([7]), { track: 'mic' })
+    await vi.waitFor(() => expect(heard).toEqual([7]))
+    expect({ lanes: binarySubscriptions(room.id), entries }).toEqual({ lanes: 1, entries: 1 })
+    entries = 0
+    await viewer._replica._renewDemand()
+    await vi.waitFor(() => expect(entries).toBeGreaterThan(0))
+    await settled()
+    expect(entries).toBe(1)
+  }, 120_000)
   it('reads the meta of 100,000 keys of a member another server holds into a view with the event loop turning', async () => {
     const room = await create('member-meta-read-turns')
     // Joined here, the member would keep this server's view current, and a read would read nothing.
@@ -482,6 +511,20 @@ describe('Room at 100,000 members', () => {
 function binaryLanesOf(room: ServerRoom): number {
   const subs = room._replica.plan as unknown as { _binary: Map<string, unknown>; _everyTrack: Map<string, unknown> }
   return subs._binary.size + subs._everyTrack.size
+}
+/** The binary lane subscriptions the store holds for the room, of every server: named, every-track and every-member. */
+function binarySubscriptions(roomId: string): number {
+  let count = 0
+  for (const gen of state.rooms.get(roomId)!.gens.values()) {
+    const lanes = gen as unknown as Record<
+      'subs' | 'everyTrackSubs' | 'everyMemberSubs',
+      Map<string, unknown[]> | undefined
+    >
+    for (const [key, targets] of lanes.subs!) if (key.startsWith('binary')) count += targets.length
+    for (const targets of lanes.everyTrackSubs!.values()) count += targets.length
+    for (const targets of lanes.everyMemberSubs?.values() ?? []) count += targets.length
+  }
+  return count
 }
 /** Each declaration replays the retained frames of its track, so a spec's declarations in one turn leave work behind
  *  them: waits it out, until five timers in a row come on time. */

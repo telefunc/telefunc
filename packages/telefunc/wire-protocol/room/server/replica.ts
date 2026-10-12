@@ -8,10 +8,11 @@ import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
 import { decodeBinaryFrame, laneTrack, publicTrack, type BinaryWantChange } from '../binary.js'
-import { DemandReport, RoomDemand, type DemandGossip } from '../demand.js'
+import { DemandReport, RoomDemand } from '../demand.js'
 import { DM_FAILURE } from '../errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../protocol.js'
 import type {
+  DemandEntry,
   MemberSnapshot,
   RoomConfigRecord,
   RoomCtrlEnvelope,
@@ -40,7 +41,7 @@ import { RoomSubscriptions } from './subscriptions.js'
 assertIsNotBrowser()
 
 /** What the control lane carries for the model: everything but demand, which the replica's demand takes. */
-type PresenceEvent = Exclude<RoomCtrlEnvelope, DemandGossip>
+type PresenceEvent = Exclude<RoomCtrlEnvelope, { __r: 'want' }>
 
 /** This process's one view of a room incarnation, whatever the number of its handles: the model, the lanes planned
  *  from the wants of every handle's holders, the demand, and the heartbeat that renews the members and pages the
@@ -78,8 +79,8 @@ class RoomReplica {
   readonly _incarnation: RoomIncarnation
   readonly model: RoomModel
   readonly demand: RoomDemand
-  /** What every holder here receives, told to `demand`. */
-  readonly report = new DemandReport(() => this.demand)
+  /** What every holder here receives, told to the other processes and to `demand`. */
+  readonly report = new DemandReport((entry, on) => this._tellDemand(entry, on))
   readonly plan: RoomSubscriptions
   readonly sync: AuthoritySync
   readonly roster: RosterStream
@@ -116,10 +117,10 @@ class RoomReplica {
       onMemberMetaGap: () => this.sync.memberMetaGap(),
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
-    const gossip = (this._gossip = new GossipOutbox(incarnation.id, incarnation.inc))
+    this._gossip = new GossipOutbox(incarnation.id, incarnation.inc)
     this.demand = new RoomDemand(
-      (event) => gossip.push(event),
       (id) => this._owners.has(id),
+      () => this._owners.keys(),
       (member, track, wanted) => this._owners.get(member)?._deliverDemand(member, track, wanted),
     )
     this.plan = new RoomSubscriptions(this, this.report)
@@ -137,6 +138,7 @@ class RoomReplica {
 
   own(member: string, handle: ServerRoom): void {
     this._owners.set(member, handle)
+    this.demand.owned(member)
   }
 
   /** The member's demand goes with it. */
@@ -287,10 +289,17 @@ class RoomReplica {
     for (const stub of stubs) this._views.set(stub, settled)
     return renewed
   }
-  /** @internal Renews the demand a slice at a time. */
+  /** This process's demand entry, to the other processes and to its own owners. */
+  private _tellDemand(entry: DemandEntry, on: boolean): void {
+    const { instance } = this.report
+    this._gossip.push({ __r: 'want', instance, on, ...entry })
+    this.demand.take(instance, entry, on, Infinity)
+  }
+  /** @internal Tells this process's demand again and drops the reports that lapsed, a slice at a time. */
   async _renewDemand(): Promise<void> {
     const slice = new Slice()
-    for (const _ of this.demand.heartbeat()) if (slice.over) await slice.next()
+    for (const _ of this.report.heartbeat()) if (slice.over) await slice.next()
+    for (const _ of this.demand.expire()) if (slice.over) await slice.next()
   }
   /** @internal */
   async _readOpenConfig(): Promise<RoomConfigRecord | null> {
@@ -307,7 +316,10 @@ class RoomReplica {
   /** @internal */
   _onControl(serialized: string, info: WirePublishInfo): void {
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
-    if (ctrl.__r === 'want' || ctrl.__r === 'covers') return this.demand.applyWant(ctrl)
+    if (ctrl.__r === 'want') {
+      if (ctrl.instance !== this.report.instance) this.demand.applyWant(ctrl)
+      return
+    }
     this.applyControl(ctrl, () => encodePublishText(serialized, info))
   }
   /** @internal */
