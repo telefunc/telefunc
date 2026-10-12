@@ -18,7 +18,7 @@ import { Slice } from '../slice.js'
 import type { LaneHolder } from './replay.js'
 import type { AuthoritySync } from './authority-sync.js'
 import { WantsIndex } from './wants-index.js'
-import { CONTROL_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
+import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 assertIsNotBrowser()
 
 /** The replica these subscriptions serve: it aggregates every handle's holders and applies what the lanes carry. */
@@ -42,6 +42,11 @@ type SubscriptionHost = {
   _onTextData(serialized: string, info: WirePublishInfo): void
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void
   _onDm(serialized: string, info: WirePublishInfo): void
+  _onDemand(serialized: string): void
+  /** The demand lane delivers, first or again: the other processes tell their demand, which it may have missed. */
+  _askDemand(): void
+  /** The demand lane stopped: what it renewed lapses unread. */
+  _forgetDemand(): void
   _readOpenConfig(): Promise<RoomConfigRecord | null>
   _closeFromAuthority(): void
 }
@@ -69,6 +74,10 @@ class RoomSubscriptions {
   private _observing = false
   private readonly _control = this._newLaneSubscription()
   private readonly _semantic = this._newLaneSubscription()
+  /** While this process owns a member: only an owner reads demand. */
+  private readonly _demandLane = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered, (slot, pending) => {
+    if (!pending && slot.wanted) this._host._askDemand()
+  })
   /** Named lanes, keyed by (member, track); `_binaryTracks` lists each member's, `_trackMembers` each track's. */
   private readonly _binary = new Map<string, LaneSubscription>()
   private readonly _binaryTracks = new Map<string, Set<string>>()
@@ -278,6 +287,7 @@ class RoomSubscriptions {
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster))
       void host.sync.refreshMembers().catch(reportRoomError)
     change()
+    this._syncDemandLane()
     if (this._planning === null) this._demand.flush()
     this._syncHeartbeat()
   }
@@ -657,6 +667,20 @@ class RoomSubscriptions {
   private _closeInbox(member: string): void {
     this._inbox.get(member)?.stop()
     this._inbox.delete(member)
+  }
+
+  private _syncDemandLane(): void {
+    const host = this._host
+    const lane = this._demandLane
+    if (!host.model.closed && !host._ownedMembers()[Symbol.iterator]().next().done)
+      return lane.sync(true, () =>
+        getRoomBackend().subscribeLane(host.id, host._inc, DEMAND_LANE, (payload) =>
+          host._onDemand(decodeRoomText(payload)),
+        ),
+      )
+    if (!lane.wanted) return
+    lane.stop()
+    host._forgetDemand()
   }
 
   /** A binary lane passes `queue`: what it carries is demand once it delivers, so its readiness replans what `queue`

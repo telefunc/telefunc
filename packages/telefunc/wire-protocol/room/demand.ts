@@ -2,10 +2,9 @@ export { RoomDemand, DemandReport }
 
 import { DEFAULT_TRACK } from './binary.js'
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
-import type { DemandEntry, RoomCtrlEnvelope } from './protocol.js'
+import type { DemandEntry, RoomDemandPage } from './protocol.js'
 import { Slice } from './slice.js'
 
-type DemandFrame = Extract<RoomCtrlEnvelope, { __r: 'want' }>
 /** Each reporter's lease. A remote reporter tells its entries again every heartbeat, so a crashed one lapses; this
  *  process's never do. */
 type Leases = Map<string, number>
@@ -218,9 +217,19 @@ class RoomDemand {
     private readonly _deliver: (member: string, track: string, wanted: boolean) => void,
   ) {}
 
-  /** Another process's report. */
-  applyWant(frame: DemandFrame): void {
-    this.take(frame.instance, frame, frame.on, Date.now() + ROOM_DEMAND_TTL_MS)
+  /** Another process's entries. */
+  applyPage(page: RoomDemandPage): void {
+    const expiresAt = Date.now() + ROOM_DEMAND_TTL_MS
+    for (const want of page.wants) this.take(page.instance, want, want.on, expiresAt)
+  }
+
+  /** Drops the leases another process renews, read from a demand lane this one no longer subscribes. It owns no member
+   *  then, so only track leases are held. */
+  forgetLeased(): void {
+    for (const [track, leases] of this._tracks) {
+      for (const [instance, { expiresAt }] of leases) if (expiresAt !== Infinity) leases.delete(instance)
+      if (leases.size === 0) this._tracks.delete(track)
+    }
   }
 
   /** A reporter's entry starts or stops, leased until `expiresAt`; telling it again renews it. Only a member's owner

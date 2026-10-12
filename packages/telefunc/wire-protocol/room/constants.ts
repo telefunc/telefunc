@@ -15,6 +15,7 @@ export {
   ROOM_MEMBER_WRITES_IN_FLIGHT_MAX,
   ROOM_PLAN_SLICE_MS,
   ROOM_ROSTER_PART_MEMBERS,
+  ROOM_DEMAND_PAGE_ENTRIES,
   ROOM_META_REPAIR_MS,
 }
 import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
@@ -40,7 +41,7 @@ const ROOM_DEPARTURE_TIMEOUT_MS = 20_000
 const ROOM_TRACK_WANTS_MAX = MAX_CHANNELS_PER_CONNECTION
 // An instance serves a member from its every-track lane once its holders name more than this many of its tracks.
 const ROOM_MEMBER_NAMED_LANES_MAX = 16
-// Demand gossip commits an instance keeps in flight; the rest wait as events.
+// Demand pages an instance keeps in flight; the rest wait as entries.
 const ROOM_GOSSIP_IN_FLIGHT_MAX = 64
 // Member lease renewals, or a roster read's evictions, kept in flight: a pass costs a round trip per 64 members.
 const ROOM_MEMBER_WRITES_IN_FLIGHT_MAX = 64
@@ -49,6 +50,8 @@ const ROOM_MEMBER_WRITES_IN_FLIGHT_MAX = 64
 const ROOM_PLAN_SLICE_MS = 10
 // The members in one frame of a roster, so neither end stringifies or parses a whole room in one turn.
 const ROOM_ROSTER_PART_MEMBERS = 1024
+// The demand entries in one frame, likewise for a heartbeat's whole report.
+const ROOM_DEMAND_PAGE_ENTRIES = 1024
 // A meta change waiting this long for the one before it: that one's writer crashed between its exchange and its
 // publish, or the lane lost it, so a whole read repairs it.
 const ROOM_META_REPAIR_MS = 1_000

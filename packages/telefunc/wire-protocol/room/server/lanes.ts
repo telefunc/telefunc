@@ -1,5 +1,6 @@
 export {
   CONTROL_LANE,
+  DEMAND_LANE,
   SEMANTIC_LANE,
   commitRoomLane,
   commitRoomLaneOrThrow,
@@ -36,6 +37,7 @@ const roomTextEncoder = new TextEncoder()
 const roomTextDecoder = new TextDecoder()
 const SEMANTIC_LANE = { kind: 'semantic' } as const satisfies LaneId
 const CONTROL_LANE = { kind: 'control' } as const satisfies LaneId
+const DEMAND_LANE = { kind: 'demand' } as const satisfies LaneId
 
 function decodeRoomText(value: Uint8Array): string {
   return roomTextDecoder.decode(value)

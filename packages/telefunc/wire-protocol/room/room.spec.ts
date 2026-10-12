@@ -22,6 +22,7 @@ import {
   ROOM_EMPTY_TIMEOUT_MS,
   ROOM_DEPARTURE_TIMEOUT_MS,
   ROOM_GOSSIP_IN_FLIGHT_MAX,
+  ROOM_DEMAND_PAGE_ENTRIES,
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, encodeBinaryFrame } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
@@ -2692,7 +2693,8 @@ describe('Room public behavior', () => {
     const commitLane = driver.commitLane.bind(driver)
     const committing = createDeferred()
     const kicked = createDeferred()
-    vi.spyOn(driver, 'commitLane').mockImplementationOnce(async (...args) => {
+    vi.spyOn(driver, 'commitLane').mockImplementation(async (...args) => {
+      if (!decoder.decode(args[3]).includes('"__r":"join"')) return await commitLane(...args)
       committing.resolve()
       await kicked.promise
       return await commitLane(...args)
@@ -5172,12 +5174,16 @@ describe('room demand lifecycle', () => {
       () => owned,
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
-    demand.applyWant({ __r: 'want', member: 'elsewhere', track: 'screen', instance: 'remote-a', on: true })
+    demand.applyPage({
+      __r: 'demand',
+      instance: 'remote-a',
+      wants: [{ on: true, member: 'elsewhere', track: 'screen' }],
+    })
     expect(leasesHeld(demand)).toBe(0)
-    demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'remote-a', on: true })
+    demand.applyPage({ __r: 'demand', instance: 'remote-a', wants: [{ on: true, member: 'member', track: 'screen' }] })
     owned.delete('member')
     demand.forgetMember('member')
-    demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'remote-b', on: true })
+    demand.applyPage({ __r: 'demand', instance: 'remote-b', wants: [{ on: true, member: 'member', track: 'screen' }] })
     expect(delivered).toEqual([['member', 'screen', true]])
     expect(leasesHeld(demand)).toBe(0)
   })
@@ -5208,7 +5214,7 @@ describe('room demand lifecycle', () => {
       () => ['member'],
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
-    demand.applyWant({ __r: 'want', member: 'member', track: 'screen', instance: 'crashed', on: true })
+    demand.applyPage({ __r: 'demand', instance: 'crashed', wants: [{ on: true, member: 'member', track: 'screen' }] })
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
     expire(demand)
     expect(leasesHeld(demand)).toBeGreaterThan(0)
@@ -5229,16 +5235,16 @@ describe('room demand lifecycle', () => {
       () => owned,
       (member, track, wanted) => delivered.push([member, track, wanted]),
     )
-    demand.applyWant({ __r: 'want', track: 'screen', except: ['c'], instance: 'crashed', on: true })
+    demand.applyPage({ __r: 'demand', instance: 'crashed', wants: [{ on: true, track: 'screen', except: ['c'] }] })
     expect(delivered).toEqual([
       ['a', 'screen', true],
       ['b', 'screen', true],
     ])
     expect(demand.wanted('a')).toEqual(['screen'])
-    demand.applyWant({ __r: 'want', track: 'screen', except: ['a', 'b'], instance: 'other', on: true })
+    demand.applyPage({ __r: 'demand', instance: 'other', wants: [{ on: true, track: 'screen', except: ['a', 'b'] }] })
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
     // Renewed, now receiving it from every member but `a`.
-    demand.applyWant({ __r: 'want', track: 'screen', except: ['a'], instance: 'other', on: true })
+    demand.applyPage({ __r: 'demand', instance: 'other', wants: [{ on: true, track: 'screen', except: ['a'] }] })
     expire(demand)
     vi.advanceTimersByTime(1)
     expire(demand)
@@ -5415,21 +5421,18 @@ describe('room protocol validation', () => {
     const sequences = new Set(members.map((member) => JSON.stringify(told.get(member.id))))
     expect([...sequences]).toEqual(['[true]'])
   })
-  it('keeps ROOM_GOSSIP_IN_FLIGHT_MAX gossip commits in flight at most while a client names tracks of 200 members', async () => {
+  it('keeps ROOM_GOSSIP_IN_FLIGHT_MAX demand pages in flight at most while a burst of entries fills more than that', async () => {
     const room = (await Room.create('gossip-in-flight')) as ServerRoom
-    const members = await Promise.all(Array.from({ length: 200 }, () => room.join()))
-    const demanded = members.map((member) => {
-      const tracks = new Set<string | null>()
-      member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
-      return tracks
-    })
+    const member = await room.join()
     const backend = getRoomBackend()
     const commitLane = backend.commitLane.bind(backend)
+    let pages = 0
     let inFlight = 0
     let most = 0
     vi.spyOn(backend, 'commitLane').mockImplementation((...args) => {
       const committed = commitLane(...args)
-      if (args[0] !== room.id || args[2].kind !== 'control') return committed
+      if (args[0] !== room.id || args[2].kind !== 'demand') return committed
+      pages++
       most = Math.max(most, ++inFlight)
       void committed
         .then((result) => ('stale' in result ? undefined : result.delivery))
@@ -5437,19 +5440,22 @@ describe('room protocol validation', () => {
         .finally(() => inFlight--)
       return committed
     })
-    const { published } = spyGossip(room)
-    const stub = register(room)
-    for (const member of members) declare(stub, { __r: 'sub-binary', member: member.id, track: 'mic', on: true })
-    await vi.waitFor(() => expect(demanded.every((wanted) => wanted.has('mic'))).toBe(true))
-    await vi.waitFor(() => expect(inFlight).toBe(0))
-    expect(published.mock.calls.length).toBeGreaterThan(ROOM_GOSSIP_IN_FLIGHT_MAX)
+    const { report } = spyGossip(room)
+    const entries = (ROOM_GOSSIP_IN_FLIGHT_MAX + 1) * ROOM_DEMAND_PAGE_ENTRIES
+    for (const track of trackNames(entries)) report._publish({ member: member.id, track }, true)
+    await vi.waitFor(
+      () => expect({ pages: pages >= ROOM_GOSSIP_IN_FLIGHT_MAX + 1, inFlight }).toEqual({ pages: true, inFlight: 0 }),
+      {
+        timeout: 10_000,
+      },
+    )
     expect(most).toBeLessThanOrEqual(ROOM_GOSSIP_IN_FLIGHT_MAX)
   })
   it.each([10, 30, 100])(
-    "renews the demand of %i Room.get() handles hearing every member's mic once per server each heartbeat, and parses each control frame once",
+    "renews the demand of %i Room.get() handles hearing every member's mic once per server each heartbeat, and parses each demand page once",
     async (handles) => {
       const heartbeats = captureHeartbeats()
-      const counted = countControlLane(`gossip-handles-${handles}`)
+      const counted = countDemandLane(`gossip-handles-${handles}`)
       const room = (await Room.create(`gossip-handles-${handles}`)) as ServerRoom
       const members = await Promise.all(Array.from({ length: 100 }, () => room.join()))
       const hearing = members.map((member) => {
@@ -5472,6 +5478,74 @@ describe('room protocol validation', () => {
     },
     120_000,
   )
+  it('reads no demand on a server that only views the room, while the server owning its members takes it', async () => {
+    const room = (await Room.create('demand-pure-viewer')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 3 }, () => room.join()))
+    const hearing = members.map((member) => {
+      const tracks = new Set<string | null>()
+      member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+      return tracks
+    })
+    const other = await anotherServer()
+    const backend = other.backend()
+    const subscribeLane = backend.subscribeLane.bind(backend)
+    let demandFrames = 0
+    vi.spyOn(backend, 'subscribeLane').mockImplementation((id, inc, lane, receiver) =>
+      subscribeLane(id, inc, lane, (payload, info) => {
+        if (/"__r":"(want|covers|demand)"/.test(decoder.decode(payload))) demandFrames++
+        return receiver(payload, info)
+      }),
+    )
+    const viewer = (await other.Room.get(room.id)) as ServerRoom
+    viewer.subscribeBinary(() => {}, { track: 'mic' })
+    ;(await viewer.getParticipant(members[0]!.id))!.subscribeBinary(() => {}, { track: 'camera' })
+    ;(await viewer.getParticipant(members[1]!.id))!.subscribeBinary(() => {})
+    // The owning server hears a track of every member too, so it tells demand of its own.
+    room.subscribeBinary(() => {}, { track: 'screen' })
+    const heard = () => hearing.map((tracks) => [...tracks].sort())
+    await vi.waitFor(() =>
+      expect(heard()).toEqual([
+        ['camera', 'mic', 'screen'],
+        ['mic', null, 'screen'],
+        ['mic', 'screen'],
+      ]),
+    )
+    await Promise.all([viewer._replica._renewDemand(), room._replica._renewDemand()])
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(demandFrames).toBe(0)
+  })
+  it('tells a server that starts owning a member the demand another server told before, without a heartbeat', async () => {
+    const room = (await Room.create('demand-late-owner')) as ServerRoom
+    const other = await anotherServer()
+    const viewer = (await other.Room.get(room.id)) as ServerRoom
+    viewer.subscribeBinary(() => {}, { track: 'mic' })
+    await vi.waitFor(() => expect(viewer._replica.report.reporting).toBe(true))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const member = await room.join()
+    const tracks = new Set<string | null>()
+    member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+    await vi.waitFor(() => expect([...tracks]).toEqual(['mic']))
+  })
+  it("drops the demand a server heard while it owned a member once it owns none, as it can't hear that demand stop", async () => {
+    const room = (await Room.create('demand-owner-again')) as ServerRoom
+    const first = await room.join()
+    const firstTracks = new Set<string | null>()
+    first.onDemand((track, wanted) => (wanted ? firstTracks.add(track) : firstTracks.delete(track)))
+    const other = await anotherServer()
+    const viewer = (await other.Room.get(room.id)) as ServerRoom
+    const stop = viewer.subscribeBinary(() => {}, { track: 'mic' })
+    await vi.waitFor(() => expect([...firstTracks]).toEqual(['mic']))
+    await first.leave()
+    await vi.waitFor(() => expect(subsOf(room)._demandLane.wanted).toBe(false))
+    stop()
+    await vi.waitFor(() => expect(viewer._replica.report.reporting).toBe(false))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const second = await room.join()
+    const secondTracks = new Set<string | null>()
+    second.onDemand((track, wanted) => (wanted ? secondTracks.add(track) : secondTracks.delete(track)))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect([...secondTracks]).toEqual([])
+  })
   it('commits none of the demand gossip still waiting once its room closed', async () => {
     const room = (await Room.create('gossip-after-close')) as ServerRoom
     const member = await room.join()
@@ -5479,7 +5553,7 @@ describe('room protocol validation', () => {
     const commitLane = backend.commitLane.bind(backend)
     let afterClose = 0
     vi.spyOn(backend, 'commitLane').mockImplementation((...args) => {
-      if (room.isClosed && args[0] === room.id && args[2].kind === 'control') afterClose++
+      if (room.isClosed && args[0] === room.id && args[2].kind === 'demand') afterClose++
       return commitLane(...args)
     })
     const { report } = spyGossip(room)
@@ -5905,6 +5979,7 @@ function subsOf(room: Room | ServerRoom): {
   _everyTrack: Map<string, LaneSubscription>
   _everyMember: Map<string, LaneSubscription>
   _inbox: Map<string, LaneSubscription>
+  _demandLane: LaneSubscription
   memberOwned(member: string): void
   memberChanged(member: string): void
   replan(): Promise<void>
@@ -5999,15 +6074,15 @@ function captureHeartbeats(): { fire(): void } {
   })
   return { fire: () => [...running.values()].forEach((callback) => callback()) }
 }
-/** The room's control-lane commits, and the frames this process's receivers took off the lane, from now on. */
-function countControlLane(roomId: string) {
+/** The room's demand-lane commits, and the pages this process's receivers took off the lane, from now on. */
+function countDemandLane(roomId: string) {
   const backend = getRoomBackend()
   const commitLane = backend.commitLane.bind(backend)
   const subscribeLane = backend.subscribeLane.bind(backend)
   const counts = { commits: 0, parsed: 0, inFlight: 0 }
   vi.spyOn(backend, 'commitLane').mockImplementation((...args) => {
     const committed = commitLane(...args)
-    if (args[0] !== roomId || args[2].kind !== 'control') return committed
+    if (args[0] !== roomId || args[2].kind !== 'demand') return committed
     counts.commits++
     counts.inFlight++
     void committed
@@ -6018,7 +6093,7 @@ function countControlLane(roomId: string) {
   })
   vi.spyOn(backend, 'subscribeLane').mockImplementation((id, inc, lane, receiver) =>
     subscribeLane(id, inc, lane, (payload, info) => {
-      if (id === roomId && lane.kind === 'control') counts.parsed++
+      if (id === roomId && lane.kind === 'demand') counts.parsed++
       return receiver(payload, info)
     }),
   )

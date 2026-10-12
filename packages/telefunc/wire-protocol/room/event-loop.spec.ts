@@ -12,6 +12,7 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { Room } from './server/statics.js'
 import type { ServerRoom } from './server/room.js'
 import type { PresenceEvent } from './server/replica.js'
+import type { RoomDemandPage } from './protocol.js'
 import { ResponseRoomGrants, RoomStubChannel } from './server/stub.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
@@ -259,13 +260,13 @@ describe('Room at 100,000 members', () => {
     let inFlight = 0
     backend.commitLane = (id, inc, lane, payload, opts) => {
       const committed = commitLane.call(backend, id, inc, lane, payload, opts)
-      if (id !== room.id || lane.kind !== 'control') return committed
-      renewed++
+      if (id !== room.id || lane.kind !== 'demand') return committed
+      renewed += wantsOf(payload)
       inFlight++
       void committed.finally(() => inFlight--).catch(() => {})
       return committed
     }
-    /** No control commit for five timer turns in a row: what the joins and the declarations told is sent. */
+    /** No demand commit for five timer turns in a row: what the joins and the declarations told is sent. */
     const quiet = async () => {
       for (let still = 0, last = renewed; still < 5; last = renewed) {
         await new Promise((resolve) => setTimeout(resolve, 20))
@@ -324,8 +325,8 @@ describe('Room at 100,000 members', () => {
     let inFlight = 0
     backend.commitLane = (id, inc, lane, payload, opts) => {
       const committed = commitLane.call(backend, id, inc, lane, payload, opts)
-      if (id !== room.id || lane.kind !== 'control') return committed
-      renewed++
+      if (id !== room.id || lane.kind !== 'demand') return committed
+      renewed += wantsOf(payload)
       inFlight++
       void committed.finally(() => inFlight--).catch(() => {})
       return committed
@@ -473,11 +474,11 @@ describe('Room at 100,000 members', () => {
     })
     // The reports this server, which owns every member, receives from the other.
     const demand = room._replica.demand
-    const applyWant = demand.applyWant.bind(demand)
+    const applyPage = demand.applyPage.bind(demand)
     let entries = 0
-    demand.applyWant = (...report) => {
-      entries++
-      applyWant(...report)
+    demand.applyPage = (page) => {
+      entries += page.wants.length
+      applyPage(page)
     }
     const viewer = (await (await anotherServer()).get(room.id)) as ServerRoom
     const heard: number[] = []
@@ -507,6 +508,10 @@ describe('Room at 100,000 members', () => {
     expect(Math.min(await read(), await read())).toBeLessThanOrEqual(50)
   }, 60_000)
 })
+/** The entries a demand page carries. */
+function wantsOf(payload: Uint8Array): number {
+  return (parse(new TextDecoder().decode(payload)) as RoomDemandPage).wants.length
+}
 /** How many binary lanes the room holds: per track and every-track. */
 function binaryLanesOf(room: ServerRoom): number {
   const subs = room._replica.plan as unknown as { _binary: Map<string, unknown>; _everyTrack: Map<string, unknown> }

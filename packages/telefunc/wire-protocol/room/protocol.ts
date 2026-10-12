@@ -13,6 +13,7 @@ export type {
   RoomDemandEvent,
   RoomCtrlEnvelope,
   DemandEntry,
+  RoomDemandPage,
   RoomMetaEntry,
   RoomMetaUpdate,
   RoomDataEnvelope,
@@ -102,13 +103,16 @@ type RoomCtrlEnvelope =
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | ({ __r: 'p-meta'; id: string; hidden?: boolean } & MemberMetaUpdate)
   | RoomMetaUpdate
-  // Demand between instances, never relayed to clients.
-  | ({ __r: 'want'; instance: string; on: boolean } & DemandEntry)
+  // An instance whose demand lane delivers, from now on or again, asks every other one for its demand.
+  | { __r: 'demand-ask'; instance: string }
   | { __r: 'closed' }
 
 /** What an instance receives: one track of a member, every track of a member (no `track`), or one track of every
  *  member but `except`. `''` is the default track. */
 type DemandEntry = { member: string; track: string } | { member: string } | { track: string; except: readonly string[] }
+/** Demand between instances, on the demand lane: entries one instance starts or stops receiving, in the order it told
+ *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`. */
+type RoomDemandPage = { __r: 'demand'; instance: string; wants: Array<{ on: boolean } & DemandEntry> }
 /** A room meta key with its place: the `meta:seq` the write that added it read, and its index in that write. */
 type RoomMetaEntry = [key: string, value: unknown, placeSeq: number, placeIndex: number]
 /** The room meta at `seq`, whole, or as the write at `seq` changed it: a key it removed as `[key]`. */

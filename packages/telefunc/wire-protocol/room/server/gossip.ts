@@ -2,19 +2,23 @@ export { GossipOutbox }
 
 import { Fifo } from '../../../utils/Fifo.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { ROOM_GOSSIP_IN_FLIGHT_MAX } from '../constants.js'
-import type { RoomCtrlEnvelope } from '../protocol.js'
+import { ROOM_DEMAND_PAGE_ENTRIES, ROOM_GOSSIP_IN_FLIGHT_MAX } from '../constants.js'
+import type { RoomDemandPage } from '../protocol.js'
 import { reportRoomError } from './errors.js'
-import { CONTROL_LANE, commitRoomLane, encodeRoomRecord } from './lanes.js'
+import { DEMAND_LANE, commitRoomLane, encodeRoomRecord } from './lanes.js'
 import { Slice } from '../slice.js'
 assertIsNotBrowser()
 
-/** Commits a room's demand gossip in order, `ROOM_GOSSIP_IN_FLIGHT_MAX` at a time and a slice per turn, so a burst
- *  waits as events rather than as commits, and its deliveries leave the event loop turning. */
+type Want = RoomDemandPage['wants'][number]
+
+/** Commits a room's demand on its demand lane in order, the entries told in one turn sharing pages, and
+ *  `ROOM_GOSSIP_IN_FLIGHT_MAX` pages at a time and a slice per turn, so a burst waits as entries rather than as commits,
+ *  and its deliveries leave the event loop turning. */
 class GossipOutbox {
-  private _waiting = new Fifo<RoomCtrlEnvelope>()
+  private _waiting = new Fifo<Want>()
   private _inFlight = 0
   private _closed = false
+  private _scheduled = false
   /** While a burst is sent; `_yielding` while it waits for the next turn. */
   private _slice: Slice | null = null
   private _yielding = false
@@ -22,13 +26,19 @@ class GossipOutbox {
   constructor(
     private readonly _roomId: string,
     private readonly _inc: string,
+    private readonly _instance: string,
   ) {}
 
-  push(event: RoomCtrlEnvelope): void {
+  push(want: Want): void {
     if (this._closed) return
-    this._waiting.push(event)
+    this._waiting.push(want)
     this._slice ??= new Slice()
-    this._send()
+    if (this._scheduled) return
+    this._scheduled = true
+    queueMicrotask(() => {
+      this._scheduled = false
+      this._send()
+    })
   }
 
   /** A closed room's gossip has no reader: what waits is dropped, and nothing more is told. */
@@ -49,9 +59,11 @@ class GossipOutbox {
         })
         return
       }
-      const event = this._waiting.shift()!
+      const wants: Want[] = []
+      while (wants.length < ROOM_DEMAND_PAGE_ENTRIES && this._waiting.length > 0) wants.push(this._waiting.shift()!)
+      const page: RoomDemandPage = { __r: 'demand', instance: this._instance, wants }
       // A stale commit is a closed room's: its gossip has no reader.
-      void commitRoomLane(this._roomId, this._inc, CONTROL_LANE, encodeRoomRecord(event))
+      void commitRoomLane(this._roomId, this._inc, DEMAND_LANE, encodeRoomRecord(page))
         .catch(reportRoomError)
         .finally(() => {
           this._inFlight--

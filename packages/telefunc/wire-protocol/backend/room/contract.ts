@@ -29,11 +29,12 @@ export type {
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
 
-/** Each lane is its own ordering domain: one semantic, one control, one per member for inbox, and one per
+/** Each lane is its own ordering domain: one semantic, one control, one demand, one per member for inbox, and one per
  *  (member, track) for binary. */
 type LaneId =
   | { kind: 'semantic' }
   | { kind: 'control' }
+  | { kind: 'demand' }
   | { kind: 'binary'; member: string; track: string }
   | { kind: 'inbox'; member: string }
 

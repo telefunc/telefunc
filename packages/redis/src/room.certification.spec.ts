@@ -231,6 +231,23 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(seen).toEqual([['a-1@1'], ['a-1@1', 'b-1@1'], ['a-1@1', 'b-1@1'], ['a-1@1', 'b-1@1', 'a-2@2']])
   })
 
+  it('reads no demand on a server that only views the room, while the server owning its members takes it', async () => {
+    const prefix = uniquePrefix('demand-viewer')
+    installRedis(ownClient(connect()), { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('demand-viewer')
+    const member = await room.join()
+    onTestFinished(() => member.leave())
+    const tracks = new Set<string | null>()
+    member.onDemand((track, wanted) => (wanted ? tracks.add(track) : tracks.delete(track)))
+    // The owning server hears a track of every member too, so it tells demand of its own.
+    onTestFinished(room.subscribeBinary(() => {}, { track: 'screen' }))
+    const viewer = demandViewerFrom({ ...env, PREFIX: prefix, ROOM: room.id })
+    await viewer.subscribed
+    await vi.waitFor(() => expect([...tracks].sort()).toEqual(['mic', 'screen']), { timeout: 10_000 })
+    await (room as unknown as { _replica: { _renewDemand(): Promise<void> } })._replica._renewDemand()
+    expect(await viewer.parsedAfterRenewal()).toEqual({ parsed: 0 })
+  }, 30_000)
   it("lists one member's retained binary lanes from that member's own set, which leaves the generation's keys once empty", async () => {
     const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('retained-of') })
     await backend.compareExchangeHead(
@@ -601,6 +618,66 @@ process.exit(0)`,
   return new Promise((resolve, reject) =>
     server.on('exit', (code) => (code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`exit ${code}`)))),
   )
+}
+
+/** A server viewing ROOM that hears its `mic` of every member, then, asked, renews its demand and reports how many
+ *  demand frames it parsed. */
+function demandViewerFrom(env: Record<string, string>): {
+  subscribed: Promise<void>
+  parsedAfterRenewal: () => Promise<unknown>
+} {
+  const server = spawn(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { Cluster, Redis } from 'ioredis'
+import { createInterface } from 'node:readline'
+import { Room } from 'telefunc'
+import { installRedis } from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)}
+const { REDIS_URL, NODES, PREFIX, ROOM } = process.env
+installRedis(NODES ? new Cluster(JSON.parse(NODES)) : new Redis(REDIS_URL), { prefix: PREFIX })
+const room = await Room.get(ROOM)
+const replica = room._replica
+let parsed = 0
+for (const name of ['_onControl', '_onDemand']) {
+  const receive = replica[name]?.bind(replica)
+  if (receive) replica[name] = (serialized, ...rest) => {
+    if (/"__r":"(want|covers|demand)"/.test(serialized)) parsed++
+    return receive(serialized, ...rest)
+  }
+}
+room.subscribeBinary(() => {}, { track: 'mic' })
+process.stdout.write('subscribed\\n')
+await createInterface({ input: process.stdin })[Symbol.asyncIterator]().next()
+await replica._renewDemand()
+await new Promise((resolve) => setTimeout(resolve, 500))
+process.stdout.write(JSON.stringify({ parsed }) + '\\n')
+process.exit(0)`,
+    ],
+    { cwd: new URL('..', import.meta.url), env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'inherit'] },
+  )
+  const lines: string[] = []
+  const waiting: Array<() => void> = []
+  let buffered = ''
+  server.stdout.on('data', (chunk) => {
+    buffered += chunk
+    const parts = buffered.split('\n')
+    buffered = parts.pop()!
+    lines.push(...parts)
+    for (const wake of waiting.splice(0)) wake()
+  })
+  const line = async (index: number): Promise<string> => {
+    while (lines.length <= index) await new Promise<void>((resolve) => waiting.push(resolve))
+    return lines[index]!
+  }
+  return {
+    subscribed: line(0).then(() => {}),
+    parsedAfterRenewal: async () => {
+      server.stdin.write('renew\n')
+      return JSON.parse(await line(1))
+    },
+  }
 }
 
 /** A server that opens ROOM and reports the stored meta, its key order and its seq: the room's, or MEMBER's. */

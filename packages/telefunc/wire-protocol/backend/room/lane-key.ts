@@ -12,7 +12,7 @@ import { assert } from '../../../utils/assert.js'
 import type { EveryMemberLane, EveryTrackLane, LaneId, RoomSubscriptionSource } from './contract.js'
 
 function encodeLaneKey(lane: LaneId | EveryTrackLane | EveryMemberLane): string {
-  if (lane.kind === 'semantic' || lane.kind === 'control') return lane.kind
+  if (lane.kind === 'semantic' || lane.kind === 'control' || lane.kind === 'demand') return lane.kind
   if (lane.kind === 'inbox') return `inbox:${encodeURIComponent(lane.member)}`
   if (lane.kind === 'binary-all') return everyTrackLaneKey(lane.member)
   if (lane.kind === 'binary-track') return everyMemberLaneKey(lane.track)
@@ -42,7 +42,7 @@ function everyMemberLaneKey(track: string): string {
 
 /** A committed lane's key back to its lane; an every-track or every-member lane holds no commits of its own. */
 function decodeLaneKey(key: string): LaneId {
-  if (key === 'semantic' || key === 'control') return { kind: key }
+  if (key === 'semantic' || key === 'control' || key === 'demand') return { kind: key }
   const [kind, member = '', track = ''] = key.split(':')
   if (kind === 'inbox') return { kind: 'inbox', member: decodeURIComponent(member) }
   assert(kind === 'binary', `Not a lane key: ${key}`)

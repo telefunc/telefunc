@@ -17,6 +17,7 @@ import type {
   RoomConfigRecord,
   RoomCtrlEnvelope,
   RoomDataEnvelope,
+  RoomDemandPage,
   RoomDmAckEnvelope,
   RoomDmEnvelope,
   RoomEnvelope,
@@ -29,7 +30,16 @@ import { AuthoritySync } from './authority-sync.js'
 import { PendingDmAcks } from './dm-acks.js'
 import { reportRoomError } from './errors.js'
 import { GossipOutbox } from './gossip.js'
-import { SEMANTIC_LANE, decodeLaneEnvelope, decodeRoomText, openConfig, withinRoomHorizon } from './lanes.js'
+import {
+  CONTROL_LANE,
+  SEMANTIC_LANE,
+  commitRoomLane,
+  decodeLaneEnvelope,
+  decodeRoomText,
+  encodeRoomRecord,
+  openConfig,
+  withinRoomHorizon,
+} from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { holdViews, removeView } from './membership.js'
 import type { StoredRoomMeta } from './meta.js'
@@ -40,8 +50,8 @@ import { MemberMessageTexts, type RoomStubChannel, unorderedEventText } from './
 import { RoomSubscriptions } from './subscriptions.js'
 assertIsNotBrowser()
 
-/** What the control lane carries for the model: everything but demand, which the replica's demand takes. */
-type PresenceEvent = Exclude<RoomCtrlEnvelope, { __r: 'want' }>
+/** What the control lane carries for the model: everything but another process's ask, which the report answers. */
+type PresenceEvent = Exclude<RoomCtrlEnvelope, { __r: 'demand-ask' }>
 
 /** This process's one view of a room incarnation, whatever the number of its handles: the model, the lanes planned
  *  from the wants of every handle's holders, the demand, and the heartbeat that renews the members and pages the
@@ -117,7 +127,7 @@ class RoomReplica {
       onMemberMetaGap: () => this.sync.memberMetaGap(),
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
-    this._gossip = new GossipOutbox(incarnation.id, incarnation.inc)
+    this._gossip = new GossipOutbox(incarnation.id, incarnation.inc, this.report.instance)
     this.demand = new RoomDemand(
       (id) => this._owners.has(id),
       () => this._owners.keys(),
@@ -291,15 +301,34 @@ class RoomReplica {
   }
   /** This process's demand entry, to the other processes and to its own owners. */
   private _tellDemand(entry: DemandEntry, on: boolean): void {
-    const { instance } = this.report
-    this._gossip.push({ __r: 'want', instance, on, ...entry })
-    this.demand.take(instance, entry, on, Infinity)
+    this._gossip.push({ on, ...entry })
+    this.demand.take(this.report.instance, entry, on, Infinity)
   }
   /** @internal Tells this process's demand again and drops the reports that lapsed, a slice at a time. */
   async _renewDemand(): Promise<void> {
+    await this._tellDemandAgain()
+    const slice = new Slice()
+    for (const _ of this.demand.expire()) if (slice.over) await slice.next()
+  }
+  /** Tells every entry of this process's demand again, a slice at a time, which renews it elsewhere. */
+  private async _tellDemandAgain(): Promise<void> {
     const slice = new Slice()
     for (const _ of this.report.heartbeat()) if (slice.over) await slice.next()
-    for (const _ of this.demand.expire()) if (slice.over) await slice.next()
+  }
+  /** @internal */
+  _onDemand(serialized: string): void {
+    const page = decodeLaneEnvelope(serialized) as RoomDemandPage
+    if (page.instance !== this.report.instance) this.demand.applyPage(page)
+  }
+  /** @internal */
+  _askDemand(): void {
+    const ask = { __r: 'demand-ask', instance: this.report.instance } satisfies RoomCtrlEnvelope
+    // A stale commit is a closed room's, which has no demand.
+    void commitRoomLane(this.id, this._inc, CONTROL_LANE, encodeRoomRecord(ask)).catch(reportRoomError)
+  }
+  /** @internal */
+  _forgetDemand(): void {
+    this.demand.forgetLeased()
   }
   /** @internal */
   async _readOpenConfig(): Promise<RoomConfigRecord | null> {
@@ -316,8 +345,8 @@ class RoomReplica {
   /** @internal */
   _onControl(serialized: string, info: WirePublishInfo): void {
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
-    if (ctrl.__r === 'want') {
-      if (ctrl.instance !== this.report.instance) this.demand.applyWant(ctrl)
+    if (ctrl.__r === 'demand-ask') {
+      if (ctrl.instance !== this.report.instance) void this._tellDemandAgain().catch(reportRoomError)
       return
     }
     this.applyControl(ctrl, () => encodePublishText(serialized, info))
