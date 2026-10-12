@@ -62,11 +62,10 @@ import { RoomSubscriptions } from './subscriptions.js'
 import { RoomReplica, type PresenceEvent } from './replica.js'
 import {
   SEMANTIC_LANE,
-  commitRoomLane,
+  commitToInbox,
   decodeRoomText,
   encodeRoomRecord,
   publishCtrl,
-  staleCommitError,
   commitRoomLaneOrThrow,
   openConfig,
   withinRoomHorizon,
@@ -453,30 +452,17 @@ class ServerRoom extends RoomStateView implements Room {
       data,
       ...(ackId ? { ackId } : {}),
     }
-    const receipt = await commitRoomLaneOrThrow(
-      this.id,
-      this._inc,
-      { kind: 'inbox', member: to },
-      encodeRoomRecord(envelope),
-      { requiredCellKeys: [memberCellKey(from), memberCellKey(to)] },
-    )
+    const receipt = await commitToInbox(this.id, this._inc, envelope, [from])
+    if ('gone' in receipt) throw participantGoneError(receipt.gone)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._guards?.onAfterSend
     if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
     return info
   }
 
-  async _publishDmAck(to: string, ackId: string, reply: DmReply): Promise<void> {
-    const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
-    const committed = await commitRoomLane(
-      this.id,
-      this._inc,
-      { kind: 'inbox', member: to },
-      encodeRoomRecord(envelope),
-      { requiredCellKeys: [memberCellKey(to)] },
-    )
-    // A sender that left had its wait failed by its leave; only a closed room is an error.
-    if ('stale' in committed && committed.stale === 'incarnation') throw staleCommitError(this.id, committed)
+  /** A sender that left had its wait failed by its leave; only a closed room is an error. */
+  _publishDmAck(to: string, ackId: string, reply: DmReply): Promise<unknown> {
+    return commitToInbox(this.id, this._inc, { __r: 'dm-ack', to, ackId, ...reply })
   }
 
   private async _resolveMember(id: string): Promise<Sender | null> {

@@ -15,7 +15,7 @@ import {
   ownMetadata,
   removedCause,
 } from '../model.js'
-import type { MemberSnapshot, RoomConfigRecord, RoomDmEnvelope, RoomEnvelope } from '../protocol.js'
+import type { MemberSnapshot, RoomConfigRecord, RoomEnvelope } from '../protocol.js'
 import type {
   AfterJoinHook,
   AfterPublishHook,
@@ -42,15 +42,7 @@ import {
   reapAndReadRoster,
   reapAndResolveIdentity,
 } from './membership.js'
-import { memberCellKey } from './cells.js'
-import {
-  SEMANTIC_LANE,
-  commitRoomLane,
-  commitRoomLaneOrThrow,
-  openConfig,
-  encodeRoomRecord,
-  staleCommitError,
-} from './lanes.js'
+import { SEMANTIC_LANE, commitToInbox, commitRoomLaneOrThrow, openConfig, encodeRoomRecord } from './lanes.js'
 import { ServerRoom } from './room.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
 import { metaEntriesAt, metaObjectOf } from '../meta-state.js'
@@ -372,18 +364,9 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
   const members = await resolveParticipantRef({ id, ...config }, target)
   const exact = 'id' in target
   for (const member of members) {
-    if (!(await sendServerDm(id, config.inc, member.id, message)) && exact) throw participantGoneError(member.id)
+    const envelope = { __r: 'dm', to: member.id, from: '', fromMeta: null, data: message } as const
+    if ('gone' in (await commitToInbox(id, config.inc, envelope)) && exact) throw participantGoneError(member.id)
   }
-}
-
-async function sendServerDm(roomId: string, inc: string, memberId: string, data: unknown): Promise<boolean> {
-  const envelope: RoomDmEnvelope = { __r: 'dm', to: memberId, from: '', fromMeta: null, data }
-  const committed = await commitRoomLane(roomId, inc, { kind: 'inbox', member: memberId }, encodeRoomRecord(envelope), {
-    requiredCellKeys: [memberCellKey(memberId)],
-  })
-  if (!('stale' in committed)) return true
-  if (committed.stale === 'cell') return false
-  throw staleCommitError(roomId, committed)
 }
 
 function normalizeRoomOptions(options: RoomOptions | undefined): {

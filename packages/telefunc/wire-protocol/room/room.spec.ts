@@ -2482,7 +2482,7 @@ describe('Room public behavior', () => {
   it("forgets a stub's ack DM once its sender timed out, at the next ack DM, so a reply after that publishes nothing", async () => {
     const room = (await Room.create('stub-ack-dm-expiry')) as ServerRoom
     const { stub } = serve(room)
-    const publishDmAck = vi.spyOn(room, '_publishDmAck').mockResolvedValue()
+    const publishDmAck = vi.spyOn(room, '_publishDmAck').mockResolvedValue(undefined)
     vi.useFakeTimers()
     const dm = (ackId: string) => ({
       __r: 'dm' as const,

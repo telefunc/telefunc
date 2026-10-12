@@ -3,6 +3,7 @@ export {
   SEMANTIC_LANE,
   commitRoomLane,
   commitRoomLaneOrThrow,
+  commitToInbox,
   openConfig,
   configFromHead,
   decodeLaneEnvelope,
@@ -10,7 +11,6 @@ export {
   decodeRoomText,
   encodeRoomRecord,
   publishCtrl,
-  staleCommitError,
   withinRoomHorizon,
 }
 
@@ -19,12 +19,18 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { raceTimeout } from '../../../utils/raceTimeout.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId, RoomHead, StaleCommit, CommitOptions } from '../../backend/room/contract.js'
-import { hasRoomTag, type RoomConfigRecord, type RoomCtrlEnvelope } from '../protocol.js'
+import {
+  hasRoomTag,
+  type RoomConfigRecord,
+  type RoomCtrlEnvelope,
+  type RoomDmAckEnvelope,
+  type RoomDmEnvelope,
+} from '../protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../../../utils/assert.js'
 import { ROOM_HORIZON_MS } from '../constants.js'
 import { reportRoomError } from './errors.js'
-import { memberIdOfCellKey } from './cells.js'
+import { memberCellKey, memberIdOfCellKey } from './cells.js'
 
 const roomTextEncoder = new TextEncoder()
 const roomTextDecoder = new TextDecoder()
@@ -95,6 +101,22 @@ async function commitRoomLaneOrThrow(
   const result = await commitRoomLane(id, inc, lane, payload, opts)
   if ('stale' in result) throw staleCommitError(id, result)
   return result
+}
+
+/** Commits `envelope` to its recipient's inbox, requiring the recipient's member cell and each of `requiring`'s. A
+ *  closed room throws; a required member that left is returned as `gone`, for the caller to throw or skip. */
+async function commitToInbox(
+  roomId: string,
+  inc: string,
+  envelope: RoomDmEnvelope | RoomDmAckEnvelope,
+  requiring: string[] = [],
+): Promise<CommitAccepted | { gone: string }> {
+  const lane = { kind: 'inbox', member: envelope.to } as const
+  const requiredCellKeys = [...requiring, envelope.to].map(memberCellKey)
+  const result = await commitRoomLane(roomId, inc, lane, encodeRoomRecord(envelope), { requiredCellKeys })
+  if (!('stale' in result)) return result
+  if (result.stale === 'cell') return { gone: memberIdOfCellKey(result.key) }
+  throw roomClosedError(roomId)
 }
 
 function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
