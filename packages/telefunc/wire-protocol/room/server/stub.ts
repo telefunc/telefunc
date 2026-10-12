@@ -245,7 +245,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   // A client learns its members from this view alone, so a want naming any other id names one that left or never was.
   private _declareBinaryWant({ member, track, on }: BinaryWantChange): void {
-    if (on && member !== null && !this._room._state.hasMember(member)) return
+    if (on && member !== null && !this._room._model.hasMember(member)) return
     const change = { member, track, on }
     if (!applyBinaryWantChange(this._binary, change)) return
     if (track !== null) this._trackWants += on ? 1 : -1
@@ -255,7 +255,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _declareTextWants(changes: Record<string, boolean>, announce: boolean): void {
     const members = new Map<string, boolean>()
     for (const [id, wanted] of Object.entries(changes)) {
-      if (wanted === this._textMemberWants.has(id) || (wanted && !this._room._state.hasMember(id))) continue
+      if (wanted === this._textMemberWants.has(id) || (wanted && !this._room._model.hasMember(id))) continue
       members.set(id, !wanted)
       if (wanted) this._textMemberWants.add(id)
       else this._textMemberWants.delete(id)
@@ -388,7 +388,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
       this._peer !== null &&
       this._rosterSent &&
       this._room._roster.settled &&
-      this._room._state.memberHidden(member) === false
+      this._room._model.memberHidden(member) === false
     )
   }
 

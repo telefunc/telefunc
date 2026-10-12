@@ -41,7 +41,7 @@ import {
   type AcceptedMeta,
   type RoomEnvelope,
 } from '../protocol.js'
-import { RoomState, RoomStateView } from '../state.js'
+import { RoomModel, RoomState, RoomStateView } from '../state.js'
 import { DemandReport } from '../demand.js'
 import { ParticipantBase } from '../participant.js'
 import { MemberMessageTexts, RoomStubChannel, unorderedEventText } from './stub.js'
@@ -108,7 +108,8 @@ class ServerRoom extends RoomStateView implements Room {
   /** In-flight `send(…, { ack: true })`s; a leave of either end, or a close, fails the ones it strands. */
   private readonly _pendingDmAcks = new PendingDmAcks()
   private _guards: Partial<RoomGuardHooks> | null = null
-  /** @internal */ readonly _state: RoomState
+  /** @internal */ readonly _model: RoomModel
+  /** @internal This handle's listeners over the model. */ readonly _state: RoomState
   private readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
   /** The attached stub holding each member a client joined through. */
@@ -138,26 +139,29 @@ class ServerRoom extends RoomStateView implements Room {
     super()
     this._inc = inc
     this._incarnation = { id: roomId, inc, hold }
-    this._state = new RoomState({
-      owner: this,
+    this._model = new RoomModel({
       roomId,
       meta: stored.entries,
       seed,
       metaSeq: stored.seq,
       onMetaWaiting: () => this._sync.metaWaiting(),
       onMemberMetaGap: () => this._sync.memberMetaGap(),
+      onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
+    })
+    this._state = new RoomState({
+      owner: this,
+      model: this._model,
       onListenersChanged: (member, binary) => {
         this._onHolderTextChanged(this._local, this._local.refreshText(member))
         if (binary !== null && this._local.applyBinary(binary)) this._onHolderBinaryChanged(this._local, binary)
       },
       onCallbackError: reportServerChannelError,
-      onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._local = new LocalHolder(this._state, this._localSuppressed)
     this._replicaOf = RoomReplica.of(roomId, inc)
     this._subs = new RoomSubscriptions(this, this._report)
     this._sync = new AuthoritySync(this, this._subs)
-    this._roster = new RosterStream(this._state, this._stubs, () => this._sync.ensureRoster())
+    this._roster = new RosterStream(this._model, this._stubs, () => this._sync.ensureRoster())
     this._writes = new RoomWrites(this, {
       guards: () => this._guards,
       local: (id) => this._localParticipants.get(id),
@@ -213,8 +217,8 @@ class ServerRoom extends RoomStateView implements Room {
 
   snapshot(): RoomSnapshotView {
     // Loads the members for the next snapshot; their arrival fires onChange.
-    if (!this._state.rosterKnown) void this._sync.ensureRoster().catch(reportRoomError)
-    return this._state.snapshot()
+    if (!this._model.rosterKnown) void this._sync.ensureRoster().catch(reportRoomError)
+    return this._model.snapshot()
   }
 
   /** Both join paths: the room is open, the guard passes, the holder takes the member, then the member commits. */
@@ -254,7 +258,7 @@ class ServerRoom extends RoomStateView implements Room {
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       // In an open room the inbox closes only when the holder detached, or a removal already evicted the member.
-      const lost = this._subs.inboxOf(id) === undefined && !this._state.closed
+      const lost = this._subs.inboxOf(id) === undefined && !this._model.closed
       const cause = lost ? ({ type: 'disconnected' } as const) : ({ type: 'left' } as const)
       await evictMember(this._incarnation, id, identity, cause).catch(reportRoomError)
       this._abandonAdmission(id, cause)
@@ -270,19 +274,19 @@ class ServerRoom extends RoomStateView implements Room {
   /** A closed room or a departed member drops the admission's inbox. */
   private _assertAdmitted(id: string): void {
     if (this._subs.inboxOf(id) === undefined)
-      throw this._state.closed ? roomClosedError(this.id) : participantLeftError()
+      throw this._model.closed ? roomClosedError(this.id) : participantLeftError()
   }
   private _abandonAdmission(id: string, cause: LeaveCause): void {
     this._pendingAdmissions.delete(id)
-    this._state.applyLeave(id, cause)
+    this._model.applyLeave(id, cause)
   }
 
   /** @internal */
   async _removeMember(id: string, cause: LeaveCause): Promise<void> {
-    if (this._state.closed) return // close() already removed everyone
+    if (this._model.closed) return // close() already removed everyone
     const identity = this._state.getRemote(id)?.identity ?? null
     await evictMember(this._incarnation, id, identity, cause)
-    this._state.applyLeave(id, cause)
+    this._model.applyLeave(id, cause)
   }
 
   /** @internal The member's holder is gone and nothing will retry: ownership ends even if eviction fails, leaving a record whose lease expires. */
@@ -291,7 +295,7 @@ class ServerRoom extends RoomStateView implements Room {
     try {
       await this._removeMember(id, cause)
     } catch (error) {
-      this._state.applyLeave(id, cause)
+      this._model.applyLeave(id, cause)
       throw error
     }
   }
@@ -301,7 +305,7 @@ class ServerRoom extends RoomStateView implements Room {
     return openConfig(await getRoomBackend().readHead(this.id), this._inc)
   }
   private async _assertOpen(): Promise<void> {
-    if (this._state.closed || (await this._readOpenConfig()) === null) throw roomClosedError(this.id)
+    if (this._model.closed || (await this._readOpenConfig()) === null) throw roomClosedError(this.id)
   }
   /** @internal */
   _onCtrlEvent(event: PresenceEvent, serialized: string, rawInfo: WirePublishInfo): void {
@@ -357,8 +361,8 @@ class ServerRoom extends RoomStateView implements Room {
   /** A stamp newer than the sender's meta here is the update this view missed so far: it applies and relays first, so
    *  every client here names the sender as of the send. */
   private _applyStamp(id: string, { fromMeta, fromMetaSeq }: SenderStamp): void {
-    const hidden = this._state.memberHidden(id)
-    if (hidden === null || this._state.memberMetaSeq(id)! >= fromMetaSeq) return
+    const hidden = this._model.memberHidden(id)
+    if (hidden === null || this._model.memberMetaSeq(id)! >= fromMetaSeq) return
     const update = { __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq, ...(hidden ? { hidden: true } : {}) } as const
     if (this._applyCtrl(update)) this._relayApplied(update)
   }
@@ -402,23 +406,23 @@ class ServerRoom extends RoomStateView implements Room {
       case 'join':
         return this._applyJoin(joinedMember(event))
       case 'leave':
-        this._state.applyLeave(event.id, leaveCauseFromWire(event))
+        this._model.applyLeave(event.id, leaveCauseFromWire(event))
         return false
       case 'p-meta': {
-        const applied = this._state.applyParticipantMeta(event.id, event)
+        const applied = this._model.applyParticipantMeta(event.id, event)
         this._localParticipants.get(event.id)?._acceptMeta(event)
         return applied
       }
       case 'update':
         // Relayed here: each update this one let apply, in seq order.
-        for (const applied of this._state.applyRoomUpdate(event)) this._relayApplied(applied)
+        for (const applied of this._model.applyRoomUpdate(event)) this._relayApplied(applied)
         return false
       case 'closed':
-        return this._state.applyClosed()
+        return this._model.applyClosed()
     }
   }
   private _applyJoin(member: MemberSnapshot): boolean {
-    if (!this._state.applyJoin(member)) return false
+    if (!this._model.applyJoin(member)) return false
     this._subs.memberChanged(member.id)
     return true
   }
@@ -467,12 +471,12 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A newer meta reaching this view through the authority never reached its clients as an event. */
   _applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {
-    for (const applied of this._state.applyRoomUpdate({ __r: 'update', seq, meta: entries }))
+    for (const applied of this._model.applyRoomUpdate({ __r: 'update', seq, meta: entries }))
       this._relayApplied(applied)
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
-    if (!this._state.applyClosed()) return
+    if (!this._model.applyClosed()) return
     this._relayApplied({ __r: 'closed' })
     this._teardown()
   }
@@ -500,9 +504,9 @@ class ServerRoom extends RoomStateView implements Room {
       metadata: {
         channelId: stub.id,
         roomId: this.id,
-        meta: this._state.metaEntries(),
+        meta: this._model.metaEntries(),
         closed: this.isClosed,
-        metaSeq: this._state.metaSeq,
+        metaSeq: this._model.metaSeq,
         bufferLimit: getServerConfig().channel.bufferLimit,
         count: this.count,
       },
@@ -522,7 +526,7 @@ class ServerRoom extends RoomStateView implements Room {
   _onStubAttached(stub: RoomStubChannel): void {
     if (!this._stubs.has(stub)) return
     this._roster.sendTo(stub)
-    stub._relayEvent({ __r: 'update', seq: this._state.metaSeq, meta: this._state.metaEntries() })
+    stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
     for (const member of stub._heldMembers())
       stub._relayEvent({ __r: 'demand-state', member, tracks: this._demandOf(member) })
   }
@@ -574,7 +578,7 @@ class ServerRoom extends RoomStateView implements Room {
     const event = parse(serialized) as RoomDataEnvelope
     // A member whose own want didn't change is wanted now only by the new room-wide want, if at all.
     const had = before.members.get(event.from) ?? holder._textDemand().members.has(event.from)
-    if (had || !holder._wantsTextFrom(event.from) || !this._state.hasMember(event.from)) return
+    if (had || !holder._wantsTextFrom(event.from) || !this._model.hasMember(event.from)) return
     // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
@@ -597,7 +601,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
       const stored = await backend.readRetained(this.id, this._inc, lane)
-      if (stored === null || !this._state.hasMember(lane.member)) continue
+      if (stored === null || !this._model.hasMember(lane.member)) continue
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
       assert(frame)

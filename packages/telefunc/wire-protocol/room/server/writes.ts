@@ -12,7 +12,7 @@ import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
 import { DM_FAILURE, participantGoneError, participantLeftError, roomClosedError, roomFailureError } from '../errors.js'
 import { ownMetaArgument, senderOf } from '../model.js'
 import type { AcceptedMeta, DmReply, RoomDataEnvelope, RoomDmEnvelope, SenderStamp } from '../protocol.js'
-import type { RoomState } from '../state.js'
+import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './cells.js'
 import type { PendingDmAcks } from './dm-acks.js'
@@ -29,7 +29,8 @@ type WritesHost = {
   readonly id: string
   readonly _inc: string
   readonly _incarnation: RoomIncarnation
-  readonly _state: Pick<RoomState, 'closed' | 'getRemote' | 'memberMetaSeq'>
+  readonly _model: Pick<RoomModel, 'closed' | 'memberMetaSeq'>
+  readonly _state: Pick<RoomState, 'getRemote'>
   readonly _replica: RoomReplica
 }
 /** What the writes read of the handle's own: its guards, its local participants, its lane plan and its view. */
@@ -130,7 +131,7 @@ class RoomWrites {
   }
 
   private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
-    if (this._host._state.closed) throw roomClosedError(this._host.id)
+    if (this._host._model.closed) throw roomClosedError(this._host.id)
     const sender = this._memberSender(from)
     const onBeforePublish = this._of.guards()?.onBeforePublish
     if (onBeforePublish) await onBeforePublish(sender, payload)
@@ -150,7 +151,7 @@ class RoomWrites {
 
   /** `sender` with the meta seq it reflects, as `_memberSender(from)` just read it. */
   private _stampOf(from: string, sender: Sender): SenderStamp {
-    const seq = this._host._state.memberMetaSeq(from) ?? this._of.local(from)!._metaSeq
+    const seq = this._host._model.memberMetaSeq(from) ?? this._of.local(from)!._metaSeq
     return {
       fromMeta: sender.meta,
       fromMetaSeq: seq,
@@ -193,7 +194,7 @@ class RoomWrites {
 
   private async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
     const host = this._host
-    if (host._state.closed) throw roomClosedError(host.id)
+    if (host._model.closed) throw roomClosedError(host.id)
     const target = await this._resolveMember(to)
     if (!target) throw participantGoneError(to)
     const sender = this._memberSender(from)

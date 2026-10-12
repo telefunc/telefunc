@@ -29,7 +29,7 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from './protocol.js'
-import { RoomState, RoomStateView, type MembershipEvent } from './state.js'
+import { RoomModel, RoomState, RoomStateView, type MembershipEvent } from './state.js'
 import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 import { ParticipantBase } from './participant.js'
 import type {
@@ -69,6 +69,7 @@ class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
   private readonly _stub: ClientBroadcast
+  private readonly _model: RoomModel
   protected readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
   /** Joins awaiting their ack. The server relays to a member from its admission, before the ack registers it here, so events naming an unknown member wait for the joins to settle. */
@@ -96,18 +97,21 @@ class ClientRoom extends RoomStateView implements Room {
     super()
     this._stub = stub
     this._bufferLimit = snapshot.bufferLimit
-    this._state = new RoomState({
-      owner: this,
+    this._model = new RoomModel({
       roomId: snapshot.roomId,
       meta: snapshot.meta,
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
       metaSeq: snapshot.metaSeq,
       closed: snapshot.closed,
+      onLeave: (id, cause) => this._onLeave(id, cause),
+      pendingMember: (id) => this._rosterPending.get(id),
+    })
+    this._state = new RoomState({
+      owner: this,
+      model: this._model,
       onListenersChanged: (member, binary) => this._syncWants(member, binary),
       onCallbackError: reportClientCallbackError,
       trackWantsMax: ROOM_TRACK_WANTS_MAX,
-      onLeave: (id, cause) => this._onLeave(id, cause),
-      pendingMember: (id) => this._rosterPending.get(id),
     })
     if (snapshot.closed) this._roster.resolve()
 
@@ -137,13 +141,13 @@ class ClientRoom extends RoomStateView implements Room {
         joinedAt: number
       }
       const participant = new ClientRoomParticipant(this, id, meta, selfDelivery)
-      const closedCause = this._state.closedCause
+      const closedCause = this._model.closedCause
       if (closedCause) {
         participant._onLeft(closedCause)
         return participant
       }
       this._localParticipants.set(id, participant)
-      this._state.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
+      this._model.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
       return participant
     } finally {
       this._pendingJoins--
@@ -170,7 +174,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private async _awaitRoster(): Promise<void> {
-    if (!this._state.rosterKnown) await this._roster.promise
+    if (!this._model.rosterKnown) await this._roster.promise
   }
 
   /** @internal Sync view read for sender resolution (delivery must not wait on I/O). */
@@ -195,7 +199,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   snapshot(): RoomSnapshotView {
-    return this._state.snapshot()
+    return this._model.snapshot()
   }
 
   /** @internal */
@@ -221,7 +225,7 @@ class ClientRoom extends RoomStateView implements Room {
   /** @internal A local participant completed its voluntary leave. */
   _dropParticipant(id: string): void {
     this._localParticipants.delete(id)
-    this._state.applyLeave(id, { type: 'left' }) // the relayed event is absorbed
+    this._model.applyLeave(id, { type: 'left' }) // the relayed event is absorbed
   }
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
@@ -243,16 +247,16 @@ class ClientRoom extends RoomStateView implements Room {
         this._state.applyData(event, makePublishInfo(this.id, rawInfo.seq, rawInfo.timestamp))
         return
       case 'join':
-        this._state.applyJoin(joinedMember(event))
+        this._model.applyJoin(joinedMember(event))
         return
       case 'leave':
-        this._state.applyLeave(event.id, leaveCauseFromWire(event))
+        this._model.applyLeave(event.id, leaveCauseFromWire(event))
         return
       case 'p-meta':
         this._acceptParticipantMeta(event.id, event)
         return
       case 'update':
-        this._state.applyRoomUpdate(event)
+        this._model.applyRoomUpdate(event)
         return
       case 'closed':
         this._applyClosed('closed')
@@ -306,7 +310,7 @@ class ClientRoom extends RoomStateView implements Room {
       this._rosterIn = null
       return this._stopRosterEvents()
     }
-    this._rosterEvents ??= this._state.recordMembership()
+    this._rosterEvents ??= this._model.recordMembership()
     for (const member of members) {
       into.members.push(member)
       this._rosterPending.set(member.id, member)
@@ -322,10 +326,10 @@ class ClientRoom extends RoomStateView implements Room {
 
   private async _applyRoster(members: MemberSnapshot[], events: readonly MembershipEvent[]): Promise<void> {
     try {
-      await this._state.reconcileRoster({ members, departing: new Set() }, events)
+      await this._model.reconcileRoster({ members, departing: new Set() }, events)
       // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
       for (const [id, local] of this._localParticipants) {
-        const accepted = this._state.acceptedMeta(id)
+        const accepted = this._model.acceptedMeta(id)
         if (accepted !== null && accepted.seq > local._metaSeq) local._acceptMeta(accepted)
       }
       this._roster.resolve()
@@ -339,18 +343,18 @@ class ClientRoom extends RoomStateView implements Room {
     if (this._rosterIn !== null || this._rostersApplying > 0 || this._rosterEvents === null) return
     this._rosterEvents = null
     this._rosterPending.clear()
-    this._state.stopRecordingMembership()
+    this._model.stopRecordingMembership()
   }
 
   /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
   _acceptParticipantMeta(id: string, accepted: AcceptedMeta): void {
-    this._state.applyParticipantMeta(id, accepted)
+    this._model.applyParticipantMeta(id, accepted)
     this._localParticipants.get(id)?._acceptMeta(accepted)
   }
 
   private _applyClosed(causeType: 'closed' | 'disconnected'): void {
     const cause: LeaveCause = { type: causeType }
-    if (!this._state.applyClosed(cause)) return
+    if (!this._model.applyClosed(cause)) return
     this._roster.resolve() // unblock any getParticipants() waiting on a wire that just died
     // Local participants end after onClose, as on the server.
     for (const local of this._localParticipants.values()) local._onLeft(cause)
@@ -362,7 +366,7 @@ class ClientRoom extends RoomStateView implements Room {
    *  the room-wide text wants and those of `member`, whose listeners changed, or the one binary want that did. */
   private _syncWants(member: string | null, binary: BinaryWantChange | null): void {
     const state = this._state
-    if (state.closed) return this._stub._setWireSubscribed('text', false) // a closed room takes no declaration
+    if (this._model.closed) return this._stub._setWireSubscribed('text', false) // a closed room takes no declaration
     const text = state.textWants()
     this._stub._setWireSubscribed('text', text.all)
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.

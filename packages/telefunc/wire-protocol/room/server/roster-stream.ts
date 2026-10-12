@@ -4,7 +4,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ROOM_ROSTER_PART_MEMBERS } from '../constants.js'
 import type { MemberSnapshot, RoomRosterEvent } from '../protocol.js'
 import { Slice } from '../slice.js'
-import type { MembershipEvent, RoomState } from '../state.js'
+import type { MembershipEvent, RoomModel } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { type RoomStubChannel, unorderedEventText } from './stub.js'
 assertIsNotBrowser()
@@ -20,7 +20,7 @@ class RosterStream {
   private _reconciling = false
 
   constructor(
-    private readonly _state: RoomState,
+    private readonly _model: RoomModel,
     /** The view's attached stubs; one that leaves it drops out of a stream. */
     private readonly _stubs: ReadonlySet<RoomStubChannel>,
     private readonly _ensureRoster: () => Promise<void>,
@@ -39,9 +39,9 @@ class RosterStream {
     roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
     events: readonly MembershipEvent[],
   ): Promise<boolean> {
-    this._reconciling = this._state.rosterKnown
+    this._reconciling = this._model.rosterKnown
     try {
-      const drifted = await this._state.reconcileRoster(roster, events)
+      const drifted = await this._model.reconcileRoster(roster, events)
       if (drifted === null) return false
       const recipients = drifted ? [...this._stubs] : [...this._owed]
       this._owed.clear()
@@ -56,11 +56,11 @@ class RosterStream {
   sendTo(stub: RoomStubChannel): void {
     void this._ensureRoster()
       .then(() => {
-        if (this._stubs.has(stub) && !this._state.closed) return this._stream([stub])
+        if (this._stubs.has(stub) && !this._model.closed) return this._stream([stub])
       })
       .catch((error) => {
         reportRoomError(error)
-        if (!this._stubs.has(stub) || this._state.closed) return
+        if (!this._stubs.has(stub) || this._model.closed) return
         stub._relayEvent({ __r: 'roster-error' })
         this._owed.add(stub)
       })
@@ -84,7 +84,7 @@ class RosterStream {
       stub._rosterStream = stream
       stub._rosterSent = false
     }
-    const state = this._state
+    const state = this._model
     const version = state.version
     if (this._texts?.version !== version) this._texts = { version, parts: [] }
     const texts = this._texts.parts

@@ -37,7 +37,7 @@ import { HOLDS_CELL_KEY, JOINS_CELL_KEY, MEMBER_CELL_PREFIX, memberCellKey } fro
 import type { LeaveCause, ParticipantMeta, Sender } from './types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
-import { RoomState, type RoomStateView, remoteBacking } from './state.js'
+import { RoomModel, RoomState, type RoomStateView, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
@@ -878,7 +878,7 @@ describe('Room public behavior', () => {
     await controlSubscribed.promise
     const member = await room.join()
     await room.getParticipants()
-    room._state.applyLeave(member.id, { type: 'left' })
+    room._model.applyLeave(member.id, { type: 'left' })
     expect(room.count).toBe(0)
     transition('lost')
     transition('ready')
@@ -1021,7 +1021,7 @@ describe('Room public behavior', () => {
     observer.onJoin(() => {})
     await observer.getParticipants()
     await vi.waitFor(() => expect(controlOf(observer).established).toBe(true))
-    expect(observer._state.rosterKnown).toBe(true)
+    expect(observer._model.rosterKnown).toBe(true)
     const readCellPages = driver.readCellPages.bind(driver)
     const started = createDeferred()
     const release = createDeferred()
@@ -1062,7 +1062,7 @@ describe('Room public behavior', () => {
       await leaving.leave()
       expected.push(`join ${joined.id}`, `leave ${leaving.id}`)
     }
-    const state = observer._state
+    const state = observer._model
     const reconciling = state.reconcilingRoster.bind(state)
     vi.spyOn(state, 'reconcilingRoster').mockImplementation(function* (roster, events) {
       const steps = reconciling(roster, events)
@@ -1626,7 +1626,7 @@ describe('Room public behavior', () => {
       await vi.waitFor(() =>
         expect(memberEvents(peer, before.id)).toContainEqual(expect.objectContaining({ __r: 'join' })),
       )
-      expect(observer._state.rosterKnown).toBe(false)
+      expect(observer._model.rosterKnown).toBe(false)
       await bot.setMeta({ secret: true })
       await bot.publishBinary(new Uint8Array([1]), { track: 'hidden-track' })
       await bot.leave()
@@ -1970,7 +1970,7 @@ describe('Room public behavior', () => {
     const viewOf = (view: ServerRoom | ClientRoom) => ({
       keys: Object.keys(view.meta),
       meta: view.meta,
-      seq: (view as unknown as { _state: RoomState })._state.metaSeq,
+      seq: (view as unknown as { _model: RoomModel })._model.metaSeq,
     })
     const expected = viewOf(stored)
     expect(expected.seq).toBeGreaterThan(100)
@@ -2013,7 +2013,7 @@ describe('Room public behavior', () => {
       ),
     )
     const viewOf = (view: ServerRoom | ClientRoom) => {
-      const accepted = (view as unknown as { _state: RoomState })._state.acceptedMeta(member.id)!
+      const accepted = (view as unknown as { _model: RoomModel })._model.acceptedMeta(member.id)!
       return { keys: Object.keys(accepted.meta), meta: accepted.meta, seq: accepted.seq }
     }
     const stored = (await Room.get(room.id)) as ServerRoom
@@ -3448,7 +3448,7 @@ describe('Room public behavior', () => {
     const peer = attachPeer(stub)
     await vi.waitFor(() => expect(relayed(peer).map(({ __r }) => __r)).toContain('roster-error'))
     declareEach(stub, [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID(), member.id])
-    expect(observer._state.rosterKnown).toBe(false)
+    expect(observer._model.rosterKnown).toBe(false)
     const only = [member.id]
     expect(wantsHeld(observer, stub)).toEqual({ text: only, binary: only, indexedText: only, indexedBinary: only })
   })
@@ -3463,7 +3463,7 @@ describe('Room public behavior', () => {
     try {
       declare(stub, { __r: 'sub-binary', member: publisher.id, track: 'screen', on: true })
       await roster.started
-      expect(observer._state.rosterKnown).toBe(false)
+      expect(observer._model.rosterKnown).toBe(false)
       expect(binaryLanes()).toBe(1)
       await subsOf(observer).binaryReady()
       await publisher.publishBinary(new Uint8Array([7]), { track: 'screen' })
@@ -4920,19 +4920,20 @@ describe('RoomState', () => {
   it('records the events of members it does not know for a roster read, and narrates only what a roster changes', async () => {
     const state = newState({ roomId: 'unknown-member-epoch' })
     const id = crypto.randomUUID()
-    const events = await state.recordingMembership(
+    const events = await state.model.recordingMembership(
       async () => {
-        state.applyParticipantMeta(id, { seq: 1, meta: { step: 1 } })
-        state.applyLeave(id, { type: 'left' })
+        state.model.applyParticipantMeta(id, { seq: 1, meta: { step: 1 } })
+        state.model.applyLeave(id, { type: 'left' })
       },
       (_, events) => events,
     )
     expect(events).toEqual([{ meta: { id, update: { seq: 1, meta: { step: 1 } } } }, { leave: id }])
     const member = { id, meta: {}, joinedAt: 1, metaSeq: 0 }
-    expect(await state.reconcileRoster({ members: [member], departing: new Set() }, [])).toBe(true)
+    expect(await state.model.reconcileRoster({ members: [member], departing: new Set() }, [])).toBe(true)
     let changes = 0
     state.onChange(() => changes++)
-    const reconcile = () => state.reconcileRoster({ members: [{ ...member, metaSeq: 1 }], departing: new Set() }, [])
+    const reconcile = () =>
+      state.model.reconcileRoster({ members: [{ ...member, metaSeq: 1 }], departing: new Set() }, [])
     expect(await reconcile()).toBe(true)
     expect(changes).toBe(1)
     expect(await reconcile()).toBe(false)
@@ -4945,9 +4946,9 @@ describe('RoomState', () => {
     const state = newState({ roomId: 'reconcile-change-count', seed: { members: [alice] } })
     const observed: string[][] = []
     const joins: string[] = []
-    state.onChange(() => observed.push([...state.memberIds()]))
+    state.onChange(() => observed.push([...state.model.memberIds()]))
     state.onJoin((member) => joins.push(member.id))
-    await state.reconcileRoster({ members: [alice, bob, carol], departing: new Set() }, [])
+    await state.model.reconcileRoster({ members: [alice, bob, carol], departing: new Set() }, [])
     expect(observed.at(-1)).toEqual([alice.id, bob.id, carol.id])
     expect(joins).toEqual([bob.id, carol.id])
   })
@@ -4974,7 +4975,7 @@ describe('RoomState', () => {
     const info = { key: state.roomId, seq: 1, timestamp: 1 }
     state.applyData({ __r: 'data', from: memberId, fromMeta: {}, data: 'text' }, info)
     state.applyBinary({ from: memberId, payload: new Uint8Array(), track: null, meta: null, retain: false }, info)
-    state.applyClosed()
+    state.model.applyClosed()
     await Promise.resolve()
     expect(errors).toEqual(failures)
   })
@@ -6064,17 +6065,17 @@ function standaloneParticipant(
   })
   return { participant, notify: (notice: unknown) => notify(notice) }
 }
-function newState(options: Partial<ConstructorParameters<typeof RoomState>[0]>): RoomState {
+function newState(
+  options: Partial<
+    ConstructorParameters<typeof RoomModel>[0] & Pick<ConstructorParameters<typeof RoomState>[0], 'onCallbackError'>
+  >,
+): RoomState {
+  const { onCallbackError = () => {}, ...model } = options
   return new RoomState({
     owner: {} as RoomStateView, // read only by the serializer
-    roomId: 'state',
-    meta: [],
-    seed: { members: [] },
-    metaSeq: 0,
+    model: new RoomModel({ roomId: 'state', meta: [], seed: { members: [] }, metaSeq: 0, onLeave: () => {}, ...model }),
     onListenersChanged: () => {},
-    onCallbackError: () => {},
-    onLeave: () => {},
-    ...options,
+    onCallbackError,
   })
 }
 function snapshot(roomId: string): RoomSnapshotMetadata {

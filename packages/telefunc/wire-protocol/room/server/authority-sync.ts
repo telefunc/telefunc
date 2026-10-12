@@ -4,7 +4,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_META_REPAIR_MS } from '../constants.js'
 import type { RoomConfigRecord } from '../protocol.js'
-import type { RoomState } from '../state.js'
+import type { RoomModel } from '../state.js'
 import { sweepLapsedRoomsSoon } from './directory.js'
 import { reportRoomError } from './errors.js'
 import { maintainHold, type RoomIncarnation } from './lifecycle.js'
@@ -22,7 +22,7 @@ type SyncHost = {
   readonly _incarnation: RoomIncarnation
   readonly _replica: RoomReplica
   /** Read-only here: every change goes through the host's methods. */
-  readonly _state: Pick<RoomState, 'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordingMembership'>
+  readonly _model: Pick<RoomModel, 'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordingMembership'>
   /** Live: the owned members whose records committed; a pending admission's is renewed once it commits. */
   _renewableMembers(): Iterable<string>
   _renewViews(): Promise<void>
@@ -49,7 +49,7 @@ class AuthoritySync {
 
   ensureRoster(): Promise<void> {
     if (this._pendingRefresh !== null) return this._pendingRefresh
-    const state = this._host._state
+    const state = this._host._model
     if (state.closed || (state.rosterKnown && this._lanes.observing && this._host._replica.controlEstablished))
       return Promise.resolve()
     return this.refreshMembers()
@@ -57,7 +57,7 @@ class AuthoritySync {
 
   async reconcileAuthority(): Promise<void> {
     const host = this._host
-    if (host._state.closed || !(await this._reconcileMeta())) return
+    if (host._model.closed || !(await this._reconcileMeta())) return
     await dropReplacedMetaGenerations(host.id, host._inc)
     await this.refreshMembers()
   }
@@ -69,7 +69,7 @@ class AuthoritySync {
     this._metaRepair = unrefTimer(
       setTimeout(() => {
         this._metaRepair = null
-        const state = this._host._state
+        const state = this._host._model
         if (state.metaWaiting && !state.closed) void this._reconcileMeta().catch(reportRoomError)
       }, ROOM_META_REPAIR_MS),
     )
@@ -82,7 +82,7 @@ class AuthoritySync {
     this._memberMetaRepair = unrefTimer(
       setTimeout(() => {
         this._memberMetaRepair = null
-        if (!this._host._state.closed) void this.refreshMembers().catch(reportRoomError)
+        if (!this._host._model.closed) void this.refreshMembers().catch(reportRoomError)
       }, ROOM_META_REPAIR_MS),
     )
   }
@@ -113,9 +113,9 @@ class AuthoritySync {
   private async _reconcileMeta(): Promise<boolean> {
     const host = this._host
     const config = await host._readOpenConfig()
-    if (config !== null && !host._state.metaWaiting) {
+    if (config !== null && !host._model.metaWaiting) {
       const seq = await readRoomMetaSeq(host.id, config.inc)
-      if (seq !== null && seq <= host._state.metaSeq) return true
+      if (seq !== null && seq <= host._model.metaSeq) return true
     }
     const stored = config && (await readRoomMeta(host.id, config))
     if (stored === null) {
@@ -129,10 +129,10 @@ class AuthoritySync {
   /** One roster read, with the membership events this view got meanwhile replayed onto it, so it undoes none. */
   private async _runMemberRefresh(): Promise<void> {
     const host = this._host
-    if (host._state.closed) return
-    const read = await host._state.recordingMembership(
+    if (host._model.closed) return
+    const read = await host._model.recordingMembership(
       () => reapAndReadRoster(host._incarnation),
-      async (roster, events) => !host._state.closed && (await host._roster.reconcile(roster, events)),
+      async (roster, events) => !host._model.closed && (await host._roster.reconcile(roster, events)),
     )
     if (read) await this._lanes.replan()
   }
@@ -155,7 +155,7 @@ class AuthoritySync {
       }
       await this._lanes.replan() // bounded retry trigger for still-wanted terminal lanes
       await this.reconcileAuthority() // the roster read reaps crashed instances' expired members and views
-      if (!host._state.closed) await maintainHold(host._incarnation)
+      if (!host._model.closed) await maintainHold(host._incarnation)
       sweepLapsedRoomsSoon()
       if (renewalFailure) throw renewalFailure.error
     } finally {

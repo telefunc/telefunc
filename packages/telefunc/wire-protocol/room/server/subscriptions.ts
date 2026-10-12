@@ -10,7 +10,7 @@ import { ROOM_MEMBER_NAMED_LANES_MAX } from '../constants.js'
 import type { BinaryWantChange } from '../binary.js'
 import type { DemandReport } from '../demand.js'
 import type { RoomConfigRecord } from '../protocol.js'
-import type { RoomState } from '../state.js'
+import type { RoomModel, RoomState } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { Slice } from '../slice.js'
@@ -27,7 +27,8 @@ type SubscriptionHost = {
   readonly _inc: string
   readonly _replica: RoomReplica
   /** Read-only here: every change goes through the host's methods. */
-  readonly _state: Pick<RoomState, 'closed' | 'rosterKnown' | 'listenerCount' | 'memberIds' | 'hasMember'>
+  readonly _model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'hasMember'>
+  readonly _state: Pick<RoomState, 'listenerCount'>
   /** What keeps the view in step with the authority, and runs the heartbeat. */
   readonly _sync: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers' | 'heartbeat'>
   /** Whether anything here observes the room: a client stub, a participant, or a listener. */
@@ -247,8 +248,8 @@ class RoomSubscriptions implements ControlObserver {
   /** The room-wide lanes are planned around a change, and the heartbeat after it. */
   private _replanAround(change: () => void): void {
     const host = this._host
-    const state = host._state
-    const open = !state.closed
+    const model = host._model
+    const open = !model.closed
     const observing = open && host._observed()
     const becomesObserved = observing && !this._observing
     if (observing || this._observing) host._replica.observe(this, observing)
@@ -258,8 +259,8 @@ class RoomSubscriptions implements ControlObserver {
         host._onTextData(decodeRoomText(payload), info),
       ),
     )
-    const needsRoster = state.listenerCount > 0 || (open && this._wants.wantsBinary)
-    if ((becomesObserved && state.rosterKnown) || (open && !state.rosterKnown && needsRoster))
+    const needsRoster = host._state.listenerCount > 0 || (open && this._wants.wantsBinary)
+    if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster))
       void host._sync.refreshMembers().catch(reportRoomError)
     change()
     if (this._planning === null) this._demand.flush()
@@ -316,7 +317,7 @@ class RoomSubscriptions implements ControlObserver {
           const members = chain(
             plan.members,
             plan.pairs.keys(),
-            plan.all || plan.tracks.size > 0 ? host._state.memberIds() : [],
+            plan.all || plan.tracks.size > 0 ? host._model.memberIds() : [],
             // Lanes of members no longer present close too.
             plan.all ? this._binaryTracks.keys() : [],
             plan.all ? this._everyTrack.keys() : [],
@@ -333,7 +334,7 @@ class RoomSubscriptions implements ControlObserver {
               slice,
               chain(this._inbox.keys(), host._ownedMembers()),
               once((member) =>
-                !host._state.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
+                !host._model.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
               ),
             )
           }
@@ -455,8 +456,8 @@ class RoomSubscriptions implements ControlObserver {
   }
 
   private _present(member: string): boolean {
-    const state = this._host._state
-    return !state.closed && state.hasMember(member)
+    const model = this._host._model
+    return !model.closed && model.hasMember(member)
   }
 
   /** Counted a slice at a time, and kept unless a change of the member's wants meanwhile made it stale: the change
@@ -534,7 +535,7 @@ class RoomSubscriptions implements ControlObserver {
 
   private _openInbox(member: string): void {
     const host = this._host
-    if (host._state.closed || !host._ownsMember(member)) return
+    if (host._model.closed || !host._ownsMember(member)) return
     let slot = this._inbox.get(member)
     if (!slot) this._inbox.set(member, (slot = this._newLaneSubscription()))
     slot.sync(true, () =>
@@ -589,7 +590,7 @@ class RoomSubscriptions implements ControlObserver {
 
   /** The heartbeat runs while this handle observes the room or owns a member. */
   private _syncHeartbeat(): void {
-    this._host._sync.heartbeat(!this._host._state.closed && (this._observing || this._inbox.size > 0))
+    this._host._sync.heartbeat(!this._host._model.closed && (this._observing || this._inbox.size > 0))
   }
 }
 
