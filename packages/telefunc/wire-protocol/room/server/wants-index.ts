@@ -132,6 +132,17 @@ class WantsIndex {
     return this._everyMemberTracks
   }
 
+  /** Whether some holder receives the member's `track`, named or with every track. */
+  receives(member: string, track: string): boolean {
+    const own = this._members.get(member)
+    return this._receives(member, track, [
+      this._everyMember.get(track),
+      own?.get(track),
+      this._everyMember.get(null),
+      own?.get(null),
+    ])
+  }
+
   /** Whether some holder that names the track receives it from the member. */
   wantsNamedPair(member: string, track: string): boolean {
     return this._receives(member, track, [this._everyMember.get(track), this._members.get(member)?.get(track)])

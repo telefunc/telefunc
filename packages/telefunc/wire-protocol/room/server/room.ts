@@ -353,6 +353,8 @@ class ServerRoom extends RoomStateView implements Room {
     const lane = { kind: 'binary', member: from, track: laneTrack(frame.track) } as const
     const { sender, commit } = await this._inCallOrder(binaryLaneKey(from, lane.track), async (sent) => {
       const sender = await this._admitPublish(from, frame.payload)
+      const planned = this._subs.lanePlanned(from, lane.track)
+      if (planned !== null) await planned
       this._replica.demand.published(from, lane.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitRoomLaneOrThrow(this.id, this._inc, lane, framed, opts)

@@ -217,6 +217,14 @@ class RoomSubscriptions implements ControlObserver {
     })
   }
 
+  /** The planning pass under way while a holder here receives the member's `track` and no lane here carries it yet:
+   *  once it ends, the lane establishes, and holds a commit on it until it delivers. */
+  lanePlanned(member: string, track: string): Promise<void> | null {
+    if (this._planning === null || !this._wants.wantsBinary || this._everyTrack.has(member)) return null
+    if (this._binary.has(binaryLaneKey(member, track)) || !this._wants.receives(member, track)) return null
+    return this._planning
+  }
+
   /** The lanes delivering the member's `track` (`null`: every track) are ready, so a retained read after this misses
    *  no live frame. */
   async pairsReady(member: string, track: string | null): Promise<void> {

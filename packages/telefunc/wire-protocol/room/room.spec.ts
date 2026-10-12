@@ -897,6 +897,19 @@ describe('Room public behavior', () => {
     await publishing
     await vi.waitFor(() => expect(received).toEqual(['first']))
   })
+  it('a binary publish right after a subscribe on this instance reaches it while a replan of 10,000 members is under way', async () => {
+    const room = (await Room.create('subscribe-during-replan')) as ServerRoom
+    await Promise.all(Array.from({ length: 10_000 }, () => room.join()))
+    const publisher = await room.join()
+    const replanning = subsOf(room).replan()
+    // The pass is past its first slice, waiting for a turn.
+    await new Promise((resolve) => setImmediate(resolve))
+    const received: number[] = []
+    room.subscribeBinary((data) => received.push(data[0]!), { track: 'camera' })
+    await publisher.publishBinary(new Uint8Array([7]), { track: 'camera' })
+    await replanning
+    await vi.waitFor(() => expect(received).toEqual([7]))
+  })
   it("holds publishes behind this instance's establishing lane while their bytes, each with its overhead, fit bufferLimit, refusing one past it with ChannelOverflowError", async () => {
     const room = (await Room.create('establishing-bound')) as ServerRoom
     const member = await room.join()
