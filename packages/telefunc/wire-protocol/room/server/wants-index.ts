@@ -105,6 +105,11 @@ class WantsIndex {
     return this._receives(member, DEFAULT_TRACK, [this._everyMember.get(null), this._members.get(member)?.get(null)])
   }
 
+  /** How many tracks some holder names of every member. */
+  get everyMemberTrackCount(): number {
+    return this._everyMember.size - Number(this._everyMember.has(null))
+  }
+
   /** The tracks some holder names of every member, `DEFAULT_TRACK` for the default one. */
   *everyMemberTracks(): Generator<string> {
     for (const track of this._everyMember.keys()) if (track !== null) yield track

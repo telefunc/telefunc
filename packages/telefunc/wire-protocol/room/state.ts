@@ -229,6 +229,10 @@ class RoomModel {
   memberHidden(id: string): boolean | null {
     return this._members.get(id)?.hidden ?? null
   }
+  /** Members currently known, hidden ones included. */
+  get memberCount(): number {
+    return this._members.size
+  }
   /** Member IDs currently known, live. Drives the per-member binary key subscriptions. */
   memberIds(): IterableIterator<string> {
     return this._members.keys()

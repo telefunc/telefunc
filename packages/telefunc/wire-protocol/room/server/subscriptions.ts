@@ -26,7 +26,7 @@ type SubscriptionHost = {
   readonly id: string
   readonly _inc: string
   /** Read-only here: every change goes through the host's methods. */
-  readonly model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'hasMember'>
+  readonly model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'memberCount' | 'hasMember'>
   /** What keeps the view in step with the authority, and runs the heartbeat. */
   readonly sync: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers' | 'heartbeat'>
   /** Whether a handle observes the room: a client stub, a participant, or a listener. */
@@ -82,11 +82,18 @@ class RoomSubscriptions {
   private readonly _binary = new Map<string, LaneSubscription>()
   private readonly _binaryTracks = new Map<string, Set<string>>()
   private readonly _trackMembers = new Map<string, Set<string>>()
-  /** Each member's every-track lane, while some holder here receives all of its tracks or more than
-   *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone. */
+  /** Each member's every-track lane, while some holder here receives all of its tracks, more than
+   *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone, or the tracks named of every member fetched by member. */
   private readonly _everyTrack = new Map<string, LaneSubscription>()
-  /** Each track's every-member lane, while some holder here names it of every member. */
+  /** Each track's every-member lane, while some holder here names it of every member and the tracks are not fetched by
+   *  member. */
   private readonly _everyMember = new Map<string, LaneSubscription>()
+  /** Whether the tracks named of every member are fetched on each member's every-track lane, as they outnumber
+   *  `ROOM_MEMBER_NAMED_LANES_MAX` and the members, so a lane per track would cost more: from more tracks than members
+   *  until twice as many members as tracks. */
+  private _byMember = false
+  /** The tracks named of every member that are told as demand while every-track lanes deliver them. */
+  private readonly _byMemberTracks = new Set<string>()
   /** The every-track lanes not delivering yet, and the tracks whose every-member lanes wait for none to be. */
   private readonly _establishingEveryTrack: Establishing = {
     lanes: new Set(),
@@ -338,6 +345,7 @@ class RoomSubscriptions {
           await this._replanEach(slice, drain(this._gone), (holder) => this._indexHolder(holder, true))
         } else if (!isEmpty(plan)) {
           this._queued = newBinaryPlan()
+          if (this._syncByMember()) plan.all = true
           const host = this._host
           const members = chain(
             plan.members,
@@ -349,7 +357,9 @@ class RoomSubscriptions {
             plan.all ? this._excepted : [],
           )
           const tracks = () =>
-            plan.all ? chain(this._everyMember.keys(), this._wants.everyMemberTracks()) : plan.tracks
+            plan.all
+              ? chain(this._everyMember.keys(), this._byMemberTracks, this._wants.everyMemberTracks())
+              : plan.tracks
           // Every lane opens before any lane it replaces is released.
           await this._replanEach(
             slice,
@@ -404,11 +414,25 @@ class RoomSubscriptions {
     }
   }
 
-  /** A member's binary lanes: its every-track lane while some holder here receives all of its tracks or more than
-   *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone, else a lane per track named of it alone. A switch between them
-   *  keeps the lanes it leaves until the lanes it takes deliver. It yields between tracks, so a member's plan is resumed a
-   *  slice at a time: it plans from the counts and lanes it read first, and every change meanwhile queues the member
-   *  again. */
+  /** Whether `_byMember` changed. */
+  private _syncByMember(): boolean {
+    const model = this._host.model
+    const tracks = this._wants.everyMemberTrackCount
+    const members = model.memberCount
+    const byMember =
+      model.rosterKnown &&
+      tracks > ROOM_MEMBER_NAMED_LANES_MAX &&
+      (this._byMember ? tracks * 2 > members : tracks > members)
+    if (byMember === this._byMember) return false
+    this._byMember = byMember
+    return true
+  }
+
+  /** A member's binary lanes: its every-track lane while some holder here receives all of its tracks, more than
+   *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone, or the tracks named of every member fetched by member, else a lane
+   *  per track named of it alone. A switch between them keeps the lanes it leaves until the lanes it takes deliver. It
+   *  yields between tracks, so a member's plan is resumed a slice at a time: it plans from the counts and lanes it read
+   *  first, and every change meanwhile queues the member again. */
   private *_syncMemberBinary(member: string): Generator<void> {
     const present = this._present(member)
     if (!present) this._counts.delete(member)
@@ -417,7 +441,7 @@ class RoomSubscriptions {
     const overflows = this._overflows(count)
     if (overflows) this._overflowing.add(member)
     else this._overflowing.delete(member)
-    const servedByAll = wantsAll || overflows
+    const servedByAll = wantsAll || overflows || (present && this._byMember)
     if (servedByAll) this._openEveryTrack(member)
     const all = this._everyTrack.get(member)
     const allDelivers = all?.delivering === true
@@ -432,7 +456,7 @@ class RoomSubscriptions {
       yield
     }
     // Stopping a lane a change meanwhile wants again would only open it again.
-    const stillServed = present && (this._wants.wantsEveryTrack(member) || this._overflows(count))
+    const stillServed = present && (this._wants.wantsEveryTrack(member) || this._overflows(count) || this._byMember)
     if (!servedByAll && !stillServed && all !== undefined && this._everyTrack.get(member) === all)
       this._releaseEveryTrack(member, all)
   }
@@ -441,6 +465,7 @@ class RoomSubscriptions {
    *  counts it again. */
   private _unconcerned(member: string): boolean {
     return (
+      !(this._byMember && this._present(member)) &&
       !this._wants.concerns(member) &&
       !this._binaryTracks.has(member) &&
       !this._everyTrack.has(member) &&
@@ -456,7 +481,7 @@ class RoomSubscriptions {
       return yield* this._syncMemberBinary(member)
     const overflows = this._overflows(count)
     if (overflows !== this._overflowing.has(member)) return yield* this._syncMemberBinary(member)
-    const servedByAll = count !== undefined && (this._wants.wantsEveryTrack(member) || overflows)
+    const servedByAll = count !== undefined && (this._wants.wantsEveryTrack(member) || overflows || this._byMember)
     for (const track of plan.pairs.get(member) ?? []) {
       this._syncLane(member, track, servedByAll)
       yield
@@ -492,27 +517,35 @@ class RoomSubscriptions {
     this._demand.setPair(member, track, (named || lane !== undefined) && delivers && !trackDelivers)
   }
 
-  /** The every-member lane of `track` while some holder here names it of every member. Its demand is one entry, told
-   *  once it delivers. */
+  /** The every-member lane of `track` while some holder here names it of every member and the tracks are not fetched
+   *  by member. Its demand is one entry, told once it delivers, or while the every-track lanes it replaces still do. */
   private _keepEveryMember(track: string): void {
-    if (!this._namesEveryMember(track)) return
+    if (this._byMember || !this._namesEveryMember(track)) return
     this._establishingEveryTrack.waiting.delete(track)
     const lane = this._everyMember.get(track) ?? this._openEveryMember(track)
     lane.resume()
-    this._demand.setTrack(track, lane.delivering)
+    if (lane.delivering) this._byMemberTracks.delete(track)
+    this._demand.setTrack(track, lane.delivering || this._byMemberTracks.has(track))
   }
 
-  /** An every-member lane no holder here names any more stops once the named lanes and every-track lanes replacing it
-   *  deliver; until then, each one's readiness replans the track. */
+  /** An every-member lane that serves no holder here stops once the lanes replacing it deliver: the named lanes and
+   *  every-track lanes once no holder names the track, each member's every-track lane while the tracks are fetched by
+   *  member, which then tells the track's demand. Until then, each one's readiness replans the track. */
   private _releaseEveryMember(track: string): void {
+    const named = this._namesEveryMember(track)
+    if (named && !this._byMember) return
     const lane = this._everyMember.get(track)
-    if (lane === undefined || this._namesEveryMember(track)) return
+    if (lane === undefined && named === this._byMemberTracks.has(track)) return
     for (const member of this._trackMembers.get(track) ?? [])
       if (!this._binary.get(inProcessBinaryLaneKey(member, track))!.delivering) return
     if (this._waitsFor(this._establishingEveryTrack, track)) return
-    this._everyMember.delete(track)
-    this._stopFanIn(lane, this._establishingEveryMember)
-    this._demand.forgetTrack(track)
+    if (lane !== undefined) {
+      this._everyMember.delete(track)
+      this._stopFanIn(lane, this._establishingEveryMember)
+    }
+    toggle(this._byMemberTracks, track, named)
+    if (named) this._demand.setTrack(track, true)
+    else this._demand.forgetTrack(track)
   }
 
   private _namesEveryMember(track: string): boolean {
@@ -520,10 +553,11 @@ class RoomSubscriptions {
   }
 
   /** Whether the member is one no holder here receives a track named of every member from: only a holder's own member
-   *  can be, as one suppresses it, so only an owned member is read while a track has its every-member lane, or one
-   *  told so before. */
+   *  can be, as one suppresses it, so only an owned member is read while a track has its every-member lane or is told
+   *  by member, or one told so before. */
   private _syncExcept(member: string): void {
-    if (!this._excepted.has(member) && (this._everyMember.size === 0 || !this._host._ownsMember(member))) return
+    const served = this._everyMember.size > 0 || this._byMemberTracks.size > 0
+    if (!this._excepted.has(member) && (!served || !this._host._ownsMember(member))) return
     const present = this._present(member)
     let excepted = false
     for (const track of this._wants.everyMemberTracks()) {

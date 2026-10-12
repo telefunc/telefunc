@@ -3378,6 +3378,74 @@ describe('Room public behavior', () => {
     expect(first).toBeLessThanOrEqual(after + 1)
     expect(streamed).toEqual(Array.from({ length: streamed.length }, (_, i) => (first + i) % 256))
   })
+  it("fetches tracks named of every member on each member's every-track lane once they outnumber the members, with the same frames and demand", async () => {
+    const room = (await Room.create('room-wide-by-member')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 10 }, () => room.join()))
+    const wanted = new Set<string | null>()
+    members[0]!.onDemand((track, on) => (on ? wanted.add(track) : wanted.delete(track)))
+    const frames: string[] = []
+    const tracks = Array.from({ length: 17 }, (_, i) => `t${i}`)
+    const offs = tracks.map((track) =>
+      room.subscribeBinary((data, info) => frames.push(`${info.track}:${data[0]}`), { track }),
+    )
+    await vi.waitFor(() => expect(binaryLanes(room)).toEqual(members.map(({ id }) => everyTrackLaneKey(id)).sort()))
+    await vi.waitFor(() => expect([...wanted].sort()).toEqual([...tracks].sort()))
+    await members[0]!.publishBinary(new Uint8Array([1]), { track: 't3' })
+    await members[1]!.publishBinary(new Uint8Array([2]), { track: 'other' })
+    await members[2]!.publishBinary(new Uint8Array([3]), { track: 't16' })
+    await vi.waitFor(() => expect(frames.sort()).toEqual(['t16:3', 't3:1']))
+    for (const off of offs) off()
+    await vi.waitFor(() => expect({ wanted: [...wanted], lanes: binaryLanes(room) }).toEqual({ wanted: [], lanes: [] }))
+  })
+  it('switches tracks named of every member between lanes per track and per member as members join and leave, losing, repeating and withdrawing nothing', async () => {
+    const room = (await Room.create('room-wide-switch')) as ServerRoom
+    const members = await Promise.all(Array.from({ length: 10 }, () => room.join()))
+    const [streamer] = members as [ServerLocalParticipant]
+    const withdrawn: Array<string | null> = []
+    streamer.onDemand((track, on) => void (on || withdrawn.push(track)))
+    const streamed: number[] = []
+    const tracks = Array.from({ length: 17 }, (_, i) => `t${i}`)
+    for (const track of tracks)
+      room.subscribeBinary((data, info) => void (info.track === 't0' && streamed.push(data[0]!)), { track })
+    const everyTrack = () => members.map(({ id }) => everyTrackLaneKey(id)).sort()
+    await vi.waitFor(() => expect(binaryLanes(room)).toEqual(everyTrack()))
+    let published = 0
+    let streaming = true
+    const stream = (async () => {
+      while (streaming) await streamer.publishBinary(new Uint8Array([++published % 256]), { track: 't0' })
+    })()
+    const joined = await Promise.all(Array.from({ length: 30 }, () => room.join()))
+    await vi.waitFor(() => expect(binaryLanes(room)).toEqual(tracks.map(everyMemberLaneKey).sort()))
+    for (const member of joined) await member.leave()
+    await vi.waitFor(() => expect(binaryLanes(room)).toEqual(everyTrack()))
+    streaming = false
+    await stream
+    await vi.waitFor(() => expect(streamed.at(-1)).toBe(published % 256))
+    expect(streamed).toEqual(Array.from({ length: published }, (_, i) => (i + 1) % 256))
+    expect(withdrawn).toEqual([])
+  })
+  it.each([
+    [50, [1, 17, 50, 50, 17]],
+    [200, [1, 17, 100, 200, 17]],
+  ] as const)(
+    'fetches 1, 17, 100, 4,096 and again 17 tracks named of every member of %i on no more lanes than fetching them by member takes',
+    async (members, lanes) => {
+      const room = (await Room.create(`room-wide-lanes-${members}`)) as ServerRoom
+      await Promise.all(Array.from({ length: members }, () => room.join()))
+      const offs: Array<() => void> = []
+      const counts: number[] = []
+      for (const tracks of [1, 17, 100, 4_096, 17]) {
+        while (offs.length < tracks) offs.push(room.subscribeBinary(() => {}, { track: `t${offs.length}` }))
+        for (const off of offs.splice(tracks)) off()
+        // A switch keeps the lanes it leaves until the lanes it takes deliver.
+        await vi.waitFor(() => expect(binaryLanes(room).length).toBe(lanes[counts.length]), { timeout: 20_000 })
+        counts.push(binaryLanes(room).length)
+      }
+      expect(counts).toEqual(lanes)
+      await Room.close(room.id)
+    },
+    60_000,
+  )
   it.each([
     ['one track', { track: 'screen' }],
     ['every track', undefined],
