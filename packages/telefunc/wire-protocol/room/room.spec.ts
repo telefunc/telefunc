@@ -5053,6 +5053,23 @@ describe("a server's handles to one room", () => {
         most: 1,
       })
     }, 120_000)
+  it('let their view go once no handle holds it, while a member keeps another view, and a Room.get() after that opens a new one', async () => {
+    const id = 'shared-view-dropped'
+    const dropped = await (async () => {
+      const room = (await Room.create(id)) as ServerRoom
+      const other = (await Room.get(id)) as ServerRoom
+      expect(other._replica).toBe(room._replica)
+      return new WeakRef(room._replica)
+    })()
+    const owning = await (async () => {
+      const room = (await Room.create('shared-view-owning')) as ServerRoom
+      await room.join()
+      return new WeakRef(room._replica)
+    })()
+    await forceRoomGc()
+    expect([dropped.deref(), owning.deref() === undefined]).toEqual([undefined, false])
+    expect((await Room.get(id)).count).toBe(0)
+  })
 })
 describe('room demand lifecycle', () => {
   it("aggregates remote demand only for the members this instance owns, and forgets a departed member's", () => {
