@@ -5432,6 +5432,29 @@ describe('room demand lifecycle', () => {
       ['c', 'screen', false],
     ])
   })
+  it("evaluates for a change of a reporter's lease of a track of every member only the members another reporter's lease leaves out, among 1,000 owned members", async () => {
+    const owned = Array.from({ length: 1_000 }, (_, i) => `m${i}`)
+    let evaluated = 0
+    const delivered: Array<[string, string, boolean]> = []
+    const demand = new RoomDemand(
+      () => (evaluated++, true),
+      () => owned,
+      (member, track, wanted) => delivered.push([member, track, wanted]),
+    )
+    const tracks = trackNames(100)
+    const tell = (instance: string, on: boolean, except: string[] = []) =>
+      demand.applyPage({ __r: 'demand', instance, wants: tracks.map((track) => ({ on, track, except })) })
+    tell('a', true)
+    await vi.waitFor(() => expect(delivered).toHaveLength(100_000))
+    evaluated = 0
+    delivered.length = 0
+    tell('b', true, ['m0'])
+    tell('a', true, ['m1'])
+    tell('a', false)
+    await vi.waitFor(() => expect(delivered).toEqual(tracks.map((track) => ['m0', track, false])))
+    // At most one member a track per change.
+    expect(evaluated).toBeLessThanOrEqual(3 * tracks.length)
+  })
 })
 describe('room protocol validation', () => {
   it('refuses as a protocol violation a client naming more than ROOM_TRACK_WANTS_MAX tracks, wanting nothing for it', async () => {

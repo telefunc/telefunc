@@ -10,7 +10,8 @@ import { Slice } from './slice.js'
 type Leases = Map<string, number>
 /** Each reporter's lease on one track of every member, the members it doesn't receive that track from, and whether it
  *  receives it only of the members it fetches by member. */
-type TrackLeases = Map<string, { expiresAt: number; except: ReadonlySet<string>; byMember: boolean }>
+type TrackLease = { expiresAt: number; except: ReadonlySet<string>; byMember: boolean }
+type TrackLeases = Map<string, TrackLease>
 
 /** What some holder of a replica receives. */
 class Receives {
@@ -238,11 +239,13 @@ class RoomDemand {
   private readonly _members = new Map<string, Leases>()
   /** Per owned member, the reporters that fetch its tracks by member. */
   private readonly _fetched = new Map<string, Leases>()
+  /** Per reporter, the owned members it fetches the tracks of by member. */
+  private readonly _fetchedBy = new Map<string, Set<string>>()
   /** Per track, the reports of it of every member, whoever owns them. */
   private readonly _tracks = new Map<string, TrackLeases>()
   /** The named tracks each member published on; a report of its every track covers them and the default one. */
   private readonly _published = new Map<string, Set<string>>()
-  /** Per track, the owned members told it is wanted. */
+  /** Per owned member, the tracks it was told are wanted. */
   private readonly _told = new Map<string, Set<string>>()
   /** Per track, the owned members whose `wanted` may have changed, or all of them (`null`). */
   private readonly _due = new Map<string, Set<string> | null>()
@@ -279,7 +282,7 @@ class RoomDemand {
       const { member } = entry
       const held = this._fetched.get(member)?.has(instance) === true
       lease(this._fetched, member, instance, on, expiresAt)
-      if (held !== on) this._queueFetched(instance, member)
+      if (held !== on) this._fetchedChanged(instance, member, on)
     } else if ('track' in entry) {
       const { member, track } = entry
       let byTrack = this._pairs.get(member)
@@ -332,16 +335,18 @@ class RoomDemand {
       for (const [instance, expiresAt] of leases)
         if (expiresAt <= now) {
           leases.delete(instance)
-          this._queueFetched(instance, member)
+          this._fetchedChanged(instance, member, false)
         }
       if (leases.size === 0) this._fetched.delete(member)
       yield
     }
     for (const [track, leases] of this._tracks) {
-      const before = leases.size
-      for (const [instance, { expiresAt }] of leases) if (expiresAt <= now) leases.delete(instance)
+      for (const [instance, held] of leases)
+        if (held.expiresAt <= now) {
+          leases.delete(instance)
+          this._queueLease(track, instance, held, undefined)
+        }
       if (leases.size === 0) this._tracks.delete(track)
-      if (leases.size !== before) this._queue(track, null)
       yield
     }
     this._settle()
@@ -349,18 +354,17 @@ class RoomDemand {
 
   /** The owned member's tracks told wanted. */
   wanted(member: string): string[] {
-    const tracks: string[] = []
-    for (const [track, members] of this._told) if (members.has(member)) tracks.push(track)
-    return tracks
+    return [...(this._told.get(member) ?? [])]
   }
 
   forgetMember(member: string): void {
     this._pairs.delete(member)
     this._members.delete(member)
+    for (const instance of this._fetched.get(member)?.keys() ?? [])
+      toggleEntry(this._fetchedBy, instance, member, false)
     this._fetched.delete(member)
     this._published.delete(member)
-    for (const [track, members] of this._told)
-      if (members.delete(member) && members.size === 0) this._told.delete(track)
+    this._told.delete(member)
   }
 
   private _takeTrack(
@@ -377,22 +381,39 @@ class RoomDemand {
       if (held === undefined) return
       leases!.delete(instance)
       if (leases!.size === 0) this._tracks.delete(track)
-      return this._queue(track, null)
+      return this._queueLease(track, instance, held, undefined)
     }
     if (held !== undefined && held.byMember === byMember && sameMembers(held.except, except)) {
       held.expiresAt = expiresAt
       return
     }
     if (!leases) this._tracks.set(track, (leases = new Map()))
-    leases.set(instance, { expiresAt, except: new Set(except), byMember })
-    if (held === undefined || held.byMember !== byMember) return this._queue(track, null)
-    for (const member of held.except) if (!except.includes(member)) this._queue(track, member)
-    for (const member of except) if (!held.except.has(member)) this._queue(track, member)
+    const now = { expiresAt, except: new Set(except), byMember }
+    leases.set(instance, now)
+    this._queueLease(track, instance, held, now)
   }
 
-  /** The member, on each track `instance` fetches by member. */
-  private _queueFetched(instance: string, member: string): void {
+  /** Queues the members whose `track` a change of `instance`'s lease of it from `was` to `now` may have turned: those
+   *  another reporter's lease of it of every member leaves out, else those either lease reaches and the other not. */
+  private _queueLease(track: string, instance: string, was: TrackLease | undefined, now: TrackLease | undefined): void {
+    for (const [other, lease] of this._tracks.get(track) ?? [])
+      if (other !== instance && !lease.byMember) return this._queueEach(track, lease.except)
+    if (was !== undefined && now !== undefined && was.byMember === now.byMember) {
+      for (const member of was.except) if (!now.except.has(member)) this._queue(track, member)
+      for (const member of now.except) if (!was.except.has(member)) this._queue(track, member)
+    } else if ((was ?? now)!.byMember && (was === undefined || now === undefined))
+      this._queueEach(track, this._fetchedBy.get(instance) ?? [])
+    else this._queue(track, null)
+  }
+
+  /** The reporter's fetching of the member's tracks by member changed: the member, on each track it fetches so. */
+  private _fetchedChanged(instance: string, member: string, on: boolean): void {
+    toggleEntry(this._fetchedBy, instance, member, on)
     for (const [track, leases] of this._tracks) if (leases.get(instance)?.byMember) this._queue(track, member)
+  }
+
+  private _queueEach(track: string, members: Iterable<string>): void {
+    for (const member of members) this._queue(track, member)
   }
 
   private _queue(track: string, member: string | null): void {
@@ -435,12 +456,8 @@ class RoomDemand {
   private _evaluate(member: string, track: string): void {
     if (!this._ownsMember(member)) return
     const wanted = this._wanted(member, track)
-    let told = this._told.get(track)
-    if (wanted === (told?.has(member) ?? false)) return
-    if (wanted) {
-      if (!told) this._told.set(track, (told = new Set()))
-      told.add(member)
-    } else if (told!.delete(member) && told!.size === 0) this._told.delete(track)
+    if (wanted === hasEntry(this._told, member, track)) return
+    toggleEntry(this._told, member, track, wanted)
     this._deliver(member, track, wanted)
   }
 
