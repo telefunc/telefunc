@@ -1,4 +1,4 @@
-export { macrotaskYield, nextTurn, nextTurnOf }
+export { macrotaskYield, nextTurn }
 
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { assertUsage } from '../../utils/assert.js'
@@ -66,8 +66,4 @@ const macrotaskYield = getGlobalObject<{ instance: MacrotaskYield }>('flow-contr
 function nextTurn(callback: () => void): void {
   if (typeof setImmediate === 'function') setImmediate(callback)
   else void macrotaskYield.yield().then(callback)
-}
-
-function nextTurnOf(): Promise<void> {
-  return new Promise((resolve) => nextTurn(resolve))
 }

@@ -14,7 +14,7 @@ import { reportRoomError } from './errors.js'
 import { GossipOutbox } from './gossip.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { CONTROL_LANE, decodeLaneEnvelope, decodeRoomText, openConfig, withinRoomHorizon } from './lanes.js'
-import { Slice } from './slice.js'
+import { Slice } from '../slice.js'
 assertIsNotBrowser()
 
 /** What the control lane tells a handle: everything but demand, which the replica takes. */

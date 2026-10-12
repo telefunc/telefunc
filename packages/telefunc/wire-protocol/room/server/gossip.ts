@@ -8,7 +8,7 @@ import { ROOM_GOSSIP_IN_FLIGHT_MAX } from '../constants.js'
 import type { RoomCtrlEnvelope } from '../protocol.js'
 import { reportRoomError } from './errors.js'
 import { CONTROL_LANE, commitRoomLane, encodeRoomRecord } from './lanes.js'
-import { Slice } from './slice.js'
+import { Slice } from '../slice.js'
 assertIsNotBrowser()
 
 /** Commits a room's demand gossip in order, `ROOM_GOSSIP_IN_FLIGHT_MAX` at a time and a slice per turn, so a burst

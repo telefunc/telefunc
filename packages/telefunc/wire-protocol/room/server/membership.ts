@@ -14,9 +14,9 @@ export {
 
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
-import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
+import { Slice } from '../slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
-import { ROOM_MEMBER_TTL_MS, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX, ROOM_PLAN_SLICE_MS } from '../constants.js'
+import { ROOM_MEMBER_TTL_MS, ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
 import { compareMetaEntries, metaObjectOf } from '../meta-state.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import {
@@ -76,13 +76,11 @@ async function readCells(roomId: string, inc: string, keys: string[]): Promise<M
 /** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function readPrefix(roomId: string, inc: string, prefix: string): Promise<Map<string, Uint8Array>> {
   const cells = new Map<string, Uint8Array>()
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  const slice = new Slice()
   for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
     if ('staleInc' in page) throw roomClosedError(roomId)
     for (const [key, raw] of page.cells) cells.set(key, raw)
-    if (performance.now() < deadline) continue
-    await nextTurnOf()
-    deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    if (slice.over) await slice.next()
   }
   return cells
 }
@@ -238,21 +236,19 @@ function metaKeyMutation(
 /** Deletes the cells under `prefix`, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn. */
 async function dropCells(roomId: string, inc: string, prefix: string): Promise<void> {
   const backend = getRoomBackend()
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  const slice = new Slice()
   for await (const page of backend.readCellPages(roomId, inc, prefix)) {
     if ('staleInc' in page) return
     const mutations = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
     if ((await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) === 'stale-inc') return
-    if (performance.now() < deadline) continue
-    await nextTurnOf()
-    deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    if (slice.over) await slice.next()
   }
 }
 
 /** Every member's meta cells, by member, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function readMembersMetaCells(room: RoomIncarnation): Promise<Map<string, MemberMetaCells>> {
   const byMember = new Map<string, Array<readonly [string, Uint8Array]>>()
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  const slice = new Slice()
   for await (const page of getRoomBackend().readCellPages(room.id, room.inc, MEMBER_META_CELL_PREFIX)) {
     if ('staleInc' in page) throw roomClosedError(room.id)
     for (const cell of page.cells) {
@@ -261,9 +257,7 @@ async function readMembersMetaCells(room: RoomIncarnation): Promise<Map<string, 
       if (cells === undefined) byMember.set(id, [cell])
       else cells.push(cell)
     }
-    if (performance.now() < deadline) continue
-    await nextTurnOf()
-    deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    if (slice.over) await slice.next()
   }
   return byMember
 }
@@ -272,7 +266,7 @@ async function readMembersMetaCells(room: RoomIncarnation): Promise<Map<string, 
 async function memberMetaOf(id: string, gen: number, cells: MemberMetaCells): Promise<ParticipantMeta> {
   const runs: RoomMetaEntry[][] = []
   let run: RoomMetaEntry[] = []
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  const slice = new Slice()
   for (const [cellKey, raw] of cells) {
     const key = memberMetaKeyOfCellKey(id, gen, cellKey)
     if (key === null) continue
@@ -281,9 +275,7 @@ async function memberMetaOf(id: string, gen: number, cells: MemberMetaCells): Pr
     if (run.length < META_RUN_KEYS) continue
     runs.push(run.sort(compareMetaEntries))
     run = []
-    if (performance.now() < deadline) continue
-    await nextTurnOf()
-    deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    if (slice.over) await slice.next()
   }
   runs.push(run.sort(compareMetaEntries))
   return metaObjectOf(runs.length === 1 ? runs[0]! : await mergeRuns(runs))
@@ -302,15 +294,14 @@ async function renewMemberLeases(roomId: string, inc: string, ids: Iterable<stri
  *  turn; throws the first failure once every task ran. */
 async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<unknown>): Promise<void> {
   const pending = items[Symbol.iterator]()
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  const slice = new Slice()
   let turn: Promise<void> | null = null
   let failure = null as { error: unknown } | null
   const worker = async (first: T) => {
     for (let next: IteratorResult<T> = { value: first }; next.done !== true; next = pending.next()) {
-      if (performance.now() >= deadline)
-        await (turn ??= nextTurnOf().then(() => {
+      if (slice.over)
+        await (turn ??= slice.next().then(() => {
           turn = null
-          deadline = performance.now() + ROOM_PLAN_SLICE_MS
         }))
       try {
         await task(next.value)

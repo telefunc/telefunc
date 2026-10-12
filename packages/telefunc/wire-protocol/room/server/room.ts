@@ -8,8 +8,8 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import type { ChannelPublishAck } from '../../channel.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_PLAN_SLICE_MS, ROOM_ROSTER_PART_MEMBERS } from '../constants.js'
-import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
+import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_ROSTER_PART_MEMBERS } from '../constants.js'
+import { Slice } from '../slice.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
@@ -700,7 +700,7 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._rosterTexts?.version !== version) this._rosterTexts = { version, parts: [] }
     const texts = this._rosterTexts.parts
     const ids = state.memberIds()
-    let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    const slice = new Slice()
     for (let part = 0; ; part++) {
       const chunk: string[] = []
       let more = true
@@ -733,9 +733,7 @@ class ServerRoom extends RoomStateView implements Room {
       if (unchanged && built === undefined && visibleText !== undefined)
         texts[part] = { text: visibleText, hidden: visible!.length < chunk.length }
       if (!more) return
-      if (performance.now() < deadline) continue
-      await nextTurnOf()
-      deadline = performance.now() + ROOM_PLAN_SLICE_MS
+      if (slice.over) await slice.next()
     }
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */

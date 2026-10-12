@@ -15,7 +15,7 @@ import type { PresenceEvent } from './server/replica.js'
 import { ResponseRoomGrants, RoomStubChannel } from './server/stub.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import { ROOM_TRACK_WANTS_MAX } from './constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_TRACK_WANTS_MAX } from './constants.js'
 
 // Each spec here times a stall at 100,000 members, so it runs in a worker of its own: room.spec's other specs leave
 // rooms reachable (vitest keeps every spy, and a stub no client connects to waits out its TTL), and collecting them
@@ -298,6 +298,63 @@ describe('Room at 100,000 members', () => {
     try {
       // The shorter of two heartbeats, so a scheduling hiccup in one is not read as a stall.
       expect(Math.min(await renewal(), await renewal())).toBeLessThanOrEqual(50)
+    } finally {
+      backend.commitLane = commitLane
+    }
+  }, 120_000)
+  it('fires every heartbeat of a room of 100,000 members at once, a client hearing every track of each, with the event loop turning', async () => {
+    const heartbeats = new Map<unknown, () => void>()
+    const { setInterval, clearInterval } = globalThis
+    // Not a vi.spyOn(): vitest keeps every spy, and so this room, until the file ends.
+    globalThis.setInterval = ((callback: () => void, ms?: number) => {
+      const timer = setInterval(callback, ms)
+      if (ms === ROOM_HEARTBEAT_INTERVAL_MS) heartbeats.set(timer, callback)
+      return timer
+    }) as typeof globalThis.setInterval
+    globalThis.clearInterval = ((timer: ReturnType<typeof setInterval>) => {
+      heartbeats.delete(timer)
+      clearInterval(timer)
+    }) as typeof globalThis.clearInterval
+    let room: ServerRoom
+    try {
+      room = await create('every-heartbeat-turns')
+      const ids = (await Promise.all(Array.from({ length: 100_000 }, () => room.join()))).map(({ id }) => id)
+      const observer = await view(room.id)
+      await observer.getParticipants()
+      const stub = register(observer)
+      attachPeer(stub, { keep: false })
+      for (const id of ids) stub._onPeerMessage(stringify({ __r: 'sub-binary', member: id, track: null, on: true }), 0)
+      await subsOf(observer).binaryReady()
+      await settled()
+    } finally {
+      globalThis.setInterval = setInterval
+      globalThis.clearInterval = clearInterval
+    }
+    const backend = getRoomBackend()
+    const commitLane = backend.commitLane
+    let renewed = 0
+    let inFlight = 0
+    backend.commitLane = (id, inc, lane, payload, opts) => {
+      const committed = commitLane.call(backend, id, inc, lane, payload, opts)
+      if (id !== room.id || lane.kind !== 'control') return committed
+      renewed++
+      inFlight++
+      void committed.finally(() => inFlight--).catch(() => {})
+      return committed
+    }
+    const all = async () => {
+      const before = renewed
+      const { gap } = await longestGapWhile(async () => {
+        // Every timer the room's handles and its replica run each heartbeat, in one turn.
+        for (const heartbeat of heartbeats.values()) heartbeat()
+        await vi.waitFor(() => expect(renewed - before >= 100_000 && inFlight === 0).toBe(true), { timeout: 30_000 })
+        await settled()
+      })
+      return gap
+    }
+    try {
+      // The shorter of two heartbeats, so a scheduling hiccup in one is not read as a stall.
+      expect(Math.min(await all(), await all())).toBeLessThanOrEqual(50)
     } finally {
       backend.commitLane = commitLane
     }

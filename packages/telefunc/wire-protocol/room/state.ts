@@ -6,8 +6,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel.js'
 import { untether } from '../wrapProxy.js'
 import { makeDisposer } from './disposer.js'
-import { ROOM_PLAN_SLICE_MS } from './constants.js'
-import { nextTurnOf } from '../flow-control/macrotask-yield.js'
+import { Slice } from './slice.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { isNamedTrack, laneTrack, type BinaryFrame, type BinaryWantChange } from './binary.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
@@ -566,12 +565,12 @@ class RoomState {
     events: readonly MembershipEvent[],
   ): Promise<boolean | null> {
     const steps = this.reconcilingRoster(roster, events)
+    const slice = new Slice()
     let step = steps.next()
-    for (let deadline = performance.now() + ROOM_PLAN_SLICE_MS; step.done !== true; step = steps.next()) {
-      if (performance.now() < deadline) continue
-      await nextTurnOf()
+    for (; step.done !== true; step = steps.next()) {
+      if (!slice.over) continue
+      await slice.next()
       if (this.closed) return null
-      deadline = performance.now() + ROOM_PLAN_SLICE_MS
     }
     return step.value
   }

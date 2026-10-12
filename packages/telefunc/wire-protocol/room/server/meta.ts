@@ -4,8 +4,7 @@ export type { StoredRoomMeta, RoomMetaWrite, MetaKeyCell }
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellMutation, CellsRead, CxResult } from '../../backend/room/contract.js'
 import { decodeCellCounter } from '../../backend/room/semantics.js'
-import { nextTurnOf } from '../../flow-control/macrotask-yield.js'
-import { ROOM_PLAN_SLICE_MS } from '../constants.js'
+import { Slice } from '../slice.js'
 import { roomClosedError } from '../errors.js'
 import { compareMetaEntries, metaEntriesAt } from '../meta-state.js'
 import { mergeAttributes } from '../model.js'
@@ -48,13 +47,11 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
     if (seq === undefined) return { entries: metaEntriesAt(meta, 0), seq: 0 }
     const gen = decodeRoomRecord<number>(before.cells.get(META_GEN_CELL_KEY)!)
     const runs: RoomMetaEntry[][] = []
-    let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    const slice = new Slice()
     for await (const page of backend.readCellPages(roomId, inc, metaKeyCellPrefix(gen))) {
       if ('staleInc' in page) return null
       runs.push(decodeMetaCells(page.cells, gen).sort(compareMetaEntries))
-      if (performance.now() < deadline) continue
-      await nextTurnOf()
-      deadline = performance.now() + ROOM_PLAN_SLICE_MS
+      if (slice.over) await slice.next()
     }
     const after = await backend.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
     if ('staleInc' in after) return null
@@ -67,15 +64,13 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
   const prefix = metaKeyCellPrefix(gen)
   const runs: RoomMetaEntry[][] = []
   let run = new Map<string, Uint8Array>()
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  const slice = new Slice()
   for (const [key, raw] of read.cells) {
     if (key.startsWith(prefix)) run.set(key, raw)
     if (run.size < META_RUN_KEYS) continue
     runs.push(decodeMetaCells(run, gen).sort(compareMetaEntries))
     run = new Map()
-    if (performance.now() < deadline) continue
-    await nextTurnOf()
-    deadline = performance.now() + ROOM_PLAN_SLICE_MS
+    if (slice.over) await slice.next()
   }
   runs.push(decodeMetaCells(run, gen).sort(compareMetaEntries))
   return { entries: await mergeRuns(runs), seq: decodeCellCounter(read.cells.get(META_SEQ_CELL_KEY)!).value }
@@ -98,7 +93,7 @@ function decodeMetaCells(cells: ReadonlyMap<string, Uint8Array>, gen: number): R
 
 /** The sorted runs as one, merged two at a time, a `ROOM_PLAN_SLICE_MS` slice per turn. */
 async function mergeRuns(runs: RoomMetaEntry[][]): Promise<RoomMetaEntry[]> {
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  const slice = new Slice()
   while (runs.length > 1) {
     const merged: RoomMetaEntry[][] = []
     for (let r = 0; r < runs.length; r += 2) {
@@ -113,9 +108,7 @@ async function mergeRuns(runs: RoomMetaEntry[][]): Promise<RoomMetaEntry[]> {
       let j = 0
       while (i < a.length && j < b.length) {
         out.push(compareMetaEntries(a[i]!, b[j]!) < 0 ? a[i++]! : b[j++]!)
-        if (out.length % META_RUN_KEYS !== 0 || performance.now() < deadline) continue
-        await nextTurnOf()
-        deadline = performance.now() + ROOM_PLAN_SLICE_MS
+        if (out.length % META_RUN_KEYS === 0 && slice.over) await slice.next()
       }
       while (i < a.length) out.push(a[i++]!)
       while (j < b.length) out.push(b[j++]!)
@@ -202,15 +195,13 @@ async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise
   if ('staleInc' in marks) return
   const drop = async (mutations: CellMutation[]) =>
     (await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
-  let deadline = performance.now() + ROOM_PLAN_SLICE_MS
+  const slice = new Slice()
   for (const [mark, raw] of marks.cells) {
     let held: CellMutation[] = []
     for await (const page of backend.readCellPages(roomId, inc, metaKeyCellPrefix(decodeRoomRecord<number>(raw)))) {
       if ('staleInc' in page || (held.length > 0 && !(await drop(held)))) return
       held = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
-      if (performance.now() < deadline) continue
-      await nextTurnOf()
-      deadline = performance.now() + ROOM_PLAN_SLICE_MS
+      if (slice.over) await slice.next()
     }
     if (!(await drop([...held, { key: mark, bytes: null }]))) return
   }
