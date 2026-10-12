@@ -2648,6 +2648,39 @@ describe('Room public behavior', () => {
     await syncOf(observer).reconcileAuthority()
     expect([room.count, observer.count]).toEqual([0, 0])
   })
+  it('never announces a member removed after its join event committed, after its leave', async () => {
+    const room = (await Room.create('join-removed-before-applied')) as ServerRoom
+    const observer = await Room.get(room.id)
+    const seen = new Map<string, string[]>()
+    for (const [name, view] of [
+      ['joiner', room],
+      ['observer', observer],
+    ] as const) {
+      seen.set(name, [])
+      view.onJoin(() => seen.get(name)!.push('join'))
+      view.onLeave(() => seen.get(name)!.push('leave'))
+    }
+    const commitLane = driver.commitLane.bind(driver)
+    const committed = createDeferred()
+    const release = createDeferred()
+    vi.spyOn(driver, 'commitLane').mockImplementation(async (...args) => {
+      const result = await commitLane(...args)
+      if (decodeRoomText(args[3] as Uint8Array).includes('"join"')) {
+        committed.resolve()
+        await release.promise
+      }
+      return result
+    })
+    const joining = room.join({ identity: 'user-1' }).catch((error: unknown) => error)
+    await committed.promise
+    await Room.removeParticipant(room.id, { identity: 'user-1' })
+    await vi.waitFor(() => expect(seen.get('joiner')).toContain('leave'))
+    release.resolve()
+    expect(isRoomError(await joining)).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(Object.fromEntries(seen)).toEqual({ joiner: ['join', 'leave'], observer: ['join', 'leave'] })
+    expect([room.count, observer.count]).toEqual([0, 0])
+  })
   it("leaves no unhandled rejection behind a participant's un-awaited publish, binary publish or DM that fails", async () => {
     const room = await Room.create('fire-and-forget-participant')
     const authority = await room.join({ identity: 'authority', hidden: true })

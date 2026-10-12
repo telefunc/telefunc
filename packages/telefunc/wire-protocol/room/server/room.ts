@@ -93,6 +93,10 @@ function hiddenMemberOf(event: PresenceEvent): string | null {
 }
 
 type Admission = { id: string; meta: ParticipantMeta; identity: string | null; joinedAt: number; hidden: boolean }
+/** An admission through this handle once its holder took the member: its inbox opening (`owned`), its record durable
+ *  (`committed`), or given up because the member left, its holder detached or the room closed (`abandoned`). Before
+ *  that it is a guard running; once its join applies, a member like any other. */
+type AdmissionState = 'owned' | 'committed' | 'abandoned'
 
 /** One instance's view of a room. Each serialization opens a fresh stub; every event, the origin's echo included, applies idempotently. */
 class ServerRoom extends RoomStateView implements Room {
@@ -119,8 +123,8 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** The local participants that joined with `selfDelivery: false`. */
   private readonly _localSuppressed = new Set<string>()
-  /** Members whose inbox is establishing before their cell commits; the heartbeat leaves them alone. */
-  private readonly _pendingAdmissions = new Set<string>()
+  /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
+  private readonly _admissions = new Map<string, AdmissionState>()
 
   /** What this handle's holders receive, told to the replica's demand (`onDemand`). */
   private readonly _report = new DemandReport(() => this._replica.demand)
@@ -236,7 +240,8 @@ class ServerRoom extends RoomStateView implements Room {
   private async _commitAdmission(admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
     const optional = { ...(identity === null ? {} : { identity }), ...(hidden ? { hidden: true } : {}) } as const
-    this._pendingAdmissions.add(id)
+    // A holder that detached during the guard took nothing, and a room that closed meanwhile takes no one.
+    this._admissions.set(id, this._ownsMember(id) && !this._model.closed ? 'owned' : 'abandoned')
     this._subs.memberOwned(id)
     try {
       await this._inboxReady(id)
@@ -247,16 +252,17 @@ class ServerRoom extends RoomStateView implements Room {
         meta,
       )
       this._assertAdmitted(id)
-      this._pendingAdmissions.delete(id)
+      this._admissions.set(id, 'committed')
       const join = { __r: 'join', id, meta, joinedAt, ...optional } as const
       // A member removed meanwhile gets no join after its leave, here or anywhere.
       await publishCtrl(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
       this._assertAdmitted(id)
+      this._admissions.delete(id)
       this._applyControl(join)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
-      // In an open room the inbox closes only when the holder detached, or a removal already evicted the member.
-      const lost = this._subs.inboxOf(id) === undefined && !this._model.closed
+      // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
+      const lost = this._admissions.get(id) === 'abandoned' && !this._model.closed
       const cause = lost ? ({ type: 'disconnected' } as const) : ({ type: 'left' } as const)
       await evictMember(this._incarnation, id, identity, cause).catch(reportRoomError)
       this._abandonAdmission(id, cause)
@@ -269,13 +275,12 @@ class ServerRoom extends RoomStateView implements Room {
     if (inbox !== undefined) await withinRoomHorizon(inbox.ready)
     this._assertAdmitted(id)
   }
-  /** A closed room or a departed member drops the admission's inbox. */
   private _assertAdmitted(id: string): void {
-    if (this._subs.inboxOf(id) === undefined)
+    if (this._admissions.get(id) === 'abandoned')
       throw this._model.closed ? roomClosedError(this.id) : participantLeftError()
   }
   private _abandonAdmission(id: string, cause: LeaveCause): void {
-    this._pendingAdmissions.delete(id)
+    this._admissions.delete(id)
     this._model.applyLeave(id, cause)
   }
 
@@ -446,6 +451,7 @@ class ServerRoom extends RoomStateView implements Room {
         ...(hidden ? { hidden: true } : {}),
       })
     this._stubOf.delete(id)
+    if (this._admissions.has(id)) this._admissions.set(id, 'abandoned')
     this._local.forgetMember(id)
     for (const stub of this._stubs) {
       stub._forgetMember(id)
@@ -463,6 +469,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
     this._localSuppressed.clear()
+    for (const id of this._admissions.keys()) this._admissions.set(id, 'abandoned')
     // A client back while its channel still holds it gets `closed`.
     const timeout = reconnectWindow()
     for (const stub of this._stubs) void stub.close({ timeout }).catch(() => {})
@@ -540,7 +547,9 @@ class ServerRoom extends RoomStateView implements Room {
       this._stubOf.delete(id)
       this._replica.disown(id, this)
       this._subs.memberReleased(id)
-      if (this._pendingAdmissions.has(id)) continue // the admission rolls itself back
+      const admission = this._admissions.get(id)
+      if (admission !== undefined) this._admissions.set(id, 'abandoned')
+      if (admission === 'owned') continue // the admission rolls itself back
       void this._removeDepartedMember(id).catch(reportRoomError)
     }
   }
@@ -657,7 +666,7 @@ class ServerRoom extends RoomStateView implements Room {
     yield* this._stubOf.keys()
   }
   *_renewableMembers(): Generator<string> {
-    for (const id of this._ownedMembers()) if (!this._pendingAdmissions.has(id)) yield id
+    for (const id of this._ownedMembers()) if (this._admissions.get(id) !== 'owned') yield id
   }
 
   /** @internal */
