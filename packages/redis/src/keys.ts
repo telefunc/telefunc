@@ -89,7 +89,7 @@ function memberOrderKey(prefix: string, roomId: string, inc: string, member: str
 }
 /** The keys of one track's binary lanes that have a commit. */
 function trackLanesKey(prefix: string, roomId: string, inc: string, track: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:ot:${encodeURIComponent(track)}`
+  return `${genPrefix(prefix, roomId, inc)}:lt:${encodeURIComponent(track)}`
 }
 function retainedKeyPrefix(prefix: string, roomId: string, inc: string): string {
   return `${genPrefix(prefix, roomId, inc)}:rt:`

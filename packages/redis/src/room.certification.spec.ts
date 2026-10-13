@@ -359,7 +359,7 @@ await read()`,
     const generationKeys = await (
       backend as unknown as { _generationKeys(roomId: string, inc: string): Promise<string[]> }
     )._generationKeys(room.id, inc)
-    const orderKeys = generationKeys.filter((key) => /:g:[^:]+:o[mt]?:/.test(key))
+    const orderKeys = generationKeys.filter((key) => /:g:[^:]+:(o|om|lt):/.test(key))
     expect(orderKeys).toEqual([expect.stringMatching(/:o:control$/)])
   })
 
