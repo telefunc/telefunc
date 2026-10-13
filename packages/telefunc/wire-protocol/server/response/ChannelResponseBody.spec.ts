@@ -14,7 +14,7 @@ function createSender(frames: Uint8Array[]): PeerSender {
       if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW) return
       frames.push(frame)
     },
-    // It carries only WINDOWs, which `send` leaves out.
+    // It carries only `WINDOW` frames, which `send` leaves out.
     carry: () => {},
     bufferedAmount: () => 0,
     deliveredBeforeFrame: () => 0,
