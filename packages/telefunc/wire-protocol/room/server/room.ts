@@ -1,4 +1,5 @@
 export { ServerRoom, ServerLocalParticipant }
+export type { MetaMirror }
 
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
@@ -446,11 +447,12 @@ class ServerRoom extends RoomStateView implements Room {
   }
 }
 const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomParticipant')
+type MetaMirror = { accepted(update: AcceptedMeta): void; rewound(): void }
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
 class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */ readonly _room: ServerRoom
-  private _metaMirror: ((accepted: AcceptedMeta) => void) | null = null
+  private _metaMirror: MetaMirror | null = null
   constructor(
     serverRoom: ServerRoom,
     id: string,
@@ -458,7 +460,7 @@ class ServerLocalParticipant extends ParticipantBase {
     selfDelivery: boolean,
     identity: string | null,
   ) {
-    super(id, meta, selfDelivery, identity)
+    super(id, meta, selfDelivery, identity, serverRoom._model.metaRewinds)
     this._room = serverRoom
   }
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
@@ -496,16 +498,19 @@ class ServerLocalParticipant extends ParticipantBase {
     this._assertActive()
     return await this._room._writes.publishBinaryFrame(frame, framed)
   }
-  /** @internal Each meta update this participant applies, which a client holding it mirrors. */
-  _onAcceptedMeta(callback: (accepted: AcceptedMeta) => void): () => void {
-    this._metaMirror = callback
+  /** @internal Each meta update this participant applies, and each failover rewind of its seq, which a client holding it
+   *  mirrors. */
+  _onMeta(mirror: MetaMirror): () => void {
+    this._metaMirror = mirror
+    this._room._replica.metaMirrors.add(mirror)
     return () => {
-      if (this._metaMirror === callback) this._metaMirror = null
+      this._room._replica.metaMirrors.delete(mirror)
+      if (this._metaMirror === mirror) this._metaMirror = null
     }
   }
   override _acceptMeta(update: AcceptedMeta): boolean {
     if (!super._acceptMeta(update)) return false
-    this._metaMirror?.(update)
+    this._metaMirror?.accepted(update)
     return true
   }
   /** @internal The client holding this participant went away without leaving. */

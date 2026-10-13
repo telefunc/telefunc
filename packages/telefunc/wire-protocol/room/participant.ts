@@ -9,7 +9,7 @@ import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
-import { MemberMeta } from './member-meta.js'
+import { MemberMeta, type MetaRewinds } from './member-meta.js'
 import type { AcceptedMeta, DmReply, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -53,9 +53,10 @@ abstract class ParticipantBase implements LocalParticipant {
   get _isBound(): boolean {
     return this._forwarder !== null
   }
-  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null) {
+  /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
+  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null, rewinds: MetaRewinds) {
     this.id = id
-    this._meta = new MemberMeta(meta, 0)
+    this._meta = new MemberMeta(meta, 0, rewinds)
     this.selfDelivery = selfDelivery
     this.identity = identity
   }
@@ -74,6 +75,10 @@ abstract class ParticipantBase implements LocalParticipant {
    *  whole meta its holder's next attach or roster sends. */
   _acceptMeta(update: AcceptedMeta): boolean {
     return this._meta.apply(update) === 'applied'
+  }
+  /** @internal A failover rewound the seq: the next whole meta applies, whatever its seq. */
+  _forgetMetaSeq(): void {
+    this._meta.forget()
   }
   protected get _left(): boolean {
     return this._leftCause !== null

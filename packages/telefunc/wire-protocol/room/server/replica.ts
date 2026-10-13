@@ -52,7 +52,7 @@ import {
 } from './membership.js'
 import type { StoredRoomMeta } from './meta.js'
 import type { LaneHolder, TextWantsChange } from './replay.js'
-import type { ServerRoom } from './room.js'
+import type { MetaMirror, ServerRoom } from './room.js'
 import { RosterStream } from './roster-stream.js'
 import { RoomSession } from './session.js'
 import { MemberMessageTexts, type RoomStubChannel, unorderedEventText } from './stub.js'
@@ -109,6 +109,8 @@ class RoomReplica {
   readonly acks = new PendingDmAcks()
   /** Every handle's attached stubs. */
   readonly stubs = new Set<RoomStubChannel>()
+  /** The meta of each participant a client holds, which the client mirrors. */
+  readonly metaMirrors = new Set<MetaMirror>()
   /** Each stub's latest view write, from its attach or a rewrite, to the key it wrote, null if it failed; its removal
    *  comes after it. */
   private readonly _views = new Map<RoomStubChannel, Promise<string | null>>()
@@ -148,6 +150,8 @@ class RoomReplica {
       metaSeq: stored.seq,
       onMetaWaiting: () => this.sync.metaWaiting(),
       onMemberMetaGap: () => this.sync.memberMetaGap(),
+      // A local participant takes each update its member's meta takes here.
+      onMemberMeta: (id, update) => this._owners.get(id)?._acceptMeta(id, update),
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._gossip = new GossipOutbox(incarnation.id, incarnation.inc, this.report.instance)
@@ -241,9 +245,7 @@ class RoomReplica {
         this.model.applyLeave(event.id, leaveCauseFromWire(event))
         return
       case 'p-meta': {
-        const applied = this.model.applyParticipantMeta(event.id, event)
-        this._owners.get(event.id)?._acceptMeta(event.id, event)
-        if (applied) relay()
+        if (this.model.applyParticipantMeta(event.id, event)) relay()
         return
       }
       case 'update':
@@ -261,7 +263,7 @@ class RoomReplica {
    *  every client here names the sender as of the send. */
   applyStamp(id: string, { fromMeta, fromMetaSeq }: SenderStamp): void {
     const hidden = this.model.memberHidden(id)
-    if (hidden === null || this.model.memberMetaSeq(id)! >= fromMetaSeq) return
+    if (hidden === null || !this.model.newerStamp(id, fromMetaSeq)) return
     this.applyControl({ __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq, ...(hidden ? { hidden: true } : {}) })
   }
 
@@ -411,6 +413,12 @@ class RoomReplica {
   /** @internal A newer meta reaching this view through the authority never reached its clients as an event. */
   _applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {
     this.applyControl({ __r: 'update', seq, meta: entries })
+  }
+  /** @internal A failover rewound the room's control lane, and its meta cells with it, which share its slot. */
+  _rewound(): void {
+    this.model.forgetMetaSeqs()
+    for (const mirror of this.metaMirrors) mirror.rewound()
+    for (const stub of this.stubs) stub._relayEvent({ __r: 'rewound' })
   }
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {

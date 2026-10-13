@@ -504,7 +504,10 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
 
   private _mirrorParticipant(): void {
     const participant = this._participant
-    const unlistenMeta = participant._onAcceptedMeta((accepted) => this._notify({ __r: 'p-meta', ...accepted }))
+    const unlistenMeta = participant._onMeta({
+      accepted: (accepted) => this._notify({ __r: 'p-meta', ...accepted }),
+      rewound: () => this._notify({ __r: 'rewound' }),
+    })
 
     participant._setForwarder({
       deliver: (msg) => this._notify({ __r: 'dm', ...wireDmFromInbox(msg) }),

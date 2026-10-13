@@ -28,6 +28,8 @@ type SyncHost = {
   _renewDemand(): Promise<void>
   _readOpenConfig(): Promise<RoomConfigRecord | null>
   _applyAuthorityMeta(stored: StoredRoomMeta): void
+  /** A failover rewound the control lane: the view forgets its meta seqs. */
+  _rewound(): void
   /** Applies a complete roster read, and sends it to the clients it concerns. */
   readonly roster: Pick<RosterStream, 'reconcile'>
   _closeFromAuthority(): void
@@ -83,7 +85,10 @@ class AuthoritySync {
     const before = this._covered
     const mark = await this._controlMark()
     // The authority's seq never goes below what a view covered, unless a failover rewound it.
-    if (mark < before) this._forgetCoverage()
+    if (mark < before) {
+      this._rewound()
+      if (!(await this._reconcileMeta())) return
+    }
     const covered = () => this._current() && mark <= this._covered
     if (covered()) return
     // A read already running may predate the mark.
@@ -95,7 +100,7 @@ class AuthoritySync {
    *  `ROOM_META_REPAIR_MS` later unless the missing frame arrives meanwhile. */
   controlDelivered(seq: number): void {
     // A driver delivers a lane in order, so a seq at or below the highest one is a failover's rewind.
-    if (seq <= this._received) this._forgetCoverage()
+    if (seq <= this._received) this._rewound()
     if (seq !== this._received + 1) this._runStart = seq
     this._received = seq
     if (seq <= this._covered + 1) this._covered = Math.max(this._covered, seq)
@@ -103,10 +108,12 @@ class AuthoritySync {
     if (this._covered < this._received) this._controlGap()
   }
 
-  private _forgetCoverage(): void {
+  /** The meta and roster cells share the control lane's slot, so a failover rewound them with it. */
+  private _rewound(): void {
     this._covered = 0
     this._received = 0
     this._runStart = 0
+    this._host._rewound()
   }
 
   private _cover(mark: number): void {

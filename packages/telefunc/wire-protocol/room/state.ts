@@ -11,7 +11,7 @@ import { Listeners } from '../../utils/Listeners.js'
 import { isNamedTrack, laneTrack, type BinaryFrame, type BinaryWantChange } from './binary.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
 import { RoomMetaState } from './meta-state.js'
-import { MemberMeta } from './member-meta.js'
+import { MemberMeta, type MetaRewinds } from './member-meta.js'
 import type {
   AcceptedMeta,
   MemberMetaUpdate,
@@ -82,6 +82,8 @@ type RoomModelOptions = {
   pendingMember?: (id: string) => MemberSnapshot | undefined
   /** A member's meta change arrived ahead of one before it, which never arrived: the next roster read repairs it. */
   onMemberMetaGap?: () => void
+  /** A known member's meta update applied, from an event, a stamp or a roster read. */
+  onMemberMeta?: (id: string, update: MemberMetaUpdate) => void
 }
 type RoomStateOptions = {
   owner: RoomStateView
@@ -175,9 +177,12 @@ class RoomModel {
   private readonly _views = new Set<RoomState>()
   private readonly _onLeave: RoomModelOptions['onLeave']
   private readonly _meta: RoomMetaState
+  /** Shared by the members' metas here and by the local participants of this view. */
+  readonly metaRewinds: MetaRewinds = { count: 0 }
   private readonly _onMetaWaiting: () => void
   private readonly _pendingMember: (id: string) => MemberSnapshot | undefined
   private readonly _onMemberMetaGap: () => void
+  private readonly _onMemberMeta: (id: string, update: MemberMetaUpdate) => void
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
@@ -191,6 +196,7 @@ class RoomModel {
     this._onLeave = opts.onLeave
     this._pendingMember = opts.pendingMember ?? (() => undefined)
     this._onMemberMetaGap = opts.onMemberMetaGap ?? (() => {})
+    this._onMemberMeta = opts.onMemberMeta ?? (() => {})
     if ('members' in opts.seed) {
       this._rosterKnown = true
       for (const member of opts.seed.members) this._createEntry(member)
@@ -221,6 +227,16 @@ class RoomModel {
   /** How many meta writes of the member this model reflects; null for a member it doesn't know. */
   memberMetaSeq(id: string): number | null {
     return this._members.get(id)?.meta.seq ?? null
+  }
+  /** Whether a sender's stamp at `seq` is newer than the member's meta here. */
+  newerStamp(id: string, seq: number): boolean {
+    return this._members.get(id)?.meta.newerStamp(seq) ?? false
+  }
+  /** A failover rewound the room's and its members' meta seqs: the next whole meta of each applies, whatever its seq. */
+  forgetMetaSeqs(): void {
+    this._meta.forget()
+    this.metaRewinds.count++
+    this._bumpState()
   }
   hasMember(id: string): boolean {
     return this._members.has(id)
@@ -261,7 +277,7 @@ class RoomModel {
     if (existing) return existing
     if (this.closed) {
       // A closed room has no members: one it hands out left with it.
-      const entry = newEntry(snap)
+      const entry = newEntry(snap, this.metaRewinds)
       entry.left = true
       entry.leaveCause = this._closedCause
       return entry
@@ -377,6 +393,7 @@ class RoomModel {
     const applied = entry.meta.apply(update)
     if (applied === 'gap') this._onMemberMetaGap()
     if (applied !== 'applied') return false
+    this._onMemberMeta(id, update)
     this._bumpState()
     if (prev === null) return true
     const next = entry.meta.object
@@ -440,7 +457,7 @@ class RoomModel {
     const entry = this._members.get(from)
     if (fromMeta !== undefined && fromMetaSeq !== undefined) {
       if (!entry) return { sender: senderOf(from, fromMeta, fromIdentity ?? null) }
-      if (entry.meta.seq < fromMetaSeq) this.applyParticipantMeta(from, { seq: fromMetaSeq, meta: fromMeta })
+      if (entry.meta.newerStamp(fromMetaSeq)) this.applyParticipantMeta(from, { seq: fromMetaSeq, meta: fromMeta })
       return { entry }
     }
     const pending = this._pendingMember(from)
@@ -526,11 +543,12 @@ class RoomModel {
       return true
     }
     if (member.metaSeq <= entry.meta.seq) return false
+    const update = { seq: member.metaSeq, meta: member.meta }
     if (narrate) {
-      this.applyParticipantMeta(member.id, { seq: member.metaSeq, meta: member.meta })
+      this.applyParticipantMeta(member.id, update)
       return true
     }
-    entry.meta.apply({ seq: member.metaSeq, meta: member.meta })
+    if (entry.meta.apply(update) === 'applied') this._onMemberMeta(member.id, update)
     return false
   }
   private _applyPreRosterMeta(): void {
@@ -541,7 +559,7 @@ class RoomModel {
     this._preRosterMeta.clear()
   }
   private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
-    const entry = newEntry(entrySeed)
+    const entry = newEntry(entrySeed, this.metaRewinds)
     this._members.set(entry.id, entry)
     if (entry.hidden) this._hiddenMembers++
     return entry
@@ -846,10 +864,13 @@ class RoomState {
     for (const cb of cbs.list()) invokeChannelListener(cb, args, this._onCallbackError)
   }
 }
-function newEntry({ id, meta, joinedAt, metaSeq, identity, hidden }: MemberSnapshot): MemberEntry {
+function newEntry(
+  { id, meta, joinedAt, metaSeq, identity, hidden }: MemberSnapshot,
+  rewinds: MetaRewinds,
+): MemberEntry {
   return {
     id,
-    meta: new MemberMeta(meta, metaSeq),
+    meta: new MemberMeta(meta, metaSeq, rewinds),
     joinedAt,
     identity: identity ?? null,
     hidden: hidden === true,

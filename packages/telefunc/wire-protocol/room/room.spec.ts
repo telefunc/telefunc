@@ -2148,6 +2148,46 @@ describe('Room public behavior', () => {
     await member.publish('after')
     await vi.waitFor(() => expect(received).toEqual(['one', 'lost', 'after']))
   })
+  it("takes the room's and a member's meta writes that reuse the seqs a failover rewound, on a server and its clients", async () => {
+    const writer = await anotherServer()
+    const room = (await Room.create('meta-rewind')) as ServerRoom
+    room.onUpdate(() => {})
+    const { peer } = serve(room)
+    await vi.waitFor(() => expect(rosterEnded(peer)).toBe(true))
+    const member = await (await writer.Room.get(room.id)).join({ meta: { v: 0 } })
+    const held = (await room.join({ meta: { w: 0 } })) as ServerLocalParticipant
+    const heldStub = new RoomParticipantStubChannel(held)
+    heldStub._registerChannel()
+    const heldPeer = attachPeer(heldStub as unknown as RoomStubChannel)
+    await writer.Room.setAttributes(room.id, { a: 1 })
+    const rewind = failoverPoint(room)
+    await writer.Room.setAttributes(room.id, { lost: 1 })
+    await member.setAttributes({ v: 'lost' })
+    await held.setAttributes({ w: 'lost' })
+    await vi.waitFor(async () => expect((await room.getParticipant(member.id))?.meta).toEqual({ v: 'lost' }))
+    rewind()
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    await writer.Room.setAttributes(room.id, { b: 2 })
+    await member.setAttributes({ v: 2 })
+    await held.setAttributes({ w: 2 })
+    await vi.waitFor(
+      async () => {
+        const { participant, notify } = standaloneParticipant({ w: 0 })
+        for (const notice of notices(heldPeer)) notify(notice)
+        expect(participant.meta).toEqual({ w: 2 })
+        expect(held.meta).toEqual({ w: 2 })
+        expect(room.meta).toEqual({ a: 1, b: 2 })
+        expect((await room.getParticipant(member.id))?.meta).toEqual({ v: 2 })
+        const client = clientView(peer, room.id)
+        // A roster after the first applies in turns of its own.
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(client.meta).toEqual({ a: 1, b: 2 })
+        expect(client._getRemote(member.id)?.meta).toEqual({ v: 2 })
+        expect(member.meta).toEqual({ v: 2 })
+      },
+      { timeout: 5_000 },
+    )
+  })
   it('repairs a room meta write whose writer crashed between its exchange and its publish', async () => {
     const room = await Room.create('meta-crash')
     const observer = await Room.get(room.id)
@@ -6859,6 +6899,24 @@ function rejectLaneSubscriptions(kind: SubscribedLane['kind'], diagnostic: strin
   return { backend, started: started.promise }
 }
 /** Loses the frames picked on matching lanes opened from now on, as a lane that stays ready. */
+/** Puts the room's generation back as it is now, its cells and its room-wide lanes' order, as a failover onto a master
+ *  that missed every write after now leaves it. */
+function failoverPoint(room: ServerRoom): () => void {
+  const generation = memoryState.rooms.get(room.id)!.gens.get(room._inc)!
+  const version = generation.version
+  const cells = new Map(generation.cells)
+  const cellsByPrefix = new Map([...generation.cellsByPrefix].map(([prefix, keys]) => [prefix, new Set(keys)]))
+  const order = new Map(generation.order)
+  return () => {
+    generation.version = version
+    generation.cells.clear()
+    for (const [key, cell] of cells) generation.cells.set(key, cell)
+    generation.cellsByPrefix.clear()
+    for (const [prefix, keys] of cellsByPrefix) generation.cellsByPrefix.set(prefix, keys)
+    generation.order.clear()
+    for (const [lane, info] of order) generation.order.set(lane, info)
+  }
+}
 function loseLaneFrames(matches: (lane: SubscribedLane) => boolean, on = here) {
   let pick: (text: string) => boolean = () => false
   mockLaneSubscription(

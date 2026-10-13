@@ -528,6 +528,41 @@ await read()`,
     await sender.leave()
     expect(settled).toBe('handled:move')
   })
+  it("takes the room's and a member's meta writes that reuse the seqs a failover rewound", async () => {
+    const prefix = uniquePrefix('meta-rewind')
+    const redis = ownClient(connect())
+    installRedis(redis, { prefix })
+    onTestFinished(() => disposeBackend())
+    const room = await Room.create('meta-rewind')
+    // Closed, so no repair a gap armed reads the store after the test.
+    onTestFinished(() => Room.close(room.id))
+    room.onUpdate(() => {})
+    const member = await room.join({ meta: { v: 0 } })
+    await Room.setAttributes(room.id, { a: 1 })
+    const backend = new RedisBackend({ redis, prefix })
+    const inc = (await backend.readHead(room.id))!.currentInc!
+    type Internals = { _prefix: string; _generationKeys(roomId: string, inc: string): Promise<string[]> }
+    const internals = backend as unknown as Internals
+    // A failover onto a replica that missed every write after now: each of the generation's keys as it is now.
+    const index = `${internals._prefix}room:{${encodeURIComponent(room.id)}}:g:${inc}:keys`
+    const kept = [index, ...(await internals._generationKeys(room.id, inc))]
+    const dumps = await Promise.all(kept.map((key) => redis.dumpBuffer(key)))
+    await Room.setAttributes(room.id, { lost: 1 })
+    await member.setAttributes({ v: 'lost' })
+    for (const key of await internals._generationKeys(room.id, inc)) if (!kept.includes(key)) await redis.del(key)
+    for (const [i, key] of kept.entries()) await redis.restore(key, 0, dumps[i]!, 'REPLACE')
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    await Room.setAttributes(room.id, { b: 2 })
+    await member.setAttributes({ v: 2 })
+    await vi.waitFor(
+      async () => {
+        expect(room.meta).toEqual({ a: 1, b: 2 })
+        expect((await room.getParticipant(member.id))?.meta).toEqual({ v: 2 })
+        expect(member.meta).toEqual({ v: 2 })
+      },
+      { timeout: 5_000 },
+    )
+  })
   it('reads, merges into and replaces a room meta of 100,000 keys with no Redis command over 20 ms', async () => {
     const prefix = uniquePrefix('meta-pages')
     const redis = ownClient(connect())

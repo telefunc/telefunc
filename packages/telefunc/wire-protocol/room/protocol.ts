@@ -147,8 +147,12 @@ type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: bool
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent | RoomAnnounceEnvelope
 /** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it; `more`
- *  on all but the last. A failed read says so, so roster getters don't wait forever. */
-type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true } | { __r: 'roster-error' }
+ *  on all but the last. A failed read says so, so roster getters don't wait forever. `rewound`: a failover rewound the
+ *  room's meta seqs, so the next whole meta of the room and of each member applies, whatever its seq. */
+type RoomRosterEvent =
+  | { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true }
+  | { __r: 'roster-error' }
+  | { __r: 'rewound' }
 /** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a reattached client
  *  gets the member's whole wanted set, since its offline buffer may have dropped changes. */
 type RoomDemandEvent =
@@ -199,10 +203,12 @@ type ParticipantStubRequest =
   | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
   | { __r: 'req-leave' }
 
-/** Server→client notices on a participant stub. */
+/** Server→client notices on a participant stub. `rewound`: a failover rewound the participant's meta seq, so its next
+ *  whole meta applies, whatever its seq. */
 type ParticipantStubNotice =
   | ({ __r: 'left' } & WireLeaveCause)
   | ({ __r: 'p-meta' } & MemberMetaUpdate)
+  | { __r: 'rewound' }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
   | { __r: 'demand'; track: string | null; wanted: boolean }
   | { __r: 'demand-state'; tracks: Array<string | null> }

@@ -53,6 +53,12 @@ class RoomMetaState {
     return [...this._orderedEntries()]
   }
 
+  /** A failover rewound the seq: any whole meta applies next, and a change waits for one. */
+  forget(): void {
+    this._seq = -1
+    this._waiting.clear()
+  }
+
   /** The updates `update` lets apply, in seq order: a whole meta at any newer seq, a change at the next one, then the
    *  waiting changes that follow. A change past the next seq waits. */
   apply(update: RoomMetaUpdate): RoomMetaUpdate[] {
