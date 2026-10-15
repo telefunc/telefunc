@@ -16,7 +16,6 @@ export {
 export type { CloudflareScale, LocationBucket, SessionRoutingTarget }
 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
-import { TELEFUNC_SESSION_HEADER } from '../../../constants.js'
 import { assert, assertUsage } from '../../../../utils/assert.js'
 
 /**
@@ -36,6 +35,8 @@ const DEFAULT_BROADCAST_BUCKETS = [
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** The session Durable Object's name, which it writes into its KV pin. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
+/** Internal: forwarded to the DO with the session token its client presented. */
+const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 
 type LocationBucket = DurableObjectLocationHint
@@ -108,10 +109,9 @@ function resolveSessionRoutingTarget(
   if (getScaleCountForBucket(scale, locationBucket) === 0) {
     locationBucket = locationFallback
   }
-  const shardIndices = getShardIndicesForBucket(scale, locationBucket)
   // By the session's token, so its calls and channels reach one shard even without a KV entry (a first call's, or a
   // lapsed one's).
-  const shardOrdinal = shardIndices[getDeterministicKeyBucketIndex(token, shardIndices.length)]!
+  const shardOrdinal = getDeterministicKeyBucketIndex(token, getBucketScale(scale, locationBucket))
   const sessionInstanceName = getSessionShardName(baseInstanceName, locationBucket, shardOrdinal)
 
   return { sessionInstanceName, locationBucket, shardOrdinal }

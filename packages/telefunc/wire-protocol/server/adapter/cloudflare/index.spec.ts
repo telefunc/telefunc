@@ -208,23 +208,32 @@ describe('cloudflare adapter entrypoint', () => {
     expect(forwardedRequest.headers.get('x-telefunc-session')).toBe('my-token')
   })
 
-  it('derives a new shard and token when no token is provided, and hands the token to the session Durable Object', async () => {
+  it("routes a request that names no token by a new one, and hands its session Durable Object none to pin, though the request carried the token's header", async () => {
     const { binding, get, fetch } = createBinding()
     const tf = new Telefunc()
     const kv = createMockKV()
-    const request = new Request('https://telefunc.test/_telefunc')
+    const put = vi.spyOn(kv, 'put')
+    const env = { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env
+    Object.assign(mocks.workerEnv, env)
 
     await tf.serve({
-      request,
-      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+      request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
+      env,
     })
 
+    expect(vi.mocked(resolveSessionRoutingTarget).mock.lastCall![4]).toMatch(/^[0-9a-f-]{36}$/)
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-0' }), {
       locationHint: 'weur',
     })
-    expect(fetch).toHaveBeenCalledTimes(1)
-
-    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
+    const forwardedRequest = fetch.mock.calls[0]![0] as Request
+    expect(forwardedRequest.headers.has('x-telefunc-session')).toBe(false)
+    const ctx = { id: { name: 'telefunc-shard-weur-0' } }
+    const instance = new tf.TelefuncDurableObject(ctx as unknown as DurableObjectState, env) as unknown as {
+      fetch(request: Request): Promise<Response>
+    }
+    await instance.fetch(forwardedRequest)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(put).not.toHaveBeenCalled()
   })
 
   it("leaves a page's pin to its session Durable Object, however many of its first requests miss KV", async () => {
@@ -257,16 +266,6 @@ describe('cloudflare adapter entrypoint', () => {
       'lapsed-token',
     )
     expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toBe('lapsed-token')
-  })
-
-  it('takes the session token from the session query parameter only', async () => {
-    const { binding, fetch } = createBinding()
-    const tf = new Telefunc()
-    await tf.serve({
-      request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
-      env: { TelefuncDurableObject: binding, TelefuncKV: createMockKV() } as unknown as Cloudflare.Env,
-    })
-    expect((fetch.mock.calls[0]![0] as Request).headers.get('x-telefunc-session')).toMatch(/^[0-9a-f-]{36}$/)
   })
 
   it("returns the session Durable Object's response as is, without the session token", async () => {
@@ -403,6 +402,7 @@ describe('cloudflare adapter entrypoint', () => {
       fetch(request: Request): Promise<Response>
       webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
       webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
+      webSocketError(ws: WebSocket, error: unknown): void
       telefuncBroadcastPublish(request: BroadcastPublishRequest): unknown
       telefuncBroadcastForward(request: BroadcastForwardRequest): unknown
       telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
@@ -441,6 +441,15 @@ describe('cloudflare adapter entrypoint', () => {
       1000,
       'done',
       true,
+    )
+
+    instance.webSocketError({} as WebSocket, new Error('WebSocket protocol error'))
+    expect(mocks.crosswsAdapter.handleDurableClose).toHaveBeenLastCalledWith(
+      instance,
+      expect.anything(),
+      1006,
+      'error',
+      false,
     )
 
     const publish = {
@@ -548,7 +557,7 @@ describe("the session Durable Object's pin", () => {
     expect(put).toHaveBeenCalledTimes(2)
   })
 
-  it('reports a pin it failed to write, and writes it on the next request', async () => {
+  it("reports a pin it failed to write, and writes it again on the token's first request a second later, as KV takes a key's writes", async () => {
     const kv = createMockKV()
     const put = vi.spyOn(kv, 'put').mockRejectedValueOnce(new Error('KV is down'))
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -557,6 +566,14 @@ describe("the session Durable Object's pin", () => {
     await flush()
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('KV is down'))
     await request('token-b')
+    await flush()
+    expect(put).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers({ now: Date.now() + 1000 })
+    try {
+      await request('token-b')
+    } finally {
+      vi.useRealTimers()
+    }
     await flush()
     expect(put).toHaveBeenCalledTimes(2)
     warn.mockRestore()

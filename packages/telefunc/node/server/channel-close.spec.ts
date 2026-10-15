@@ -4,8 +4,8 @@ import { ReplayBuffer } from '../../wire-protocol/replay-buffer.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, decode, encode } from '../../wire-protocol/shared-ws.js'
 import type { ChannelFrame } from '../../wire-protocol/shared-ws.js'
 import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
-import { ServerChannel, reconnectWindow } from '../../wire-protocol/server/channel.js'
-import { config } from './serverConfig.js'
+import { ServerChannel } from '../../wire-protocol/server/channel.js'
+import { config, reconnectWindow } from './serverConfig.js'
 
 /** Records what the channel sends, but for the flow-control limits every attach sends. */
 function createPeer(frames: Uint8Array[]) {

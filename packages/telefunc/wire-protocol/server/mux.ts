@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux, CHANNEL_MUX }
-export type { ReconcileOutcome, ServerTransport }
+export type { ConnectionEntry, ReconcileOutcome, ServerTransport, Wire }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -54,6 +54,7 @@ import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { PieceSender, ServerPieceReceiver } from '../pieces.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from './socket-wait.js'
+import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -132,22 +133,6 @@ type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
 
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 
-/** An initial channel a RECONCILE on this wire named before the server registered it. The RECONCILED leaves it out,
- *  and an ATTACH_RESULT settles it. */
-type AwaitedChannel = {
-  /** The latest RECONCILE entry naming it. */
-  entry: ReconcileOpenEntry
-  /** The wire awaiting it: the one whose RECONCILE named it, until a barrier moves it to the WebSocket. */
-  conn: ConnectionEntry
-  wire: Wire
-  /** What the page sent it meanwhile, dispatched after its attach. */
-  held: { frame: ChannelFrame; bytes: number }[]
-  /** `attached` until what it holds is dispatched. `expired` once `connectTtl` passed, and kept until a RECONCILE no
-   *  longer names it, so one that crossed its ATTACH_RESULT doesn't await it again. */
-  phase: 'waiting' | 'attached' | 'expired'
-  stopWaiting: () => void
-}
-
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   /** When the wire last delivered a frame, or the ping deadline was last set. */
@@ -164,9 +149,8 @@ type ConnectionState = {
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
   closed: { isPermanent: boolean } | null
   retiredByBarrier: boolean
-  recvBacklogBytes: number
-  recvBacklogFrames: number
-  awaited: Map<number, AwaitedChannel>
+  recvBacklog: RecvBacklog
+  awaited: AwaitedChannels
   /** What may be written to the wire before its backlog, which only writes grow, can pass what its channels' flow
    *  control allowed when it was last read (see `WIRE_SEND_BACKLOG_BASE_BYTES`), and is read again. */
   sendHeadroom: number
@@ -289,6 +273,7 @@ class ChannelMux {
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
     const wait = new SocketWait(() => this.bufferedAmount(connection))
+    const recvBacklog = { bytes: 0, frames: 0 }
     const sender = transport.wholeMessages
       ? new PieceSender(
           (message) => transport.sendNow(connection, message),
@@ -313,9 +298,8 @@ class ChannelMux {
         recvChain: null,
         closed: null,
         retiredByBarrier: false,
-        recvBacklogBytes: 0,
-        recvBacklogFrames: 0,
-        awaited: new Map(),
+        recvBacklog,
+        awaited: new AwaitedChannels(recvBacklog),
         sendHeadroom: 0,
         largestSent: 0,
         pastSendBacklog: false,
@@ -385,8 +369,9 @@ class ChannelMux {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
+    entry.state.pieces?.sender.close()
     this.clearPingTimer(entry.state)
-    this.stopAwaiting(entry.state)
+    entry.state.awaited.stop()
     this.connectionEntries.delete(connection)
     const connId = entry.transport.getConnId(connection)
     // Identity-equality guards against deleting a *replacement* connection's entry when
@@ -468,15 +453,15 @@ class ChannelMux {
       state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now, arrival === 'riding')
       state.deliveries.note(now, byteLength)
     }
-    state.recvBacklogBytes += byteLength
-    state.recvBacklogFrames++
+    state.recvBacklog.bytes += byteLength
+    state.recvBacklog.frames++
     // Taken as it arrives: it's handled once those before it were, after later ones arrived.
     const delivery = state.deliveries.last
     state.lastReceivedAt = now
     const exec = (): Promise<ReconcileOutcome | null> =>
       this.runInboundTurn(entry, connection, rawFrame, byteLength, delivery)
     if (tag === TAG.PING || tag === TAG.PIECES_ACK) return exec()
-    this.answerArrival(entry, connection, now)
+    this.answerArrival(entry, connection)
     return this.chainRecv(entry, exec)
   }
 
@@ -489,7 +474,7 @@ class ChannelMux {
     const now = performance.now()
     entry.state.lastReceivedAt = now
     entry.state.deliveries.note(now, rawFrame.byteLength)
-    this.answerArrival(entry, connection, now)
+    this.answerArrival(entry, connection)
     const { state } = entry
     let frame: Uint8Array<ArrayBuffer> | null
     try {
@@ -503,8 +488,8 @@ class ChannelMux {
       const heldBefore = receiver.held
       frame = receiver.add(piece.total, piece.piece, now)
       // What it holds of a frame counts in the recv backlog as the frame does once whole.
-      state.recvBacklogBytes += receiver.held - heldBefore
-      state.recvBacklogFrames += Number(receiver.held > 0) - Number(heldBefore > 0)
+      state.recvBacklog.bytes += receiver.held - heldBefore
+      state.recvBacklog.frames += Number(receiver.held > 0) - Number(heldBefore > 0)
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(connection)
@@ -539,15 +524,14 @@ class ChannelMux {
   onConnectionBytes(connection: Wire): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
-    const now = performance.now()
-    entry.state.lastReceivedAt = now
-    this.answerArrival(entry, connection, now)
+    entry.state.lastReceivedAt = performance.now()
+    this.answerArrival(entry, connection)
   }
 
   // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose bytes keep arriving
   // is answered all the same, once a ping interval, so the page knows they arrive.
-  private answerArrival(entry: ConnectionEntry, connection: Wire, now: number): void {
-    if (now - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
+  private answerArrival(entry: ConnectionEntry, connection: Wire): void {
+    if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
   }
 
   /** Control frames are bounded by what the protocol itself can describe; only the data plane carries user payloads and
@@ -562,8 +546,8 @@ class ChannelMux {
     const byteLength = rawFrame.byteLength
     if (byteLength > maxFrameBytes) return true
     const { state, transport } = entry
-    const backlogBytes = state.recvBacklogBytes + byteLength
-    const backlogFrames = state.recvBacklogFrames
+    const backlogBytes = state.recvBacklog.bytes + byteLength
+    const backlogFrames = state.recvBacklog.frames
     if (backlogBytes <= WIRE_RECV_BACKLOG_BASE_BYTES && backlogFrames < WIRE_RECV_BACKLOG_BASE_FRAMES) return false
     const sessionId = transport.getSessionId(connection)
     const channels = sessionId === undefined ? 0 : (this.sessions.peekSession(sessionId)?.size ?? 0)
@@ -588,8 +572,8 @@ class ChannelMux {
       this.terminateWire(err.target ?? connection)
       return null
     } finally {
-      entry.state.recvBacklogBytes -= byteLength
-      entry.state.recvBacklogFrames--
+      entry.state.recvBacklog.bytes -= byteLength
+      entry.state.recvBacklog.frames--
     }
   }
 
@@ -640,7 +624,7 @@ class ChannelMux {
     // One for a channel the wire awaits is held for after its attach, and stays in the recv backlog until then.
     const awaited = entry.state.awaited.get(channelFrame.index)
     if (awaited && awaited.phase !== 'expired') {
-      this.hold(awaited, channelFrame, rawFrame.byteLength)
+      entry.state.awaited.hold(awaited, channelFrame, rawFrame.byteLength)
       return null
     }
     this.dispatchChannelFrame(sessionId, channelFrame)
@@ -847,13 +831,12 @@ class ChannelMux {
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
-      this.stopAwaiting(state)
+      state.awaited.stop()
       throw new ProtocolViolationError('connection closed mid-reconcile')
     }
 
     // What the wire awaits is forgotten once a RECONCILE no longer names it: the page has let it go.
-    const named = new Set(ctrl.open.map((open) => open.ix))
-    for (const [ix, awaited] of state.awaited) if (!named.has(ix)) this.forgetAwaited(state, ix, awaited)
+    state.awaited.forgetUnnamed(new Set(ctrl.open.map((open) => open.ix)))
 
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
@@ -925,7 +908,7 @@ class ChannelMux {
       phase: 'waiting',
       stopWaiting: this.waitForChannelRegistration(entry.id, this.options.connectTtl, onResult),
     }
-    conn.state.awaited.set(entry.ix, awaited)
+    conn.state.awaited.add(awaited)
   }
 
   /** Runs in `registerChannel`, so the waiters of several wires attach in the order they began waiting and the latest
@@ -955,49 +938,24 @@ class ChannelMux {
   /** Returns false if what it held broke the protocol, which ends its wire. */
   private dispatchHeld(awaited: AwaitedChannel): boolean {
     const { conn, wire } = awaited
-    conn.state.awaited.delete(awaited.entry.ix)
+    const held = conn.state.awaited.take(awaited)
     const sessionId = conn.transport.getSessionId(wire)
     assert(sessionId)
     try {
-      for (const { frame } of awaited.held) this.dispatchChannelFrame(sessionId, frame)
+      for (const { frame } of held) this.dispatchChannelFrame(sessionId, frame)
       return true
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(wire)
       return false
-    } finally {
-      this.dropHeld(awaited)
     }
   }
 
   /** Not registered within `connectTtl`, or shut down as it registered. */
   private expireAwaited(awaited: AwaitedChannel): void {
     awaited.phase = 'expired'
-    this.dropHeld(awaited)
+    awaited.conn.state.awaited.drop(awaited)
     this.send(awaited.wire, encode.attachResult(awaited.entry.ix, null))
-  }
-
-  /** The wire awaits it no more, and drops what it held for it. One attached meanwhile, the RECONCILE left out of the
-   *  session, which ended it. */
-  private forgetAwaited(state: ConnectionState, ix: number, awaited: AwaitedChannel): void {
-    awaited.stopWaiting()
-    this.dropHeld(awaited)
-    state.awaited.delete(ix)
-  }
-
-  /** What a wire holds counts against its recv backlog. */
-  private hold(awaited: AwaitedChannel, frame: ChannelFrame, bytes: number): void {
-    awaited.held.push({ frame, bytes })
-    awaited.conn.state.recvBacklogBytes += bytes
-    awaited.conn.state.recvBacklogFrames++
-  }
-
-  private dropHeld(awaited: AwaitedChannel): void {
-    for (const { bytes } of awaited.held) {
-      awaited.conn.state.recvBacklogBytes -= bytes
-      awaited.conn.state.recvBacklogFrames--
-    }
-    awaited.held = []
   }
 
   /** A channel the old wire awaits moves with the barrier listing it, so the WebSocket awaits it from then on. One
@@ -1011,23 +969,9 @@ class ChannelMux {
     for (const entry of open) {
       const awaited = oldEntry.state.awaited.get(entry.ix)
       if (!awaited) continue
-      if (awaited.phase === 'attached') {
-        this.dispatchHeld(awaited)
-        continue
-      }
-      oldEntry.state.awaited.delete(entry.ix)
-      const { held } = awaited
-      this.dropHeld(awaited)
-      awaited.conn = wsEntry
-      awaited.wire = wsConnection
-      for (const { frame, bytes } of held) this.hold(awaited, frame, bytes)
-      wsEntry.state.awaited.set(entry.ix, awaited)
+      if (awaited.phase === 'attached') this.dispatchHeld(awaited)
+      else oldEntry.state.awaited.move(awaited, wsEntry, wsConnection)
     }
-  }
-
-  private stopAwaiting(state: ConnectionState): void {
-    for (const awaited of state.awaited.values()) awaited.stopWaiting()
-    state.awaited.clear()
   }
 
   /** Attaches an `IndexedPeer`, after draining, with `replay`, the replay frames missed since `lastSeq` (sends are
@@ -1125,7 +1069,7 @@ class ChannelMux {
     if (!entry) return
     const { state } = entry
     if (state.pastSendBacklog) return
-    if (state.probed.length > 0 && frame[0] !== TAG.RECONCILED) this.answerProbes(connection, state)
+    if (state.probed.length > 0) this.answerProbes(connection, state)
     if (frame[0] === TAG.ACK_RES) state.pieces?.receiver.answering()
     if (frame.byteLength > state.largestSent) state.largestSent = frame.byteLength
     if (frame.byteLength > state.sendHeadroom) {

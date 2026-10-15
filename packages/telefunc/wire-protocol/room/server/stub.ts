@@ -4,7 +4,8 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TRACK_WANTS_MAX } from '../constants.js'
-import { ServerChannel, parsePeerText, reconnectWindow } from '../../server/channel.js'
+import { ServerChannel, parsePeerText } from '../../server/channel.js'
+import { reconnectWindow } from '../../../node/server/serverConfig.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import {
   assertProtocol,

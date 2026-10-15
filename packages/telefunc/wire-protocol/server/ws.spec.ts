@@ -3,7 +3,7 @@ import type { Peer } from 'crossws'
 import { getTelefuncChannelHooks } from './ws.js'
 import { getChannelMux } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { TAG, decode, encode, isOneFrame } from '../shared-ws.js'
+import { TAG, decode, encode, isOneFrame, withTook } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
@@ -30,6 +30,31 @@ test("a client that goes silent is detached at its ping deadline, though the pee
   const { pingInterval, reconnectTimeout } = getServerConfig().channel
   await vi.advanceTimersByTimeAsync(2 * pingInterval + reconnectTimeout + 1_000)
   expect(closed).toBe(true)
+})
+
+test('the server hands a socket it closed nothing more, though it answered a frame in the same turn: workerd throws on a send after close', async () => {
+  const hooks = getTelefuncChannelHooks()
+  let closed = false
+  let sentAfterClose = 0
+  const peer = {
+    context: {},
+    websocket: {},
+    send() {
+      if (closed) sentAfterClose++
+    },
+    terminate() {
+      closed = true
+    },
+  } as unknown as Peer
+  await hooks.open!(peer)
+  await hooks.message!(peer, { uint8Array: () => encode.reconcile({ open: [] }) } as never)
+  // The PONG the PING is answered with is gathered for a message the turn sends as it ends.
+  void hooks.message!(peer, { uint8Array: () => withTook(encode.ping(), 0) } as never)
+  // A piece of a frame larger than any the server takes ends the wire as it arrives.
+  void hooks.message!(peer, { uint8Array: () => encode.piece(0xffffffff, new Uint8Array(1)) } as never)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(closed).toBe(true)
+  expect(sentAfterClose).toBe(0)
 })
 
 /** A channel attached to a page that reads nothing, or, `acknowledging`, only what tells the server what arrived,

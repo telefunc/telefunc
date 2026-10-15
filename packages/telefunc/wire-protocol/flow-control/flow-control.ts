@@ -200,13 +200,13 @@ class FlowControl {
     return backlog
   }
 
-  /** Receiver-side: account one received frame off the wire, received at `at` on `performance.now()`'s clock. Emits a
-   *  `BDP_PING` via the channel's emit callback iff the estimator opens a probe. */
-  onReceived(bytes: number, at: number): void {
+  /** Receiver-side: account one received frame off the wire. Emits a `BDP_PING` via the channel's emit callback iff the
+   *  estimator opens a probe. */
+  onReceived(bytes: number): void {
     this._arrived = true
     this._receivedBytes += bytes
     this._uplink?.creditArrived(bytes)
-    if (this._bdp.onReceive(bytes, at, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
   }
 
   /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `link`, which the peer answers before
@@ -271,20 +271,19 @@ class FlowControl {
     }
   }
 
-  /** Channel calls this after the sync portion of a send or a receive-dispatch, which started at `t0` on
-   *  `performance.now()`'s clock, to report how much wall-clock that work consumed. */
-  _recordSelfTime(t0: number): void {
-    const now = performance.now()
-    this._advanceBuckets(now)
-    this._curBucket += Math.min(now - t0, FC_SELF_TIME_WINDOW_MS)
+  /** Channel calls this after the sync portion of a send or a receive-dispatch
+   *  to report how much wall-clock that work consumed. */
+  _recordSelfTime(durationMs: number): void {
+    this._advanceBuckets()
+    this._curBucket += Math.min(durationMs, FC_SELF_TIME_WINDOW_MS)
   }
 
   /** Telefunc's share of wall-clock time on this channel over the last
    *  `FC_SELF_TIME_WINDOW_MS`, in [0, 1]. While the channel is younger than the
    *  window, denominates by lifetime instead. */
   private _selfUtilisation(): number {
+    this._advanceBuckets()
     const now = performance.now()
-    this._advanceBuckets(now)
     const phase = (now - this._curBucketStart) / FC_SELF_TIME_WINDOW_MS
     const effectiveMs = this._prevBucket * (1 - phase) + this._curBucket
     const denom = Math.min(now - this._openedAt, FC_SELF_TIME_WINDOW_MS)
@@ -293,7 +292,8 @@ class FlowControl {
     return util > 1 ? 1 : util
   }
 
-  private _advanceBuckets(now: number): void {
+  private _advanceBuckets(): void {
+    const now = performance.now()
     const elapsed = now - this._curBucketStart
     if (elapsed < FC_SELF_TIME_WINDOW_MS) return
     if (elapsed < 2 * FC_SELF_TIME_WINDOW_MS) {

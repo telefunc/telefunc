@@ -89,23 +89,24 @@ class BdpEstimator {
     return this._ping
   }
 
-  /** Record one received frame (pre-app-processing), received at `at` on `performance.now()`'s clock. Returns true iff
-   *  a `BDP_PING`, of the number `probe` reads, should be emitted: caller fires `sendBdpPing()` synchronously, and it
-   *  waits for what `sendWait` says. A single probe collects samples for both axes — `onPingAck` then derives
-   *  independent byte-sample / msg-sample saturation decisions. */
-  onReceive(bytes: number, at: number, sendWait: SendWait | null = null): boolean {
+  /** Record one received frame (pre-app-processing). Returns true iff a `BDP_PING`, of the number `probe` reads, should
+   *  be emitted: caller fires `sendBdpPing()` synchronously, and it waits for what `sendWait` says. A single probe
+   *  collects samples for both axes — `onPingAck` then derives independent byte-sample / msg-sample saturation
+   *  decisions. */
+  onReceive(bytes: number, sendWait: SendWait | null = null): boolean {
     let probe = false
     // Skip probe only when *both* axes have already hit their cap — otherwise one of them
     // might still want to grow.
     if (!this._pingInFlight && !(this._byteWindow >= this._byteWindowMax && this._msgWindow >= CREDIT_MSG_WINDOW_MAX)) {
-      if (at - this._lastPingAt >= this._probeIntervalMs) {
+      const now = performance.now()
+      if (now - this._lastPingAt >= this._probeIntervalMs) {
         // Snapshot BEFORE crediting the triggering frame — it counts as the first
         // in-flight byte. Otherwise a window-bound producer always samples 0.
         this._sendPing()
         this._pingWait = sendWait?.waitNow() ?? 0
         this._pingFollowsGrowth = this._grewSincePing
         this._grewSincePing = false
-        this._lastPingAt = at
+        this._lastPingAt = now
         probe = true
       }
     }

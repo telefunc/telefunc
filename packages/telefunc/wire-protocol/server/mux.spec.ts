@@ -428,8 +428,8 @@ async function upgradingWithAwaitedCallback(mux: ChannelMux) {
   const barrier = encode.barrier({ sessionId, upgradeId: 'upgrade', open: [clock, callback] })
   const backlog = (wire: object) =>
     (
-      mux as unknown as { connectionEntries: Map<object, { state: { recvBacklogFrames: number } }> }
-    ).connectionEntries.get(wire)!.state.recvBacklogFrames
+      mux as unknown as { connectionEntries: Map<object, { state: { recvBacklog: { frames: number } } }> }
+    ).connectionEntries.get(wire)!.state.recvBacklog.frames
   return { old, ws, barrier, callback, texts, attachResults, backlog }
 }
 

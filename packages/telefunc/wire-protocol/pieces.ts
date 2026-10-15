@@ -102,6 +102,7 @@ class PieceSender {
   private gatheredSent = false
   private gatheredAtOnce = false
   private flushQueued = false
+  private closed = false
 
   constructor(
     private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
@@ -239,13 +240,18 @@ class PieceSender {
   /** Hands the socket what it gathered, in one message. */
   flush(): void {
     const n = this.gathered.length
-    if (n === 0) return
+    if (n === 0 || this.closed) return
     const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes)
     this.gathered.length = 0
     this.gatheredBytes = 0
     this.lastVaries = this.gatheredSent = this.gatheredAtOnce = false
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.transmit(message)
+  }
+
+  /** Its socket closed: it hands it nothing more, though this turn gathered frames for it. */
+  close(): void {
+    this.closed = true
   }
 
   /** Hands the socket `frame` from `offset` in pieces, of data as far as its room goes, and holds the rest. */

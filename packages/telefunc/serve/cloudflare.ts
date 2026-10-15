@@ -31,7 +31,8 @@ import {
   assertLocationFallbackIsScaled,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/server/adapter/cloudflare/routing.js'
-import { assertUsage, assertWarning } from '../utils/assert.js'
+import { SessionPins, readSessionPin } from '../wire-protocol/server/adapter/cloudflare/session-pin.js'
+import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
@@ -45,9 +46,8 @@ import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/server/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
-const SHARD_TOKEN_TTL_SECONDS = 86400
-/** A session Durable Object writes its pin again once it's this old, well before KV lets it lapse. */
-const SHARD_TOKEN_REPIN_MS = (SHARD_TOKEN_TTL_SECONDS * 1000) / 2
+/** A Durable Object takes a WebSocket message of 32 MiB at most. */
+const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
 
 type CloudflareOptions = {
   bindingName?: string
@@ -57,11 +57,6 @@ type CloudflareOptions = {
   scale?: CloudflareScale
   locationFallback?: DurableObjectLocationHint
   jurisdiction?: DurableObjectJurisdiction
-}
-
-type StoredShardToken = {
-  s: string
-  b: LocationBucket
 }
 
 type ServeInput = {
@@ -83,8 +78,7 @@ class Telefunc {
 
 function telefunc(options?: CloudflareOptions): TelefuncServe {
   enableChannelTransports([CHANNEL_TRANSPORT.WS])
-  // workerd closes a WebSocket that receives a larger message (1009).
-  setAdapterMaxFrameBytes(32 * 1024 * 1024)
+  setAdapterMaxFrameBytes(DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES)
   const bindingName = options?.bindingName ?? 'TelefuncDurableObject'
   const kvBindingName = options?.kvBindingName ?? 'TelefuncKV'
   const baseInstanceName = options?.instanceName ?? 'telefunc'
@@ -93,58 +87,20 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   assertLocationFallbackIsScaled(scale, locationFallback)
   const jurisdiction = options?.jurisdiction
 
-  /** When each session token this isolate's Durable Objects serve was last pinned in KV, oldest first. */
-  const pinnedAt = new Map<string, number>()
-
-  /** The Worker routes a token by its KV pin. The session Durable Object writes the pin, once and again before it
-   *  lapses: a Worker, whose KV reads are cached, would see no pin and write it on each request of the page's first
-   *  minute. */
+  const sessionPins = new SessionPins()
   function pinSession(request: Request): void {
-    const token = request.headers.get(TELEFUNC_SESSION_HEADER)
-    if (!token) return
-    const now = Date.now()
-    const at = pinnedAt.get(token)
-    if (at !== undefined && now - at < SHARD_TOKEN_REPIN_MS) return
-    const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-    const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-    if (!shard || !bucket) return
-    const kv = requireBinding<KVNamespace>(workerEnv, kvBindingName, 'KV namespace')
-    pinnedAt.delete(token)
-    pinnedAt.set(token, now)
-    for (const [oldToken, oldAt] of pinnedAt) {
-      if (now - oldAt < SHARD_TOKEN_TTL_SECONDS * 1000) break
-      pinnedAt.delete(oldToken)
-    }
-    const pin: StoredShardToken = { s: shard, b: bucket }
-    // A Durable Object lives on while the write is pending.
-    kv.put(`session:${token}`, JSON.stringify(pin), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }).catch(
-      (err: unknown) => {
-        pinnedAt.delete(token)
-        assertWarning(
-          false,
-          `A session's shard couldn't be pinned in KV, and is retried on its next request: ${String(err)}`,
-          {
-            onlyOnce: false,
-          },
-        )
-      },
-    )
+    sessionPins.pin(request, () => requireBinding<KVNamespace>(workerEnv, kvBindingName, 'KV namespace'))
   }
 
-  const channelHooks = getTelefuncChannelHooks()
-  const crosswsAdapter = crossws({
-    bindingName,
-    instanceName: baseInstanceName,
-    hooks: {
-      ...channelHooks,
-      // A page may use its session over its WebSocket alone: each message renews the pin, as a request does, from the
-      // upgrade request the socket was opened with.
-      message: (peer, message) => {
-        pinSession(peer.request)
-        return channelHooks.message?.(peer, message)
-      },
-    },
-  })
+  const hooks = getTelefuncChannelHooks()
+  const onMessage = hooks.message
+  // A page may use its session over its WebSocket alone: each message renews the pin, as a request does, from the
+  // upgrade request the socket was opened with.
+  hooks.message = (peer, message) => {
+    pinSession(peer.request)
+    return onMessage(peer, message)
+  }
+  const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   function requireBinding<T>(env: Cloudflare.Env, name: string, kind: string): T {
     const binding = (env as Record<string, T | undefined>)[name]
     assertUsage(binding, `Missing Cloudflare ${kind} binding "${name}". Add it to your wrangler.jsonc.`)
@@ -218,6 +174,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
+    // workerd calls no webSocketClose after a socket's error, and crossws has no handler for one: its wire ends here.
+    webSocketError(ws: WebSocket) {
+      return this.runInSession(() => crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false))
+    }
+
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
       return broadcast.publishToSubscribers(this.authorityState, this.broadcastCalls, request)
     }
@@ -258,15 +219,17 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const kv = requireBinding<KVNamespace>(env, kvBindingName, 'KV namespace')
       const presented = new URL(request.url).searchParams.get('session')
       const token = presented || crypto.randomUUID()
-      const stored = presented ? await kv.get<StoredShardToken>(`session:${token}`, 'json') : null
-      // A presented token keeps its shard: a client names one before its first call, and a lapsed one stays. The
-      // session Durable Object pins it.
+      const stored = presented ? await readSessionPin(kv, presented) : null
+      // A presented token keeps the shard KV pinned for it; without a pin, its hash picks the same shard of its region
+      // again. The session Durable Object writes the pin.
       const { sessionInstanceName, locationBucket } = stored
         ? { sessionInstanceName: stored.s, locationBucket: stored.b }
         : resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
 
       const forwardedHeaders = new Headers(request.headers as Headers)
-      forwardedHeaders.set(TELEFUNC_SESSION_HEADER, token)
+      // A token the client didn't name is never presented again: its session Durable Object pins none.
+      if (presented) forwardedHeaders.set(TELEFUNC_SESSION_HEADER, presented)
+      else forwardedHeaders.delete(TELEFUNC_SESSION_HEADER)
       forwardedHeaders.set(TELEFUNC_SHARD_HEADER, sessionInstanceName)
       forwardedHeaders.set(TELEFUNC_BROADCAST_BUCKET_HEADER, locationBucket)
       const forwardedRequest = new Request(request, { headers: forwardedHeaders })

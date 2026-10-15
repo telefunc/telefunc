@@ -32,7 +32,7 @@ class IndexedPeer {
   sendText(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.text(this.index, data, seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame))
+    this.sendSequenced(seq, frame)
     return payloadBytes(frame)
   }
 
@@ -41,13 +41,13 @@ class IndexedPeer {
     const seq = this.replay.nextSeq()
     const frame = encode.textAckReq(this.index, data, seq)
     onQueued(seq, payloadBytes(frame))
-    this.sender.send(frame, () => this.replay.push(seq, frame))
+    this.sendSequenced(seq, frame)
   }
 
   sendBinary(data: Uint8Array): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame))
+    this.sendSequenced(seq, frame)
   }
 
   /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
@@ -55,7 +55,7 @@ class IndexedPeer {
     const seq = this.replay.nextSeq()
     const frame = encode.binaryAckReq(this.index, data, seq)
     onQueued(seq, data.byteLength)
-    this.sender.send(frame, () => this.replay.push(seq, frame))
+    this.sendSequenced(seq, frame)
   }
 
   /** Send an acknowledgement response for a message the client sent.
@@ -92,19 +92,19 @@ class IndexedPeer {
   sendByteWindowUpdate(limit: number, lastSeq: number, withNext = false): void {
     const frame = encode.window(this.index, limit, lastSeq)
     if (withNext) this.sender.carry(frame)
-    else this.sendCtrl(frame)
+    else this.sender.send(frame)
   }
 
   sendMsgWindowUpdate(limit: number): void {
-    this.sendCtrl(encode.msgWindow(this.index, limit))
+    this.sender.send(encode.msgWindow(this.index, limit))
   }
 
   sendBdpPing(probe: number): void {
-    this.sendCtrl(encode.bdpPing(this.index, probe))
+    this.sender.send(encode.bdpPing(this.index, probe))
   }
 
   sendBdpPingAck(probe: number, backlog: number, pathRtt: number): void {
-    this.sendCtrl(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
+    this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
   /** Returns the frame's payload byte count. */
@@ -125,18 +125,6 @@ class IndexedPeer {
 
   /** Replayed once committed, so a frame a dead wire lost goes again. */
   private sendSequenced(seq: number, frame: Uint8Array<ArrayBuffer>): void {
-    try {
-      this.sender.send(frame, () => this.replay.push(seq, frame))
-    } catch {
-      /* transport may already be closed */
-    }
-  }
-
-  private sendCtrl(frame: Uint8Array<ArrayBuffer>): void {
-    try {
-      this.sender.send(frame)
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 }

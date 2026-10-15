@@ -6,6 +6,7 @@ export { setAdapterMaxFrameBytes }
 export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { pingDeadlineOf }
+export { reconnectWindow }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -402,6 +403,12 @@ function getServerConfig(): ConfigResolved {
 /** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
 function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
   return Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2
+}
+
+/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
+function reconnectWindow(): number {
+  const c = getServerConfig().channel
+  return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.

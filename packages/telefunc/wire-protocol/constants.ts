@@ -364,8 +364,3 @@ export const FC_PAGE_YIELD_BYTES = 64 * 1024
  *  hogging the loop doesn't affect this value, so we don't falsely throttle
  *  telefunc when the choke is elsewhere. */
 export const FC_SELF_UTIL_THRESHOLD = 0.5
-
-// ===== Session routing =====
-
-/** User-facing header for sticky session routing (opaque token). */
-export const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'

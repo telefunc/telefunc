@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import { makeHttpRequest } from './makeHttpRequest.js'
-import { TELEFUNC_SESSION_HEADER } from '../../wire-protocol/constants.js'
+import { TELEFUNC_SESSION_HEADER } from '../../wire-protocol/server/adapter/cloudflare/routing.js'
 
 test("a page's concurrent first calls present one session token, so they reach one session", async () => {
   const requests: Array<{ session: string | null; headers: Record<string, string> }> = []
