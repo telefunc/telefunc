@@ -2,6 +2,7 @@ export { emptyBinaryWants, wantsTrack, binaryWantsCovers, applyBinaryWantChange 
 export type { TrackWants, BinaryWants }
 
 import { ALL, type BinaryWantChange, type TrackKey } from '../binary.js'
+import { toggle } from './sets.js'
 
 /** Which of a publisher's tracks a holder wants: every track while `all`, and each of `tracks` either way
  *  (`DEFAULT_TRACK` selects the unnamed lane). */
@@ -31,8 +32,7 @@ function applyBinaryWantChange(wants: BinaryWants, { member, track, on }: Binary
     scope.all = on
   } else {
     if (scope.tracks.has(track) === on) return false
-    if (on) scope.tracks.add(track)
-    else scope.tracks.delete(track)
+    toggle(scope.tracks, track, on)
   }
   if (member !== ALL && !scope.all && scope.tracks.size === 0) wants.members.delete(member)
   return true

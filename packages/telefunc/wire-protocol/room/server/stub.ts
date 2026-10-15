@@ -53,6 +53,7 @@ import {
   type RoomRosterEvent,
 } from '../protocol.js'
 import { type RoomDataEnvelope } from './protocol.js'
+import { toggle } from './sets.js'
 assertIsNotBrowser()
 
 /** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it
@@ -251,8 +252,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     for (const [id, wanted] of Object.entries(changes)) {
       if (wanted === this._textMemberWants.has(id) || (wanted && !this._room._model.hasMember(id))) continue
       members.set(id, !wanted)
-      if (wanted) this._textMemberWants.add(id)
-      else this._textMemberWants.delete(id)
+      toggle(this._textMemberWants, id, wanted)
     }
     this._announce = announce
     this._flushTail()

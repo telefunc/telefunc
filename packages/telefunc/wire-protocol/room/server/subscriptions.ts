@@ -330,10 +330,7 @@ class RoomSubscriptions {
   }
 
   private _queuePair(member: string, track: string): void {
-    const pairs = this._queued.pairs
-    let tracks = pairs.get(member)
-    if (!tracks) pairs.set(member, (tracks = new Set()))
-    tracks.add(track)
+    toggleEntry(this._queued.pairs, member, track, true)
   }
 
   private _schedulePlan(): void {
@@ -448,8 +445,7 @@ class RoomSubscriptions {
     const count = present ? (this._counts.get(member) ?? (yield* this._countNamed(member))) : undefined
     const wantsAll = present && this._wants.wantsEveryTrack(member)
     const overflows = this._overflows(count)
-    if (overflows) this._overflowing.add(member)
-    else this._overflowing.delete(member)
+    toggle(this._overflowing, member, overflows)
     const servedByAll = wantsAll || overflows || (present && this._byMember)
     if (servedByAll) this._openEveryTrack(member)
     const all = this._everyTrack.get(member)

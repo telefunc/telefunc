@@ -5,6 +5,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ALL, DEFAULT_TRACK, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
 import { type TrackWants } from './binary-wants.js'
 import type { LaneHolder } from './replay.js'
+import { hasEntry, toggle, toggleEntry } from './sets.js'
 assertIsNotBrowser()
 
 /** A holder's text wants as last indexed, and the binary cover keys it is in per scope (`ALL`: every member). */
@@ -85,8 +86,7 @@ class WantsIndex {
         const wantsText = text?.members.has(id) ?? false
         if (wantsText !== indexed.textMembers.has(id)) {
           addCount(this._textMembers, id, wantsText ? 1 : -1)
-          if (wantsText) indexed.textMembers.add(id)
-          else indexed.textMembers.delete(id)
+          toggle(indexed.textMembers, id, wantsText)
         }
         yield
       }
@@ -195,30 +195,20 @@ class WantsIndex {
   /** Puts the holder in or out of one cover key of a scope. */
   private _cover(holder: LaneHolder, scope: string | All, key: TrackKey | All, on: boolean): Affected {
     const indexed = this._indexedOf(holder)
-    let keys = indexed.binary.get(scope)
-    if ((keys?.has(key) ?? false) === on) return NONE
-    if (!keys) indexed.binary.set(scope, (keys = new Set()))
-    if (on) keys.add(key)
-    else keys.delete(key)
-    if (keys.size === 0) indexed.binary.delete(scope)
+    if (hasEntry(indexed.binary, scope, key) === on) return NONE
+    toggleEntry(indexed.binary, scope, key, on)
     if (scope !== ALL) {
       let cover = this._members.get(scope)
       if (!cover) this._members.set(scope, (cover = new Map()))
-      setCover(cover, key, holder, on)
+      toggleEntry(cover, key, holder, on)
       if (cover.size === 0) this._members.delete(scope)
-      if (key !== ALL) {
-        let members = this._trackMembers.get(key)
-        if (cover.has(key)) {
-          if (!members) this._trackMembers.set(key, (members = new Set()))
-          members.add(scope)
-        } else if (members?.delete(scope) && members.size === 0) this._trackMembers.delete(key)
-      }
+      if (key !== ALL) toggleEntry(this._trackMembers, key, scope, cover.has(key))
       return new Set([scope])
     }
     // A pair a room-wide coverer adds or drops is one every other coverer of the key suppresses, so any one names it.
-    if (!on) setCover(this._everyMember, key, holder, false)
+    if (!on) toggleEntry(this._everyMember, key, holder, false)
     const [other] = this._everyMember.get(key) ?? []
-    if (on) setCover(this._everyMember, key, holder, true)
+    if (on) toggleEntry(this._everyMember, key, holder, true)
     if (key === ALL) return other !== undefined ? new Set(other._suppressedMembers()) : 'all'
     this._onEveryMemberCover(key)
     if (other !== undefined) return new Set(other._suppressedMembers())
@@ -231,17 +221,6 @@ function coverKeys(wants: TrackWants | undefined): Set<TrackKey | All> {
   const keys = new Set<TrackKey | All>(wants?.tracks)
   if (wants?.all) keys.add(ALL)
   return keys
-}
-
-function setCover(cover: TrackCover, key: TrackKey | All, holder: LaneHolder, on: boolean): void {
-  let holders = cover.get(key)
-  if (on) {
-    if (!holders) cover.set(key, (holders = new Set()))
-    holders.add(holder)
-    return
-  }
-  holders?.delete(holder)
-  if (holders?.size === 0) cover.delete(key)
 }
 
 /** Whether `affected` is every member; else its members are added to `into`. */

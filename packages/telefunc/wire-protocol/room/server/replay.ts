@@ -9,6 +9,7 @@ import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type Binary
 import type { MemberWants } from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomState } from '../state.js'
+import { toggle } from './sets.js'
 assertIsNotBrowser()
 
 // Text gate keys: a member's id, and for announcements a key no id takes.
@@ -88,8 +89,7 @@ class LocalHolder implements LaneHolder {
       const wantsText = text.members.has(member)
       if (wantsText !== this._textMembers.has(member)) {
         before.set(member, !wantsText)
-        if (wantsText) this._textMembers.add(member)
-        else this._textMembers.delete(member)
+        toggle(this._textMembers, member, wantsText)
       }
     }
     const change = text.all !== this._textAll || before.size > 0 ? { all: this._textAll, members: before } : null

@@ -4,10 +4,10 @@ function toggle<T>(set: Set<T>, value: T, on: boolean): void {
   if (on) set.add(value)
   else set.delete(value)
 }
-function hasEntry(entries: Map<string, Set<string>>, key: string, value: string): boolean {
+function hasEntry<K, V>(entries: Map<K, Set<V>>, key: K, value: V): boolean {
   return entries.get(key)?.has(value) === true
 }
-function toggleEntry(entries: Map<string, Set<string>>, key: string, value: string, on: boolean): void {
+function toggleEntry<K, V>(entries: Map<K, Set<V>>, key: K, value: V, on: boolean): void {
   let values = entries.get(key)
   if (on) {
     if (!values) entries.set(key, (values = new Set()))

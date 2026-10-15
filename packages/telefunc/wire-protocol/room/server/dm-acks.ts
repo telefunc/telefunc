@@ -2,6 +2,7 @@ export { PendingDmAcks }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import type { DmReply } from '../protocol.js'
+import { toggleEntry } from './sets.js'
 assertIsNotBrowser()
 
 type PendingDmAck = { from: string; to: string; settle: (reply: DmReply) => void }
@@ -13,11 +14,7 @@ class PendingDmAcks {
 
   add(ackId: string, pending: PendingDmAck): void {
     this._byId.set(ackId, pending)
-    for (const member of [pending.from, pending.to]) {
-      let ackIds = this._byMember.get(member)
-      if (!ackIds) this._byMember.set(member, (ackIds = new Set()))
-      ackIds.add(ackId)
-    }
+    for (const member of [pending.from, pending.to]) toggleEntry(this._byMember, member, ackId, true)
   }
 
   settle(ackId: string, reply: DmReply): void {
@@ -28,11 +25,7 @@ class PendingDmAcks {
     const pending = this._byId.get(ackId)
     if (!pending) return undefined
     this._byId.delete(ackId)
-    for (const member of [pending.from, pending.to]) {
-      const ackIds = this._byMember.get(member)
-      ackIds?.delete(ackId)
-      if (ackIds?.size === 0) this._byMember.delete(member)
-    }
+    for (const member of [pending.from, pending.to]) toggleEntry(this._byMember, member, ackId, false)
     return pending
   }
 

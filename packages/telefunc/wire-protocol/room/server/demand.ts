@@ -349,10 +349,8 @@ class RoomDemand {
   /** The member publishes on `track`, which a report of its every track covers from now on. */
   published(member: string, track: string): void {
     if (track === DEFAULT_TRACK) return
-    let tracks = this._published.get(member)
-    if (tracks?.has(track)) return
-    if (!tracks) this._published.set(member, (tracks = new Set()))
-    tracks.add(track)
+    if (hasEntry(this._published, member, track)) return
+    toggleEntry(this._published, member, track, true)
     if (!this._members.has(member)) return
     this._queue(track, member)
     this._settle()
