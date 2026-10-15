@@ -1,4 +1,4 @@
-export { closeIncarnation, acquireClosingLease, finishClose, cleanupFinalizedIncarnation }
+export { closeIncarnation, takeOverClose, cleanupFinalizedIncarnation }
 
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
@@ -19,10 +19,15 @@ async function closeIncarnation(id: string, inc?: string): Promise<void> {
       return
     }
     if (inc !== undefined && current.currentInc !== inc) return
-    const closing = await acquireClosingLease(backend, id, current)
-    if (closing !== null && (await finishClose(backend, id, closing))) return
+    if (await takeOverClose(backend, id, current)) return
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
+}
+
+/** Takes the close lease and finishes the close; false when the head changed meanwhile. */
+async function takeOverClose(backend: RoomBackend, roomId: string, current: RoomHead): Promise<boolean> {
+  const closing = await acquireClosingLease(backend, roomId, current)
+  return closing !== null && (await finishClose(backend, roomId, closing))
 }
 
 async function acquireClosingLease(backend: RoomBackend, roomId: string, current: RoomHead): Promise<RoomHead | null> {

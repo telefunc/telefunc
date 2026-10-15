@@ -48,7 +48,7 @@ import { RoomReplica } from './replica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
 import { metaEntriesAt, metaObjectOf } from '../meta-state.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
-import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
+import { cleanupFinalizedIncarnation, closeIncarnation, takeOverClose } from './close.js'
 import { createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
 import { listRoom, repairRoomIndex, sweepLapsedRoomsSoon } from './directory.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
@@ -139,8 +139,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   return await retryCompareExchange(async () => {
     let current = await backend.readHead(id)
     if (current?.state === 'closing') {
-      const closing = await acquireClosingLease(backend, id, current)
-      if (closing === null || !(await finishClose(backend, id, closing))) return { kind: 'closing' }
+      if (!(await takeOverClose(backend, id, current))) return { kind: 'closing' }
       current = await backend.readHead(id)
     }
     if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
