@@ -36,7 +36,7 @@ const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
 type SendRoom = {
   /** With a rate measured, the most bytes of data it hands the socket now. */
   dataRoom(): number
-  /** It handed the socket `bytes`, of data or not. */
+  /** It handed the socket `bytes`, of data or not, or gathered them for the message its turn ends with. */
   handed(bytes: number, data: boolean): void
   /** It was sent a frame of `tag` and `bytes`, which it hands the socket now or once room allows. */
   sentFrame(tag: number, bytes: number): void
@@ -55,7 +55,7 @@ class PieceSender {
   private firstAt = 0
   /** The bytes its receiver said it took at its newest heartbeat. */
   heartbeatBytes = 0
-  /** The bytes of the messages handed to the socket, headers and announcements included, as its receiver counts them. */
+  /** The bytes of the messages for the socket, headers and announcements included, as its receiver counts them. */
   transmittedBytes = 0
   /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
   private probe: { end: number; second: number | null } | null = null
@@ -270,7 +270,7 @@ class PieceSender {
     if (end < bytes) this.hold(frame, end)
   }
 
-  /** Counts `bytes` handed to the socket, of data or not. */
+  /** Counts `bytes` handed to the socket, of data or not, or gathered for the message its turn ends with. */
   private transmitted(bytes: number, data: boolean): void {
     this.transmittedBytes += bytes
     this.room.handed(bytes, data)
