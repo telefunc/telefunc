@@ -40,7 +40,8 @@ class ReplayGate {
   }
 }
 
-/** A later time is newer whatever the seq: a commit never sets its lane's time back, and a failover may rewind its seq. */
+/** A later time is newer whatever the seq: a commit never sets its lane's time back, and a failover may rewind its
+ *  seq. */
 function admitInto(high: Map<string, WirePublishInfo>, key: string, info: WirePublishInfo): boolean {
   const last = high.get(key)
   if (last !== undefined && info.timestamp < last.timestamp) return false
@@ -68,7 +69,8 @@ interface LaneHolder {
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void
 }
 
-/** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they differ, as a client declares them. */
+/** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they
+ *  differ, as a client declares them. */
 class LocalHolder implements LaneHolder {
   private readonly _replay = new ReplayGate()
   private _textAll = false

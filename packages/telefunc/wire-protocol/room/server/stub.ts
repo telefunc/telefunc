@@ -77,7 +77,8 @@ class ResponseRoomGrants {
 
 /** A Room stub answers each client request through its channel ack, under the Room error contract. */
 abstract class RoomRequestChannel extends ServerChannel {
-  /** A client may have missed state its buffer dropped, before it first connected or while offline: each attach sends it. */
+  /** A client may have missed state its buffer dropped, before it first connected or while offline: each attach sends
+   *  it. */
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     super._attachPeer(peer, state)
     this._onAttached()
@@ -131,7 +132,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private readonly _room: ServerRoom
   private readonly _publishShield: ShieldValidator | undefined
   private readonly _members = new Set<string>()
-  /** Members whose own messages this client doesn't get back: its selfDelivery: false joins and co-returned server joins. */
+  /** Members whose own messages this client doesn't get back: its selfDelivery: false joins and co-returned server
+   *  joins. */
   private readonly _selfSuppressed: Set<string>
   /** Hidden members this response handed the client: their events are relayed to it alone. */
   private readonly _grantedHidden: Set<string>
@@ -422,7 +424,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   // Tail
 
-  /** Seeded from the room's pre-attach hold, with a fresh lease; expiry drops the hold and lets the room release ingestion. */
+  /** Seeded from the room's pre-attach hold, with a fresh lease; expiry drops the hold and lets the room release
+   *  ingestion. */
   _beginTail(seed: TailEntry[], onExpire: () => void): void {
     this._tail = new TailHold(() => {
       this._tail = null
@@ -448,7 +451,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 }
 
-/** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave flow back to the client. */
+/** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave
+ *  flow back to the client. */
 class RoomParticipantStubChannel extends RoomRequestChannel {
   private readonly _participant: ServerLocalParticipant
   private readonly _publishShield: ShieldValidator | undefined

@@ -56,9 +56,9 @@ type PresenceEvent = Exclude<RoomCtrlEnvelope, { __r: 'demand-ask' }>
 
 /** This process's one view of a room incarnation, whatever the number of its handles: the model, the lanes planned
  *  from the wants of every handle's holders, the demand, the session hosting the members and pages the handles hold,
- *  and the heartbeat that renews it and checks the authority again. Each handle keeps its guards, its tail, the stubs it opened and its
- *  listeners. A replica no handle observes, owns a member through or tails runs no heartbeat and holds no lane; it
- *  lives while a handle holds it. */
+ *  and the heartbeat that renews it and checks the authority again. Each handle keeps its guards, its tail, the stubs
+ *  it opened and its listeners. A replica no handle observes, owns a member through or tails runs no heartbeat and
+ *  holds no lane; it lives while a handle holds it. */
 class RoomReplica {
   private static readonly _byInc = new Map<string, WeakRef<RoomReplica>>()
   private static readonly _collected = new FinalizationRegistry<string>((inc) => {
@@ -269,8 +269,8 @@ class RoomReplica {
     holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
   }
 
-  /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so a
-   *  frame it already has is not delivered again. A want for one member's track reads that lane; any other lists the
+  /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so
+   *  a frame it already has is not delivered again. A want for one member's track reads that lane; any other lists the
    *  retained lanes it covers. As with text, a frame replays only while its member is in the roster: a leave clears the
    *  member's retained frames, and one read just before that is gone with it. */
   async replayBinary(holder: LaneHolder, { member, track }: BinaryWantChange): Promise<void> {

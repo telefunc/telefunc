@@ -6,7 +6,8 @@ assertIsNotBrowser()
 
 function ignorePending(): void {}
 
-/** A lane subscription the room wants: holder-facing readiness survives failed attempts, and Room's recovery policy replaces them. */
+/** A lane subscription the room wants: holder-facing readiness survives failed attempts, and Room's recovery policy
+ *  replaces them. */
 class LaneSubscription {
   private _subscription: BackendSubscription | null = null
   private _subscribe: (() => BackendSubscription) | null = null

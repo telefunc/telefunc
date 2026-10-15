@@ -76,7 +76,8 @@ class ServerRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
 
-  /** @internal Every authority check and member write carries this incarnation, rejecting stale handles after recreate. */
+  /** @internal Every authority check and member write carries this incarnation, rejecting stale handles after
+   *  recreate. */
   readonly _incarnation: RoomIncarnation
   /** @internal What this process shares of the incarnation. */ readonly _replica: RoomReplica
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
@@ -176,7 +177,8 @@ class ServerRoom extends RoomStateView implements Room {
     if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
   }
 
-  /** The member's inbox is ready before its record is durable, and the join is announced after, so no DM or event is lost. */
+  /** The member's inbox is ready before its record is durable, and the join is announced after, so no DM or event is
+   *  lost. */
   private async _commitAdmission(admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
     const record: Omit<RoomMemberRecord, 'session'> = { joinedAt, metaSeq: 0, metaGen: 0 }
@@ -324,7 +326,8 @@ class ServerRoom extends RoomStateView implements Room {
     this._replica.track(this)
     this._replica.plan.syncLanes() // drop the text ingestion nothing is consuming
   }
-  /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every earlier one is in the snapshot. */
+  /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
+   *  earlier one is in the snapshot. */
   _openStub(options: ConstructorParameters<typeof RoomStubChannel>[1]): {
     stub: RoomStubChannel
     metadata: RoomSnapshotMetadata
@@ -491,8 +494,8 @@ class ServerLocalParticipant extends ParticipantBase {
     this._assertActive()
     return await this._room._writes.publishBinaryFrame(frame, framed)
   }
-  /** @internal Each meta update this participant applies, and each failover rewind of its seq, which a client holding it
-   *  mirrors. */
+  /** @internal Each meta update this participant applies, and each failover rewind of its seq, which a client holding
+   *  it mirrors. */
   _onMeta(mirror: MetaMirror): () => void {
     this._metaMirror = mirror
     this._room._replica.metaMirrors.add(mirror)
