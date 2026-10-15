@@ -279,7 +279,7 @@ describe('several frames in one WebSocket message', () => {
     ]
     const message = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
     expect(isOneFrame(message)).toBe(false)
-    expect(messageFrames(message)).toEqual(frames)
+    expect(Array.from(messageFrames(message))).toEqual(frames)
     expect(frames.map(isOneFrame)).toEqual([true, true, true, true])
   })
 
@@ -290,7 +290,13 @@ describe('several frames in one WebSocket message', () => {
     ['a LENGTH past its message', encode.message([encode.text(1, 'a', 1), encode.closeAck(1)], 22).fill(0xff, 3, 7)],
   ]
   test.each(malformed)('with %s are a violation', (_name, message) => {
-    expect(() => messageFrames(message)).toThrow(ProtocolViolationError)
+    expect(() => Array.from(messageFrames(message))).toThrow(ProtocolViolationError)
+  })
+
+  test('are read and copied only as far as they are taken', () => {
+    const frames = messageFrames(encode.message([encode.closeAck(1), encode.closeAck(1)], 14).fill(TAG.LENGTH, 7, 8))
+    expect(frames.next().value).toEqual(encode.closeAck(1))
+    expect(() => frames.next()).toThrow(ProtocolViolationError)
   })
 })
 

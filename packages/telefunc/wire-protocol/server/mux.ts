@@ -399,26 +399,24 @@ class ChannelMux {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
     if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, connection, rawFrame, 'alone')
-    let frames: Uint8Array<ArrayBuffer>[]
+    // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
+    // measures. Each is copied as the one before it goes, so a message past the ingress budget is copied no further.
+    let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
     try {
       assertProtocol(entry.state.pieces, 'frames in one message on a wire that takes no pieces')
-      frames = messageFrames(rawFrame)
+      const { receiver } = entry.state.pieces
+      const frames = messageFrames(rawFrame)
+      let next = frames.next()
+      while (!next.done && entry.state.closed === null) {
+        const frame = next.value
+        next = frames.next()
+        const dispatched = this.dispatchFrame(entry, connection, frame, next.done ? 'alone' : 'riding')
+        if (frame[0] === TAG.RECONCILE) outcome = dispatched
+        if (!next.done && fixedBytes(frame[0]!) === 0) receiver.tookLength(LENGTH_BYTES)
+      }
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
       this.terminateWire(connection)
-      return Promise.resolve(null)
-    }
-    // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
-    // measures.
-    const { receiver } = entry.state.pieces
-    let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
-    const last = frames.length - 1
-    for (let i = 0; i <= last; i++) {
-      if (entry.state.closed !== null) return outcome
-      const frame = frames[i]!
-      const dispatched = this.dispatchFrame(entry, connection, frame, i < last ? 'riding' : 'alone')
-      if (frame[0] === TAG.RECONCILE) outcome = dispatched
-      if (i < last && fixedBytes(frame[0]!) === 0) receiver.tookLength(LENGTH_BYTES)
     }
     return outcome
   }
