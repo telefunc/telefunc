@@ -375,7 +375,8 @@ function getServerConfig(): ConfigResolved {
     },
     channel: {
       transports: configState.channel.transports ?? [
-        ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...globalObject.adapterChannelTransports]),
+        ...DEFAULT_SERVER_CHANNEL_TRANSPORTS,
+        ...globalObject.adapterChannelTransports,
       ],
       reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
       idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,

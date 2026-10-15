@@ -366,11 +366,13 @@ test('a stream the page consumes while the server awaits another channel its fir
   expect(page.received).toEqual([...page.received.keys()])
 })
 
-test("a page listener that transfers its data's buffer leaves the frames behind that data in its message intact", async () => {
+test("a page listener's data has a buffer of its own frame, which it may transfer, in a message of several", async () => {
   const { server, page } = loop.open()
   const got: number[] = []
+  const buffers: number[] = []
   page.listenBinary((data) => {
     got.push(data.byteLength)
+    buffers.push(data.buffer.byteLength)
     structuredClone(data.buffer, { transfer: [data.buffer] })
   })
   await run(50)
@@ -378,6 +380,8 @@ test("a page listener that transfers its data's buffer leaves the frames behind 
   for (let i = 0; i < 3; i++) void server.sendBinary(new Uint8Array(100))
   await run(50)
   expect(got).toEqual([100, 100, 100])
+  const frameBytes = encode.binary(0, new Uint8Array(100)).byteLength
+  expect(buffers).toEqual([frameBytes, frameBytes, frameBytes])
   expect(loop.sockets.length).toBe(1)
 })
 
@@ -1488,6 +1492,26 @@ test("the server acknowledges at its heartbeat in its PONG's message, and the pa
   expect(alone(sent, TAG.WINDOW)).toEqual([])
   expect(sent.filter(([tag]) => tag === TAG.WINDOW)).toHaveLength(1)
   expect(pageReplayBytes(page)).toBe(0)
+})
+
+test('on a 10 B/ms uplink, a page that idled an hour after an upload has its next send reach the server within seconds', async () => {
+  const { server, page } = loop.open<string, never>()
+  let got = 0
+  server.listen(() => void got++)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 10
+  let uploading = true
+  void (async () => {
+    while (uploading) await page.send('x'.repeat(1_000))
+  })()
+  await run(20_000)
+  uploading = false
+  for (let minute = 0; minute < 60; minute++) await run(60_000)
+  const before = got
+  void page.send('x'.repeat(100))
+  await runUntil(() => got > before, 5_000)
+  expect(got).toBe(before + 1)
+  expect(loop.sockets.length).toBe(1)
 })
 
 test('a page taking a push of 128 KiB messages acknowledges them only in the messages it sends anyway, once the server measured the rate', async () => {

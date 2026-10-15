@@ -116,10 +116,11 @@ class SendBudget {
   private roomPast(sent: number): number {
     const unacknowledged = sent - this.sender.acknowledgedBytes
     const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
-    // Up to `slack` arrived unacknowledged. More arrives while an acknowledgement comes back, or would wait behind what
-    // the server sends now.
+    // What the newest heartbeat says the server took arrived, and up to `slack` more unacknowledged. More arrives while
+    // an acknowledgement comes back, or would wait behind what the server sends now.
     const late = Math.max(this.lateMs, this.uplink.peerQueueWait())
-    const unarrived = unacknowledged - this.uplink.uplinkRate() * late - this.slack
+    const untaken = sent - Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
+    const unarrived = untaken - this.uplink.uplinkRate() * late - this.slack
     return this.allowance - Math.max(waiting, unarrived)
   }
 

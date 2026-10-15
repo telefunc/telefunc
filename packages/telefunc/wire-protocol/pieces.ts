@@ -53,6 +53,8 @@ class PieceSender {
   acknowledgedBytes = 0
   private firstBytes = 0
   private firstAt = 0
+  /** The bytes its receiver said it took at its newest heartbeat. */
+  heartbeatBytes = 0
   /** The bytes of the messages handed to the socket, headers and announcements included, as its receiver counts them. */
   transmittedBytes = 0
   /** A probe out: the bytes handed to the socket through it, and where its second piece starts, for a pair. */
@@ -457,6 +459,7 @@ class PieceSender {
     // Behind the acknowledged bytes if a PIECES_ACK passed it while it waited behind a probe.
     const took = this.acknowledgedBytes + ((bytes - this.acknowledgedBytes) | 0)
     if (took > this.transmittedBytes) return false
+    this.heartbeatBytes = took
     this.raiseFloor(took / Math.max(at - this.firstAt, WIRE_PROBE_CLOCK_MS))
     return true
   }
