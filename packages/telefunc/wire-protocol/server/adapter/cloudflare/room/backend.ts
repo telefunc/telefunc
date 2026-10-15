@@ -29,7 +29,7 @@ import type {
 } from '../../../../backend/room/contract.js'
 import type { SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
-import { CloudflareBroadcast } from '../broadcast.js'
+import type { CloudflareBroadcast } from '../broadcast.js'
 import type { RoomAuthority } from './do.js'
 import type { DurableObject } from 'cloudflare:workers'
 import { currentCloudflareSession, requireCloudflareSession } from '../session.js'
