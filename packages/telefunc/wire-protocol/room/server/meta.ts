@@ -105,24 +105,25 @@ async function mergeRuns(runs: RoomMetaEntry[][]): Promise<RoomMetaEntry[]> {
     for (let r = 0; r < runs.length; r += 2) {
       const a = runs[r]!
       const b = runs[r + 1]
-      if (b === undefined) {
-        merged.push(a)
-        continue
-      }
-      const out: RoomMetaEntry[] = []
-      let i = 0
-      let j = 0
-      while (i < a.length && j < b.length) {
-        out.push(compareMetaEntries(a[i]!, b[j]!) < 0 ? a[i++]! : b[j++]!)
-        if (out.length % CELL_PAGE_SIZE === 0 && slice.over) await slice.next()
-      }
-      while (i < a.length) out.push(a[i++]!)
-      while (j < b.length) out.push(b[j++]!)
-      merged.push(out)
+      merged.push(b === undefined ? a : await mergePair(a, b, slice))
     }
     runs = merged
   }
   return runs[0] ?? []
+}
+
+/** Two sorted runs as one, within `slice`. */
+async function mergePair(a: RoomMetaEntry[], b: RoomMetaEntry[], slice: Slice): Promise<RoomMetaEntry[]> {
+  const out: RoomMetaEntry[] = []
+  let i = 0
+  let j = 0
+  while (i < a.length && j < b.length) {
+    out.push(compareMetaEntries(a[i]!, b[j]!) < 0 ? a[i++]! : b[j++]!)
+    if (out.length % CELL_PAGE_SIZE === 0 && slice.over) await slice.next()
+  }
+  while (i < a.length) out.push(a[i++]!)
+  while (j < b.length) out.push(b[j++]!)
+  return out
 }
 
 /** Null once the incarnation is gone. Until its first write, the meta is the one the room was created with. A read
