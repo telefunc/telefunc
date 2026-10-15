@@ -205,6 +205,7 @@ class RoomSubscriptions {
       // Only a want of every track of every member concerns every member.
       assert(affected !== 'all')
       const everyMember = this._wants.namesEveryMember(track)
+      const pair: BinaryWantChange & { track: TrackKey } = { member: change.member, track, on: change.on }
       // A track counts for a member while it is named of the member alone; one named of every member counts for none.
       for (const member of affected) {
         const count = this._counts.get(member)
@@ -212,7 +213,7 @@ class RoomSubscriptions {
           if (this._counting?.member === member) this._counting.stale = true
           continue
         }
-        const [before, after] = this._wants.namedPairChange(holder, { ...change, track }, member)
+        const [before, after] = this._wants.namedPairChange(holder, pair, member)
         this._counts.set(member, count + Number(!everyMember && after) - Number(!wasEveryMember && before))
       }
       for (const member of affected) this._queuePair(member, track)
