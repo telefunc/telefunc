@@ -4,7 +4,7 @@ import { PieceSender } from './pieces.js'
 import { PagePieceReceiver } from './client/page-piece-receiver.js'
 import { ServerPieceReceiver } from './server/server-piece-receiver.js'
 import { Uplink } from './client/uplink.js'
-import { decode, encode, TAG } from './shared-ws.js'
+import { decode, encode, messageFrames, TAG } from './shared-ws.js'
 
 afterEach(() => void vi.restoreAllMocks())
 
@@ -196,6 +196,31 @@ test('an acknowledgement counts the bytes handed to the socket, announcements an
   // count.
   sender.send(new Uint8Array(20_000), 5_000)
   const all = 24_200 + ANNOUNCE + 5 * PIECE
+  expect(sender.acknowledged({ bytes: all + 1, heldMs: 0, spanUs: 0 })).toBe(false)
+  expect(sender.acknowledged({ bytes: all, heldMs: 0, spanUs: 0 })).toBe(true)
+})
+
+test('a frame held for room goes, once room comes, in one message behind what was carried while it waited, whose bytes an acknowledgement counts', () => {
+  const transmitted: Uint8Array<ArrayBuffer>[] = []
+  let dataRoom = 0
+  const link = new Link()
+  link.rise(100, performance.now())
+  const sender = new PieceSender(
+    (message) => void transmitted.push(message),
+    () => 0,
+    link,
+    { dataRoom: () => dataRoom, handed: () => {}, sentFrame: () => {} },
+  )
+  sender.send(data(1_000), 5_000)
+  expect(transmitted).toEqual([])
+  const window = encode.window(1, 0, 0)
+  sender.carry(() => window)
+  dataRoom = Number.POSITIVE_INFINITY
+  sender.sendHeld()
+  expect(transmitted.map((message) => messageFrames(message).map((frame) => frame[0]))).toEqual([
+    [TAG.WINDOW, TAG.PIECE],
+  ])
+  const all = window.byteLength + PIECE + 1_000
   expect(sender.acknowledged({ bytes: all + 1, heldMs: 0, spanUs: 0 })).toBe(false)
   expect(sender.acknowledged({ bytes: all, heldMs: 0, spanUs: 0 })).toBe(true)
 })
