@@ -45,6 +45,7 @@ import type { StoredRoomMeta } from './meta.js'
 import type { LaneHolder, TextWantsChange } from './replay.js'
 import type { MetaMirror, ServerRoom } from './room.js'
 import { RosterStream } from './roster-stream.js'
+import { toggle } from './sets.js'
 import { RoomSession } from './session.js'
 import { MemberMessageTexts, type RoomStubChannel, unorderedEventText } from './stub.js'
 import { RoomSubscriptions } from './subscriptions.js'
@@ -521,9 +522,4 @@ function hiddenMemberOf(event: PresenceEvent): string | null {
   if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta')
     return event.hidden === true ? event.id : null
   return null
-}
-
-function toggle<T>(set: Set<T>, value: T, on: boolean): void {
-  if (on) set.add(value)
-  else set.delete(value)
 }

@@ -3,6 +3,7 @@ export { RoomDemand, DemandReport }
 import { ALL, DEFAULT_TRACK, type All } from './binary.js'
 import { ROOM_DEMAND_TTL_MS } from './server/constants.js'
 import type { DemandEntry, RoomDemandPage } from './server/protocol.js'
+import { hasEntry, runAll, toggle, toggleEntry } from './server/sets.js'
 import { Slice } from './slice.js'
 
 /** The reporters of an entry, each with the telling of everything (`Reporter.telling`) it last told the entry in. */
@@ -563,24 +564,6 @@ function lapse(leases: Leases, dropped: (instance: string, telling: number) => b
   for (const [instance, telling] of leases) if (dropped(instance, telling)) leases.delete(instance)
   return leases.size === 0
 }
-/** Runs every step now. */
-function runAll(steps: Iterable<unknown>): void {
-  for (const _ of steps);
-}
 function sameMembers(a: ReadonlySet<string>, b: readonly string[]): boolean {
   return a.size === b.length && b.every((member) => a.has(member))
-}
-function toggle<T>(set: Set<T>, value: T, on: boolean): void {
-  if (on) set.add(value)
-  else set.delete(value)
-}
-function hasEntry(entries: Map<string, Set<string>>, key: string, value: string): boolean {
-  return entries.get(key)?.has(value) === true
-}
-function toggleEntry(entries: Map<string, Set<string>>, key: string, value: string, on: boolean): void {
-  let values = entries.get(key)
-  if (on) {
-    if (!values) entries.set(key, (values = new Set()))
-    values.add(value)
-  } else if (values?.delete(value) && values.size === 0) entries.delete(key)
 }

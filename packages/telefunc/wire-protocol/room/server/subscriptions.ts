@@ -18,6 +18,7 @@ import { Slice } from '../slice.js'
 import type { LaneHolder } from './replay.js'
 import type { AuthoritySync } from './authority-sync.js'
 import { WantsIndex } from './wants-index.js'
+import { runAll, toggle, toggleEntry } from './sets.js'
 import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
 assertIsNotBrowser()
 
@@ -513,8 +514,8 @@ class RoomSubscriptions {
     if (!keep && lane !== undefined) {
       lane.stop()
       this._binary.delete(key)
-      untrack(this._binaryTracks, member, track)
-      untrack(this._trackMembers, track, member)
+      toggleEntry(this._binaryTracks, member, track, false)
+      toggleEntry(this._trackMembers, track, member, false)
       lane = undefined
       if (this._everyMember.has(track)) this._queued.tracks.add(track)
     } else if (keep) {
@@ -658,8 +659,8 @@ class RoomSubscriptions {
       if (this._everyMember.has(track)) this._queued.tracks.add(track)
     })
     this._binary.set(inProcessBinaryLaneKey(member, track), lane)
-    addTo(this._binaryTracks, member, track)
-    addTo(this._trackMembers, track, member)
+    toggleEntry(this._binaryTracks, member, track, true)
+    toggleEntry(this._trackMembers, track, member, true)
     lane.sync(true, () =>
       getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary', member, track }, (framed, info) =>
         host._onBinary(framed, info),
@@ -775,26 +776,9 @@ class RoomSubscriptions {
   }
 }
 
-function addTo(sets: Map<string, Set<string>>, key: string, value: string): void {
-  let values = sets.get(key)
-  if (!values) sets.set(key, (values = new Set()))
-  values.add(value)
-}
-function untrack(sets: Map<string, Set<string>>, key: string, value: string): void {
-  const values = sets.get(key)
-  if (values?.delete(value) && values.size === 0) sets.delete(key)
-}
-function toggle<T>(set: Set<T>, value: T, on: boolean): void {
-  if (on) set.add(value)
-  else set.delete(value)
-}
 /** Each source's items in turn, each source read live as the iteration reaches it. */
 function* chain<T>(...sources: Iterable<T>[]): Generator<T> {
   for (const source of sources) yield* source
-}
-/** Runs every step now. */
-function runAll(steps: Iterable<unknown>): void {
-  for (const _ of steps);
 }
 /** Each item's step, then what it yields one at a time; an item whose step yields nothing is still one step. */
 function* stepsOf<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Generator<void> {
