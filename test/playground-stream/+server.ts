@@ -74,7 +74,15 @@ app.post('/api/room-cross-instance/join', async (c) => {
   const room = await Room.getOrCreate(roomId, { meta: { purpose: 'cross-instance-e2e' } })
   const participant = await room.join({ meta: { instance: INST } })
   const received: unknown[] = []
-  const unsubscribe = room.subscribe((data) => received.push(data))
+  const readiness = crypto.randomUUID()
+  const { promise: subscribed, resolve } = Promise.withResolvers<void>()
+  const unsubscribe = room.subscribe((data) => {
+    if (data === readiness) resolve()
+    else received.push(data)
+  })
+  // `subscribe()` becomes active asynchronously: once this instance's own publish arrives, other instances' publishes do too.
+  await participant.publish(readiness)
+  await subscribed
   crossInstanceRooms.set(roomId, { participant, received, unsubscribe })
   return c.json({ ok: true, instance: INST })
 })
