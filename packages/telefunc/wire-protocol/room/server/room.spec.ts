@@ -456,18 +456,22 @@ describe('Room public behavior', () => {
     expect(recreated._incarnation.inc).not.toBe(firstInc)
     expect(await recreated.getParticipants()).toEqual([])
   })
-  it('reports directory registration failure and repairs the open head on getOrCreate', async () => {
-    const put = driver.directoryPut.bind(driver)
-    let attempts = 0
-    vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc, checkAt, minDelayMs) => {
-      if (roomId === 'index-repair' && attempts++ === 0) throw new Error('index registration failure')
-      await put(roomId, inc, checkAt, minDelayMs)
+  it('keeps listing a room whose creator stopped right after writing its head, through the sweep', async () => {
+    vi.useFakeTimers()
+    const compareExchangeHead = driver.compareExchangeHead.bind(driver)
+    vi.spyOn(driver, 'compareExchangeHead').mockImplementationOnce(async (id, cx, next) => {
+      await compareExchangeHead(id, cx, next)
+      throw new RoomError('server gone')
     })
-    await expect(Room.create('index-repair')).rejects.toThrow('index registration failure')
-    const open = (await driver.readHead('index-repair'))!
+    await expect(Room.create('creator-stopped')).rejects.toThrow('server gone')
+    const open = (await driver.readHead('creator-stopped'))!
     expect(open).toMatchObject({ state: 'open', currentInc: expect.any(String) })
-    expect(((await Room.getOrCreate('index-repair')) as ServerRoom)._incarnation.inc).toBe(open.currentInc)
-    expect((await Room.list()).map(({ id }) => id)).toContain('index-repair')
+    const due = vi.spyOn(driver, 'directoryDue')
+    await vi.advanceTimersByTimeAsync(ROOM_SESSION_TTL_MS)
+    await Room.create('next-session')
+    await vi.waitFor(() => expect(due).toHaveBeenCalled())
+    expect(memoryState.directory.get('creator-stopped')?.incTag).toBe(open.currentInc)
+    expect((await Room.list()).map(({ id }) => id)).toContain('creator-stopped')
   })
   it('waits for an active close lease and takes over until the head is closed', async () => {
     vi.useFakeTimers()

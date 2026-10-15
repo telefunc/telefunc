@@ -4,7 +4,6 @@ export type { RoomGuardHooks }
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { RoomHead } from '../../backend/room/contract.js'
 import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../errors.js'
 import {
   assertKnownOptions,
@@ -131,7 +130,7 @@ function roomNotFoundError(id: string): RoomError {
   return new RoomError(`Room not found: ${id}`)
 }
 
-type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists'; head: RoomHead } | { kind: 'closing' }
+type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
@@ -144,12 +143,16 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
       current = await backend.readHead(id)
     }
     if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
-    if (current !== null && current.state !== 'closed') return { kind: 'exists', head: current }
+    if (current !== null && current.state !== 'closed') return { kind: 'exists' }
     const created: RoomConfigRecord = {
       meta,
       inc: crypto.randomUUID(),
       hold: newHoldConfig(emptyTimeout, departureTimeout),
     }
+    // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
+    const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
+    // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
+    if (lapsed === undefined) await listRoom(backend, id, created.inc, created.hold, undefined)
     const result = await backend.compareExchangeHead(
       id,
       current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
@@ -158,14 +161,12 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     if ('conflict' in result) {
       // A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again.
       if (result.current === null || result.current.state === 'closed') return CX_CONFLICT
-      return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists', head: result.current }
+      return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
     }
     assert('head' in result)
     // The head lapses only once the counters that keep it ahead are written.
     await createHold({ id, ...created })
     const lapsing = await lapseNewRoom({ id, ...created })
-    // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
-    const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
     if (lapsed !== undefined) await backend.dropGeneration(id, lapsed.incTag)
     await listRoom(backend, id, created.inc, created.hold, lapsing?.expiresAt)
     sweepLapsedRoomsSoon()
@@ -216,12 +217,7 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
   const result = await tryCreateRoom(id, options)
   if (result.kind === 'created') return result.room
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
-  const room = await openRoom(id)
-  // Repairs the listing of a creator that crashed between its head and directory writes.
-  const { head } = result
-  const expiresAt = head.currentInc === room._incarnation.inc ? head.expiresAt : undefined
-  await listRoom(getRoomBackend(), id, room._incarnation.inc, room._incarnation.hold, expiresAt)
-  return room
+  return await openRoom(id)
 }
 
 /** A room's guards and after-hooks, typed by its participants' meta. */
