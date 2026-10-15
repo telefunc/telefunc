@@ -11,7 +11,6 @@ import { promiseReviver } from './promise.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
-import { roomReviver, roomParticipantReviver, roomRemoteReviver } from '../../room/response-client.js'
 import type { ClientReviverContext, InternalClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
@@ -24,9 +23,6 @@ const clientTypes = [
   fileDownloadReviver,
   blobDownloadReviver,
   promiseReviver,
-  roomReviver,
-  roomParticipantReviver,
-  roomRemoteReviver,
   broadcastReviver,
   channelReviver,
   functionReviver,
@@ -41,9 +37,10 @@ const clientTypes = [
 function createStreamingReviver(
   context: InternalClientReviverContext,
   onRevived: (revived: ReturnType<ReviverType['revive']>) => void,
+  roomTypes: ReviverType<TypeContract, InternalClientReviverContext>[],
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
-  const allTypes = [...clientTypes, ...extensionTypes]
+  const allTypes = [...clientTypes, ...roomTypes, ...extensionTypes]
   const revivedByWireString = new Map<string, unknown>()
   const reviver: Reviver = (_path, value, parser) => {
     if (revivedByWireString.has(value)) return { replacement: revivedByWireString.get(value) }

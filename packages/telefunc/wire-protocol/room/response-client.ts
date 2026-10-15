@@ -1,4 +1,4 @@
-export { roomReviver, roomParticipantReviver, roomRemoteReviver }
+export { roomRemoteReviver, roomTypes }
 
 import type { InternalClientReviverContext, ReviverType, TypeContract } from '../types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
@@ -67,3 +67,5 @@ const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, InternalClientRe
     }
   },
 }
+
+const roomTypes = [roomReviver, roomParticipantReviver, roomRemoteReviver]

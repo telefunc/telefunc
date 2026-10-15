@@ -27,7 +27,7 @@ import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
-import { STREAMING_ERROR_TYPE } from '../../constants.js'
+import { SERIALIZER_PREFIX_ROOM_STEM, STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { ChannelTransports } from '../../constants.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
@@ -161,6 +161,14 @@ async function reviveResponse(
 
   const allCloseHandlers = [...callContext.requestCloseHandlers]
 
+  // Keeps Room's client code out of the entry bundle: only a response whose text holds a Room prefix loads it.
+  let roomTypes: ReviverType<TypeContract, InternalClientReviverContext>[] = []
+  if (body.includes(SERIALIZER_PREFIX_ROOM_STEM)) {
+    roomTypes = (await import('../../room/response-client.js')).roomTypes
+    // Aborted during the load, before any revived value listens for it.
+    if (callContext.abortController.signal.aborted)
+      throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
+  }
   const reviver = createStreamingReviver(
     context,
     function onRevived(revived) {
@@ -192,6 +200,7 @@ async function reviveResponse(
       // This is what the user gets
       revived.value = wrapper
     },
+    roomTypes,
     extensionResponseTypes,
   )
 

@@ -105,6 +105,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
       revived.value = wrapProxy(revived.value as object)
       lifecycles.push(revived)
     },
+    [],
     extensionTypes,
   )
   const parseBody = (body: string) => parse(body, { reviver })
