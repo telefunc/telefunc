@@ -10,9 +10,9 @@ import type { WirePublishInfo } from '../../shared-ws.js'
 import {
   encodeBinaryFrame,
   decodeBinaryFrame,
-  publicTrack,
   type BinaryFrame,
   type BinaryWantChange,
+  type TrackKey,
 } from '../binary.js'
 import { participantLeftError, roomClosedError } from '../errors.js'
 import {
@@ -367,7 +367,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._replica.roster.sendTo(stub)
     stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
     for (const member of stub._heldMembers())
-      stub._relayEvent({ __r: 'demand-state', member, tracks: this._replica.demandOf(member) })
+      stub._relayEvent({ __r: 'demand-state', member, tracks: this._replica.demand.wanted(member) })
   }
   private _detachStub(stub: RoomStubChannel): void {
     this._stubs.delete(stub)
@@ -440,10 +440,9 @@ class ServerRoom extends RoomStateView implements Room {
   }
   /** @internal */
   _deliverDemand(member: string, track: string, wanted: boolean): void {
-    const trackOut = publicTrack(track)
     const holder = this._holderOf(member)
-    if (holder instanceof ServerLocalParticipant) holder._onDemand(trackOut, wanted)
-    else holder?._relayEvent({ __r: 'demand', member, track: trackOut, wanted })
+    if (holder instanceof ServerLocalParticipant) holder._onDemand(track, wanted)
+    else holder?._relayEvent({ __r: 'demand', member, track, wanted })
   }
 }
 const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomParticipant')
@@ -467,8 +466,8 @@ class ServerLocalParticipant extends ParticipantBase {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
   }
   /** @internal Read from the room's demand, which holds it once. */
-  get _demandedTracks(): Array<string | null> {
-    return this._left ? [] : this._room._replica.demandOf(this.id)
+  get _demandedTracks(): TrackKey[] {
+    return this._left ? [] : this._room._replica.demand.wanted(this.id)
   }
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')

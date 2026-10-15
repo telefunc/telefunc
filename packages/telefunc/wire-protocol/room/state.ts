@@ -8,7 +8,16 @@ import { untether } from '../wrapProxy.js'
 import { makeDisposer } from './disposer.js'
 import { Slice } from './slice.js'
 import { Listeners } from '../../utils/Listeners.js'
-import { isNamedTrack, laneTrack, type BinaryFrame, type BinaryWantChange } from './binary.js'
+import {
+  ALL,
+  DEFAULT_TRACK,
+  isNamedTrack,
+  publicTrack,
+  type All,
+  type BinaryFrame,
+  type BinaryWantChange,
+  type TrackKey,
+} from './binary.js'
 import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
 import { RoomMetaState } from './meta-state.js'
 import { MemberMeta, type MetaRewinds } from './member-meta.js'
@@ -31,12 +40,12 @@ import type {
   RoomSnapshotView,
   Sender,
 } from './types.js'
-/** A binary listener's track filter: `undefined` = every track, `null` = the default lane only, a name = that track only. */
-type TrackFilter = string | null | undefined
+/** A binary listener's track filter: one track, or `ALL`. */
+type TrackFilter = TrackKey | All
 /** A membership event as this model got it, whether it applied it or not. */
 type MembershipEvent = { join: MemberSnapshot } | { leave: string } | { meta: { id: string; update: MemberMetaUpdate } }
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
-type TrackCounts = { all: number; named: Map<string, number> }
+type TrackCounts = { all: number; named: Map<TrackKey, number> }
 type CountedTrack = { counts: TrackCounts; track: TrackFilter }
 type MemberEntry = {
   id: string
@@ -753,21 +762,21 @@ class RoomState {
   }
   /** A binary frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
   applyBinary({ from, payload, track, meta }: BinaryFrame, info: ChannelPublishInfo): void {
-    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track, meta }
+    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track: publicTrack(track), meta }
     const entry = this.model._entry(from)
     const sender = entry ? this._remote(entry) : senderOf(from, {}, null)
     this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))
     const binary = entry && this._memberListeners.get(entry)?.binary
     if (binary) this._fireTrackFiltered(binary.cbs, track, (cb) => cb(payload, frameInfo))
   }
-  /** Fire the listeners whose track filter admits `track` (`undefined` = every track). */
+  /** Fire the listeners whose track filter admits `track`. */
   private _fireTrackFiltered<CB>(
     cbs: Listeners<{ cb: CB; track: TrackFilter }>,
-    track: string | null,
+    track: TrackKey,
     invoke: (cb: CB) => unknown,
   ): void {
     for (const { cb, track: want } of cbs.list()) {
-      if (want !== undefined && want !== track) continue
+      if (want !== ALL && want !== track) continue
       invokeChannelListener(invoke, [cb], this._onCallbackError)
     }
   }
@@ -822,9 +831,10 @@ class RoomState {
   /** `entry` owns the list (`null`: the room); a binary listener's `filter` is counted in its list's counts. */
   private _register<T>(list: Listeners<T>, cb: T, entry: MemberEntry | null = null, filter?: CountedTrack): () => void {
     assertUsage(
-      filter?.track === undefined ||
+      filter === undefined ||
+        filter.track === ALL ||
         this._trackWants < this._trackWantsMax ||
-        filter.counts.named.has(laneTrack(filter.track)),
+        filter.counts.named.has(filter.track),
       `Too many binary tracks subscribed on one room (${this._trackWantsMax} max): subscribe without \`{ track }\` to receive every track`,
     )
     const remove = list.add(cb)
@@ -861,7 +871,7 @@ class RoomState {
   private _bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {
     this._listenerCount += delta
     if (this._listenerCount === (delta > 0 ? 1 : 0)) this.model._listen(this, delta > 0)
-    if (binary !== null && binary.track !== null) this._trackWants += binary.on ? 1 : -1
+    if (binary !== null && binary.track !== ALL) this._trackWants += binary.on ? 1 : -1
     if (entry !== null) {
       if ((this._memberListeners.get(entry)?.dataCbs?.size ?? 0) > 0) this._textWanted.add(entry.id)
       else this._textWanted.delete(entry.id)
@@ -903,7 +913,7 @@ function replayMembershipEvent(
     if (meta.apply(update) === 'applied') members.set(id, { ...member, meta: meta.object, metaSeq: meta.seq })
   }
 }
-/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default lane, a non-empty name = that track. */
+/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default track, a non-empty name = that track. */
 function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
   assertUsage(
     opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),
@@ -911,7 +921,8 @@ function normalizeTrackFilter(opts: { track?: string | null } | undefined): Trac
   )
   assertKnownOptions(opts, ['track'], 'subscribeBinary()')
   const track = opts?.track
-  if (track === undefined || track === null) return track
+  if (track === undefined) return ALL
+  if (track === null) return DEFAULT_TRACK
   assertUsage(isNamedTrack(track), 'subscribeBinary() track should be a valid non-empty string')
   return track
 }
@@ -923,16 +934,15 @@ function newTrackCounts(): TrackCounts {
 }
 /** Whether the count crossed zero, turning a want on or off. */
 function countTrack(counts: TrackCounts, track: TrackFilter, delta: 1 | -1): boolean {
-  if (track === undefined) {
+  if (track === ALL) {
     counts.all += delta
     return counts.all === (delta === 1 ? 1 : 0)
   }
-  const key = laneTrack(track)
-  const count = (counts.named.get(key) ?? 0) + delta
-  if (count === 0) counts.named.delete(key)
-  else counts.named.set(key, count)
+  const count = (counts.named.get(track) ?? 0) + delta
+  if (count === 0) counts.named.delete(track)
+  else counts.named.set(track, count)
   return count === (delta === 1 ? 1 : 0)
 }
 function wantOf(entry: MemberEntry | null, { track }: CountedTrack, on: boolean): BinaryWantChange {
-  return { member: entry?.id ?? null, track: track === undefined ? null : laneTrack(track), on }
+  return { member: entry?.id ?? ALL, track, on }
 }

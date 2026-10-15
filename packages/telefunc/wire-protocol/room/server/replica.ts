@@ -7,7 +7,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
 import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../shared-ws.js'
-import { decodeBinaryFrame, laneTrack, publicTrack, type BinaryWantChange } from '../binary.js'
+import { ALL, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
 import { DemandReport, RoomDemand } from '../demand.js'
 import { DM_FAILURE } from '../errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../protocol.js'
@@ -216,11 +216,6 @@ class RoomReplica {
     }
   }
 
-  /** The owned member's tracks someone wants. */
-  demandOf(member: string): Array<string | null> {
-    return this.demand.wanted(member).map(publicTrack)
-  }
-
   /** Applies a presence event to the model and relays what it changed to the clients: as the lane carried it when
    *  `carried` is given, else as applied. A leave reaches them from `_onLeave`, whatever applied it, and an update as
    *  each one it let apply, in seq order. */
@@ -280,15 +275,15 @@ class RoomReplica {
    *  member's retained frames, and one read just before that is gone with it. */
   async replayBinary(holder: LaneHolder, { member, track }: BinaryWantChange): Promise<void> {
     await this.sync.ensureRoster()
-    await (member === null ? this.plan.binaryReady() : this.plan.pairsReady(member, track))
+    await (member === ALL ? this.plan.binaryReady() : this.plan.pairsReady(member, track))
     const backend = getRoomBackend()
     const lanes: LaneId[] =
-      member !== null && track !== null
+      member !== ALL && track !== ALL
         ? [{ kind: 'binary', member, track }]
         : await backend.listRetained(
             this.id,
             this._inc,
-            member !== null ? { member } : track !== null ? { track } : undefined,
+            member !== ALL ? { member } : track !== ALL ? { track } : undefined,
           )
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
@@ -452,8 +447,7 @@ class RoomReplica {
     for (const handle of this._receivers) handle._local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
     const wireData = encodePublishBinary(framed, info)
-    const track = laneTrack(unframed.track)
-    for (const stub of this.stubs) stub._relayBinary(wireData, unframed.from, track, info)
+    for (const stub of this.stubs) stub._relayBinary(wireData, unframed.from, unframed.track, info)
   }
   /** @internal A DM for a member a handle here owns, routed to that handle. */
   _onDm(serialized: string, info: WirePublishInfo): void {

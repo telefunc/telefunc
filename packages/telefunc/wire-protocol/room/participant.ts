@@ -10,6 +10,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import { MemberMeta, type MetaRewinds } from './member-meta.js'
+import { publicTrack, type TrackKey } from './binary.js'
 import type { AcceptedMeta, DmReply, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
@@ -170,14 +171,14 @@ abstract class ParticipantBase implements LocalParticipant {
   }
   onDemand(callback: (track: string | null, wanted: boolean) => void): () => void {
     const unlisten = this._register((this._demandCbs ??= new Listeners()), callback)
-    for (const track of this._demandedTracks) this._invoke(callback, track, true)
+    for (const track of this._demandedTracks) this._invoke(callback, publicTrack(track), true)
     return unlisten
   }
   /** @internal The wanted tracks, whole. */
-  abstract get _demandedTracks(): Array<string | null>
-  /** @internal Room-wide demand for one of this member's tracks changed; `null` is the default track. */
-  _onDemand(track: string | null, wanted: boolean): void {
-    for (const cb of this._demandCbs?.list() ?? []) this._invoke(cb, track, wanted)
+  abstract get _demandedTracks(): TrackKey[]
+  /** @internal Room-wide demand for one of this member's tracks changed. */
+  _onDemand(track: TrackKey, wanted: boolean): void {
+    for (const cb of this._demandCbs?.list() ?? []) this._invoke(cb, publicTrack(track), wanted)
   }
   onLeave(callback: (cause: LeaveCause) => void): () => void {
     if (this._leftCause) {

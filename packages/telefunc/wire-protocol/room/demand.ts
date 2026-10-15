@@ -1,6 +1,6 @@
 export { RoomDemand, DemandReport }
 
-import { DEFAULT_TRACK } from './binary.js'
+import { ALL, DEFAULT_TRACK, type All } from './binary.js'
 import { ROOM_DEMAND_TTL_MS } from './server/constants.js'
 import type { DemandEntry, RoomDemandPage } from './server/protocol.js'
 import { Slice } from './slice.js'
@@ -250,8 +250,8 @@ class RoomDemand {
   private readonly _published = new Map<string, Set<string>>()
   /** Per track, the owned members told it is wanted, kept by track as `_due` is evaluated a track at a time. */
   private readonly _told = new Map<string, Set<string>>()
-  /** Per track, the owned members whose `wanted` may have changed, or all of them (`null`). */
-  private readonly _due = new Map<string, Set<string> | null>()
+  /** Per track, the owned members whose `wanted` may have changed, or `ALL` of them. */
+  private readonly _due = new Map<string, Set<string> | All>()
   private _settling = false
 
   constructor(
@@ -449,7 +449,7 @@ class RoomDemand {
     if (was !== undefined && now !== undefined && was.byMember === now.byMember) {
       for (const member of was.except) if (!now.except.has(member)) this._queue(track, member)
       for (const member of now.except) if (!was.except.has(member)) this._queue(track, member)
-    } else this._queue(track, null)
+    } else this._queue(track, ALL)
   }
 
   /** The member, on each track `instance` fetches by member. */
@@ -461,10 +461,10 @@ class RoomDemand {
     for (const member of members) this._queue(track, member)
   }
 
-  private _queue(track: string, member: string | null): void {
+  private _queue(track: string, member: string | All): void {
     const due = this._due.get(track)
-    if (due === null) return
-    if (member === null) this._due.set(track, null)
+    if (due === ALL) return
+    if (member === ALL) this._due.set(track, ALL)
     else if (due) due.add(member)
     else this._due.set(track, new Set([member]))
   }
@@ -491,7 +491,7 @@ class RoomDemand {
   private *_evaluations(): Generator<void> {
     for (const [track, members] of this._due) {
       this._due.delete(track)
-      for (const member of members ?? this._ownedMembers()) {
+      for (const member of members === ALL ? this._ownedMembers() : members) {
         this._evaluate(member, track)
         yield
       }

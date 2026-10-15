@@ -7,7 +7,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
 import type { ClientChannel } from '../client/channel.js'
-import { decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange } from './binary.js'
+import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from './binary.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from './model.js'
 import {
   hasRoomTag,
@@ -389,7 +389,14 @@ class ClientRoom extends RoomStateView implements Room {
       this._declaredAnnounce = state.wantsAnnounce
       this._notify({ __r: 'sub-text', announce: state.wantsAnnounce, members: textChanges })
     }
-    if (binary !== null) this._notify({ __r: 'sub-binary', ...binary })
+    if (binary === null) return
+    const { member: wantMember, track, on } = binary
+    this._notify({
+      __r: 'sub-binary',
+      member: wantMember === ALL ? null : wantMember,
+      track: track === ALL ? null : track,
+      on,
+    })
   }
 
   /** A closed stub's server side is gone with its wants, and a DM reply to it times out as any lost reply does. */
@@ -404,7 +411,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     string,
     { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
   >()
-  private readonly _wantedTracks = new Set<string | null>()
+  private readonly _wantedTracks = new Set<TrackKey>()
 
   constructor(
     id: string,
@@ -418,16 +425,16 @@ abstract class ClientParticipantBase extends ParticipantBase {
     super(id, meta, selfDelivery, identity, rewinds)
   }
 
-  get _demandedTracks(): Array<string | null> {
+  get _demandedTracks(): TrackKey[] {
     return this._left ? [] : [...this._wantedTracks]
   }
   /** @internal The whole wanted set, as a reattached holder hears it: only the tracks that changed fire. */
-  _applyDemandState(tracks: Array<string | null>): void {
+  _applyDemandState(tracks: TrackKey[]): void {
     const next = new Set(tracks)
     for (const track of [...this._wantedTracks]) if (!next.has(track)) this._onDemand(track, false)
     for (const track of next) if (!this._wantedTracks.has(track)) this._onDemand(track, true)
   }
-  override _onDemand(track: string | null, wanted: boolean): void {
+  override _onDemand(track: TrackKey, wanted: boolean): void {
     if (wanted) this._wantedTracks.add(track)
     else this._wantedTracks.delete(track)
     super._onDemand(track, wanted)

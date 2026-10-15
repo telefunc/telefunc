@@ -28,7 +28,7 @@ export type {
 }
 
 import { isRecord, ownLeaveCause, removedCause } from './model.js'
-import type { BinaryWantChange } from './binary.js'
+import type { TrackKey } from './binary.js'
 import type { LeaveCause, ParticipantMeta } from './types.js'
 
 type MemberSnapshot = {
@@ -104,8 +104,8 @@ type RoomRosterEvent =
 /** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a reattached client
  *  gets the member's whole wanted set, since its offline buffer may have dropped changes. */
 type RoomDemandEvent =
-  | { __r: 'demand'; member: string; track: string | null; wanted: boolean }
-  | { __r: 'demand-state'; member: string; tracks: Array<string | null> }
+  | { __r: 'demand'; member: string; track: TrackKey; wanted: boolean }
+  | { __r: 'demand-state'; member: string; tracks: TrackKey[] }
 /** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. A
  *  room-authored one has no sender (`from: ''`, `fromMeta: null`); a client that names the sender gets it unstamped. */
 type RoomDmEnvelope = {
@@ -137,7 +137,8 @@ type RoomStubRequest =
   | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
   | { __r: 'req-dm'; id: string; to: string; data: unknown; ack?: boolean }
   | { __r: 'dm-reply'; ackId: string; reply: DmReply }
-  | ({ __r: 'sub-binary' } & BinaryWantChange)
+  /** A `BinaryWantChange`, with `null` for `ALL`. */
+  | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
   /** Changes only: announcements, and each member whose own want changed. */
   | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
 
@@ -156,8 +157,8 @@ type ParticipantStubNotice =
   | ({ __r: 'p-meta' } & MemberMetaUpdate)
   | { __r: 'rewound' }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
-  | { __r: 'demand'; track: string | null; wanted: boolean }
-  | { __r: 'demand-state'; tracks: Array<string | null> }
+  | { __r: 'demand'; track: TrackKey; wanted: boolean }
+  | { __r: 'demand-state'; tracks: TrackKey[] }
 
 /** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for participant-scoped ones. */
 type MemberWants = { all: boolean; members: ReadonlySet<string> }

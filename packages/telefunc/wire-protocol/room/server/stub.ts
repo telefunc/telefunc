@@ -34,7 +34,7 @@ import {
 } from './requests.js'
 import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
-import { laneTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binary-wants.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import {
@@ -233,17 +233,17 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   /** The client library names at most `ROOM_TRACK_WANTS_MAX` tracks, so only a peer bypassing it names more. */
   private _assertTrackWantFits({ member, track, on }: BinaryWantChange): void {
-    if (!on || track === null || this._trackWants < ROOM_TRACK_WANTS_MAX) return
-    const scope = member === null ? this._binary.everyMember : this._binary.members.get(member)
+    if (!on || track === ALL || this._trackWants < ROOM_TRACK_WANTS_MAX) return
+    const scope = member === ALL ? this._binary.everyMember : this._binary.members.get(member)
     assertProtocol(scope?.tracks.has(track), 'Room binary wants over ROOM_TRACK_WANTS_MAX')
   }
 
   // A client learns its members from this view alone, so a want naming any other id names one that left or never was.
   private _declareBinaryWant({ member, track, on }: BinaryWantChange): void {
-    if (on && member !== null && !this._room._model.hasMember(member)) return
-    const change = { member, track, on }
+    if (on && member !== ALL && !this._room._model.hasMember(member)) return
+    const change: BinaryWantChange = { member, track, on }
     if (!applyBinaryWantChange(this._binary, change)) return
-    if (track !== null) this._trackWants += on ? 1 : -1
+    if (track !== ALL) this._trackWants += on ? 1 : -1
     this._room._onHolderBinaryChanged(this, change)
   }
 
@@ -391,7 +391,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void {
-    if (this._replay.admitBinary(frame.from, laneTrack(frame.track), info))
+    if (this._replay.admitBinary(frame.from, frame.track, info))
       this._sendPublishBinary(encodePublishBinary(framed, info))
   }
 
@@ -516,7 +516,9 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
       },
     })
 
-    const unlistenDemand = participant.onDemand((track, wanted) => this._notify({ __r: 'demand', track, wanted }))
+    const unlistenDemand = participant.onDemand((track, wanted) =>
+      this._notify({ __r: 'demand', track: track ?? DEFAULT_TRACK, wanted }),
+    )
 
     let left = false
     const unlistenLeave = participant.onLeave((cause) => {

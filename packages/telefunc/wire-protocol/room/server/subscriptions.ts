@@ -8,7 +8,7 @@ import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from './constants.js'
-import type { BinaryWantChange } from '../binary.js'
+import { ALL, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
 import type { DemandReport } from '../demand.js'
 import type { RoomConfigRecord } from './protocol.js'
 import type { RoomModel } from '../state.js'
@@ -193,10 +193,10 @@ class RoomSubscriptions {
    *  planning pass. */
   binaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
     const { track } = change
-    const wasEveryMember = track !== null && this._wants.namesEveryMember(track)
+    const wasEveryMember = track !== ALL && this._wants.namesEveryMember(track)
     const affected = this._wants.applyBinary(holder, change)
     const queued = this._queued
-    if (track === null) {
+    if (track === ALL) {
       if (affected === 'all') queued.all = true
       else for (const member of affected) queued.members.add(member)
     } else {
@@ -250,15 +250,15 @@ class RoomSubscriptions {
     return this._planning
   }
 
-  /** The lanes delivering the member's `track` (`null`: every track) are ready, so a retained read after this misses
-   *  no live frame. */
-  async pairsReady(member: string, track: string | null): Promise<void> {
+  /** The lanes delivering the member's `track` (or `ALL`) are ready, so a retained read after this misses no live
+   *  frame. */
+  async pairsReady(member: string, track: TrackKey | All): Promise<void> {
     await this._planning
     const pending: Promise<void>[] = []
     for (const lane of [
       this._everyTrack.get(member),
-      track === null ? undefined : this._binary.get(inProcessBinaryLaneKey(member, track)),
-      track === null ? undefined : this._everyMember.get(track),
+      track === ALL ? undefined : this._binary.get(inProcessBinaryLaneKey(member, track)),
+      track === ALL ? undefined : this._everyMember.get(track),
     ])
       if (lane !== undefined && this._binaryPending.has(lane)) pending.push(lane.ready)
     if (pending.length > 0) await withinRoomHorizon(Promise.all(pending))

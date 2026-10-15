@@ -1,14 +1,5 @@
-export {
-  isMemberId,
-  encodeBinaryFrame,
-  decodeBinaryFrame,
-  DEFAULT_TRACK,
-  laneTrack,
-  publicTrack,
-  isNamedTrack,
-  isRoomTrack,
-}
-export type { BinaryWantChange, BinaryFrame }
+export { isMemberId, encodeBinaryFrame, decodeBinaryFrame, DEFAULT_TRACK, ALL, publicTrack, isNamedTrack, isRoomTrack }
+export type { TrackKey, All, BinaryWantChange, BinaryFrame }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -139,7 +130,7 @@ function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, 
 type BinaryFrame = {
   from: string
   payload: Uint8Array
-  track: string | null
+  track: TrackKey
   meta: Record<string, unknown> | null
   retain: boolean
 }
@@ -148,7 +139,7 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
   const flags = data[MEMBER_ID_BYTE_LENGTH]!
   if (flags & ~FRAME_FLAGS_KNOWN) return null
   const cursor = { offset: MEMBER_ID_BYTE_LENGTH + 1 }
-  const track = flags & FRAME_FLAG_TRACK ? readTrackSection(data, cursor) : null
+  const track = flags & FRAME_FLAG_TRACK ? readTrackSection(data, cursor) : DEFAULT_TRACK
   if (track === undefined) return null
   const meta = flags & FRAME_FLAG_META ? readMetaSection(data, cursor) : null
   if (meta === undefined) return null
@@ -161,16 +152,18 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
   }
 }
 // Tracks
-/** The default (unnamed) track's slot in want sets and lane keys; named tracks are non-empty, so `''` is unambiguous. */
-const DEFAULT_TRACK = ''
-function laneTrack(track: string | null): string {
-  return track ?? DEFAULT_TRACK
-}
-function publicTrack(track: string): string | null {
+/** A track inside Room: a name, or `DEFAULT_TRACK`, which the public API calls `null`. */
+type TrackKey = string
+/** The default track's key; named tracks are non-empty, so `''` is unambiguous. */
+const DEFAULT_TRACK: TrackKey = ''
+/** Every track, or every member, as a want's target. */
+const ALL: unique symbol = Symbol('ALL')
+type All = typeof ALL
+function publicTrack(track: TrackKey): string | null {
   return track === DEFAULT_TRACK ? null : track
 }
-/** One change of a holder's binary wants: `track` (`null`: every track) of `member` (`null`: every member), on or off. */
-type BinaryWantChange = { member: string | null; track: string | null; on: boolean }
+/** One change of a holder's binary wants: `track` (or `ALL`) of `member` (or `ALL`), on or off. */
+type BinaryWantChange = { member: string | All; track: TrackKey | All; on: boolean }
 /** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that doesn't fit. */
 function isRoomTrack(track: unknown): track is string {
   return typeof track === 'string' && track.isWellFormed() && utf8ByteLength(track) <= TRACK_LENGTH_FIELD_MAX

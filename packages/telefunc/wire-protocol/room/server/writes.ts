@@ -7,7 +7,7 @@ import type { CommitAccepted } from '../../backend/room/contract.js'
 import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
 import type { ChannelPublishAck } from '../../channel.js'
 import { reportServerChannelError } from '../../server/channel.js'
-import { laneTrack, type BinaryFrame } from '../binary.js'
+import type { BinaryFrame } from '../binary.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   DM_FAILURE,
@@ -109,7 +109,7 @@ class RoomWrites {
   async publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     const host = this._host
     const { from } = frame
-    const lane = { kind: 'binary', member: from, track: laneTrack(frame.track) } as const
+    const lane = { kind: 'binary', member: from, track: frame.track } as const
     const { sender, commit } = await this._inCallOrder(inProcessBinaryLaneKey(from, lane.track), async (sent) => {
       const sender = await this._admitPublish(from, frame.payload)
       const planned = this._of.lanePlanned(from, lane.track)

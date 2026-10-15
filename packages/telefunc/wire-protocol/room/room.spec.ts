@@ -4361,7 +4361,7 @@ describe('Room public behavior', () => {
       await vi.waitFor(() =>
         expect(relayed(peer)).toEqual([
           expect.objectContaining({ __r: 'update', meta: [['pad', meta.pad, expect.any(Number), 0]] }),
-          { __r: 'demand-state', member: wanted, tracks: [null] },
+          { __r: 'demand-state', member: wanted, tracks: [DEFAULT_TRACK] },
           { __r: 'demand-state', member: idle, tracks: [] },
           expect.objectContaining({
             __r: 'roster',
@@ -4424,7 +4424,7 @@ describe('Room public behavior', () => {
     const peer = attachPeer(channel)
     await vi.waitFor(() =>
       expect(notices(peer).filter(({ __r }) => __r === 'demand-state')).toEqual([
-        { __r: 'demand-state', tracks: [null] },
+        { __r: 'demand-state', tracks: [DEFAULT_TRACK] },
       ]),
     )
   })
@@ -4467,7 +4467,7 @@ describe('Room public behavior', () => {
       await vi.waitFor(() =>
         expect(notices(peer).filter(({ __r }) => __r === 'p-meta' || __r === 'demand-state')).toEqual([
           { __r: 'p-meta', meta: { score: 1, pad }, seq: expect.any(Number) },
-          { __r: 'demand-state', tracks: [null] },
+          { __r: 'demand-state', tracks: [DEFAULT_TRACK] },
         ]),
       )
       expect(channel.isClosed).toBe(false)
@@ -4860,7 +4860,7 @@ describe('client Room lifecycle', () => {
     const demand: unknown[] = []
     participant.onDemand((track, wanted) => demand.push([track, wanted]))
     demand.length = 0
-    notify({ __r: 'demand-state', tracks: [null] })
+    notify({ __r: 'demand-state', tracks: [DEFAULT_TRACK] })
     expect(demand).toEqual([
       ['screen', false],
       [null, true],
@@ -4956,7 +4956,7 @@ describe('client Room lifecycle', () => {
     const demand: unknown[] = []
     participant.onDemand((track, wanted) => demand.push([track, wanted]))
     demand.length = 0
-    emit({ __r: 'demand-state', member: id, tracks: ['mic', null] }, 4)
+    emit({ __r: 'demand-state', member: id, tracks: ['mic', DEFAULT_TRACK] }, 4)
     expect(demand).toEqual([
       ['screen', false],
       [null, true],
@@ -5385,7 +5385,10 @@ describe('RoomState', () => {
     state.onClose(() => rejected[4])
     const info = { key: state.roomId, seq: 1, timestamp: 1 }
     state.applyData({ __r: 'data', from: memberId, fromMeta: {}, data: 'text' }, info)
-    state.applyBinary({ from: memberId, payload: new Uint8Array(), track: null, meta: null, retain: false }, info)
+    state.applyBinary(
+      { from: memberId, payload: new Uint8Array(), track: DEFAULT_TRACK, meta: null, retain: false },
+      info,
+    )
     state.model.applyClosed()
     await Promise.resolve()
     expect(errors).toEqual(failures)

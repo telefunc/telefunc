@@ -4,7 +4,7 @@ export type { LaneHolder, TextWantsChange }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { makePublishInfo } from '../../channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
-import { laneTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binary-wants.js'
 import type { MemberWants } from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
@@ -131,8 +131,7 @@ class LocalHolder implements LaneHolder {
   }
 
   relayBinary(frame: BinaryFrame, info: WirePublishInfo): void {
-    const track = laneTrack(frame.track)
-    if (this._wantsBinary(frame.from, track) && this._replay.admitBinary(frame.from, track, info))
+    if (this._wantsBinary(frame.from, frame.track) && this._replay.admitBinary(frame.from, frame.track, info))
       this._applyBinary(frame, info)
   }
 
@@ -141,7 +140,7 @@ class LocalHolder implements LaneHolder {
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._replay.admitBinary(frame.from, laneTrack(frame.track), info)) this._applyBinary(frame, info)
+    if (this._replay.admitBinary(frame.from, frame.track, info)) this._applyBinary(frame, info)
   }
 
   forgetMember(member: string): void {

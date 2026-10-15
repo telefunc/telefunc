@@ -12,7 +12,7 @@ export type { RoomRequest, RoomDeclaration }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ProtocolViolationError } from '../../shared-ws.js'
-import { decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { ALL, decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { isRecord } from '../model.js'
 import type { DmReply, ParticipantStubRequest, RoomDataPublish, RoomStubRequest } from '../protocol.js'
 assertIsNotBrowser()
@@ -21,7 +21,9 @@ type RoomRequest = Extract<
   RoomStubRequest,
   { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-set-attrs' | 'req-dm' }
 >
-type RoomDeclaration = Exclude<RoomStubRequest, RoomRequest>
+type RoomDeclaration =
+  | Exclude<RoomStubRequest, RoomRequest | { __r: 'sub-binary' }>
+  | ({ __r: 'sub-binary' } & BinaryWantChange)
 /** A member's meta, attributes and DM requests, by the API call each serves. */
 const MEMBER_MUTATIONS = { 'req-set-meta': 'setMeta', 'req-set-attrs': 'setAttributes', 'req-dm': 'send' } as const
 type MemberMutation = Extract<ParticipantStubRequest, { __r: keyof typeof MEMBER_MUTATIONS }>
@@ -102,7 +104,7 @@ function decodeDmReply(reply: unknown): DmReply | null {
 function decodeBinaryWantChange({ member, track, on }: Record<string, unknown>): BinaryWantChange {
   if (member !== null && !isMemberId(member)) malformed('binary wants')
   if (track !== null && !isRoomTrack(track)) malformed('binary wants')
-  return { member, track, on: flag(on, 'binary wants') }
+  return { member: member ?? ALL, track: track ?? ALL, on: flag(on, 'binary wants') }
 }
 /** A declared change per member id, into a record no key can reach the prototype of. */
 function decodeMemberChanges<T>(changes: unknown, what: string, decode: (change: unknown) => T): Record<string, T> {
