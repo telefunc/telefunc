@@ -7,7 +7,7 @@ import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { Slice } from '../slice.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SESSION_TTL_MS } from './constants.js'
-import type { HoldConfig } from './protocol.js'
+import type { RoomIncarnation } from './lifecycle.js'
 import { configFromHead, openConfig } from './lanes.js'
 import { reportRoomError } from './errors.js'
 
@@ -16,9 +16,7 @@ import { reportRoomError } from './errors.js'
  *  session's lease from now. */
 async function listRoom(
   backend: RoomBackend,
-  id: string,
-  inc: string,
-  hold: HoldConfig | null,
+  { id, inc, hold }: RoomIncarnation,
   expiresAt: number | undefined,
 ): Promise<void> {
   if (hold === null) return await backend.directoryPut(id, inc, Infinity, 0)
@@ -37,7 +35,7 @@ async function repairRoomIndex(
   if (head?.currentInc === listedInc) return
   await backend.dropGeneration(id, listedInc)
   const live = openConfig(head)
-  if (live) await listRoom(backend, id, live.inc, live.hold, head!.expiresAt)
+  if (live) await listRoom(backend, { id, inc: live.inc, hold: live.hold }, head!.expiresAt)
   else await backend.directoryDelete(id, listedInc)
 }
 
@@ -59,7 +57,7 @@ async function sweepLapsedRooms(backend: RoomBackend): Promise<void> {
     for (const { roomId, incTag } of due) {
       const head = await backend.readHead(roomId)
       if (head?.currentInc !== incTag) await repairRoomIndex(backend, roomId, incTag, head)
-      else await listRoom(backend, roomId, incTag, configFromHead(head).hold, head.expiresAt)
+      else await listRoom(backend, { id: roomId, inc: incTag, hold: configFromHead(head).hold }, head.expiresAt)
     }
     if (slice.over) await slice.next()
   }
