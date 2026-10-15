@@ -315,6 +315,10 @@ class RoomReplica {
   _ownsMember(id: string): boolean {
     return this._owners.has(id)
   }
+  /** @internal */
+  _ownsAnyMember(): boolean {
+    return this._owners.size > 0
+  }
   /** @internal Live. A pending admission owns its inbox. */
   _ownedMembers(): Iterable<string> {
     return this._owners.keys()

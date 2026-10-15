@@ -39,6 +39,7 @@ type SubscriptionHost = {
   /** A pre-attach tail ingests all text. */
   _holdsTail(): boolean
   _ownsMember(id: string): boolean
+  _ownsAnyMember(): boolean
   /** Live. A pending admission owns its inbox. */
   _ownedMembers(): Iterable<string>
   _onControl(serialized: string, info: WirePublishInfo): void
@@ -727,7 +728,7 @@ class RoomSubscriptions {
   private _syncDemandLane(): void {
     const host = this._host
     const lane = this._demandLane
-    if (!host.model.closed && !host._ownedMembers()[Symbol.iterator]().next().done) {
+    if (!host.model.closed && host._ownsAnyMember()) {
       return lane.sync(true, () =>
         getRoomBackend().subscribeLane(host.id, host._incarnation.inc, DEMAND_LANE, (payload) =>
           host._onDemand(decodeRoomText(payload)),
