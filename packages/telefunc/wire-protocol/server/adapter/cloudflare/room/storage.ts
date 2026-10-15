@@ -218,10 +218,11 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
 
 type CellRow = { key: string; bytes: ArrayBuffer; version: number }
 function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
-  if ('keys' in sel)
+  if ('keys' in sel) {
     return sel.keys.flatMap((key) =>
       sql.exec<CellRow>('SELECT key, bytes, version FROM cell WHERE inc = ? AND key = ?', inc, key).toArray(),
     )
+  }
   const range = keyRange('key', sel.prefix)
   return sql
     .exec<CellRow>(`SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)

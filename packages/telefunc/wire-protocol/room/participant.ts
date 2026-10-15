@@ -149,7 +149,8 @@ abstract class ParticipantBase implements LocalParticipant {
       dropped.ackResolve?.(DM_FAILURE.overflow)
     }
   }
-  /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a room view exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
+  /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a room view
+   *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
   private _senderOf(msg: InboxMessage): Sender | null {
     const { from, fromMeta, fromIdentity: identity } = msg
     return from === '' ? null : (this._resolveSender(from) ?? senderOf(from, ownMetadata(fromMeta ?? {}), identity))

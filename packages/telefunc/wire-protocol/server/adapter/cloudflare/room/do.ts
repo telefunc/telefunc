@@ -85,12 +85,9 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     const now = Date.now()
     const outcome = this.#transaction((sql) => compareExchangeHead(sql, cx, next, now))
     await this.#scheduleMaintenanceIfNeeded()
-    if ('conflict' in outcome)
-      return {
-        conflict: true,
-        current: outcome.current === null ? null : publicHead(outcome.current, outcome.current.config),
-      }
-    return { head: publicHead(outcome.head, outcome.head.config) }
+    if ('head' in outcome) return { head: publicHead(outcome.head, outcome.head.config) }
+    const { current } = outcome
+    return { conflict: true, current: current === null ? null : publicHead(current, current.config) }
   }
 
   async readCells(inc: string, sel: CellSelector): Promise<CellsRead> {

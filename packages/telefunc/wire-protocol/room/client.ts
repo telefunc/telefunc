@@ -140,7 +140,8 @@ class ClientRoom extends RoomStateView implements Room {
     stub._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
     // Wire death; a server `Room.close()` arrives before it, as the `closed` event.
     stub.onClose(() => this._applyClosed('disconnected'))
-    // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving the original rejection for each later getter.
+    // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving
+    // the original rejection for each later getter.
     void this._roster.promise.catch(() => {})
   }
 
