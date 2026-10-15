@@ -177,8 +177,8 @@ describe('Redis real three-master Cluster CI certification', () => {
       for (const subscription of starting) await subscription.ready
       for (const subscription of starting) await subscription.unsubscribe()
       await backend.dropLaneOrders(roomId, inc, 'member} escape')
-      await backend.directoryPut(roomId, inc, Infinity)
-      expect(await backend.directoryDue(Number.MAX_SAFE_INTEGER)).toEqual([])
+      await backend.directoryPut(roomId, inc, Infinity, 0)
+      expect(await backend.directoryDue()).toEqual([])
       const hmget = commandClient.hmget.bind(commandClient)
       const hmgetMock = vi.spyOn(commandClient, 'hmget').mockImplementation((async (
         key: string,
@@ -189,7 +189,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       }) as never)
       expect(await backend.directoryList(roomId)).toEqual({ entries: [] })
       hmgetMock.mockRestore()
-      await backend.directoryPut(roomId, inc, Infinity)
+      await backend.directoryPut(roomId, inc, Infinity, 0)
       await backend.directoryDelete(roomId, inc)
       expect(
         (await backend.publish({ key: 'generic} escape', kind: 'binary' }, bytes('generic'))).receivers,
@@ -615,7 +615,7 @@ process.exit(0)`,
       const roomId = `room-${String(index).padStart(3, '0')}`
       return { roomId, incTag: `${roomId}-inc` }
     })
-    for (const { roomId, incTag } of entries) await backend.directoryPut(roomId, incTag, Infinity)
+    for (const { roomId, incTag } of entries) await backend.directoryPut(roomId, incTag, Infinity, 0)
     const first = await backend.directoryList('room-')
     expect(first).toEqual({ entries: entries.slice(0, 100), cursor: 'room-099' })
     expect(await backend.directoryList('room-', first.cursor)).toEqual({ entries: entries.slice(100) })

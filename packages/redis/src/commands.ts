@@ -451,11 +451,16 @@ redis.call('UNLINK', KEYS[2])
 // Directory records use three co-slotted global keys. Put and compare-delete are each one atomic record,
 // so stale cleanup cannot erase (or de-index) a concurrent newer tag.
 //   KEYS: [1]=index [2]=tags [3]=checks
-//   ARGV: [1]=room id [2]=tag [3]=when it is due, '' for never (put only)
-const DIRECTORY_PUT_LUA = `
+//   ARGV: [1]=room id [2]=tag [3]=when it is due, '' for never [4]=the least delay from authority time (put only)
+const DIRECTORY_PUT_LUA = `${NOW_LUA}
 redis.call('ZADD', KEYS[1], 0, ARGV[1])
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
-if ARGV[3] == '' then redis.call('ZREM', KEYS[3], ARGV[1]) else redis.call('ZADD', KEYS[3], ARGV[3], ARGV[1]) end
+if ARGV[3] == '' then
+  redis.call('ZREM', KEYS[3], ARGV[1])
+else
+  local at = math.max(tonumber(ARGV[3]), tf_now() + tonumber(ARGV[4]))
+  redis.call('ZADD', KEYS[3], string.format('%.0f', at), ARGV[1])
+end
 return 1
 `
 
@@ -467,11 +472,12 @@ redis.call('ZREM', KEYS[3], ARGV[1])
 return 1
 `
 
-// Up to ARGV[2] entries due at ARGV[1], earliest first: each room id, then its tag.
+// Up to ARGV[1] entries due at authority time, earliest first: each room id, then its tag.
 //   KEYS: [1]=checks [2]=tags
-const DIRECTORY_DUE_LUA = `
+const DIRECTORY_DUE_LUA = `${NOW_LUA}
 local reply = {}
-for _, roomId in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, tonumber(ARGV[2]))) do
+local now = string.format('%.0f', tf_now())
+for _, roomId in ipairs(redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', now, 'LIMIT', 0, tonumber(ARGV[1]))) do
   reply[#reply + 1] = roomId
   reply[#reply + 1] = redis.call('HGET', KEYS[2], roomId)
 end
@@ -494,6 +500,7 @@ type RedisCommand<Input, Output> = {
 const command = <Input, Output>(spec: RedisCommand<Input, Output>): RedisCommand<Input, Output> => spec
 
 type RoomInc = { roomId: string; inc: string }
+type DirectoryPutInput = { roomId: string; incTag: string; checkAt: number; minDelayMs: number }
 type CommitInput = RoomInc & {
   lane: LaneId
   laneKey: string
@@ -807,9 +814,9 @@ const REDIS_COMMANDS = {
     name: 'tfRoomDirectoryPut',
     lua: DIRECTORY_PUT_LUA,
     numberOfKeys: 3,
-    invoke: (prefix, { roomId, incTag, checkAt }: { roomId: string; incTag: string; checkAt: number }) => ({
+    invoke: (prefix, { roomId, incTag, checkAt, minDelayMs }: DirectoryPutInput) => ({
       keys: [directoryIndexKey(prefix), directoryTagsKey(prefix), directoryChecksKey(prefix)],
-      argv: [roomId, incTag, checkAt === Infinity ? '' : String(checkAt)],
+      argv: [roomId, incTag, checkAt === Infinity ? '' : String(checkAt), String(minDelayMs)],
     }),
     parse: () => {},
   }),
@@ -827,9 +834,9 @@ const REDIS_COMMANDS = {
     name: 'tfRoomDirectoryDue',
     lua: DIRECTORY_DUE_LUA,
     numberOfKeys: 2,
-    invoke: (prefix, { now, limit }: { now: number; limit: number }) => ({
+    invoke: (prefix, { limit }: { limit: number }) => ({
       keys: [directoryChecksKey(prefix), directoryTagsKey(prefix)],
-      argv: [String(now), String(limit)],
+      argv: [String(limit)],
     }),
     parse: (reply) => {
       const found = reply as string[]

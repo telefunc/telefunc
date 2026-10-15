@@ -69,10 +69,10 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     subscribeLane: (roomId, inc, lane, receiver) =>
       subscriptions.subscribe({ roomId, inc, lane }, receiver as BackendReceiver<BackendPayload>),
     dropGeneration: (roomId, inc) => driver.dropGeneration(roomId, inc),
-    directoryPut: (roomId, incTag, checkAt) => driver.directoryPut(roomId, incTag, checkAt),
+    directoryPut: (roomId, incTag, checkAt, minDelayMs) => driver.directoryPut(roomId, incTag, checkAt, minDelayMs),
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),
     directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),
-    directoryDue: (now) => driver.directoryDue(now),
+    directoryDue: () => driver.directoryDue(),
     dispose: () => subscriptions.dispose(),
   }
 }

@@ -208,8 +208,9 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     await this.#scheduleMaintenanceIfNeeded()
   }
 
-  async directoryPut(roomId: string, incTag: string, checkAt: number): Promise<void> {
-    this.#transaction((sql) => directoryPut(sql, roomId, incTag, checkAt))
+  async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
+    const at = Math.max(checkAt, Date.now() + minDelayMs)
+    this.#transaction((sql) => directoryPut(sql, roomId, incTag, at))
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
@@ -220,8 +221,8 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     return directoryList(this.#sql(), prefix, cursor)
   }
 
-  async directoryDue(now: number): Promise<DirectoryPage['entries']> {
-    return directoryDue(this.#sql(), now)
+  async directoryDue(): Promise<DirectoryPage['entries']> {
+    return directoryDue(this.#sql(), Date.now())
   }
 
   // Only a room authority schedules alarms.

@@ -358,12 +358,12 @@ describe('Room at 100,000 members', () => {
   it('keeps the event loop turning through a sweep of 100,000 lapsed rooms', async () => {
     const backend = getRoomBackend()
     const sweep = async (pass: number) => {
-      for (let i = 0; i < 100_000; i++) await backend.directoryPut(`lapsed-${pass}-${i}`, 'inc', 0)
+      for (let i = 0; i < 100_000; i++) await backend.directoryPut(`lapsed-${pass}-${i}`, 'inc', 0, 0)
       // Past this process's last sweep, so the room's creation sweeps.
       vi.setSystemTime(Date.now() + 60_000)
       return await longestGapWhile(async () => {
         await create(`after-lapses-${pass}`)
-        await vi.waitFor(async () => expect(await backend.directoryDue(Date.now())).toEqual([]), { timeout: 30_000 })
+        await vi.waitFor(async () => expect(await backend.directoryDue()).toEqual([]), { timeout: 30_000 })
       })
     }
     vi.useFakeTimers({ toFake: ['Date'] })

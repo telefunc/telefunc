@@ -555,9 +555,9 @@ describe('Room public behavior', () => {
   it('reports directory registration failure and repairs the open head on getOrCreate', async () => {
     const put = driver.directoryPut.bind(driver)
     let attempts = 0
-    vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc, checkAt) => {
+    vi.spyOn(driver, 'directoryPut').mockImplementation(async (roomId, inc, checkAt, minDelayMs) => {
       if (roomId === 'index-repair' && attempts++ === 0) throw new Error('index registration failure')
-      await put(roomId, inc, checkAt)
+      await put(roomId, inc, checkAt, minDelayMs)
     })
     await expect(Room.create('index-repair')).rejects.toThrow('index registration failure')
     const open = (await driver.readHead('index-repair'))!
@@ -6054,6 +6054,26 @@ describe('a room nothing holds closes on its own', () => {
     await (await room.join()).leave()
   }
 
+  it.each([120_000, -120_000])(
+    "closes a room departureTimeout after its last member left, and a new room nobody joins emptyTimeout after its creation, with the app servers' clocks %i ms off the store's",
+    async (skew) => {
+      await disposeBackend()
+      memoryState = new MemoryBackendState({ now: () => Date.now() - skew })
+      driver = new MemoryBackend({ state: memoryState })
+      installBackend(() => driver)
+      const left = await Room.create('skewed-left', { departureTimeout: 20_000 })
+      const leftClosed = await observe(left.id)
+      await visit(left)
+      const unjoined = await Room.create('skewed-unjoined', { emptyTimeout: 20_000 })
+      const unjoinedClosed = await observe(unjoined.id)
+      await vi.advanceTimersByTimeAsync(19_000)
+      expect((await getRoomBackend().readHead(left.id))?.state).toBe('open')
+      expect((await getRoomBackend().readHead(unjoined.id))?.state).toBe('open')
+      await vi.advanceTimersByTimeAsync(2_000)
+      await expectClosed(left.id, leftClosed)
+      await expectClosed(unjoined.id, unjoinedClosed)
+    },
+  )
   it('keeps a room a page was returned open for 10 minutes, and its join then works, while one nobody holds closes at emptyTimeout', async () => {
     const held = (await Room.create('page-holds')) as ServerRoom
     const unheld = await Room.create('nobody-holds')

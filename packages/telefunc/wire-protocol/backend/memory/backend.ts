@@ -472,9 +472,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     this._releaseWhenLapsed(roomId, room)
   }
 
-  async directoryPut(roomId: string, incTag: string, checkAt: number): Promise<void> {
-    this._state.directory.set(roomId, { incTag, checkAt })
-    if (checkAt !== Infinity) pushCheck(this._state.directoryChecks, { at: checkAt, roomId })
+  async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
+    const at = Math.max(checkAt, this._state.now() + minDelayMs)
+    this._state.directory.set(roomId, { incTag, checkAt: at })
+    if (at !== Infinity) pushCheck(this._state.directoryChecks, { at, roomId })
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
@@ -489,8 +490,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     return { entries }
   }
 
-  async directoryDue(now: number): Promise<DirectoryPage['entries']> {
+  async directoryDue(): Promise<DirectoryPage['entries']> {
     const { directory, directoryChecks: checks } = this._state
+    const now = this._state.now()
     // A put twice at the same time scheduled two checks, both current.
     const due = new Map<string, DirectoryCheck>()
     while (due.size < DIRECTORY_PAGE_SIZE && checks.length > 0 && checks[0]!.at <= now) {

@@ -26,8 +26,9 @@ const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000
 /** What holds a room (its non-hidden members and pages' views), and how many joins it had. */
 type HoldCounts = { holds: number; joins: number }
 
-/** `closesAt` is set while nothing holds the room: its unheld timeout after the hold count last changed. */
-type HoldRecord = HoldConfig & HoldCounts & { closesAt?: number }
+/** `closesAt` is set while nothing holds the room: its unheld timeout after the hold count last changed. `readAt` is
+ *  the authority time of the read or exchange that gave the record; app servers' clocks may be off it. */
+type HoldRecord = HoldConfig & HoldCounts & { closesAt?: number; readAt: number }
 
 type HoldChange = { before: HoldCounts; after: HoldRecord }
 
@@ -49,12 +50,14 @@ function holdCounts(config: HoldConfig | null, delta: number, joining = false): 
   ]
 }
 
-/** Every count creates both counters, so a room with timeouts that was counted has both. */
-function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounter>): HoldRecord {
+/** Every count creates both counters, so a room with timeouts that was counted has both. An exchange's time is taken
+ *  as its counters' latest change, which is its own once it changed one. */
+function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounter>, readAt?: number): HoldRecord {
   const holds = counters.get(HOLDS_CELL_KEY)
   const joins = counters.get(JOINS_CELL_KEY)
   assert(holds !== undefined && joins !== undefined)
-  const record: HoldRecord = { ...config, holds: holds.value, joins: joins.value }
+  const at = readAt ?? Math.max(holds.changedAt, joins.changedAt)
+  const record: HoldRecord = { ...config, holds: holds.value, joins: joins.value, readAt: at }
   const timeout = unheldTimeout(record)
   return record.holds > 0 || timeout === Infinity ? record : { ...record, closesAt: holds.changedAt + timeout }
 }
@@ -79,7 +82,7 @@ async function readHoldRecord({ id, inc, hold }: RoomIncarnation): Promise<HoldR
   if ('staleInc' in read || read.cells.size === 0) return null
   const counters = new Map<string, CellCounter>()
   for (const [key, raw] of read.cells) counters.set(key, decodeCellCounter(raw))
-  return holdRecord(hold, counters)
+  return holdRecord(hold, counters, read.now)
 }
 
 function unheldTimeout({ joins, emptyTimeout, departureTimeout }: HoldConfig & HoldCounts): number {
@@ -90,7 +93,7 @@ function unheldTimeout({ joins, emptyTimeout, departureTimeout }: HoldConfig & H
 function afterHoldChange(room: RoomIncarnation, change: HoldChange | null): void {
   if (change === null) return
   const { before, after } = change
-  if (after.closesAt !== undefined) return scheduleClose(room, after.closesAt)
+  if (after.closesAt !== undefined) return scheduleClose(room, after.closesAt - after.readAt)
   if (before.holds === 0 || before.joins > 0 !== after.joins > 0)
     void extendLapse(room, after, before.holds === 0).catch(reportRoomError)
 }
@@ -106,8 +109,8 @@ async function createHold(room: RoomIncarnation): Promise<void> {
   })
   if (result === 'stale-inc') throw roomClosedError(room.id)
   assert(result !== 'conflict')
-  const { closesAt } = holdRecord(hold, result.committed)
-  if (closesAt !== undefined) scheduleClose(room, closesAt)
+  const record = holdRecord(hold, result.committed)
+  if (record.closesAt !== undefined) scheduleClose(room, record.closesAt - record.readAt)
 }
 
 /** Each heartbeat, after it reaped lapsed sessions: keeps a held room's lapse ahead, or arms the close of
@@ -115,7 +118,7 @@ async function createHold(room: RoomIncarnation): Promise<void> {
 async function maintainHold(room: RoomIncarnation): Promise<void> {
   const record = await readHoldRecord(room)
   if (record === null) return
-  if (record.closesAt !== undefined) scheduleClose(room, record.closesAt)
+  if (record.closesAt !== undefined) scheduleClose(room, record.closesAt - record.readAt)
   else await extendLapse(room, record)
 }
 
@@ -129,14 +132,14 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
   return await retryCompareExchange(async () => {
     const head = await backend.readHead(id)
     if (head?.state !== 'open' || head.currentInc !== inc) return null
-    const closesAt = (await readHoldRecord(room))?.closesAt
-    if (closesAt === undefined) return head
+    const record = await readHoldRecord(room)
+    if (record?.closesAt === undefined) return head
     const result = await backend.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
       {
         head: { currentInc: inc, state: 'open', config: head.config },
-        ttlMs: closesAt - Date.now() + ROOM_LAPSE_AFTER_CLOSE_MS,
+        ttlMs: record.closesAt - record.readAt + ROOM_LAPSE_AFTER_CLOSE_MS,
       },
     )
     return 'conflict' in result ? CX_CONFLICT : result.head
@@ -157,7 +160,7 @@ async function extendLapse({ id, inc }: RoomIncarnation, record: HoldRecord, fir
     const ahead =
       ttlMs === undefined
         ? expiresAt === undefined
-        : expiresAt !== undefined && expiresAt >= Date.now() + ttlMs - ROOM_HEARTBEAT_INTERVAL_MS
+        : expiresAt !== undefined && expiresAt >= record.readAt + ttlMs - ROOM_HEARTBEAT_INTERVAL_MS
     if (ahead && !firstHold) return
     const result = await backend.compareExchangeHead(
       id,
@@ -171,9 +174,9 @@ async function extendLapse({ id, inc }: RoomIncarnation, record: HoldRecord, fir
 /** One close timer per room in this process; it checks the record again when it fires. */
 const closeTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
-function scheduleClose(room: RoomIncarnation, closesAt: number): void {
+function scheduleClose(room: RoomIncarnation, closesIn: number): void {
   clearTimeout(closeTimers.get(room.id))
-  const delay = Math.min(Math.max(closesAt - Date.now(), 0), TIMER_DELAY_MAX_MS)
+  const delay = Math.min(Math.max(closesIn, 0), TIMER_DELAY_MAX_MS)
   const timer = unrefTimer(
     setTimeout(() => {
       if (closeTimers.get(room.id) === timer) closeTimers.delete(room.id)
@@ -184,8 +187,8 @@ function scheduleClose(room: RoomIncarnation, closesAt: number): void {
 }
 
 async function closeIfUnheld(room: RoomIncarnation): Promise<void> {
-  const closesAt = (await readHoldRecord(room))?.closesAt
-  if (closesAt === undefined) return // held again
-  if (closesAt > Date.now()) return scheduleClose(room, closesAt)
+  const record = await readHoldRecord(room)
+  if (record?.closesAt === undefined) return // held again
+  if (record.closesAt > record.readAt) return scheduleClose(room, record.closesAt - record.readAt)
   await closeIncarnation(room.id, room.inc)
 }

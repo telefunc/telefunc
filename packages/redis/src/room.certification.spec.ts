@@ -401,18 +401,20 @@ await read()`,
     expect(await seqs({ kind: 'binary-track', track: 'camera' })).toEqual({})
   })
 
-  it('lists the directory entries due, earliest first and a page at a time, until each is put again or deleted', async () => {
+  it("lists the directory entries due at Redis's time, earliest first and a page at a time, until each is put again or deleted", async () => {
     const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('directory-due') })
-    for (let i = 0; i < 150; i++) await backend.directoryPut(`due-${i}`, 'inc', 1_000 - i)
-    await backend.directoryPut('never', 'inc', Infinity)
-    const first = await backend.directoryDue(1_000)
+    // Due a second apart before Redis's time, however long the puts take.
+    for (let i = 0; i < 150; i++) await backend.directoryPut(`due-${i}`, 'inc', 0, -1_000 * (i + 1))
+    await backend.directoryPut('never', 'inc', Infinity, 0)
+    // Due at once by its time, but not for an hour of Redis's.
+    await backend.directoryPut('delayed', 'inc', 0, 3_600_000)
+    const first = await backend.directoryDue()
     expect(first.map(({ roomId }) => roomId)).toEqual(Array.from({ length: 100 }, (_, i) => `due-${149 - i}`))
-    for (const { roomId, incTag } of first) await backend.directoryPut(roomId, incTag, 3_000)
+    for (const { roomId, incTag } of first) await backend.directoryPut(roomId, incTag, 0, 3_600_000)
     await backend.directoryDelete('due-49', 'inc')
-    const second = await backend.directoryDue(1_000)
+    const second = await backend.directoryDue()
     expect(second.map(({ roomId }) => roomId)).toEqual(Array.from({ length: 49 }, (_, i) => `due-${48 - i}`))
     expect(second[0]).toEqual({ roomId: 'due-48', incTag: 'inc' })
-    expect((await backend.directoryDue(Number.MAX_SAFE_INTEGER)).map(({ roomId }) => roomId)).not.toContain('never')
   })
 
   it("lists one track's retained binary lanes across members from that track's own set, until they are deleted or the generation drops", async () => {
@@ -859,6 +861,24 @@ await read()`,
     expect([writes, JSON.parse(await other.line(1))]).toEqual([['session'], ['session']])
   }, 60_000)
 
+  it.each([120_000, -120_000])(
+    "closes a room departureTimeout after its last member left, and a new room nobody joins emptyTimeout after its creation, with the app server's clock %i ms off Redis's",
+    async (skew) => {
+      installRedis(ownClient(connect()), { prefix: uniquePrefix('skewed-close') })
+      onTestFinished(() => disposeBackend())
+      const now = Date.now
+      const skewed = vi.spyOn(Date, 'now').mockImplementation(() => now() + skew)
+      onTestFinished(() => skewed.mockRestore())
+      const left = await Room.create('skewed-left', { departureTimeout: 2_000 })
+      await (await left.join()).leave()
+      const unjoined = await Room.create('skewed-unjoined', { emptyTimeout: 2_000 })
+      const states = () =>
+        Promise.all([left, unjoined].map(async ({ id }) => (await getRoomBackend().readHead(id))?.state))
+      await new Promise((resolve) => setTimeout(resolve, 1_000))
+      expect(await states()).toEqual(['open', 'open'])
+      await vi.waitFor(async () => expect(await states()).toEqual(['closed', 'closed']), { timeout: 5_000 })
+    },
+  )
   it("evicts nobody when an app server's clock runs 120 seconds ahead of Redis's", async () => {
     const prefix = uniquePrefix('skewed-clock')
     installRedis(ownClient(connect()), { prefix })

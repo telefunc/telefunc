@@ -50,7 +50,7 @@ import { metaEntriesAt, metaObjectOf } from '../meta-state.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { acquireClosingLease, cleanupFinalizedIncarnation, closeIncarnation, finishClose } from './close.js'
 import { createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
-import { directoryCheckAt, repairRoomIndex, sweepLapsedRoomsSoon } from './directory.js'
+import { listRoom, repairRoomIndex, sweepLapsedRoomsSoon } from './directory.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
@@ -166,7 +166,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
     const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
     if (lapsed !== undefined) await backend.dropGeneration(id, lapsed.incTag)
-    await backend.directoryPut(id, created.inc, directoryCheckAt(created.hold, lapsing?.expiresAt))
+    await listRoom(backend, id, created.inc, created.hold, lapsing?.expiresAt)
     sweepLapsedRoomsSoon()
     return {
       kind: 'created',
@@ -219,7 +219,7 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
   // Repairs the listing of a creator that crashed between its head and directory writes.
   const { head } = result
   const expiresAt = head.currentInc === room._inc ? head.expiresAt : undefined
-  await getRoomBackend().directoryPut(id, room._inc, directoryCheckAt(room._incarnation.hold, expiresAt))
+  await listRoom(getRoomBackend(), id, room._inc, room._incarnation.hold, expiresAt)
   return room
 }
 

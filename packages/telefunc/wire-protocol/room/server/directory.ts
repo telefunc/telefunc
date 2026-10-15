@@ -1,4 +1,4 @@
-export { directoryCheckAt, repairRoomIndex, sweepLapsedRoomsSoon }
+export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 
 // Each listed room is due once its head may have lapsed: a sweep then drops what a lapsed incarnation left, as
 // `Room.list()` does, so no lapsed room's data waits for a list call.
@@ -11,13 +11,19 @@ import type { HoldConfig } from '../protocol.js'
 import { configFromHead, openConfig } from './lanes.js'
 import { reportRoomError } from './errors.js'
 
-/** When to look at a listed room again: once its head lapses, and a heartbeat from now at the earliest. A room
+/** Lists the room, to be looked at again once its head lapses, and a heartbeat from now at the earliest. A room
  *  without hold timeouts never lapses; one with them but no lapse yet gets one once held, so it is looked at again a
  *  session's lease from now. */
-function directoryCheckAt(hold: HoldConfig | null, expiresAt: number | undefined): number {
-  if (hold === null) return Infinity
-  if (expiresAt === undefined) return Date.now() + ROOM_SESSION_TTL_MS
-  return Math.max(expiresAt, Date.now() + ROOM_HEARTBEAT_INTERVAL_MS)
+async function listRoom(
+  backend: RoomBackend,
+  id: string,
+  inc: string,
+  hold: HoldConfig | null,
+  expiresAt: number | undefined,
+): Promise<void> {
+  if (hold === null) return await backend.directoryPut(id, inc, Infinity, 0)
+  if (expiresAt === undefined) return await backend.directoryPut(id, inc, 0, ROOM_SESSION_TTL_MS)
+  await backend.directoryPut(id, inc, expiresAt, ROOM_HEARTBEAT_INTERVAL_MS)
 }
 
 /** A listed incarnation no head names as current has no owner left (its close finished, or was interrupted and its
@@ -31,7 +37,7 @@ async function repairRoomIndex(
   if (head?.currentInc === listedInc) return
   await backend.dropGeneration(id, listedInc)
   const live = openConfig(head)
-  if (live) await backend.directoryPut(id, live.inc, directoryCheckAt(live.hold, head!.expiresAt))
+  if (live) await listRoom(backend, id, live.inc, live.hold, head!.expiresAt)
   else await backend.directoryDelete(id, listedInc)
 }
 
@@ -49,11 +55,11 @@ function sweepLapsedRoomsSoon(): void {
  *  `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function sweepLapsedRooms(backend: RoomBackend): Promise<void> {
   const slice = new Slice()
-  for (let due = await backend.directoryDue(Date.now()); due.length > 0; due = await backend.directoryDue(Date.now())) {
+  for (let due = await backend.directoryDue(); due.length > 0; due = await backend.directoryDue()) {
     for (const { roomId, incTag } of due) {
       const head = await backend.readHead(roomId)
       if (head?.currentInc !== incTag) await repairRoomIndex(backend, roomId, incTag, head)
-      else await backend.directoryPut(roomId, incTag, directoryCheckAt(configFromHead(head).hold, head.expiresAt))
+      else await listRoom(backend, roomId, incTag, configFromHead(head).hold, head.expiresAt)
     }
     if (slice.over) await slice.next()
   }

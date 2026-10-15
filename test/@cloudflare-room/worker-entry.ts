@@ -628,10 +628,10 @@ async function rejectionOf(promise: Promise<unknown>, label: string): Promise<st
 async function refusedFirstWrite(env: Env, suffix: string) {
   const authority = env.ROOM.get(env.ROOM.idFromName(`refused-first-write-${suffix}`)) as unknown as Authority
   const refused = await rejectionOf(
-    authority.directoryPut('x'.repeat(3 * 1024 * 1024), 'inc', Infinity),
+    authority.directoryPut('x'.repeat(3 * 1024 * 1024), 'inc', Infinity, 0),
     'oversized id',
   )
-  await authority.directoryPut('room', 'inc', Infinity)
+  await authority.directoryPut('room', 'inc', Infinity, 0)
   return {
     refused: refused.includes('SQLITE_TOOBIG'),
     listed: (await authority.directoryList('')).entries.map(({ roomId }) => roomId),

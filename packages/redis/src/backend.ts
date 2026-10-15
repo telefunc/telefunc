@@ -232,8 +232,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     await this._run(REDIS_COMMANDS.dropGeneration, { roomId, inc, generationKeys })
   }
 
-  directoryPut(roomId: string, incTag: string, checkAt: number): Promise<void> {
-    return this._run(REDIS_COMMANDS.directoryPut, { roomId, incTag, checkAt })
+  directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
+    return this._run(REDIS_COMMANDS.directoryPut, { roomId, incTag, checkAt, minDelayMs })
   }
 
   directoryDelete(roomId: string, incTag: string): Promise<void> {
@@ -260,8 +260,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return matching.length > DIRECTORY_PAGE_SIZE ? { entries, cursor: last } : { entries }
   }
 
-  directoryDue(now: number): Promise<DirectoryPage['entries']> {
-    return this._run(REDIS_COMMANDS.directoryDue, { now, limit: DIRECTORY_PAGE_SIZE })
+  directoryDue(): Promise<DirectoryPage['entries']> {
+    return this._run(REDIS_COMMANDS.directoryDue, { limit: DIRECTORY_PAGE_SIZE })
   }
 
   /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
