@@ -304,7 +304,8 @@ class RoomDemand {
         this._settle()
       }
     // A renewal while asked means the ask or its answer was lost.
-    if (tellsAgain || !(reporter.asked ? page.wants.length === 0 : !continues)) return
+    const asksAgain = reporter.asked ? page.wants.length === 0 : !continues
+    if (tellsAgain || !asksAgain) return
     reporter.asked = true
     this._ask(instance)
   }
