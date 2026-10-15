@@ -40,7 +40,7 @@ function publicHead(head: StoredHead, config: Uint8Array): RoomHead {
   return view
 }
 
-function isOpenIncarnation(head: Omit<RoomHead, 'expiresAt'> | null, inc: string): boolean {
+function isOpenIncarnation<H extends Omit<RoomHead, 'expiresAt'>>(head: H | null, inc: string): head is H {
   return head !== null && head.currentInc === inc && head.state === 'open'
 }
 

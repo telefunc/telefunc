@@ -9,7 +9,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CellCount, CellCounter, RoomHead } from '../../backend/room/contract.js'
-import { decodeCellCounter } from '../../backend/room/semantics.js'
+import { decodeCellCounter, isOpenIncarnation } from '../../backend/room/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LAPSE_AFTER_CLOSE_MS, ROOM_SESSION_TTL_MS } from './constants.js'
 import type { HoldConfig } from './protocol.js'
@@ -130,7 +130,7 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
   const backend = getRoomBackend()
   return await retryCompareExchange(async () => {
     const head = await backend.readHead(id)
-    if (head?.state !== 'open' || head.currentInc !== inc) return null
+    if (!isOpenIncarnation(head, inc)) return null
     const record = await readHoldRecord(room)
     if (record?.closesAt === undefined) return head
     const result = await backend.compareExchangeHead(
@@ -154,7 +154,7 @@ async function extendLapse({ id, inc }: RoomIncarnation, record: HoldRecord, fir
   const backend = getRoomBackend()
   await retryCompareExchange(async () => {
     const head = await backend.readHead(id)
-    if (head?.state !== 'open' || head.currentInc !== inc) return
+    if (!isOpenIncarnation(head, inc)) return
     const { expiresAt } = head
     if (!firstHold && ttlMs === undefined && expiresAt === undefined) return
     const bothLapse = ttlMs !== undefined && expiresAt !== undefined

@@ -20,6 +20,7 @@ import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import { Slice } from '../slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
+import { isOpenIncarnation } from '../../backend/room/semantics.js'
 import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
 import { roomClosedError } from '../errors.js'
 import {
@@ -337,8 +338,7 @@ async function evictMember(
     return await removeMemberCells(room, id, identity, cause)
   } catch (error) {
     // A room that closed under the eviction ended the member with everyone else.
-    const head = await getRoomBackend().readHead(room.id)
-    if (head?.state !== 'open' || head.currentInc !== room.inc) return true
+    if (!isOpenIncarnation(await getRoomBackend().readHead(room.id), room.inc)) return true
     throw error
   }
 }
