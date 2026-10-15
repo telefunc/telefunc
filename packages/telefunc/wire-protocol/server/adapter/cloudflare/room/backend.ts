@@ -12,6 +12,7 @@ import type {
   CellsCx,
   CellSelector,
   CellsRead,
+  CommitAccepted,
   CommitOptions,
   CommitResult,
   CxResult,
@@ -110,9 +111,14 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
       ? session.room.callAuthority(roomId, () => this.#stub(roomId), commit)
       : commit(this.#stub(roomId)))
     if ('stale' in wire) return wire
-    const { seq, timestamp, receivers, deliveryToken } = wire
-    if (deliveryToken === undefined) return { accepted: true, seq, timestamp, receivers }
-    return { accepted: true, seq, timestamp, receivers, delivery: this.#stub(roomId).awaitDelivery(deliveryToken) }
+    const receipt: CommitAccepted = {
+      accepted: true,
+      seq: wire.seq,
+      timestamp: wire.timestamp,
+      receivers: wire.receivers,
+    }
+    if (wire.deliveryToken !== undefined) receipt.delivery = this.#stub(roomId).awaitDelivery(wire.deliveryToken)
+    return receipt
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
