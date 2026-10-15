@@ -183,7 +183,7 @@ class RoomReplica {
     this.stubs.add(stub)
     this._views.set(
       stub,
-      this._holdViews([stub]).then(([key]) => key!),
+      this._holdViews([stub]).then(([key]) => key ?? null),
     )
   }
 
@@ -342,7 +342,7 @@ class RoomReplica {
     stubs.forEach((stub, i) =>
       this._views.set(
         stub,
-        keys.then((written) => written[i]!),
+        keys.then((written) => written[i] ?? null),
       ),
     )
     await keys
