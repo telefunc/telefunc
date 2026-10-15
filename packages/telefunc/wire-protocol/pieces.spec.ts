@@ -1,6 +1,8 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { Link } from './link.js'
-import { PagePieceReceiver, PieceSender, ServerPieceReceiver } from './pieces.js'
+import { PieceSender } from './pieces.js'
+import { PagePieceReceiver } from './client/page-piece-receiver.js'
+import { ServerPieceReceiver } from './server/server-piece-receiver.js'
 import { Uplink } from './client/uplink.js'
 import { decode, encode, TAG } from './shared-ws.js'
 
@@ -71,13 +73,13 @@ test("a probe pair's receiver spacing measures the rate later frames are cut by,
   sender.send(data(100_000), 5_000)
   await flush()
   clock.now = 200
-  expect(sender.acknowledged(PAIR_FIRST, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: PAIR_FIRST, heldMs: 0, spanUs: 0 })).toBe(true)
   // Until the pair's second is acknowledged, frames still go behind an announcement.
   sender.send(data(5_000), 5_000)
   await flush()
   expect(lengths(transmitted.slice(-3))).toEqual(['announce 0', 5_000, 'announce 5000'])
   // The second, 2048 B and its header, arrived 100 ms after the first.
-  expect(sender.acknowledged(PAIR_SECOND, 0, 100_000)).toBe(true)
+  expect(sender.acknowledged({ bytes: PAIR_SECOND, heldMs: 0, spanUs: 100_000 })).toBe(true)
   transmitted.length = 0
   sender.send(data(30_000), 5_000)
   const piece = pieceAt(PIECE + 2_048, 100)
@@ -95,10 +97,10 @@ test('a rate that lapsed still cuts a frame at once, until the next measure repl
   sender.send(data(20_000), 5_000)
   await flush()
   clock.now = 200
-  expect(sender.acknowledged(PAIR_FIRST, 0, 0)).toBe(true)
-  expect(sender.acknowledged(PAIR_SECOND, 0, 100_000)).toBe(true)
+  expect(sender.acknowledged({ bytes: PAIR_FIRST, heldMs: 0, spanUs: 0 })).toBe(true)
+  expect(sender.acknowledged({ bytes: PAIR_SECOND, heldMs: 0, spanUs: 100_000 })).toBe(true)
   clock.now = 2_200
-  expect(sender.acknowledged(sender.transmittedBytes, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: sender.transmittedBytes, heldMs: 0, spanUs: 0 })).toBe(true)
   clock.now = 70_000
   transmitted.length = 0
   sender.send(data(30_000), 5_000)
@@ -106,7 +108,7 @@ test('a rate that lapsed still cuts a frame at once, until the next measure repl
   expect(lengths(transmitted)).toEqual(['piece 0', `piece ${piece}`, `piece ${piece}`, `piece ${30_000 - 2 * piece}`])
   // 30 000 B and three headers in 10 s: about 3 B per ms.
   clock.now = 80_000
-  expect(sender.acknowledged(sender.transmittedBytes, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: sender.transmittedBytes, heldMs: 0, spanUs: 0 })).toBe(true)
   transmitted.length = 0
   sender.send(data(5_000), 5_000)
   const slower = pieceAt(30_000 + 3 * PIECE, 10_000)
@@ -122,14 +124,14 @@ test('an acknowledgement within one tick of a coarsened clock measures a probe a
   )
   sender.send(data(20_000), 5_000)
   await flush()
-  expect(sender.acknowledged(PAIR_FIRST, 0, 0)).toBe(true)
-  expect(sender.acknowledged(PAIR_SECOND, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: PAIR_FIRST, heldMs: 0, spanUs: 0 })).toBe(true)
+  expect(sender.acknowledged({ bytes: PAIR_SECOND, heldMs: 0, spanUs: 0 })).toBe(true)
   // 2048 B in a tick: a frame that rate carries in 5 s / 8 goes whole.
   const before = transmitted.length
   sender.send(data(1_000_000), 5_000)
   await flush()
   expect(lengths(transmitted.slice(before))).toEqual([1_000_000])
-  expect(sender.acknowledged(sender.transmittedBytes, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: sender.transmittedBytes, heldMs: 0, spanUs: 0 })).toBe(true)
   transmitted.length = 0
   sender.send(data(2_000_000), 5_000)
   expect(transmitted.length).toBeGreaterThan(1)
@@ -149,14 +151,14 @@ test('a rate counts what the socket holds ahead of a frame but the largest messa
   )
   sender.send(data(80_000), 5_000)
   clock.now = 10_000
-  expect(sender.acknowledged(sender.transmittedBytes, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: sender.transmittedBytes, heldMs: 0, spanUs: 0 })).toBe(true)
   // The rate lapsed; the socket holds 40 000 B as a whole frame goes.
   clock.now = 70_000
   queued = 40_000
   sender.send(data(20_000), 5_000)
   await flush()
   clock.now = 71_000
-  expect(sender.acknowledged(sender.transmittedBytes, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: sender.transmittedBytes, heldMs: 0, spanUs: 0 })).toBe(true)
   // In 1 s, the 40 000 B less the largest message, a piece of 20 000 B, and the frame.
   expect(link.fastest).toBe((40_000 - (PIECE + 20_000) + 20_000) / 1_000)
 })
@@ -168,17 +170,17 @@ test('an acknowledgement counts the bytes handed to the socket, announcements an
   )
   sender.send(new Uint8Array(4_000), 5_000)
   sender.send(new Uint8Array(100), 5_000)
-  expect(sender.acknowledged(4_100, 0, 0)).toBe(true)
-  expect(sender.acknowledged(4_100, 0, 0)).toBe(false)
+  expect(sender.acknowledged({ bytes: 4_100, heldMs: 0, spanUs: 0 })).toBe(true)
+  expect(sender.acknowledged({ bytes: 4_100, heldMs: 0, spanUs: 0 })).toBe(false)
   sender.send(new Uint8Array(100), 5_000)
-  expect(sender.acknowledged(4_300, 0, 0)).toBe(false)
-  expect(sender.acknowledged(4_200, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: 4_300, heldMs: 0, spanUs: 0 })).toBe(false)
+  expect(sender.acknowledged({ bytes: 4_200, heldMs: 0, spanUs: 0 })).toBe(true)
   // A frame to announce goes behind an announcement, an empty piece, the probe pair, and two more pieces, whose headers
   // count.
   sender.send(new Uint8Array(20_000), 5_000)
   const all = 24_200 + ANNOUNCE + 5 * PIECE
-  expect(sender.acknowledged(all + 1, 0, 0)).toBe(false)
-  expect(sender.acknowledged(all, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: all + 1, heldMs: 0, spanUs: 0 })).toBe(false)
+  expect(sender.acknowledged({ bytes: all, heldMs: 0, spanUs: 0 })).toBe(true)
 })
 
 test('an acknowledgement is read modulo 2^32', () => {
@@ -187,12 +189,12 @@ test('an acknowledgement is read modulo 2^32', () => {
     () => 0,
   )
   sender.send(new Uint8Array(5_000), 5_000)
-  expect(sender.acknowledged(4_096, 0, 0)).toBe(true)
-  expect(sender.acknowledged(5_000, 0, 0)).toBe(true)
+  expect(sender.acknowledged({ bytes: 4_096, heldMs: 0, spanUs: 0 })).toBe(true)
+  expect(sender.acknowledged({ bytes: 5_000, heldMs: 0, spanUs: 0 })).toBe(true)
   const frame = new Uint8Array(40_000_000)
   for (let sent = 5_000; sent < 2 ** 32 + 40_000_000; sent += frame.byteLength) {
     sender.send(frame, 5_000)
-    expect(sender.acknowledged((sent + frame.byteLength) % 2 ** 32, 0, 0)).toBe(true)
+    expect(sender.acknowledged({ bytes: (sent + frame.byteLength) % 2 ** 32, heldMs: 0, spanUs: 0 })).toBe(true)
   }
 })
 
@@ -205,19 +207,19 @@ test('a receiver whose peer holds data back acknowledges data within 25 ms once 
     (frame) => void sent.push(frame),
     () => {},
   )
-  receiver.arrived(1_000, true, Date.now())
+  receiver.arrived(1_000, true, Date.now(), false)
   vi.advanceTimersByTime(100)
   expect(sent).toHaveLength(0)
-  receiver.arrived(1_500, true, Date.now())
+  receiver.arrived(1_500, true, Date.now(), false)
   vi.advanceTimersByTime(24)
   expect(sent).toHaveLength(0)
   vi.advanceTimersByTime(1)
   expect(acks()).toEqual([{ tag: TAG.PIECES_ACK, bytes: 2_500, heldMs: 25, spanUs: 0 }])
   // 100 ms on, 8 KB twice and 1 KB: past 16 KiB, at once, 125 ms after the data the first ack covered.
   vi.advanceTimersByTime(100)
-  receiver.arrived(8_000, true, Date.now())
-  receiver.arrived(8_000, true, Date.now())
-  receiver.arrived(1_000, true, Date.now())
+  receiver.arrived(8_000, true, Date.now(), false)
+  receiver.arrived(8_000, true, Date.now(), false)
+  receiver.arrived(1_000, true, Date.now(), false)
   expect(acks()[1]).toEqual({ tag: TAG.PIECES_ACK, bytes: 19_500, heldMs: 0, spanUs: 125_000 })
   vi.useRealTimers()
 })
@@ -237,15 +239,15 @@ test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB 
     carried = null
     return ack && decode(ack)
   }
-  for (let i = 0; i < 1_000; i++) receiver.arrived(64, true, Date.now())
+  for (let i = 0; i < 1_000; i++) receiver.arrived(64, true, Date.now(), false)
   vi.advanceTimersByTime(1_000)
   expect(carried).toBeNull()
-  receiver.arrived(20_000, true, Date.now())
+  receiver.arrived(20_000, true, Date.now(), false)
   vi.advanceTimersByTime(5)
   expect(next()).toEqual({ tag: TAG.PIECES_ACK, bytes: 84_000, heldMs: 5, spanUs: 0 })
   // 50 ms after that one went, which was 5 ms after the first arrived.
   vi.advanceTimersByTime(5)
-  receiver.arrived(20_000, true, Date.now())
+  receiver.arrived(20_000, true, Date.now(), false)
   vi.advanceTimersByTime(44)
   expect(carried).toBeNull()
   vi.advanceTimersByTime(1)

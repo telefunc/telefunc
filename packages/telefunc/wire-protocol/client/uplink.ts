@@ -5,9 +5,7 @@ import { DRAIN_SPAN_MS, Link, Waits, newestFastest, type SendWait } from '../lin
 import { TAG } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 
-/** A page's uplink: the rate the server takes data at, what the uplink holds at that rate, how long the frames
- *  that go at once waited behind it, how long what the server sends waits behind what the page's credit let it send,
- *  and when the page's next acknowledgement or window refresh may go. */
+/** A page's uplink: the rate the server takes data at, what the uplink holds, and the shares its control frames take. */
 class Uplink implements SendWait {
   /** In bytes per ms: the fastest of the newest rates the peer took data at, 0 before any. */
   drainRate = 0
@@ -36,15 +34,11 @@ class Uplink implements SendWait {
   private deliveredAt = Number.NEGATIVE_INFINITY
   /** The span being measured started as the one before it ended, not after a pause. */
   private deliveryGoesOn = false
+  readonly link = new Link()
   /** The acknowledgements and the window refreshes of what this side receives, each kind within its share of the rate
    *  the link carries. */
-  readonly acks: Share
-  readonly refreshes: Share
-
-  constructor(readonly link = new Link()) {
-    this.acks = new Share(link, WIRE_ACK_SHARE)
-    this.refreshes = new Share(link, WIRE_REFRESH_SHARE)
-  }
+  readonly acks = new Share(this.link, WIRE_ACK_SHARE)
+  readonly refreshes = new Share(this.link, WIRE_REFRESH_SHARE)
 
   /** The channels on this wire granted the peer `bytes` more credit: it reaches it once what the uplink holds drained. */
   granted(bytes: number): void {
@@ -147,10 +141,10 @@ class Uplink implements SendWait {
     return Math.max(this.waits.since(at), this.waitNow())
   }
 
-  /** Notes a PIECES_ACK, or a window refresh, of `tag` and `bytes`, handed to the socket. */
-  handedControl(tag: number, bytes: number): void {
-    const share = tag === TAG.PIECES_ACK ? this.acks : this.refreshes
-    share.handed(bytes)
+  /** Notes a frame of `tag` and `bytes` handed to the socket: a PIECES_ACK or a window refresh takes its share. */
+  handedFrame(tag: number, bytes: number): void {
+    if (tag === TAG.PIECES_ACK) this.acks.handed(bytes)
+    else if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW) this.refreshes.handed(bytes)
   }
 
   /** Notes a wait seen now: what a frame that goes at once waits, or what data waited. */

@@ -128,14 +128,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._maxFrameBytes = transports.includes(CHANNEL_TRANSPORT.WS) ? maxFrameBytes : WIRE_MAX_RAW_FRAME_BYTES
     this._flow = new FlowControl(
       {
-        byteWindowUpdate: (limit, urgent, withNext) =>
-          this._connection.sendByteWindowUpdate(this, limit, urgent, withNext),
+        byteWindowUpdate: (limit, kind) => this._connection.sendByteWindowUpdate(this, limit, kind),
         msgWindowUpdate: (limit, urgent) => this._connection.sendMsgWindowUpdate(this, limit, urgent),
         bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
       },
       () => this._connection.bufferedAmount(),
       FC_PAGE_YIELD_BYTES,
-      () => this._connection.sendWait(),
     )
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {

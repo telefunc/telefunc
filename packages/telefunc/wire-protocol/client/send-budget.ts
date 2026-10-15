@@ -10,7 +10,7 @@ import {
 } from '../constants.js'
 import { PieceSender } from '../pieces.js'
 import type { Uplink } from './uplink.js'
-import { isSequencedTag } from '../shared-ws.js'
+import { isSequencedTag, type PiecesAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
@@ -57,7 +57,7 @@ class SendBudget {
     this.sender = new PieceSender(transmit, queued, uplink.link, {
       dataRoom: () => this.roomPast(this.sender.transmittedBytes),
       handed: (bytes, data) => this.handed(bytes, data),
-      handedControl: (tag, bytes) => uplink.handedControl(tag, bytes),
+      handedFrame: (tag, bytes) => uplink.handedFrame(tag, bytes),
     })
   }
 
@@ -82,11 +82,6 @@ class SendBudget {
     return this.roomPast(this.sender.sentBytes)
   }
 
-  /** Sends what the sender holds for room, as far as it goes now. */
-  sendHeld(): void {
-    this.sender.sendHeld()
-  }
-
   /** A message arrived: where the timer is late to look again, looks now. A hidden tab throttles timers, not messages. */
   received(): void {
     if (this.paceTimer === null || performance.now() < this.paceDue) return
@@ -95,15 +90,15 @@ class SendBudget {
   }
 
   /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made room for. */
-  acknowledged(bytes: number, heldMs: number, spanUs: number): boolean {
+  acknowledged(ack: PiecesAck): boolean {
     const before = this.sender.acknowledgedBytes
-    if (!this.sender.acknowledged(bytes, heldMs, spanUs)) return false
+    if (!this.sender.acknowledged(ack)) return false
     const acknowledged = this.sender.acknowledgedBytes
     const newly = acknowledged - before
-    const spanMs = spanUs / 1000
+    const spanMs = ack.spanUs / 1000
     this.arrivedAt += spanMs
     const now = performance.now()
-    const back = now - this.arrivedAt - heldMs
+    const back = now - this.arrivedAt - ack.heldMs
     if (back < this.leastBack) this.leastBack = back
     this.lateMs = Math.max(back - this.leastBack, this.lateMs - (now - this.lateAt))
     this.lateAt = now
@@ -111,8 +106,8 @@ class SendBudget {
     let newest: SentData | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
-    if (newest !== undefined) this.measure(newest, newly, spanUs)
-    this.sendHeld()
+    if (newest !== undefined) this.measure(newest, newly, ack.spanUs)
+    this.sender.sendHeld()
     this.pace()
     return true
   }

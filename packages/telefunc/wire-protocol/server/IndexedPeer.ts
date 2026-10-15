@@ -87,8 +87,8 @@ class IndexedPeer {
     this.sendSequenced(seq, encode.error(this.index, reason, seq))
   }
 
-  /** `lastSeq`: the last seq the server has of what the page sent on the channel. `withNext`: see
-   *  `FlowControlEmit.byteWindowUpdate`. */
+  /** `lastSeq`: the last seq the server has of what the page sent on the channel. `withNext`: it is an
+   *  `acknowledgement` (see `ByteWindowKind`). */
   sendByteWindowUpdate(limit: number, lastSeq: number, withNext = false): void {
     const frame = encode.window(this.index, limit, lastSeq)
     if (withNext) this.sender.carry(frame)

@@ -35,8 +35,7 @@ import {
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
 } from '../constants.js'
-import type { SendWait } from '../link.js'
-import { replayWindow } from '../flow-control/flow-control.js'
+import { replayWindow, type ByteWindowKind } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
   ACK_STATUS,
@@ -92,6 +91,7 @@ type ProbeWire = {
 
 type ProbeSession = {
   upgradeId: string
+  sessionId: string
   probeHeartbeat: Heartbeat
   uplink: Uplink
 }
@@ -157,7 +157,7 @@ interface MuxConnection {
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean, withNext: boolean): void
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
@@ -166,8 +166,6 @@ interface MuxConnection {
   bufferedAmount(): number
   /** The bytes the wire delivered in the `ms` before it last delivered: before a frame handled as it arrives. */
   deliveredBeforeLast(ms: number): number
-  /** How long the frames that go at once wait behind the wire's own data, `null` where it can't tell. */
-  sendWait(): SendWait | null
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void
   unregister(channel: MuxChannel): void
@@ -244,8 +242,6 @@ type ClientChannelTransport = {
    *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
   attachHeartbeat(hb: Heartbeat): void
   detachHeartbeat(): void
-  /** How long the frames that go at once wait behind its wire's own data, `null` where it can't tell. */
-  sendWait(): SendWait | null
   /** Settles once the frames it was handed have left it, or its wire is gone. */
   drained(): Promise<void>
   dispose(): void
@@ -620,7 +616,7 @@ class ClientConnection implements MuxConnection {
     if (this.registerReconcileTimer === null) return
     if (this.state.tag !== 'open' || this.state.upgrade.tag === 'committing' || this.upgradeReady) return
     if (this.reconciling) return
-    this.sendReconcileBatch(this.stageReconcileBatch())
+    this.sendReconcileBatch(this.stageReconcileBatch(false))
   }
 
   private cancelRegisterReconcileTimer(): void {
@@ -755,11 +751,10 @@ class ClientConnection implements MuxConnection {
     this.sendOrQueue(ix, seq, buildFrame(ix, seq), 'control')
   }
 
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean, withNext: boolean): void {
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const frame = encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0)
-    this.sendUnsequenced(ix, frame, urgent ? 'urgent-flow-control' : withNext ? 'acknowledgement' : 'flow-control')
+    this.sendUnsequenced(ix, encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0), kind)
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
@@ -788,14 +783,8 @@ class ClientConnection implements MuxConnection {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
-  sendWait(): SendWait | null {
-    return this.transport.sendWait()
-  }
-
-  /** Held with the rest while sends are held. A limit is cumulative, so one that waited is still right, where a
-   *  dropped one could stall the peer: an upgrade attempt that ends without its barrier lifts the hold with no reattach
-   *  to advertise it again. */
-  /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait. */
+  /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait: a limit is cumulative, so one
+   *  that waited is still right. */
   private sendUnsequenced(ix: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(ix)) {
       this.settleQueue().push({ frame, channelIx: ix, seq: undefined })
@@ -821,7 +810,7 @@ class ClientConnection implements MuxConnection {
     if (transport !== this.transport) return
     this.enterOpen()
     if (this.transport.sendReconcileOnOpen) {
-      this.sendReconcileBatch(this.stageReconcileBatch())
+      this.sendReconcileBatch(this.stageReconcileBatch(false))
       this.beatFromReconcile(transport)
       return
     }
@@ -952,13 +941,13 @@ class ClientConnection implements MuxConnection {
    *  the first, provisionally at the least one a server accepts, pinging only once that passed: a RECONCILED that comes
    *  sooner replaces it before it adds a frame. */
   private beatFromReconcile(transport: ClientChannelTransport): void {
-    if (this.sessionId !== null) this.installHeartbeat(transport, this.pingIntervalMs)
+    if (this.sessionId !== null) this.installHeartbeat(transport, this.pingIntervalMs, false)
     else this.installHeartbeat(transport, CHANNEL_PING_INTERVAL_MIN_MS, true)
   }
 
   /** Idempotent once a RECONCILED set the interval. Detaches first either way so a fresh install can never leak the
    *  prior. A provisional one leaves the server's interval unknown, and the next install replaces it. */
-  private installHeartbeat(transport: ClientChannelTransport, intervalMs: number, provisional = false): void {
+  private installHeartbeat(transport: ClientChannelTransport, intervalMs: number, provisional: boolean): void {
     if (transport.heartbeat !== null && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs) return
     transport.detachHeartbeat()
     if (!provisional) this.pingIntervalMs = intervalMs
@@ -1155,12 +1144,11 @@ class ClientConnection implements MuxConnection {
       if (ctrl.upgradeId !== committing.upgradeId) return
       committing.committed = true
     }
-    for (const [ix, probe] of this.inFlight.probes) this.channels.get(ix)?.channel._onProbeAnswered(probe)
     this.transport.applyReconciledSettings(ctrl)
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
-    this.installHeartbeat(this.transport, ctrl.pingInterval)
+    this.installHeartbeat(this.transport, ctrl.pingInterval, false)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen)
@@ -1202,7 +1190,7 @@ class ClientConnection implements MuxConnection {
     this.transport.abandonActiveTransport()
     this.transport.dispose()
     this.transport = TRANSPORT_REGISTRY[CHANNEL_TRANSPORT.SSE](this.telefuncUrl, this.connectionOptions, this)
-    this.handleTransportLoss(err)
+    this.handleTransportLoss(err, false)
   }
 
   private isTransportUpgradeAllowed(nextTransport: ChannelTransport): boolean {
@@ -1219,7 +1207,7 @@ class ClientConnection implements MuxConnection {
       const to = UPGRADE_TARGET_REGISTRY[targetTransport](this.telefuncUrl, this)
       const session = await this.stageProbe(to, sessionId, attempt)
       if (!session) return
-      await this.commitBarrier(from, to, session, sessionId, attempt)
+      await this.commitBarrier(from, to, session, attempt)
     } finally {
       this.exitUpgradeAttempt(attempt)
       this.flushPendingRegisterReconcile()
@@ -1261,7 +1249,7 @@ class ClientConnection implements MuxConnection {
       return null
     }
     this.enterUpgradeReady(attempt)
-    return { upgradeId, probeHeartbeat, uplink: probe.uplink }
+    return { upgradeId, sessionId, probeHeartbeat, uplink: probe.uplink }
   }
 
   /** The probe is nobody's transport yet, so it has no heartbeat of its own: this one keeps it
@@ -1275,7 +1263,7 @@ class ClientConnection implements MuxConnection {
     )
     probe.onPong(() => heartbeat.resetPong())
     probe.onClose(() => attempt.abort())
-    heartbeat.start()
+    heartbeat.start(true)
     attempt.signal.addEventListener(
       'abort',
       () => {
@@ -1291,17 +1279,13 @@ class ClientConnection implements MuxConnection {
     from: UpgradeSource,
     to: UpgradeTarget,
     session: ProbeSession,
-    sessionId: string,
     attempt: AbortController,
   ): Promise<void> {
     // After the RECONCILED of the one in flight, which may name a channel the barrier lists.
     await this.reconcileSettled(attempt.signal)
     if (attempt.signal.aborted) return
     this.enterUpgradeCommitting(from, to, session, attempt)
-    const emission = await from.emitBarrier(
-      () => this.buildBarrierFrame(sessionId, session.upgradeId, session.uplink),
-      attempt.signal,
-    )
+    const emission = await from.emitBarrier(() => this.buildBarrierFrame(session), attempt.signal)
 
     if (emission === 'not-emitted') {
       attempt.abort()
@@ -1342,7 +1326,7 @@ class ClientConnection implements MuxConnection {
     this.startTtlIfIdle()
   }
 
-  private handleTransportLoss(err: Error, rejected = false): void {
+  private handleTransportLoss(err: Error, rejected: boolean): void {
     if (this.closed) return
     if (this.flipped) {
       this.fallbackToSse(err)
@@ -1460,7 +1444,7 @@ class ClientConnection implements MuxConnection {
 
   /** The old wire's last frame. A channel the server awaits is listed, and its await moves to the new wire. One no
    *  RECONCILE has named yet is left out: the server has no record of it, so it reconciles after the handoff. */
-  private buildBarrierFrame(sessionId: string, upgradeId: string, uplink: Uplink): OutboundFrame {
+  private buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
     const open = this.declareOpenEntries({ skipUnnamed: true, uplink, batched: false })
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
@@ -1537,7 +1521,7 @@ class ClientConnection implements MuxConnection {
 
   private readonly isSendable = (ix: number): boolean => !this.awaitedIxes.has(ix)
 
-  stageReconcileBatch(isInitialBatch = false): ReconcileBatch {
+  stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
     // This batch includes every channel, so it already covers any pending registration.
     this.cancelRegisterReconcileTimer()
     const reconcileFrame = this.buildReconcileFrame()
@@ -1574,8 +1558,9 @@ class ClientConnection implements MuxConnection {
 
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
-    const { ixes, attachResults, carriedFrom } = this.inFlight
+    const { ixes, probes, attachResults, carriedFrom } = this.inFlight
     this.inFlight = reconcileInFlight()
+    for (const [ix, probe] of probes) this.channels.get(ix)?.channel._onProbeAnswered(probe)
     for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
     // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
     for (const [ix, initial] of ixes) {
@@ -1622,7 +1607,7 @@ class ClientConnection implements MuxConnection {
     for (const frame of this.drainBufferedFrames((ix) => serverMap.has(ix))) releaseFrames.push(frame)
 
     if (hasNewChannels && !this.upgradeReady) {
-      const reconcileBatch = this.stageReconcileBatch()
+      const reconcileBatch = this.stageReconcileBatch(false)
       this.appendReconcileBatch(releaseFrames, reconcileBatch)
     } else {
       this.exitReconciling()

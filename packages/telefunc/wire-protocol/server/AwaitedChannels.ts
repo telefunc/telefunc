@@ -73,9 +73,7 @@ class AwaitedChannels {
 
   /** The wire `wire`, whose entry is `conn`, awaits it from now on, with what it held. */
   move(awaited: AwaitedChannel, conn: ConnectionEntry, wire: Wire): void {
-    this.byIx.delete(awaited.entry.ix)
-    const { held } = awaited
-    this.drop(awaited)
+    const held = this.take(awaited)
     awaited.conn = conn
     awaited.wire = wire
     for (const { frame, bytes } of held) conn.state.awaited.hold(awaited, frame, bytes)

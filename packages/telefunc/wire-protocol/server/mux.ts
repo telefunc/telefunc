@@ -51,7 +51,8 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceSender, ServerPieceReceiver } from '../pieces.js'
+import { PieceSender } from '../pieces.js'
+import { ServerPieceReceiver } from './server-piece-receiver.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from './socket-wait.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
@@ -163,9 +164,9 @@ type ConnectionState = {
   attaching: Set<ServerChannel>
   /** How long the frames that go at once wait behind what the socket holds. */
   wait: SocketWait
-  /** The probed entries of the RECONCILE it reads, until its RECONCILED answers them: a frame that goes ahead of that
-   *  goes behind a BDP_PING_ACK for each. */
-  probed: ReconcileOpenEntry[]
+  /** Each probed entry's index and probe, of the RECONCILE it reads, until its RECONCILED answers them: a frame that
+   *  goes ahead of that goes behind a BDP_PING_ACK for each. */
+  probed: { ix: number; probe: number }[]
 }
 
 type ConnectionEntry = {
@@ -227,9 +228,10 @@ class ChannelMux {
     channel._registerChannel()
     this.channels.set(channel.id, channel)
     // Before a waiter attaches it: its `onOpen` may end it.
-    channel._onShutdown((keep, pageAttached) =>
-      keep ? this.keepEnded(channel, pageAttached) : this.unregisterChannel(channel.id),
-    )
+    channel._onShutdown((keep, pageAttached) => {
+      if (keep) this.keepEnded(channel, pageAttached)
+      else this.unregisterChannel(channel.id)
+    })
     const waiters = this.pendingRegisterWaiters.get(channel.id)
     if (waiters) {
       this.pendingRegisterWaiters.delete(channel.id)
@@ -311,8 +313,7 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         carry: (frame) => {
-          const pieces = this.connectionEntries.get(connection)?.state.pieces
-          if (pieces) pieces.sender.carry(() => frame as Uint8Array<ArrayBuffer>)
+          if (sender) sender.carry(() => frame as Uint8Array<ArrayBuffer>)
           else this.send(connection, frame as Uint8Array<ArrayBuffer>)
         },
         bufferedAmount: () => this.bufferedAmount(connection),
@@ -597,17 +598,16 @@ class ChannelMux {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.state.pieces
-      assertProtocol(!pieces || pieces.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
+      const fits = pieces ? pieces.sender.heartbeat(frame.took, performance.now()) : true
+      assertProtocol(fits, 'PING took more than sent')
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
       this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      assertProtocol(
-        entry.state.pieces?.sender.acknowledged(frame.bytes, frame.heldMs, frame.spanUs),
-        'PIECES_ACK for nothing sent',
-      )
+      const known = entry.state.pieces?.sender.acknowledged(frame)
+      assertProtocol(known, 'PIECES_ACK for nothing sent')
       return null
     }
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
@@ -880,7 +880,7 @@ class ChannelMux {
   ): ChannelHandle | null {
     // Answered ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip
     // is the path's.
-    if (entry.probe !== undefined) conn.state.probed.push(entry)
+    if (entry.probe !== undefined) conn.state.probed.push({ ix: entry.ix, probe: entry.probe })
     const awaited = conn.state.awaited.get(entry.ix)
     if (awaited) {
       awaited.entry = entry
@@ -1091,7 +1091,7 @@ class ChannelMux {
   private answerProbes(connection: Wire, state: ConnectionState): void {
     const probed = state.probed
     state.probed = []
-    for (const { ix, probe } of probed) this.send(connection, encode.bdpPingAck(ix, probe!, Infinity, Infinity))
+    for (const { ix, probe } of probed) this.send(connection, encode.bdpPingAck(ix, probe, Infinity, Infinity))
   }
 
   /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't

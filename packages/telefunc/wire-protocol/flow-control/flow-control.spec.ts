@@ -69,9 +69,9 @@ function makeEmit(): Emit {
     msgWindowUrgent: [],
     bdpPingCalls: 0,
     probe: 0,
-    byteWindowUpdate(b, urgent) {
+    byteWindowUpdate(b, kind) {
       e.windowCalls.push(b)
-      e.windowUrgent.push(urgent)
+      e.windowUrgent.push(kind === 'urgent-flow-control')
     },
     msgWindowUpdate(c, urgent) {
       e.msgWindowCalls.push(c)

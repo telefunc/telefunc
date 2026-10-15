@@ -31,8 +31,8 @@ function open() {
     uplink.link,
   )
   prober.send(data(PROBE), 5_000)
-  prober.acknowledged(WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, 0, 0)
-  prober.acknowledged(PROBE, 0, 0)
+  prober.acknowledged({ bytes: WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, heldMs: 0, spanUs: 0 })
+  prober.acknowledged({ bytes: PROBE, heldMs: 0, spanUs: 0 })
   const budget = new SendBudget(
     () => {},
     () => 0,
@@ -47,7 +47,7 @@ function open() {
     budget.sender.flush() // as its turn ends
     sent += bytes
     clock.now += 10
-    expect(budget.acknowledged(sent, 0, spanMs * 1_000)).toBe(true)
+    expect(budget.acknowledged({ bytes: sent, heldMs: 0, spanUs: spanMs * 1_000 })).toBe(true)
     return budget.room
   }
   return { budget, uplink, clock, exchange }
@@ -62,7 +62,7 @@ test('data goes out until the allowance and what the server holds before it ackn
   budget.send(data(40_000), 5_000)
   budget.send(data(40_000), 5_000)
   expect(budget.room).toBeLessThan(0)
-  expect(budget.acknowledged(80_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged({ bytes: 80_000, heldMs: 0, spanUs: 0 })).toBe(true)
   expect(budget.room).toBeGreaterThan(0)
 })
 
@@ -70,7 +70,7 @@ test('the frames that go at once count against the room, and are not dated', () 
   const { budget } = open()
   budget.send(flowControl(WIRE_PIECES_ACK_BYTES + 1_000), 5_000)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES - 1_000)
-  expect(budget.acknowledged(WIRE_PIECES_ACK_BYTES + 1_000, 0, 0)).toBe(true)
+  expect(budget.acknowledged({ bytes: WIRE_PIECES_ACK_BYTES + 1_000, heldMs: 0, spanUs: 0 })).toBe(true)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
 })
 
@@ -117,7 +117,7 @@ test('a frame that goes at once waits behind none of the data the server acknowl
   budget.send(data(20_000), 5_000)
   expect(uplink.waitNow()).toBeGreaterThan(0)
   clock.now += 10
-  expect(budget.acknowledged(40_000, 0, 10_000)).toBe(true)
+  expect(budget.acknowledged({ bytes: 40_000, heldMs: 0, spanUs: 10_000 })).toBe(true)
   expect(uplink.waitNow()).toBe(0)
 })
 

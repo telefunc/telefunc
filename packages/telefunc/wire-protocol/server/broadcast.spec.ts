@@ -320,26 +320,13 @@ describe('keyed in-process broadcast', () => {
   it("takes the page's subscribe and unsubscribe frames", async () => {
     const broadcast = new ServerBroadcast<string>({ key: 'room:page-frames' })
     broadcast._registerChannel()
-    const sent: DecodedFrame[] = []
-    const replay = new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024)
-    broadcast._attachPeer(
-      new IndexedPeer(
-        {
-          send: (frame) => void sent.push(decode(frame)),
-          carry: (frame) => void sent.push(decode(frame)),
-          bufferedAmount: () => 0,
-          deliveredBeforeFrame: () => 0,
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-        },
-        7,
-        replay,
-      ),
-    )
+    const frames: Uint8Array[] = []
+    broadcast._attachPeer(peer((frame) => void frames.push(frame)))
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_SUB, index: 7, binary: false })
     await broadcast.publish('on')
     broadcast._dispatchFrame({ tag: TAG.BROADCAST_UNSUB, index: 7, binary: false })
     await broadcast.publish('off')
-    expect(sent.flatMap((frame) => (frame.tag === TAG.PUBLISH ? [frame.text] : []))).toEqual(['"on"'])
+    expect(frames.map(decode).flatMap((frame) => (frame.tag === TAG.PUBLISH ? [frame.text] : []))).toEqual(['"on"'])
   })
 
   // Edge case: a Broadcast can be created and have `publish` called on it BEFORE
@@ -356,21 +343,7 @@ describe('keyed in-process broadcast', () => {
     sender.publish({ text: 'hello' })
 
     const frames: Uint8Array[] = []
-    receiver._attachPeer(
-      new IndexedPeer(
-        {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry: (frame) => void frames.push(frame),
-          bufferedAmount: () => 0,
-          deliveredBeforeFrame: () => 0,
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-        },
-        7,
-        new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
-      ),
-    )
+    receiver._attachPeer(peer((frame) => void frames.push(frame)))
 
     // One publish made before attach → exactly one publish frame flushed on attach.
     expect(frames.filter((frame) => frame[0] === TAG.PUBLISH).length).toBe(1)
@@ -755,21 +728,7 @@ describe('Broadcast shield validation', () => {
     broadcast._registerChannel()
 
     const frames: Uint8Array[] = []
-    broadcast._attachPeer(
-      new IndexedPeer(
-        {
-          send: (frame) => {
-            frames.push(frame)
-          },
-          carry: (frame) => void frames.push(frame),
-          bufferedAmount: () => 0,
-          deliveredBeforeFrame: () => 0,
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-        },
-        7,
-        new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
-      ),
-    )
+    broadcast._attachPeer(peer((frame) => void frames.push(frame)))
 
     void broadcast._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
 
@@ -793,19 +752,7 @@ describe('Broadcast shield validation', () => {
     const seen: Array<{ text: string }> = []
     receiver.subscribe((m) => seen.push(m))
 
-    sender._attachPeer(
-      new IndexedPeer(
-        {
-          send: () => {},
-          carry: () => {},
-          bufferedAmount: () => 0,
-          deliveredBeforeFrame: () => 0,
-          sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
-        },
-        7,
-        new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
-      ),
-    )
+    sender._attachPeer(peer(() => {}))
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])

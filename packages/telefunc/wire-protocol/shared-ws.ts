@@ -45,6 +45,7 @@ export type {
   ReadyPayload,
   PingEntry,
   PongEntry,
+  PiecesAck,
   WirePublishInfo,
 }
 
@@ -370,6 +371,8 @@ type SequencedFrame =
   | ChannelDataFrame
   | Extract<ChannelCtrlFrame, { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.ABORT | typeof TAG.ERROR }>
 
+type PiecesAck = { bytes: number; heldMs: number; spanUs: number }
+
 type ConnCtrlFrame =
   | { tag: typeof TAG.PING; ended: PingEntry[]; took: number }
   | { tag: typeof TAG.PONG; ended: PongEntry[]; took: number }
@@ -381,7 +384,7 @@ type ConnCtrlFrame =
   | { tag: typeof TAG.PREPARE; payload: PreparePayload }
   | { tag: typeof TAG.READY; payload: ReadyPayload }
   | { tag: typeof TAG.PIECE; total: number; piece: Uint8Array }
-  | { tag: typeof TAG.PIECES_ACK; bytes: number; heldMs: number; spanUs: number }
+  | ({ tag: typeof TAG.PIECES_ACK } & PiecesAck)
   | { tag: typeof TAG.ANNOUNCE; bytes: number; floor: number }
 
 type DecodedFrame = ChannelFrame | ConnCtrlFrame

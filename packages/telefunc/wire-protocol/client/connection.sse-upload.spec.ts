@@ -140,7 +140,7 @@ test('a frame written into an upload POST the server refused before its open-ack
     if (frame.tag === TAG.TEXT) serverChannel._dispatchFrame(frame)
   })
   const channel = muxChannelStub(serverChannel.id)
-  const connection = ClientConnection.getOrCreate('http://upload.test/_telefunc', channel as never, {
+  const connection = ClientConnection.getOrCreate('http://upload.test/_telefunc', channel, {
     transports: ['sse'],
     fetchImpl: server.fetch,
     connectionKey: crypto.randomUUID(),
@@ -177,7 +177,7 @@ describe('an upload POST whose open-ack never comes', () => {
       return server.fetch(url, init)
     }) as typeof fetch
     const channel = muxChannelStub(serverChannel.id)
-    const connection = ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel as never, {
+    const connection = ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel, {
       transports: ['sse'],
       fetchImpl,
       connectionKey: crypto.randomUUID(),
@@ -392,7 +392,7 @@ test("a reconnect's wire gets its own connection id, so a POST still in flight f
       connIds.push(((await parseBlobBody(init.body)).metadata as { connId: string }).connId)
     return await new Promise<Response>(() => {})
   }) as unknown as typeof fetch
-  const connection = ClientConnection.getOrCreate('http://conn-id.test/_telefunc', muxChannelStub() as never, {
+  const connection = ClientConnection.getOrCreate('http://conn-id.test/_telefunc', muxChannelStub(), {
     transports: ['sse'],
     fetchImpl,
     connectionKey: crypto.randomUUID(),
@@ -533,7 +533,7 @@ test('a channel the page aborted before the server confirmed it gets none of wha
 test("an upload request the server ends after its open-ack, as Node's requestTimeout does, replaces the wire", async () => {
   vi.useFakeTimers()
   const server = fakeServer()
-  const connection = ClientConnection.getOrCreate('http://upload-cut.test/_telefunc', muxChannelStub() as never, {
+  const connection = ClientConnection.getOrCreate('http://upload-cut.test/_telefunc', muxChannelStub(), {
     transports: ['sse'],
     fetchImpl: server.fetch,
     connectionKey: crypto.randomUUID(),
@@ -555,7 +555,7 @@ test("a RECONCILED that comes on an SSE wire the page gave up doesn't settle the
   const server = fakeServer()
   const connectionKey = crypto.randomUUID()
   const register = () =>
-    ClientConnection.getOrCreate('http://abandoned-reconciled.test/_telefunc', muxChannelStub() as never, {
+    ClientConnection.getOrCreate('http://abandoned-reconciled.test/_telefunc', muxChannelStub(), {
       transports: ['sse'],
       fetchImpl: server.fetch,
       connectionKey,
@@ -598,7 +598,7 @@ describe('a slow uplink', () => {
     const channel = muxChannelStub()
     const connectionKey = crypto.randomUUID()
     const register = (channel: ReturnType<typeof muxChannelStub>) =>
-      ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel as never, {
+      ClientConnection.getOrCreate(`http://${name}.test/_telefunc`, channel, {
         transports: ['sse'],
         fetchImpl: server.fetch,
         connectionKey,
@@ -620,7 +620,7 @@ describe('a slow uplink', () => {
     })
     await vi.advanceTimersByTimeAsync(500)
     const queuedAt = Date.now()
-    connection.sendByteWindowUpdate(channel, 1 << 20, true)
+    connection.sendByteWindowUpdate(channel, 1 << 20, 'urgent-flow-control')
     await advanceUntil(() => arrivals.length === 1, 10_000)
     expect(arrivals).toHaveLength(1)
     expect(arrivals[0]! - queuedAt).toBeLessThan(SSE_POST_TARGET_MS + 1_000)

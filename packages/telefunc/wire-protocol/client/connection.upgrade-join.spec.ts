@@ -180,7 +180,7 @@ async function upgradeToBarrier(): Promise<Harness> {
     })
   }) as unknown as typeof fetch
 
-  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
     transports: ['sse', 'ws'],
     fetchImpl,
     connectionKey: crypto.randomUUID(),
@@ -245,7 +245,7 @@ async function stageBatchUpgrade() {
     })
   }) as unknown as typeof fetch
 
-  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
     transports: ['sse', 'ws'],
     fetchImpl,
     connectionKey: crypto.randomUUID(),
@@ -382,7 +382,7 @@ describe('an upgrade attempt behind an upload', () => {
 
     // An upload is out when the barrier is due, and stays out past the attempt's 10 s.
     upgrade.holdNextPost()
-    upgrade.connection.send(upgrade.channel as never, '"upload"')
+    upgrade.connection.send(upgrade.channel, '"upload"')
     await settle()
     upgrade.ready()
     await vi.advanceTimersByTimeAsync(12_000)
@@ -404,12 +404,12 @@ describe('flow control across an upgrade attempt', () => {
 
     // A batch POST is in flight when the upgrade commits, so the barrier waits for it with sends held.
     upgrade.holdNextPost()
-    upgrade.connection.send(upgrade.channel as never, '"in-flight"')
+    upgrade.connection.send(upgrade.channel, '"in-flight"')
     await settle()
     expect(upgrade.releasePost).not.toBeNull()
     upgrade.ready()
     await settle()
-    upgrade.connection.sendMsgWindowUpdate(upgrade.channel as never, 2_000, false)
+    upgrade.connection.sendMsgWindowUpdate(upgrade.channel, 2_000, false)
 
     // The attempt ends before the barrier could go: the probe dies, then the POST it waited for settles.
     upgrade.probe.close()

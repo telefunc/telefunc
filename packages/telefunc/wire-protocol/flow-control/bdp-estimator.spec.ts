@@ -262,6 +262,16 @@ describe('BdpEstimator', () => {
     expect(new Link().pathRtt).toBe(Infinity)
   })
 
+  // An attach's probe may wait behind other channels' frames, or on the channel's registration: a later ping that took
+  // less shows the path takes no more, and every later sample counts at it.
+  it("lowers the round trip an attach's probe measured to that of a later ping that took less", () => {
+    const link = new Link()
+    const bdp = new BdpEstimator()
+    attach(bdp, 200, link)
+    probeAfter(bdp, 20, EMPTY)
+    expect(link.pathRtt).toBe(20)
+  })
+
   // Every channel on a wire takes the path its round trip measures: one attach's probe measures it for all.
   it("counts samples at the round trip another channel's attach measured on its wire, and probes that wire no more", () => {
     const link = new Link()

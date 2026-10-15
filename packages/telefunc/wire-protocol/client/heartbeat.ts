@@ -21,7 +21,7 @@ class Heartbeat {
   ) {}
 
   /** `pingNow`: its first PING goes at once, rather than once its interval passed. */
-  start(pingNow = true): void {
+  start(pingNow: boolean): void {
     if (this.pingTimer) return
     if (pingNow) this.send()
     this.resetPong()

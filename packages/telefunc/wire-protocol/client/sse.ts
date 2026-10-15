@@ -575,10 +575,6 @@ class SseTransport implements UpgradeSource {
     this.heartbeat = null
   }
 
-  sendWait(): null {
-    return null
-  }
-
   drained(): Promise<void> {
     if (!this.hasWire() || (!this.flushing && this.outbox.length === 0)) return Promise.resolve()
     return new Promise((resolve) => this.drainCallbacks.push(resolve))

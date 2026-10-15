@@ -173,7 +173,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   }) as unknown as typeof fetch
 
   const channel = muxChannelStub()
-  const conn = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+  const conn = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
     transports: ['sse'],
     fetchImpl,
     connectionKey: crypto.randomUUID(),
@@ -184,7 +184,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   expect(wire).toBe(1)
 
   // 2) Send seq 1 — goes onto wire 1's streamRequest (delivered, or "lost" in flight).
-  conn.send(channel as never, stringify(1))
+  conn.send(channel, stringify(1))
   await vi.advanceTimersByTimeAsync(40)
   expect(upstreamSeqsByPost[1]).toContain(1) // client always emits seq 1 on wire 1
 
@@ -194,7 +194,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   await vi.advanceTimersByTimeAsync(20)
 
   // 4) Send seq 2 while reconnecting → buffered, picked up by the reconnect.
-  conn.send(channel as never, stringify(2))
+  conn.send(channel, stringify(2))
 
   // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) + settle.
   await vi.advanceTimersByTimeAsync(900)

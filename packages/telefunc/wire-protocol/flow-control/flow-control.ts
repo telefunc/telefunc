@@ -1,5 +1,5 @@
 export { FlowControl, replayWindow }
-export type { FlowControlEmit }
+export type { ByteWindowKind, FlowControlEmit }
 
 import { BdpEstimator } from './bdp-estimator.js'
 import type { Link, SendWait } from '../link.js'
@@ -16,13 +16,15 @@ import {
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
+/** `urgent-flow-control`: past half its window has been consumed since the last urgent limit, so the peer may be close to
+ *  blocking: a transport that batches should send it at once. `acknowledgement`: it only acknowledges what arrived, so
+ *  it may go in the next message its wire sends. */
+type ByteWindowKind = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
+
 /** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
  *  arrived (see `constants.ts`). */
 interface FlowControlEmit {
-  /** `urgent`: past half its window has been consumed since the last urgent limit, so the peer may be close to
-   *  blocking: a transport that batches should send it at once. `withNext`: it only acknowledges what arrived, so it
-   *  may go in the next message its wire sends. */
-  byteWindowUpdate(limit: number, urgent: boolean, withNext: boolean): void
+  byteWindowUpdate(limit: number, kind: ByteWindowKind): void
   msgWindowUpdate(limit: number, urgent: boolean): void
   bdpPing(probe: number): void
 }
@@ -95,7 +97,7 @@ class FlowControl {
    *  `yieldBytes`: the sender yields a macrotask once it sent that many bytes since it last yielded or waited. A page
    *  sets it: Chromium takes what a page queued on a WebSocket or an upload stream only between tasks, and woken by
    *  credit, a page would send all of it in one. `sendWait`: how long the frames that go at once wait behind the
-   *  channel's wire's own data, `null` where the runtime can't tell. */
+   *  channel's wire's own data where no attach's uplink tells it, `null` where the runtime can't tell. */
   constructor(
     private readonly _emit: FlowControlEmit,
     private readonly _backlog: () => number | undefined,
@@ -206,7 +208,12 @@ class FlowControl {
     this._arrived = true
     this._receivedBytes += bytes
     this._uplink?.creditArrived(bytes)
-    if (this._bdp.onReceive(bytes, this._sendWait())) this._emit.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, this._wireWait())) this._emit.bdpPing(this._bdp.probe)
+  }
+
+  /** How long the frames that go at once wait behind the wire's own data: the attached uplink's, else `sendWait`'s. */
+  private _wireWait(): SendWait | null {
+    return this._uplink ?? this._sendWait()
   }
 
   /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `link`, which the peer answers before
@@ -255,7 +262,7 @@ class FlowControl {
    *  queue (see `BdpEstimator`), AND our own self-utilisation is below threshold. On growth, the new limit goes out to
    *  the peer immediately. */
   onPingAck(probe: number, peerBacklog: number, peerPathRtt: number, deliveredBefore: (ms: number) => number): void {
-    const suggest = this._bdp.onPingAck(probe, peerBacklog, peerPathRtt, deliveredBefore, this._sendWait())
+    const suggest = this._bdp.onPingAck(probe, peerBacklog, peerPathRtt, deliveredBefore, this._wireWait())
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'
@@ -263,7 +270,7 @@ class FlowControl {
     if (this._selfUtilisation() > FC_SELF_UTIL_THRESHOLD) return
     if (wantBytes) {
       this._bdp.growBytes()
-      this._advertiseBytes()
+      this._advertiseBytes(false)
     }
     if (wantMsgs) {
       this._bdp.growMsgs()
@@ -325,10 +332,10 @@ class FlowControl {
     this._bdp.reset()
     if (!this._wired) {
       this._wired = true
-      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes) this._advertiseBytes()
+      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes) this._advertiseBytes(false)
       return
     }
-    this._advertiseBytes()
+    this._advertiseBytes(false)
     this._advertiseMessages()
   }
 
@@ -361,7 +368,7 @@ class FlowControl {
   useBatchTransportInitial(): void {
     const prev = this.byteWindow
     this._bdp.raiseByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
-    if (this.byteWindow > prev) this._advertiseBytes()
+    if (this.byteWindow > prev) this._advertiseBytes(false)
   }
 
   shutdown(): void {
@@ -396,12 +403,12 @@ class FlowControl {
       )
       return
     }
-    if (bytes) this._advertiseBytes()
+    if (bytes) this._advertiseBytes(false)
     if (messages) this._advertiseMessages()
   }
 
   /** `acknowledging`: it goes to acknowledge what arrived, not for a limit that was due. */
-  private _advertiseBytes(acknowledging = false): void {
+  private _advertiseBytes(acknowledging: boolean): void {
     if (!this._fitted) return
     this._advertisedBytes = this._consumedBytes
     const limit = this._consumedBytes + this.byteWindow
@@ -411,9 +418,12 @@ class FlowControl {
     }
     this._uncountedBytes = 0
     this._arrived = false
-    const urgent = (this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow
-    if (urgent) this._urgentBytes = this._consumedBytes
-    this._emit.byteWindowUpdate((this._consumedBytes + this.byteWindow) >>> 0, urgent, acknowledging && !urgent)
+    let kind: ByteWindowKind = acknowledging ? 'acknowledgement' : 'flow-control'
+    if ((this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow) {
+      this._urgentBytes = this._consumedBytes
+      kind = 'urgent-flow-control'
+    }
+    this._emit.byteWindowUpdate(limit >>> 0, kind)
   }
 
   private _advertiseMessages(): void {
