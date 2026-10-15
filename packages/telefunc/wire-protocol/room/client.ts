@@ -477,7 +477,8 @@ abstract class ClientParticipantBase extends ParticipantBase {
           this._coalescers.set(key, slot)
         }
         // Supersede any queued value; its waiters ride along and all resolve with the winning send.
-        const waiters = [...(slot.pending?.waiters ?? []), { resolve, reject }]
+        const waiters = slot.pending?.waiters ?? []
+        waiters.push({ resolve, reject })
         slot.pending = { data: ownMessage(data), retain: options?.retain, waiters }
         this._drainCoalesce(key)
       }),
