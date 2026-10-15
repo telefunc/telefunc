@@ -76,8 +76,8 @@ class ServerRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
 
-  /** Every authority check and member write carries this incarnation, rejecting stale handles after recreate. */
-  /** @internal */ readonly _incarnation: RoomIncarnation
+  /** @internal Every authority check and member write carries this incarnation, rejecting stale handles after recreate. */
+  readonly _incarnation: RoomIncarnation
   /** @internal What this process shares of the incarnation. */ readonly _replica: RoomReplica
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private _tail: TailHold | null = null
