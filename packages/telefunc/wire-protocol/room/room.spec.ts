@@ -1357,7 +1357,10 @@ describe('Room public behavior', () => {
     const textSlot = subsOf(observer)._semantic
     expect((await backend.readHead(observer.id))?.state).toBe('open')
     expect({ closed: observer.isClosed, onClose: onClose.mock.calls.length }).toEqual({ closed: false, onClose: 0 })
-    expect(textSlot).toMatchObject({ wanted: true, active: false })
+    expect({ wanted: textSlot.wanted, dropped: subsOf(observer)._dropped.has(textSlot) }).toEqual({
+      wanted: true,
+      dropped: true,
+    })
   })
   it('settles an in-flight join when its inbox recovery horizon exhausts', async () => {
     const room = (await Room.create('join-recovery-exhaustion')) as ServerRoom
@@ -6449,6 +6452,7 @@ function subsOf(room: Room | ServerRoom): {
   _everyTrack: Map<string, LaneSubscription>
   _everyMember: Map<string, LaneSubscription>
   _inbox: Map<string, LaneSubscription>
+  _dropped: Set<LaneSubscription>
   _demandLane: LaneSubscription
   memberOwned(member: string): void
   memberChanged(member: string): void

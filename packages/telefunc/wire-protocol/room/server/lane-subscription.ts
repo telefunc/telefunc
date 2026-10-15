@@ -21,10 +21,6 @@ class LaneSubscription {
     private readonly _onPending: (slot: LaneSubscription, pending: boolean) => void = ignorePending,
   ) {}
 
-  get active(): boolean {
-    return this._subscription !== null && this._subscription.state() !== 'closed'
-  }
-
   get established(): boolean {
     return this._subscription?.state() === 'ready'
   }
