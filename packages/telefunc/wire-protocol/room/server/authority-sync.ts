@@ -196,7 +196,7 @@ class AuthoritySync {
       const seq = await readRoomMetaSeq(host.id, config.inc)
       if (seq !== null && seq <= host.model.metaSeq) return true
     }
-    const stored = config && (await readRoomMeta(host.id, config))
+    const stored = config === null ? null : await readRoomMeta(host.id, config)
     if (stored === null) {
       host._closeFromAuthority()
       return false
