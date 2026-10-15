@@ -87,6 +87,39 @@ test("a listener that transfers its data's buffer leaves the frames behind that 
   expect(terminated).toBe(false)
 })
 
+test("on Node.js, a listener's data from a message of several frames has a buffer of its own frame, which it may transfer", async () => {
+  const hooks = getTelefuncChannelHooks()
+  let terminated = false
+  const peer = {
+    context: {},
+    websocket: {},
+    send() {},
+    terminate() {
+      terminated = true
+    },
+  } as unknown as Peer
+  const channel = new ServerChannel()
+  getChannelMux().registerChannel(channel)
+  await hooks.open!(peer)
+  const reconcile = encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] })
+  await hooks.message!(peer, { uint8Array: () => reconcile } as never)
+  const buffers: number[] = []
+  channel.listenBinary((data) => {
+    buffers.push(data.buffer.byteLength)
+    structuredClone(data.buffer, { transfer: [data.buffer] })
+  })
+  const binary = encode.binary(0, new Uint8Array(100), 1)
+  const frames = [binary, encode.window(0, 1 << 20, 0), encode.window(0, 1 << 20, 0)]
+  const encoded = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
+  // ws hands a Node.js server each message as a `Buffer`.
+  const message = Buffer.alloc(encoded.byteLength)
+  message.set(encoded)
+  await hooks.message!(peer, { uint8Array: () => message } as never)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(buffers).toEqual([binary.byteLength])
+  expect(terminated).toBe(false)
+})
+
 /** A channel attached to a page that reads nothing, or, `acknowledging`, only what tells the server what arrived,
  *  through a peer whose `websocket` is the runtime's socket. */
 async function attachToStalledPage(websocket: (written: () => number) => object, { acknowledging = false } = {}) {

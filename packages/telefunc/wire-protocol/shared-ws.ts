@@ -691,8 +691,8 @@ function isOneFrame(message: Uint8Array): boolean {
 }
 
 /** The frames a WebSocket message of several holds, in order. Each but the last is as long as its tag fixes, or the
- *  LENGTH ahead of it says, and is whole; the last is the rest. Each is a copy: a listener may keep or transfer its
- *  data's buffer. */
+ *  LENGTH ahead of it says, and is whole; the last is the rest. Each is a copy, a Node.js `Buffer`'s too (its `slice` is
+ *  a view): a listener may keep or transfer its data's buffer. */
 function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] {
   const frames: Uint8Array<ArrayBuffer>[] = []
   const end = message.byteLength
@@ -705,7 +705,7 @@ function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer
       at += HEADER
       assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at > bytes, 'LENGTH of no frame')
     } else if (bytes === 0 || end - at <= bytes) {
-      frames.push(message.slice(at))
+      frames.push(new Uint8Array(message.subarray(at)))
       return frames
     }
     const tag = message[at]
@@ -713,7 +713,7 @@ function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer
       tag !== TAG.PIECE && tag !== TAG.ANNOUNCE && tag !== TAG.LENGTH,
       'frame ahead of another it never is',
     )
-    frames.push(message.slice(at, at + bytes))
+    frames.push(new Uint8Array(message.subarray(at, at + bytes)))
     at += bytes
   }
 }
