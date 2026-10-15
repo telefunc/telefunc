@@ -16,7 +16,9 @@ async function nodeReadableToWebRequest(
   response?: Writable,
 ): Promise<{ request: Request; unwatch: () => void }> {
   const { Readable: ReadableClass } = await loadStreamNodeModule()
-  const body = ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>
+  // `new Request()` refuses a body for these methods.
+  const hasBody = !['GET', 'HEAD'].includes(method.toUpperCase())
+  const body = hasBody ? (ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>) : null
 
   const headerPairs = normalizeHeaders(headers)
 
@@ -28,6 +30,14 @@ async function nodeReadableToWebRequest(
   const abortController = new AbortController()
   readable.on('close', () => {
     if (readable.readableAborted && !abortController.signal.aborted) abortController.abort()
+  })
+  const request = new Request(url, {
+    method,
+    headers: headerPairs,
+    body,
+    signal: abortController.signal,
+    // @ts-expect-error duplex required for streaming request bodies
+    duplex: 'half',
   })
   // The readable closes as soon as its body is read: a later disconnect only shows on the response, or else on the
   // connection, watched until `unwatch()`. `req.socket`: an HTTP/1 connection, which keep-alive reuses, or an HTTP/2
@@ -43,14 +53,6 @@ async function nodeReadableToWebRequest(
     socket.once('close', abort)
     unwatch = () => socket.off('close', abort)
   }
-  const request = new Request(url, {
-    method,
-    headers: headerPairs,
-    body,
-    signal: abortController.signal,
-    // @ts-expect-error duplex required for streaming request bodies
-    duplex: 'half',
-  })
   return { request, unwatch }
 }
 
