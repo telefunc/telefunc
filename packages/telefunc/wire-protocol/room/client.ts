@@ -448,7 +448,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     rewinds: MetaRewinds,
     private readonly _requestParticipant: (request: ParticipantMutationRequest) => Promise<unknown>,
   ) {
-    super(participant.id, participant.meta, participant.selfDelivery, participant.identity, rewinds)
+    super(participant, rewinds)
     this._bufferLimit = participant.bufferLimit
   }
 

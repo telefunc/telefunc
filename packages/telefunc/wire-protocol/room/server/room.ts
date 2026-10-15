@@ -453,7 +453,7 @@ class ServerLocalParticipant extends ParticipantBase {
     selfDelivery: boolean,
     identity: string | null,
   ) {
-    super(id, meta, selfDelivery, identity, serverRoom._model.metaRewinds)
+    super({ id, meta, selfDelivery, identity }, serverRoom._model.metaRewinds)
     this._room = serverRoom
   }
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {

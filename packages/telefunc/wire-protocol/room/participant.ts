@@ -46,11 +46,14 @@ abstract class ParticipantBase implements LocalParticipant {
   /** When a client holds this participant, its inbox forwards there instead of to local listeners (see `RoomParticipantStubChannel`). */
   private _forwarder: InboxForwarder | null = null
   /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
-  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null, rewinds: MetaRewinds) {
-    this.id = id
-    this._meta = new MemberMeta(meta, 0, rewinds)
-    this.selfDelivery = selfDelivery
-    this.identity = identity
+  constructor(
+    participant: { id: string; meta: ParticipantMeta; selfDelivery: boolean; identity: string | null },
+    rewinds: MetaRewinds,
+  ) {
+    this.id = participant.id
+    this._meta = new MemberMeta(participant.meta, 0, rewinds)
+    this.selfDelivery = participant.selfDelivery
+    this.identity = participant.identity
   }
   /** @internal Route this participant's inbox to a remote holder instead of local listeners. */
   _setForwarder(forwarder: InboxForwarder): void {
