@@ -158,7 +158,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         if (request.headers.get('upgrade') === 'websocket') {
           return crosswsAdapter.handleDurableUpgrade(this, request)
         }
-        const context = getContext ? await getContext(request, this.env as Cloudflare.Env) : undefined
+        const context = getContext ? await getContext(request, this.env) : undefined
         return toResponse(await serveTelefunc(context ? { request, context } : { request }))
       })
     }
