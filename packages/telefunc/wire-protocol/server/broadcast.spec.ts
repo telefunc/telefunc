@@ -541,6 +541,23 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(seen).toEqual(Array.from({ length: 1025 }, (_, i) => i + 1))
   })
 
+  it('delivers the bytes a binary publish was given, though its caller reuses or transfers the buffer while it waits', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    const seen: Uint8Array[] = []
+    adapter.subscribeBinary('burst-binary', (data) => void seen.push(data))
+    const first = new Uint8Array([0])
+    const results = Array.from({ length: 1024 }, () => adapter.publishBinary('burst-binary', first))
+    const reused = new Uint8Array([1])
+    results.push(adapter.publishBinary('burst-binary', reused))
+    reused[0] = 2
+    const transferred = new Uint8Array([3])
+    results.push(adapter.publishBinary('burst-binary', transferred))
+    structuredClone(transferred.buffer, { transfer: [transferred.buffer] })
+    await Promise.all(results)
+    expect(seen[0]).toBe(first)
+    expect(seen.slice(1024).map((data) => data[0])).toEqual([1, 3])
+  })
+
   it('resolves a static publish to a receipt with its key, as a subscriber gets it', async () => {
     const key = `room:receipt-${crypto.randomUUID()}`
     const text = await Broadcast.publish(key, 'hi')

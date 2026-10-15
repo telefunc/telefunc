@@ -165,10 +165,12 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     // A publish made from a listener reaches every subscriber after the message it answers, as through a transport, and
     // one past the burst after the event loop's turn.
     if (this.delivering || this.queued.length > 0 || this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST) {
+      // The caller may reuse or transfer its buffer once the publish returns.
+      const queuedData = data instanceof Uint8Array ? (new Uint8Array(data) as T) : data
       return new Promise((resolve, reject) => {
         this.queued.push(() => {
           try {
-            resolve(this._deliverInMemory(subs, key, data, seq, timestamp))
+            resolve(this._deliverInMemory(subs, key, queuedData, seq, timestamp))
           } catch (err) {
             reject(err)
           }
