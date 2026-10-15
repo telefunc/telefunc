@@ -536,7 +536,7 @@ class RoomModel {
     }
     if (!narrate) {
       this._rosterKnown = true
-      this._applyPreRosterMeta()
+      this._preRosterMeta.clear()
       this._bumpState()
     }
     for (const id of [...this._members.keys()]) {
@@ -569,13 +569,6 @@ class RoomModel {
     }
     if (entry.meta.apply(update) === 'applied') this._onMemberMeta(member.id, update)
     return false
-  }
-  private _applyPreRosterMeta(): void {
-    for (const [id, updates] of this._preRosterMeta) {
-      const entry = this._members.get(id)
-      if (entry) for (const update of updates) entry.meta.apply(update)
-    }
-    this._preRosterMeta.clear()
   }
   private _createEntry(entrySeed: MemberSnapshot): MemberEntry {
     const entry = newEntry(entrySeed, this.metaRewinds)
