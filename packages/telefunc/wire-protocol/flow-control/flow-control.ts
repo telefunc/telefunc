@@ -13,7 +13,7 @@ import {
   FC_SELF_TIME_WINDOW_MS,
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
-import { MESSAGE_FRAME_OVERHEAD_MAX } from '../shared-ws.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
@@ -35,7 +35,7 @@ interface FlowControlEmit {
  *  ack answer up to half sent as the credit ran out, fit it. At least a byte, so credit lets a message through each
  *  round trip. */
 function replayWindow(text: number, binary: number): number {
-  return Math.max(1, Math.floor(Math.min(text, binary) / 2) - MESSAGE_FRAME_OVERHEAD_MAX)
+  return Math.max(1, Math.floor(Math.min(text, binary) / 2) - MESSAGE_FRAME_OVERHEAD_MAX_BYTES)
 }
 
 /** A channel's byte and message credit both ways, as cumulative limits, as QUIC's MAX_DATA. */
