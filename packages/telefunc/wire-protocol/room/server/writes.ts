@@ -16,6 +16,7 @@ import {
   roomClosedError,
   roomFailureError,
   toRoomFailure,
+  ROOM_BUG_MESSAGE,
 } from '../errors.js'
 import { ownMetaArgument, senderOf } from '../model.js'
 import type { AcceptedMeta, DmReply, RoomCtrlEnvelope, RoomDmEnvelope, SenderStamp } from '../protocol.js'
@@ -197,7 +198,7 @@ class RoomWrites {
     try {
       reply = (await takeDmReply(this._host.id, this._host._incarnation.inc, from, ackId)) ?? DM_FAILURE.timeout
     } catch (err) {
-      reply = toRoomFailure(err, reportRoomError)
+      reply = toRoomFailure(err, reportRoomError, ROOM_BUG_MESSAGE)
     }
     this._host._replica.acks.settle(ackId, reply)
   }

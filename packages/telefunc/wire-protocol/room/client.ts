@@ -32,6 +32,7 @@ import {
 } from './protocol.js'
 import { RoomModel, RoomState, RoomStateView, type MembershipEvent } from './state.js'
 import { ROOM_TRACK_WANTS_MAX } from './constants.js'
+import { CLIENT_ROOM_BUG_MESSAGE } from './errors.js'
 import { ParticipantBase } from './participant.js'
 import type { MetaRewinds } from './member-meta.js'
 import type {
@@ -539,6 +540,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   protected _reportError(err: unknown): void {
     reportClientCallbackError(err)
   }
+  protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
   protected _inboxBufferLimit(): number {
     return this._bufferLimit

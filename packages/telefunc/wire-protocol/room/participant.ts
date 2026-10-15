@@ -93,6 +93,8 @@ abstract class ParticipantBase implements LocalParticipant {
   abstract leave(): Promise<void>
   /** A user callback threw. Each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
+  /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
+  protected abstract readonly _bugMessage: string
   /** The bytes of DMs held before the first `listen()`, past which the oldest is dropped. */
   protected abstract _inboxBufferLimit(): number
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
@@ -160,7 +162,7 @@ abstract class ParticipantBase implements LocalParticipant {
       try {
         result = await cb(msg.data, sender)
       } catch (err) {
-        return toRoomFailure(err, (e) => this._reportError(e))
+        return toRoomFailure(err, (e) => this._reportError(e), this._bugMessage)
       }
     }
     return { ok: true, result }

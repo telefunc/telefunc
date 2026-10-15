@@ -18,7 +18,7 @@ import {
   ROOM_MEMBER_NAMED_LANES_MAX,
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, encodeBinaryFrame } from '../binary.js'
-import { RoomError, isRoomError, roomAckError, toRoomFailure } from '../errors.js'
+import { ROOM_BUG_MESSAGE, RoomError, isRoomError, roomAckError, toRoomFailure } from '../errors.js'
 import { type InboxMessage } from '../protocol.js'
 import { HOLDS_CELL_KEY, MEMBER_CELL_PREFIX, SESSION_CELL_PREFIX, memberCellKey } from './cells.js'
 import type { Sender } from '../types.js'
@@ -3235,7 +3235,7 @@ describe('Room public behavior', () => {
     const report = vi.fn()
     const error = new ShieldValidationError('data.text should be a string')
     expect(roomAckError(error, report)).toEqual({ text: error.message, status: ACK_STATUS.SHIELD_ERROR })
-    expect(toRoomFailure(error, report)).toEqual({ ok: false, err: error.message })
+    expect(toRoomFailure(error, report, ROOM_BUG_MESSAGE)).toEqual({ ok: false, err: error.message })
     expect(report).not.toHaveBeenCalled()
   })
   it('applies before guards and after hooks around authoritative joins, publishes, and sends', async () => {

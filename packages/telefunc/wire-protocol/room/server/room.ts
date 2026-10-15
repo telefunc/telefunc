@@ -14,7 +14,7 @@ import {
   type BinaryWantChange,
   type TrackKey,
 } from '../binary.js'
-import { participantLeftError, roomClosedError } from '../errors.js'
+import { participantLeftError, roomClosedError, ROOM_BUG_MESSAGE } from '../errors.js'
 import {
   assertKnownOptions,
   mergeAttributes,
@@ -549,6 +549,7 @@ class ServerLocalParticipant extends ParticipantBase {
   protected _reportError(err: unknown): void {
     reportServerChannelError(err)
   }
+  protected readonly _bugMessage = ROOM_BUG_MESSAGE
   protected _inboxBufferLimit(): number {
     return getServerConfig().channel.bufferLimit
   }
