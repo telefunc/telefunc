@@ -53,12 +53,12 @@ type HttpRequest =
  */
 async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, arguments.length)
-  const { unwatch, ...httpRequestResolved } = await resolveHttpRequest(httpRequest)
+  const httpRequestResolved = await resolveHttpRequest(httpRequest)
   try {
     return await runTelefunc(httpRequestResolved)
   } finally {
     // Past this, `httpResponse.pipe(res)` ends a streaming response's body once the client is gone.
-    unwatch?.()
+    httpRequestResolved.unwatch?.()
   }
 }
 
