@@ -44,6 +44,20 @@ test('a message whose frame the server would refuse throws at once, ack or not, 
   expect(queued).toMatchObject([{ tag: TAG.BINARY, seq: 1 }])
 })
 
+test('a text send or a publish whose frame the server would refuse throws at once, and its channel stays open', () => {
+  const channel = stalledChannel() as unknown as ClientChannel<string, string>
+  const broadcast = stalledBroadcast()
+  const tooLarge = 'x'.repeat(64 * 1024 * 1024)
+  expect(() => channel.send(tooLarge)).toThrow('the server accepts 67108864 at most')
+  expect(() => channel.send(tooLarge, { ack: true })).toThrow('the server accepts 67108864 at most')
+  expect(() => broadcast.publish(tooLarge)).toThrow('the server accepts 67108864 at most')
+  expect(() => broadcast.publishBinary(new Uint8Array(64 * 1024 * 1024))).toThrow('the server accepts 67108864 at most')
+  void channel.send('x')
+  const queued = (channel as any)._connection.sendBuffer.map(({ frame }: { frame: Uint8Array }) => decode(frame))
+  expect(queued).toMatchObject([{ tag: TAG.TEXT, seq: 1 }])
+  expect([channel.isClosed, broadcast.isClosed]).toEqual([false, false])
+})
+
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = stalledChannel()
   const seen: string[] = []
