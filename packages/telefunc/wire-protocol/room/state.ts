@@ -372,9 +372,10 @@ class RoomModel {
   /** A leave a server relayed, which it does once for each member it knew: before the first roster, a visible member
    *  this model has not seen is one its seed count holds. */
   applyRelayedLeave(id: string, cause: LeaveCause, hidden: boolean): void {
-    if (this._rosterKnown || hidden || this.closed || this._members.has(id)) return this.applyLeave(id, cause)
-    this._seedCount = Math.max(0, this._seedCount - 1)
-    this._bumpState()
+    if (!this._rosterKnown && !hidden && !this.closed && !this._members.has(id)) {
+      this._seedCount = Math.max(0, this._seedCount - 1)
+      this._bumpState()
+    }
     this.applyLeave(id, cause)
   }
   applyLeave(id: string, cause: LeaveCause): void {
