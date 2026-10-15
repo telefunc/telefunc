@@ -110,7 +110,7 @@ class PieceSender {
     private readonly room = UNBOUNDED,
   ) {}
 
-  /** The bytes handed to the socket, and of the frames sent, those it holds. */
+  /** The bytes of the messages for the socket, and of the frames sent, those it holds. */
   get sentBytes(): number {
     return this.transmittedBytes + this.heldBytes
   }
