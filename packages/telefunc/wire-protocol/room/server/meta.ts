@@ -15,6 +15,7 @@ export {
 }
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { getRoomBackend } from '../../backend/install.js'
 import { CELL_PAGE_SIZE, type CellMutation, type CellsRead, type CxResult } from '../../backend/room/contract.js'
 import { decodeCellCounter } from '../../backend/room/semantics.js'
@@ -342,12 +343,7 @@ async function readMembersMetaCells(room: RoomIncarnation, id?: string): Promise
   const slice = new Slice()
   for await (const page of getRoomBackend().readCellPages(room.id, room.inc, prefix)) {
     if ('staleInc' in page) throw roomClosedError(room.id)
-    for (const cell of page.cells) {
-      const id = memberIdOfMetaCellKey(cell[0])
-      const cells = byMember.get(id)
-      if (cells === undefined) byMember.set(id, [cell])
-      else cells.push(cell)
-    }
+    for (const cell of page.cells) getOrCreate(byMember, memberIdOfMetaCellKey(cell[0]), () => []).push(cell)
     if (slice.over) await slice.next()
   }
   return byMember

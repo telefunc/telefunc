@@ -156,19 +156,11 @@ function readCellsOf(gen: Generation, keys: Iterable<string>, now: number): Cell
 function setCell(gen: Generation, key: string, bytes: Uint8Array | null, version: string): void {
   if (bytes === null) {
     if (!gen.cells.delete(key)) return
-    for (const prefix of separatorPrefixes(key)) {
-      const keys = gen.cellsByPrefix.get(prefix)!
-      keys.delete(key)
-      if (keys.size === 0) gen.cellsByPrefix.delete(prefix)
-    }
+    for (const prefix of separatorPrefixes(key)) unindex(gen.cellsByPrefix, prefix, key)
     return
   }
   if (!gen.cells.has(key)) {
-    for (const prefix of separatorPrefixes(key)) {
-      const keys = gen.cellsByPrefix.get(prefix)
-      if (keys === undefined) gen.cellsByPrefix.set(prefix, new Set([key]))
-      else keys.add(key)
-    }
+    for (const prefix of separatorPrefixes(key)) getOrCreate(gen.cellsByPrefix, prefix, () => new Set()).add(key)
   }
   gen.cells.set(key, { bytes: copyBytes(bytes), version })
 }
