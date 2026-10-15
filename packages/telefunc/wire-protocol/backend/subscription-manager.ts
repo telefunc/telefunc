@@ -1,5 +1,5 @@
 export { SubscriptionManager, reportSubscriptionEnd }
-export type { HoldWeight }
+export type { HoldWeight, SendHold }
 
 import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
