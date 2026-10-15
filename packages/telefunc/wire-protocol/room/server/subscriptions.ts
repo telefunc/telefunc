@@ -353,60 +353,63 @@ class RoomSubscriptions {
         if (this._gone.size > 0) {
           await slice.next()
           await this._replanEach(slice, drain(this._gone), (holder) => this._indexHolder(holder, true))
-        } else if (!isEmpty(plan)) {
-          this._queued = newBinaryPlan()
-          if (this._syncByMember()) plan.all = true
-          const host = this._host
-          const members = chain(
-            plan.members,
-            plan.pairs.keys(),
-            plan.all ? host.model.memberIds() : [],
-            // Lanes of members no longer present close too.
-            plan.all ? this._binaryTracks.keys() : [],
-            plan.all ? this._everyTrack.keys() : [],
-            plan.all ? this._excepted : [],
-          )
-          const tracks = () =>
-            plan.all
-              ? chain(this._everyMember.keys(), this._byMemberTracks, this._wants.everyMemberTracks())
-              : plan.tracks
-          // Every lane opens before any lane it replaces is released.
-          await this._replanEach(
-            slice,
-            tracks(),
-            once((track) => this._keepEveryMember(track)),
-          )
-          await this._replanEach(
-            slice,
-            members,
-            once((member) => {
-              this._syncExcept(member)
-              if (!this._unconcerned(member)) return this._planMember(member, plan)
-              this._counts.delete(member)
-            }),
-          )
-          await this._replanEach(
-            slice,
-            tracks(),
-            once((track) => this._releaseEveryMember(track)),
-          )
-          if (plan.all) {
-            await this._replanEach(
-              slice,
-              chain(this._inbox.keys(), host._ownedMembers()),
-              once((member) => {
-                if (!host.model.closed && host._ownsMember(member)) this._openInbox(member)
-                else this._closeInbox(member)
-              }),
-            )
-          }
-        } else if (this._demand.changed) {
+        } else if (!isEmpty(plan)) await this._planRound(slice, plan)
+        else if (this._demand.changed) {
           while (!this._demand.tellUntil(slice.end)) await slice.next()
         } else return
       }
     } finally {
       this._planning = null
       this._syncHeartbeat()
+    }
+  }
+
+  /** One round of what was queued: the every-member lanes kept, each member planned, the every-member lanes released,
+   *  and with `all`, the inboxes. */
+  private async _planRound(slice: Slice, plan: BinaryPlan): Promise<void> {
+    this._queued = newBinaryPlan()
+    if (this._syncByMember()) plan.all = true
+    const host = this._host
+    const members = chain(
+      plan.members,
+      plan.pairs.keys(),
+      plan.all ? host.model.memberIds() : [],
+      // Lanes of members no longer present close too.
+      plan.all ? this._binaryTracks.keys() : [],
+      plan.all ? this._everyTrack.keys() : [],
+      plan.all ? this._excepted : [],
+    )
+    const tracks = () =>
+      plan.all ? chain(this._everyMember.keys(), this._byMemberTracks, this._wants.everyMemberTracks()) : plan.tracks
+    // Every lane opens before any lane it replaces is released.
+    await this._replanEach(
+      slice,
+      tracks(),
+      once((track) => this._keepEveryMember(track)),
+    )
+    await this._replanEach(
+      slice,
+      members,
+      once((member) => {
+        this._syncExcept(member)
+        if (!this._unconcerned(member)) return this._planMember(member, plan)
+        this._counts.delete(member)
+      }),
+    )
+    await this._replanEach(
+      slice,
+      tracks(),
+      once((track) => this._releaseEveryMember(track)),
+    )
+    if (plan.all) {
+      await this._replanEach(
+        slice,
+        chain(this._inbox.keys(), host._ownedMembers()),
+        once((member) => {
+          if (!host.model.closed && host._ownsMember(member)) this._openInbox(member)
+          else this._closeInbox(member)
+        }),
+      )
     }
   }
 
