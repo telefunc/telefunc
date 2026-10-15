@@ -103,11 +103,6 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     return onMessage(peer, message)
   }
   const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
-  function requireBinding<T>(env: Cloudflare.Env, name: string, kind: string): T {
-    const binding = (env as Record<string, T | undefined>)[name]
-    assertUsage(binding, `Missing Cloudflare ${kind} binding "${name}". Add it to your wrangler.jsonc.`)
-    return binding
-  }
   function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
     const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')
     return jurisdiction ? namespace.jurisdiction(jurisdiction) : namespace
@@ -245,4 +240,10 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     },
     TelefuncDurableObject,
   }
+}
+
+function requireBinding<T>(env: Cloudflare.Env, name: string, kind: string): T {
+  const binding = (env as Record<string, T | undefined>)[name]
+  assertUsage(binding, `Missing Cloudflare ${kind} binding "${name}". Add it to your wrangler.jsonc.`)
+  return binding
 }
