@@ -69,6 +69,19 @@ function heldMemberOf(
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
 /** A join awaiting its ack: the member the server admitted, once `joined` names it, and the events naming that member. */
 type PendingJoin = { id: string | null; held: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> }
+/** The rosters streaming in or applying, from the first part of the first until the last applies. */
+type RosterStream = {
+  /** The roster streaming in: its members so far and the part due next. */
+  parts: { members: MemberSnapshot[]; next: number } | null
+  /** The members of the rosters streaming in or applying, by id, which an unstamped message may name. */
+  pending: Map<string, MemberSnapshot>
+  /** The membership events since the stream's first part. Each roster replays them all: those from before its own
+   *  first part change nothing it lists. */
+  events: readonly MembershipEvent[]
+  /** The rosters received and not yet applied, applied in turn. */
+  applying: number
+  applied: Promise<void>
+}
 type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
 
 /** A server room through one Broadcast stub: its frames carry events and data, its acked messages requests. */
@@ -89,16 +102,7 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly _declaredText = new Set<string>()
   /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
   private readonly _roster = createDeferred()
-  /** The roster streaming in: its members so far and the part due next. */
-  private _rosterIn: { members: MemberSnapshot[]; next: number } | null = null
-  /** The members of the rosters streaming in or applying, by id, which an unstamped message may name. */
-  private readonly _rosterPending = new Map<string, MemberSnapshot>()
-  /** The rosters received and not yet applied, applied in turn. */
-  private _rostersApplying = 0
-  private _rosterApplied: Promise<void> = Promise.resolve()
-  /** The membership events since the first part of a roster streaming in or applying. Each roster replays them all:
-   *  those from before its own first part change nothing it lists. */
-  private _rosterEvents: readonly MembershipEvent[] | null = null
+  private _rosterStream: RosterStream | null = null
   /** @internal */
   readonly _bufferLimit: number
 
@@ -113,7 +117,7 @@ class ClientRoom extends RoomStateView implements Room {
       metaSeq: snapshot.metaSeq,
       closed: snapshot.closed,
       onLeave: (id, cause) => this._onLeave(id, cause),
-      pendingMember: (id) => this._rosterPending.get(id),
+      pendingMember: (id) => this._rosterStream?.pending.get(id),
     })
     this._state = new RoomState({
       owner: this,
@@ -316,30 +320,38 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private _onRosterPart({ members, part, more }: Extract<RoomRosterEvent, { __r: 'roster' }>): void {
-    if (part === 0) this._rosterIn = { members: [], next: 0 }
-    const into = this._rosterIn
+    if (part === 0) {
+      this._rosterStream ??= {
+        parts: null,
+        pending: new Map(),
+        events: this._model.recordMembership(),
+        applying: 0,
+        applied: Promise.resolve(),
+      }
+      this._rosterStream.parts = { members: [], next: 0 }
+    }
+    const stream = this._rosterStream
+    const parts = stream?.parts ?? null
     // A part lost while offline: the next attach sends the whole roster again.
-    if (into === null || part !== into.next) {
-      this._rosterIn = null
+    if (stream === null || parts === null || part !== parts.next) {
+      if (stream !== null) stream.parts = null
       return this._stopRosterEvents()
     }
-    this._rosterEvents ??= this._model.recordMembership()
     for (const member of members) {
-      into.members.push(member)
-      this._rosterPending.set(member.id, member)
+      parts.members.push(member)
+      stream.pending.set(member.id, member)
     }
-    into.next++
+    parts.next++
     if (more) return
-    this._rosterIn = null
-    const events = this._rosterEvents
-    const apply = () => this._applyRoster(into.members, events)
-    this._rostersApplying++
-    this._rosterApplied = this._rostersApplying === 1 ? apply() : this._rosterApplied.then(apply)
+    stream.parts = null
+    const apply = () => this._applyRoster(stream, parts.members)
+    stream.applying++
+    stream.applied = stream.applying === 1 ? apply() : stream.applied.then(apply)
   }
 
-  private async _applyRoster(members: MemberSnapshot[], events: readonly MembershipEvent[]): Promise<void> {
+  private async _applyRoster(stream: RosterStream, members: MemberSnapshot[]): Promise<void> {
     try {
-      await this._model.reconcileRoster({ members, departing: new Set() }, events)
+      await this._model.reconcileRoster({ members, departing: new Set() }, stream.events)
       // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
       for (const [id, local] of this._localParticipants) {
         const accepted = this._model.acceptedMeta(id)
@@ -347,15 +359,15 @@ class ClientRoom extends RoomStateView implements Room {
       }
       this._roster.resolve()
     } finally {
-      this._rostersApplying--
+      stream.applying--
       this._stopRosterEvents()
     }
   }
 
   private _stopRosterEvents(): void {
-    if (this._rosterIn !== null || this._rostersApplying > 0 || this._rosterEvents === null) return
-    this._rosterEvents = null
-    this._rosterPending.clear()
+    const stream = this._rosterStream
+    if (stream === null || stream.parts !== null || stream.applying > 0) return
+    this._rosterStream = null
     this._model.stopRecordingMembership()
   }
 
