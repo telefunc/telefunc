@@ -593,7 +593,7 @@ function createFakeStub(options?: {
   const text: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const binary: Array<(data: Uint8Array, info: ChannelPublishInfo) => void> = []
   const stub = {
-    _wire: { text: false, binary: false },
+    _subscribed: { text: false, binary: false },
     _isClosed: false,
     _connection: {
       sendBroadcastSubscribe: () => options?.wireDeclarations?.push(true),
@@ -604,7 +604,7 @@ function createFakeStub(options?: {
       listeners.push(callback)
       return () => listeners.splice(listeners.indexOf(callback), 1)
     },
-    _setWireSubscribed: ClientBroadcast.prototype._setWireSubscribed,
+    _setSubscribed: ClientBroadcast.prototype._setSubscribed,
     send: options?.send ?? (async () => undefined),
     _publishUnreported: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),
     _publishBinaryUnreported: async () => ({ key: 'fake', seq: 1, timestamp: 1 }),

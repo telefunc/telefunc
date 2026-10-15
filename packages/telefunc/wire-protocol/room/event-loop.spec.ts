@@ -651,14 +651,14 @@ type Peer = ReturnType<typeof attachPeer>
 function fakeClient(roomId: string) {
   const text: Array<(data: unknown, info: ChannelPublishInfo) => void> = []
   const stub = {
-    _wire: { text: false, binary: false },
+    _subscribed: { text: false, binary: false },
     _isClosed: false,
     _connection: { sendBroadcastSubscribe: () => {}, sendBroadcastUnsubscribe: () => {} },
     _subscribeLocal: (kind: 'text' | 'binary', callback: never) => {
       if (kind === 'text') text.push(callback)
       return () => {}
     },
-    _setWireSubscribed: ClientBroadcast.prototype._setWireSubscribed,
+    _setSubscribed: ClientBroadcast.prototype._setSubscribed,
     send: async () => undefined,
     onClose: () => {},
   } as unknown as ClientBroadcast

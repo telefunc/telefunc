@@ -57,35 +57,43 @@ test('the server hands a socket it closed nothing more, though it answered a fra
   expect(sentAfterClose).toBe(0)
 })
 
-test("a listener that transfers its data's buffer leaves the frames behind that data in its message intact", async () => {
-  const hooks = getTelefuncChannelHooks()
-  let terminated = false
-  const peer = {
-    context: {},
-    websocket: {},
-    send() {},
-    terminate() {
-      terminated = true
-    },
-  } as unknown as Peer
-  const channel = new ServerChannel()
-  getChannelMux().registerChannel(channel)
-  await hooks.open!(peer)
-  const reconcile = encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] })
-  await hooks.message!(peer, { uint8Array: () => reconcile } as never)
-  const got: number[] = []
-  channel.listenBinary((data) => {
-    got.push(data.byteLength)
-    structuredClone(data.buffer, { transfer: [data.buffer] })
-  })
-  const frames = [encode.binary(0, new Uint8Array(100), 1), encode.window(0, 1 << 20, 0)]
-  const message = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
+test.each([
   // Deno, Bun and workerd hand the server each message in an ArrayBuffer of its own.
-  await hooks.message!(peer, { uint8Array: () => message } as never)
-  await new Promise((resolve) => setTimeout(resolve, 0))
-  expect(got).toEqual([100])
-  expect(terminated).toBe(false)
-})
+  ['Deno, Bun and workerd', (message: Uint8Array<ArrayBuffer>) => message],
+  // ws hands a Node.js server each message as a `Buffer`, whose `slice` is a view.
+  ['Node.js', (message: Uint8Array<ArrayBuffer>) => Buffer.from(message)],
+] as const)(
+  "on %s, a listener's data from a message of several frames has a buffer of its own frame, which it may transfer",
+  async (_host, received) => {
+    const hooks = getTelefuncChannelHooks()
+    let terminated = false
+    const peer = {
+      context: {},
+      websocket: {},
+      send() {},
+      terminate() {
+        terminated = true
+      },
+    } as unknown as Peer
+    const channel = new ServerChannel()
+    getChannelMux().registerChannel(channel)
+    await hooks.open!(peer)
+    const reconcile = encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] })
+    await hooks.message!(peer, { uint8Array: () => reconcile } as never)
+    const buffers: number[] = []
+    channel.listenBinary((data) => {
+      buffers.push(data.buffer.byteLength)
+      structuredClone(data.buffer, { transfer: [data.buffer] })
+    })
+    const binary = encode.binary(0, new Uint8Array(100), 1)
+    const frames = [binary, encode.window(0, 1 << 20, 0)]
+    const message = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
+    await hooks.message!(peer, { uint8Array: () => received(message) } as never)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(buffers).toEqual([binary.byteLength])
+    expect(terminated).toBe(false)
+  },
+)
 
 /** A channel attached to a page that reads nothing, or, `acknowledging`, only what tells the server what arrived,
  *  through a peer whose `websocket` is the runtime's socket. */

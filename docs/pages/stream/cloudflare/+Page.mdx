@@ -102,7 +102,7 @@ Each region runs its own Durable Objects so that channel state stays close to us
 
 Every telefunction call and channel message from a client must reach the **same Durable Object** — otherwise that client's channel state would be unavailable.
 
-Before its first request, the client names a session token, and every request carries it as the `session` query parameter. The token picks one Durable Object of the nearest region, and KV remembers that region for it (TTL: 24 hours, renewed while the client keeps using it). So a client's requests reach the same Durable Object, even after the KV entry lapses while the client stays in that region.
+The client sends a session token with every request, as the `session` query parameter. Telefunc routes all requests with the same token to the same Durable Object, in the region nearest to the client.
 
 <Warning>
 
@@ -197,7 +197,7 @@ A Durable Object registers with the authority on its first subscription to a key
 | Buffering | The server buffers messages while the client is disconnected: up to `config.channel.bufferLimit` for text (default: 512 KB) and up to `config.channel.bufferLimitBinary` for binary (default: 2 MB). Binary frames have a separate budget and can never evict text. |
 | Replay | Both sides keep a replay buffer. On reconnect, missing messages are replayed and duplicates are ignored. |
 | Acknowledgements | `send(data, { ack: true })` resolves when the other side processes the message. |
-| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, or a reconnect needs messages a replay buffer no longer holds, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
+| Loss | If the disconnection lasts longer than `config.channel.reconnectTimeout`, or one side missed more messages than the replay buffer holds, the channel closes with <Link href="/channel#errors">`NetworkError`</Link>. |
 
 ### Broadcast messages (`publish` / `subscribe`)
 

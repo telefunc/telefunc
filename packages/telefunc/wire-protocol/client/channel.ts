@@ -661,7 +661,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
   private readonly _subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
   private readonly _onListenerError = (error: unknown) => this._handleCallbackError(error)
-  private readonly _wire: BroadcastSubscriptions = { text: false, binary: false }
+  private readonly _subscribed: BroadcastSubscriptions = { text: false, binary: false }
 
   constructor(...args: ConstructorParameters<typeof ClientChannel>) {
     super(...args)
@@ -673,15 +673,15 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return hasProp(value, CLIENT_BROADCAST_BRAND)
   }
 
-  /** @internal Register a local listener without changing wire intent. */
+  /** @internal Register a local listener without changing what it asks the server for. */
   _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
     return this._subscribers[kind].add(callback)
   }
 
-  /** @internal Declare wire intent; a reconnect carries it in the RECONCILE entry. */
-  _setWireSubscribed(kind: BroadcastKind, on: boolean): void {
-    if (on === this._wire[kind] || this._isClosed) return
-    this._wire[kind] = on
+  /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */
+  _setSubscribed(kind: BroadcastKind, on: boolean): void {
+    if (on === this._subscribed[kind] || this._isClosed) return
+    this._subscribed[kind] = on
     if (on) this._connection.sendBroadcastSubscribe(this, kind === 'binary')
     else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
@@ -689,7 +689,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal Every (re)attach declares the subscriptions: a SUB or UNSUB written to a wire that died isn't replayed.
    *  Publishes start no BDP probe, so it probes no path. */
   override _reattachState(): ReattachState {
-    return { broadcast: { ...this._wire } }
+    return { broadcast: this._subscribed }
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -723,11 +723,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** The first listener of a kind subscribes the wire, and the last one unsubscribes it. */
   private _subscribeWired<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
-    if (this._subscribers[kind].size === 0) this._setWireSubscribed(kind, true)
+    if (this._subscribers[kind].size === 0) this._setSubscribed(kind, true)
     const unsubscribe = this._subscribeLocal(kind, callback)
     return () => {
       unsubscribe()
-      if (this._subscribers[kind].size === 0) this._setWireSubscribed(kind, false)
+      if (this._subscribers[kind].size === 0) this._setSubscribed(kind, false)
     }
   }
 

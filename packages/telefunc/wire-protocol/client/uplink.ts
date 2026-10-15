@@ -143,8 +143,8 @@ class Uplink implements SendWait {
 
   /** Notes a frame of `tag` and `bytes` sent: a PIECES_ACK or a window refresh takes its share. */
   sentFrame(tag: number, bytes: number): void {
-    if (tag === TAG.PIECES_ACK) this.acks.handed(bytes)
-    else if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW) this.refreshes.handed(bytes)
+    if (tag === TAG.PIECES_ACK) this.acks.sent(bytes)
+    else if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW) this.refreshes.sent(bytes)
   }
 
   /** Notes a wait seen now: what a frame that goes at once waits, or what data waited. */
@@ -168,8 +168,8 @@ class Share {
     return Math.max(0, this.at - performance.now())
   }
 
-  /** Notes a frame of the kind, of `bytes`, handed to the socket. */
-  handed(bytes: number): void {
+  /** Notes a frame of the kind, of `bytes`, sent. */
+  sent(bytes: number): void {
     if (this.link.fastest === 0) return
     this.at = Math.max(performance.now(), this.at) + bytes / (this.share * this.link.fastest)
   }
