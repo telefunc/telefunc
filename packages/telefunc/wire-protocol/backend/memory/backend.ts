@@ -356,11 +356,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         getOrCreate(gen.retainedOf, lane.member, () => new Set()).add(key)
         getOrCreate(gen.retainedOfTrack, lane.track, () => new Set()).add(key)
       }
-      gen.retained.set(key, {
-        lane: copyLane(lane),
-        payload: frame,
-        ...mark,
-      })
+      gen.retained.set(key, { lane: copyLane(lane), payload: frame, seq: mark.seq, timestamp: mark.timestamp })
     }
     const targets = gen.subs.get(key) ?? NO_TARGETS
     // A binary commit also reaches its member's every-track lane and its track's every-member lane.
