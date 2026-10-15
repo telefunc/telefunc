@@ -176,13 +176,14 @@ type InboxMessage = {
 }
 type WireDm = Omit<RoomDmEnvelope, '__r' | 'to'>
 function inboxMessageFromWire(dm: WireDm): InboxMessage {
-  return {
+  const msg: InboxMessage = {
     from: dm.from,
     fromMeta: dm.fromMeta ?? null,
     fromIdentity: dm.fromIdentity ?? null,
     data: dm.data,
-    ...(dm.ackId ? { ackId: dm.ackId } : {}),
   }
+  if (dm.ackId) msg.ackId = dm.ackId
+  return msg
 }
 function wireDmFromInbox(msg: InboxMessage): WireDm & { fromMeta: ParticipantMeta | null } {
   return {
@@ -205,14 +206,15 @@ function leaveCauseToWire(cause: LeaveCause): WireLeaveCause {
 
 /** The member a `join` event announces, before any meta write or track. */
 function joinedMember(event: Extract<RoomCtrlEnvelope, { __r: 'join' }>): MemberSnapshot {
-  return {
+  const member: MemberSnapshot = {
     id: event.id,
     meta: event.meta,
     joinedAt: event.joinedAt,
     metaSeq: 0,
     identity: event.identity ?? null,
-    ...(event.hidden ? { hidden: true } : {}),
   }
+  if (event.hidden) member.hidden = true
+  return member
 }
 
 /** All room messages are tagged with `__r`: envelopes, requests, and notices alike. */

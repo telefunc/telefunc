@@ -215,12 +215,9 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** @internal `from` is a claim: the server checks it against this stub's members and stamps `fromMeta` itself. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
-    return await this._stub._publishUnreported({
-      __r: 'data',
-      from,
-      data,
-      ...(retain ? { retain: true } : {}),
-    } satisfies RoomDataPublish)
+    const publish: RoomDataPublish = { __r: 'data', from, data }
+    if (retain) publish.retain = true
+    return await this._stub._publishUnreported(publish)
   }
 
   /** @internal */
@@ -295,10 +292,9 @@ class ClientRoom extends RoomStateView implements Room {
         // A room-authored DM has no sender to resolve.
         if (event.from === '') return this._deliverDm(local, inboxMessageFromWire(event))
         const { meta, identity } = this._state.resolveSender(event as RoomDmEnvelope & Partial<SenderStamp>)
-        this._deliverDm(
-          local,
-          inboxMessageFromWire({ ...event, fromMeta: meta, ...(identity === null ? {} : { fromIdentity: identity }) }),
-        )
+        const msg: InboxMessage = { from: event.from, fromMeta: meta, fromIdentity: identity, data: event.data }
+        if (event.ackId) msg.ackId = event.ackId
+        this._deliverDm(local, msg)
         return
       }
     }
@@ -501,7 +497,9 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
-    return await this._requestParticipant({ __r: 'req-dm', to, data, ...(ack ? { ack: true } : {}) })
+    const request: ParticipantMutationRequest = { __r: 'req-dm', to, data }
+    if (ack) request.ack = true
+    return await this._requestParticipant(request)
   }
 
   async setMeta(meta: ParticipantMeta): Promise<void> {
@@ -641,7 +639,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   protected async _sendPublish(data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     this._assertActive()
-    return (await this._request({ __r: 'req-publish', data, ...(retain ? { retain: true } : {}) })) as ChannelPublishAck
+    const request: ParticipantStubRequest = { __r: 'req-publish', data }
+    if (retain) request.retain = true
+    return (await this._request(request)) as ChannelPublishAck
   }
 
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {

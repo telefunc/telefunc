@@ -39,8 +39,9 @@ const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerCon
     })
     context.registerChannel(stub)
     const maxFrameBytes = getAdapterMaxFrameBytes()
+    if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
     return {
-      metadata: { ...metadata, ...(maxFrameBytes && { maxFrameBytes }) },
+      metadata,
       async close() {
         await stub.close()
       },
@@ -61,17 +62,18 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServe
     const { state, entry } = remoteBacking(remote)!
     // Returning a hidden member hands it to this client: its room stub relays that member's events.
     if (entry.hidden) responseRoomGrants(context, state.roomId).hidden.add(entry.id)
+    // The entry outlives a racing leave, so the snapshot stays coherent and the client's roster heals it.
+    const metadata: RemoteParticipantMetadata = {
+      room: state._owner,
+      id: entry.id,
+      meta: entry.meta.object,
+      joinedAt: entry.joinedAt,
+      metaSeq: entry.meta.seq,
+      identity: entry.identity,
+    }
+    if (entry.hidden) metadata.hidden = true
     return {
-      // The entry outlives a racing leave, so the snapshot stays coherent and the client's roster heals it.
-      metadata: {
-        room: state._owner,
-        id: entry.id,
-        meta: entry.meta.object,
-        joinedAt: entry.joinedAt,
-        metaSeq: entry.meta.seq,
-        identity: entry.identity,
-        ...(entry.hidden ? { hidden: true } : {}),
-      },
+      metadata,
       close() {},
       abort() {},
     }
@@ -88,16 +90,17 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Int
     // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
     if (!participant.selfDelivery) responseRoomGrants(context, participant._room.id).suppress(participant.id)
     const maxFrameBytes = getAdapterMaxFrameBytes()
+    const metadata: ParticipantStubMetadata = {
+      channelId: channel.id,
+      id: participant.id,
+      meta: participant.meta,
+      selfDelivery: participant.selfDelivery,
+      identity: participant.identity,
+      bufferLimit: getServerConfig().channel.bufferLimit,
+    }
+    if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
     return {
-      metadata: {
-        channelId: channel.id,
-        id: participant.id,
-        meta: participant.meta,
-        selfDelivery: participant.selfDelivery,
-        identity: participant.identity,
-        bufferLimit: getServerConfig().channel.bufferLimit,
-        ...(maxFrameBytes && { maxFrameBytes }),
-      },
+      metadata,
       async close() {
         await channel.close()
       },

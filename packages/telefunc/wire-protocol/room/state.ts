@@ -273,7 +273,9 @@ class RoomModel {
   /** A member `memberIds()` listed, as a roster carries it. */
   memberSnapshot(id: string): MemberSnapshot {
     const { meta, joinedAt, identity, hidden } = this._members.get(id)!
-    return { id, meta: meta.object, joinedAt, metaSeq: meta.seq, identity, ...(hidden ? { hidden: true } : {}) }
+    const member: MemberSnapshot = { id, meta: meta.object, joinedAt, metaSeq: meta.seq, identity }
+    if (hidden) member.hidden = true
+    return member
   }
   /** Bumped on every observable change: a roster read at one version lists the same members as any other read at it. */
   get version(): number {
