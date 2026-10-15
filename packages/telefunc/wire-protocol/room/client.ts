@@ -294,7 +294,10 @@ class ClientRoom extends RoomStateView implements Room {
         const local = this._localParticipants.get(event.to)
         if (!local) return
         // A room-authored DM has no sender to resolve.
-        if (event.from === '') return this._deliverDm(local, inboxMessageFromWire(event))
+        if (event.from === '') {
+          this._deliverDm(local, inboxMessageFromWire(event))
+          return
+        }
         const { meta, identity } = this._state.resolveSender(event as RoomDmEnvelope & Partial<SenderStamp>)
         const msg: InboxMessage = { from: event.from, fromMeta: meta, fromIdentity: identity, data: event.data }
         if (event.ackId) msg.ackId = event.ackId
