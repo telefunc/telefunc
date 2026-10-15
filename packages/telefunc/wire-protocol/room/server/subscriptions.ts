@@ -430,7 +430,9 @@ class RoomSubscriptions {
     for (let done = false; !done; ) {
       if (slice.over) await slice.next()
       this._replanAround(() => {
-        while (!(done = pending.next().done === true)) if (slice.over) return
+        do {
+          done = pending.next().done === true
+        } while (!done && !slice.over)
       })
     }
   }
