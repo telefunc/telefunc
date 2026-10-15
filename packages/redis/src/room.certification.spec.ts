@@ -905,7 +905,7 @@ import { installRedis } from ${JSON.stringify(new URL('../dist/index.js', import
 const { REDIS_URL, NODES, PREFIX, ROOM, COUNT, START_AT } = process.env
 installRedis(NODES ? new Cluster(JSON.parse(NODES)) : new Redis(REDIS_URL), { prefix: PREFIX })
 const room = await Room.get(ROOM)
-await new Promise((resolve) => setTimeout(resolve, Number(START_AT) - Date.now()))
+await new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(START_AT) - Date.now())))
 const joins = Array.from({ length: Number(COUNT) }, (_, i) => room.join({ identity: 'user-' + (i % 50) }))
 const outcomes = await Promise.allSettled(joins)
 const failures = outcomes.flatMap((outcome) => (outcome.status === 'rejected' ? [String(outcome.reason)] : []))
