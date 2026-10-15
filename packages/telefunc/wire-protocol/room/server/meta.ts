@@ -10,6 +10,7 @@ export {
   readMembersMetaCells,
   memberMetaOf,
   dropCells,
+  deleteCells,
   readOpenCells,
 }
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
@@ -250,17 +251,16 @@ async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise
   const backend = getRoomBackend()
   const marks = await backend.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
   if ('staleInc' in marks) return
-  const drop = async (mutations: CellMutation[]) =>
-    (await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
   const slice = new Slice()
   for (const [mark, raw] of marks.cells) {
-    let held: CellMutation[] = []
+    let held: string[] = []
     for await (const page of backend.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
-      if ('staleInc' in page || (held.length > 0 && !(await drop(held)))) return
-      held = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
+      if ('staleInc' in page || (held.length > 0 && !(await deleteCells(roomId, inc, held)))) return
+      held = [...page.cells.keys()]
       if (slice.over) await slice.next()
     }
-    if (!(await drop([...held, { key: mark, bytes: null }]))) return
+    held.push(mark)
+    if (!(await deleteCells(roomId, inc, held))) return
   }
 }
 
@@ -323,14 +323,17 @@ async function dropMemberMeta(roomId: string, inc: string, id: string): Promise<
 
 /** Deletes the cells under `prefix`, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn. */
 async function dropCells(roomId: string, inc: string, prefix: string): Promise<void> {
-  const backend = getRoomBackend()
   const slice = new Slice()
-  for await (const page of backend.readCellPages(roomId, inc, prefix)) {
-    if ('staleInc' in page) return
-    const mutations = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
-    if ((await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) === 'stale-inc') return
+  for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
+    if ('staleInc' in page || !(await deleteCells(roomId, inc, page.cells.keys()))) return
     if (slice.over) await slice.next()
   }
+}
+
+/** Deletes `keys` in one exchange; false once the incarnation is stale. */
+async function deleteCells(roomId: string, inc: string, keys: Iterable<string>): Promise<boolean> {
+  const mutations = [...keys].map((key) => ({ key, bytes: null }))
+  return (await getRoomBackend().compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
 }
 
 /** The meta cells of every member, or of member `id`, by member, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */

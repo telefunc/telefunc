@@ -32,6 +32,7 @@ import {
   memberMetaOf,
   readMembersMetaCells,
   readOpenCells,
+  deleteCells,
   type MemberMetaCells,
 } from './meta.js'
 import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
@@ -542,18 +543,12 @@ async function takeDmReplies(roomId: string, inc: string, sender: string): Promi
   for await (const page of backend.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
     if ('staleInc' in page) throw roomClosedError(roomId)
     for (const [key, raw] of page.cells) replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<DmReply>(raw))
-    const mutations = [...page.cells.keys()].map((key) => ({ key, bytes: null }))
-    if ((await backend.compareExchangeCells(roomId, inc, { expect: [], mutations })) === 'stale-inc') {
-      throw roomClosedError(roomId)
-    }
+    if (!(await deleteCells(roomId, inc, page.cells.keys()))) throw roomClosedError(roomId)
     if (slice.over) await slice.next()
   }
   return replies
 }
 
 async function dropDmReply(roomId: string, inc: string, sender: string, ackId: string): Promise<void> {
-  const mutations = [{ key: dmReplyCellKey(sender, ackId), bytes: null }]
-  if ((await getRoomBackend().compareExchangeCells(roomId, inc, { expect: [], mutations })) === 'stale-inc') {
-    throw roomClosedError(roomId)
-  }
+  if (!(await deleteCells(roomId, inc, [dmReplyCellKey(sender, ackId)]))) throw roomClosedError(roomId)
 }
