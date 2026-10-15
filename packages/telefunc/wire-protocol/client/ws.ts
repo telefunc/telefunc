@@ -197,7 +197,7 @@ class WsTransport implements UpgradeTarget {
   }
 
   drained(): Promise<void> {
-    // A socket sends what it buffered before its close, but not what its piece sender holds for a probe.
+    // A socket sends what it buffered before its close, but not what its piece sender holds for room.
     if (!this.ws || !this.ends?.budget.sender.heldBytes) return Promise.resolve()
     return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
