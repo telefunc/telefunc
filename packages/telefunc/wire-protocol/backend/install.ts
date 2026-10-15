@@ -84,8 +84,9 @@ function unfollowBroadcastPlane(follower: BroadcastPlaneFollower): void {
 
 function getBroadcastBackend(): BroadcastBackend {
   const override = state.broadcastOverride
-  if (override)
+  if (override) {
     return (override.backend ??= superviseBroadcastDriver(createBroadcastTransportDriver(override.transport)))
+  }
   const installed = currentBackend()
   return (installed.broadcast ??= superviseBroadcastDriver(installed.driver))
 }
