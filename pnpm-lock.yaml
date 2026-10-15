@@ -33,8 +33,8 @@ importers:
         specifier: 4.20260329.0
         version: 4.20260329.0
       playwright-chromium:
-        specifier: 1.57.0
-        version: 1.57.0
+        specifier: 1.60.0
+        version: 1.60.0
       vitest:
         specifier: ^3.2.4
         version: 3.2.4(@types/debug@4.1.12)(@types/node@24.0.10)(jiti@2.7.0)(lightningcss@1.32.0)
@@ -5869,13 +5869,13 @@ packages:
     resolution: {integrity: sha512-o8mkY4E/+LNUf6LzX96ht6k6CEDi65k9G2rjMtBe9Oo+VPKSvl+0GKHuH/AlG+GA5LPG/i5hrekkxUc3s2HU+Q==}
     hasBin: true
 
-  playwright-chromium@1.57.0:
-    resolution: {integrity: sha512-GCVVTbmIDrZuBxWYoQ70rehRXMb3Q7ccENe63a+rGTWwypeVAgh/DD5o5QQ898oer5pdIv3vGINUlEkHtOZQEw==}
+  playwright-chromium@1.60.0:
+    resolution: {integrity: sha512-xxz9pc2HIxQW/Qg9ijG2fZOHRT//KhLo0KfvJRa45YYRrcA7ZONoilgJR40SW5pmecb6HkuROaeViXoCaXTZyQ==}
     engines: {node: '>=18'}
     hasBin: true
 
-  playwright-core@1.57.0:
-    resolution: {integrity: sha512-agTcKlMw/mjBWOnD6kFZttAAGHgi/Nw0CZ2o6JqWSbMlI219lAFLZZCyqByTsvVAJq5XA5H8cA6PrvBRpBWEuQ==}
+  playwright-core@1.60.0:
+    resolution: {integrity: sha512-9bW6zvX/m0lEbgTKJ6YppOKx8H3VOPBMOCFh2irXFOT4BbHgrx5hPjwJYLT40Lu+4qtD36qKc/Hn56StUW57IA==}
     engines: {node: '>=18'}
     hasBin: true
 
@@ -8044,7 +8044,7 @@ snapshots:
       esbuild: 0.23.1
       fast-glob: 3.3.3
       pixelmatch: 5.3.0
-      playwright-chromium: 1.57.0
+      playwright-chromium: 1.60.0
       pngjs: 6.0.0
       source-map-support: 0.5.21
       strip-ansi: 6.0.1
@@ -12709,11 +12709,11 @@ snapshots:
     dependencies:
       pngjs: 6.0.0
 
-  playwright-chromium@1.57.0:
+  playwright-chromium@1.60.0:
     dependencies:
-      playwright-core: 1.57.0
+      playwright-core: 1.60.0
 
-  playwright-core@1.57.0: {}
+  playwright-core@1.60.0: {}
 
   pngjs@6.0.0: {}
 

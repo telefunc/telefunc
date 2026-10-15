@@ -721,7 +721,8 @@ function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer
       tag !== TAG.PIECE && tag !== TAG.ANNOUNCE && tag !== TAG.LENGTH,
       'frame ahead of another it never is',
     )
-    frames.push(message.subarray(at, at + bytes))
+    // A copy: a listener may transfer its data's buffer, which would detach the frames behind it.
+    frames.push(message.slice(at, at + bytes))
     at += bytes
   }
 }

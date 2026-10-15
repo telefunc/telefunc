@@ -57,6 +57,18 @@ afterAll(() => {
 const call = (ms: number, init?: RequestInit) =>
   fetch(url, { method: 'POST', body: stringify({ file: FILE, name: 'onSlow', args: [ms] }), ...init })
 
+// `fetch` decides itself when to open another connection; this agent sends every call over one.
+const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+const callOverOneSocket = (ms: number) =>
+  new Promise<number>((resolve, reject) => {
+    const request = http.request(url, { method: 'POST', agent }, (response) => {
+      response.resume()
+      response.on('end', () => resolve(response.statusCode!))
+    })
+    request.on('error', reject)
+    request.end(stringify({ file: FILE, name: 'onSlow', args: [ms] }))
+  })
+
 test('with serve({ readable: req }), context.signal aborts once the client disconnects during a telefunction (#477)', async () => {
   const controller = new AbortController()
   const response = call(4_000, { signal: controller.signal })
@@ -77,7 +89,7 @@ test("with serve({ readable: req }), calls over one keep-alive connection leave 
   try {
     for (let n = 0; n < 20; n++) {
       signalAbortedAfter = null
-      expect((await call(0)).status).toBe(200)
+      expect(await callOverOneSocket(0)).toBe(200)
       // Its signal aborts as it completes, not before.
       expect(signalAbortedAfter).toBe(null)
     }
@@ -87,5 +99,6 @@ test("with serve({ readable: req }), calls over one keep-alive connection leave 
     expect(warnings.filter((warning) => warning.name === 'MaxListenersExceededWarning')).toEqual([])
   } finally {
     process.off('warning', onWarning)
+    agent.destroy()
   }
 })

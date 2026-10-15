@@ -3,7 +3,7 @@ import type { Peer } from 'crossws'
 import { getTelefuncChannelHooks } from './ws.js'
 import { getChannelMux } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { TAG, decode, encode, isOneFrame, withTook } from '../shared-ws.js'
+import { LENGTH_BYTES, TAG, decode, encode, isOneFrame, withTook } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
@@ -55,6 +55,36 @@ test('the server hands a socket it closed nothing more, though it answered a fra
   await new Promise((resolve) => setTimeout(resolve, 0))
   expect(closed).toBe(true)
   expect(sentAfterClose).toBe(0)
+})
+
+test("a listener that transfers its data's buffer leaves the frames behind that data in its message intact", async () => {
+  const hooks = getTelefuncChannelHooks()
+  let terminated = false
+  const peer = {
+    context: {},
+    websocket: {},
+    send() {},
+    terminate() {
+      terminated = true
+    },
+  } as unknown as Peer
+  const channel = new ServerChannel()
+  getChannelMux().registerChannel(channel)
+  await hooks.open!(peer)
+  const reconcile = encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] })
+  await hooks.message!(peer, { uint8Array: () => reconcile } as never)
+  const got: number[] = []
+  channel.listenBinary((data) => {
+    got.push(data.byteLength)
+    structuredClone(data.buffer, { transfer: [data.buffer] })
+  })
+  const frames = [encode.binary(0, new Uint8Array(100), 1), encode.window(0, 1 << 20, 0)]
+  const message = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
+  // Deno, Bun and workerd hand the server each message in an ArrayBuffer of its own.
+  await hooks.message!(peer, { uint8Array: () => message } as never)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  expect(got).toEqual([100])
+  expect(terminated).toBe(false)
 })
 
 /** A channel attached to a page that reads nothing, or, `acknowledging`, only what tells the server what arrived,

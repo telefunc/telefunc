@@ -110,6 +110,9 @@ function tolerateError({ logSource, logText }) {
       // Warning: G] Transforming this CSS nesting syntax is not supported in the configured target environment ("chrome87", "edge88", "es2020", "firefox78", "safari14") [unsupported-css-nesting]
       'CSS nesting syntax is not supported in the configured target environment',
 
+      // [05:16:40.038][/examples/next][pnpm run dev][stderr] (node:2650) ExperimentalWarning: localStorage is not available because --localstorage-file was not provided.
+      'localStorage is not available because --localstorage-file was not provided',
+
       // [11:03:16.814][/docs/.test-dev.test.ts][pnpm run dev][stderr] Cannot optimize dependency: @brillout/docpress/renderer/onRenderClient, present in 'optimizeDeps.include'
       'Cannot optimize dependency: @brillout/docpress/renderer/onRenderClient',
 
