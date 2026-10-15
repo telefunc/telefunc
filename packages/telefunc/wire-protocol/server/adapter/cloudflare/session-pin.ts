@@ -52,9 +52,7 @@ class SessionPins {
       assertWarning(
         false,
         `A session's shard couldn't be pinned in KV, and is retried after a second: ${String(err)}`,
-        {
-          onlyOnce: false,
-        },
+        { onlyOnce: false },
       )
     })
   }
