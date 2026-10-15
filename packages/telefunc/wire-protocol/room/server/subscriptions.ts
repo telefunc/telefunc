@@ -51,11 +51,11 @@ type SubscriptionHost = {
   _closeFromAuthority(): void
 }
 
-/** What a planning pass replans: each member's binary lanes, or every member's and every track's when `all`, the
- *  lanes of each of `tracks` named of every member, and some members' named pairs. */
 /** Fan-in lanes of one kind not delivering yet, and the lanes of the other kind, by member or track, that wait for
  *  none to be; the last one's first delivery or stop replans those. */
 type Establishing = { lanes: Set<LaneSubscription>; waiting: Set<string>; replan(item: string): void }
+/** What a planning pass replans: each member's binary lanes, or every member's and every track's when `all`, the
+ *  lanes of each of `tracks` named of every member, and some members' named pairs. */
 type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pairs: Map<string, Set<string>> }
 
 /** What this process subscribes of a room: a function of its holders' wants, ownership and membership, kept current
