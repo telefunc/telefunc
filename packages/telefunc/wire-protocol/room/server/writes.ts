@@ -23,13 +23,12 @@ import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './cells.js'
-import type { PendingDmAcks } from './dm-acks.js'
 import { reportRoomError } from './errors.js'
 import { SEMANTIC_LANE, commitRoomLaneOrThrow, commitToInbox, encodeRoomRecord, publishCtrl } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { reapAndReadMembersById, storeDmReply, takeDmReply } from './membership.js'
 import { dropMemberMetaGeneration, writeMemberMeta, type MemberMetaWrite } from './meta.js'
-import type { PresenceEvent, RoomReplica } from './replica.js'
+import type { RoomReplica } from './replica.js'
 import type { RoomGuardHooks } from './statics.js'
 assertIsNotBrowser()
 
@@ -42,15 +41,11 @@ type WritesHost = {
   readonly _state: Pick<RoomState, 'getRemote'>
   readonly _replica: RoomReplica
 }
-/** What the writes read of the handle's own: its guards, its local participants, its lane plan and its view. */
+/** What the writes read of the handle's own: its guards and its local participants. */
 type WritesOf = {
   guards(): Partial<RoomGuardHooks> | null
   /** A local participant, whose meta a view that holds no roster yet doesn't hold. */
   local(id: string): { meta: ParticipantMeta; identity: string | null; _metaSeq: number } | undefined
-  lanePlanned(member: string, track: string): Promise<void> | null
-  /** Applies an own write's event to the view and relays it to its clients. */
-  applyOwn(event: PresenceEvent): void
-  acks: PendingDmAcks
 }
 
 /** A member's writes through one handle: each passes its guard, carries its sender's stamp, commits its cells with its
@@ -82,7 +77,7 @@ class RoomWrites {
     return await this._inCallOrder(`meta:${id}`, async (sent) => {
       const { update, hidden, replaced } = await writeMemberMeta(host._incarnation, id, write)
       const accepted = { __r: 'p-meta', id, ...update, ...(hidden ? { hidden: true } : {}) } as const
-      this._of.applyOwn(accepted)
+      host._replica.applyControl(accepted)
       const publishing = publishCtrl(host.id, host._inc, accepted)
       sent()
       await publishing
@@ -112,7 +107,7 @@ class RoomWrites {
     const lane = { kind: 'binary', member: from, track: frame.track } as const
     const { sender, commit } = await this._inCallOrder(inProcessBinaryLaneKey(from, lane.track), async (sent) => {
       const sender = await this._admitPublish(from, frame.payload)
-      const planned = this._of.lanePlanned(from, lane.track)
+      const planned = host._replica.plan.lanePlanned(from, lane.track)
       if (planned !== null) await planned
       host._replica.demand.published(from, lane.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
@@ -179,7 +174,7 @@ class RoomWrites {
     return ack ? await this._sendDmAck(from, to, data) : await this._publishDm(from, to, data)
   }
   private async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
-    const acks = this._of.acks
+    const acks = this._host._replica.acks
     const ackId = crypto.randomUUID()
     let timer: ReturnType<typeof setTimeout> | undefined
     const reply = new Promise<DmReply>((settle) => {
@@ -209,7 +204,7 @@ class RoomWrites {
     } catch (err) {
       reply = toRoomFailure(err, reportRoomError)
     }
-    this._of.acks.settle(ackId, reply)
+    this._host._replica.acks.settle(ackId, reply)
   }
 
   private async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {

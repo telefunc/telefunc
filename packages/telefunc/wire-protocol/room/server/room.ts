@@ -113,9 +113,6 @@ class ServerRoom extends RoomStateView implements Room {
     this._writes = new RoomWrites(this, {
       guards: () => this._guards,
       local: (id) => this._localParticipants.get(id),
-      lanePlanned: (member, track) => replica.plan.lanePlanned(member, track),
-      applyOwn: (event) => replica.applyControl(event),
-      acks: replica.acks,
     })
   }
 
