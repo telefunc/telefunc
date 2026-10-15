@@ -45,7 +45,7 @@ import {
   retainedOfTrackKey,
   commitChannels,
 } from './keys.js'
-import { LANE_PAGE_SIZE, REDIS_COMMANDS, type RedisCommand } from './commands.js'
+import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrderMark, type RedisCommand } from './commands.js'
 import { RedisSubscriptionDriver, type RedisSubscriptionSource } from './subscriber.js'
 
 const DIRECTORY_PAGE_SIZE = 100
@@ -186,9 +186,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
       lane.kind === 'inbox' || lane.kind === 'binary'
         ? await this._publisher.hget(memberOrderKey(this._prefix, roomId, inc, lane.member), laneKey)
         : await this._publisher.get(orderKey(this._prefix, roomId, inc, laneKey))
-    if (mark === null) return null
-    const [seq, timestamp] = mark.split(':').map(Number) as [number, number]
-    return { seq, timestamp }
+    return mark === null ? null : parseOrderMark(mark)
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
