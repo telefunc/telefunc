@@ -48,6 +48,7 @@ import {
   initSchema,
   deleteLapsedHead,
   listOrphanGenerations,
+  nextMaintenanceDeadline,
   readCells,
   readCellPage,
   readLiveHead,
@@ -250,13 +251,4 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     if (deadline <= now && currentAlarm !== null && currentAlarm <= nextAlarm) return
     await this.ctx.storage.setAlarm(nextAlarm)
   }
-}
-
-function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
-  const deadlines = [
-    sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM head').toArray()[0]?.deadline,
-    sql.exec<{ deadline: number | null }>('SELECT MIN(expires_at) AS deadline FROM route').toArray()[0]?.deadline,
-  ].filter((deadline): deadline is number => deadline !== null && deadline !== undefined)
-  if (listOrphanGenerations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) deadlines.push(now)
-  return deadlines.length === 0 ? null : Math.min(...deadlines)
 }

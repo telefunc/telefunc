@@ -8,6 +8,7 @@ export {
   readLiveHead,
   deleteLapsedHead,
   listOrphanGenerations,
+  nextMaintenanceDeadline,
   compareExchangeHead,
   readCells,
   readCellPage,
@@ -168,6 +169,18 @@ function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): stri
     .exec<{ inc: string }>('SELECT inc FROM gen WHERE inc IS NOT ?', currentInc)
     .toArray()
     .map((row) => row.inc)
+}
+
+/** When the alarm's sweep next has work: `now` while an orphaned generation waits, else the first lapse of a head or a
+ *  route, or null for none. */
+function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
+  if (listOrphanGenerations(sql, readLiveHead(sql, now)?.currentInc ?? null).length > 0) return now
+  // Each table takes its own MIN, so the route table's seeks its expires_at index.
+  return sql
+    .exec<{ deadline: number | null }>(
+      'SELECT MIN(deadline) AS deadline FROM (SELECT MIN(expires_at) AS deadline FROM head UNION ALL SELECT MIN(expires_at) FROM route)',
+    )
+    .toArray()[0]!.deadline
 }
 
 // Called inside `transactionSync`; a lost race returns the current head.
