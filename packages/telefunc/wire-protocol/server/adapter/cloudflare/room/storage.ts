@@ -273,7 +273,7 @@ function readRevision(sql: SqlStorage, inc: string): number {
 }
 
 function cellVersion(sql: SqlStorage, inc: string, key: string): string | null {
-  const row = selectCellRows(sql, inc, { keys: [key] })[0]
+  const row = sql.exec<{ version: number }>('SELECT version FROM cell WHERE inc = ? AND key = ?', inc, key).toArray()[0]
   return row === undefined ? null : String(row.version)
 }
 
