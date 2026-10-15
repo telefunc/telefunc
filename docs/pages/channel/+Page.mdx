@@ -235,7 +235,7 @@ Fire-and-forget is also fine — data is sent immediately whether or not you awa
 channel.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
-If the receiver can't keep up, up to 64 MiB of a channel's messages wait for it. A send past that rejects with `ChannelOverflowError`; `await` your sends to avoid it.
+If the receiver can't keep up, a channel can get up to 64 MiB ahead of it (a fixed limit). A send past that rejects with `ChannelOverflowError`; `await` your sends to avoid it.
 
 
 ## `Broadcast`
@@ -421,7 +421,7 @@ Channels and broadcasts signal failure through four errors:
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` has no `send()` to reject, so it closes with `ChannelOverflowError` instead when its client falls 80 MiB behind (less if you lowered the replay buffers), or misses more than `bufferLimit` while offline. Call its telefunction again to rejoin.
+> A `BroadcastChannel` whose client falls 80 MiB behind (less if you lowered the replay buffers), or misses more than `bufferLimit` while offline, closes with `ChannelOverflowError`. Call its telefunction again to rejoin.
 
 See also:
 - <Link href="/stream#error-handling" />
@@ -433,8 +433,8 @@ See also:
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
-- Messages lost in the disconnect are resent after reconnect. If you `await` your sends, nothing is lost.
-- If you don't `await` them and the other side missed too much, the channel closes with `NetworkError`; its message names the setting to raise (see <Link href="/channel-config" />).
+- Messages lost in the disconnect are resent after reconnect. If you `await` your sends, a reconnect loses nothing.
+- If you don't `await` them and the other side missed too much, the channel closes with `NetworkError`, and the error message names the setting to raise (see <Link href="/channel-config" />).
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.
