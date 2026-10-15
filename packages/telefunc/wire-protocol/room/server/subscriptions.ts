@@ -276,7 +276,7 @@ class RoomSubscriptions {
     await this._planning
     if (this._binaryPending.size === 0) return
     if (this._binaryReady === null) {
-      const ready = withinRoomHorizon(Promise.all([...this._binaryPending].map((lane) => lane.ready))).then(() => {})
+      const ready = withinRoomHorizon(Promise.all(Array.from(this._binaryPending, (lane) => lane.ready))).then(() => {})
       const clear = () => {
         if (this._binaryReady === ready) this._binaryReady = null
       }

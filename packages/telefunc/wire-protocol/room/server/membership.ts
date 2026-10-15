@@ -387,7 +387,7 @@ async function readRoster(room: RoomIncarnation): Promise<Roster> {
   const cells = await readPrefix(room.id, room.inc, MEMBER_CELL_PREFIX)
   // After the member read, so an eviction committing in between shows up as departing.
   const cleanups = await readPrefix(room.id, room.inc, CLEANUP_CELL_PREFIX)
-  const departing = new Set([...cleanups.keys()].map(memberIdOfCleanupKey))
+  const departing = new Set(Array.from(cleanups.keys(), memberIdOfCleanupKey))
   // After the member read, so each member's cells are as new as its record or newer, and the updates after the record's
   // seq bring a view to them.
   const metaCells = await readMembersMetaCells(room)
@@ -466,7 +466,7 @@ async function reapAndCountPresence(room: RoomIncarnation): Promise<number> {
 async function reapAndResolveIdentity(room: RoomIncarnation, identity: string): Promise<MemberSnapshot[]> {
   const prefix = identityCellPrefix(identity)
   const markers = await readPrefix(room.id, room.inc, prefix)
-  const ids = [...markers.keys()].map((key) => key.slice(prefix.length))
+  const ids = Array.from(markers.keys(), (key) => key.slice(prefix.length))
   const members = await reapAndReadMembersById(room, ids)
   // A member and its identity marker are written and removed in one compare-exchange.
   assert(members.every((member) => member.identity === identity))

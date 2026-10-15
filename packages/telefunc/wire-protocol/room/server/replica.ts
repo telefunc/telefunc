@@ -515,7 +515,9 @@ class RoomReplica {
     this.roster.clear()
     this.demand.close()
     for (const [id, owner] of this._owners) this.disown(id, owner)
-    for (const handle of new Set([...this._observers, ...this._tails])) handle._teardown()
+    const handles = new Set(this._observers)
+    for (const tail of this._tails) handles.add(tail)
+    for (const handle of handles) handle._teardown()
     this._gossip.close()
     void this.plan.replan()
   }

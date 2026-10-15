@@ -386,9 +386,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
     const gen = this._state.rooms.get(roomId)?.gens.get(inc)
     if (gen === undefined) return []
-    if (of === undefined) return [...gen.retained.values()].map((entry) => copyLane(entry.lane))
+    if (of === undefined) return Array.from(gen.retained.values(), (entry) => copyLane(entry.lane))
     const keys = 'member' in of ? gen.retainedOf.get(of.member) : gen.retainedOfTrack.get(of.track)
-    return [...(keys ?? [])].map((key) => copyLane(gen.retained.get(key)!.lane))
+    return Array.from(keys ?? [], (key) => copyLane(gen.retained.get(key)!.lane))
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
@@ -479,7 +479,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     }
     // Still due until put again or deleted.
     for (const check of due.values()) pushCheck(checks, check)
-    return [...due.keys()].map((roomId) => ({ roomId, incTag: directory.get(roomId)!.incTag }))
+    return Array.from(due.keys(), (roomId) => ({ roomId, incTag: directory.get(roomId)!.incTag }))
   }
 
   // ── internals ──

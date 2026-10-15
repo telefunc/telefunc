@@ -332,7 +332,7 @@ async function dropCells(roomId: string, inc: string, prefix: string): Promise<v
 
 /** Deletes `keys` in one exchange; false once the incarnation is stale. */
 async function deleteCells(roomId: string, inc: string, keys: Iterable<string>): Promise<boolean> {
-  const mutations = [...keys].map((key) => ({ key, bytes: null }))
+  const mutations = Array.from(keys, (key) => ({ key, bytes: null }))
   return (await getRoomBackend().compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
 }
 
