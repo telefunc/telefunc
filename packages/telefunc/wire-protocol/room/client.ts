@@ -343,7 +343,7 @@ class ClientRoom extends RoomStateView implements Room {
       // A meta change of one's own that a gap dropped, as while offline, is in the roster whole.
       for (const [id, local] of this._localParticipants) {
         const accepted = this._model.acceptedMeta(id)
-        if (accepted !== null && accepted.seq > local._metaSeq) local._acceptMeta(accepted)
+        if (accepted !== null) local._acceptMeta(accepted)
       }
       this._roster.resolve()
     } finally {
