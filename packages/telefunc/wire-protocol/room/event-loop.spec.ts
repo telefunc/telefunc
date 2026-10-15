@@ -61,7 +61,7 @@ describe('Room at 100,000 members', () => {
     await subsOf(room).replan()
     const before = allocatedBytes()
     await subsOf(room).replan()
-    // About 450 measured, the inbox renewal included; 1,400 when every member's plan walked its empty want lists.
+    // About 450 measured, the inbox renewal included.
     expect((allocatedBytes() - before) / 100_000).toBeLessThanOrEqual(700)
   }, 60_000)
   it('streams a roster of 100,000 members to a client a part at a time, with the join and leave landing between two parts each once', async () => {
@@ -159,8 +159,7 @@ describe('Room at 100,000 members', () => {
     const before = await live()
     const members = await Promise.all(Array.from({ length: 20_000 }, () => room.join()))
     const perMember = ((await live()) - before) / members.length
-    // About 4,300 measured, most of it the member's inbox lane subscription; 7,700 before its listener lists and
-    // participant view were made on demand.
+    // About 4,300 measured, most of it the member's inbox lane subscription.
     expect(perMember).toBeLessThanOrEqual(5_500)
     expect(members).toHaveLength(20_000)
   }, 60_000)
