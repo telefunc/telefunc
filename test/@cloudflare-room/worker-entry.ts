@@ -24,8 +24,10 @@ const PROBE_FILE = '/probe.telefunc.ts'
 const probeRuns = new Map<string, () => Promise<void>>()
 decorateTelefunction(async (runId: unknown) => probeRuns.get(runId as string)!(), 'onProbe', PROBE_FILE, '/')
 const textEncoder = new TextEncoder()
+const textDecoder = new TextDecoder()
 const INBOX_LANE = { kind: 'inbox', member: 'member' } as const
 const INBOX_LANE_KEY = 'inbox:member'
+const CONTROL_HORIZON_MS = 2_000
 // The isolate's intervals, each with the session DO whose call made it and how often it has fired.
 const intervals: { by: string; fired: number }[] = []
 let makingFor = ''
@@ -38,10 +40,9 @@ globalThis.setInterval = ((callback: () => void, ms?: number) => {
     callback()
   }, ms)
 }) as typeof setInterval
-const textDecoder = new TextDecoder()
-const CONTROL_HORIZON_MS = 2_000
 export class TelefuncProbeDurableObject extends TelefuncDurableObject {
   readonly #frames: number[] = []
+  readonly #held = new Map<string, unknown[]>()
   // Each subscriber records into its own DO's storage: I/O that only that DO may do, like a socket send.
   broadcastSubscribe(key: string): Promise<void> {
     return this.#inSession(async () => {
@@ -104,7 +105,6 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       this.#held.delete(channelId)
     })
   }
-  readonly #held = new Map<string, unknown[]>()
   // A server creates a room nothing ever holds.
   createRoom(roomId: string, emptyTimeout: number): Promise<void> {
     return this.#inSession(async () => {
@@ -336,12 +336,8 @@ async function everyTrackRoutes(env: Env, suffix: string) {
     ['camera', 'binary:m:camera'],
     ['every-track', 'binary-all:m'],
     ['every-member', 'binary-track:camera'],
-  ] as const) {
-    const sessionDoId = sessionOf(env, `${role}-${suffix}`).toString()
-    const route = { roomId: probe.roomId, inc: probe.inc, laneKey, sessionDoId, leaseId: `${role}-${suffix}` }
-    const registration = await probe.authority.registerRoute(route)
-    if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
-  }
+  ] as const)
+    await probe.join(sessionOf(env, `${role}-${suffix}`), role, laneKey)
   const receivers: number[] = []
   for (const [member, track, text] of [
     ['m', 'camera', 'camera-1'],
