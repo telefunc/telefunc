@@ -17,6 +17,9 @@ type RoomSessionDeliveryRequest = {
   info: OrderingInfo
 }
 
+/** A call to the room's authority through the session's ordered stub for it. */
+type AuthorityCall = <T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>) => Promise<T>
+
 function entryKey(route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>): string {
   return JSON.stringify([route.roomId, route.inc, route.laneKey])
 }
@@ -66,9 +69,6 @@ class CloudflareRoomSessionManager {
     entry.deliver(request.payload, request.info)
   }
 }
-
-/** A call to the room's authority through the session's ordered stub for it. */
-type AuthorityCall = <T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>) => Promise<T>
 
 /** Ready once the authority has durably registered this attempt's exact route; Room owns retry and replacement. */
 class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
