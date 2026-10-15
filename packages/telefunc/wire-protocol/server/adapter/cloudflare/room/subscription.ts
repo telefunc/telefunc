@@ -107,10 +107,12 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     try {
       registered = await this.#callAuthority((authority) => authority.registerRoute(this.#route))
     } catch (error) {
-      return this.#finish(error)
+      this.#finish(error)
+      return
     }
     if (!('ok' in registered)) {
-      return this.#finish(new Error(registered.reason))
+      this.#finish(new Error(registered.reason))
+      return
     }
     // Unsubscribed while it registered: its release already went out.
     if (this.ended) return
@@ -129,7 +131,8 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     try {
       renewed = await this.#callAuthority((authority) => authority.renewRoute(this.#route))
     } catch (error) {
-      return this.#finish(error)
+      this.#finish(error)
+      return
     }
     if (this.state() !== 'ready') return
     if (renewed) this.#scheduleRenewal()
