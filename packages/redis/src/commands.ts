@@ -49,7 +49,7 @@ const REDIS_DELIVERY_FENCE_BYTE = 0xff
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
-/** The lanes a start read's or a leave's page holds, as a SCAN count. */
+/** What a start read's, a leave's or a generation drop's page holds, as a SCAN count. */
 const LANE_PAGE_SIZE = 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
@@ -259,11 +259,10 @@ redis.call('SET', KEYS[1], mark)
 return mark
 `
 
-// One atomic room-slot operation; incarnation ids are never reused, so a repeated drop deletes nothing.
-//   KEYS: [1]=invalidation-channel [2]=manifest [3..]=members
+// Drops the manifest once its keys are; incarnation ids are never reused, so a repeated drop deletes nothing.
+//   KEYS: [1]=invalidation-channel [2]=manifest
 //   ARGV: [1]=inc
 const DROP_GENERATION_LUA = `
-for i = 3, #KEYS do redis.call('UNLINK', KEYS[i]) end
 redis.call('UNLINK', KEYS[2])
 redis.call('PUBLISH', KEYS[1], ARGV[1])
 `
@@ -671,13 +670,9 @@ const REDIS_COMMANDS = {
   dropGeneration: command({
     name: 'tfRoomDropGeneration',
     lua: DROP_GENERATION_LUA,
-    numberOfKeys: null,
-    invoke: (prefix, { roomId, inc, generationKeys }: RoomInc & { generationKeys: readonly string[] }) => ({
-      keys: [
-        generationInvalidationChannel(prefix, roomId, inc),
-        generationKeysKey(prefix, roomId, inc),
-        ...generationKeys,
-      ],
+    numberOfKeys: 2,
+    invoke: (prefix, { roomId, inc }: RoomInc) => ({
+      keys: [generationInvalidationChannel(prefix, roomId, inc), generationKeysKey(prefix, roomId, inc)],
       argv: [inc],
     }),
     parse: () => {},

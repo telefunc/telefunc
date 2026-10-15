@@ -231,8 +231,15 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
-    const generationKeys = await this._generationKeys(roomId, inc)
-    await this._run(REDIS_COMMANDS.dropGeneration, { roomId, inc, generationKeys })
+    // No head names the incarnation any more, so no commit adds to its manifest while it is paged.
+    const manifest = generationKeysKey(this._prefix, roomId, inc)
+    let cursor = '0'
+    do {
+      const [next, keys] = await this._publisher.sscan(manifest, cursor, 'COUNT', LANE_PAGE_SIZE)
+      cursor = next
+      if (keys.length > 0) await this._publisher.unlink(...keys)
+    } while (cursor !== '0')
+    await this._run(REDIS_COMMANDS.dropGeneration, { roomId, inc })
   }
 
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
