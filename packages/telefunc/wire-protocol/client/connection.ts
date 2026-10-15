@@ -544,21 +544,21 @@ class ClientConnection implements MuxConnection {
   }
 
   private register(channel: MuxChannel): void {
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = null
-    }
-    assertUsage(
-      this.openChannelCount() < MAX_CHANNELS_PER_CONNECTION,
-      `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
-    )
-    // Every RECONCILE lists every channel, the closed ones too, so the oldest closed one makes way.
+    // Every RECONCILE lists every channel, the closed ones too, so the oldest the server has all of makes way.
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
       for (const [ix, entry] of this.channels) {
-        if (entry.state.tag !== 'closed') continue
+        if (entry.state.tag !== 'closed' || !entry.state.delivered) continue
         this.releaseChannel(ix, entry.channel)
         break
       }
+    }
+    assertUsage(
+      this.channels.size < MAX_CHANNELS_PER_CONNECTION,
+      `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
+    )
+    if (this.ttl) {
+      clearTimeout(this.ttl)
+      this.ttl = null
     }
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
@@ -708,6 +708,7 @@ class ClientConnection implements MuxConnection {
       this.replayBuffers.get(channelIx)!.push(seq, frame)
       this.transport.sendFrame({ kind: 'reconcile', frame })
     }
+    this.startTtlIfIdle()
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {

@@ -377,14 +377,30 @@ test('the channel cap counts the open channels, not every channel the connection
   connection.dispose()
 })
 
-test('a closed channel counts against neither the channel cap nor, when a new one needs its place, what a RECONCILE lists', () => {
+test('a closed channel whose abort waits for the wire keeps its place rather than dropping its abort', () => {
+  const options = stalledOptions()
+  const closing = muxChannelStub()
+  const connection = ClientConnection.getOrCreate('http://cap-closing.test', closing, options) as any
+  for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++)
+    ClientConnection.getOrCreate('http://cap-closing.test', muxChannelStub(), options)
+  connection.sendAbort(closing, 'null') // its abort waits for the wire
+  connection.unregister(closing)
+  expect(() => ClientConnection.getOrCreate('http://cap-closing.test', muxChannelStub(), options)).toThrow(
+    'Too many channels',
+  )
+  expect(connection.channels.has(0)).toBe(true)
+  connection.dispose()
+})
+
+test('a closed channel the server has all of counts against neither the channel cap nor, when a new one needs its place, what a RECONCILE lists', () => {
   const options = stalledOptions()
   const closing = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://cap-closed.test', closing, options) as any
   for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++)
     ClientConnection.getOrCreate('http://cap-closed.test', muxChannelStub(), options)
-  connection.sendAbort(closing, 'null') // its abort waits for the wire
+  connection.sendAbort(closing, 'null')
   connection.unregister(closing)
+  connection.channels.get(0).state.delivered = true // a PING found its abort acknowledged
   expect(ClientConnection.getOrCreate('http://cap-closed.test', muxChannelStub(), options)).toBe(connection)
   expect(connection.channels.size).toBe(MAX_CHANNELS_PER_CONNECTION)
   expect(connection.channels.has(0)).toBe(false)
