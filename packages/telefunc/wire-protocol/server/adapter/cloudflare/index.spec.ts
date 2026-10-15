@@ -37,6 +37,7 @@ const mocks = vi.hoisted(() => {
     crosswsAdapter,
     crosswsFactory: vi.fn(() => crosswsAdapter),
     enableChannelTransports: vi.fn(),
+    setAdapterMaxFrameBytes: vi.fn(),
     getServerConfig: vi.fn(() => ({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })),
     telefuncMock: vi.fn(async () => ({
       statusCode: 200,
@@ -77,7 +78,7 @@ vi.mock('../../ws.js', () => ({
 vi.mock('../../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
   enableChannelTransports: mocks.enableChannelTransports,
-  setAdapterMaxFrameBytes: vi.fn(),
+  setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
 }))
 
 vi.mock('../../../../node/server/telefunc.js', () => ({
@@ -161,6 +162,7 @@ beforeEach(() => {
   mocks.crosswsAdapter.handleDurableMessage.mockReset()
   mocks.crosswsAdapter.handleDurableClose.mockReset()
   mocks.enableChannelTransports.mockClear()
+  mocks.setAdapterMaxFrameBytes.mockClear()
   mocks.getServerConfig.mockReset()
   mocks.getServerConfig.mockReturnValue({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })
   mocks.telefuncMock.mockClear()
@@ -177,6 +179,11 @@ beforeEach(() => {
 })
 
 describe('cloudflare adapter entrypoint', () => {
+  it('caps a page message at the 32 MiB a Durable Object takes over a WebSocket', () => {
+    new Telefunc()
+    expect(mocks.setAdapterMaxFrameBytes).toHaveBeenCalledWith(32 * 1024 * 1024)
+  })
+
   it('resolves shard from KV token and forwards routing headers', async () => {
     const { binding, get, fetch } = createBinding()
     const tf = new Telefunc()
