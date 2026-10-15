@@ -404,15 +404,12 @@ class ClientRoom extends RoomStateView implements Room {
     this._stub._setSubscribed('text', text.all)
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
     const textChanges: Record<string, boolean> = Object.create(null)
-    let memberText = false
-    if (member !== null) {
+    const memberText = member !== null && text.members.has(member) !== this._declaredText.has(member)
+    if (memberText) {
       const wanted = text.members.has(member)
-      if (wanted !== this._declaredText.has(member)) {
-        memberText = true
-        textChanges[member] = wanted
-        if (wanted) this._declaredText.add(member)
-        else this._declaredText.delete(member)
-      }
+      textChanges[member] = wanted
+      if (wanted) this._declaredText.add(member)
+      else this._declaredText.delete(member)
     }
     if (memberText || state.wantsAnnounce !== this._declaredAnnounce) {
       this._declaredAnnounce = state.wantsAnnounce
