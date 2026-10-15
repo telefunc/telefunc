@@ -516,7 +516,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  // A broadcast takes subscriptions; a plain channel drops them.
+  /** A broadcast takes subscriptions; a plain channel drops them. */
   _onPeerSubscription(_binary: boolean, _subscribed: boolean): void {}
 
   _onPeerMessage(text: string, bytes: number): void {
