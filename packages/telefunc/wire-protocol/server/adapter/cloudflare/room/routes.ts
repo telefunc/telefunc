@@ -18,7 +18,9 @@ type RouteInstallation = {
   leaseId: string
 }
 
-const exact = (route: RouteInstallation) => [route.inc, route.laneKey, route.sessionDoId, route.leaseId]
+function exact(route: RouteInstallation): string[] {
+  return [route.inc, route.laneKey, route.sessionDoId, route.leaseId]
+}
 
 // The DO checks the open head; this UPSERT atomically replaces the prior exact lease.
 function upsertRoute(sql: SqlStorage, route: RouteInstallation, now: number): void {

@@ -17,8 +17,9 @@ type RoomSessionDeliveryRequest = {
   info: OrderingInfo
 }
 
-const entryKey = (route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>) =>
-  JSON.stringify([route.roomId, route.inc, route.laneKey])
+function entryKey(route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>): string {
+  return JSON.stringify([route.roomId, route.inc, route.laneKey])
+}
 
 class CloudflareRoomSessionManager {
   /** Subscriptions share an attempt only within one session DO. */
