@@ -308,8 +308,8 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
   const slice = new Slice()
   let turn: Promise<void> | null = null
   let failure = null as { error: unknown } | null
-  const worker = async (first: T) => {
-    for (let next: IteratorResult<T> = { value: first }; next.done !== true; next = pending.next()) {
+  const worker = async () => {
+    for (let next = pending.next(); next.done !== true; next = pending.next()) {
       if (slice.over)
         await (turn ??= slice.next().then(() => {
           turn = null
@@ -321,12 +321,7 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
       }
     }
   }
-  const workers: Promise<void>[] = []
-  for (let next = pending.next(); next.done !== true; next = pending.next()) {
-    workers.push(worker(next.value))
-    if (workers.length === ROOM_MEMBER_WRITES_IN_FLIGHT_MAX) break
-  }
-  await Promise.all(workers)
+  await Promise.all(Array.from({ length: ROOM_MEMBER_WRITES_IN_FLIGHT_MAX }, worker))
   if (failure) throw failure.error
 }
 
