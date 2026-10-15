@@ -654,7 +654,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   private readonly _broadcastListeners = new Listeners<BroadcastListener<T>>()
   private readonly _broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
   /** The subscriptions this page asks the server for. */
-  private readonly _wire = { text: false, binary: false }
+  private readonly _subscribed = { text: false, binary: false }
 
   constructor(...args: ConstructorParameters<typeof ClientChannel>) {
     super(...args)
@@ -677,11 +677,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    if (this._broadcastListeners.size === 0) this._setWireSubscribed('text', true)
+    if (this._broadcastListeners.size === 0) this._setSubscribed('text', true)
     const remove = this._broadcastListeners.add(callback)
     return () => {
       remove()
-      if (this._broadcastListeners.size === 0) this._setWireSubscribed('text', false)
+      if (this._broadcastListeners.size === 0) this._setSubscribed('text', false)
     }
   }
 
@@ -695,17 +695,17 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    if (this._broadcastBinaryListeners.size === 0) this._setWireSubscribed('binary', true)
+    if (this._broadcastBinaryListeners.size === 0) this._setSubscribed('binary', true)
     const remove = this._broadcastBinaryListeners.add(callback)
     return () => {
       remove()
-      if (this._broadcastBinaryListeners.size === 0) this._setWireSubscribed('binary', false)
+      if (this._broadcastBinaryListeners.size === 0) this._setSubscribed('binary', false)
     }
   }
 
-  private _setWireSubscribed(kind: 'text' | 'binary', on: boolean): void {
-    if (on === this._wire[kind] || this._isClosed) return
-    this._wire[kind] = on
+  private _setSubscribed(kind: 'text' | 'binary', on: boolean): void {
+    if (on === this._subscribed[kind] || this._isClosed) return
+    this._subscribed[kind] = on
     if (on) this._connection.sendBroadcastSubscribe(this, kind === 'binary')
     else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
@@ -713,7 +713,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** @internal Every (re)attach declares the subscriptions: a SUB or UNSUB written to a wire that died isn't replayed.
    *  Publishes start no BDP probe, so it probes no path. */
   override _reattachState(): ReattachState {
-    return { broadcast: { ...this._wire } }
+    return { broadcast: this._subscribed }
   }
 
   override _dispatchDataFrame(frame: ChannelDataFrame): void {
