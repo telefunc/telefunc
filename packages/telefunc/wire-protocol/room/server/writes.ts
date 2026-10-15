@@ -172,12 +172,9 @@ class RoomWrites {
   private async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const acks = this._host._replica.acks
     const ackId = crypto.randomUUID()
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const reply = new Promise<DmReply>((settle) => {
-      acks.add(ackId, { from, to, settle })
-      // Bounds the wait nothing else settles: a lost reply frame, or a recipient that never handled the DM.
-      timer = unrefTimer(setTimeout(() => void this._settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
-    })
+    const reply = new Promise<DmReply>((settle) => acks.add(ackId, { from, to, settle }))
+    // Bounds the wait nothing else settles: a lost reply frame, or a recipient that never handled the DM.
+    const timer = unrefTimer(setTimeout(() => void this._settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
     let receipt: RoomSendReceipt
     try {
       receipt = await this._publishDm(from, to, data, ackId)
