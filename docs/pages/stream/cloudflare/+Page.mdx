@@ -35,8 +35,7 @@ export default {
 // wrangler.jsonc
 {
   "compatibility_date": "2025-08-15", // or later: channels need MessageChannel
-  // Required: Telefunc finds a subscription's session through AsyncLocalStorage (`nodejs_compat` works too).
-  // enable_request_signal lets context.signal see a client disconnect.
+  // Required: nodejs_als (nodejs_compat works too). enable_request_signal lets context.signal see a client disconnect.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
