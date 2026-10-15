@@ -17,7 +17,7 @@ export {
   advanceOrder,
   dropLaneOrderRows,
   dropGenerationRows,
-  prefixEnd,
+  keyRange,
 }
 
 export type { CellPage }
@@ -100,15 +100,12 @@ function directoryDelete(sql: SqlStorage, roomId: string, incTag: string): void 
   sql.exec('DELETE FROM directory WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
 }
 
-// A key range, so a page seeks the primary key instead of scanning every room.
 function directoryList(sql: SqlStorage, prefix: string, cursor?: string): DirectoryPage {
-  const end = prefixEnd(prefix)
-  const range = [cursor === undefined ? 'room_id >= ?' : 'room_id > ?', ...(end === null ? [] : ['room_id < ?'])]
+  const range = keyRange('room_id', prefix, cursor)
   const matching = sql
     .exec<{ room_id: string; inc_tag: string }>(
-      `SELECT room_id, inc_tag FROM directory WHERE ${range.join(' AND ')} ORDER BY room_id LIMIT ?`,
-      cursor ?? prefix,
-      ...(end === null ? [] : [end]),
+      `SELECT room_id, inc_tag FROM directory WHERE ${range.where} ORDER BY room_id LIMIT ?`,
+      ...range.args,
       DIRECTORY_PAGE_SIZE + 1,
     )
     .toArray()
@@ -129,6 +126,18 @@ function directoryDue(sql: SqlStorage, now: number): DirectoryPage['entries'] {
     )
     .toArray()
     .map((row) => ({ roomId: row.room_id, incTag: row.inc_tag }))
+}
+
+/** The strings of `column` starting with `prefix`, past `cursor` if given, as a range, so a query seeks its index
+ *  instead of scanning. */
+function keyRange(column: string, prefix: string, cursor?: string): { where: string; args: string[] } {
+  const range = { where: `${column} ${cursor === undefined ? '>=' : '>'} ?`, args: [cursor ?? prefix] }
+  const end = prefixEnd(prefix)
+  if (end !== null) {
+    range.where += ` AND ${column} < ?`
+    range.args.push(end)
+  }
+  return range
 }
 
 /** The least string above every string starting with `prefix` (TEXT compares by code point), or null for none. */
@@ -218,16 +227,10 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
         .toArray()[0]
       return row === undefined ? [] : [{ key, ...row }]
     })
-  const range = prefixRange(sel.prefix)
+  const range = keyRange('key', sel.prefix)
   return sql
     .exec<CellRow>(`SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)
     .toArray()
-}
-
-/** A key range, so a query seeks the primary key instead of scanning every cell of the incarnation. */
-function prefixRange(prefix: string): { where: string; args: string[] } {
-  const end = prefixEnd(prefix)
-  return end === null ? { where: 'key >= ?', args: [prefix] } : { where: 'key >= ? AND key < ?', args: [prefix, end] }
 }
 
 // Reads stay available while closing; staleInc means the head is absent or names another incarnation.
@@ -250,14 +253,12 @@ type CellPage =
 function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
-  const end = prefixEnd(prefix)
-  const range = [cursor === undefined ? 'key >= ?' : 'key > ?', ...(end === null ? [] : ['key < ?'])]
+  const range = keyRange('key', prefix, cursor)
   const rows = sql
     .exec<CellRow>(
-      `SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.join(' AND ')} ORDER BY key LIMIT ?`,
+      `SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.where} ORDER BY key LIMIT ?`,
       inc,
-      cursor ?? prefix,
-      ...(end === null ? [] : [end]),
+      ...range.args,
       CELL_PAGE_SIZE,
     )
     .toArray()
@@ -323,13 +324,12 @@ function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number)
 
 // A member's binary lanes are a primary-key range: their keys share its prefix.
 function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
-  const prefix = binaryLaneKeyPrefix(member)
+  const range = keyRange('domain', binaryLaneKeyPrefix(member))
   sql.exec(
-    'DELETE FROM ord WHERE inc = ? AND (domain = ? OR (domain >= ? AND domain < ?))',
+    `DELETE FROM ord WHERE inc = ? AND (domain = ? OR (${range.where}))`,
     inc,
     encodeLaneKey({ kind: 'inbox', member }),
-    prefix,
-    prefixEnd(prefix)!,
+    ...range.args,
   )
 }
 

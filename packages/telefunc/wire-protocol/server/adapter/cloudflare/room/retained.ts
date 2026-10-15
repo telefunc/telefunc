@@ -6,7 +6,7 @@ export { installRetained, readRetained, listRetained, deleteRetained }
 import type { LaneId, RetainedFrame, RetainedOf } from '../../../../backend/room/contract.js'
 import { binaryLaneKeyPrefix, decodeLaneKey, encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
-import { prefixEnd } from './storage.js'
+import { keyRange } from './storage.js'
 
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
@@ -58,8 +58,8 @@ function listRetained(sql: SqlStorage, inc: string, of?: RetainedOf): LaneId[] {
   if (of === undefined) rows = sql.exec(query, inc)
   else if ('track' in of) rows = sql.exec(`${query} AND track = ?`, inc, of.track)
   else {
-    const prefix = binaryLaneKeyPrefix(of.member)
-    rows = sql.exec(`${query} AND lane_key >= ? AND lane_key < ?`, inc, prefix, prefixEnd(prefix)!)
+    const range = keyRange('lane_key', binaryLaneKeyPrefix(of.member))
+    rows = sql.exec(`${query} AND ${range.where}`, inc, ...range.args)
   }
   return rows.toArray().map((row) => decodeLaneKey(row.lane_key))
 }
