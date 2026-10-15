@@ -168,11 +168,8 @@ class WantsIndex {
     const others = this._receives(member, track, coverers, holder)
     if (others || holder._suppressedMembers().has(member)) return [others, others]
     // The holder may name the track of the member in the other scope too.
-    const both =
-      this._indexed
-        .get(holder)
-        ?.binary.get(scope === ALL ? member : ALL)
-        ?.has(track) === true
+    const indexed = this._indexed.get(holder)
+    const both = indexed !== undefined && hasEntry(indexed.binary, scope === ALL ? member : ALL, track)
     return [both || !on, both || on]
   }
 
