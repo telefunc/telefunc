@@ -474,8 +474,8 @@ describe('FlowControl — reattach', () => {
 })
 
 describe('FlowControl — replay buffers', () => {
-  it("a receiver's window is half the smaller lane of its peer's replay buffer, at least a byte", () => {
-    expect(replayWindow(4 * 1024 * 1024, 2 * 1024 * 1024)).toBe(1024 * 1024)
+  it("a receiver's window is half the smaller lane of its peer's replay buffer less a frame's header, at least a byte", () => {
+    expect(replayWindow(4 * 1024 * 1024, 2 * 1024 * 1024)).toBe(1024 * 1024 - 7)
     expect(replayWindow(1, 0)).toBe(1)
   })
 

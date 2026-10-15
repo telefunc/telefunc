@@ -177,7 +177,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.#runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
-    // workerd calls no webSocketClose after a socket's error, and crossws has no handler for one: its wire ends here.
+    /** workerd calls no webSocketClose after a socket's error, and crossws has no handler for one: its wire
+     *  ends here. */
     webSocketError(ws: WebSocket) {
       return this.#runInSession(() => crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false))
     }

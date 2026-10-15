@@ -529,8 +529,8 @@ class ChannelMux {
     this.answerArrival(entry, connection)
   }
 
-  // A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose bytes keep arriving
-  // is answered all the same, once a ping interval, so the page knows they arrive.
+  /** A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose bytes keep arriving
+   *  is answered all the same, once a ping interval, so the page knows they arrive. */
   private answerArrival(entry: ConnectionEntry, connection: Wire): void {
     if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
   }

@@ -518,6 +518,40 @@ test.each(['server', 'page'] as const)(
   },
 )
 
+test.each((['server', 'page'] as const).flatMap((from) => (['text', 'binary'] as const).map((kind) => [from, kind])))(
+  'awaited %s %s messages, the last one half the replay buffer and sent as the credit runs out, all arrive after a reconnect',
+  async (from, kind) => {
+    config.channel = {
+      serverReplayBuffer: 2 * KIB,
+      serverReplayBufferBinary: 2 * KIB,
+      clientReplayBuffer: 2 * KIB,
+      clientReplayBufferBinary: 2 * KIB,
+    }
+    const ends = loop.open<string, string>()
+    const [sender, receiver] = from === 'server' ? [ends.server, ends.page] : [ends.page, ends.server]
+    const closed = closedWith(ends)
+    const got: number[] = []
+    receiver.listen((text) => void got.push(text.length + 2))
+    receiver.listenBinary((data) => void got.push(data.byteLength))
+    // A text message's bytes are its JSON string, quotes included.
+    const send = (bytes: number) =>
+      kind === 'text' ? sender.send('x'.repeat(bytes - 2)) : sender.sendBinary(new Uint8Array(bytes))
+    await run(100)
+    ;(from === 'server' ? loop.socket.toPage : loop.socket.toServer).hold()
+    // The first message's frame, its 7-byte header included, leaves a byte of credit.
+    const first = creditOf(sender) - 1 - 7
+    void (async () => {
+      await send(first)
+      await send(KIB)
+    })().catch(() => {})
+    await run(50)
+    loop.socket.cut()
+    await runUntil(() => got.length === 2, 2_000)
+    expect(got).toEqual([first, KIB])
+    expect(closed).toEqual({ page: 'open', server: 'open' })
+  },
+)
+
 test("sends nobody awaits, past the page's window and more than the server's replay holds, end the channel with NetworkError on both ends at a reconnect, the page having got them in order up to there", async () => {
   config.channel.serverReplayBuffer = 4 * KIB
   const feed = loop.open<never, string>()
@@ -820,7 +854,7 @@ test("a page's consumption of what a broadcast publishes moves the server's limi
   const seen: string[] = []
   room.page.subscribe((text) => void seen.push(text))
   await run(100)
-  expect(creditOf(room.server)).toBe(CREDIT_WINDOW_MAX_BYTES)
+  expect(creditOf(room.server)).toBe(CREDIT_WINDOW_MAX_BYTES - 7)
   const publications = CREDIT_WINDOW_MAX_BYTES / 4 / KIB / KIB + 1
   for (let n = 0; n < publications; n++) {
     Broadcast.publish(key, 'x'.repeat(KIB * KIB))

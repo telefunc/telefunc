@@ -741,7 +741,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     super._dispatchDataFrame(frame)
   }
 
-  // A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is.
+  /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
   _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this._flow.onArrived()
     const parsed = parse(data) as ChannelData<T>
