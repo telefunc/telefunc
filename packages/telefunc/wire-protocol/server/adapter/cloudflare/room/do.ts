@@ -207,7 +207,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     return directoryDue(this.#sql(), Date.now())
   }
 
-  // Only a room authority schedules alarms.
+  /** Only a room authority schedules alarms. */
   async alarm(): Promise<void> {
     try {
       this.#runSweep(Date.now())

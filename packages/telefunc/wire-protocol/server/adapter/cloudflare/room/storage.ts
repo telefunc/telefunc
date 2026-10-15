@@ -84,7 +84,7 @@ function initSchema(sql: SqlStorage): void {
   `)
 }
 
-// A NULL check_at is never due.
+/** A NULL check_at is never due. */
 function directoryPut(sql: SqlStorage, roomId: string, incTag: string, checkAt: number): void {
   sql.exec(
     'INSERT OR REPLACE INTO directory (room_id, inc_tag, check_at) VALUES (?, ?, ?)',
@@ -115,7 +115,7 @@ function directoryList(sql: SqlStorage, prefix: string, cursor?: string): Direct
   return more ? { entries, cursor: last.room_id } : { entries }
 }
 
-// A check_at range, so a page seeks its index instead of scanning every room.
+/** A check_at range, so a page seeks its index instead of scanning every room. */
 function directoryDue(sql: SqlStorage, now: number): DirectoryPage['entries'] {
   return sql
     .exec<{ room_id: string; inc_tag: string }>(
@@ -190,7 +190,7 @@ function nextMaintenanceDeadline(sql: SqlStorage, now: number): number | null {
     .toArray()[0]!.deadline
 }
 
-// Called inside `transactionSync`; a lost race returns the current head.
+/** Called inside `transactionSync`; a lost race returns the current head. */
 function compareExchangeHead(sql: SqlStorage, cx: HeadCx, next: HeadNext, now: number): HeadCxOutcome {
   const current = readLiveHead(sql, now)
   if (!headCxMatches(cx, current, now)) return { conflict: true, current }
@@ -281,7 +281,7 @@ function writeCell(sql: SqlStorage, inc: string, key: string, bytes: Uint8Array 
   else sql.exec('INSERT OR REPLACE INTO cell (inc, key, bytes, version) VALUES (?, ?, ?, ?)', inc, key, bytes, version)
 }
 
-// Cell writes are all-or-nothing while every expected cell is at its version, and require an open head.
+/** Cell writes are all-or-nothing while every expected cell is at its version, and require an open head. */
 function compareExchangeCells(sql: SqlStorage, inc: string, cx: CellsCx, now: number): CxResult {
   const head = readLiveHead(sql, now)
   if (!isOpenIncarnation(head, inc)) return 'stale-inc'
@@ -307,7 +307,7 @@ function readOrder(sql: SqlStorage, inc: string, domain: string): OrderingInfo |
   return row === undefined ? null : { seq: row.seq, timestamp: row.ts }
 }
 
-// `seq` strictly increases for the lifetime of a domain instance.
+/** `seq` strictly increases for the lifetime of a domain instance. */
 function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number): OrderingInfo {
   const mark = nextOrderMark(readOrder(sql, inc, domain) ?? undefined, now)
   sql.exec(
@@ -320,7 +320,7 @@ function advanceOrder(sql: SqlStorage, inc: string, domain: string, now: number)
   return mark
 }
 
-// A member's binary lanes are a primary-key range: their keys share its prefix.
+/** A member's binary lanes are a primary-key range: their keys share its prefix. */
 function dropLaneOrderRows(sql: SqlStorage, inc: string, member: string): void {
   const range = keyRange('domain', binaryLaneKeyPrefix(member))
   sql.exec(

@@ -155,7 +155,7 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
     )
   }
 
-  // The authority forwards only to an unexpired record, so what arrives is owed, lost route or not.
+  /** The authority forwards only to an unexpired record, so what arrives is owed, lost route or not. */
   deliver(payload: BroadcastPayload, info: OrderingInfo): void {
     this.#receiver(payload, info)
   }

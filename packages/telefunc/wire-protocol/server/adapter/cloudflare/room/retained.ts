@@ -51,7 +51,7 @@ function readRetained(sql: SqlStorage, inc: string, lane: LaneId): RetainedFrame
   return { payload, seq: manifest.seq, timestamp: manifest.ts }
 }
 
-// A member's lanes are a primary-key range: their keys share its prefix. A track's are an rt_manifest_track range.
+/** A member's lanes are a primary-key range: their keys share its prefix. A track's are an rt_manifest_track range. */
 function listRetained(sql: SqlStorage, inc: string, of?: RetainedOf): LaneId[] {
   const query = 'SELECT lane_key FROM rt_manifest WHERE inc = ?'
   let rows: SqlStorageCursor<Pick<ManifestRow, 'lane_key'>>

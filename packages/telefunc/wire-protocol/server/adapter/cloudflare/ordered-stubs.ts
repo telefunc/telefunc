@@ -47,7 +47,7 @@ class OrderedStubs<Stub> {
   }
 }
 
-// Delivery is at-most-once: a Durable Object that fails to take a delivery loses it, and the sender goes on.
+/** Delivery is at-most-once: a Durable Object that fails to take a delivery loses it, and the sender goes on. */
 function reportLostDeliveries(delivery: string, outcomes: PromiseSettledResult<unknown>[]): void {
   const failed = outcomes.filter((outcome) => outcome.status === 'rejected')
   if (failed.length > 0)

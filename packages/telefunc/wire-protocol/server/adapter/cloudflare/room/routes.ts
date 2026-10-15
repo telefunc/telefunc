@@ -50,7 +50,7 @@ function deleteRoute(sql: SqlStorage, route: RouteInstallation): void {
   sql.exec(`DELETE FROM route WHERE ${EXACT_ROUTE}`, ...exact(route))
 }
 
-// The delivery target snapshot at acceptance: live (non-expired) routes for these (inc, lane) pairs only.
+/** The delivery target snapshot at acceptance: live (non-expired) routes for these (inc, lane) pairs only. */
 function snapshotRoutes(sql: SqlStorage, inc: string, laneKeys: readonly string[], now: number): RouteInstallation[] {
   return sql
     .exec<RouteInstallation>(
