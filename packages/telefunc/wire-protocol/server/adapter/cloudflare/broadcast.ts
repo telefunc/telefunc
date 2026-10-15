@@ -23,6 +23,7 @@ import type { BackendPayload, BackendReceiver } from '../../../backend/subscript
 import { DriverAttempt } from '../../../backend/attempt.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
 import { getOrCreate } from '../../../../utils/getOrCreate.js'
+import { Listeners } from '../../../../utils/Listeners.js'
 import type { OrderingInfo } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 import { currentCloudflareSession } from './session.js'
@@ -81,7 +82,7 @@ class MemberRoute {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
   readonly route: BroadcastRoute
   readonly #setup = createDeferred()
-  readonly #presenceListeners = new Set<(state: 'ready' | 'lost') => void>()
+  readonly #presenceListeners = new Listeners<(state: 'ready' | 'lost') => void>()
   #refreshTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(route: BroadcastRoute) {
@@ -113,8 +114,7 @@ class MemberRoute {
   }
 
   onPresenceStateChange(cb: (state: 'ready' | 'lost') => void): () => void {
-    this.#presenceListeners.add(cb)
-    return () => this.#presenceListeners.delete(cb)
+    return this.#presenceListeners.add(cb)
   }
 
   startRefresh(refresh: () => Promise<void>): void {
@@ -131,7 +131,7 @@ class MemberRoute {
   }
 
   #notifyPresenceState(state: 'ready' | 'lost'): void {
-    for (const listener of [...this.#presenceListeners]) listener(state)
+    for (const listener of this.#presenceListeners.list()) listener(state)
   }
 }
 
