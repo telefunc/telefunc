@@ -334,6 +334,18 @@ describe('client Room lifecycle', () => {
       [rosterNewer, { v: 3 }],
     ])
   })
+  it('gives an unstamped message from a member of a roster still streaming in the meta changes relayed after its part', async () => {
+    const { client, emit } = fakeClient('pending-sender-meta')
+    const member = crypto.randomUUID()
+    const senderMetas: unknown[] = []
+    client.subscribe((_data, _info, from) => senderMetas.push(from.meta))
+    emit({ __r: 'roster', members: [{ id: member, meta: { v: 0 }, joinedAt: 1, metaSeq: 0 }], part: 0, more: true }, 1)
+    emit({ __r: 'p-meta', id: member, meta: { v: 1 }, seq: 1 }, 2)
+    emit({ __r: 'data', from: member, data: 'hi' }, 3)
+    emit({ __r: 'roster', members: [], part: 1 }, 4)
+    expect(senderMetas).toEqual([{ v: 1 }])
+    expect((await client.getParticipant(member))?.meta).toEqual({ v: 1 })
+  })
   it("derives participant-update prev from the receiver's own applied state", async () => {
     const { client, emit } = fakeClient('receiver-local-prev')
     const memberId = crypto.randomUUID()
