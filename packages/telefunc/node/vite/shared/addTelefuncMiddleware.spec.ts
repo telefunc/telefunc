@@ -20,7 +20,7 @@ addTelefuncMiddleware({ use: (fn: Middleware) => void (middleware = fn) } as nev
 let server: http.Server
 let origin: string
 beforeAll(async () => {
-  // Vite's own server: the middleware, then a 404
+  // node:http running the middleware the fake `use()` took, then a 404
   server = http.createServer((req, res) =>
     middleware(req, res, () => {
       res.statusCode = 404
@@ -32,7 +32,7 @@ beforeAll(async () => {
 })
 afterAll(() => new Promise((resolve) => server.close(resolve)))
 
-test("a call through Vite's dev and preview server reaches the telefunction", async () => {
+test('a call through the middleware on node:http reaches the telefunction', async () => {
   const result = await makeHttpRequest({
     telefuncUrl: `${origin}/_telefunc`,
     httpRequestBody: JSON.stringify({ file: '/hello.telefunc.ts', name: 'hello', args: ['Eva'] }),
