@@ -203,8 +203,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (opts?.ack === true) {
       return this._sendAckReq((onQueued) => this._connection.sendBinaryAckReq(this, data, onQueued))
     }
-    this._connection.sendBinary(this, data)
-    return this._waitForWindow(data.byteLength)
+    return this._waitForWindow(this._connection.sendBinary(this, data))
   }
 
   /** Decrement credit by `bytes`; return void if credit remains, otherwise a Promise
@@ -343,9 +342,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._trackAck(this._dispatchBinaryAckReq(data, seq))
   }
 
-  _onTransportBinaryMessage(data: Uint8Array<ArrayBuffer>): void {
+  _onTransportBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
     const t0 = performance.now()
-    const bytes = data.byteLength
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []
@@ -393,7 +391,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         void this._onTransportAckReqMessage(frame.text, frame.seq)
         return
       case TAG.BINARY:
-        this._onTransportBinaryMessage(frame.data as Uint8Array<ArrayBuffer>)
+        this._onTransportBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
         return
       case TAG.BINARY_ACK_REQ:
         void this._onTransportBinaryAckReqMessage(frame.data, frame.seq)

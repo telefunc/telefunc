@@ -1617,6 +1617,27 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
     expect(read.value).toBeInstanceOf(NetworkError)
   })
 
+  test("an upload over the 'channel' transport whose source fails part-way errors on the server after the bytes before it, rather than completing", async () => {
+    page(wire)
+    const chunks = (async function* () {
+      yield new Uint8Array([1]) as Uint8Array<ArrayBuffer>
+      throw new Error('the file read failed')
+    })()
+    const upload = pumpClientProducerToChannel(() => ({ chunks, cancel: () => {} }), {
+      transports: wire === 'ws' ? ['ws'] : ['sse'],
+      telefuncUrl: `http://${crypto.randomUUID()}.test/_telefunc`,
+    })
+    const server = new ServerChannel({ id: upload.metadata.channelId })
+    getChannelMux().registerChannel(server)
+    const source = ChannelStreamSource.create(server)
+    const first = settled(source.readNextChunk())
+    await advance(1_000)
+    expect(first.value).toEqual(new Uint8Array([1]))
+    const second = settled(source.readNextChunk())
+    await advance(1_000)
+    expect(second.value).toEqual(new Error('Streaming error frame received'))
+  })
+
   test("a stream over the 'channel' transport that a reconnect needs a chunk of larger than the server's replay errors on the page rather than completing short", async () => {
     serverConfig.channel = { pingInterval: 1_000, serverReplayBufferBinary: 4_096 }
     const { net, resume, read } = download(wire, 8_192)

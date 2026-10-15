@@ -102,3 +102,29 @@ test("with serve({ readable: req }), calls over one keep-alive connection leave 
     agent.destroy()
   }
 })
+
+test('with serve({ readable: req }), GET calls get an answer and leave no listener on their keep-alive connection', async () => {
+  const sockets = new Set<import('node:net').Socket>()
+  const onConnection = (socket: import('node:net').Socket) => void sockets.add(socket)
+  server.on('connection', onConnection)
+  const getAgent = new http.Agent({ keepAlive: true, maxSockets: 1 })
+  try {
+    const listeners: number[] = []
+    for (let n = 0; n < 4; n++) {
+      await new Promise<void>((resolve, reject) => {
+        const request = http.request(url, { method: 'GET', agent: getAgent }, (response) => {
+          response.resume()
+          response.on('end', resolve)
+        })
+        request.on('error', reject)
+        request.end()
+      })
+      listeners.push([...sockets][0]!.listenerCount('close'))
+    }
+    expect(sockets.size).toBe(1)
+    expect(listeners).toEqual([listeners[0], listeners[0], listeners[0], listeners[0]])
+  } finally {
+    server.off('connection', onConnection)
+    getAgent.destroy()
+  }
+})

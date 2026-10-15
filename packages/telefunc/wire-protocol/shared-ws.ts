@@ -22,7 +22,7 @@ export {
   isConnCtrlTag,
   encodePublishText,
   encodePublishBinary,
-  payloadBytes,
+  chargedBytes,
   seqNear,
   seqThrough,
 }
@@ -85,7 +85,8 @@ const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
 /** An ACK_RES's `ackedSeq` and status. */
 const ACK_RES_PREFIX = 9
-const payloadBytes = (frame: Uint8Array): number => frame.byteLength - HEADER
+/** What a frame counts against flow control and the replay buffer: all of it, so an empty message counts too. */
+const chargedBytes = (frame: Uint8Array): number => frame.byteLength
 const DATA_TAG_MIN = 0x10
 
 const CHANNEL_CTRL_TAG_MIN = 0x30
@@ -335,7 +336,7 @@ type WirePublishInfo = { seq: number; timestamp: number }
 
 // ===== Decoded frame =====
 
-/** `bytes`: the payload's size, what flow control counts. */
+/** `bytes`: what flow control counts (see `chargedBytes`). */
 type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
   | { tag: typeof TAG.TEXT; text: string }
   | { tag: typeof TAG.BINARY; data: Uint8Array }
@@ -756,7 +757,7 @@ function decode(frame: Uint8Array): DecodedFrame {
   const seq = isSequencedTag(tag) ? readU32(frame, SEQ_OFFSET) : 0
   const payload = frame.subarray(HEADER)
 
-  const bytes = payload.byteLength
+  const bytes = chargedBytes(frame)
 
   switch (tag) {
     case TAG.TEXT:

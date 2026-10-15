@@ -481,7 +481,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         void this._onPeerAckReqMessage(frame.text, frame.seq)
         return
       case TAG.BINARY:
-        this._onPeerBinaryMessage(frame.data)
+        this._onPeerBinaryMessage(frame.data, frame.bytes)
         return
       case TAG.BINARY_ACK_REQ:
         void this._onPeerBinaryAckReqMessage(frame.data, frame.seq)
@@ -605,9 +605,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._trackAck(this._dispatchBinaryAckReq(data, seq))
   }
 
-  _onPeerBinaryMessage(data: Uint8Array): void {
+  _onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
     const t0 = performance.now()
-    const bytes = data.byteLength
     try {
       this._flow.onReceived(bytes)
       const pending: Promise<unknown>[] = []

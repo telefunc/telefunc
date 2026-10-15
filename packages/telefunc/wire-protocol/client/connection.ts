@@ -43,7 +43,7 @@ import {
   TAG,
   encode,
   isSequencedFrame,
-  payloadBytes,
+  chargedBytes,
   seqNear,
   seqThrough,
 } from '../shared-ws.js'
@@ -143,7 +143,7 @@ interface MuxConnection {
   sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void
   sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void
   sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void
-  sendBinary(channel: MuxChannel, data: Uint8Array): void
+  sendBinary(channel: MuxChannel, data: Uint8Array): number
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
@@ -627,11 +627,12 @@ class ClientConnection implements MuxConnection {
 
   send(channel: MuxChannel, data: string): number {
     const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.text(ix, data, seq))
-    return frame ? payloadBytes(frame) : 0
+    return frame ? chargedBytes(frame) : 0
   }
 
-  sendBinary(channel: MuxChannel, data: Uint8Array): void {
-    this.sendSequenced(channel, 'data', (ix, seq) => encode.binary(ix, data, seq))
+  sendBinary(channel: MuxChannel, data: Uint8Array): number {
+    const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.binary(ix, data, seq))
+    return frame ? chargedBytes(frame) : 0
   }
 
   sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
