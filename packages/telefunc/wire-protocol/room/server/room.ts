@@ -27,10 +27,11 @@ import {
   inboxMessageFromWire,
   type SenderStamp,
   type RoomDmEnvelope,
+  type RoomCtrlEnvelope,
   type AcceptedMeta,
   type RoomSnapshotMetadata,
 } from '../protocol.js'
-import { type RoomDataEnvelope } from './protocol.js'
+import { type RoomDataEnvelope, type RoomMemberRecord } from './protocol.js'
 import { type RoomModel, RoomState, RoomStateView } from '../state.js'
 import { ParticipantBase } from '../participant.js'
 import { MemberMessageTexts, RoomStubChannel } from './stub.js'
@@ -180,22 +181,18 @@ class ServerRoom extends RoomStateView implements Room {
   /** The member's inbox is ready before its record is durable, and the join is announced after, so no DM or event is lost. */
   private async _commitAdmission(admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
-    const optional = { ...(identity === null ? {} : { identity }), ...(hidden ? { hidden: true } : {}) } as const
+    const record: Omit<RoomMemberRecord, 'session'> = { joinedAt, metaSeq: 0, metaGen: 0 }
+    const join: Extract<RoomCtrlEnvelope, { __r: 'join' }> = { __r: 'join', id, meta, joinedAt }
+    if (identity !== null) record.identity = join.identity = identity
+    if (hidden) record.hidden = join.hidden = true
     // A holder that detached during the guard took nothing, and a room that closed meanwhile takes no one.
     this._admissions.set(id, this._holderOf(id) !== undefined && !this._model.closed ? 'owned' : 'abandoned')
     this._replica.plan.memberOwned(id)
     try {
       await this._inboxReady(id)
-      await createMember(
-        this._incarnation,
-        this._replica.session,
-        id,
-        { joinedAt, metaSeq: 0, metaGen: 0, ...optional },
-        meta,
-      )
+      await createMember(this._incarnation, this._replica.session, id, record, meta)
       this._assertAdmitted(id)
       this._admissions.set(id, 'committed')
-      const join = { __r: 'join', id, meta, joinedAt, ...optional } as const
       // A member removed meanwhile gets no join after its leave, here or anywhere.
       await publishCtrl(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
       this._assertAdmitted(id)
