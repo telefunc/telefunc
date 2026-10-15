@@ -9,7 +9,7 @@ import { Slice } from './slice.js'
 type Leases = Map<string, number>
 /** A reporter's entry of one track of every member: the members it doesn't receive that track from, and whether it
  *  receives it only of the members it fetches by member. */
-type TrackLease = { instance: string; telling: number; except: ReadonlySet<string>; byMember: boolean }
+type TrackLease = { instance: string; telling: number; except: Set<string>; byMember: boolean }
 type TrackLeases = Map<string, TrackLease>
 /** Another process telling demand: its lease on all it told, renewed by each of its pages, so a crashed one lapses; the
  *  count of its last page, which skips one this process missed; how many times it told everything again; and whether
@@ -25,6 +25,8 @@ class Receives {
   readonly tracks = new Set<string>()
   /** The members whose tracks fetched by member reach this process. */
   readonly fetched = new Set<string>()
+  /** Per track of every member, the members it isn't received from. */
+  readonly except = new Map<string, Set<string>>()
 }
 
 /** What a replica's planner sets, told as it changes: one track of a member, every track of a member, and one track of
@@ -32,9 +34,8 @@ class Receives {
 class DemandReport {
   /** The reports of this process carry it, so its own echo is told apart. */
   readonly instance = crypto.randomUUID()
+  /** Its `except` is set whether or not the track is planned. */
   private readonly _planned = new Receives()
-  /** Per track of every member, the members it isn't received from, set whether or not the track is planned. */
-  private readonly _except = new Map<string, Set<string>>()
   /** The planned tracks of every member that are fetched by member. */
   private readonly _byMember = new Set<string>()
   private _changed = new Receives()
@@ -44,7 +45,7 @@ class DemandReport {
     pairs: new Map<string, Set<string>>(),
     members: new Set<string>(),
     /** Each track told, with the members it was told without and whether it was told fetched by member. */
-    tracks: new Map<string, { except: readonly string[]; byMember: boolean }>(),
+    tracks: new Map<string, { except: Set<string>; byMember: boolean }>(),
     fetched: new Set<string>(),
   }
 
@@ -80,15 +81,15 @@ class DemandReport {
 
   /** Whether no holder here receives `track` from the member, though some holder names it of every member. */
   setExcept(track: string, member: string, on: boolean): void {
-    if (on === hasEntry(this._except, track, member)) return
-    toggleEntry(this._except, track, member, on)
-    if (this._planned.tracks.has(track)) this._changed.tracks.add(track)
+    if (on === hasEntry(this._planned.except, track, member)) return
+    toggleEntry(this._planned.except, track, member, on)
+    toggleEntry(this._changed.except, track, member, true)
   }
 
   /** No holder here names `track` of every member any more. */
   forgetTrack(track: string): void {
     this.setTrack(track, false)
-    this._except.delete(track)
+    for (const member of this._planned.except.get(track) ?? []) this.setExcept(track, member, false)
   }
 
   /** Whether the member's tracks are told here, as pairs or as every track. */
@@ -120,7 +121,8 @@ class DemandReport {
       changed.pairs.size > 0 ||
       changed.members.size > 0 ||
       changed.tracks.size > 0 ||
-      changed.fetched.size > 0
+      changed.fetched.size > 0 ||
+      changed.except.size > 0
     )
   }
 
@@ -162,11 +164,12 @@ class DemandReport {
 
   /** Ons go before offs, so no pair reads as unreceived while one state hands over to another: a track of every member
    *  is told before the pairs it replaces stop, and after the pairs replacing it start; a member it is fetched by is
-   *  told before it, and stops after it. A track whose `except` or fetching changed is told again with it. Only a
-   *  planning round sets what this reads, and none runs until the telling ends, so it is read as it goes. Each change it
-   *  reads is a step. */
+   *  told before it, and stops after it. A track whose fetching changed is told again whole; a member a told track
+   *  stops being told without is told with the ons, one it starts being told without with the offs. Only a planning
+   *  round sets what this reads, and none runs until the telling ends, so it is read as it goes. Each change it reads
+   *  is a step. */
   private *_tellChanges(): Generator<void, void, void> {
-    const { pairs, members, tracks, fetched } = this._changed
+    const { pairs, members, tracks, fetched, except } = this._changed
     this._changed = new Receives()
     const planned = this._planned
     const told = this._told
@@ -193,16 +196,34 @@ class DemandReport {
       yield
     }
     for (const track of tracks) {
-      if (planned.tracks.has(track)) {
-        const entry = { except: [...(this._except.get(track) ?? [])], byMember: this._byMember.has(track) }
-        const was = told.tracks.get(track)
-        if (was === undefined || was.byMember !== entry.byMember || !sameMembers(was.except, entry.except)) {
-          told.tracks.set(track, entry)
-          this._publish(trackEntry(track, entry), true)
-        }
+      const byMember = this._byMember.has(track)
+      if (planned.tracks.has(track) && told.tracks.get(track)?.byMember !== byMember) {
+        const entry = { except: new Set(planned.except.get(track)), byMember }
+        told.tracks.set(track, entry)
+        this._publish(trackEntry(track, entry), true)
       }
       yield
     }
+    for (const [track, byTrack] of except)
+      for (const member of byTrack) {
+        const was = told.tracks.get(track)
+        if (
+          planned.tracks.has(track) &&
+          !hasEntry(planned.except, track, member) &&
+          was?.except.delete(member) === true
+        )
+          this._publish({ track, member, except: true }, false)
+        yield
+      }
+    for (const [track, byTrack] of except)
+      for (const member of byTrack) {
+        const was = told.tracks.get(track)
+        if (planned.tracks.has(track) && hasEntry(planned.except, track, member) && was?.except.has(member) === false) {
+          was.except.add(member)
+          this._publish({ track, member, except: true }, true)
+        }
+        yield
+      }
     for (const track of tracks) {
       const was = told.tracks.get(track)
       if (!planned.tracks.has(track) && was !== undefined) {
@@ -420,10 +441,16 @@ class RoomDemand {
     on: boolean,
     telling: number,
   ): void {
+    let leases = this._tracks.get(entry.track)
+    const held = leases?.get(instance)
+    // A member's change follows its track's entry; a lease this process lost comes whole with the telling it asks.
+    if ('member' in entry) {
+      if (held === undefined) return
+      toggle(held.except, entry.member, on)
+      return this._queue(entry.track, entry.member)
+    }
     const { track, except } = entry
     const byMember = entry.byMember === true
-    let leases = this._tracks.get(track)
-    const held = leases?.get(instance)
     if (!on) {
       if (held === undefined) return
       leases!.delete(instance)
@@ -521,11 +548,8 @@ class RoomDemand {
   }
 }
 
-function trackEntry(
-  track: string,
-  { except, byMember }: { except: readonly string[]; byMember: boolean },
-): DemandEntry {
-  return byMember ? { track, except, byMember } : { track, except }
+function trackEntry(track: string, { except, byMember }: { except: Set<string>; byMember: boolean }): DemandEntry {
+  return byMember ? { track, except: [...except], byMember } : { track, except: [...except] }
 }
 /** Takes, renews or drops `instance`'s lease on `key`, and whether `key` went from held to not or back. */
 function lease<K>(leases: Map<K, Leases>, key: K, instance: string, on: boolean, telling: number): boolean {
@@ -548,9 +572,8 @@ function lapse(leases: Leases, dropped: (instance: string, telling: number) => b
 function runAll(steps: Iterable<unknown>): void {
   for (const _ of steps);
 }
-function sameMembers(a: ReadonlySet<string> | readonly string[], b: readonly string[]): boolean {
-  const set = a instanceof Set ? a : new Set(a)
-  return set.size === b.length && b.every((member) => set.has(member))
+function sameMembers(a: ReadonlySet<string>, b: readonly string[]): boolean {
+  return a.size === b.length && b.every((member) => a.has(member))
 }
 function toggle<T>(set: Set<T>, value: T, on: boolean): void {
   if (on) set.add(value)

@@ -38,13 +38,15 @@ type RoomMemberRecord = {
 }
 
 /** What an instance receives: one track of a member, every track of a member (no `track`), or one track of every
- *  member but `except`. A track it fetches by member (`byMember`) covers only the members it tells `{ member, byMember }`
- *  for, each told once that member's tracks reach it. `''` is the default track. */
+ *  member but `except`, told once, then each member it starts (`on`) or stops being told without (`except: true`). A
+ *  track it fetches by member (`byMember`) covers only the members it tells `{ member, byMember }` for, each told once
+ *  that member's tracks reach it. `''` is the default track. */
 type DemandEntry =
   | { member: string; track: string }
   | { member: string }
   | { member: string; byMember: true }
   | { track: string; except: readonly string[]; byMember?: true }
+  | { track: string; member: string; except: true }
 /** Demand between instances, on the demand lane: entries one instance starts or stops receiving, in the order it told
  *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`, its `page`th page. Its entries from `{ again: true }` to `{ again: false }`
  *  are all it receives. */

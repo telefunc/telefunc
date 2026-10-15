@@ -50,7 +50,7 @@ import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
 import { RoomModel, RoomState, type RoomStateView, remoteBacking } from './state.js'
 import { Room } from './server/statics.js'
 import { ServerRoom, type ServerLocalParticipant } from './server/room.js'
-import { configFromHead, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
+import { configFromHead, decodeDemandPage, decodeRoomText, encodeRoomRecord } from './server/lanes.js'
 import { decodeBinaryWantChange } from './server/requests.js'
 import { config, getServerConfig, reconnectWindow } from '../../node/server/serverConfig.js'
 import { config as clientConfig } from '../../client/clientConfig.js'
@@ -5675,6 +5675,25 @@ describe('room demand lifecycle', () => {
     await vi.waitFor(() => expect(delivered).toEqual(tracks.map((track) => ['m0', track, false])))
     // At most one member a track per change.
     expect(evaluated).toBeLessThanOrEqual(3 * tracks.length)
+  })
+  it('gossips each member a track of every member is not received from once, however many were before it', async () => {
+    const room = (await Room.create('except-each-once')) as ServerRoom
+    room.subscribeBinary(() => {}, { track: 'mic' })
+    const backend = getRoomBackend()
+    const commitLane = backend.commitLane.bind(backend)
+    let excepted = 0
+    vi.spyOn(backend, 'commitLane').mockImplementation((...args) => {
+      if (args[2].kind === 'demand')
+        for (const want of decodeDemandPage(decodeRoomText(args[3])).wants)
+          if ('except' in want) excepted += Array.isArray(want.except) ? want.except.length : 1
+      return commitLane(...args)
+    })
+    // Each joins unheard by the handle's own listener.
+    for (let i = 0; i < 200; i++) await room.join({ selfDelivery: false })
+    await room._replica.plan.replan()
+    await vi.waitFor(() => expect(room._replica.report.changed).toBe(false))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(excepted).toBe(200)
   })
 })
 describe('room protocol validation', () => {
