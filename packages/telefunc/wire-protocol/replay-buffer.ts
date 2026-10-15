@@ -1,11 +1,11 @@
-import { payloadBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
+import { chargedBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
 
 /**
  * High-performance replay buffer for outgoing WebSocket data frames.
  *
  * Stores encoded frames keyed by monotonic sequence number for replay on reconnect, until the peer acknowledges them,
  * however long that takes: its channel lets it go when it gives up on a peer away for `reconnectTimeout`. Bounded by
- * the bytes of their payloads, what flow control counts: oldest entries are evicted when full. A budget lowered while
+ * the bytes of the frames, what flow control counts: oldest entries are evicted when full. A budget lowered while
  * the peer lacks frames sent under the higher one applies once the peer has them.
  *
  * A frame goes in the lane its tag names (`replayLaneOf`), each with its own byte budget, none for the frame that ends
@@ -178,7 +178,7 @@ class ReplayLane {
    * @returns `true` if the frame was stored, `false` if it was larger than the budget.
    */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
-    const bytes = payloadBytes(frame)
+    const bytes = chargedBytes(frame)
     if (bytes > this.maxBytes) return false
     this.seqs.push(seq)
     this.frames.push(frame)
@@ -226,7 +226,7 @@ class ReplayLane {
 
   /** Drops the oldest entry, leaving its slot for `compact`. */
   private dropHead(): void {
-    this.totalBytes -= payloadBytes(this.frames[this.head]!)
+    this.totalBytes -= chargedBytes(this.frames[this.head]!)
     this.head++
   }
 

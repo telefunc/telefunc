@@ -435,6 +435,28 @@ test('a stream whose window grew to 16 MiB, cut off with its window on the wire,
   expect(closed).toEqual({ page: 'open', server: 'open' })
 })
 
+test.each(['server', 'page'] as const)(
+  'an awaited stream of empty binary messages from the %s, cut off with what credit lets be in flight on the wire, resumes after the reconnect without loss',
+  async (from) => {
+    config.channel = { serverReplayBufferBinary: KIB, clientReplayBufferBinary: KIB }
+    const ends = loop.open<never, never>()
+    const [sender, receiver] = from === 'server' ? [ends.server, ends.page] : [ends.page, ends.server]
+    const closed = closedWith(ends)
+    let got = 0
+    receiver.listenBinary(() => void got++)
+    void (async () => {
+      for (let n = 0; n < 1_000; n++) await sender.sendBinary(new Uint8Array(0))
+    })().catch(() => {})
+    await run(50)
+    ;(from === 'server' ? loop.socket.toPage : loop.socket.toServer).hold()
+    await run(50)
+    loop.socket.cut()
+    await runUntil(() => got === 1_000, 2_000)
+    expect(got).toBe(1_000)
+    expect(closed).toEqual({ page: 'open', server: 'open' })
+  },
+)
+
 test("sends nobody awaits, past the page's window and more than the server's replay holds, end the channel with NetworkError on both ends at a reconnect, the page having got them in order up to there", async () => {
   config.channel.serverReplayBuffer = 4 * KIB
   const feed = loop.open<never, string>()

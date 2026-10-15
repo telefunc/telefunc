@@ -1,7 +1,7 @@
 export { IndexedPeer }
 export type { PeerSender }
 
-import { ACK_STATUS, encode, payloadBytes } from '../shared-ws.js'
+import { ACK_STATUS, encode, chargedBytes } from '../shared-ws.js'
 import type { AckResultStatus, ErrorReason } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import type { SendWait } from '../link.js'
@@ -29,35 +29,35 @@ class IndexedPeer {
     private replay: ReplayBuffer,
   ) {}
 
-  /** Returns the frame's payload byte count (the caller's flow-control unit). */
+  /** Returns the bytes the frame counts against flow control. */
   sendText(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.text(this.index, data, seq)
     this.sendSequenced(seq, frame)
-    return payloadBytes(frame)
+    return chargedBytes(frame)
   }
 
-  /** Send a text frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
+  /** Send a text frame that requests an ack response from the receiver. `onQueued` gets its seq and charged bytes. */
   sendTextAckReq(data: string, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
     const frame = encode.textAckReq(this.index, data, seq)
-    onQueued(seq, payloadBytes(frame))
+    onQueued(seq, chargedBytes(frame))
     this.sendSequenced(seq, frame)
   }
 
-  /** Returns the frame's payload byte count. */
+  /** Returns the bytes the frame counts against flow control. */
   sendBinary(data: Uint8Array): number {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
     this.sendSequenced(seq, frame)
-    return data.byteLength
+    return chargedBytes(frame)
   }
 
-  /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
+  /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and charged bytes. */
   sendBinaryAckReq(data: Uint8Array, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binaryAckReq(this.index, data, seq)
-    onQueued(seq, data.byteLength)
+    onQueued(seq, chargedBytes(frame))
     this.sendSequenced(seq, frame)
   }
 
@@ -109,20 +109,20 @@ class IndexedPeer {
     this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
-  /** Returns the frame's payload byte count. */
+  /** Returns the bytes the frame counts against flow control. */
   sendPublish(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publish(this.index, data, seq)
     this.sendSequenced(seq, frame)
-    return payloadBytes(frame)
+    return chargedBytes(frame)
   }
 
-  /** Returns the frame's payload byte count. */
+  /** Returns the bytes the frame counts against flow control. */
   sendPublishBinary(data: Uint8Array): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publishBinary(this.index, data, seq)
     this.sendSequenced(seq, frame)
-    return payloadBytes(frame)
+    return chargedBytes(frame)
   }
 
   /** Replayed once committed, so a frame a dead wire lost goes again. */
