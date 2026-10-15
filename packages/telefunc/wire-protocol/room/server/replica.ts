@@ -249,7 +249,9 @@ class RoomReplica {
   applyStamp(id: string, { fromMeta, fromMetaSeq }: SenderStamp): void {
     const hidden = this.model.memberHidden(id)
     if (hidden === null || !this.model.newerStamp(id, fromMetaSeq)) return
-    this.applyControl({ __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq, ...(hidden ? { hidden: true } : {}) })
+    const update: Extract<PresenceEvent, { __r: 'p-meta' }> = { __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq }
+    if (hidden) update.hidden = true
+    this.applyControl(update)
   }
 
   async replayText(holder: LaneHolder, before: TextWantsChange): Promise<void> {
@@ -383,7 +385,8 @@ class RoomReplica {
   }
   /** @internal Asks `of`, or every other process, to tell its demand again. */
   _askDemand(of?: string): void {
-    const ask = { __r: 'demand-ask', instance: this.report.instance, ...(of && { of }) } satisfies RoomCtrlEnvelope
+    const ask: Extract<RoomCtrlEnvelope, { __r: 'demand-ask' }> = { __r: 'demand-ask', instance: this.report.instance }
+    if (of) ask.of = of
     // A stale commit is a closed room's, which has no demand.
     void commitControl(this.id, this._incarnation.inc, ask).catch(reportRoomError)
   }
@@ -493,7 +496,8 @@ class RoomReplica {
     }
     // Every leave of a known member reaches the clients here, once, whatever applied it.
     if (hidden !== null) {
-      const leave = { __r: 'leave', id, ...leaveCauseToWire(cause), ...(hidden ? { hidden: true } : {}) } as const
+      const leave: Extract<PresenceEvent, { __r: 'leave' }> = { __r: 'leave', id, ...leaveCauseToWire(cause) }
+      if (hidden) leave.hidden = true
       this._relayControl(leave, () => unorderedEventText(leave))
     }
     for (const stub of this.stubs) {

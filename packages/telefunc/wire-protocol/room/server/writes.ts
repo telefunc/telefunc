@@ -18,7 +18,7 @@ import {
   toRoomFailure,
 } from '../errors.js'
 import { ownMetaArgument, senderOf } from '../model.js'
-import type { AcceptedMeta, DmReply, RoomDmEnvelope, SenderStamp } from '../protocol.js'
+import type { AcceptedMeta, DmReply, RoomCtrlEnvelope, RoomDmEnvelope, SenderStamp } from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
@@ -75,7 +75,8 @@ class RoomWrites {
     const host = this._host
     return await this._inCallOrder(`meta:${id}`, async (sent) => {
       const { update, hidden, replaced } = await writeMemberMeta(host._incarnation, id, write)
-      const accepted = { __r: 'p-meta', id, ...update, ...(hidden ? { hidden: true } : {}) } as const
+      const accepted: Extract<RoomCtrlEnvelope, { __r: 'p-meta' }> = { __r: 'p-meta', id, ...update }
+      if (hidden) accepted.hidden = true
       host._replica.applyControl(accepted)
       const publishing = commitControlOrThrow(host.id, host._incarnation.inc, accepted)
       sent()
@@ -142,11 +143,8 @@ class RoomWrites {
   }
 
   private async _finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
-    const receipt = {
-      seq: commit.seq,
-      timestamp: commit.timestamp,
-      ...(commit.receivers === undefined ? {} : { receivers: commit.receivers }),
-    }
+    const receipt: Omit<ChannelPublishAck, 'key'> = { seq: commit.seq, timestamp: commit.timestamp }
+    if (commit.receivers !== undefined) receipt.receivers = commit.receivers
     const onAfterPublish = this._of.guards()?.onAfterPublish
     if (onAfterPublish) await runAfterHook(() => onAfterPublish(sender, payload, receipt))
     return { key: this._host.id, ...receipt }
@@ -155,11 +153,9 @@ class RoomWrites {
   /** `sender` with the meta seq it reflects, as `_memberSender(from)` just read it. */
   private _stampOf(from: string, sender: Sender): SenderStamp {
     const seq = this._host._model.memberMetaSeq(from) ?? this._of.local(from)!._metaSeq
-    return {
-      fromMeta: sender.meta,
-      fromMetaSeq: seq,
-      ...(sender.identity === null ? {} : { fromIdentity: sender.identity }),
-    }
+    const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: seq }
+    if (sender.identity !== null) stamp.fromIdentity = sender.identity
+    return stamp
   }
 
   /** A member that left while its call waited has no sender to show a guard. */
@@ -214,14 +210,8 @@ class RoomWrites {
     const sender = this._memberSender(from)
     const onBeforeSend = this._of.guards()?.onBeforeSend
     if (onBeforeSend) await onBeforeSend(sender, target, data)
-    const envelope: RoomDmEnvelope = {
-      __r: 'dm',
-      to,
-      from,
-      ...this._stampOf(from, sender),
-      data,
-      ...(ackId ? { ackId } : {}),
-    }
+    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...this._stampOf(from, sender), data }
+    if (ackId) envelope.ackId = ackId
     const receipt = await commitToInbox(host.id, host._incarnation.inc, envelope, [from])
     if ('gone' in receipt) throw participantGoneError(receipt.gone)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }

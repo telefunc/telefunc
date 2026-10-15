@@ -129,12 +129,9 @@ function decodeMemberChanges<T>(changes: unknown, what: string, decode: (change:
 function decodeRoomPublish(value: unknown): RoomDataPublish {
   const publish = record(value, 'publish')
   if (publish.__r !== 'data') malformed('publish')
-  return {
-    __r: 'data',
-    from: memberId(publish.from, 'publish'),
-    data: publish.data,
-    ...(optionalTrue(publish.retain, 'publish retain') ? { retain: true } : {}),
-  }
+  const decoded: RoomDataPublish = { __r: 'data', from: memberId(publish.from, 'publish'), data: publish.data }
+  if (optionalTrue(publish.retain, 'publish retain')) decoded.retain = true
+  return decoded
 }
 
 function decodeStubBinaryFrame(framed: Uint8Array): BinaryFrame {
@@ -150,12 +147,11 @@ function decodeParticipantFrame(framed: Uint8Array, participantId: string): Bina
 function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
   const req = record(value, 'participant request')
   switch (req.__r) {
-    case 'req-publish':
-      return {
-        __r: 'req-publish',
-        data: req.data,
-        ...(optionalTrue(req.retain, 'publish retain') ? { retain: true } : {}),
-      }
+    case 'req-publish': {
+      const publish: Extract<ParticipantStubRequest, { __r: 'req-publish' }> = { __r: 'req-publish', data: req.data }
+      if (optionalTrue(req.retain, 'publish retain')) publish.retain = true
+      return publish
+    }
     case 'req-set-meta':
     case 'req-set-attrs':
     case 'req-dm':
@@ -173,12 +169,14 @@ function decodeMemberMutation(kind: MemberMutation['__r'], req: Record<string, u
       return { __r: 'req-set-meta', meta: record(req.meta, 'setMeta meta') }
     case 'req-set-attrs':
       return { __r: 'req-set-attrs', attrs: record(req.attrs, 'attributes') }
-    case 'req-dm':
-      return {
+    case 'req-dm': {
+      const dm: Extract<MemberMutation, { __r: 'req-dm' }> = {
         __r: 'req-dm',
         to: text(req.to, 'send recipient'),
         data: req.data,
-        ...(optionalTrue(req.ack, 'send ack') ? { ack: true } : {}),
       }
+      if (optionalTrue(req.ack, 'send ack')) dm.ack = true
+      return dm
+    }
   }
 }

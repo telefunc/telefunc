@@ -113,7 +113,8 @@ class RosterStream {
       const visible = members?.filter(({ hidden }) => !hidden)
       let visibleText = built?.text
       const textOf = (listed: MemberSnapshot[]) => {
-        const event: RoomRosterEvent = { __r: 'roster', members: listed, part, ...(more ? { more } : {}) }
+        const event: Extract<RoomRosterEvent, { __r: 'roster' }> = { __r: 'roster', members: listed, part }
+        if (more) event.more = more
         return unorderedEventText(event)
       }
       for (const stub of receiving) {
