@@ -214,6 +214,7 @@ describe('cloudflare adapter entrypoint', () => {
     expect(fetch).toHaveBeenCalledTimes(1)
 
     const forwardedRequest = fetch.mock.calls[0]![0] as Request
+    expect(forwardedRequest.headers.get('x-telefunc-shard')).toBe('telefunc-shard-weur-1')
     expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('weur')
     expect(forwardedRequest.headers.get('x-telefunc-session')).toBe('my-token')
   })
