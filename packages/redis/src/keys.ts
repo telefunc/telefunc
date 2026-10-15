@@ -29,7 +29,6 @@ export type { CommitChannels }
 
 import { everyMemberLaneKey, everyTrackLaneKey, type BroadcastRoute, type LaneId } from 'telefunc/__internal'
 
-/** The channels a commit publishes on: its lane's, and a binary lane's member's every-track one. */
 /** A binary commit's lane, its member's every-track and its track's every-member channels; another commit's lane only. */
 type CommitChannels = { lane: string; everyTrack: string | null; everyMember: string | null }
 
