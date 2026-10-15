@@ -46,17 +46,16 @@ class SessionPins {
     }
     const pin: StoredShardToken = { s: shard, b: bucket }
     // A Durable Object lives on while the write is pending.
-    kv.put(`session:${token}`, JSON.stringify(pin), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }).catch(
-      (err: unknown) => {
-        this.dueAt.set(token, Date.now() + SHARD_TOKEN_RETRY_MS)
-        assertWarning(
-          false,
-          `A session's shard couldn't be pinned in KV, and is retried after a second: ${String(err)}`,
-          {
-            onlyOnce: false,
-          },
-        )
-      },
-    )
+    const written = kv.put(`session:${token}`, JSON.stringify(pin), { expirationTtl: SHARD_TOKEN_TTL_SECONDS })
+    written.catch((err: unknown) => {
+      this.dueAt.set(token, Date.now() + SHARD_TOKEN_RETRY_MS)
+      assertWarning(
+        false,
+        `A session's shard couldn't be pinned in KV, and is retried after a second: ${String(err)}`,
+        {
+          onlyOnce: false,
+        },
+      )
+    })
   }
 }
