@@ -880,7 +880,7 @@ function encodeNext(next: HeadNext): string {
   return JSON.stringify(payload)
 }
 
-// The read's time, then key, value and version triples.
+/** The read's time, then key, value and version triples. */
 function parseCells(
   now: Buffer,
   found: Buffer[],

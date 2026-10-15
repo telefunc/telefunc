@@ -283,7 +283,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix), this._state.now())
   }
 
-  // The prefix's keys as the read starts, so a page costs its own size and a join adds nothing to the read.
+  /** The prefix's keys as the read starts, so a page costs its own size and a join adds nothing to the read. */
   async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
     let keys: string[] | null = null
     for (let at = 0; keys === null || at < keys.length; at += CELL_PAGE_SIZE) {
@@ -297,7 +297,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  // Closing tails may read; only writes require an open head.
+  /** Closing tails may read; only writes require an open head. */
   private _readableGeneration(roomId: string, inc: string): Generation | null {
     const room = this._state.rooms.get(roomId)
     const head = this._liveHead(room)

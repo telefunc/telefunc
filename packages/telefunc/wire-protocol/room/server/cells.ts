@@ -108,8 +108,8 @@ function memberMetaGenPrefix(memberId: string, gen: number): string {
 function memberIdOfMetaCellKey(cellKey: string): string {
   return cellKey.slice(MEMBER_META_CELL_PREFIX.length, cellKey.indexOf(':', MEMBER_META_CELL_PREFIX.length))
 }
-// A meta key's cell, the room's or a member's, under its generation's prefix. JSON keeps any string, lone surrogates
-// included, as a well-formed one.
+/** A meta key's cell, the room's or a member's, under its generation's prefix. JSON keeps any string, lone surrogates
+ *  included, as a well-formed one. */
 function metaKeyCellKey(genPrefix: string, key: string): string {
   return genPrefix + JSON.stringify(key)
 }

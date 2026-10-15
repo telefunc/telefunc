@@ -240,7 +240,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     assertProtocol(scope?.tracks.has(track), 'Room binary wants over ROOM_TRACK_WANTS_MAX')
   }
 
-  // A client learns its members from this view alone, so a want naming any other id names one that left or never was.
+  /** A client learns its members from this view alone, so a want naming any other id names one that left or never
+   *  was. */
   private _declareBinaryWant({ member, track, on }: BinaryWantChange): void {
     if (on && member !== ALL && !this._room._model.hasMember(member)) return
     const change: BinaryWantChange = { member, track, on }

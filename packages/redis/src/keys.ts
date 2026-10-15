@@ -38,7 +38,7 @@ const DEFAULT_PREFIX = 'tf:'
 function assertKeyPrefix(prefix: string): void {
   if (prefix.includes('{')) throw new Error("installRedis(): the prefix must not contain '{'")
 }
-// Encoded like a room id, so any key is one hash tag; an empty tag would hash the whole name instead.
+/** Encoded like a room id, so any key is one hash tag; an empty tag would hash the whole name instead. */
 function broadcastTag(key: string): string {
   return key === '' ? '{_}:empty' : `{${encodeURIComponent(key)}}`
 }
@@ -119,7 +119,7 @@ function commitChannels(prefix: string, roomId: string, inc: string, lane: LaneI
 function generationInvalidationChannel(prefix: string, roomId: string, inc: string): string {
   return `${roomTag(prefix, roomId)}:invalidate:${inc}`
 }
-// The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster.
+/** The directory's two keys share their own tag so the tag-guarded delete stays one slot under Cluster. */
 function directoryIndexKey(prefix: string): string {
   return `${prefix}room-dir:{${prefix}dir}:index`
 }
