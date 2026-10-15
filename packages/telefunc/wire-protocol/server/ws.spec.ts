@@ -78,7 +78,7 @@ test("a listener that transfers its data's buffer leaves the frames behind that 
     got.push(data.byteLength)
     structuredClone(data.buffer, { transfer: [data.buffer] })
   })
-  const frames = [encode.binary(0, new Uint8Array(100), 1), encode.window(0, 1 << 20, 0)]
+  const frames = [encode.binary(0, new Uint8Array(100), 1), encode.window(0, 1 << 20, 0), encode.window(0, 1 << 20, 0)]
   const message = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
   // Deno, Bun and workerd hand the server each message in an ArrayBuffer of its own.
   await hooks.message!(peer, { uint8Array: () => message } as never)
