@@ -2,6 +2,7 @@ import { configDefaults, defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
+    // **/*.test.ts => @brillout/test-e2e
     include: ['packages/**/*.spec.ts'],
     exclude: [...configDefaults.exclude, 'packages/redis/src/*.certification.spec.ts'],
     // Specs that force real garbage collection need it.
