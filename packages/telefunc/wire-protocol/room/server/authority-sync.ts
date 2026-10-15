@@ -41,9 +41,8 @@ type SyncHost = {
 class AuthoritySync {
   private _pendingRefresh: Promise<void> | null = null
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  private _metaRepair: ReturnType<typeof setTimeout> | null = null
-  private _memberMetaRepair: ReturnType<typeof setTimeout> | null = null
-  private _controlRepair: ReturnType<typeof setTimeout> | null = null
+  /** The repairs due `ROOM_META_REPAIR_MS` after the first gap that asked for each. */
+  private readonly _repairsDue = new Set<'control' | 'meta' | 'memberMeta'>()
   private _heartbeatBusy = false
   /** Every control seq at or below it reached this view, as a frame or through a roster read started after it. */
   private _covered = 0
@@ -127,12 +126,19 @@ class AuthoritySync {
   }
 
   private _controlGap(): void {
-    if (this._controlRepair !== null) return
-    this._controlRepair = unrefTimer(
+    this._repairSoon('control', () => {
+      if (this._covered < this._received && !this._host.model.closed)
+        void this.reconcileAuthority().catch(reportRoomError)
+    })
+  }
+
+  private _repairSoon(repair: 'control' | 'meta' | 'memberMeta', run: () => void): void {
+    if (this._repairsDue.has(repair)) return
+    this._repairsDue.add(repair)
+    unrefTimer(
       setTimeout(() => {
-        this._controlRepair = null
-        if (this._covered < this._received && !this._host.model.closed)
-          void this.reconcileAuthority().catch(reportRoomError)
+        this._repairsDue.delete(repair)
+        run()
       }, ROOM_META_REPAIR_MS),
     )
   }
@@ -145,26 +151,18 @@ class AuthoritySync {
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap
    *  `ROOM_META_REPAIR_MS` after the first wait rather than at the next heartbeat. */
   metaWaiting(): void {
-    if (this._metaRepair !== null) return
-    this._metaRepair = unrefTimer(
-      setTimeout(() => {
-        this._metaRepair = null
-        const state = this._host.model
-        if (state.metaWaiting && !state.closed) void this._reconcileMeta().catch(reportRoomError)
-      }, ROOM_META_REPAIR_MS),
-    )
+    this._repairSoon('meta', () => {
+      const state = this._host.model
+      if (state.metaWaiting && !state.closed) void this._reconcileMeta().catch(reportRoomError)
+    })
   }
 
   /** A member's meta change arrived past a gap and was dropped: a roster read `ROOM_META_REPAIR_MS` after it repairs the
    *  member rather than the next heartbeat's. */
   memberMetaGap(): void {
-    if (this._memberMetaRepair !== null) return
-    this._memberMetaRepair = unrefTimer(
-      setTimeout(() => {
-        this._memberMetaRepair = null
-        if (!this._host.model.closed) void this.refreshMembers().catch(reportRoomError)
-      }, ROOM_META_REPAIR_MS),
-    )
+    this._repairSoon('memberMeta', () => {
+      if (!this._host.model.closed) void this.refreshMembers().catch(reportRoomError)
+    })
   }
 
   /** One roster refresh at a time; concurrent callers join it. */
