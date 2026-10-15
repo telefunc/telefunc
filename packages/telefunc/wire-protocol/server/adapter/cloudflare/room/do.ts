@@ -2,7 +2,7 @@
 export { RoomAuthority }
 export type { CommitWire, RegisterWire }
 
-// A room's authority owns its time, state and fanout; transaction rollback and RPC structured clone preserve SPI outcomes.
+// A room's authority owns its time, state and fanout.
 
 import { DurableObject } from 'cloudflare:workers'
 import type {
