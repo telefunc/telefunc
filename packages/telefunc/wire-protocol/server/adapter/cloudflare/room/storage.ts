@@ -149,7 +149,7 @@ function prefixEnd(prefix: string): string | null {
   return null
 }
 
-// A lapsed tombstone reads absent; `now` is authority time.
+/** A lapsed tombstone reads absent; `now` is authority time. */
 function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
   const row = sql.exec<HeadRow>('SELECT * FROM head WHERE id = 1').toArray()[0]
   if (row === undefined) return null
@@ -229,7 +229,7 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
     .toArray()
 }
 
-// Reads stay available while closing; staleInc means the head is absent or names another incarnation.
+/** Reads stay available while closing; staleInc means the head is absent or names another incarnation. */
 function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }

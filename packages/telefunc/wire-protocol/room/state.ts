@@ -847,8 +847,7 @@ class RoomState {
       entry,
       filter && countTrack(filter.counts, filter.track, 1) ? wantOf(entry, filter, true) : null,
     )
-    let cleanups = this._listenerCleanups.get(list)
-    if (!cleanups) this._listenerCleanups.set(list, (cleanups = new Set()))
+    const cleanups = getOrCreate(this._listenerCleanups, list, () => new Set())
     const unlisten = makeDisposer(() => {
       if (remove()) {
         this._bumpListenerCount(

@@ -22,7 +22,7 @@ function exact(route: RouteInstallation): string[] {
   return [route.inc, route.laneKey, route.sessionDoId, route.leaseId]
 }
 
-// The DO checks the open head; this UPSERT atomically replaces the prior exact lease.
+/** The DO checks the open head; this UPSERT atomically replaces the prior exact lease. */
 function upsertRoute(sql: SqlStorage, route: RouteInstallation, now: number): void {
   sql.exec(
     'INSERT OR REPLACE INTO route (room_id, inc, lane_key, session_do_id, lease_id, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
@@ -47,7 +47,7 @@ function renewRoute(sql: SqlStorage, route: RouteInstallation, now: number): boo
   return changed > 0
 }
 
-// Exact-lease deletion prevents a racing old lease from removing its successor.
+/** Exact-lease deletion prevents a racing old lease from removing its successor. */
 function deleteRoute(sql: SqlStorage, route: RouteInstallation): void {
   sql.exec(`DELETE FROM route WHERE ${EXACT_ROUTE}`, ...exact(route))
 }

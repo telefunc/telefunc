@@ -75,7 +75,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   readonly #route: RouteInstallation
   readonly #receiver: BackendReceiver
   readonly #onClosed: () => void
-  #cancelRenewal: (() => void) | null = null
+  #renewalTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(route: RouteInstallation, callAuthority: AuthorityCall, receiver: BackendReceiver, onClosed: () => void) {
     super()
@@ -121,12 +121,10 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   #scheduleRenewal(): void {
-    const handle = setTimeout(() => void this.#renew(), ROUTE_RENEW_EVERY_MS)
-    this.#cancelRenewal = () => clearTimeout(handle)
+    this.#renewalTimer = setTimeout(() => void this.#renew(), ROUTE_RENEW_EVERY_MS)
   }
 
   async #renew(): Promise<void> {
-    this.#cancelRenewal = null
     let renewed: boolean
     try {
       renewed = await this.#callAuthority((authority) => authority.renewRoute(this.#route))
@@ -141,8 +139,7 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
 
   #finish(error?: unknown): void {
     if (this.ended) return
-    this.#cancelRenewal?.()
-    this.#cancelRenewal = null
+    clearTimeout(this.#renewalTimer)
     this.transition('closed', error)
     this.#onClosed()
   }

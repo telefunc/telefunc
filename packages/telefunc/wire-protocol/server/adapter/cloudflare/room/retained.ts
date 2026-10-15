@@ -12,7 +12,7 @@ const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
 type ManifestRow = { lane_key: string; size: number; seq: number; ts: number }
 
-// Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back.
+/** Install retained state inside the acceptance `transactionSync`; partial chunk replacement rolls back. */
 function installRetained(sql: SqlStorage, inc: string, lane: LaneId, payload: Uint8Array, mark: OrderingInfo): void {
   const key = encodeLaneKey(lane)
   sql.exec('DELETE FROM rt_chunk WHERE inc = ? AND lane_key = ?', inc, key)
