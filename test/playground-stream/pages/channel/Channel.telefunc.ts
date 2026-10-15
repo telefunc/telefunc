@@ -59,7 +59,7 @@ function formatCloseError(err: CloseError): string {
 async function onChannelInit() {
   const ch = new Channel<ClientToServer, ServerToClient>({ ack: true })
   const swallowClosedChannel = (err: any) => {
-    if (ch.isClosed && err?.name === 'ChannelClosedError') return
+    if (ch.isClosed && (err?.name === 'ChannelClosedError' || err instanceof Abort)) return
     throw err
   }
 
@@ -90,8 +90,7 @@ async function onChannelInit() {
       const ack = await ch.send({ type: 'tick', count: n })
       console.log(`[server] tick #${n} acked by client:`, ack)
     } catch (err: any) {
-      if (ch.isClosed && err?.name === 'ChannelClosedError') return
-      throw err
+      swallowClosedChannel(err)
     }
   }, 1000)
 
