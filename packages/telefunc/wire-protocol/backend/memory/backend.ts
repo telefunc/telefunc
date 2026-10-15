@@ -38,6 +38,7 @@ import {
 import type { OrderingInfo } from '../../ordering-frame.js'
 import type { BroadcastKind } from '../../shared-ws.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
@@ -569,10 +570,4 @@ function unindex(index: Map<string, Set<string>>, of: string, key: string): void
   const keys = index.get(of)
   keys?.delete(key)
   if (keys?.size === 0) index.delete(of)
-}
-
-function getOrCreate<Key, Value>(map: Map<Key, Value>, key: Key, create: () => Value): Value {
-  let value = map.get(key)
-  if (value === undefined) map.set(key, (value = create()))
-  return value
 }

@@ -1,5 +1,6 @@
 export { RoomDemand, DemandReport }
 
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { ALL, DEFAULT_TRACK, type All } from '../binary.js'
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
 import type { DemandEntry, RoomDemandPage } from './protocol.js'
@@ -286,9 +287,8 @@ class RoomDemand {
    *  told before. */
   applyPage(page: RoomDemandPage): void {
     const { instance } = page
-    let reporter = this._reporters.get(instance)
-    const continues = page.page === (reporter?.page ?? 0) + 1
-    if (!reporter) this._reporters.set(instance, (reporter = { expiresAt: 0, page: 0, telling: 0, asked: false }))
+    const reporter = getOrCreate(this._reporters, instance, () => ({ expiresAt: 0, page: 0, telling: 0, asked: false }))
+    const continues = page.page === reporter.page + 1
     reporter.expiresAt = Date.now() + ROOM_DEMAND_TTL_MS
     reporter.page = page.page
     let tellsAgain = false
@@ -333,8 +333,7 @@ class RoomDemand {
       if (held !== on) this._queueFetched(instance, member)
     } else if ('track' in entry) {
       const { member, track } = entry
-      let byTrack = this._pairs.get(member)
-      if (!byTrack) this._pairs.set(member, (byTrack = new Map()))
+      const byTrack = getOrCreate(this._pairs, member, () => new Map())
       if (lease(byTrack, track, instance, on, telling)) this._queue(track, member)
       if (byTrack.size === 0) this._pairs.delete(member)
     } else if (lease(this._members, entry.member, instance, on, telling))
@@ -441,7 +440,7 @@ class RoomDemand {
     on: boolean,
     telling: number,
   ): void {
-    let leases = this._tracks.get(entry.track)
+    const leases = this._tracks.get(entry.track)
     const held = leases?.get(instance)
     // A member's change follows its track's entry; a lease this process lost comes whole with the telling it asks.
     if ('member' in entry) {
@@ -461,9 +460,8 @@ class RoomDemand {
       held.telling = telling
       return
     }
-    if (!leases) this._tracks.set(track, (leases = new Map()))
     const now = { instance, telling, except: new Set(except), byMember }
-    leases.set(instance, now)
+    getOrCreate(this._tracks, track, () => new Map()).set(instance, now)
     this._queueLease(track, instance, held, now)
   }
 

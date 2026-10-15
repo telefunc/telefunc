@@ -2,6 +2,7 @@ export { WantsIndex }
 export type { Affected }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { ALL, DEFAULT_TRACK, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
 import { type TrackWants } from './binary-wants.js'
 import type { LaneHolder } from './replay.js'
@@ -183,13 +184,12 @@ class WantsIndex {
   }
 
   private _indexedOf(holder: LaneHolder): Indexed {
-    let indexed = this._indexed.get(holder)
-    if (!indexed)
-      this._indexed.set(
-        holder,
-        (indexed = { textAll: false, announce: false, textMembers: new Set(), binary: new Map() }),
-      )
-    return indexed
+    return getOrCreate(this._indexed, holder, () => ({
+      textAll: false,
+      announce: false,
+      textMembers: new Set(),
+      binary: new Map(),
+    }))
   }
 
   /** Puts the holder in or out of one cover key of a scope. */
@@ -198,8 +198,7 @@ class WantsIndex {
     if (hasEntry(indexed.binary, scope, key) === on) return NONE
     toggleEntry(indexed.binary, scope, key, on)
     if (scope !== ALL) {
-      let cover = this._members.get(scope)
-      if (!cover) this._members.set(scope, (cover = new Map()))
+      const cover = getOrCreate(this._members, scope, () => new Map())
       toggleEntry(cover, key, holder, on)
       if (cover.size === 0) this._members.delete(scope)
       if (key !== ALL) toggleEntry(this._trackMembers, key, scope, cover.has(key))

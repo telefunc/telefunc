@@ -13,6 +13,7 @@ import { RoomParticipantStubChannel, ResponseRoomGrants } from './server/stub.js
 import { remoteBacking } from './state.js'
 import { getAdapterMaxFrameBytes, getServerConfig } from '../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { getOrCreate } from '../../utils/getOrCreate.js'
 assertIsNotBrowser()
 
 type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata>
@@ -23,9 +24,7 @@ const ROOM_GRANTS = Symbol('telefunc.RoomResponseGrants')
 /** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
 function responseRoomGrants(context: InternalServerReplacerContext, roomId: string): ResponseRoomGrants {
   const byRoom = context.responseState(ROOM_GRANTS, () => new Map<string, ResponseRoomGrants>())
-  let grants = byRoom.get(roomId)
-  if (!grants) byRoom.set(roomId, (grants = new ResponseRoomGrants()))
-  return grants
+  return getOrCreate(byRoom, roomId, () => new ResponseRoomGrants())
 }
 const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,

@@ -2,6 +2,7 @@ export { ReplayGate, LocalHolder, ANNOUNCE_KEY }
 export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { makePublishInfo } from '../../channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { type BinaryFrame, type BinaryWantChange } from '../binary.js'
@@ -29,8 +30,7 @@ class ReplayGate {
   }
 
   admitBinary(member: string, track: string, info: WirePublishInfo): boolean {
-    let high = this._binaryHigh.get(member)
-    if (!high) this._binaryHigh.set(member, (high = new Map()))
+    const high = getOrCreate(this._binaryHigh, member, () => new Map())
     return admitInto(high, track, info)
   }
 

@@ -2,6 +2,7 @@ export { RoomSubscriptions }
 
 import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { getRoomBackend } from '../../backend/install.js'
 import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
 import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
@@ -710,8 +711,7 @@ class RoomSubscriptions {
   private _openInbox(member: string): void {
     const host = this._host
     if (host.model.closed || !host._ownsMember(member)) return
-    let slot = this._inbox.get(member)
-    if (!slot) this._inbox.set(member, (slot = this._newLaneSubscription()))
+    const slot = getOrCreate(this._inbox, member, () => this._newLaneSubscription())
     slot.sync(true, () =>
       getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'inbox', member }, (payload, info) =>
         host._onDm(decodeRoomText(payload), info),
