@@ -8,6 +8,7 @@ import { untether } from '../wrapProxy.js'
 import { makeDisposer } from './disposer.js'
 import { Slice } from './slice.js'
 import { Listeners } from '../../utils/Listeners.js'
+import { getOrCreate } from '../../utils/getOrCreate.js'
 import {
   ALL,
   DEFAULT_TRACK,
@@ -400,11 +401,7 @@ class RoomModel {
     this._record({ meta: { id, update } })
     const entry = this._members.get(id)
     // Before the first roster every member is unknown, and the first roster applies the changes after its own.
-    if (!entry && !this._rosterKnown) {
-      const early = this._preRosterMeta.get(id)
-      if (early === undefined) this._preRosterMeta.set(id, [update])
-      else early.push(update)
-    }
+    if (!entry && !this._rosterKnown) getOrCreate(this._preRosterMeta, id, () => []).push(update)
     if (!entry) return false
     const listening = [...this._views].filter((view) => view._listensToMeta(entry))
     const prev = listening.length > 0 ? entry.meta.object : null

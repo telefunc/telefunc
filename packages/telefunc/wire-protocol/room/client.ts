@@ -3,6 +3,7 @@ export { ClientRoom, ClientStandaloneParticipant }
 import { createDeferred } from '../../utils/createDeferred.js'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { markHandled } from '../../utils/markHandled.js'
+import { getOrCreate } from '../../utils/getOrCreate.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel.js'
 import { ClientBroadcast } from '../client/channel.js'
@@ -485,11 +486,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
     if (key === undefined) return markHandled(this._sendPublish(data, options?.retain))
     return markHandled(
       new Promise<ChannelPublishAck>((resolve, reject) => {
-        let slot = this._coalescers.get(key)
-        if (!slot) {
-          slot = { sending: false, pending: null }
-          this._coalescers.set(key, slot)
-        }
+        const slot = getOrCreate(this._coalescers, key, () => ({ sending: false, pending: null }))
         // Supersede any queued value; its waiters ride along and all resolve with the winning send.
         const waiters = slot.pending?.waiters ?? []
         waiters.push({ resolve, reject })

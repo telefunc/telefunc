@@ -22,6 +22,7 @@ import { broadcastRouteKey } from '../../../backend/broadcast/route-key.js'
 import type { BackendPayload, BackendReceiver } from '../../../backend/subscription.js'
 import { DriverAttempt } from '../../../backend/attempt.js'
 import { createDeferred } from '../../../../utils/createDeferred.js'
+import { getOrCreate } from '../../../../utils/getOrCreate.js'
 import type { OrderingInfo } from '../../../ordering-frame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 import { currentCloudflareSession } from './session.js'
@@ -393,9 +394,7 @@ class CloudflareBroadcast {
     const membersByCoordinatorBucket = new Map<LocationBucket, string[]>()
     for (const { member, bucket } of presence) {
       const via = getScaleCountForBucket(this.#scale, bucket) > 0 ? bucket : this.#locationFallback
-      const group = membersByCoordinatorBucket.get(via)
-      if (group) group.push(member)
-      else membersByCoordinatorBucket.set(via, [member])
+      getOrCreate(membersByCoordinatorBucket, via, () => []).push(member)
     }
     const forwards = await Promise.allSettled(
       Array.from(membersByCoordinatorBucket, ([bucket, members]) =>
