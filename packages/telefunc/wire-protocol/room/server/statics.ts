@@ -374,7 +374,8 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
   const exact = 'id' in target
   for (const member of members) {
     const envelope = { __r: 'dm', to: member.id, from: '', fromMeta: null, data: message } as const
-    if ('gone' in (await commitToInbox(id, incarnation.inc, envelope)) && exact) throw participantGoneError(member.id)
+    const receipt = await commitToInbox(id, incarnation.inc, envelope)
+    if ('gone' in receipt && exact) throw participantGoneError(member.id)
   }
 }
 
