@@ -43,8 +43,11 @@ class MemberMeta {
   }
 
   get object(): ParticipantMeta {
-    const merges = this._merges
-    if (merges === null) return this._object
+    if (this._merges !== null) this._fold(this._merges)
+    return this._object
+  }
+
+  private _fold(merges: ParticipantMeta[]): void {
     const next: ParticipantMeta = { ...this._object }
     let keys = this._keys
     for (const attrs of merges)
@@ -62,7 +65,6 @@ class MemberMeta {
     this._keys = keys
     this._merges = null
     this._mergedKeys = 0
-    return this._object
   }
 
   /** Whether a sender's stamp at `seq` is newer. None is while the seq is forgotten: a stamp from before a failover may
@@ -92,7 +94,7 @@ class MemberMeta {
     ;(this._merges ??= []).push(update.attrs)
     this._mergedKeys += Object.keys(update.attrs).length
     this._seq = update.seq
-    if (this._mergedKeys > Math.max(MEMBER_META_MERGES_HELD_MIN, this._keys)) void this.object
+    if (this._mergedKeys > Math.max(MEMBER_META_MERGES_HELD_MIN, this._keys)) this._fold(this._merges)
     return 'applied'
   }
 }
