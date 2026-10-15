@@ -708,6 +708,7 @@ class ClientConnection implements MuxConnection {
       this.replayBuffers.get(channelIx)!.push(seq, frame)
       this.transport.sendFrame({ kind: 'reconcile', frame })
     }
+    this.startTtlIfIdle()
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {

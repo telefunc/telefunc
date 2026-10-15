@@ -1616,6 +1616,17 @@ test('a page whose every channel on a full connection aborted, then refused one 
   expect(socket.readyState).toBe(3)
 })
 
+test('a page that aborted a thousand channels while its wire was down lets the next wire go idle once their aborts went', async () => {
+  config.channel.idleTimeout = 1
+  const pairs = Array.from({ length: 1_000 }, () => loop.open())
+  await run(100)
+  loop.socket.cut()
+  for (const { page } of pairs) page.abort()
+  // More aborts than the new wire has room for at once: the last of them wait for its room.
+  await runUntil(() => loop.sockets.length === 2 && loop.socket.readyState === 3, 60_000)
+  expect(loop.socket.readyState).toBe(3)
+})
+
 test('a burst of 60 frames of 512 KB a server sends as its channel opens on a fast wire goes at once, whole after its first two', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   let got = 0
