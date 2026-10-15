@@ -2,6 +2,7 @@ export { Fanout }
 export type { RoomSessionNamespace, RoomSessionStub }
 
 import type { OrderingInfo } from '../../../../ordering-frame.js'
+import { ROOM_HORIZON_MS } from '../../../../room/constants.js'
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
 import { OrderedStubs, reportLostDeliveries } from '../ordered-stubs.js'
@@ -21,7 +22,10 @@ type RoomSessionNamespace = {
 class Fanout {
   readonly #sessions: RoomSessionNamespace
   readonly #calls = new OrderedStubs<RoomSessionStub>()
-  readonly #deliveries = new Map<string, Promise<void>>()
+  /** A token's delivery, kept until it is awaited or two rotations later, which come a horizon apart at the earliest. */
+  #deliveries = new Map<string, Promise<void>>()
+  #rotated = new Map<string, Promise<void>>()
+  #rotatedAt = Date.now()
 
   constructor(sessions: RoomSessionNamespace) {
     this.#sessions = sessions
@@ -36,6 +40,7 @@ class Fanout {
         (session) => session.telefuncRoomDeliver({ ...route, payload, info }),
       ),
     )
+    this.#rotate()
     const token = crypto.randomUUID()
     const delivery = Promise.allSettled(handoffs).then((outcomes) =>
       reportLostDeliveries('Cloudflare Room delivery', outcomes),
@@ -45,12 +50,19 @@ class Fanout {
   }
 
   async awaitDelivery(token: string): Promise<void> {
-    const delivery = this.#deliveries.get(token)
+    this.#rotate()
+    const delivery = this.#deliveries.get(token) ?? this.#rotated.get(token)
     if (delivery === undefined) throw new Error('Cloudflare Room delivery has an unknown delivery token')
-    try {
-      await delivery
-    } finally {
-      this.#deliveries.delete(token)
-    }
+    this.#deliveries.delete(token)
+    this.#rotated.delete(token)
+    await delivery
+  }
+
+  #rotate(): void {
+    const now = Date.now()
+    if (now - this.#rotatedAt < ROOM_HORIZON_MS) return
+    this.#rotated = this.#deliveries
+    this.#deliveries = new Map()
+    this.#rotatedAt = now
   }
 }

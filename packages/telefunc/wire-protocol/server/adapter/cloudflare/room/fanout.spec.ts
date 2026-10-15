@@ -1,4 +1,5 @@
 import { expect, test, vi } from 'vitest'
+import { ROOM_HORIZON_MS } from '../../../../room/constants.js'
 import { Fanout, type RoomSessionNamespace } from './fanout.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
 
@@ -47,5 +48,20 @@ test("a failed handoff is loss: its delivery settles, the loss is logged, and th
     expect(handedTo).toEqual([1])
   } finally {
     report.mockRestore()
+  }
+})
+
+test('forgets a delivery token nobody awaits within two horizons', async () => {
+  vi.useFakeTimers({ toFake: ['Date'] })
+  try {
+    const fanout = new Fanout(sessions(async () => {}))
+    const unawaited = fanout.send([route], new Uint8Array([1]), { seq: 1, timestamp: 1 })
+    vi.advanceTimersByTime(ROOM_HORIZON_MS)
+    const late = fanout.send([route], new Uint8Array([2]), { seq: 2, timestamp: 1 })
+    vi.advanceTimersByTime(ROOM_HORIZON_MS)
+    await expect(fanout.awaitDelivery(late)).resolves.toBeUndefined()
+    await expect(fanout.awaitDelivery(unawaited)).rejects.toThrow('unknown delivery token')
+  } finally {
+    vi.useRealTimers()
   }
 })
