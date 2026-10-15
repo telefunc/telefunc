@@ -212,7 +212,9 @@ class WantsIndex {
     this._onEveryMemberCover(key)
     if (other !== undefined) return new Set(other._suppressedMembers())
     // Only the members it is named of alone change lanes; the holder's own may stop or start being received.
-    return new Set([...this.membersNaming(key), ...holder._suppressedMembers()])
+    const affected = new Set(this.membersNaming(key))
+    for (const member of holder._suppressedMembers()) affected.add(member)
+    return affected
   }
 }
 
