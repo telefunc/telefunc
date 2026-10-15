@@ -4,7 +4,7 @@ export {
   ERROR_REASON,
   encode,
   withTook,
-  HEADER,
+  MESSAGE_FRAME_OVERHEAD_MAX,
   LENGTH_BYTES,
   fixedBytes,
   isOneFrame,
@@ -83,6 +83,8 @@ const PING_ENTRY_BYTES = 6
 const PONG_ENTRY_BYTES = 7
 /** An ACK_RES's `ackedSeq` and status. */
 const ACK_RES_PREFIX = 9
+/** The most a frame adds to a channel message or its ack answer: an ACK_RES's header and prefix. */
+const MESSAGE_FRAME_OVERHEAD_MAX = HEADER + ACK_RES_PREFIX
 /** What a frame counts against flow control and the replay buffer: all of it, so an empty message counts too. */
 const chargedBytes = (frame: Uint8Array): number => frame.byteLength
 const DATA_TAG_MIN = 0x10

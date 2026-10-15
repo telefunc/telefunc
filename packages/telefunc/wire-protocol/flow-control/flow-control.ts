@@ -13,7 +13,7 @@ import {
   FC_SELF_TIME_WINDOW_MS,
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
-import { HEADER } from '../shared-ws.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
@@ -31,10 +31,11 @@ interface FlowControlEmit {
 }
 
 /** The largest window a receiver grants a sender whose replay buffer's lanes hold `text` and `binary` bytes: half the
- *  smaller, less a frame's header, so what credit lets be in flight, and the frame of a message up to half sent as the
- *  credit ran out, fit it. At least a byte, so credit lets a message through each round trip. */
+ *  smaller, less the most a frame adds to a message, so what credit lets be in flight, and the frame of a message or
+ *  ack answer up to half sent as the credit ran out, fit it. At least a byte, so credit lets a message through each
+ *  round trip. */
 function replayWindow(text: number, binary: number): number {
-  return Math.max(1, Math.floor(Math.min(text, binary) / 2) - HEADER)
+  return Math.max(1, Math.floor(Math.min(text, binary) / 2) - MESSAGE_FRAME_OVERHEAD_MAX)
 }
 
 /** A channel's byte and message credit both ways, as cumulative limits, as QUIC's MAX_DATA. */
