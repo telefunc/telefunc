@@ -843,12 +843,13 @@ class RoomState {
     let cleanups = this._listenerCleanups.get(list)
     if (!cleanups) this._listenerCleanups.set(list, (cleanups = new Set()))
     const unlisten = makeDisposer(() => {
-      if (remove())
+      if (remove()) {
         this._bumpListenerCount(
           -1,
           entry,
           filter && countTrack(filter.counts, filter.track, -1) ? wantOf(entry, filter, false) : null,
         )
+      }
     }, cleanups)
     return unlisten
   }
