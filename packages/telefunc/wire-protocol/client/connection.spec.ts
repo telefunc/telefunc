@@ -366,7 +366,7 @@ test("a wire's end aborts its batch POST still in flight, which would otherwise 
   connection.dispose()
 })
 
-test('the channel cap counts the open channels, not every channel the connection opened', () => {
+test('the channel cap counts the channels a connection still lists, not every channel it opened', () => {
   const options = stalledOptions()
   const connection = ClientConnection.getOrCreate('http://cap.test', muxChannelStub(), options) as any
   connection.nextIndex = MAX_CHANNELS_PER_CONNECTION // what 4,095 channels opened and closed on it leave

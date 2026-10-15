@@ -5,7 +5,6 @@ import {
   assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
-  getShardIndicesForBucket,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
 } from './routing.js'
@@ -299,15 +298,6 @@ describe('cloudflare broadcast routing', () => {
     }
   })
 
-  it('partitions shards by bucket when the scale is uniform', () => {
-    expect(getShardIndicesForBucket(2, 'wnam')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'enam')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'weur')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'eeur')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'apac')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'oc')).toEqual([0, 1])
-  })
-
   it('partitions bucket coordinators at ceil(sessionScale / 2) per bucket', () => {
     expect(getBucketCoordinatorShardIndices(1, 'wnam')).toEqual([0])
     expect(getBucketCoordinatorShardIndices(2, 'wnam')).toEqual([0])
@@ -316,17 +306,13 @@ describe('cloudflare broadcast routing', () => {
     expect(getBucketCoordinatorShardIndices(4, 'enam')).toEqual([0, 1])
   })
 
-  it('uses scale maps to control the session and bucket-coordinator shard subsets together', () => {
-    expect(getShardIndicesForBucket({ weur: 2, enam: 1 }, 'enam')).toEqual([0])
-    expect(getShardIndicesForBucket({ weur: 2, enam: 1 }, 'weur')).toEqual([0, 1])
+  it('uses scale maps to control the bucket-coordinator shard subsets', () => {
     expect(getBucketCoordinatorShardIndices({ weur: 2, enam: 1 }, 'enam')).toEqual([0])
     expect(getBucketCoordinatorShardIndices({ weur: 2, enam: 1 }, 'weur')).toEqual([0])
     expect(getBucketCoordinatorShardIndices({ weur: 3, enam: 1 }, 'weur')).toEqual([0, 1])
   })
 
   it('uses only canonical bucket scale entries', () => {
-    expect(getShardIndicesForBucket({ weur: 2, apac: 1 }, 'weur')).toEqual([0, 1])
-    expect(getShardIndicesForBucket({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
     expect(getBucketCoordinatorShardIndices({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
   })
 

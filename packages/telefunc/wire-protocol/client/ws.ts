@@ -371,7 +371,7 @@ function receiveMessage(
   let frame: DecodedFrame | null
   try {
     if (!isOneFrame(raw)) {
-      const frames = messageFrames(raw)
+      const frames = Array.from(messageFrames(raw))
       raw = frames.pop()!
       riding = { frames, decoded: [] }
       for (const each of frames) {

@@ -15,7 +15,6 @@ export {
   peekTag,
   ProtocolViolationError,
   isChannelCtrlTag,
-  isChannelDataFrame,
   isSequencedFrame,
   isSequencedTag,
   replayLaneOf,
@@ -193,10 +192,6 @@ function isConnCtrlTag(tag: number): boolean {
 
 function isChannelCtrlTag(tag: number): boolean {
   return tag >= CHANNEL_CTRL_TAG_MIN
-}
-
-function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
-  return frame.tag >= DATA_TAG_MIN && frame.tag < CHANNEL_CTRL_TAG_MIN
 }
 
 /** What a replay holds: data, and the closing frames. */
@@ -705,9 +700,9 @@ function isOneFrame(message: Uint8Array): boolean {
 
 /** The frames a WebSocket message of several holds, in order. Each but the last is as long as its tag fixes, or the
  *  LENGTH ahead of it says, and is whole; the last is the rest. Each is a copy, a Node.js `Buffer`'s too (its `slice` is
- *  a view): a listener may keep or transfer its data's buffer. */
-function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer>[] {
-  const frames: Uint8Array<ArrayBuffer>[] = []
+ *  a view): a listener may keep or transfer its data's buffer. A frame is read and copied as it is taken, so a reader
+ *  that stops early copies no more. */
+function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<ArrayBuffer>> {
   const end = message.byteLength
   let at = 0
   for (;;) {
@@ -718,15 +713,15 @@ function messageFrames(message: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer
       at += HEADER
       assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at > bytes, 'LENGTH of no frame')
     } else if (bytes === 0 || end - at <= bytes) {
-      frames.push(new Uint8Array(message.subarray(at)))
-      return frames
+      yield new Uint8Array(message.subarray(at))
+      return
     }
     const tag = message[at]
     assertProtocol(
       tag !== TAG.PIECE && tag !== TAG.ANNOUNCE && tag !== TAG.LENGTH,
       'frame ahead of another it never is',
     )
-    frames.push(new Uint8Array(message.subarray(at, at + bytes)))
+    yield new Uint8Array(message.subarray(at, at + bytes))
     at += bytes
   }
 }

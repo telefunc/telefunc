@@ -9,7 +9,6 @@ export {
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
   getScaleCountForBucket,
-  getShardIndicesForBucket,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
 }
@@ -71,16 +70,6 @@ function getBucketCoordinatorShardIndices(
     shardCount > 0,
     `Cloudflare bucket coordinator scale does not define any shards for location bucket "${locationBucket}".`,
   )
-  return Array.from({ length: shardCount }, (_, shardOrdinal) => shardOrdinal)
-}
-
-/**
- * Maps one location bucket to its local session-shard ordinals.
- * Buckets no longer share one global shard index space; each bucket owns ordinals `0..n-1` independently.
- */
-function getShardIndicesForBucket(scale: CloudflareScale | undefined, locationBucket: LocationBucket): number[] {
-  const shardCount = getBucketScale(scale, locationBucket)
-  assert(shardCount > 0, `Cloudflare session scale does not define any shards for location bucket "${locationBucket}".`)
   return Array.from({ length: shardCount }, (_, shardOrdinal) => shardOrdinal)
 }
 

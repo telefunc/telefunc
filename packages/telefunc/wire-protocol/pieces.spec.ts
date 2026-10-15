@@ -217,7 +217,7 @@ test('a frame held for room goes, once room comes, in one message behind what wa
   sender.carry(() => window)
   dataRoom = Number.POSITIVE_INFINITY
   sender.sendHeld()
-  expect(transmitted.map((message) => messageFrames(message).map((frame) => frame[0]))).toEqual([
+  expect(transmitted.map((message) => Array.from(messageFrames(message), (frame) => frame[0]))).toEqual([
     [TAG.WINDOW, TAG.PIECE],
   ])
   const all = window.byteLength + PIECE + 1_000

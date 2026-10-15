@@ -394,6 +394,7 @@ class ClientConnection implements MuxConnection {
    *  their replay goes first. */
   private awaitedIxes = new Set<number>()
   private channels = new Map<number, ChannelEntry>()
+  /** The channels not closed: `unregister` takes one out while `channels` still lists it. */
   private channelIndex = new Map<MuxChannel, number>()
   /** Frames held while sends are, or for their channel's ATTACH_RESULT. */
   private sendBuffer: BufferedFrame[] = []
@@ -1367,21 +1368,15 @@ class ClientConnection implements MuxConnection {
       this.ttl ||
       this.settleQueue().length > 0 ||
       this.heldForRoom.length > 0 ||
-      this.openChannelCount() > 0
+      this.channelIndex.size > 0
     )
       return
     const ttl = setTimeout(() => {
       void this.transport.drained().then(() => {
-        if (this.ttl === ttl && this.openChannelCount() === 0) this.dispose()
+        if (this.ttl === ttl && this.channelIndex.size === 0) this.dispose()
       })
     }, this.idleTimeoutMs)
     this.ttl = ttl
-  }
-
-  private openChannelCount(): number {
-    let count = 0
-    for (const entry of this.channels.values()) if (entry.state.tag !== 'closed') count++
-    return count
   }
 
   /** What the wire's RECONCILEs left pending goes with it: the server stops awaiting channels when their wire goes, and

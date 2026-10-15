@@ -1,7 +1,7 @@
 import { expect, test, vi } from 'vitest'
 import { ChannelMux, type ServerTransport } from './mux.js'
 import { ServerChannel } from './channel.js'
-import { decode, encode, ERROR_REASON, TAG, type DecodedFrame } from '../shared-ws.js'
+import { decode, encode, ERROR_REASON, LENGTH_BYTES, TAG, type DecodedFrame } from '../shared-ws.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import {
   CREDIT_MSG_WINDOW_MAX,
@@ -343,6 +343,32 @@ test('a peer flooding past what its channels can have in flight is still termina
   )
   await wire.deliver(frames)
   expect(wire.terminated()).toBe(true)
+})
+
+test('a WebSocket message of more frames than the ingress budget takes stops being copied two frames past it', async () => {
+  const mux = new ChannelMux()
+  const transport: ServerTransport<object> = {
+    getSessionId: () => 'flood',
+    setSessionId: () => {},
+    getConnId: () => null,
+    wholeMessages: true,
+    sendNow: () => {},
+    bufferedAmount: () => 0,
+    terminateConnection: (wire) => mux.onConnectionClosed(wire, { permanent: true }),
+  }
+  const wire = {}
+  mux.onConnectionOpen(wire, transport)
+  const frames = Array.from({ length: 4 * WIRE_RECV_BACKLOG_BASE_FRAMES }, (_, i) => encode.text(0, '1', i + 1))
+  const message = encode.message(
+    frames,
+    frames.reduce((bytes, frame) => bytes + LENGTH_BYTES + frame.byteLength, -LENGTH_BYTES),
+  )
+  // Each frame is copied out of a view of the message.
+  const copies = vi.spyOn(Uint8Array.prototype, 'subarray')
+  const done = mux.onConnectionRawMessage(wire, message)
+  expect(copies.mock.calls.length).toBeLessThanOrEqual(WIRE_RECV_BACKLOG_BASE_FRAMES + 2)
+  copies.mockRestore()
+  await done
 })
 
 test("a RECONCILE that crossed the ATTACH_RESULT saying its channel never registered doesn't await it again", async () => {
