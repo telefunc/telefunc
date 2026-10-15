@@ -544,10 +544,6 @@ class ClientConnection implements MuxConnection {
   }
 
   private register(channel: MuxChannel): void {
-    if (this.ttl) {
-      clearTimeout(this.ttl)
-      this.ttl = null
-    }
     // Every RECONCILE lists every channel, the closed ones too, so the oldest the server has all of makes way.
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
       for (const [ix, entry] of this.channels) {
@@ -560,6 +556,10 @@ class ClientConnection implements MuxConnection {
       this.channels.size < MAX_CHANNELS_PER_CONNECTION,
       `Too many channels on one connection (${MAX_CHANNELS_PER_CONNECTION} max) — open another with \`connectionKey\``,
     )
+    if (this.ttl) {
+      clearTimeout(this.ttl)
+      this.ttl = null
+    }
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
     this.replayBuffers.set(ix, new ReplayBuffer(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes))

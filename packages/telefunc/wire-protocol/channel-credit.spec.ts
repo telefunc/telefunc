@@ -14,6 +14,7 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
+  MAX_CHANNELS_PER_CONNECTION,
   RECONCILE_TIMEOUT_MS,
 } from './constants.js'
 import { ChannelOverflowError } from './channel-errors.js'
@@ -1601,6 +1602,18 @@ test('a page that aborts its channel right after a message on a fresh wire hands
   await runUntil(() => socket.readyState === 3, 1_000)
   expect(socket.readyState).toBe(3)
   expect(loop.sent.page.map(([tag]) => tag)).toContain(TAG.ABORT)
+})
+
+test('a page whose every channel on a full connection aborted, then refused one more, still lets the wire go idle', async () => {
+  config.channel.idleTimeout = 1
+  const pairs = Array.from({ length: MAX_CHANNELS_PER_CONNECTION }, () => loop.open())
+  await run(100)
+  const socket = loop.socket
+  for (const { page } of pairs) page.abort()
+  // Their aborts are on the wire, not yet acknowledged: each still holds its place.
+  expect(() => loop.open()).toThrow('Too many channels')
+  await runUntil(() => socket.readyState === 3, 10_000)
+  expect(socket.readyState).toBe(3)
 })
 
 test('a burst of 60 frames of 512 KB a server sends as its channel opens on a fast wire goes at once, whole after its first two', async () => {
