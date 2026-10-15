@@ -215,22 +215,15 @@ class CloudflareBroadcastAuthorityState {
     })
   }
 
-  /** The route's unexpired member DOs by bucket. */
-  livePresence(routeKey: string, now: number): Map<LocationBucket, string[]> {
-    const byBucket = new Map<LocationBucket, string[]>()
-    const rows = this.#sql()
+  /** The route's unexpired member DOs, each with its bucket. */
+  livePresence(routeKey: string, now: number): Array<{ member: string; bucket: LocationBucket }> {
+    return this.#sql()
       .exec<{ member: string; bucket: LocationBucket }>(
         'SELECT member, bucket FROM broadcast_presence WHERE route_key = ? AND expires_at > ?',
         routeKey,
         now,
       )
       .toArray()
-    for (const { member, bucket } of rows) {
-      const doNames = byBucket.get(bucket)
-      if (doNames === undefined) byBucket.set(bucket, [member])
-      else doNames.push(member)
-    }
-    return byBucket
   }
 
   #sql(): SqlStorage {
@@ -399,16 +392,14 @@ class CloudflareBroadcast {
   ): Promise<PublishResult> {
     const { key, kind, payload } = request
     const info = { seq: authorityState.nextSequence(key), timestamp: Date.now() }
-    const presenceByBucket = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
-    let receivers = 0
+    const presence = authorityState.livePresence(broadcastRouteKey({ key, kind }), info.timestamp)
     // Presence written before a redeploy dropped its region forwards through the fallback region's coordinators.
     const membersByCoordinatorBucket = new Map<LocationBucket, string[]>()
-    for (const [bucket, members] of presenceByBucket) {
-      receivers += members.length
+    for (const { member, bucket } of presence) {
       const via = getScaleCountForBucket(this.scale, bucket) > 0 ? bucket : this.locationFallback
       const group = membersByCoordinatorBucket.get(via)
-      if (group) group.push(...members)
-      else membersByCoordinatorBucket.set(via, [...members])
+      if (group) group.push(member)
+      else membersByCoordinatorBucket.set(via, [member])
     }
     const forwards = await Promise.allSettled(
       Array.from(membersByCoordinatorBucket, ([bucket, members]) =>
@@ -418,7 +409,7 @@ class CloudflareBroadcast {
       ),
     )
     reportLostDeliveries(`Cloudflare Broadcast delivery of '${key}'`, forwards)
-    return { ...info, receivers }
+    return { ...info, receivers: presence.length }
   }
 
   /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs, in arrival order. */

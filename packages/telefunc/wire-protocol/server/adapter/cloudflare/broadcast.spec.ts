@@ -114,7 +114,7 @@ function presenceAt(authority: CloudflareBroadcastAuthorityState, hooks: Presenc
 }
 
 function liveMembers(authority: CloudflareBroadcastAuthorityState, route: BroadcastRoute) {
-  return Object.fromEntries(authority.livePresence(broadcastRouteKey(route), Date.now()))
+  return authority.livePresence(broadcastRouteKey(route), Date.now())
 }
 
 async function flushMicrotasks(turns = 6): Promise<void> {
@@ -398,7 +398,7 @@ describe('cloudflare broadcast routing', () => {
     const route = { key: 'room:test', kind: 'text' } as const
     const subscription = member.openSubscription(route, () => {})
     await untilReady(subscription)
-    expect(liveMembers(authority, route)).toEqual({ weur: ['member-weur-0'] })
+    expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
     const binary = await broadcast.publish({ key: 'room:test', kind: 'binary' }, new Uint8Array([1]))
     const text = await broadcast.publish(route, '"text"')
     expect([binary.receivers, text.receivers]).toEqual([0, 1])
@@ -719,9 +719,9 @@ describe('cloudflare broadcast routing', () => {
     const route = { key: 'room:test', kind: 'text' } as const
     const subscription = member.openSubscription(route, () => {})
     await untilReady(subscription)
-    expect(liveMembers(authority, route)).toEqual({ weur: ['member-weur-0'] })
+    expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
     await subscription.unsubscribe()
-    expect(liveMembers(authority, route)).toEqual({})
+    expect(liveMembers(authority, route)).toEqual([])
   })
 
   it('keeps presence generation-safe across setup and withdrawal churn', async () => {
@@ -737,7 +737,7 @@ describe('cloudflare broadcast routing', () => {
     setup.resolve()
     await untilReady(successor)
     await flushMicrotasks()
-    expect(liveMembers(authority, route)).toEqual({ weur: ['member-weur-0'] })
+    expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
     const releaseWithdrawal = Promise.withResolvers<void>()
     hooks.beforeWithdraw = () => releaseWithdrawal.promise
     const teardown = successor.unsubscribe()
@@ -746,7 +746,7 @@ describe('cloudflare broadcast routing', () => {
     expect(replacement.state()).toBe('establishing')
     releaseWithdrawal.resolve()
     await Promise.all([teardown, untilReady(replacement)])
-    expect(liveMembers(authority, route)).toEqual({ weur: ['member-weur-0'] })
+    expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
     await replacement.unsubscribe()
   })
 
@@ -770,7 +770,7 @@ describe('cloudflare broadcast routing', () => {
     withdrawal.resolve()
     await untilReady(replacement)
     await flushMicrotasks()
-    expect(liveMembers(authority, route)).toEqual({ weur: ['member-weur-0'] })
+    expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
     await replacement.unsubscribe()
   })
 
