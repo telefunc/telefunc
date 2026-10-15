@@ -237,7 +237,7 @@ Fire-and-forget is also fine — data is sent immediately whether or not you awa
 channel.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
-If a client's connection can't keep up, a server channel holds what you send. Once it holds 64 MiB beyond the message that filled the client's room, the next send rejects with `ChannelOverflowError`; `await` your sends to avoid it.
+If a client's connection can't keep up, a server channel holds what you send. Once it holds 64 MiB more than the client is ready to receive, the next send rejects with `ChannelOverflowError`; `await` your sends to avoid it.
 
 
 ## `Broadcast`
