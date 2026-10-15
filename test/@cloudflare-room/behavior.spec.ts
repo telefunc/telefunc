@@ -79,7 +79,7 @@ test('heads, cells and a stale commit cross native Durable Object RPC intact', a
 })
 
 test('a retained Room payload larger than a SQLite row replays whole, as native bytes', async () => {
-  expect(await probe('/large-retained')).toEqual({ bytes: 25 * 1024 * 1024, first: 0x11, last: 0xee })
+  expect(await probe('/large-retained')).toEqual({ bytes: 25 * 1024 * 1024, firstMismatch: -1 })
 })
 
 test("a room authority's first write that SQLite refuses leaves its tables for the next calls", async () => {

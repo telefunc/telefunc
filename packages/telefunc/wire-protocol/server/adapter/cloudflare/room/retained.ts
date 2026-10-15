@@ -19,8 +19,7 @@ function installRetained(sql: SqlStorage, inc: string, lane: LaneId, payload: Ui
   const chunkCount = Math.max(1, Math.ceil(payload.byteLength / MAX_RETAINED_CHUNK_BYTES))
   for (let i = 0; i < chunkCount; i++) {
     const slice = payload.subarray(i * MAX_RETAINED_CHUNK_BYTES, (i + 1) * MAX_RETAINED_CHUNK_BYTES)
-    // Copy out of the subarray view so SQLite stores exactly the chunk bytes.
-    sql.exec('INSERT INTO rt_chunk (inc, lane_key, i, bytes) VALUES (?, ?, ?, ?)', inc, key, i, new Uint8Array(slice))
+    sql.exec('INSERT INTO rt_chunk (inc, lane_key, i, bytes) VALUES (?, ?, ?, ?)', inc, key, i, slice)
   }
   sql.exec(
     'INSERT OR REPLACE INTO rt_manifest (inc, lane_key, track, size, seq, ts) VALUES (?, ?, ?, ?, ?, ?)',

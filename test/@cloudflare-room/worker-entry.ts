@@ -508,20 +508,14 @@ async function joinOpensLane(env: Env, suffix: string) {
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')
   await probe.open('large retained open')
-  const payload = new Uint8Array(25 * 1024 * 1024)
-  payload.fill(0xa5)
-  payload[0] = 0x11
-  payload[payload.length - 1] = 0xee
+  // A byte pattern whose period divides no chunk's length, so a chunk stored from the wrong bytes reads back unlike it.
+  const payload = Uint8Array.from({ length: 25 * 1024 * 1024 }, (_, index) => index % 251)
   const lane = { kind: 'binary' as const, member: 'member', track: 'track' }
   accepted(await probe.authority.commitLane(probe.inc, lane, payload, { retain: true }), 'large retained')
   const retained = await probe.authority.readRetained(probe.inc, lane)
   const replayed = (retained as { payload?: unknown } | null)?.payload
   if (!(replayed instanceof Uint8Array)) throw new Error('large retained replay did not return native bytes')
-  return {
-    bytes: replayed.byteLength,
-    first: replayed[0],
-    last: replayed[replayed.length - 1],
-  }
+  return { bytes: replayed.byteLength, firstMismatch: replayed.findIndex((byte, index) => byte !== index % 251) }
 }
 async function nativeRpcRoundTrip(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'native-rpc')
