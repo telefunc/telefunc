@@ -103,7 +103,11 @@ class AuthoritySync {
     this._received = seq
     if (seq <= this._covered + 1) this._covered = Math.max(this._covered, seq)
     this._joinRun()
-    if (this._covered < this._received) this._controlGap()
+    if (this._covered < this._received)
+      this._repairSoon('control', () => {
+        if (this._covered < this._received && !this._host.model.closed)
+          void this.reconcileAuthority().catch(reportRoomError)
+      })
   }
 
   /** The meta and roster cells share the control lane's slot, so a failover rewound them with it. */
@@ -122,13 +126,6 @@ class AuthoritySync {
   /** The delivered run joins what is covered once nothing is missing between them. */
   private _joinRun(): void {
     if (this._runStart <= this._covered + 1) this._covered = Math.max(this._covered, this._received)
-  }
-
-  private _controlGap(): void {
-    this._repairSoon('control', () => {
-      if (this._covered < this._received && !this._host.model.closed)
-        void this.reconcileAuthority().catch(reportRoomError)
-    })
   }
 
   private _repairSoon(repair: 'control' | 'meta' | 'memberMeta', run: () => void): void {
@@ -229,12 +226,10 @@ class AuthoritySync {
     const host = this._host
     try {
       await host._renewDemand()
-      let renewalFailure: { error: unknown } | null = null
-      try {
-        await host._renewSession()
-      } catch (error) {
-        renewalFailure = { error }
-      }
+      const renewalFailure = await host._renewSession().then(
+        () => null,
+        (error: unknown) => ({ error }),
+      )
       this._lanes.resumeDropped()
       await this._checkAuthority()
       if (!host.model.closed) await maintainHold(host._incarnation)
