@@ -3,8 +3,6 @@ export {
   decodeLaneKey,
   everyTrackLaneKey,
   everyMemberLaneKey,
-  EVERY_MEMBER_LANE_KEY_PREFIX,
-  trackOfEveryMemberLaneKey,
   binaryLaneKeyPrefix,
   inProcessBinaryLaneKey,
   roomSubscriptionSourceKey,
@@ -37,17 +35,9 @@ function everyTrackLaneKey(member: string): string {
   return `binary-all:${encodeURIComponent(member)}`
 }
 
-const EVERY_MEMBER_LANE_KEY_PREFIX = 'binary-track:'
-
 /** The key of the lane that receives every member's binary commits on `track`. */
 function everyMemberLaneKey(track: string): string {
-  return `${EVERY_MEMBER_LANE_KEY_PREFIX}${encodeURIComponent(track)}`
-}
-
-/** The track of an every-member lane's key; `null` for another lane's. */
-function trackOfEveryMemberLaneKey(key: string): string | null {
-  if (!key.startsWith(EVERY_MEMBER_LANE_KEY_PREFIX)) return null
-  return decodeURIComponent(key.slice(EVERY_MEMBER_LANE_KEY_PREFIX.length))
+  return `binary-track:${encodeURIComponent(track)}`
 }
 
 /** A committed lane's key back to its lane; an every-track or every-member lane holds no commits of its own. */

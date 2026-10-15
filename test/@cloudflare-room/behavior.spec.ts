@@ -61,13 +61,6 @@ test("a binary commit reaches its lane's sessions, its member's every-track sess
   })
 })
 
-test("a binary commit reaches its track's every-member session only while a route names that lane", async () => {
-  expect(await probe('/every-member-routes')).toEqual({
-    receivers: [0, 1, 1, 0, 1],
-    camera: ['routed', 'after-other', 'rerouted'],
-  })
-})
-
 test("a member's join, delivered to a session watching every member's frames, opens that member's lane there", async () => {
   expect(await probe('/join-opens-lane')).toEqual([7])
 })

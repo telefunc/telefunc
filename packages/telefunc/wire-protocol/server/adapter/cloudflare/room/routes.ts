@@ -1,17 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
-export {
-  ROUTE_RENEW_EVERY_MS,
-  upsertRoute,
-  deleteExpiredRoutes,
-  renewRoute,
-  deleteRoute,
-  snapshotRoutes,
-  listEveryMemberRouteTracks,
-}
+export { ROUTE_RENEW_EVERY_MS, upsertRoute, deleteExpiredRoutes, renewRoute, deleteRoute, snapshotRoutes }
 export type { RouteInstallation }
-
-import { EVERY_MEMBER_LANE_KEY_PREFIX, trackOfEveryMemberLaneKey } from '../../../../backend/room/lane-key.js'
-import { prefixEnd } from './storage.js'
 
 // One exact-lease row per (incarnation, lane, session). Re-establishment atomically replaces the
 // prior lease, and incarnation scoping fences recreated rooms from surviving old subscriptions.
@@ -59,19 +48,6 @@ function renewRoute(sql: SqlStorage, route: RouteInstallation, now: number): boo
 // Exact-lease deletion prevents a racing old lease from removing its successor.
 function deleteRoute(sql: SqlStorage, route: RouteInstallation): void {
   sql.exec(`DELETE FROM route WHERE ${EXACT_ROUTE}`, ...exact(route))
-}
-
-/** The tracks of `inc` whose every-member lane some route names, lapsed or not. */
-function listEveryMemberRouteTracks(sql: SqlStorage, inc: string): Set<string> {
-  const rows = sql
-    .exec<{ laneKey: string }>(
-      'SELECT DISTINCT lane_key AS laneKey FROM route WHERE inc = ? AND lane_key >= ? AND lane_key < ?',
-      inc,
-      EVERY_MEMBER_LANE_KEY_PREFIX,
-      prefixEnd(EVERY_MEMBER_LANE_KEY_PREFIX)!,
-    )
-    .toArray()
-  return new Set(rows.map(({ laneKey }) => trackOfEveryMemberLaneKey(laneKey)!))
 }
 
 // The delivery target snapshot at acceptance: live (non-expired) routes for these (inc, lane) pairs only.
