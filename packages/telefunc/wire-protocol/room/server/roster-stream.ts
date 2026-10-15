@@ -119,7 +119,8 @@ class RosterStream {
       }
       for (const stub of receiving) {
         const listed = members && stub._rosterMembers(members, visible!)
-        stub._relayEventText(!listed || listed === visible ? (visibleText ??= textOf(visible!)) : textOf(listed))
+        if (listed && listed !== visible) stub._relayEventText(textOf(listed))
+        else stub._relayEventText((visibleText ??= textOf(visible!)))
         if (!more) stub._rosterSent = true
       }
       if (unchanged && built === undefined && visibleText !== undefined) {
