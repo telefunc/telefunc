@@ -421,17 +421,15 @@ abstract class ClientParticipantBase extends ParticipantBase {
     { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
   >()
   private readonly _wantedTracks = new Set<TrackKey>()
+  private readonly _bufferLimit: number
 
   constructor(
-    id: string,
-    meta: ParticipantMeta,
-    selfDelivery: boolean,
-    identity: string | null,
+    participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>,
     rewinds: MetaRewinds,
     private readonly _requestParticipant: (request: ParticipantMutationRequest) => Promise<unknown>,
-    private readonly _bufferLimit: number,
   ) {
-    super(id, meta, selfDelivery, identity, rewinds)
+    super(participant.id, participant.meta, participant.selfDelivery, participant.identity, rewinds)
+    this._bufferLimit = participant.bufferLimit
   }
 
   get _demandedTracks(): TrackKey[] {
@@ -551,14 +549,8 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean, rewinds: MetaRewinds) {
     // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
-    super(
-      id,
-      meta,
-      selfDelivery,
-      null,
-      rewinds,
-      (request) => clientRoom._request({ ...request, id } as RoomStubRequest),
-      clientRoom._bufferLimit,
+    super({ id, meta, selfDelivery, identity: null, bufferLimit: clientRoom._bufferLimit }, rewinds, (request) =>
+      clientRoom._request({ ...request, id } as RoomStubRequest),
     )
     this._room = clientRoom
   }
@@ -597,15 +589,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
     const request = (req: ParticipantStubRequest) => channel.send(req, { ack: true })
     // Its own: the `rewound` notice forgets its seq.
-    super(
-      metadata.id,
-      metadata.meta,
-      metadata.selfDelivery,
-      metadata.identity,
-      { count: 0 },
-      request,
-      metadata.bufferLimit,
-    )
+    super(metadata, { count: 0 }, request)
     this._channel = channel
     this._request = request
 
