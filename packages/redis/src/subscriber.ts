@@ -294,7 +294,9 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   }
 
   private _attempts(): Set<RedisSubscriptionAttempt> {
-    return new Set([...this._byChannel.values()].flatMap((attempts) => [...attempts]))
+    const all = new Set<RedisSubscriptionAttempt>()
+    for (const attempts of this._byChannel.values()) for (const attempt of attempts) all.add(attempt)
+    return all
   }
 
   private _dispatch(channel: string, frame: Buffer): void {
