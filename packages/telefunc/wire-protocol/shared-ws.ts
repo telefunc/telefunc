@@ -698,7 +698,7 @@ function isOneFrame(message: Uint8Array): boolean {
  *  LENGTH ahead of it says, and is whole; the last is the rest. Each is a copy, a Node.js `Buffer`'s too (its `slice` is
  *  a view): a listener may keep or transfer its data's buffer. A frame is read and copied as it is taken, so a reader
  *  that stops early copies no more. */
-function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<ArrayBuffer>, void, undefined> {
+function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<ArrayBuffer>> {
   const end = message.byteLength
   let at = 0
   for (;;) {
