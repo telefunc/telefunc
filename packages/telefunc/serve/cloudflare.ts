@@ -36,7 +36,7 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import { CloudflareBackend } from '../wire-protocol/server/adapter/cloudflare/room/backend.js'
+import { CloudflareBackend } from '../wire-protocol/server/adapter/cloudflare/backend.js'
 import {
   CloudflareRoomSessionManager,
   type RoomSessionDeliveryRequest,

@@ -7,7 +7,7 @@ import type {
   BroadcastPayload,
   BroadcastRoute,
   PublishResult,
-} from '../../../../backend/broadcast/contract.js'
+} from '../../../backend/broadcast/contract.js'
 import type {
   CellsCx,
   CellSelector,
@@ -26,12 +26,12 @@ import type {
   RoomDriver,
   RoomHead,
   RoomSubscriptionSource,
-} from '../../../../backend/room/contract.js'
-import type { SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
-import type { OrderingInfo } from '../../../../ordering-frame.js'
-import type { CloudflareBroadcast } from '../broadcast.js'
-import type { CloudflareRoomAuthorityStub } from './do.js'
-import { currentCloudflareSession, requireCloudflareSession } from '../session.js'
+} from '../../../backend/room/contract.js'
+import type { SubscriptionBinding, SubscriptionDriver } from '../../../backend/subscription.js'
+import type { OrderingInfo } from '../../../ordering-frame.js'
+import type { CloudflareBroadcast } from './broadcast.js'
+import type { CloudflareRoomAuthorityStub } from './room/do.js'
+import { currentCloudflareSession, requireCloudflareSession } from './session.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
