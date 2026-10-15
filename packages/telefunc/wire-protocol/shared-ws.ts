@@ -4,6 +4,7 @@ export {
   ERROR_REASON,
   encode,
   withTook,
+  HEADER,
   LENGTH_BYTES,
   fixedBytes,
   isOneFrame,
