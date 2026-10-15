@@ -18,8 +18,9 @@ import { disposeBackend, getRoomBackend, installBackend } from '../backend/insta
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from './server/constants.js'
+import { mark, ran, subsOf, syncOf } from '../test/room.js'
 
-// Each spec here times a stall at 100,000 members, so it runs in a worker of its own: room.spec's other specs leave
+// Each spec here times a stall at 100,000 members, so it runs in a worker of its own: the other room specs leave
 // rooms reachable (vitest keeps every spy, and a stub no client connects to waits out its TTL), and collecting them
 // lands in the timed turns.
 beforeEach(async () => {
@@ -565,19 +566,6 @@ function collectGarbage(): void {
   setFlagsFromString('--expose-gc')
   ;(runInNewContext('gc') as () => void)()
 }
-function subsOf(room: ServerRoom): {
-  replan(): Promise<void>
-  binaryReady(): Promise<void>
-} {
-  return room._replica.plan
-}
-function syncOf(room: ServerRoom): {
-  _heartbeatTick(): Promise<void>
-  readonly _heartbeatBusy: boolean
-  reconcileAuthority(): Promise<void>
-} {
-  return room._replica.sync as unknown as ReturnType<typeof syncOf>
-}
 /** The longest event-loop gap while `run` runs, counting the time the process ran in it, and what `run` returned. */
 async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number; value: T }> {
   let last = mark()
@@ -593,14 +581,6 @@ async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number;
   } finally {
     clearInterval(timer)
   }
-}
-type Mark = { wall: number; cpu: NodeJS.CpuUsage }
-const mark = (): Mark => ({ wall: performance.now(), cpu: process.cpuUsage() })
-/** Milliseconds the process ran from `from` to `to`: wall time, but no more than its CPU time, which the machine's
- *  load, holding the process off a CPU, does not add to. */
-function ran(from: Mark, to: Mark): number {
-  const cpu = to.cpu.user - from.cpu.user + to.cpu.system - from.cpu.system
-  return Math.min(to.wall - from.wall, cpu / 1000)
 }
 const opened = { rooms: [] as ServerRoom[], stubs: [] as RoomStubChannel[] }
 let state: MemoryBackendState
