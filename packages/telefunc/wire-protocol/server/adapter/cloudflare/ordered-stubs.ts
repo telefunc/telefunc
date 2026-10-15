@@ -25,17 +25,16 @@ class OrderedStubs<Stub> {
       line = { stub: open(), after: line?.idle.promise ?? null, idle: createDeferred(), calls: 0, failed: false }
       this.#lines.set(target, line)
     }
-    const current = line
-    current.calls++
+    line.calls++
     const result =
-      current.after === null
-        ? new Promise<T>((resolve) => resolve(invoke(current.stub)))
-        : current.after.then(() => invoke(current.stub))
+      line.after === null
+        ? new Promise<T>((resolve) => resolve(invoke(line.stub)))
+        : line.after.then(() => invoke(line.stub))
     result.then(
-      () => this.#settle(target, current),
+      () => this.#settle(target, line),
       () => {
-        current.failed = true
-        this.#settle(target, current)
+        line.failed = true
+        this.#settle(target, line)
       },
     )
     return result
