@@ -114,16 +114,17 @@ function assertRoomId(id: unknown): asserts id is string {
   assertUsage(id.isWellFormed(), 'The room ID should be a well-formed string')
 }
 
-/** The room's config, or null if the room is missing or closed. */
-async function findRoom(id: string): Promise<RoomConfigRecord | null> {
+/** The room's incarnation and config, or null if the room is missing or closed. */
+async function findRoom(id: string): Promise<(RoomIncarnation & RoomConfigRecord) | null> {
   assertRoomId(id)
-  return openConfig(await getRoomBackend().readHead(id))
+  const config = openConfig(await getRoomBackend().readHead(id))
+  return config === null ? null : { id, ...config }
 }
 
-async function requireRoom(id: string): Promise<RoomConfigRecord> {
-  const config = await findRoom(id)
-  if (config === null) throw roomNotFoundError(id)
-  return config
+async function requireRoom(id: string): Promise<RoomIncarnation & RoomConfigRecord> {
+  const room = await findRoom(id)
+  if (room === null) throw roomNotFoundError(id)
+  return room
 }
 
 function roomNotFoundError(id: string): RoomError {
@@ -144,11 +145,12 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     }
     if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
     if (current !== null && current.state !== 'closed') return { kind: 'exists' }
-    const created: RoomConfigRecord = {
-      meta,
+    const incarnation: RoomIncarnation = {
+      id,
       inc: crypto.randomUUID(),
       hold: newHoldConfig(emptyTimeout, departureTimeout),
     }
+    const created: RoomConfigRecord = { meta, inc: incarnation.inc, hold: incarnation.hold }
     // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
     const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
     // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
@@ -165,8 +167,8 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     }
     assert('head' in result)
     // The head lapses only once the counters that keep it ahead are written.
-    await createHold({ id, ...created })
-    const lapsing = await lapseNewRoom({ id, ...created })
+    await createHold(incarnation)
+    const lapsing = await lapseNewRoom(incarnation)
     if (lapsed !== undefined) await backend.dropGeneration(id, lapsed.incTag)
     await listRoom(backend, id, created.inc, created.hold, lapsing?.expiresAt)
     sweepLapsedRoomsSoon()
@@ -196,14 +198,14 @@ async function getRoom(id: string, options?: RoomGetOptions): Promise<Room> {
 /** A handle on this process's view of the room: a held view catches up unless it is current; a new one reads the member
  *  count and the meta. */
 async function openRoom(id: string): Promise<ServerRoom> {
-  const config = await requireRoom(id)
-  const held = RoomReplica.of(config.inc)
+  const incarnation = await requireRoom(id)
+  const held = RoomReplica.of(incarnation.inc)
   if (held !== undefined) {
     await held.sync.catchUp()
     return new ServerRoom(held)
   }
-  const count = await reapAndCountPresence({ id, ...config })
-  return new ServerRoom(RoomReplica.seeded(id, config, await requireRoomMeta(id, config), { count }))
+  const count = await reapAndCountPresence(incarnation)
+  return new ServerRoom(RoomReplica.seeded(id, incarnation, await requireRoomMeta(id, incarnation), { count }))
 }
 
 async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<StoredRoomMeta> {
@@ -327,21 +329,20 @@ async function resolveParticipantRef(incarnation: RoomIncarnation, target: Parti
 }
 
 async function removeParticipant(id: string, target: ParticipantRef & { reason?: unknown }): Promise<void> {
-  const config = await findRoom(id)
-  if (config === null) {
+  const incarnation = await findRoom(id)
+  if (incarnation === null) {
     // An `{ identity }` matches nobody in a room that is missing or closed; an `{ id }` names one who isn't there.
     if (!isObject(target) || !('identity' in target)) throw roomNotFoundError(id)
     assertParticipantIdentity(target.identity, 'The participant ref { identity }')
     return
   }
-  const incarnation = { id, ...config }
   const members = await resolveParticipantRef(incarnation, target)
   const cause = removedCause(target.reason)
   for (const member of members) await evictMember(incarnation, member.id, member.identity ?? null, cause)
 }
 
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {
-  const incarnation = { id, ...(await requireRoom(id)) }
+  const incarnation = await requireRoom(id)
   let members: MemberSnapshot[]
   if (target === undefined) {
     members = (await reapAndReadRoster(incarnation)).members
@@ -369,12 +370,12 @@ async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceip
 
 async function sendToParticipant(id: string, target: ParticipantRef, data: unknown): Promise<void> {
   const message = ownMessage(data)
-  const config = await requireRoom(id)
-  const members = await resolveParticipantRef({ id, ...config }, target)
+  const incarnation = await requireRoom(id)
+  const members = await resolveParticipantRef(incarnation, target)
   const exact = 'id' in target
   for (const member of members) {
     const envelope = { __r: 'dm', to: member.id, from: '', fromMeta: null, data: message } as const
-    if ('gone' in (await commitToInbox(id, config.inc, envelope)) && exact) throw participantGoneError(member.id)
+    if ('gone' in (await commitToInbox(id, incarnation.inc, envelope)) && exact) throw participantGoneError(member.id)
   }
 }
 
