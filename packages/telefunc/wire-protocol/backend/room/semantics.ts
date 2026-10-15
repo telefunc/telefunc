@@ -3,6 +3,7 @@ export {
   commitPreconditionHolds,
   isOpenIncarnation,
   materializeHead,
+  publicHead,
   nextOrderMark,
   countCell,
   encodeCellCounter,
@@ -31,6 +32,14 @@ function materializeHead(next: HeadNext, now: number, rev: string): StoredHead {
     expiresAt: ttlMs === undefined ? null : now + ttlMs,
     ...(closeLease === undefined ? {} : { closeLease: { id: closeLease.id, until: now + closeLease.durationMs } }),
   }
+}
+
+/** A stored head as a read hands it out, with the `config` bytes the driver hands out. */
+function publicHead(head: StoredHead, config: Uint8Array): RoomHead {
+  const view: RoomHead = { rev: head.rev, currentInc: head.currentInc, state: head.state, config }
+  if (head.closeLease !== undefined) view.closeLease = { id: head.closeLease.id, until: head.closeLease.until }
+  if (head.expiresAt !== null) view.expiresAt = head.expiresAt
+  return view
 }
 
 function isOpenIncarnation(head: Omit<RoomHead, 'expiresAt'> | null, inc: string): boolean {

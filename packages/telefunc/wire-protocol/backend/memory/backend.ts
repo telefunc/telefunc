@@ -31,6 +31,7 @@ import {
   isOpenIncarnation,
   materializeHead,
   nextOrderMark,
+  publicHead,
   type StoredHead,
 } from '../room/semantics.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
@@ -180,16 +181,6 @@ function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: num
   return mark
 }
 
-function publicHead(head: StoredHead): RoomHead {
-  const { expiresAt, closeLease, ...view } = head
-  return {
-    ...view,
-    config: copyBytes(head.config),
-    ...(closeLease === undefined ? {} : { closeLease: { ...closeLease } }),
-    ...(expiresAt === null ? {} : { expiresAt }),
-  }
-}
-
 class MemorySubscriptionAttempt extends DriverAttempt {
   private readonly _receiver: BackendReceiver<BackendPayload>
   private readonly _localReceiverCount: () => number
@@ -273,16 +264,17 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   async readHead(roomId: string): Promise<RoomHead | null> {
     const head = this._liveHead(this._state.rooms.get(roomId))
-    return head === null ? null : publicHead(head)
+    return head === null ? null : publicHead(head, copyBytes(head.config))
   }
 
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
     const current = this._liveHead(this._state.rooms.get(roomId))
     if (!headCxMatches(cx, current, this._state.now())) {
-      return { conflict: true, current: current === null ? null : publicHead(current) }
+      return { conflict: true, current: current === null ? null : publicHead(current, copyBytes(current.config)) }
     }
     // Only a CX that actually applies materializes a room record.
-    return { head: publicHead(this._storeHead(this._roomFor(roomId), next)) }
+    const head = this._storeHead(this._roomFor(roomId), next)
+    return { head: publicHead(head, copyBytes(head.config)) }
   }
 
   private _storeHead(room: RoomRecord, next: HeadNext): StoredHead {

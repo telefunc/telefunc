@@ -24,7 +24,7 @@ import type {
 import type { OrderingInfo } from '../../../../ordering-frame.js'
 import { assert } from '../../../../../utils/assert.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../../../../backend/room/lane-key.js'
-import { commitPreconditionHolds, isOpenIncarnation, type StoredHead } from '../../../../backend/room/semantics.js'
+import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../../../../backend/room/semantics.js'
 import { Fanout, type RoomSessionNamespace } from './fanout.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
@@ -62,17 +62,6 @@ type RegisterWire = { ok: true } | { rejected: true; reason: string }
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
-function headForRpc(head: StoredHead): RoomHead {
-  return {
-    rev: head.rev,
-    currentInc: head.currentInc,
-    state: head.state,
-    config: head.config,
-    ...(head.closeLease === undefined ? {} : { closeLease: { ...head.closeLease } }),
-    ...(head.expiresAt === null ? {} : { expiresAt: head.expiresAt }),
-  }
-}
-
 /** A Durable Object that can act as a room authority, fanning out to the session DOs of `sessions`. Its tables are
  *  created on first use, so a DO in another role never has them. */
 class RoomAuthority<Env = unknown> extends DurableObject<Env> {
@@ -86,7 +75,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async readHead(): Promise<RoomHead | null> {
     const head = readLiveHead(this.#sql(), Date.now())
-    return head === null ? null : headForRpc(head)
+    return head === null ? null : publicHead(head, head.config)
   }
 
   async compareExchangeHead(cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
@@ -94,8 +83,11 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     const outcome = this.#transaction((sql) => compareExchangeHead(sql, cx, next, now))
     await this.#scheduleMaintenanceIfNeeded()
     if ('conflict' in outcome)
-      return { conflict: true, current: outcome.current === null ? null : headForRpc(outcome.current) }
-    return { head: headForRpc(outcome.head) }
+      return {
+        conflict: true,
+        current: outcome.current === null ? null : publicHead(outcome.current, outcome.current.config),
+      }
+    return { head: publicHead(outcome.head, outcome.head.config) }
   }
 
   async readCells(inc: string, sel: CellSelector): Promise<CellsRead> {
