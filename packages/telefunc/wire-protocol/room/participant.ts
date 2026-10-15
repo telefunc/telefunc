@@ -43,7 +43,8 @@ abstract class ParticipantBase implements LocalParticipant {
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
   private _pendingInbox: Fifo<HeldDm> | null = null
   private _pendingInboxBytes = 0
-  /** When a client holds this participant, its inbox forwards there instead of to local listeners (see `RoomParticipantStubChannel`). */
+  /** When a client holds this participant, its inbox forwards there instead of to local listeners (see
+   *  `RoomParticipantStubChannel`). */
   private _forwarder: InboxForwarder | null = null
   /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
   constructor(
@@ -105,7 +106,8 @@ abstract class ParticipantBase implements LocalParticipant {
     this._flushHeld({ deliver: (msg) => this._fireInbox(msg), deliverAck: (msg) => this._fireInboxAck(msg) })
     return unlisten
   }
-  /** @internal A DM for this member: to its remote holder if bound, else its listeners (held until the first `listen()`). */
+  /** @internal A DM for this member: to its remote holder if bound, else its listeners (held until the first
+   *  `listen()`). */
   _deliverMessage(msg: InboxMessage): void {
     if (this._forwarder) return this._forwarder.deliver(msg)
     if (!this._messageCbs?.size) {
@@ -115,7 +117,8 @@ abstract class ParticipantBase implements LocalParticipant {
     }
     this._fireInbox(msg)
   }
-  /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never rejects. */
+  /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never
+   *  rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
     if (this._forwarder) return this._forwarder.deliverAck(msg)
     if (this._messageCbs?.size) return this._fireInboxAck(msg)
@@ -155,7 +158,8 @@ abstract class ParticipantBase implements LocalParticipant {
     const sender = this._senderOf(msg)
     for (const cb of this._messageCbs?.list() ?? []) this._invoke(cb, msg.data, sender)
   }
-  /** The last listener's return is the reply; a throw is the failure reply (`Abort(value)` reaches the sender, anything else is a bug reported here). */
+  /** The last listener's return is the reply; a throw is the failure reply (`Abort(value)` reaches the sender, anything
+   *  else is a bug reported here). */
   private async _fireInboxAck(msg: InboxMessage): Promise<DmReply> {
     const sender = this._senderOf(msg)
     let result: unknown

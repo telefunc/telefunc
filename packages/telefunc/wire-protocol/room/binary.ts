@@ -164,7 +164,8 @@ function publicTrack(track: TrackKey): string | null {
 }
 /** One change of a holder's binary wants: `track` (or `ALL`) of `member` (or `ALL`), on or off. */
 type BinaryWantChange = { member: string | All; track: TrackKey | All; on: boolean }
-/** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that doesn't fit. */
+/** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that
+ *  doesn't fit. */
 function isRoomTrack(track: unknown): track is string {
   return typeof track === 'string' && track.isWellFormed() && utf8ByteLength(track) <= TRACK_LENGTH_FIELD_MAX
 }

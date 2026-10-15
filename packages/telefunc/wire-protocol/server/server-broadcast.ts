@@ -121,8 +121,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._sendPublishBinary(encodePublishBinary(data, rawInfo))
   }
 
-  /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once a
-   *  listener's error ended the channel. */
+  /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once
+   *  a listener's error ended the channel. */
   private _callListeners<Data>(
     listeners: readonly ((data: Data, info: ChannelPublishInfo) => unknown)[],
     data: Data,

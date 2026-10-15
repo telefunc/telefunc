@@ -72,7 +72,8 @@ type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err:
 /** A key's conflation: at most one send in flight, while the newest value waits in `pending`, superseding any
  *  earlier one. */
 type CoalesceSlot = { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
-/** A join awaiting its ack: the member the server admitted, once `joined` names it, and the events naming that member. */
+/** A join awaiting its ack: the member the server admitted, once `joined` names it, and the events naming that
+ *  member. */
 type PendingJoin = { id: string | null; held: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> }
 /** The rosters streaming in or applying, from the first part of the first until the last applies. */
 type RosterStream = {
@@ -133,7 +134,8 @@ class ClientRoom extends RoomStateView implements Room {
     })
     if (snapshot.closed) this._roster.resolve()
 
-    // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives, text while subscribed, binary per `sub-binary`.
+    // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
+    // text while subscribed, binary per `sub-binary`.
     stub._subscribeLocal('text', (envelope, info) => this._onEnvelope(envelope, info))
     stub._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
     // Wire death; a server `Room.close()` arrives before it, as the `closed` event.

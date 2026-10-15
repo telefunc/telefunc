@@ -22,7 +22,8 @@ type RoomSessionNamespace = {
 class Fanout {
   readonly #sessions: RoomSessionNamespace
   readonly #calls = new OrderedStubs<RoomSessionStub>()
-  /** A token's delivery, kept until it is awaited or two rotations later, which come a horizon apart at the earliest. */
+  /** A token's delivery, kept until it is awaited or two rotations later, which come a horizon apart at the
+   *  earliest. */
   #deliveries = new Map<string, Promise<void>>()
   #rotated = new Map<string, Promise<void>>()
   #rotatedAt = Date.now()

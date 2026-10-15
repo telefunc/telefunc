@@ -22,7 +22,8 @@ function metaObjectOf(entries: Iterable<RoomMetaEntry>): RoomMeta {
 class RoomMetaState {
   /** In key order while `_ordered`. */
   private _entries: Map<string, RoomMetaEntry>
-  /** False once a change placed a key before the last one added, which concurrent writes can do: the next read orders. */
+  /** False once a change placed a key before the last one added, which concurrent writes can do: the next read
+   *  orders. */
   private _ordered = true
   private _last: RoomMetaEntry | undefined
   private _object: RoomMeta | null = null

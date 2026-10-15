@@ -72,7 +72,8 @@ type RoomSendReceipt = { seq: number; timestamp: number }
 /** A delivered-message receipt plus the recipient listener's response. */
 type RoomAckReceipt = RoomSendReceipt & { response: unknown }
 
-/** Runs after a room-wide text or binary publish commits (`data` is a binary frame's bytes); throwing cannot undo delivery. */
+/** Runs after a room-wide text or binary publish commits (`data` is a binary frame's bytes); throwing cannot undo
+ *  delivery. */
 type AfterPublishHook<P extends ParticipantMeta = ParticipantMeta> = (
   from: Sender<P>,
   data: unknown,
@@ -106,9 +107,11 @@ type ParticipantRef = { id: string } | { identity: string }
 type RoomOptions<M extends RoomMeta = RoomMeta> = {
   /** Room metadata, visible to all observers. Default: `{}`. */
   meta?: M
-  /** Milliseconds an unheld room nobody joined stays before it closes; `Infinity` never. Default: `config.room.emptyTimeout`. */
+  /** Milliseconds an unheld room nobody joined stays before it closes; `Infinity` never. Default:
+   *  `config.room.emptyTimeout`. */
   emptyTimeout?: number
-  /** Milliseconds an unheld room a member had joined stays before it closes; `Infinity` never. Default: `config.room.departureTimeout`. */
+  /** Milliseconds an unheld room a member had joined stays before it closes; `Infinity` never. Default:
+   *  `config.room.departureTimeout`. */
   departureTimeout?: number
 }
 
@@ -270,7 +273,8 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   setAttributes(attributes: Partial<P>): Promise<void>
 
   leave(): Promise<void>
-  /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the room), `'disconnected'` (the connection died, or fell further behind than the server holds for it). */
+  /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the
+   *  room), `'disconnected'` (the connection died, or fell further behind than the server holds for it). */
   onLeave(callback: (cause: LeaveCause) => void): () => void
 } & RoomShield<Pub>
 

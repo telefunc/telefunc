@@ -50,7 +50,8 @@ const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerCon
     }
   },
 }
-/** Rides its room's stub, so it has no lifecycle of its own; the recursive serializer replaces or dedupes the room it names. */
+/** Rides its room's stub, so it has no lifecycle of its own; the recursive serializer replaces or dedupes the room it
+ *  names. */
 const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   detect(value): value is RoomRemoteReplacerContract['value'] {

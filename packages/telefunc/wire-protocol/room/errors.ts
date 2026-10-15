@@ -46,7 +46,8 @@ function participantLeftError(): RoomError {
 }
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
 const CLIENT_ROOM_BUG_MESSAGE = "Internal client room error — see the recipient's client logs"
-/** `roomAckError`'s classification rendered for an ack DM's reply, which travels on an inbox lane, not as a channel ack. */
+/** `roomAckError`'s classification rendered for an ack DM's reply, which travels on an inbox lane, not as a channel
+ *  ack. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage: string): RoomFailure {
   const classified = classifyTelefuncError(err, isRoomError)
   if (classified.kind === 'abort') return { ok: false, abort: true, abortValue: classified.error.abortValue }

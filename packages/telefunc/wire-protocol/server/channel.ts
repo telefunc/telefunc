@@ -169,8 +169,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     /** Its page is a `ClientBroadcast`, which takes what this channel publishes: nothing waits on a publish's credit,
      *  so that page grants the largest window from the start, and this channel counts it granted. */
     publishes?: boolean
-    /** Nothing that sends on it can be refused: a page a send finds behind, or one offline whose buffer drops a send, is
-     *  let go, on both ends, as for a publish. */
+    /** Nothing that sends on it can be refused: a page a send finds behind, or one offline whose buffer drops a send,
+     *  is let go, on both ends, as for a publish. */
     closesWhenBehind?: boolean
   } = {}) {
     this.ack = ack
@@ -563,7 +563,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  /** A parsed no-ack message: handling it releases its receive credit (`_flow.onConsumed`) unless the channel aborted. */
+  /** A parsed no-ack message: handling it releases its receive credit (`_flow.onConsumed`) unless the channel
+   *  aborted. */
   protected _onPeerData(value: unknown, bytes: number): void {
     const data = value as ChannelData<ClientToServer>
     const validateData = this._validators.get('data')
@@ -828,8 +829,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._forwardPublish(wireData, true)
   }
 
-  /** A text (`string`) or binary publish to the page, buffered while it is away, where dropping it leaves a `gap`; a page
-   *  behind is let go. */
+  /** A text (`string`) or binary publish to the page, buffered while it is away, where dropping it leaves a `gap`; a
+   *  page behind is let go. */
   private _forwardPublish(wire: string | Uint8Array, gap: boolean): void {
     const peer = this._peer
     if (peer === null) {

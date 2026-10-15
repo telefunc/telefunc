@@ -15,7 +15,8 @@ type Line<Stub> = {
 
 /** One Durable Object's calls to others. Calls to one target share a stub while any is in flight: Cloudflare delivers
  *  RPC calls through one stub in call order, and calls through different stubs in no order. A stub that rejected may be
- *  broken, so later calls get a fresh one, which waits until the failed stub's calls settle so it can't overtake them. */
+ *  broken, so later calls get a fresh one, which waits until the failed stub's calls settle so it can't overtake
+ *  them. */
 class OrderedStubs<Stub> {
   readonly #lines = new Map<string, Line<Stub>>()
 

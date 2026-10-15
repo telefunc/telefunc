@@ -54,7 +54,8 @@ type MemberEntry = {
   meta: MemberMeta
   joinedAt: number
   identity: string | null
-  /** An off-presence participant: a member for routing/discovery, excluded from every presence read (`count`, `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
+  /** An off-presence participant: a member for routing/discovery, excluded from every presence read (`count`,
+   *  `snapshot`, `onJoin`/`onLeave`/`onEmpty`). Any number per room. */
   hidden: boolean
   left: boolean
   leaveCause?: LeaveCause
@@ -78,7 +79,8 @@ type RoomModelOptions = {
   roomId: string
   /** In key order. */
   meta: readonly RoomMetaEntry[]
-  /** Either the authoritative roster, or just its member count. A lazy model seeds with `{ count }` and learns the members from its first roster (read on the server, streamed to the client). */
+  /** Either the authoritative roster, or just its member count. A lazy model seeds with `{ count }` and learns the
+   *  members from its first roster (read on the server, streamed to the client). */
   seed: { members: MemberSnapshot[] } | { count: number }
   /** How many meta writes `meta` reflects (see `applyRoomUpdate`). */
   metaSeq: number
@@ -176,7 +178,8 @@ abstract class RoomStateView {
 class RoomModel {
   readonly roomId: string
   closed: boolean
-  /** Bumped on every observable change (membership, participant meta, room config, closure). Drives `onChange`/`snapshot()` cache invalidation. */
+  /** Bumped on every observable change (membership, participant meta, room config, closure). Drives
+   *  `onChange`/`snapshot()` cache invalidation. */
   private _stateVersion = 0
   private _snapshotCache: { version: number; value: WeakRef<RoomSnapshotView> } | null = null
   /** The membership events the in-flight roster read has seen so far. */
@@ -242,7 +245,8 @@ class RoomModel {
   newerStamp(id: string, seq: number): boolean {
     return this._members.get(id)?.meta.newerStamp(seq) ?? false
   }
-  /** A failover rewound the room's and its members' meta seqs: the next whole meta of each applies, whatever its seq. */
+  /** A failover rewound the room's and its members' meta seqs: the next whole meta of each applies, whatever its
+   *  seq. */
   forgetMetaSeqs(): void {
     this._meta.forget()
     this.metaRewinds.count++
@@ -303,7 +307,8 @@ class RoomModel {
     if (on) this._views.add(view)
     else this._views.delete(view)
   }
-  /** Immutable view of the whole room, cached by state version, so the reference is stable until something actually changes (the `useSyncExternalStore` contract). */
+  /** Immutable view of the whole room, cached by state version, so the reference is stable until something actually
+   *  changes (the `useSyncExternalStore` contract). */
   snapshot(): RoomSnapshotView {
     const cached = this._snapshotCache?.version === this._stateVersion ? this._snapshotCache.value.deref() : undefined
     if (cached) return cached
@@ -442,7 +447,8 @@ class RoomModel {
   get metaWaiting(): boolean {
     return this._meta.waiting
   }
-  /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty` intentionally don't fire: `onClose` is the signal. */
+  /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty`
+   *  intentionally don't fire: `onClose` is the signal. */
   applyClosed(cause: LeaveCause = { type: 'closed' }): boolean {
     if (this.closed) return false
     cause = ownLeaveCause(cause)
@@ -573,8 +579,8 @@ class RoomModel {
     return entry
   }
 }
-/** One view of a room model: its listeners and the remotes it hands out, each backed by its owner. A room-level `onLeave`
- *  or `onEmpty` never fires for a hidden member. */
+/** One view of a room model: its listeners and the remotes it hands out, each backed by its owner. A room-level
+ *  `onLeave` or `onEmpty` never fires for a hidden member. */
 class RoomState {
   /** @internal The owning `ServerRoom`/`ClientRoom`, for serialization backing. */
   readonly _owner: RoomStateView
@@ -738,7 +744,8 @@ class RoomState {
   applyAnnounce(data: unknown, info: ChannelPublishInfo): void {
     this._fireAll(this._announceCbs, data, info)
   }
-  /** Never waits on the roster: an unknown sender (its join may be behind on the control lane) is the snapshot its instance stamped. */
+  /** Never waits on the roster: an unknown sender (its join may be behind on the control lane) is the snapshot its
+   *  instance stamped. */
   applyData(event: RoomDataEvent, info: ChannelPublishInfo): void {
     const sender = this.resolveSender(event)
     this._fireAll(this._roomDataCbs, event.data, info, sender)
@@ -911,7 +918,8 @@ function replayMembershipEvent(
     if (meta.apply(update) === 'applied') members.set(id, { ...member, meta: meta.object, metaSeq: meta.seq })
   }
 }
-/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default track, a non-empty name = that track. */
+/** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default track, a non-empty name =
+ *  that track. */
 function normalizeTrackFilter(opts: { track?: string | null } | undefined): TrackFilter {
   assertUsage(
     opts === undefined || (typeof opts === 'object' && opts !== null && !Array.isArray(opts)),

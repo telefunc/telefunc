@@ -49,7 +49,8 @@ type RoomSnapshotMetadata = {
   count: number
   /** How many meta writes `meta` reflects, which orders later updates. */
   metaSeq: number
-  /** The server's `config.channel.bufferLimit`, which bounds the DMs a participant holds before its first `listen()`. */
+  /** The server's `config.channel.bufferLimit`, which bounds the DMs a participant holds before its first
+   *  `listen()`. */
   bufferLimit: number
   maxFrameBytes?: number
 }
@@ -73,8 +74,8 @@ type RoomCtrlEnvelope =
   | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
   | ({ __r: 'p-meta'; id: string; hidden?: boolean } & MemberMetaUpdate)
   | RoomMetaUpdate
-  // An instance whose demand lane delivers, from now on or again, asks every other one for its demand; one that missed a
-  // page of another's asks that one (`of`).
+  // An instance whose demand lane delivers, from now on or again, asks every other one for its demand; one that missed
+  // a page of another's asks that one (`of`).
   | { __r: 'demand-ask'; instance: string; of?: string }
   | { __r: 'closed' }
 
@@ -86,7 +87,8 @@ type RoomMetaUpdate =
   | { __r: 'update'; seq: number; changes: (RoomMetaEntry | [key: string])[] }
 /** A `LeaveCause` on the wire: no `cause` means the member left on its own. */
 type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
-/** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the client. */
+/** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the
+ *  client. */
 type SenderStamp = { fromMeta: ParticipantMeta; fromMetaSeq: number; fromIdentity?: string }
 /** A member's message as a client gets it: stamped only while the client can't name the sender yet. */
 type RoomDataEvent = { __r: 'data'; from: string; data: unknown } & Partial<SenderStamp>
@@ -95,9 +97,9 @@ type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: bool
 /** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent | RoomAnnounceEnvelope
-/** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it; `more`
- *  on all but the last. A failed read says so, so roster getters don't wait forever. `rewound`: a failover rewound the
- *  room's meta seqs, so the next whole meta of the room and of each member applies, whatever its seq. */
+/** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it;
+ *  `more` on all but the last. A failed read says so, so roster getters don't wait forever. `rewound`: a failover
+ *  rewound the room's meta seqs, so the next whole meta of the room and of each member applies, whatever its seq. */
 type RoomRosterEvent =
   | { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true }
   | { __r: 'roster-error' }
@@ -132,7 +134,8 @@ type AcceptedMeta = MemberMetaUpdate
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
 
-/** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast subscription, which reattaches before `onOpen`. */
+/** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast
+ *  subscription, which reattaches before `onOpen`. */
 type RoomStubRequest =
   | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
@@ -145,7 +148,8 @@ type RoomStubRequest =
   /** Changes only: announcements, and each member whose own want changed. */
   | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
 
-/** Client→server requests on a participant stub; an ack DM is answered through the channel's own ack, so there's no `dm-reply`. */
+/** Client→server requests on a participant stub; an ack DM is answered through the channel's own ack, so there's no
+ *  `dm-reply`. */
 type ParticipantStubRequest =
   | { __r: 'req-publish'; data: unknown; retain?: boolean }
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
@@ -163,10 +167,12 @@ type ParticipantStubNotice =
   | { __r: 'demand'; track: TrackKey; wanted: boolean }
   | { __r: 'demand-state'; tracks: TrackKey[] }
 
-/** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for participant-scoped ones. */
+/** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for
+ *  participant-scoped ones. */
 type MemberWants = { all: boolean; members: ReadonlySet<string> }
 
-/** A delivered private message, as stamped by the sender's instance. `ackId` is present when the sender awaits a reply (`send(…, { ack: true })`). */
+/** A delivered private message, as stamped by the sender's instance. `ackId` is present when the sender awaits a reply
+ *  (`send(…, { ack: true })`). */
 type InboxMessage = {
   from: string
   fromMeta: ParticipantMeta | null
