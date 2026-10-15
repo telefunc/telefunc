@@ -137,26 +137,26 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
   // coordinator, a room authority or the room directory.
   const TelefuncDurableObject = class extends RoomAuthority<Cloudflare.Env> {
-    private readonly authorityState: CloudflareBroadcastAuthorityState
-    private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
-    private readonly session: CloudflareSession
+    readonly #authorityState: CloudflareBroadcastAuthorityState
+    readonly #broadcastCalls: BroadcastCalls = new OrderedStubs()
+    readonly #session: CloudflareSession
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env, telefuncNamespace(env))
-      this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
+      this.#authorityState = new CloudflareBroadcastAuthorityState(ctx)
       const id = ctx.id.toString()
-      this.session = {
+      this.#session = {
         room: new CloudflareRoomSessionManager(id),
-        broadcast: broadcast.member(id, this.broadcastCalls),
+        broadcast: broadcast.member(id, this.#broadcastCalls),
         mux: new ChannelMux(),
       }
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
     async fetch(request: Request) {
-      return this.runInSession(async () => {
+      return this.#runInSession(async () => {
         const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-        if (bucket) this.session.broadcast.locate(bucket)
+        if (bucket) this.#session.broadcast.locate(bucket)
         pinSession(request)
         if (request.headers.get('upgrade') === 'websocket') {
           return crosswsAdapter.handleDurableUpgrade(this, request)
@@ -167,43 +167,43 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
-      return this.runInSession(() => crosswsAdapter.handleDurableMessage(this, ws, message))
+      return this.#runInSession(() => crosswsAdapter.handleDurableMessage(this, ws, message))
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
       // Before compatibility date 2026-04-07 a client's close waits for this answer; close() refuses 1005 and 1006.
       if (code === 1005) ws.close()
       else if (wasClean) ws.close(code, reason)
-      return this.runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
+      return this.#runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
     // workerd calls no webSocketClose after a socket's error, and crossws has no handler for one: its wire ends here.
     webSocketError(ws: WebSocket) {
-      return this.runInSession(() => crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false))
+      return this.#runInSession(() => crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false))
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
-      return broadcast.publishToSubscribers(this.authorityState, this.broadcastCalls, request)
+      return broadcast.publishToSubscribers(this.#authorityState, this.#broadcastCalls, request)
     }
 
     telefuncBroadcastForward(request: BroadcastForwardRequest) {
-      return broadcast.forwardToBucket(this.broadcastCalls, request)
+      return broadcast.forwardToBucket(this.#broadcastCalls, request)
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      return this.runInSession(() => this.session.broadcast.deliver(request))
+      return this.#runInSession(() => this.#session.broadcast.deliver(request))
     }
 
     telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
-      return this.authorityState.setPresence(request)
+      return this.#authorityState.setPresence(request)
     }
 
     telefuncRoomDeliver(request: RoomSessionDeliveryRequest) {
-      return this.runInSession(() => this.session.room.deliver(request))
+      return this.#runInSession(() => this.#session.room.deliver(request))
     }
 
-    private runInSession<T>(fn: () => T): T {
-      return withCloudflareSession(this.session, fn)
+    #runInSession<T>(fn: () => T): T {
+      return withCloudflareSession(this.#session, fn)
     }
   }
 

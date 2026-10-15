@@ -26,30 +26,30 @@ function readSessionPin(kv: KVNamespace, token: string): Promise<StoredShardToke
  *  minute. */
 class SessionPins {
   /** When each session token this isolate's Durable Objects serve is due to be pinned, in the order they were pinned. */
-  private readonly dueAt = new Map<string, number>()
+  readonly #dueAt = new Map<string, number>()
 
   /** Pins the session of `request`, as the Worker forwarded it, if its pin is due. */
   pin(request: Request, getKV: () => KVNamespace): void {
     const token = request.headers.get(TELEFUNC_SESSION_HEADER)
     if (!token) return
     const now = Date.now()
-    const due = this.dueAt.get(token)
+    const due = this.#dueAt.get(token)
     if (due !== undefined && now < due) return
     const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
     const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
     if (!shard || !bucket) return
     const kv = getKV()
-    this.dueAt.delete(token)
-    this.dueAt.set(token, now + SHARD_TOKEN_REPIN_MS)
-    for (const [oldToken, oldDue] of this.dueAt) {
+    this.#dueAt.delete(token)
+    this.#dueAt.set(token, now + SHARD_TOKEN_REPIN_MS)
+    for (const [oldToken, oldDue] of this.#dueAt) {
       if (now < oldDue) break
-      this.dueAt.delete(oldToken)
+      this.#dueAt.delete(oldToken)
     }
     const pin: StoredShardToken = { s: shard, b: bucket }
     // A Durable Object lives on while the write is pending.
     kv.put(`session:${token}`, JSON.stringify(pin), { expirationTtl: SHARD_TOKEN_TTL_SECONDS }).catch(
       (err: unknown) => {
-        this.dueAt.set(token, Date.now() + SHARD_TOKEN_RETRY_MS)
+        this.#dueAt.set(token, Date.now() + SHARD_TOKEN_RETRY_MS)
         assertWarning(
           false,
           `A session's shard couldn't be pinned in KV, and is retried after a second: ${String(err)}`,

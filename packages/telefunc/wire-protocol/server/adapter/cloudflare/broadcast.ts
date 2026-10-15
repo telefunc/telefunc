@@ -338,10 +338,10 @@ class CloudflareBroadcastMember {
 /** The isolate's Cloudflare Broadcast driver: where each key's authority and each bucket's coordinators live, and
  *  their RPC handlers. Each session DO subscribes through its own `CloudflareBroadcastMember`. */
 class CloudflareBroadcast {
-  private readonly baseInstanceName: string
-  private readonly scale: CloudflareScale | undefined
-  private readonly locationFallback: LocationBucket
-  private readonly namespace: () => BroadcastNamespace
+  readonly #baseInstanceName: string
+  readonly #scale: CloudflareScale | undefined
+  readonly #locationFallback: LocationBucket
+  readonly #namespace: () => BroadcastNamespace
 
   constructor({
     baseInstanceName,
@@ -354,10 +354,10 @@ class CloudflareBroadcast {
     locationFallback: LocationBucket
     namespace: () => BroadcastNamespace
   }) {
-    this.baseInstanceName = baseInstanceName
-    this.scale = scale
-    this.locationFallback = locationFallback
-    this.namespace = namespace
+    this.#baseInstanceName = baseInstanceName
+    this.#scale = scale
+    this.#locationFallback = locationFallback
+    this.#namespace = namespace
   }
 
   member(id: string, calls: BroadcastCalls): CloudflareBroadcastMember {
@@ -371,14 +371,14 @@ class CloudflareBroadcast {
     const locationBucket = member?.bucket ?? null
     const request = { key: route.key, kind: route.kind, payload }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
-    const name = this.authorityName(route.key)
+    const name = this.#authorityName(route.key)
     return member === undefined
-      ? send(this.stubByName(name, locationBucket))
-      : this.callByName(member.calls, name, locationBucket, send)
+      ? send(this.#stubByName(name, locationBucket))
+      : this.#callByName(member.calls, name, locationBucket, send)
   }
 
   sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest): Promise<void> {
-    return this.callByName(calls, this.authorityName(request.key), request.bucket, (authority) =>
+    return this.#callByName(calls, this.#authorityName(request.key), request.bucket, (authority) =>
       authority.telefuncBroadcastPresence(request),
     )
   }
@@ -396,14 +396,14 @@ class CloudflareBroadcast {
     // Presence written before a redeploy dropped its region forwards through the fallback region's coordinators.
     const membersByCoordinatorBucket = new Map<LocationBucket, string[]>()
     for (const { member, bucket } of presence) {
-      const via = getScaleCountForBucket(this.scale, bucket) > 0 ? bucket : this.locationFallback
+      const via = getScaleCountForBucket(this.#scale, bucket) > 0 ? bucket : this.#locationFallback
       const group = membersByCoordinatorBucket.get(via)
       if (group) group.push(member)
       else membersByCoordinatorBucket.set(via, [member])
     }
     const forwards = await Promise.allSettled(
       Array.from(membersByCoordinatorBucket, ([bucket, members]) =>
-        this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
+        this.#callByName(calls, this.#coordinatorName(key, bucket), bucket, (coordinator) =>
           coordinator.telefuncBroadcastForward({ key, kind, payload, info, members }),
         ),
       ),
@@ -419,7 +419,7 @@ class CloudflareBroadcast {
       members.map((member) =>
         calls.call(
           member,
-          () => this.stubById(member),
+          () => this.#stubById(member),
           (stub) => stub.telefuncBroadcastDeliver(delivery),
         ),
       ),
@@ -428,32 +428,32 @@ class CloudflareBroadcast {
   }
 
   /** A call from the DO owning `calls`, through its stub for the named instance. */
-  private callByName<T>(
+  #callByName<T>(
     calls: BroadcastCalls,
     name: string,
     locationHint: LocationBucket | null,
     invoke: (stub: TelefuncBroadcastStub) => Promise<T>,
   ): Promise<T> {
-    return calls.call(name, () => this.stubByName(name, locationHint), invoke)
+    return calls.call(name, () => this.#stubByName(name, locationHint), invoke)
   }
 
-  private authorityName(key: string): string {
-    return `${this.baseInstanceName}:broadcast:authority:${key}`
+  #authorityName(key: string): string {
+    return `${this.#baseInstanceName}:broadcast:authority:${key}`
   }
 
-  private coordinatorName(key: string, locationBucket: LocationBucket): string {
-    const bucketShardCount = getBucketCoordinatorShardIndices(this.scale, locationBucket).length
+  #coordinatorName(key: string, locationBucket: LocationBucket): string {
+    const bucketShardCount = getBucketCoordinatorShardIndices(this.#scale, locationBucket).length
     const bucketShardOrdinal = getDeterministicKeyBucketIndex(key, bucketShardCount)
-    return `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
+    return `${this.#baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
   }
 
-  private stubByName(name: string, locationHint: LocationBucket | null): TelefuncBroadcastStub {
-    const namespace = this.namespace()
+  #stubByName(name: string, locationHint: LocationBucket | null): TelefuncBroadcastStub {
+    const namespace = this.#namespace()
     return namespace.get(namespace.idFromName(name), locationHint === null ? undefined : { locationHint })
   }
 
-  private stubById(id: string): TelefuncBroadcastStub {
-    const namespace = this.namespace()
+  #stubById(id: string): TelefuncBroadcastStub {
+    const namespace = this.#namespace()
     return namespace.get(namespace.idFromString(id))
   }
 }
