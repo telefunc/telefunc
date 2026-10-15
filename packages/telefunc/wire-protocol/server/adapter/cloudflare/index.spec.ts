@@ -434,7 +434,8 @@ describe('cloudflare adapter entrypoint', () => {
     instance.webSocketMessage({} as WebSocket, 'payload')
     expect(mocks.crosswsAdapter.handleDurableMessage).toHaveBeenCalledWith(instance, expect.anything(), 'payload')
 
-    instance.webSocketClose({} as WebSocket, 1000, 'done', true)
+    const ws = { close: vi.fn() }
+    instance.webSocketClose(ws as unknown as WebSocket, 1000, 'done', true)
     expect(mocks.crosswsAdapter.handleDurableClose).toHaveBeenCalledWith(
       instance,
       expect.anything(),
@@ -442,6 +443,11 @@ describe('cloudflare adapter entrypoint', () => {
       'done',
       true,
     )
+    expect(ws.close).toHaveBeenLastCalledWith(1000, 'done')
+    instance.webSocketClose(ws as unknown as WebSocket, 1005, '', true)
+    expect(ws.close).toHaveBeenLastCalledWith()
+    instance.webSocketClose(ws as unknown as WebSocket, 1006, '', false)
+    expect(ws.close).toHaveBeenCalledTimes(2)
 
     instance.webSocketError({} as WebSocket, new Error('WebSocket protocol error'))
     expect(mocks.crosswsAdapter.handleDurableClose).toHaveBeenLastCalledWith(

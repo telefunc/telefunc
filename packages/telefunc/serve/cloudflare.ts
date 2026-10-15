@@ -171,6 +171,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
+      // Before compatibility date 2026-04-07 a client's close waits for this answer; close() refuses 1005 and 1006.
+      if (code === 1005) ws.close()
+      else if (wasClean) ws.close(code, reason)
       return this.runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
