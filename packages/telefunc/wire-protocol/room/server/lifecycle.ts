@@ -159,11 +159,9 @@ async function extendLapse({ id, inc }: RoomIncarnation, record: HoldRecord, fir
     const head = await backend.readHead(id)
     if (head?.state !== 'open' || head.currentInc !== inc) return
     const { expiresAt } = head
-    const ahead =
-      ttlMs === undefined
-        ? expiresAt === undefined
-        : expiresAt !== undefined && expiresAt >= record.readAt + ttlMs - ROOM_HEARTBEAT_INTERVAL_MS
-    if (ahead && !firstHold) return
+    if (!firstHold && ttlMs === undefined && expiresAt === undefined) return
+    const bothLapse = ttlMs !== undefined && expiresAt !== undefined
+    if (!firstHold && bothLapse && expiresAt >= record.readAt + ttlMs - ROOM_HEARTBEAT_INTERVAL_MS) return
     const result = await backend.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
