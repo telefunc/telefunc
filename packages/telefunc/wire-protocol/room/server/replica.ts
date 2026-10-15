@@ -363,7 +363,10 @@ class RoomReplica {
   /** Tells every entry of this process's demand again as all it receives, a slice at a time; once more after it when
    *  asked again meanwhile, as an asker may not have read what it told before the ask. */
   private async _tellDemandAgain(): Promise<void> {
-    if (this._tellingAgain) return void (this._askedAgain = true)
+    if (this._tellingAgain) {
+      this._askedAgain = true
+      return
+    }
     this._tellingAgain = true
     try {
       do {

@@ -68,7 +68,10 @@ class RoomSubscriptions {
   private readonly _onLaneTerminal = (slot: LaneSubscription, error?: unknown) => this._onTerminal(slot, error)
   private readonly _onLaneRecovered = () => void this._host.sync.reconcileAuthority().catch(reportRoomError)
   private readonly _onBinaryPending = (slot: LaneSubscription, pending: boolean) => {
-    if (!pending) return void this._binaryPending.delete(slot)
+    if (!pending) {
+      this._binaryPending.delete(slot)
+      return
+    }
     this._binaryPending.add(slot)
     this._binaryReady = null
   }
@@ -378,7 +381,8 @@ class RoomSubscriptions {
             members,
             once((member) => {
               this._syncExcept(member)
-              return this._unconcerned(member) ? void this._counts.delete(member) : this._planMember(member, plan)
+              if (!this._unconcerned(member)) return this._planMember(member, plan)
+              this._counts.delete(member)
             }),
           )
           await this._replanEach(
@@ -390,9 +394,10 @@ class RoomSubscriptions {
             await this._replanEach(
               slice,
               chain(this._inbox.keys(), host._ownedMembers()),
-              once((member) =>
-                !host.model.closed && host._ownsMember(member) ? this._openInbox(member) : this._closeInbox(member),
-              ),
+              once((member) => {
+                if (!host.model.closed && host._ownsMember(member)) this._openInbox(member)
+                else this._closeInbox(member)
+              }),
             )
           }
         } else if (this._demand.changed) {
@@ -521,7 +526,8 @@ class RoomSubscriptions {
       lane = undefined
       if (this._everyMember.has(track)) this._queued.tracks.add(track)
     } else if (keep) {
-      ;(lane ??= this._openNamedLane(member, track)).resume()
+      lane ??= this._openNamedLane(member, track)
+      lane.resume()
     }
     if (everyMember) this._setExcept(track, member, present && !named)
     const delivers = allDelivers || trackDelivers || lane?.delivering === true

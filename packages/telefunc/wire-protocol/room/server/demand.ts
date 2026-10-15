@@ -504,7 +504,10 @@ class RoomDemand {
     const run = (): void => {
       try {
         for (let step = steps.next(); !step.done; step = steps.next())
-          if (slice.over) return void slice.next().then(run)
+          if (slice.over) {
+            void slice.next().then(run)
+            return
+          }
       } catch (error) {
         this._settling = false
         throw error

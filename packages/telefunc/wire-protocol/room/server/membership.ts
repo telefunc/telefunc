@@ -154,7 +154,10 @@ function createSession(room: RoomIncarnation, session: RoomSession): Promise<voi
     const lease = session.hosting(id, cells, now)
     return { value: lease !== null, mutations: lease ?? [] }
   })
-    .then(({ value: hosted }) => (hosted ? session.hosted(id) : session.lost(id)))
+    .then(({ value: hosted }) => {
+      if (hosted) session.hosted(id)
+      else session.lost(id)
+    })
     .finally(() => {
       session.creating = null
     })

@@ -432,7 +432,8 @@ class RedisSubscriptionAttempt extends DriverAttempt {
 
   private _hold(order: LaneOrder, payload: Uint8Array, info: OrderingInfo, token: string | null): void {
     if (order.held?.has(info.seq)) return this._settle(token)
-    ;(order.held ??= new Map()).set(info.seq, { payload, info, token })
+    order.held ??= new Map()
+    order.held.set(info.seq, { payload, info, token })
     if (order.release !== null) return
     order.release = setTimeout(() => this._release(order), REORDER_WAIT_MS)
     order.release.unref()
