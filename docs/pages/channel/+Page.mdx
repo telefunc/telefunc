@@ -217,7 +217,7 @@ channel.listenBinary((data) => {
 const ack = await channel.sendBinary(frame, { ack: true })
 ```
 
-A message the client sends can be at most 64 MiB once serialized (32 MiB on Cloudflare with the default transports). A larger `send()`, `sendBinary()` or `publish()` throws, and the channel stays open.
+A message the client sends can be at most 64 MiB (32 MiB on Cloudflare). A larger `send()`, `sendBinary()` or `publish()` throws, and the channel stays open.
 
 ### Backpressure
 
@@ -235,7 +235,7 @@ Fire-and-forget is also fine — data is sent immediately whether or not you awa
 channel.send({ type: 'ping' }) // sent immediately, no await needed
 ```
 
-If the receiver falls behind, the server holds up to 64 MiB of a channel's unread messages. A send past that rejects with `ChannelOverflowError`; `await` your sends to stay within it.
+If the receiver can't keep up, up to 64 MiB of a channel's messages wait for it. A send past that rejects with `ChannelOverflowError`; `await` your sends to avoid it.
 
 
 ## `Broadcast`
@@ -415,13 +415,13 @@ Channels and broadcasts signal failure through four errors:
 | Error | When | Channel state | Recovery |
 |---|---|---|---|
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
-| `NetworkError` (`isChannel: true`) | Connection lost beyond `reconnectTimeout`, or a reconnect couldn't replay the messages the other side missed | Closed | Auto-closed — recreate if needed |
+| `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | A send was dropped — the receiver fell too far behind, or `config.channel.bufferLimit` filled while it was offline | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
+| `ChannelOverflowError` | The receiver fell too far behind, or `bufferLimit` filled while it was offline | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` whose client falls too far behind (80 MiB with the defaults) closes with `ChannelOverflowError`, as does one offline past `config.channel.bufferLimit`. Call its telefunction again to rejoin.
+> A `BroadcastChannel` has no `send()` to reject, so it closes with `ChannelOverflowError` instead when its client falls 80 MiB behind (less if you lowered the replay buffers), or misses more than `bufferLimit` while offline. Call its telefunction again to rejoin.
 
 See also:
 - <Link href="/stream#error-handling" />
@@ -433,8 +433,8 @@ See also:
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
-- Both sides keep a replay buffer; after reconnect, missing messages are replayed. If you `await` your sends, nothing is lost.
-- If you don't, and the other side missed more than the replay buffer holds, the channel closes with `NetworkError`. The error names the setting to raise (see <Link href="/channel-config" />).
+- Messages lost in the disconnect are resent after reconnect. If you `await` your sends, nothing is lost.
+- If you don't `await` them and the other side missed too much, the channel closes with `NetworkError`; its message names the setting to raise (see <Link href="/channel-config" />).
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 
 > Reconnection is automatic — you don't need to handle it in your application code.
