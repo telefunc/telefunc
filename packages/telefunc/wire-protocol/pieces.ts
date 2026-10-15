@@ -475,11 +475,19 @@ class PieceSender {
     if (this.link.rise(rate, at)) this.setWholeUpTo()
   }
 
-  /** Sends what waits for room, as far as its room goes now. */
+  /** Sends what waits for room, as far as its room goes now, and the frames held behind it. */
   sendHeld(): void {
     if (this.rest === null) return
     this.takeCarried()
-    this.release()
+    const { frame, offset } = this.rest
+    this.rest = null
+    this.heldBytes -= frame.byteLength - offset
+    this.cut(frame, offset)
+    while (this.rest === null && this.held.length > 0) {
+      const next = this.held.shift()!
+      this.heldBytes -= next.byteLength
+      this.pass(next)
+    }
   }
 
   /** Counts the frames carried into what it gathers, ahead of what is sent next, whatever that holds. */
@@ -491,19 +499,6 @@ class PieceSender {
       this.room.sentFrame(frame[0]!, frame.byteLength)
       this.count(frame, false)
       this.add(frame)
-    }
-  }
-
-  /** Sends what waited for room, as far as it goes now, and the frames held behind it. */
-  private release(): void {
-    const { frame, offset } = this.rest!
-    this.rest = null
-    this.heldBytes -= frame.byteLength - offset
-    this.cut(frame, offset)
-    while (this.rest === null && this.held.length > 0) {
-      const next = this.held.shift()!
-      this.heldBytes -= next.byteLength
-      this.pass(next)
     }
   }
 }
