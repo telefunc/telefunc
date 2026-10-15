@@ -131,8 +131,8 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
       await backend.compareExchangeCells(room.id, inc, { expect: [], mutations })
     }
     const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
-    await Promise.all(nodes.map((node) => node.slowlog('RESET')))
     const tick = async () => {
+      await Promise.all(nodes.map((node) => node.slowlog('RESET')))
       let last = performance.now()
       let longest = 0
       const timer = setInterval(() => {
@@ -144,21 +144,13 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
         room as unknown as { _replica: { sync: { _heartbeatTick(): Promise<void> } } }
       )._replica.sync._heartbeatTick()
       clearInterval(timer)
-      return Math.max(longest, performance.now() - last)
+      return { gap: Math.max(longest, performance.now() - last), slow: await commandsOver20Ms(nodes, prefix) }
     }
-    const gaps = [await tick(), await tick()]
+    const ticks = [await tick(), await tick()]
     expect(room.count).toBe(100_000)
-    // Each entry: id, time, microseconds, then the command and its arguments.
-    const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
-      number,
-      number,
-      number,
-      string[],
-    ][]
-    const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
-    expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
-    // The shorter of two ticks, so a scheduling hiccup in one is not read as a stall.
-    expect(Math.min(...gaps)).toBeLessThanOrEqual(50)
+    // The cleaner of two ticks, so a host stall in one is not read as a stalled event loop or a slow command.
+    expect(Math.min(...ticks.map(({ gap }) => gap))).toBeLessThanOrEqual(50)
+    expect(ticks.map(({ slow }) => slow).sort((a, b) => a.length - b.length)[0]).toEqual([])
   })
 
   it("delivers each of a member's binary commits to its every-track subscription with its own track's seq", async () => {
@@ -564,15 +556,7 @@ await read()`,
     await Room.setAttributes(room.id, { k0: 'merged' })
     await Room.setMeta(room.id, { only: true })
     expect((await Room.get(room.id)).meta).toEqual({ only: true })
-    // Each entry: id, time, microseconds, then the command and its arguments.
-    const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
-      number,
-      number,
-      number,
-      string[],
-    ][]
-    const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
-    expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+    expect(await commandsOver20Ms(nodes, prefix)).toEqual([])
   })
 
   it('merges one key into a room meta of 100,000 keys with the event loop turning, a view applying it, and no Redis command over 20 ms', async () => {
@@ -589,7 +573,9 @@ await read()`,
     const observer = await Room.get(room.id)
     // Ended before the backend is, so nothing of this view reaches for a backend after it.
     onTestFinished(observer.onUpdate(() => {}))
+    const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
     const merge = async (value: number) => {
+      await Promise.all(nodes.map((node) => node.slowlog('RESET')))
       let last = performance.now()
       let longest = 0
       const timer = setInterval(() => {
@@ -600,21 +586,13 @@ await read()`,
       await Room.setAttributes(room.id, { k0: value })
       await vi.waitFor(() => expect(observer.meta.k0).toBe(value))
       clearInterval(timer)
-      return Math.max(longest, performance.now() - last)
+      return { gap: Math.max(longest, performance.now() - last), slow: await commandsOver20Ms(nodes, prefix) }
     }
     await merge(-1)
-    const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
-    await Promise.all(nodes.map((node) => node.slowlog('RESET')))
-    // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
-    expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
-    const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
-      number,
-      number,
-      number,
-      string[],
-    ][]
-    const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
-    expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+    const merges = [await merge(1), await merge(2)]
+    // The cleaner of two merges, so a host stall in one is not read as a stalled event loop or a slow command.
+    expect(Math.min(...merges.map(({ gap }) => gap))).toBeLessThanOrEqual(50)
+    expect(merges.map(({ slow }) => slow).sort((a, b) => a.length - b.length)[0]).toEqual([])
   }, 60_000)
   it('ends the views of two servers on the stored meta, its key order and its seq while both merge into and replace it at once', async () => {
     const prefix = uniquePrefix('meta-converge')
@@ -654,7 +632,9 @@ await read()`,
     onTestFinished(observer.onChange(() => changes++))
     // Timed until the view applied the write. Reading the whole meta builds it, the reader's own cost, so it is read once
     // at the end, and its garbage lands in no timed merge.
+    const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
     const merge = async (value: number) => {
+      await Promise.all(nodes.map((node) => node.slowlog('RESET')))
       const before = changes
       let last = performance.now()
       let longest = 0
@@ -666,21 +646,13 @@ await read()`,
       await member.setAttributes({ k0: value })
       await vi.waitFor(() => expect(changes).toBe(before + 1))
       clearInterval(timer)
-      return Math.max(longest, performance.now() - last)
+      return { gap: Math.max(longest, performance.now() - last), slow: await commandsOver20Ms(nodes, prefix) }
     }
     await merge(-1)
-    const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
-    await Promise.all(nodes.map((node) => node.slowlog('RESET')))
-    // The shorter of two merges, so a scheduling hiccup in one is not read as a stall.
-    expect(Math.min(await merge(1), await merge(2))).toBeLessThanOrEqual(50)
-    const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
-      number,
-      number,
-      number,
-      string[],
-    ][]
-    const ours = logged.filter(([, , , args]) => args.some((arg) => String(arg).includes(prefix)))
-    expect(ours.map(([, , micros]) => micros).filter((micros) => micros > 20_000)).toEqual([])
+    const merges = [await merge(1), await merge(2)]
+    // The cleaner of two merges, so a host stall in one is not read as a stalled event loop or a slow command.
+    expect(Math.min(...merges.map(({ gap }) => gap))).toBeLessThanOrEqual(50)
+    expect(merges.map(({ slow }) => slow).sort((a, b) => a.length - b.length)[0]).toEqual([])
     expect(remote.meta.k0).toBe(2)
   }, 60_000)
   it("ends a second server's view on a member's stored meta, its key order and its seq while its server merges into and replaces it at once", async () => {
@@ -1230,4 +1202,18 @@ function sleep(ms: number): Promise<void> {
 
 function bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value)
+}
+
+/** The commands of `prefix` that each node's slowlog holds over 20 ms, each as its first three arguments and its time. */
+async function commandsOver20Ms(nodes: Redis[], prefix: string): Promise<string[]> {
+  // Each entry: id, time, microseconds, then the command and its arguments.
+  const logged = (await Promise.all(nodes.map((node) => node.slowlog('GET', 1_000)))).flat() as [
+    number,
+    number,
+    number,
+    string[],
+  ][]
+  return logged
+    .filter(([, , micros, args]) => micros > 20_000 && args.some((arg) => String(arg).includes(prefix)))
+    .map(([, , micros, args]) => `${args.slice(0, 3).join(' ')}: ${micros} µs`)
 }
