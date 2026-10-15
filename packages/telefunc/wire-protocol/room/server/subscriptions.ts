@@ -448,7 +448,11 @@ class RoomSubscriptions {
     const overflows = this._overflows(count)
     toggle(this._overflowing, member, overflows)
     const servedByAll = wantsAll || overflows || (present && this._byMember)
-    if (servedByAll) this._openEveryTrack(member)
+    if (servedByAll) {
+      this._establishingEveryMember.waiting.delete(member)
+      const lane = this._everyTrack.get(member) ?? this._openEveryTrack(member)
+      lane.resume()
+    }
     const all = this._everyTrack.get(member)
     const allDelivers = all?.delivering === true
     this._demand.setMember(member, wantsAll && allDelivers)
@@ -607,25 +611,21 @@ class RoomSubscriptions {
     return count !== undefined && count > ROOM_MEMBER_NAMED_LANES_MAX
   }
 
-  private _openEveryTrack(member: string): void {
-    let lane = this._everyTrack.get(member)
-    if (lane === undefined) {
-      const host = this._host
-      const establishing = this._establishingEveryTrack
-      const opened = (lane = this._newLaneSubscription(() => {
-        this._queued.members.add(member)
-        this._established(opened, establishing)
-      }))
-      establishing.lanes.add(lane)
-      this._everyTrack.set(member, lane)
-      lane.sync(true, () =>
-        getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'binary-all', member }, (framed, info) =>
-          host._onBinary(framed, info),
-        ),
-      )
-    }
-    this._establishingEveryMember.waiting.delete(member)
-    lane.resume()
+  private _openEveryTrack(member: string): LaneSubscription {
+    const host = this._host
+    const establishing = this._establishingEveryTrack
+    const lane = this._newLaneSubscription(() => {
+      this._queued.members.add(member)
+      this._established(lane, establishing)
+    })
+    establishing.lanes.add(lane)
+    this._everyTrack.set(member, lane)
+    lane.sync(true, () =>
+      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'binary-all', member }, (framed, info) =>
+        host._onBinary(framed, info),
+      ),
+    )
+    return lane
   }
 
   private _openEveryMember(track: string): LaneSubscription {
