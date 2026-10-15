@@ -305,11 +305,13 @@ test('a stream the page consumes while the server awaits another channel its fir
   expect(page.received).toEqual([...page.received.keys()])
 })
 
-test("a page listener that transfers its data's buffer leaves the frames behind that data in its message intact", async () => {
+test("a page listener's data has a buffer of its own frame, which it may transfer, in a message of several", async () => {
   const { server, page } = loop.open()
   const got: number[] = []
+  const buffers: number[] = []
   page.listenBinary((data) => {
     got.push(data.byteLength)
+    buffers.push(data.buffer.byteLength)
     structuredClone(data.buffer, { transfer: [data.buffer] })
   })
   await run(50)
@@ -317,6 +319,8 @@ test("a page listener that transfers its data's buffer leaves the frames behind 
   for (let i = 0; i < 3; i++) void server.sendBinary(new Uint8Array(100))
   await run(50)
   expect(got).toEqual([100, 100, 100])
+  const frameBytes = encode.binary(0, new Uint8Array(100)).byteLength
+  expect(buffers).toEqual([frameBytes, frameBytes, frameBytes])
   expect(loop.sockets.length).toBe(1)
 })
 
