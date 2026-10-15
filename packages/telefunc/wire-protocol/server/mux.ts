@@ -400,7 +400,7 @@ class ChannelMux {
     if (!entry) return Promise.resolve(null)
     if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, connection, rawFrame, 'alone')
     // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
-    // measures. Each is copied as the one before it goes, so a message past the ingress budget is copied no further.
+    // measures. Each is copied as the one before it goes, so copying stops two frames past the ingress budget.
     let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
     try {
       assertProtocol(entry.state.pieces, 'frames in one message on a wire that takes no pieces')
