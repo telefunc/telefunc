@@ -836,8 +836,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       if (typeof wire === 'string') this._prePeerBuffer.pushPublish(wire, gap)
       else this._prePeerBuffer.pushPublishBinary(wire, gap)
       this._closeIfDroppedOffline()
-    } else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
-    else this._flow.countSentBytes(typeof wire === 'string' ? peer.sendPublish(wire) : peer.sendPublishBinary(wire))
+      return
+    }
+    if (this._flow.isPastByteCredit && this._isPeerBehind()) {
+      this._closeBehind()
+      return
+    }
+    this._flow.countSentBytes(typeof wire === 'string' ? peer.sendPublish(wire) : peer.sendPublishBinary(wire))
   }
 
   /** A page that can't keep up, where no sender can be refused: once behind, it leaves, on both ends, rather than be
