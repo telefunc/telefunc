@@ -15,6 +15,9 @@ export {
   ROOM_ROSTER_PART_MEMBERS,
   ROOM_DEMAND_PAGE_ENTRIES,
   ROOM_META_REPAIR_MS,
+  ROOM_TOMBSTONE_TTL_MS,
+  ROOM_CLOSE_LEASE_MS,
+  ROOM_LAPSE_AFTER_CLOSE_MS,
 }
 
 const ROOM_HEARTBEAT_INTERVAL_MS = 30_000
@@ -47,3 +50,7 @@ const ROOM_DEMAND_PAGE_ENTRIES = 1024
 // A meta change or a control frame waiting this long for the one before it: that one's writer crashed between its
 // exchange and its publish, or the lane lost it, so a whole read repairs it.
 const ROOM_META_REPAIR_MS = 1_000
+const ROOM_TOMBSTONE_TTL_MS = 60_000
+const ROOM_CLOSE_LEASE_MS = 15_000
+/** How long past an unheld room's close its head lapses: the close that server's timer starts lands well before. */
+const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000

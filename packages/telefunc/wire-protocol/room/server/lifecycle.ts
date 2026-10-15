@@ -11,7 +11,7 @@ import { getRoomBackend } from '../../backend/install.js'
 import type { CellCount, CellCounter, RoomHead } from '../../backend/room/contract.js'
 import { decodeCellCounter } from '../../backend/room/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../constants.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SESSION_TTL_MS } from './constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_LAPSE_AFTER_CLOSE_MS, ROOM_SESSION_TTL_MS } from './constants.js'
 import type { HoldConfig } from './protocol.js'
 import { roomClosedError } from '../errors.js'
 import { HOLDS_CELL_KEY, JOINS_CELL_KEY } from './cells.js'
@@ -19,9 +19,6 @@ import { closeIncarnation } from './close.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { reportRoomError } from './errors.js'
 assertIsNotBrowser()
-
-/** How long past an unheld room's close its head lapses: the close that server's timer starts lands well before. */
-const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000
 
 /** What holds a room (its non-hidden members and pages' views), and how many joins it had. */
 type HoldCounts = { holds: number; joins: number }

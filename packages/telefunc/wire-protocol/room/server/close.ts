@@ -3,10 +3,8 @@ export { closeIncarnation, takeOverClose, cleanupFinalizedIncarnation }
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
+import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from './constants.js'
 import { commitControl, configFromHead } from './lanes.js'
-
-const ROOM_TOMBSTONE_TTL_MS = 60_000
-const ROOM_CLOSE_LEASE_MS = 15_000
 
 /** Closes the room, or only its incarnation `inc` when given. */
 async function closeIncarnation(id: string, inc?: string): Promise<void> {
