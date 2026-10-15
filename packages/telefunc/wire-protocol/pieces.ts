@@ -162,7 +162,7 @@ class PieceSender {
   /** Whether `frame`, sent while the rest of a data frame waits for room, goes ahead of it: a frame that isn't data and
    *  goes whole, as a flow-control frame does. */
   private passesRest(frame: Uint8Array<ArrayBuffer>): boolean {
-    return this.rest !== null && this.probe === null && !isSequencedTag(frame[0]!) && frame.byteLength <= this.wholeUpTo
+    return !isSequencedTag(frame[0]!) && frame.byteLength <= this.wholeUpTo
   }
 
   /** Hands the socket `frame`, whole or in pieces. */
@@ -446,10 +446,7 @@ class PieceSender {
       if (sent.probe) this.rise(sent.crossing / Math.max(arrived - sent.at, WIRE_PROBE_CLOCK_MS), arrived)
       else if (arrived > sent.at) this.rise(sent.crossing / (arrived - sent.at), arrived)
     }
-    if (probe !== null && this.acknowledgedBytes >= probe.end) {
-      this.probe = null
-      if (this.rest !== null) this.release()
-    }
+    if (probe !== null && this.acknowledgedBytes >= probe.end) this.probe = null
     return true
   }
 
@@ -480,7 +477,7 @@ class PieceSender {
 
   /** Sends what waits for room, as far as its room goes now. */
   sendHeld(): void {
-    if (this.rest === null || this.probe !== null) return
+    if (this.rest === null) return
     this.takeCarried()
     this.release()
   }
