@@ -402,12 +402,11 @@ class ClientRoom extends RoomStateView implements Room {
    *  are replayed channel messages, so the server keeps them across reconnects: each one carries only what changed,
    *  the room-wide text wants and those of `member`, whose listeners changed, or the one binary want that did. */
   private _syncWants(member: string | null, binary: BinaryWantChange | null): void {
-    const state = this._state
     if (this._model.closed) {
       this._stub._setSubscribed('text', false) // a closed room takes no declaration
       return
     }
-    const text = state.textWants()
+    const text = this._state.textWants()
     this._stub._setSubscribed('text', text.all)
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
     const textChanges: Record<string, boolean> = Object.create(null)
@@ -418,9 +417,9 @@ class ClientRoom extends RoomStateView implements Room {
       if (wanted) this._declaredText.add(member)
       else this._declaredText.delete(member)
     }
-    if (memberText || state.wantsAnnounce !== this._declaredAnnounce) {
-      this._declaredAnnounce = state.wantsAnnounce
-      this._notify({ __r: 'sub-text', announce: state.wantsAnnounce, members: textChanges })
+    if (memberText || this._state.wantsAnnounce !== this._declaredAnnounce) {
+      this._declaredAnnounce = this._state.wantsAnnounce
+      this._notify({ __r: 'sub-text', announce: this._state.wantsAnnounce, members: textChanges })
     }
     if (binary === null) return
     const { member: wantMember, track, on } = binary
