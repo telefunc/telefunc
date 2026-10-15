@@ -253,13 +253,10 @@ class RoomSubscriptions {
    *  frame. */
   async pairsReady(member: string, track: TrackKey | All): Promise<void> {
     await this._planning
+    const lanes = [this._everyTrack.get(member)]
+    if (track !== ALL) lanes.push(this._binary.get(inProcessBinaryLaneKey(member, track)), this._everyMember.get(track))
     const pending: Promise<void>[] = []
-    for (const lane of [
-      this._everyTrack.get(member),
-      track === ALL ? undefined : this._binary.get(inProcessBinaryLaneKey(member, track)),
-      track === ALL ? undefined : this._everyMember.get(track),
-    ])
-      if (lane !== undefined && this._binaryPending.has(lane)) pending.push(lane.ready)
+    for (const lane of lanes) if (lane !== undefined && this._binaryPending.has(lane)) pending.push(lane.ready)
     if (pending.length > 0) await withinRoomHorizon(Promise.all(pending))
   }
 
