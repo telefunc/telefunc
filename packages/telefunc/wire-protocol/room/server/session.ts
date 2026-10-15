@@ -8,19 +8,22 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import type { CellMutation } from '../../backend/room/contract.js'
 import { ROOM_SESSION_TTL_MS } from './constants.js'
 import { sessionCellKey } from './cells.js'
+import { decodeRoomText } from './lanes.js'
 assertIsNotBrowser()
+
+const sessionTextEncoder = new TextEncoder()
 
 /** Lapses at `until`, authority time; `cleaner` names the server that claimed it to remove what it hosted. */
 type SessionRecord = { until: number; cleaner?: string }
 
 function decodeSessionRecord(raw: Uint8Array): SessionRecord {
-  return JSON.parse(new TextDecoder().decode(raw)) as SessionRecord
+  return JSON.parse(decodeRoomText(raw)) as SessionRecord
 }
 
 /** A lease from `now`, the authority time its exchange read. */
 function sessionRecordBytes(now: number, cleaner?: string): Uint8Array {
   const record: SessionRecord = { until: now + ROOM_SESSION_TTL_MS, cleaner }
-  return new TextEncoder().encode(JSON.stringify(record))
+  return sessionTextEncoder.encode(JSON.stringify(record))
 }
 
 /** One per replica. Its id changes once its cell is lost: claimed, or removed after a claim. */

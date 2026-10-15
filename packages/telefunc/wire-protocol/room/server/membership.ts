@@ -41,7 +41,7 @@ import {
   deleteCells,
   type MemberMetaCells,
 } from './meta.js'
-import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
+import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, decodeRoomText, encodeRoomRecord } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { afterHoldChange, holdChange, holdCounts, type RoomIncarnation } from './lifecycle.js'
 import {
@@ -72,6 +72,7 @@ type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
 type PendingMemberCleanup = { cause: WireLeaveCause; session: string; hidden?: true }
 /** An exchange hosting something under a session found it lost. */
 const SESSION_LOST: unique symbol = Symbol('telefunc.RoomSessionLost')
+const identityTextEncoder = new TextEncoder()
 
 /** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function readPrefix(roomId: string, inc: string, prefix: string): Promise<Map<string, Uint8Array>> {
@@ -173,7 +174,7 @@ async function createMember(
   const { counters } = await mutateHosted(room, session, (hostId) => {
     const mutations: CellMutation[] = [
       { key: memberCellKey(id), bytes: encodeRoomRecord({ ...record, session: hostId } satisfies RoomMemberRecord) },
-      { key: sessionMemberCellKey(hostId, id), bytes: new TextEncoder().encode(record.identity ?? '') },
+      { key: sessionMemberCellKey(hostId, id), bytes: identityTextEncoder.encode(record.identity ?? '') },
       ...memberMetaMutations(id, meta),
     ]
     if (record.identity !== undefined)
@@ -270,12 +271,7 @@ async function reapSessions(room: RoomIncarnation, { cells, now }: CellsAt): Pro
 async function cleanSession(room: RoomIncarnation, session: string, cleaner: string): Promise<void> {
   const marks = await readPrefix(room.id, room.inc, sessionMemberCellPrefix(session))
   await eachInFlight(marks, ([key, raw]) =>
-    finishSessionMember(
-      room,
-      session,
-      memberIdOfSessionMemberKey(key),
-      raw.length > 0 ? new TextDecoder().decode(raw) : null,
-    ),
+    finishSessionMember(room, session, memberIdOfSessionMemberKey(key), raw.length > 0 ? decodeRoomText(raw) : null),
   )
   const views = await readPrefix(room.id, room.inc, sessionViewCellPrefix(session))
   await eachInFlight(views.keys(), (key) => removeView(room, key))

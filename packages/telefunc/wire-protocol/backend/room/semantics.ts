@@ -16,6 +16,9 @@ import type { OrderingInfo } from '../../ordering-frame.js'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
 
+const counterTextEncoder = new TextEncoder()
+const counterTextDecoder = new TextDecoder()
+
 /** A head as an authority stores it; `expiresAt` is when it lapses. */
 type StoredHead = Omit<RoomHead, 'expiresAt'> & { expiresAt: number | null }
 
@@ -91,9 +94,9 @@ function countCell(
 }
 
 function encodeCellCounter(counter: CellCounter): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify(counter))
+  return counterTextEncoder.encode(JSON.stringify(counter))
 }
 
 function decodeCellCounter(bytes: Uint8Array): CellCounter {
-  return JSON.parse(new TextDecoder().decode(bytes)) as CellCounter
+  return JSON.parse(counterTextDecoder.decode(bytes)) as CellCounter
 }
