@@ -21,7 +21,8 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 ;(globalThis as { process?: { env: Record<string, string | undefined> } }).process!.env.NODE_TLS_REJECT_UNAUTHORIZED =
   '0'
 
-function setupDockerRun(command = 'pnpm test:docker'): boolean {
+/** `additionalTimeout`: how much longer than test-e2e's default the stack may take to serve. */
+function setupDockerRun(command = 'pnpm test:docker', additionalTimeout = 0): boolean {
   // Skip locally when Docker is unavailable. On CI a missing Docker should fail loudly,
   // not silently shrink coverage.
   if (!isCI() && !isDockerAvailable()) {
@@ -32,6 +33,7 @@ function setupDockerRun(command = 'pnpm test:docker'): boolean {
   run(command, {
     serverUrl: 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
+    additionalTimeout,
     tolerateExitCode: [130],
     tolerateError(log) {
       const t = log.logText
