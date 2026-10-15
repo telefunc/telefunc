@@ -175,12 +175,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       assertUsage(kv, `Missing Cloudflare KV namespace binding "${kvBindingName}". Add it to your wrangler.jsonc.`)
       const presented = new URL(request.url).searchParams.get('session')
       const token = presented || crypto.randomUUID()
-      const stored = presented ? await readSessionPin(kv, presented) : null
+      const pinned = presented ? await readSessionPin(kv, presented) : null
       // A presented token keeps the shard KV pinned for it; without a pin, its hash picks the same shard of its region
       // again. The session Durable Object writes the pin.
-      const { sessionInstanceName, locationBucket } = stored
-        ? { sessionInstanceName: stored.s, locationBucket: stored.b }
-        : resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
+      const { sessionInstanceName, locationBucket } =
+        pinned ?? resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
 
       const forwardedHeaders = new Headers(request.headers as Headers)
       // A token the client didn't name is never presented again: its session Durable Object pins none.

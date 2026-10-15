@@ -3,7 +3,7 @@ export { SessionPins, readSessionPin }
 
 import { TELEFUNC_BROADCAST_BUCKET_HEADER, TELEFUNC_SESSION_HEADER, TELEFUNC_SHARD_HEADER } from './routing.js'
 import { assertWarning } from '../../../../utils/assert.js'
-import type { LocationBucket } from './routing.js'
+import type { LocationBucket, SessionRoutingTarget } from './routing.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
 /** A session Durable Object writes its pin again once it's this old, well before KV lets it lapse. */
@@ -17,8 +17,12 @@ type StoredShardToken = {
 }
 
 /** The session Durable Object and region KV pinned for `token`, if any. */
-function readSessionPin(kv: KVNamespace, token: string): Promise<StoredShardToken | null> {
-  return kv.get<StoredShardToken>(`session:${token}`, 'json')
+async function readSessionPin(
+  kv: KVNamespace,
+  token: string,
+): Promise<Pick<SessionRoutingTarget, 'sessionInstanceName' | 'locationBucket'> | null> {
+  const pin = await kv.get<StoredShardToken>(`session:${token}`, 'json')
+  return pin && { sessionInstanceName: pin.s, locationBucket: pin.b }
 }
 
 /** The Worker routes a token by its KV pin. The session Durable Object writes the pin, once and again before it lapses:
