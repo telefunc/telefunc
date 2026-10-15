@@ -15,7 +15,6 @@ export {
   peekTag,
   ProtocolViolationError,
   isChannelCtrlTag,
-  isChannelDataFrame,
   isSequencedFrame,
   isSequencedTag,
   replayLaneOf,
@@ -190,10 +189,6 @@ function isConnCtrlTag(tag: number): boolean {
 
 function isChannelCtrlTag(tag: number): boolean {
   return tag >= CHANNEL_CTRL_TAG_MIN
-}
-
-function isChannelDataFrame(frame: DecodedFrame): frame is ChannelDataFrame {
-  return frame.tag >= DATA_TAG_MIN && frame.tag < CHANNEL_CTRL_TAG_MIN
 }
 
 /** What a replay holds: data, and the closing frames. */
