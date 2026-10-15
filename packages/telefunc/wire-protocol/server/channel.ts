@@ -286,8 +286,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Cooperative credit model; see `_send`.
     if (this._flow.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
-    this._peer.sendBinary(data)
-    return this._flow.decrement(data.byteLength)
+    return this._flow.decrement(this._peer.sendBinary(data))
   }
 
   /** @internal The most this channel's flow control lets wait on its wire for a page that reads: its credit, which a
@@ -743,10 +742,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._prePeerBuffer.flush({
       sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
       sendPublish: (msg) => this._flow.countSentBytes(peer.sendPublish(msg)),
-      sendBinary: (msg) => {
-        peer.sendBinary(msg)
-        this._flow.countSent(msg.byteLength)
-      },
+      sendBinary: (msg) => this._flow.countSent(peer.sendBinary(msg)),
       sendTextAck: (data, cb) =>
         peer.sendTextAckReq(data, (seq, bytes) => {
           if (cb) this._addPendingAck(seq, bytes, cb)

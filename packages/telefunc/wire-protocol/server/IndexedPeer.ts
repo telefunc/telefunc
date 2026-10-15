@@ -45,10 +45,12 @@ class IndexedPeer {
     this.sendSequenced(seq, frame)
   }
 
-  sendBinary(data: Uint8Array): void {
+  /** Returns the frame's payload byte count. */
+  sendBinary(data: Uint8Array): number {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
     this.sendSequenced(seq, frame)
+    return data.byteLength
   }
 
   /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and payload bytes. */
