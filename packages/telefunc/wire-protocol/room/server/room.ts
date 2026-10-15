@@ -295,8 +295,10 @@ class ServerRoom extends RoomStateView implements Room {
     if (holder instanceof RoomStubChannel) {
       if (envelope.fromMetaSeq !== undefined)
         this._replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
-      const { fromMeta, fromMetaSeq, fromIdentity, ...unstamped } = envelope
-      const texts = new MemberMessageTexts(serialized, info, () => unstamped)
+      const texts = new MemberMessageTexts(serialized, info, () => {
+        const { fromMeta, fromMetaSeq, fromIdentity, ...unstamped } = envelope
+        return unstamped
+      })
       return holder._relayDm(texts, envelope)
     }
     if (holder === undefined) return
