@@ -118,12 +118,10 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
     if (this._forwarder) return this._forwarder.deliverAck(msg)
-    if (!this._messageCbs?.size) {
-      if (this._left) return Promise.resolve(DM_FAILURE.left)
-      if (this._inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
-      return new Promise<DmReply>((resolve) => this._hold(msg, resolve))
-    }
-    return this._fireInboxAck(msg)
+    if (this._messageCbs?.size) return this._fireInboxAck(msg)
+    if (this._left) return Promise.resolve(DM_FAILURE.left)
+    if (this._inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
+    return new Promise<DmReply>((resolve) => this._hold(msg, resolve))
   }
   /** The inbox attached: DMs held until now go out in order, and nothing is held again. */
   private _flushHeld(to: InboxForwarder): void {
