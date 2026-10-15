@@ -86,7 +86,7 @@ test.each([
       structuredClone(data.buffer, { transfer: [data.buffer] })
     })
     const binary = encode.binary(0, new Uint8Array(100), 1)
-    const frames = [binary, encode.window(0, 1 << 20, 0), encode.window(0, 1 << 20, 0)]
+    const frames = [binary, encode.window(0, 1 << 20, 0)]
     const message = encode.message(frames, LENGTH_BYTES + frames.reduce((bytes, frame) => bytes + frame.byteLength, 0))
     await hooks.message!(peer, { uint8Array: () => received(message) } as never)
     await new Promise((resolve) => setTimeout(resolve, 0))
