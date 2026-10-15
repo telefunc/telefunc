@@ -269,9 +269,12 @@ export default {
     }
   },
 }
-const sessionOf = (env: Env, suffix: string) => env.TelefuncDurableObject.idFromName(`session-${suffix}`)
-const session = (env: Env, suffix: string) =>
-  env.TelefuncDurableObject.get(sessionOf(env, suffix)) as unknown as Session
+function sessionOf(env: Env, suffix: string): DurableObjectId {
+  return env.TelefuncDurableObject.idFromName(`session-${suffix}`)
+}
+function session(env: Env, suffix: string): Session {
+  return env.TelefuncDurableObject.get(sessionOf(env, suffix)) as unknown as Session
+}
 function roomProbe(env: Env, suffix: string, name: string) {
   const roomId = `${name}-${suffix}`
   const inc = `${name}-inc-${suffix}`
