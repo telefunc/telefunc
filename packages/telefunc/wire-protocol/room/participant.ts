@@ -45,6 +45,13 @@ abstract class ParticipantBase implements LocalParticipant {
   private _pendingInboxBytes = 0
   /** When a client holds this participant, its inbox forwards there instead of to local listeners (see `RoomParticipantStubChannel`). */
   private _forwarder: InboxForwarder | null = null
+  /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
+  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null, rewinds: MetaRewinds) {
+    this.id = id
+    this._meta = new MemberMeta(meta, 0, rewinds)
+    this.selfDelivery = selfDelivery
+    this.identity = identity
+  }
   /** @internal Route this participant's inbox to a remote holder instead of local listeners. */
   _setForwarder(forwarder: InboxForwarder): void {
     this._forwarder = forwarder
@@ -53,13 +60,6 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal Already bound to a client holder (serialized once, via `RoomParticipantStubChannel`)? */
   get _isBound(): boolean {
     return this._forwarder !== null
-  }
-  /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
-  constructor(id: string, meta: ParticipantMeta, selfDelivery: boolean, identity: string | null, rewinds: MetaRewinds) {
-    this.id = id
-    this._meta = new MemberMeta(meta, 0, rewinds)
-    this.selfDelivery = selfDelivery
-    this.identity = identity
   }
   get meta(): ParticipantMeta {
     return this._meta.object

@@ -441,6 +441,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   >()
   private readonly _wantedTracks = new Set<TrackKey>()
   private readonly _bufferLimit: number
+  protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
   constructor(
     participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>,
@@ -555,7 +556,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
   protected _reportError(err: unknown): void {
     reportClientCallbackError(err)
   }
-  protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
   protected _inboxBufferLimit(): number {
     return this._bufferLimit
