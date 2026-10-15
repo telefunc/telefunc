@@ -7,7 +7,7 @@ type Deferred<T> = {
   reject: (reason: unknown) => void
 }
 
-/** `Promise.withResolvers()`, which Node.js 20 lacks. */
+/** `Promise.withResolvers()`, which the browser client can't call: Safari before 17.4 lacks it. */
 function createDeferred<T = void>(): Deferred<T> {
   let resolve!: Deferred<T>['resolve']
   let reject!: Deferred<T>['reject']
