@@ -229,10 +229,9 @@ class RoomReplica {
       case 'leave':
         this.model.applyLeave(event.id, leaveCauseFromWire(event))
         return
-      case 'p-meta': {
+      case 'p-meta':
         if (this.model.applyParticipantMeta(event.id, event)) relay()
         return
-      }
       case 'update':
         for (const applied of this.model.applyRoomUpdate(event))
           this._relayControl(applied, () => unorderedEventText(applied))
