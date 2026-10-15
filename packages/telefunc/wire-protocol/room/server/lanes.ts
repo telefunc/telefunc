@@ -121,6 +121,16 @@ async function commitControl(
   return result
 }
 
+async function commitControlOrThrow(
+  roomId: string,
+  inc: string,
+  event: RoomCtrlEnvelope,
+  opts?: { requiredCellKeys: string[] },
+): Promise<void> {
+  const result = await commitControl(roomId, inc, event, opts)
+  if ('stale' in result) throw staleCommitError(roomId, result)
+}
+
 /** Delivery is at-most-once: a handoff that rejects or never settles is lost, not the committer's failure. */
 async function handedOff(roomId: string, commit: CommitAccepted): Promise<void> {
   assert(commit.delivery !== undefined)
@@ -140,16 +150,6 @@ function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
   return raceTimeout(promise, ROOM_HORIZON_MS, () => {
     throw new RoomError('Room subscription recovery horizon expired')
   })
-}
-
-async function commitControlOrThrow(
-  roomId: string,
-  inc: string,
-  event: RoomCtrlEnvelope,
-  opts?: { requiredCellKeys: string[] },
-): Promise<void> {
-  const result = await commitControl(roomId, inc, event, opts)
-  if ('stale' in result) throw staleCommitError(roomId, result)
 }
 
 /** Required cells are member records, so a missing one names the member that left. */
