@@ -33,7 +33,7 @@ class Fanout {
 
   /** Hands a committed frame to every route's session DO; the returned delivery settles once every handoff did. */
   send(routes: RouteInstallation[], payload: Uint8Array, info: OrderingInfo): Promise<void> {
-    const handoffs = routes.map(async (route) =>
+    const handoffs = routes.map((route) =>
       this.#calls.call(
         route.sessionDoId,
         () => this.#sessions.get(this.#sessions.idFromString(route.sessionDoId)),
