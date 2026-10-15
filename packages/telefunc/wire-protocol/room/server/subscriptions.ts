@@ -354,8 +354,9 @@ class RoomSubscriptions {
         if (this._gone.size > 0) {
           await slice.next()
           await this._replanEach(slice, drain(this._gone), (holder) => this._indexHolder(holder, true))
-        } else if (!isEmpty(plan)) await this._planRound(slice, plan)
-        else if (this._demand.changed) {
+        } else if (!isEmpty(plan)) {
+          await this._planRound(slice, plan)
+        } else if (this._demand.changed) {
           while (!this._demand.tellUntil(slice.end)) await slice.next()
         } else return
       }
