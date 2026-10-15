@@ -1,30 +1,14 @@
 /// <reference types="@cloudflare/workers-types" />
-import { DurableObject, env as workerEnv } from 'cloudflare:workers'
-import '../../packages/telefunc/node/server/async_hooks.js'
-import { installBackend } from '../../packages/telefunc/wire-protocol/backend/install.js'
+import { DurableObject } from 'cloudflare:workers'
+import { Telefunc } from '../../packages/telefunc/serve/cloudflare.js'
+import { decorateTelefunction } from '../../packages/telefunc/node/server/runTelefunc/decorateTelefunction.js'
 import type { HeadCxResult, RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
-import { CloudflareBackend } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/backend.js'
-import {
-  CloudflareRoomSessionManager,
-  type RoomSessionDeliveryRequest,
-} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/subscription.js'
+import type { RoomSessionDeliveryRequest } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/subscription.js'
 import {
   RoomAuthority,
   type CommitWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
-import {
-  CloudflareBroadcastAuthorityState,
-  CloudflareBroadcast,
-  type BroadcastCalls,
-  type BroadcastDeliverRequest,
-  type BroadcastForwardRequest,
-  type BroadcastPresenceRequest,
-  type BroadcastPublishRequest,
-  type CloudflareBroadcastMember,
-} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/broadcast.js'
-import { OrderedStubs } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
-import { withCloudflareSession } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/session.js'
-import { ChannelMux } from '../../packages/telefunc/wire-protocol/server/mux.js'
+import { TELEFUNC_BROADCAST_BUCKET_HEADER } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/routing.js'
 import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
 import { getChannelMux } from '../../packages/telefunc/wire-protocol/server/mux.js'
 import { parseHttpRequest } from '../../packages/telefunc/node/server/runTelefunc/parseHttpRequest.js'
@@ -34,12 +18,11 @@ import { SERIALIZER_PREFIX_FUNCTION } from '../../packages/telefunc/wire-protoco
 import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.js'
 import { raceTimeout } from '../../packages/telefunc/utils/raceTimeout.js'
 import { stringify } from '@brillout/json-serializer/stringify'
-const broadcast = new CloudflareBroadcast({
-  baseInstanceName: 'telefunc',
-  locationFallback: 'weur',
-  namespace: () => workerEnv.TELEFUNC,
-})
-installBackend(() => new CloudflareBackend({ rooms: () => workerEnv.TELEFUNC, broadcast }), ['cloudflare-room-ci'])
+const { TelefuncDurableObject } = new Telefunc({ bindingName: 'TELEFUNC' })
+// A probe's code runs as an app's code does: in a telefunction, which the session DO's fetch() runs in its session.
+const PROBE_FILE = '/probe.telefunc.ts'
+const probeRuns = new Map<string, () => Promise<void>>()
+decorateTelefunction(async (runId: unknown) => probeRuns.get(runId as string)!(), 'onProbe', PROBE_FILE, '/')
 const textEncoder = new TextEncoder()
 const INBOX_LANE = { kind: 'inbox', member: 'member' } as const
 const INBOX_LANE_KEY = 'inbox:member'
@@ -57,24 +40,11 @@ globalThis.setInterval = ((callback: () => void, ms?: number) => {
 }) as typeof setInterval
 const textDecoder = new TextDecoder()
 const CONTROL_HORIZON_MS = 2_000
-// The production class's roles: each instance is a session, a Broadcast key authority and coordinator, and a room
-// authority.
-export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
-  readonly #manager: CloudflareRoomSessionManager
-  readonly #calls: BroadcastCalls = new OrderedStubs()
-  readonly #broadcastAuthority: CloudflareBroadcastAuthorityState
-  readonly #member: CloudflareBroadcastMember
-  readonly #mux = new ChannelMux()
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env, env.TELEFUNC)
-    this.#manager = new CloudflareRoomSessionManager(ctx.id.toString())
-    this.#broadcastAuthority = new CloudflareBroadcastAuthorityState(ctx)
-    this.#member = broadcast.member(ctx.id.toString(), this.#calls)
-    this.#member.locate('weur')
-  }
+export class TelefuncProbeDurableObject extends TelefuncDurableObject {
+  readonly #frames: number[] = []
   // Each subscriber records into its own DO's storage: I/O that only that DO may do, like a socket send.
   broadcastSubscribe(key: string): Promise<void> {
-    return this.#run(async () => {
+    return this.#inSession(async () => {
       this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS probe_received (seq INTEGER NOT NULL, text TEXT NOT NULL)')
       new ServerBroadcast<string>({ key }).subscribe((text, info) => {
         this.ctx.storage.sql.exec('INSERT INTO probe_received (seq, text) VALUES (?, ?)', info.seq, text)
@@ -82,7 +52,7 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
     })
   }
   broadcastPublish(key: string, texts: string[]): Promise<void> {
-    return this.#run(async () => {
+    return this.#inSession(async () => {
       const channel = new ServerBroadcast<string>({ key })
       await Promise.all(texts.map((text) => channel.publish(text)))
     })
@@ -95,7 +65,7 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
   // A call whose argument is a callback, as a page makes it: the telefunction holds the callback, and the response
   // went out.
   callWithCallback(name: string): Promise<string> {
-    return this.#run(async () => {
+    return this.#inSession(async () => {
       const callback = { channelId: crypto.randomUUID() }
       const body = stringify(
         { file: '/pages/Upload.telefunc.ts', name: 'onUpload', args: [callback] },
@@ -129,7 +99,7 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
   }
   // Its page leaves: the callback's channel closes.
   leave(channelId: string): Promise<void> {
-    return this.#run(async () => {
+    return this.#inSession(async () => {
       getChannelMux()['channels'].get(channelId)!._onPeerClose()
       this.#held.delete(channelId)
     })
@@ -137,13 +107,13 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
   readonly #held = new Map<string, unknown[]>()
   // A server creates a room nothing ever holds.
   createRoom(roomId: string, emptyTimeout: number): Promise<void> {
-    return this.#run(async () => {
+    return this.#inSession(async () => {
       await Room.create(roomId, { emptyTimeout })
     })
   }
   // A server writes a room's meta, and reads its keys after each step.
   metaKeyOrder(roomId: string): Promise<string[][]> {
-    return this.#run(async () => {
+    return this.#inSession(async () => {
       const room = await Room.create(roomId, { meta: { b: 1, a: 1 } })
       const seen: string[][] = []
       const see = async () => seen.push(Object.keys((await Room.get(room.id)).meta))
@@ -161,7 +131,7 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
   }
   // A recipient answers an acknowledged send whose reply's frame is lost, then sends the sender a later DM.
   lostDmAck(roomId: string): Promise<unknown> {
-    return this.#run(async () => {
+    return this.#inSession(async () => {
       const room = await Room.create(roomId)
       const sender = await room.join()
       const recipient = await room.join()
@@ -190,23 +160,38 @@ export class TelefuncProbeDurableObject extends RoomAuthority<Env> {
   scheduledAlarm(): Promise<number | null> {
     return this.ctx.storage.getAlarm()
   }
-  telefuncBroadcastPublish(request: BroadcastPublishRequest) {
-    return broadcast.publishToSubscribers(this.#broadcastAuthority, this.#calls, request)
+  // A server watches every member's frames of a room, past its roster read: a member who joins later reaches it only by
+  // the join's delivery.
+  watchFrames(roomId: string): Promise<void> {
+    return this.#inSession(async () => {
+      const room = await Room.create(roomId)
+      room.subscribeBinary((data) => this.#frames.push(data[0]!))
+      await room.getParticipants()
+    })
   }
-  telefuncBroadcastForward(request: BroadcastForwardRequest) {
-    return broadcast.forwardToBucket(this.#calls, request)
+  framesSeen(): number[] {
+    return this.#frames
   }
-  telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-    return this.#run(() => this.#member.deliver(request))
+  // A server's member joins a room and keeps a frame there.
+  joinAndKeepFrame(roomId: string): Promise<void> {
+    return this.#inSession(async () => {
+      const member = await (await Room.get(roomId)).join()
+      await member.publishBinary(new Uint8Array([7]), { retain: true })
+    })
   }
-  telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
-    return this.#broadcastAuthority.setPresence(request)
-  }
-  telefuncRoomDeliver(request: RoomSessionDeliveryRequest) {
-    return this.#run(() => this.#manager.deliver(request))
-  }
-  #run<T>(fn: () => T): T {
-    return withCloudflareSession({ room: this.#manager, broadcast: this.#member, mux: this.#mux }, fn)
+  async #inSession<T>(probe: () => Promise<T>): Promise<T> {
+    const runId = crypto.randomUUID()
+    const outcome = Promise.withResolvers<T>()
+    probeRuns.set(runId, () => probe().then(outcome.resolve, outcome.reject))
+    const request = new Request('https://room.test/_telefunc', {
+      method: 'POST',
+      headers: { [TELEFUNC_BROADCAST_BUCKET_HEADER]: 'weur' },
+      body: stringify({ file: PROBE_FILE, name: 'onProbe', args: [runId] }),
+    })
+    const response = await this.fetch!(request)
+    probeRuns.delete(runId)
+    if (!response.ok) throw new Error(`the probe's telefunction answered ${response.status}`)
+    return outcome.promise
   }
 }
 // A session DO that records the Room frames it is handed, holding the one reading 'hold' until released; one told to
@@ -254,7 +239,8 @@ type BroadcastSession = RpcMethods<
 >
 type CallbackSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'callWithCallback' | 'leave'>>
 type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'metaKeyOrder' | 'lostDmAck' | 'die'>>
-type TelefuncAuthority = RpcMethods<Pick<TelefuncProbeDurableObject, 'readHead' | 'scheduledAlarm'>>
+type LaneServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'watchFrames' | 'framesSeen' | 'joinAndKeepFrame'>>
+type TelefuncAuthority = RpcMethods<Pick<RoomProbeDurableObject, 'readHead' | 'scheduledAlarm'>>
 type Env = Cloudflare.Env
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/lost-target': lostTarget,
@@ -271,6 +257,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/auto-close': autoClose,
   '/meta-order': metaKeyOrder,
   '/lost-dm-ack': lostDmAck,
+  '/join-opens-lane': joinOpensLane,
 }
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -543,6 +530,20 @@ async function metaKeyOrder(env: Env, suffix: string) {
 async function lostDmAck(env: Env, suffix: string) {
   const server = env.TELEFUNC.get(env.TELEFUNC.idFromName(`lost-dm-ack-server-${suffix}`)) as unknown as RoomServer
   return await server.lostDmAck(`lost-dm-ack-${suffix}`)
+}
+// A server in one session watches every member's frames; a member joins from another session and keeps a frame. The
+// join's delivery to the watching session opens that member's lane.
+async function joinOpensLane(env: Env, suffix: string) {
+  const roomId = `join-opens-lane-${suffix}`
+  const server = (name: string) =>
+    env.TELEFUNC.get(env.TELEFUNC.idFromName(`join-opens-lane-${name}-${suffix}`)) as unknown as LaneServer
+  const [watcher, joiner] = [server('watcher'), server('joiner')]
+  await watcher.watchFrames(roomId)
+  await joiner.joinAndKeepFrame(roomId)
+  return await poll(
+    () => watcher.framesSeen(),
+    (frames) => frames.length > 0,
+  )
 }
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')

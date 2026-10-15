@@ -6,8 +6,8 @@ let miniflare: Miniflare | undefined
 
 beforeAll(async () => {
   miniflare = new Miniflare({
-    modules: true,
-    script: await bundleWorker(),
+    // Listed, not scanned: Miniflare's scan refuses the bundle's import() of a computed specifier.
+    modules: [{ type: 'ESModule', path: 'worker-entry.mjs', contents: await bundleWorker() }],
     compatibilityDate: '2025-08-15',
     compatibilityFlags: ['nodejs_compat'],
     durableObjects: {
@@ -66,6 +66,10 @@ test("a binary commit reaches its track's every-member session only while a rout
     receivers: [0, 1, 1, 0, 1],
     camera: ['routed', 'after-other', 'rerouted'],
   })
+})
+
+test("a member's join, delivered to a session watching every member's frames, opens that member's lane there", async () => {
+  expect(await probe('/join-opens-lane')).toEqual([7])
 })
 
 test('a route renews under its own lease only', async () => {
