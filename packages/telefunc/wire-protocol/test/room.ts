@@ -508,6 +508,7 @@ type RelayedEvent = {
   __r: string
   id?: string
   members?: Array<{ id: string; meta: unknown }>
+  part?: number
   meta?: unknown
   data?: unknown
   ackId?: string

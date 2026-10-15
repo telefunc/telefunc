@@ -7,7 +7,7 @@ import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../../shared-ws
 import { ShieldValidationError, isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { Abort } from '../../../shared/Abort.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
-import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
+import { ROOM_PLAN_SLICE_MS, ROOM_TRACK_WANTS_MAX } from '../constants.js'
 import {
   ROOM_DM_ACK_TIMEOUT_MS,
   ROOM_HEARTBEAT_INTERVAL_MS,
@@ -16,6 +16,7 @@ import {
   ROOM_HORIZON_MS,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_MEMBER_NAMED_LANES_MAX,
+  ROOM_ROSTER_PART_MEMBERS,
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, encodeBinaryFrame } from '../binary.js'
 import { ROOM_BUG_MESSAGE, RoomError, isRoomError, roomAckError, toRoomFailure } from '../errors.js'
@@ -4312,6 +4313,43 @@ describe('Room public behavior', () => {
     await vi.waitFor(() => expect(events()).toContain('roster-error'))
     await syncOf(room).refreshMembers()
     expect(events()).toEqual(['update', 'roster-error', 'roster'])
+  })
+  it('sends a client only the newer of two drift-correcting rosters once the newer one starts', async () => {
+    const authority = await Room.create('roster-replaced-mid-stream')
+    await Promise.all(Array.from({ length: ROOM_ROSTER_PART_MEMBERS }, () => authority.join()))
+    const other = await anotherServer()
+    holdLaneDelivery((lane) => lane.kind === 'control', other)
+    const observer = (await other.Room.get(authority.id)) as ServerRoom
+    const stub = register(observer)
+    const peer = attachPeer(stub)
+    await vi.waitFor(() => expect(rosterEnded(peer)).toBe(true))
+    const sent = relayed(peer).length
+    // Time stands still but after a roster part, so the first roster waits a turn while the second refresh runs.
+    const relayEventText = stub._relayEventText.bind(stub)
+    let partSent = false
+    vi.spyOn(stub, '_relayEventText').mockImplementation((text) => {
+      partSent = text.includes('"roster"')
+      relayEventText(text)
+    })
+    const now = performance.now()
+    vi.spyOn(performance, 'now').mockImplementation(() => {
+      const yields = partSent
+      partSent = false
+      return yields ? now + ROOM_PLAN_SLICE_MS : now
+    })
+    await authority.join()
+    await syncOf(observer).refreshMembers()
+    const newer = await authority.join()
+    await syncOf(observer).refreshMembers()
+    const rosters = () =>
+      relayed(peer)
+        .slice(sent)
+        .filter(({ __r }) => __r === 'roster')
+    await vi.waitFor(() =>
+      expect(rosters().some(({ members }) => members!.some(({ id }) => id === newer.id))).toBe(true),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(rosters().map(({ part }) => part)).toEqual([0, 0, 1])
   })
   it('replays a committed server-pushed roster after reconnect, then sends a fresh one', async () => {
     const room = (await Room.create('roster-replay')) as ServerRoom
