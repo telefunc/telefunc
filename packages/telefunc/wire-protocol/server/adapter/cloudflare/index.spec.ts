@@ -139,6 +139,9 @@ function createMockKV(): KVNamespace {
   } as unknown as KVNamespace
 }
 
+/** A request doesn't await its pin's KV write: a macrotask lets it settle. */
+const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+
 function createBinding() {
   const fetch = vi.fn(async (_request: Request) => new Response())
   const get = vi.fn((id: { name: string }, options?: { locationHint: string }) => {
@@ -232,7 +235,7 @@ describe('cloudflare adapter entrypoint', () => {
       fetch(request: Request): Promise<Response>
     }
     await instance.fetch(forwardedRequest)
-    await new Promise((resolve) => setTimeout(resolve, 0))
+    await flush()
     expect(put).not.toHaveBeenCalled()
   })
 
@@ -493,8 +496,6 @@ describe('cloudflare adapter entrypoint', () => {
 })
 
 describe("the session Durable Object's pin", () => {
-  /** The request doesn't await its pin's KV write: a macrotask lets it settle. */
-  const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
   function sessionObject(kv: KVNamespace) {
     const { binding } = createBinding()
     const tf = new Telefunc()

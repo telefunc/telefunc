@@ -11,10 +11,10 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 import { config } from 'telefunc'
 
 config.channel = {
-  reconnectTimeout: 60_000,             // Hold channels open after disconnect (ms)
-  idleTimeout: 60_000,                  // Keep connection alive after last channel closes (ms)
-  pingInterval: 5_000,                  // Client ping interval (ms)
-  connectTtl: 15_000,                   // Wait for client to connect to new channel (ms)
+  reconnectTimeout: 60_000,               // Hold channels open after disconnect (ms)
+  idleTimeout: 60_000,                    // Keep connection alive after last channel closes (ms)
+  pingInterval: 5_000,                    // Client ping interval (ms)
+  connectTtl: 15_000,                     // Wait for client to connect to new channel (ms)
 
   // Text buffers
   serverReplayBuffer: 134_217_728,        // Server replay buffer for text messages (bytes)
