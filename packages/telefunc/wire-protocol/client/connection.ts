@@ -101,16 +101,7 @@ type ProbeSession = {
  *  leaves the wire usable. */
 type BarrierEmission = 'emitted' | 'not-emitted'
 
-/** `acknowledgement`: a WINDOW that only acknowledges what arrived, which may go in the next message the wire sends. */
-type OutboundFrameKind =
-  | 'reconcile'
-  | 'control'
-  | 'flow-control'
-  | 'urgent-flow-control'
-  | 'acknowledgement'
-  | 'ack'
-  | 'data'
-  | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'control' | ByteWindowKind | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind

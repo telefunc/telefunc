@@ -10,7 +10,7 @@ function muxChannelStub(id: string = crypto.randomUUID()): MuxChannel & { dispat
     id,
     isClosed: false,
     _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
-    dispatched: [] as DecodedFrame[],
+    dispatched: [],
     _onTransportOpen() {},
     _dispatchFrame(frame) {
       this.dispatched.push(frame)

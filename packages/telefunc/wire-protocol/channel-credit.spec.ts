@@ -1447,6 +1447,21 @@ test("a page acknowledges the answers it receives in the next message it sends, 
   expect((server as unknown as { _replayBuffer: { byteLength: number } })._replayBuffer.byteLength).toBe(0)
 })
 
+test("the server acknowledges the page's answers to its ack requests in the next message it sends", async () => {
+  const { server, page } = loop.open<string, string>()
+  page.listen((text) => text)
+  await run(100)
+  const before = loop.sent.server.length
+  for (let i = 0; i < 10; i++) {
+    let answered = false
+    void server.send('x'.repeat(256 * KIB), { ack: true }).then(() => (answered = true))
+    while (!answered) await run(1)
+  }
+  const sent = loop.sent.server.slice(before)
+  expect(alone(sent, TAG.WINDOW)).toEqual([])
+  expect(sent.filter(([tag]) => tag === TAG.WINDOW).length).toBeGreaterThan(0)
+})
+
 test("the server acknowledges at its heartbeat in its PONG's message, and the page's replay lets go of what it sent", async () => {
   const { server, page } = loop.open<string, string>()
   server.listen(() => {})

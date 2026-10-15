@@ -216,7 +216,7 @@ class WsTransport implements UpgradeTarget {
       () => {
         if (this.ws !== ws) return
         sender.sendHeld()
-        this.onRoom(budget.sender)
+        this.onRoom(sender)
       },
     )
     const { sender } = budget

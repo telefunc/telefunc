@@ -240,13 +240,13 @@ class FlowControl {
   onReceivedUncounted(bytes: number): void {
     this._arrived = true
     this._uncountedBytes += bytes
-    if (this._uncountedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes(true)
+    if (this._uncountedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes('acknowledgement')
   }
 
   /** Receiver-side, at each heartbeat: a `WINDOW` for what arrived since the last, so the sender's replay lets it go
    *  while the channel is quiet. */
   acknowledge(): void {
-    if (this._arrived) this._advertiseBytes(true)
+    if (this._arrived) this._advertiseBytes('acknowledgement')
   }
 
   /** Receiver-side: this side answered the newest frame that arrived, which tells the sender it has every frame before
@@ -270,7 +270,7 @@ class FlowControl {
     if (this._selfUtilisation() > FC_SELF_UTIL_THRESHOLD) return
     if (wantBytes) {
       this._bdp.growBytes()
-      this._advertiseBytes(false)
+      this._advertiseBytes('flow-control')
     }
     if (wantMsgs) {
       this._bdp.growMsgs()
@@ -332,10 +332,11 @@ class FlowControl {
     this._bdp.reset()
     if (!this._wired) {
       this._wired = true
-      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes) this._advertiseBytes(false)
+      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes)
+        this._advertiseBytes('flow-control')
       return
     }
-    this._advertiseBytes(false)
+    this._advertiseBytes('flow-control')
     this._advertiseMessages()
   }
 
@@ -368,7 +369,7 @@ class FlowControl {
   useBatchTransportInitial(): void {
     const prev = this.byteWindow
     this._bdp.raiseByteWindow(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
-    if (this.byteWindow > prev) this._advertiseBytes(false)
+    if (this.byteWindow > prev) this._advertiseBytes('flow-control')
   }
 
   shutdown(): void {
@@ -403,12 +404,11 @@ class FlowControl {
       )
       return
     }
-    if (bytes) this._advertiseBytes(false)
+    if (bytes) this._advertiseBytes('flow-control')
     if (messages) this._advertiseMessages()
   }
 
-  /** `acknowledging`: it goes to acknowledge what arrived, not for a limit that was due. */
-  private _advertiseBytes(acknowledging: boolean): void {
+  private _advertiseBytes(kind: 'acknowledgement' | 'flow-control'): void {
     if (!this._fitted) return
     this._advertisedBytes = this._consumedBytes
     const limit = this._consumedBytes + this.byteWindow
@@ -418,12 +418,12 @@ class FlowControl {
     }
     this._uncountedBytes = 0
     this._arrived = false
-    let kind: ByteWindowKind = acknowledging ? 'acknowledgement' : 'flow-control'
+    let sent: ByteWindowKind = kind
     if ((this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow) {
       this._urgentBytes = this._consumedBytes
-      kind = 'urgent-flow-control'
+      sent = 'urgent-flow-control'
     }
-    this._emit.byteWindowUpdate(limit >>> 0, kind)
+    this._emit.byteWindowUpdate(limit >>> 0, sent)
   }
 
   private _advertiseMessages(): void {

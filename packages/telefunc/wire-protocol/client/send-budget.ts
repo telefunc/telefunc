@@ -57,7 +57,7 @@ class SendBudget {
     this.sender = new PieceSender(transmit, queued, uplink.link, {
       dataRoom: () => this.roomPast(this.sender.transmittedBytes),
       handed: (bytes, data) => this.handed(bytes, data),
-      handedFrame: (tag, bytes) => uplink.handedFrame(tag, bytes),
+      sentFrame: (tag, bytes) => uplink.sentFrame(tag, bytes),
     })
   }
 
@@ -106,7 +106,7 @@ class SendBudget {
     let newest: SentData | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
-    if (newest !== undefined) this.measure(newest, newly, ack.spanUs)
+    if (newest !== undefined) this.measure(newest, newly, spanMs)
     this.sender.sendHeld()
     this.pace()
     return true
@@ -155,9 +155,9 @@ class SendBudget {
     } else this.sent.push({ end, bytes, ahead, at })
   }
 
-  /** Moves the allowance by the delay of `newest`, the newest data an acknowledgement of `newly` bytes covered, `spanUs`
+  /** Moves the allowance by the delay of `newest`, the newest data an acknowledgement of `newly` bytes covered, `spanMs`
    *  after the data the one before covered. */
-  private measure(newest: SentData, newly: number, spanUs: number): void {
+  private measure(newest: SentData, newly: number, spanMs: number): void {
     const delay = this.arrivedAt - newest.at
     const { drainRate } = this.uplink
     const path = drainRate > 0 ? delay - (newest.ahead + newest.bytes) / drainRate : delay
@@ -170,8 +170,8 @@ class SendBudget {
     this.uplink.noteWait(Math.max(0, wait))
     if (wait < WIRE_QUEUE_DELAY_MS) {
       allowance += (newly * (WIRE_QUEUE_DELAY_MS - wait)) / WIRE_QUEUE_DELAY_MS
-    } else if (spanUs > 0) {
-      const rate = newly / (spanUs / 1000)
+    } else if (spanMs > 0) {
+      const rate = newly / spanMs
       allowance -= (SHED_SHARE * rate * (wait - WIRE_QUEUE_DELAY_MS) * newly) / allowance
     }
     this.movedAllowance = Math.min(CREDIT_WINDOW_MAX_BYTES, Math.max(least, allowance))

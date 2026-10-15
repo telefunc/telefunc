@@ -140,3 +140,22 @@ test('the longest wait since an instant is what a frame that went at once after 
   // Since a later instant, only what a frame sent then waits.
   expect(uplink.longestWaitSince(clock.now)).toBe(51)
 })
+
+// The server held what arrived before it acknowledged: the acknowledgement came back no later than one it sent at once.
+test('an acknowledgement the server held leaves the room as one it sent at once', () => {
+  const roomAfter = (heldMs: number) => {
+    const { budget, clock, exchange } = open()
+    for (let i = 0; i < 20; i++) exchange(32_000, 10)
+    budget.send(data(32_000), 5_000)
+    budget.sender.flush() // as its turn ends
+    clock.now += 10 + heldMs
+    expect(budget.acknowledged({ bytes: 21 * 32_000, heldMs, spanUs: 10_000 })).toBe(true)
+    clock.now += 40 - heldMs
+    budget.send(data(32_000), 5_000)
+    budget.sender.flush() // as its turn ends
+    // The uplink carried it, so how late acknowledgements come back decides what may not have arrived.
+    clock.now += 1_000
+    return budget.room
+  }
+  expect(roomAfter(40)).toBe(roomAfter(0))
+})

@@ -163,6 +163,23 @@ test('a rate counts what the socket holds ahead of a frame but the largest messa
   expect(link.fastest).toBe((40_000 - (PIECE + 20_000) + 20_000) / 1_000)
 })
 
+test('a rate leaves out how long its receiver held what arrived before it acknowledged', async () => {
+  const clock = { now: 0 }
+  vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
+  const link = new Link()
+  link.rise(32, 0)
+  const sender = new PieceSender(
+    () => {},
+    () => 0,
+    link,
+  )
+  sender.send(data(20_000), 5_000)
+  await flush()
+  clock.now = 1_000
+  expect(sender.acknowledged({ bytes: sender.transmittedBytes, heldMs: 500, spanUs: 0 })).toBe(true)
+  expect(link.fastest).toBe(sender.transmittedBytes / 500)
+})
+
 test('an acknowledgement counts the bytes handed to the socket, announcements and piece headers included, and refuses more, or nothing new', () => {
   const sender = new PieceSender(
     () => {},

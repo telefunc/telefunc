@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FlowControl, replayWindow } from './flow-control.js'
-import type { FlowControlEmit } from './flow-control.js'
+import type { ByteWindowKind, FlowControlEmit } from './flow-control.js'
 import {
   BDP_PING_MIN_INTERVAL_MS,
   CREDIT_MSG_WINDOW_INITIAL,
@@ -54,8 +54,9 @@ function watch(promises: (void | Promise<void>)[]): boolean[] {
 type Emit = FlowControlEmit & {
   windowCalls: number[]
   msgWindowCalls: number[]
-  /** `urgent` of each `windowCalls` / `msgWindowCalls` entry. */
-  windowUrgent: boolean[]
+  /** The kind of each `windowCalls` entry. */
+  windowKinds: ByteWindowKind[]
+  /** `urgent` of each `msgWindowCalls` entry. */
   msgWindowUrgent: boolean[]
   bdpPingCalls: number
   /** The number of the last probe sent. */
@@ -65,13 +66,13 @@ function makeEmit(): Emit {
   const e: Emit = {
     windowCalls: [],
     msgWindowCalls: [],
-    windowUrgent: [],
+    windowKinds: [],
     msgWindowUrgent: [],
     bdpPingCalls: 0,
     probe: 0,
     byteWindowUpdate(b, kind) {
       e.windowCalls.push(b)
-      e.windowUrgent.push(kind === 'urgent-flow-control')
+      e.windowKinds.push(kind)
     },
     msgWindowUpdate(c, urgent) {
       e.msgWindowCalls.push(c)
@@ -252,7 +253,26 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
     const { flow, emit } = makeFlow()
     const quarter = Math.floor(CREDIT_WINDOW_INITIAL_BYTES / 4)
     for (let i = 0; i < 6; i++) flow.onConsumedBytes(quarter)
-    expect(emit.windowUrgent).toEqual([false, false, true, false, false, true])
+    expect(emit.windowKinds).toEqual([
+      'flow-control',
+      'flow-control',
+      'urgent-flow-control',
+      'flow-control',
+      'flow-control',
+      'urgent-flow-control',
+    ])
+  })
+
+  // A limit past half its window goes at once, though it only acknowledges.
+  it('marks a WINDOW that acknowledges urgent once more than half a window was consumed since the last urgent one', () => {
+    const { flow, emit } = makeFlow()
+    const quarter = flow.byteWindow >> 2
+    flow.onConsumed(quarter)
+    flow.onConsumed(quarter)
+    flow.onReceived(1)
+    flow.onConsumed(1)
+    flow.acknowledge()
+    expect(emit.windowKinds).toEqual(['flow-control', 'flow-control', 'urgent-flow-control'])
   })
 
   it('marks a MSG_WINDOW urgent once more than half a window was consumed since the last urgent one', () => {

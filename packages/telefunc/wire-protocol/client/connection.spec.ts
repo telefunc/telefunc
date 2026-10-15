@@ -105,7 +105,7 @@ test('a zero replay budget still registers a later channel on the connection', (
 
 test("a reconnect declares a broadcast's subscriptions, not the toggles queued before it", () => {
   const channel = { ...muxChannelStub(), _reattachState: () => ({ broadcast: { text: true, binary: false } }) }
-  const connection = ClientConnection.getOrCreate('http://toggle.test', channel as never, stalledOptions()) as any
+  const connection = ClientConnection.getOrCreate('http://toggle.test', channel, stalledOptions()) as any
   // Offline, the listener is swapped: an unsubscribe, then a subscribe. The reconcile entry already says subscribed.
   connection.sendBroadcastUnsubscribe(channel, false)
   connection.sendBroadcastSubscribe(channel, false)

@@ -38,11 +38,11 @@ type SendRoom = {
   dataRoom(): number
   /** It handed the socket `bytes`, of data or not. */
   handed(bytes: number, data: boolean): void
-  /** It handed the socket a frame of `tag` and `bytes`. */
-  handedFrame(tag: number, bytes: number): void
+  /** It was sent a frame of `tag` and `bytes`, which it hands the socket now or once room allows. */
+  sentFrame(tag: number, bytes: number): void
 }
 
-const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {}, handedFrame: () => {} }
+const UNBOUNDED: SendRoom = { dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {}, sentFrame: () => {} }
 
 /** One WebSocket's sender: a turn's frames go in one message, one that may take a ping interval to cross in pieces. */
 class PieceSender {
@@ -136,7 +136,7 @@ class PieceSender {
       this.setWholeUpTo()
     }
     const tag = frame[0]!
-    this.room.handedFrame(tag, frame.byteLength)
+    this.room.sentFrame(tag, frame.byteLength)
     // It passes what waits: the probe its peer waits on may be its own.
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) {
@@ -488,7 +488,7 @@ class PieceSender {
     for (const take of this.carried.splice(0)) {
       const frame = take()
       if (frame === null) continue
-      this.room.handedFrame(frame[0]!, frame.byteLength)
+      this.room.sentFrame(frame[0]!, frame.byteLength)
       this.count(frame, false)
       this.add(frame)
     }

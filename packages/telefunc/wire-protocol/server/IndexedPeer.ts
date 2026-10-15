@@ -5,6 +5,7 @@ import { ACK_STATUS, encode, payloadBytes } from '../shared-ws.js'
 import type { AckResultStatus, ErrorReason } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import type { SendWait } from '../link.js'
+import type { ByteWindowKind } from '../flow-control/flow-control.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
@@ -87,11 +88,10 @@ class IndexedPeer {
     this.sendSequenced(seq, encode.error(this.index, reason, seq))
   }
 
-  /** `lastSeq`: the last seq the server has of what the page sent on the channel. `withNext`: it is an
-   *  `acknowledgement` (see `ByteWindowKind`). */
-  sendByteWindowUpdate(limit: number, lastSeq: number, withNext = false): void {
+  /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
+  sendByteWindowUpdate(limit: number, lastSeq: number, kind: ByteWindowKind): void {
     const frame = encode.window(this.index, limit, lastSeq)
-    if (withNext) this.sender.carry(frame)
+    if (kind === 'acknowledgement') this.sender.carry(frame)
     else this.sender.send(frame)
   }
 
