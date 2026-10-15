@@ -10,6 +10,7 @@ export {
   readMembersMetaCells,
   memberMetaOf,
   dropCells,
+  readOpenCells,
 }
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
@@ -184,7 +185,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
   const { inc } = config
   const backend = getRoomBackend()
   const update = await retryCompareExchange(async (): Promise<RoomMetaUpdate | null | typeof CX_CONFLICT> => {
-    const read = await readMetaCells(roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY])
+    const read = await readOpenCells(roomId, inc, [META_SEQ_CELL_KEY, META_GEN_CELL_KEY])
     const seq = read.cells.get(META_SEQ_CELL_KEY)
     if (seq === undefined) {
       const meta = metaEntriesAt('replace' in write ? write.replace : mergeAttributes(config.meta, write.merge), 0)
@@ -210,7 +211,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
     }
     const prefix = roomMetaGenPrefix(gen)
     const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
-    const merging = keys.length === 0 ? new Map() : (await readMetaCells(roomId, inc, keys)).cells
+    const merging = keys.length === 0 ? new Map() : (await readOpenCells(roomId, inc, keys)).cells
     const changes = metaChanges(write.merge, prefix, count, merging)
     const mutations = changes.map((change) => changeMutation(prefix, change))
     const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
@@ -232,7 +233,7 @@ function committed(
   return update(result.committed.get(META_SEQ_CELL_KEY)!.value)
 }
 
-async function readMetaCells(
+async function readOpenCells(
   roomId: string,
   inc: string,
   keys: string[],
@@ -285,7 +286,7 @@ async function writeMemberMeta(
   const backend = getRoomBackend()
   const memberKey = memberCellKey(id)
   return await retryCompareExchange(async () => {
-    const read = await readMetaCells(room.id, room.inc, [memberKey])
+    const read = await readOpenCells(room.id, room.inc, [memberKey])
     const raw = read.cells.get(memberKey)
     if (raw === undefined) throw participantGoneError(id)
     const record = decodeRoomRecord<RoomMemberRecord>(raw)
@@ -296,7 +297,7 @@ async function writeMemberMeta(
     if ('replace' in write) mutations = metaEntriesAt(write.replace, seq).map((entry) => metaKeyMutation(prefix, entry))
     else {
       const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
-      const merging = keys.length === 0 ? new Map() : (await readMetaCells(room.id, room.inc, keys)).cells
+      const merging = keys.length === 0 ? new Map() : (await readOpenCells(room.id, room.inc, keys)).cells
       mutations = metaChanges(write.merge, prefix, seq, merging).map((change) => changeMutation(prefix, change))
     }
     const next: RoomMemberRecord = { ...record, metaSeq: seq, metaGen: gen }

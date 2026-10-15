@@ -31,6 +31,7 @@ import {
   memberMetaMutations,
   memberMetaOf,
   readMembersMetaCells,
+  readOpenCells,
   type MemberMetaCells,
 } from './meta.js'
 import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
@@ -64,12 +65,6 @@ type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
 type PendingMemberCleanup = { cause: WireLeaveCause; session: string; hidden?: true }
 /** An exchange hosting something under a session found it lost. */
 const SESSION_LOST: unique symbol = Symbol('telefunc.RoomSessionLost')
-
-async function readCells(roomId: string, inc: string, keys: string[]): Promise<Map<string, Uint8Array>> {
-  const result = await getRoomBackend().readCells(roomId, inc, { keys })
-  if ('staleInc' in result) throw roomClosedError(roomId)
-  return result.cells
-}
 
 /** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
 async function readPrefix(roomId: string, inc: string, prefix: string): Promise<Map<string, Uint8Array>> {
@@ -427,7 +422,7 @@ async function reapAndReadMembersById(room: RoomIncarnation, ids: string[]): Pro
 }
 
 async function readMembersById(room: RoomIncarnation, ids: string[]): Promise<MemberSnapshot[]> {
-  const cells = await readCells(room.id, room.inc, ids.map(memberCellKey))
+  const { cells } = await readOpenCells(room.id, room.inc, ids.map(memberCellKey))
   const metaCells = new Map<string, MemberMetaCells>()
   const entries = ids.flatMap((id) => {
     const raw = cells.get(memberCellKey(id))
@@ -495,7 +490,7 @@ async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string
 
 async function finishPendingMemberCleanup(roomId: string, inc: string, memberId: string): Promise<void> {
   const key = cleanupCellKey(memberId)
-  const raw = (await readCells(roomId, inc, [key])).get(key)
+  const raw = (await readOpenCells(roomId, inc, [key])).cells.get(key)
   if (raw !== undefined) await completeCleanup(roomId, inc, memberId, raw)
 }
 
@@ -533,7 +528,7 @@ async function storeDmReply(roomId: string, inc: string, sender: string, ackId: 
 /** The reply stored for `ackId`, deleted as it is read, or null if none is. */
 async function takeDmReply(roomId: string, inc: string, sender: string, ackId: string): Promise<DmReply | null> {
   const key = dmReplyCellKey(sender, ackId)
-  const raw = (await readCells(roomId, inc, [key])).get(key)
+  const raw = (await readOpenCells(roomId, inc, [key])).cells.get(key)
   if (raw === undefined) return null
   await dropDmReply(roomId, inc, sender, ackId)
   return decodeRoomRecord<DmReply>(raw)
