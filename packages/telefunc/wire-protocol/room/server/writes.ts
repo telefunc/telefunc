@@ -98,7 +98,7 @@ class RoomWrites {
       sent()
       return { sender, commit: await committing }
     })
-    return this._finishPublish(sender, data, commit)
+    return await this._finishPublish(sender, data, commit)
   }
 
   /** `frame` is `framed` decoded; receivers trust its sender id, which every caller checked is the publisher's. */
