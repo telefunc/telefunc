@@ -202,7 +202,7 @@ abstract class ParticipantBase implements LocalParticipant {
     this._pendingInboxBytes = 0
     if (held) for (const entry of held) entry.ackResolve?.(DM_FAILURE.left)
     const cbs = this._leaveCbs?.list() ?? []
-    for (const unlisten of [...(this._listenerCleanups ?? [])]) unlisten()
+    for (const unlisten of this._listenerCleanups ?? []) unlisten()
     for (const cb of cbs) this._invoke(cb, ownedCause)
   }
   protected _assertActive(): void {
