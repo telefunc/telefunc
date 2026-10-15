@@ -1624,6 +1624,7 @@ test('a page that aborted a thousand channels while its wire was down lets the n
   for (const { page } of pairs) page.abort()
   // More aborts than the new wire has room for at once: the last of them wait for its room.
   await runUntil(() => loop.sockets.length === 2 && loop.socket.readyState === 3, 60_000)
+  expect(loop.sockets).toHaveLength(2)
   expect(loop.socket.readyState).toBe(3)
 })
 
