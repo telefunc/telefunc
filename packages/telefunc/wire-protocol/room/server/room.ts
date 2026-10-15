@@ -40,7 +40,7 @@ import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
 import type { RoomReplica } from './replica.js'
 import { RoomWrites, runAfterHook } from './writes.js'
-import { publishCtrl, withinRoomHorizon } from './lanes.js'
+import { commitControlOrThrow, withinRoomHorizon } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import { getServerConfig, reconnectWindow } from '../../../node/server/serverConfig.js'
@@ -194,7 +194,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._assertAdmitted(id)
       this._admissions.set(id, 'committed')
       // A member removed meanwhile gets no join after its leave, here or anywhere.
-      await publishCtrl(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
+      await commitControlOrThrow(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
       this._assertAdmitted(id)
       this._admissions.delete(id)
       this._replica.applyControl(join)

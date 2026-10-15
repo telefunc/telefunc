@@ -39,7 +39,7 @@ import {
   roomMetaGenPrefix,
 } from './cells.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
-import { decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
+import { commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 
 // A meta, the room's or a member's, is a cell per top-level key under its generation's prefix, each holding the
@@ -217,7 +217,7 @@ async function writeRoomMeta(roomId: string, config: RoomConfigRecord, write: Ro
     return committed(roomId, result, (seq) => ({ __r: 'update', seq, changes }))
   })
   if (update === null) return
-  await publishCtrl(roomId, inc, update)
+  await commitControlOrThrow(roomId, inc, update)
   if ('replace' in write) await dropReplacedMetaGenerations(roomId, inc)
 }
 

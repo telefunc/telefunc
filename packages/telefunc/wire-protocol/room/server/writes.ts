@@ -24,7 +24,7 @@ import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './cells.js'
 import { reportRoomError } from './errors.js'
-import { SEMANTIC_LANE, commitRoomLaneOrThrow, commitToInbox, encodeRoomRecord, publishCtrl } from './lanes.js'
+import { SEMANTIC_LANE, commitControlOrThrow, commitRoomLaneOrThrow, commitToInbox, encodeRoomRecord } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { reapAndReadMembersById, storeDmReply, takeDmReply } from './membership.js'
 import { dropMemberMetaGeneration, writeMemberMeta, type MemberMetaWrite } from './meta.js'
@@ -78,7 +78,7 @@ class RoomWrites {
       const { update, hidden, replaced } = await writeMemberMeta(host._incarnation, id, write)
       const accepted = { __r: 'p-meta', id, ...update, ...(hidden ? { hidden: true } : {}) } as const
       host._replica.applyControl(accepted)
-      const publishing = publishCtrl(host.id, host._inc, accepted)
+      const publishing = commitControlOrThrow(host.id, host._inc, accepted)
       sent()
       await publishing
       if (replaced !== null) await dropMemberMetaGeneration(host._incarnation, id, replaced)

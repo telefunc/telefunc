@@ -33,7 +33,7 @@ import {
   readMembersMetaCells,
   type MemberMetaCells,
 } from './meta.js'
-import { SEMANTIC_LANE, decodeRoomRecord, encodeRoomRecord, publishCtrl } from './lanes.js'
+import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { afterHoldChange, holdChange, holdCounts, type RoomIncarnation } from './lifecycle.js'
 import {
@@ -508,7 +508,7 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
   await getRoomBackend().dropLaneOrders(roomId, inc, memberId)
   await dropMemberMeta(roomId, inc, memberId)
   await dropCells(roomId, inc, dmReplyCellPrefix(memberId))
-  await publishCtrl(roomId, inc, {
+  await commitControlOrThrow(roomId, inc, {
     __r: 'leave',
     id: memberId,
     ...cleanup.cause,

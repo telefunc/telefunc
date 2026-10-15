@@ -3,6 +3,7 @@ export {
   DEMAND_LANE,
   SEMANTIC_LANE,
   commitControl,
+  commitControlOrThrow,
   commitRoomLaneOrThrow,
   commitToInbox,
   openConfig,
@@ -13,7 +14,6 @@ export {
   decodeRoomText,
   encodeDemandPage,
   encodeRoomRecord,
-  publishCtrl,
   withinRoomHorizon,
 }
 
@@ -142,7 +142,7 @@ function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
   })
 }
 
-async function publishCtrl(
+async function commitControlOrThrow(
   roomId: string,
   inc: string,
   event: RoomCtrlEnvelope,
