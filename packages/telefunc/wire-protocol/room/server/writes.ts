@@ -8,7 +8,7 @@ import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
 import type { ChannelPublishAck } from '../../channel.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import { laneTrack, type BinaryFrame } from '../binary.js'
-import { ROOM_DM_ACK_TIMEOUT_MS } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   DM_FAILURE,
   participantGoneError,
@@ -18,7 +18,8 @@ import {
   toRoomFailure,
 } from '../errors.js'
 import { ownMetaArgument, senderOf } from '../model.js'
-import type { AcceptedMeta, DmReply, RoomDataEnvelope, RoomDmEnvelope, SenderStamp } from '../protocol.js'
+import type { AcceptedMeta, DmReply, RoomDmEnvelope, SenderStamp } from '../protocol.js'
+import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './cells.js'

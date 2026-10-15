@@ -1,8 +1,8 @@
 export { RoomDemand, DemandReport }
 
 import { DEFAULT_TRACK } from './binary.js'
-import { ROOM_DEMAND_TTL_MS } from './constants.js'
-import type { DemandEntry, RoomDemandPage } from './protocol.js'
+import { ROOM_DEMAND_TTL_MS } from './server/constants.js'
+import type { DemandEntry, RoomDemandPage } from './server/protocol.js'
 import { Slice } from './slice.js'
 
 /** The reporters of an entry, each with the telling of everything (`Reporter.telling`) it last told the entry in. */

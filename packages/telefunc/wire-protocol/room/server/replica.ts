@@ -11,17 +11,8 @@ import { decodeBinaryFrame, laneTrack, publicTrack, type BinaryWantChange } from
 import { DemandReport, RoomDemand } from '../demand.js'
 import { DM_FAILURE } from '../errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../protocol.js'
-import type {
-  DemandEntry,
-  MemberSnapshot,
-  RoomConfigRecord,
-  RoomCtrlEnvelope,
-  RoomDataEnvelope,
-  RoomDmAckEnvelope,
-  RoomDmEnvelope,
-  RoomEnvelope,
-  SenderStamp,
-} from '../protocol.js'
+import type { MemberSnapshot, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope, SenderStamp } from '../protocol.js'
+import type { DemandEntry, RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
 import { Slice } from '../slice.js'
 import { RoomModel } from '../state.js'
 import type { LeaveCause } from '../types.js'

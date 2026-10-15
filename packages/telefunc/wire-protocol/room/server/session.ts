@@ -6,7 +6,7 @@ export type { SessionRecord }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import type { CellMutation } from '../../backend/room/contract.js'
-import { ROOM_SESSION_TTL_MS } from '../constants.js'
+import { ROOM_SESSION_TTL_MS } from './constants.js'
 import { sessionCellKey } from './cells.js'
 assertIsNotBrowser()
 

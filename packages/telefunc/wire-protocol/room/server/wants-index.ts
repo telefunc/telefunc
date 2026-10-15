@@ -2,7 +2,8 @@ export { WantsIndex }
 export type { Affected }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { DEFAULT_TRACK, type BinaryWantChange, type TrackWants } from '../binary.js'
+import { DEFAULT_TRACK, type BinaryWantChange } from '../binary.js'
+import { type TrackWants } from './binary-wants.js'
 import type { LaneHolder } from './replay.js'
 assertIsNotBrowser()
 

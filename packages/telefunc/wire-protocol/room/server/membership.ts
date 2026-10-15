@@ -20,17 +20,10 @@ import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import { Slice } from '../slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
-import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from '../constants.js'
+import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
 import { roomClosedError } from '../errors.js'
-import {
-  leaveCauseToWire,
-  type DmReply,
-  type HoldConfig,
-  type MemberSnapshot,
-  type RoomDataEnvelope,
-  type RoomMemberRecord,
-  type WireLeaveCause,
-} from '../protocol.js'
+import { leaveCauseToWire, type DmReply, type MemberSnapshot, type WireLeaveCause } from '../protocol.js'
+import { type HoldConfig, type RoomDataEnvelope, type RoomMemberRecord } from './protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 import {
   dropCells,

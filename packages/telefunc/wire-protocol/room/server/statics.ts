@@ -15,7 +15,8 @@ import {
   ownMetadata,
   removedCause,
 } from '../model.js'
-import type { MemberSnapshot, RoomConfigRecord, RoomEnvelope } from '../protocol.js'
+import type { MemberSnapshot, RoomEnvelope } from '../protocol.js'
+import type { RoomConfigRecord } from './protocol.js'
 import type {
   AfterJoinHook,
   AfterPublishHook,

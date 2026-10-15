@@ -4,16 +4,10 @@ export type { LaneHolder, TextWantsChange }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { makePublishInfo } from '../../channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
-import {
-  applyBinaryWantChange,
-  binaryWantsCovers,
-  emptyBinaryWants,
-  laneTrack,
-  type BinaryFrame,
-  type BinaryWantChange,
-  type BinaryWants,
-} from '../binary.js'
-import type { MemberWants, RoomDataEnvelope } from '../protocol.js'
+import { laneTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binary-wants.js'
+import type { MemberWants } from '../protocol.js'
+import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomState } from '../state.js'
 assertIsNotBrowser()
 

@@ -22,17 +22,11 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { raceTimeout } from '../../../utils/raceTimeout.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { CommitAccepted, LaneId, RoomHead, StaleCommit, CommitOptions } from '../../backend/room/contract.js'
-import {
-  hasRoomTag,
-  type RoomConfigRecord,
-  type RoomCtrlEnvelope,
-  type RoomDemandPage,
-  type RoomDmAckEnvelope,
-  type RoomDmEnvelope,
-} from '../protocol.js'
+import { hasRoomTag, type RoomCtrlEnvelope, type RoomDmEnvelope } from '../protocol.js'
+import { type RoomConfigRecord, type RoomDemandPage, type RoomDmAckEnvelope } from './protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../../../utils/assert.js'
-import { ROOM_HORIZON_MS } from '../constants.js'
+import { ROOM_HORIZON_MS } from './constants.js'
 import { reportRoomError } from './errors.js'
 import { memberCellKey, memberIdOfCellKey } from './cells.js'
 

@@ -3,7 +3,8 @@ export { RoomStubChannel, RoomParticipantStubChannel, ResponseRoomGrants, Member
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../../utils/assert.js'
-import { ROOM_DM_ACK_TIMEOUT_MS, ROOM_TRACK_WANTS_MAX } from '../constants.js'
+import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
+import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { ServerChannel, parsePeerText } from '../../server/channel.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
@@ -33,15 +34,8 @@ import {
 } from './requests.js'
 import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
-import {
-  applyBinaryWantChange,
-  binaryWantsCovers,
-  emptyBinaryWants,
-  laneTrack,
-  type BinaryFrame,
-  type BinaryWantChange,
-  type BinaryWants,
-} from '../binary.js'
+import { laneTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binary-wants.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import {
   leaveCauseToWire,
@@ -52,12 +46,12 @@ import {
   type ParticipantStubNotice,
   type ParticipantStubRequest,
   type RoomCtrlEnvelope,
-  type RoomDataEnvelope,
   type RoomDataPublish,
   type RoomDemandEvent,
   type RoomDmEnvelope,
   type RoomRosterEvent,
 } from '../protocol.js'
+import { type RoomDataEnvelope } from './protocol.js'
 assertIsNotBrowser()
 
 /** What one response's Room values grant the client on a room: echo drops for its own members, and hidden members it

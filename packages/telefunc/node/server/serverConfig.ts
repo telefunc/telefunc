@@ -27,7 +27,7 @@ import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
 import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
 import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/transport.js'
-import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from '../../wire-protocol/room/constants.js'
+import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from '../../wire-protocol/room/server/constants.js'
 import { assertRoomTimeout } from '../../wire-protocol/room/model.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,

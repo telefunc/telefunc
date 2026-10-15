@@ -20,13 +20,8 @@ import { Slice } from '../slice.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
 import { compareMetaEntries, metaEntriesAt } from '../meta-state.js'
 import { mergeAttributes } from '../model.js'
-import type {
-  MemberMetaUpdate,
-  RoomConfigRecord,
-  RoomMemberRecord,
-  RoomMetaEntry,
-  RoomMetaUpdate,
-} from '../protocol.js'
+import type { MemberMetaUpdate, RoomMetaEntry, RoomMetaUpdate } from '../protocol.js'
+import type { RoomConfigRecord, RoomMemberRecord } from './protocol.js'
 import type { ParticipantMeta, RoomMeta } from '../types.js'
 import {
   MEMBER_META_CELL_PREFIX,

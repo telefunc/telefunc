@@ -8,6 +8,7 @@ import { ACK_STATUS, ProtocolViolationError, TAG, decode, type BroadcastSubscrip
 import { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { Abort } from '../../shared/Abort.js'
 import { createDeferred } from '../../utils/createDeferred.js'
+import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 import {
   ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
@@ -18,13 +19,12 @@ import {
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_TAIL_HOLD_MAX,
-  ROOM_TRACK_WANTS_MAX,
   ROOM_MEMBER_NAMED_LANES_MAX,
   ROOM_EMPTY_TIMEOUT_MS,
   ROOM_DEPARTURE_TIMEOUT_MS,
   ROOM_GOSSIP_IN_FLIGHT_MAX,
   ROOM_DEMAND_PAGE_ENTRIES,
-} from './constants.js'
+} from './server/constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, encodeBinaryFrame } from './binary.js'
 import { RoomError, isRoomError, roomAckError, toRoomFailure } from './errors.js'
 import { mergeAttributes } from './model.js'
@@ -33,9 +33,9 @@ import {
   leaveCauseFromWire,
   leaveCauseToWire,
   type InboxMessage,
-  type RoomDemandPage,
   type RoomSnapshotMetadata,
 } from './protocol.js'
+import { type RoomDemandPage } from './server/protocol.js'
 import {
   HOLDS_CELL_KEY,
   JOINS_CELL_KEY,

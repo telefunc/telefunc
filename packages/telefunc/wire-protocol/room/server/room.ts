@@ -25,12 +25,12 @@ import {
 } from '../model.js'
 import {
   inboxMessageFromWire,
-  type RoomDataEnvelope,
   type SenderStamp,
   type RoomDmEnvelope,
   type AcceptedMeta,
   type RoomSnapshotMetadata,
 } from '../protocol.js'
+import { type RoomDataEnvelope } from './protocol.js'
 import { type RoomModel, RoomState, RoomStateView } from '../state.js'
 import { ParticipantBase } from '../participant.js'
 import { MemberMessageTexts, RoomStubChannel } from './stub.js'

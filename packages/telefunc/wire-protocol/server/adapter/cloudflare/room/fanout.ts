@@ -2,7 +2,7 @@ export { Fanout }
 export type { RoomSessionNamespace, RoomSessionStub }
 
 import type { OrderingInfo } from '../../../../ordering-frame.js'
-import { ROOM_HORIZON_MS } from '../../../../room/constants.js'
+import { ROOM_HORIZON_MS } from '../../../../room/server/constants.js'
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
 import { OrderedStubs, reportLostDeliveries } from '../ordered-stubs.js'

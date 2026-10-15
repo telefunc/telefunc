@@ -6,13 +6,9 @@ export {
   laneTrack,
   publicTrack,
   isNamedTrack,
-  emptyBinaryWants,
-  wantsTrack,
-  binaryWantsCovers,
-  applyBinaryWantChange,
   isRoomTrack,
 }
-export type { TrackWants, BinaryWants, BinaryWantChange, BinaryFrame }
+export type { BinaryWantChange, BinaryFrame }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -164,7 +160,7 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
     retain: !!(flags & FRAME_FLAG_RETAIN),
   }
 }
-// Binary wants: per member, per track
+// Tracks
 /** The default (unnamed) track's slot in want sets and lane keys; named tracks are non-empty, so `''` is unambiguous. */
 const DEFAULT_TRACK = ''
 function laneTrack(track: string | null): string {
@@ -173,42 +169,8 @@ function laneTrack(track: string | null): string {
 function publicTrack(track: string): string | null {
   return track === DEFAULT_TRACK ? null : track
 }
-/** Which of a publisher's tracks a holder wants: every track while `all`, and each of `tracks` either way
- *  (`DEFAULT_TRACK` selects the unnamed lane). */
-type TrackWants = { all: boolean; tracks: Set<string> }
-/** A member with no wants has no entry. */
-type BinaryWants = { everyMember: TrackWants; members: Map<string, TrackWants> }
 /** One change of a holder's binary wants: `track` (`null`: every track) of `member` (`null`: every member), on or off. */
 type BinaryWantChange = { member: string | null; track: string | null; on: boolean }
-function emptyBinaryWants(): BinaryWants {
-  return { everyMember: { all: false, tracks: new Set() }, members: new Map() }
-}
-function wantsTrack(wants: TrackWants, track: string): boolean {
-  return wants.all || wants.tracks.has(track)
-}
-function binaryWantsCovers(wants: BinaryWants, memberId: string, track: string): boolean {
-  if (wantsTrack(wants.everyMember, track)) return true
-  const memberWants = wants.members.get(memberId)
-  return memberWants !== undefined && wantsTrack(memberWants, track)
-}
-/** Whether `change` changed `wants`. */
-function applyBinaryWantChange(wants: BinaryWants, { member, track, on }: BinaryWantChange): boolean {
-  let scope = member === null ? wants.everyMember : wants.members.get(member)
-  if (scope === undefined) {
-    if (!on) return false
-    wants.members.set(member!, (scope = { all: false, tracks: new Set() }))
-  }
-  if (track === null) {
-    if (scope.all === on) return false
-    scope.all = on
-  } else {
-    if (scope.tracks.has(track) === on) return false
-    if (on) scope.tracks.add(track)
-    else scope.tracks.delete(track)
-  }
-  if (member !== null && !scope.all && scope.tracks.size === 0) wants.members.delete(member)
-  return true
-}
 /** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that doesn't fit. */
 function isRoomTrack(track: unknown): track is string {
   return typeof track === 'string' && track.isWellFormed() && utf8ByteLength(track) <= TRACK_LENGTH_FIELD_MAX

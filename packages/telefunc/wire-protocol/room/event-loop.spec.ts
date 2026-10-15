@@ -12,11 +12,12 @@ import type { ChannelPublishInfo } from '../channel.js'
 import { Room } from './server/statics.js'
 import type { ServerRoom } from './server/room.js'
 import type { PresenceEvent } from './server/replica.js'
-import type { RoomDemandPage } from './protocol.js'
+import type { RoomDemandPage } from './server/protocol.js'
 import { ResponseRoomGrants, RoomStubChannel } from './server/stub.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
-import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_TRACK_WANTS_MAX } from './constants.js'
+import { ROOM_TRACK_WANTS_MAX } from './constants.js'
+import { ROOM_HEARTBEAT_INTERVAL_MS } from './server/constants.js'
 
 // Each spec here times a stall at 100,000 members, so it runs in a worker of its own: room.spec's other specs leave
 // rooms reachable (vitest keeps every spy, and a stub no client connects to waits out its TTL), and collecting them

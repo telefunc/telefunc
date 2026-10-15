@@ -1,5 +1,5 @@
 import { expect, test, vi } from 'vitest'
-import { ROOM_HORIZON_MS } from '../../../../room/constants.js'
+import { ROOM_HORIZON_MS } from '../../../../room/server/constants.js'
 import { Fanout, type RoomSessionNamespace } from './fanout.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
 
