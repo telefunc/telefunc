@@ -20,7 +20,7 @@ type Reporter = { expiresAt: number; page: number; telling: number; asked: boole
 /** What some holder of a replica receives. */
 class Receives {
   readonly pairs = new Map<string, Set<string>>()
-  /** The members whose every track. */
+  /** The members whose every track is received. */
   readonly members = new Set<string>()
   /** The tracks of every member. */
   readonly tracks = new Set<string>()
