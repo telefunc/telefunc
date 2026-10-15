@@ -16,7 +16,7 @@ export {
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
 import { getRoomBackend } from '../../backend/install.js'
-import type { CellMutation, CellsRead, CxResult } from '../../backend/room/contract.js'
+import { CELL_PAGE_SIZE, type CellMutation, type CellsRead, type CxResult } from '../../backend/room/contract.js'
 import { decodeCellCounter } from '../../backend/room/semantics.js'
 import { Slice } from '../slice.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
@@ -59,8 +59,6 @@ type MetaKeyCell = { value: unknown; place: [seq: number, index: number] }
 
 /** Paged reads that a write landing in invalidates before the read takes the meta in one call. */
 const META_PAGED_READS = 2
-/** The keys sorted in one run of a whole read, as many as a page holds. */
-const META_RUN_KEYS = 1024
 
 function metaKeyMutation(prefix: string, [key, value, placeSeq, placeIndex]: RoomMetaEntry): CellMutation {
   const cell: MetaKeyCell = { value, place: [placeSeq, placeIndex] }
@@ -116,7 +114,7 @@ async function mergeRuns(runs: RoomMetaEntry[][]): Promise<RoomMetaEntry[]> {
       let j = 0
       while (i < a.length && j < b.length) {
         out.push(compareMetaEntries(a[i]!, b[j]!) < 0 ? a[i++]! : b[j++]!)
-        if (out.length % META_RUN_KEYS === 0 && slice.over) await slice.next()
+        if (out.length % CELL_PAGE_SIZE === 0 && slice.over) await slice.next()
       }
       while (i < a.length) out.push(a[i++]!)
       while (j < b.length) out.push(b[j++]!)
@@ -158,7 +156,7 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
   const slice = new Slice()
   for (const [key, raw] of read.cells) {
     if (key.startsWith(prefix)) run.set(key, raw)
-    if (run.size < META_RUN_KEYS) continue
+    if (run.size < CELL_PAGE_SIZE) continue
     runs.push(metaRun(run, prefix))
     run = new Map()
     if (slice.over) await slice.next()
@@ -359,8 +357,8 @@ async function memberMetaOf(id: string, gen: number, cells: MemberMetaCells): Pr
   const prefix = memberMetaGenPrefix(id, gen)
   const runs: RoomMetaEntry[][] = []
   const slice = new Slice()
-  for (let at = 0; at < cells.length; at += META_RUN_KEYS) {
-    runs.push(metaRun(cells.slice(at, at + META_RUN_KEYS), prefix))
+  for (let at = 0; at < cells.length; at += CELL_PAGE_SIZE) {
+    runs.push(metaRun(cells.slice(at, at + CELL_PAGE_SIZE), prefix))
     if (slice.over) await slice.next()
   }
   const entries = await mergeRuns(runs)
@@ -368,7 +366,7 @@ async function memberMetaOf(id: string, gen: number, cells: MemberMetaCells): Pr
   for (let i = 0; i < entries.length; i++) {
     const [key, value] = entries[i]!
     Object.defineProperty(meta, key, { value, enumerable: true, configurable: true, writable: true })
-    if (i % META_RUN_KEYS === 0 && slice.over) await slice.next()
+    if (i % CELL_PAGE_SIZE === 0 && slice.over) await slice.next()
   }
   return Object.freeze(meta)
 }

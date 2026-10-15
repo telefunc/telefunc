@@ -4,6 +4,7 @@ export type { RedisCommand }
 // Every Lua script and the one command table that registers and invokes them.
 
 import {
+  CELL_PAGE_SIZE,
   decodeLaneKey,
   encodeLaneKey,
   type BroadcastPayload,
@@ -48,8 +49,6 @@ import {
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
 /** A fence token is a UUID. */
 const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
-/** The cells a prefix read's page holds. */
-const CELL_PAGE_SIZE = 1024
 /** What a start read's, a leave's or a generation drop's page holds, as a SCAN count. */
 const LANE_PAGE_SIZE = 1024
 

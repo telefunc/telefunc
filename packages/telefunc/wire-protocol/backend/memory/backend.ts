@@ -22,6 +22,7 @@ import type {
   RetainedOf,
   DirectoryPage,
 } from '../room/contract.js'
+import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from '../room/contract.js'
 import { encodeLaneKey } from '../room/lane-key.js'
 import {
   commitPreconditionHolds,
@@ -105,10 +106,6 @@ class MemoryBackendState {
 
 /** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself can't starve the loop. */
 const DELIVERIES_PER_TURN = 1024
-/** The cells a prefix read's page holds. */
-const CELL_PAGE_SIZE = 1024
-/** The entries a due read's page holds. */
-const DIRECTORY_PAGE_SIZE = 100
 
 const NO_TARGETS: readonly MemorySubscriptionAttempt[] = []
 const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)

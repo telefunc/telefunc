@@ -31,7 +31,7 @@ import type {
   DirectoryPage,
   OrderingInfo,
 } from 'telefunc/__internal'
-import { decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
+import { DIRECTORY_PAGE_SIZE, decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
 import {
   directoryIndexKey,
   directoryTagsKey,
@@ -48,7 +48,6 @@ import {
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrderMark, type RedisCommand } from './commands.js'
 import { RedisSubscriptionDriver, type RedisSubscriptionSource } from './subscriber.js'
 
-const DIRECTORY_PAGE_SIZE = 100
 const NO_FENCE_TOKENS = { lane: '', everyTrack: '', everyMember: '' }
 
 type RedisBackendOptions = {
