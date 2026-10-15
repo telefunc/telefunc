@@ -203,12 +203,10 @@ class DemandReport {
     for (const [track, byTrack] of except)
       for (const member of byTrack) {
         const was = told.tracks.get(track)
-        if (
-          planned.tracks.has(track) &&
-          !hasEntry(planned.except, track, member) &&
-          was?.except.delete(member) === true
-        )
+        if (planned.tracks.has(track) && !hasEntry(planned.except, track, member) && was?.except.has(member) === true) {
+          was.except.delete(member)
           this._tell({ track, member, except: true }, false)
+        }
         yield
       }
     for (const [track, byTrack] of except)
@@ -229,7 +227,10 @@ class DemandReport {
       yield
     }
     for (const member of fetched) {
-      if (!planned.fetched.has(member) && told.fetched.delete(member)) this._tell({ member, byMember: true }, false)
+      if (!planned.fetched.has(member) && told.fetched.has(member)) {
+        told.fetched.delete(member)
+        this._tell({ member, byMember: true }, false)
+      }
       yield
     }
     for (const member of members) {
@@ -423,8 +424,12 @@ class RoomDemand {
 
   /** The room closed: it holds no demand from now on, so its members' leaves forget nothing one at a time. */
   close(): void {
-    for (const entries of [this._reporters, this._pairs, this._members, this._fetched, this._tracks, this._told])
-      entries.clear()
+    this._reporters.clear()
+    this._pairs.clear()
+    this._members.clear()
+    this._fetched.clear()
+    this._tracks.clear()
+    this._told.clear()
     this._published.clear()
     this._due.clear()
   }
