@@ -109,7 +109,8 @@ class RoomSubscriptions {
   private readonly _excepted = new Set<string>()
   /** Per present member, how many tracks named of it alone some holder here receives. */
   private readonly _counts = new Map<string, number>()
-  /** The member a planning pass counts a slice at a time, and whether a change of its wants since made the count stale. */
+  /** The member a planning pass counts a slice at a time, and whether a change of its wants since made the count
+   *  stale. */
   private _counting: { member: string; stale: boolean } | null = null
   /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
   private readonly _overflowing = new Set<string>()
@@ -442,10 +443,10 @@ class RoomSubscriptions {
   }
 
   /** A member's binary lanes: its every-track lane while some holder here receives all of its tracks, more than
-   *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone, or the tracks named of every member fetched by member, else a lane
-   *  per track named of it alone. A switch between them keeps the lanes it leaves until the lanes it takes deliver. It
-   *  yields between tracks, so a member's plan is resumed a slice at a time: it plans from the counts and lanes it read
-   *  first, and every change meanwhile queues the member again. */
+   *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone, or the tracks named of every member fetched by member, else a
+   *  lane per track named of it alone. A switch between them keeps the lanes it leaves until the lanes it takes
+   *  deliver. It yields between tracks, so a member's plan is resumed a slice at a time: it plans from the counts and
+   *  lanes it read first, and every change meanwhile queues the member again. */
   private *_syncMemberBinary(member: string): Generator<void> {
     const present = this._present(member)
     if (!present) this._counts.delete(member)
@@ -492,7 +493,8 @@ class RoomSubscriptions {
     )
   }
 
-  /** The member's queued pairs; a change that moved it across `ROOM_MEMBER_NAMED_LANES_MAX` replans all of its lanes. */
+  /** The member's queued pairs; a change that moved it across `ROOM_MEMBER_NAMED_LANES_MAX` replans all of its
+   *  lanes. */
   private *_planMember(member: string, plan: BinaryPlan): Generator<void> {
     const count = this._counts.get(member)
     if (plan.all || plan.members.has(member) || (count === undefined && this._present(member))) {

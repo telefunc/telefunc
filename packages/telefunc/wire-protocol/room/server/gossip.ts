@@ -13,8 +13,8 @@ assertIsNotBrowser()
 type Want = RoomDemandPage['wants'][number]
 
 /** Commits a room's demand on its demand lane in order, the entries told in one turn sharing pages, and
- *  `ROOM_GOSSIP_IN_FLIGHT_MAX` pages at a time and a slice per turn, so a burst waits as entries rather than as commits,
- *  and its deliveries leave the event loop turning. Its pages are counted, so a reader sees one it missed. */
+ *  `ROOM_GOSSIP_IN_FLIGHT_MAX` pages at a time and a slice per turn, so a burst waits as entries rather than as
+ *  commits, and its deliveries leave the event loop turning. Its pages are counted, so a reader sees one it missed. */
 class GossipOutbox {
   private _waiting = new Fifo<Want>()
   private _pages = 0

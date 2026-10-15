@@ -73,8 +73,8 @@ class WantsIndex {
     if (gone) this._indexed.delete(holder)
   }
 
-  /** Indexes the holder's current text wants, a member per step: its room-wide ones, and those of `members`, or of every
-   *  member when omitted. */
+  /** Indexes the holder's current text wants, a member per step: its room-wide ones, and those of `members`, or of
+   *  every member when omitted. */
   *updateText(holder: LaneHolder, gone = false, members?: Iterable<string>): Generator<void> {
     const indexed = this._indexedOf(holder)
     const text = gone ? null : holder._textDemand()

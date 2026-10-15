@@ -277,8 +277,8 @@ function memberMetaMutations(id: string, meta: ParticipantMeta): CellMutation[] 
 
 /** One exchange that expects the member's record, which counts each meta write in `metaSeq`.
  *  A merge writes its keys, a key already there keeping its place; a replace writes its keys into a new generation and
- *  returns the one it `replaced`, for `dropMemberMetaGeneration`. New keys are placed at the write's own `metaSeq`. Each
- *  costs the keys it was given. */
+ *  returns the one it `replaced`, for `dropMemberMetaGeneration`. New keys are placed at the write's own `metaSeq`.
+ *  Each costs the keys it was given. */
 async function writeMemberMeta(
   room: RoomIncarnation,
   id: string,

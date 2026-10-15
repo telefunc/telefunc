@@ -480,8 +480,8 @@ class RoomDemand {
   }
 
   /** Queues the members whose `track` a change of `instance`'s lease of it from `was` to `now` may have turned: those
-   *  another reporter's lease of it of every member leaves out, else those one lease excepts and the other not when both
-   *  are fetched alike, else every member. */
+   *  another reporter's lease of it of every member leaves out, else those one lease excepts and the other not when
+   *  both are fetched alike, else every member. */
   private _queueLease(track: string, instance: string, was: TrackLease | undefined, now: TrackLease | undefined): void {
     for (const [other, lease] of this._tracks.get(track) ?? []) {
       if (other !== instance && !lease.byMember) return this._queueEach(track, lease.except)

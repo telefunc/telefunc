@@ -155,8 +155,8 @@ class AuthoritySync {
     })
   }
 
-  /** A member's meta change arrived past a gap and was dropped: a roster read `ROOM_META_REPAIR_MS` after it repairs the
-   *  member rather than the next heartbeat's. */
+  /** A member's meta change arrived past a gap and was dropped: a roster read `ROOM_META_REPAIR_MS` after it repairs
+   *  the member rather than the next heartbeat's. */
   memberMetaGap(): void {
     this._repairSoon('memberMeta', () => {
       if (!this._host.model.closed) void this.refreshMembers().catch(reportRoomError)

@@ -241,7 +241,8 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
         // A failed (UN)SUBSCRIBE leaves the channel set unknown: start over on a fresh connection.
         return this._lost(connection.id, error)
       }
-      // Recovered once the channels are subscribed, not when the socket connects: a refused SUBSCRIBE keeps backing off.
+      // Recovered once the channels are subscribed, not when the socket connects: a refused SUBSCRIBE keeps backing
+      // off.
       this._reconnectDelay = RECONNECT_DELAY_MIN_MS
       this._outageReported = false
     })

@@ -77,9 +77,9 @@ class RosterStream {
     this._texts = null
   }
 
-  /** The roster to `stubs`, `ROOM_ROSTER_PART_MEMBERS` live members per part and a `ROOM_PLAN_SLICE_MS` slice per turn, so
-   *  each event relayed between two parts is one the parts after it reflect. A stub sent a newer roster drops out. While
-   *  the roster is unchanged since the stream began, each part's text is the one another stream built for it. */
+  /** The roster to `stubs`, `ROOM_ROSTER_PART_MEMBERS` live members per part and a `ROOM_PLAN_SLICE_MS` slice per turn,
+   *  so each event relayed between two parts is one the parts after it reflect. A stub sent a newer roster drops out.
+   *  While the roster is unchanged since the stream began, each part's text is the one another stream built for it. */
   private async _stream(stubs: RoomStubChannel[]): Promise<void> {
     const stream = {}
     for (const stub of stubs) {

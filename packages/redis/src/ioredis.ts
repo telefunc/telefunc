@@ -55,9 +55,9 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     // A Cluster fills its node pool just before it is ready, and a lazyConnect one connects only on a command.
     if (redis.status === 'wait') await redis.connect()
     else if (redis.status === 'connecting') await clusterReady(redis)
-    // Every Cluster node, replica or master, delivers every PUBLISH to its subscribers. A failed node stays pooled until
-    // the Cluster uses it, and a promoted replica keeps its label until a refresh, so each reconnect starts after the last
-    // node used.
+    // Every Cluster node, replica or master, delivers every PUBLISH to its subscribers. A failed node stays pooled
+    // until the Cluster uses it, and a promoted replica keeps its label until a refresh, so each reconnect starts after
+    // the last node used.
     const nodes = redis.nodes('all').filter((candidate) => candidate.status !== 'end')
     const last = subscriberNodes.get(redis)
     const node = nodes[last === undefined ? 0 : (nodes.indexOf(last) + 1) % nodes.length]

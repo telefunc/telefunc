@@ -30,14 +30,15 @@ function reportSubscriptionEnd(error: unknown, report: (error: unknown) => void)
 /** Sends on one key waiting for this instance's establishing subscriptions. */
 type Hold = { readonly established: Promise<void>; sends: number }
 
-/** A held send's bytes, read only for a send that is held and counted in `budget`, which sends of several keys can share;
- *  a send its budget can't fit is refused with `overflow()`. */
+/** A held send's bytes, read only for a send that is held and counted in `budget`, which sends of several keys can
+ *  share; a send its budget can't fit is refused with `overflow()`. */
 type HoldWeight = { budget: string; bytes(): number; fits(bytes: number): boolean; overflow(): Error }
 
 /** What a send waits for, read only while some subscription could be establishing; `sources` share a partition. */
 type SendHold<Source> = { key: string; sources: readonly [Source, ...Source[]]; weight?: HoldWeight }
 
-/** Checks a delivery against the driver contract, once for all its consumers; one it throws for is reported and dropped. */
+/** Checks a delivery against the driver contract, once for all its consumers; one it throws for is reported and
+ *  dropped. */
 type DeliveryCheck<Source> = (source: Source, payload: BackendPayload, info: { seq: number; timestamp: number }) => void
 
 type SubscriptionSlotConfig = {

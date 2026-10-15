@@ -74,7 +74,8 @@ local function tf_live_head(key, now)
 end
 `
 
-// The same bytes as telefunc's ordering frame (wire-protocol/ordering-frame.ts): four u32 big-endian words, then the payload.
+// The same bytes as telefunc's ordering frame (wire-protocol/ordering-frame.ts): four u32 big-endian words, then the
+// payload.
 const REDIS_ORDERING_FRAME_LUA = `
 local function tf_ordering_frame(seq, ts, payload)
   local seq_hi = math.floor(seq / 4294967296)
@@ -85,7 +86,8 @@ local function tf_ordering_frame(seq, ts, payload)
 end
 `
 
-// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of the ordering frame.
+// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of the ordering
+// frame.
 //   KEYS: [1]=order ('seq:ts') [2]=channel
 //   ARGV: [1]=payload
 const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
