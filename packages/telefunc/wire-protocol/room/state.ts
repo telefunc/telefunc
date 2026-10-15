@@ -399,15 +399,13 @@ class RoomModel {
   applyParticipantMeta(id: string, update: MemberMetaUpdate): boolean {
     this._record({ meta: { id, update } })
     const entry = this._members.get(id)
-    if (!entry) {
-      // Before the first roster every member is unknown, and the first roster applies the changes after its own.
-      if (!this._rosterKnown) {
-        const early = this._preRosterMeta.get(id)
-        if (early === undefined) this._preRosterMeta.set(id, [update])
-        else early.push(update)
-      }
-      return false
+    // Before the first roster every member is unknown, and the first roster applies the changes after its own.
+    if (!entry && !this._rosterKnown) {
+      const early = this._preRosterMeta.get(id)
+      if (early === undefined) this._preRosterMeta.set(id, [update])
+      else early.push(update)
     }
+    if (!entry) return false
     const listening = [...this._views].filter((view) => view._listensToMeta(entry))
     const prev = listening.length > 0 ? entry.meta.object : null
     const applied = entry.meta.apply(update)
