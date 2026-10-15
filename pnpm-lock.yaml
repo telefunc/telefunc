@@ -480,18 +480,6 @@ importers:
         specifier: ^4.79.0
         version: 4.79.0(@cloudflare/workers-types@4.20260615.1)
 
-  test/backend-public-consumer:
-    devDependencies:
-      '@telefunc/redis':
-        specifier: workspace:*
-        version: link:../../packages/redis
-      telefunc:
-        specifier: link:../../packages/telefunc
-        version: link:../../packages/telefunc
-      typescript:
-        specifier: ^6.0.2
-        version: 6.0.3
-
   test/playground:
     dependencies:
       '@types/react':
@@ -599,6 +587,18 @@ importers:
       vite:
         specifier: ^8.0.16
         version: 8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0)
+
+  test/released-api:
+    devDependencies:
+      '@telefunc/redis':
+        specifier: workspace:*
+        version: link:../../packages/redis
+      telefunc:
+        specifier: link:../../packages/telefunc
+        version: link:../../packages/telefunc
+      typescript:
+        specifier: ^6.0.2
+        version: 6.0.3
 
 packages:
 
