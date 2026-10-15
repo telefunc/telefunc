@@ -116,8 +116,9 @@ type CommitAccepted = {
   seq: number
   timestamp: number
   receivers?: number
-  /** One at-most-once handoff that never retries; a rejection means the handoff was lost. */
-  delivery: Promise<void>
+  /** An inbox or control commit's one at-most-once handoff that never retries; a rejection means the handoff was
+   *  lost. Other commits have none. */
+  delivery?: Promise<void>
 }
 
 /** Why a commit was refused: the incarnation isn't open (or its closing lease lapsed), or a required cell is gone. */

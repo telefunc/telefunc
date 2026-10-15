@@ -13,6 +13,7 @@ import type {
   BroadcastPayload,
   BroadcastRoute,
   CellsCx,
+  CommitAccepted,
   CommitResult,
   CxResult,
   HeadCx,
@@ -48,6 +49,7 @@ import { LANE_PAGE_SIZE, REDIS_COMMANDS, type RedisCommand } from './commands.js
 import { RedisSubscriptionDriver, type RedisSubscriptionSource } from './subscriber.js'
 
 const DIRECTORY_PAGE_SIZE = 100
+const NO_FENCE_TOKENS = { lane: '', everyTrack: '', everyMember: '' }
 
 type RedisBackendOptions = {
   redis: RedisClient
@@ -144,7 +146,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   ): Promise<CommitResult> {
     const laneKey = encodeLaneKey(lane)
     const channels = commitChannels(this._prefix, roomId, inc, lane, laneKey)
-    const fence = this.subscriptions.prepareFence(channels)
+    const fence = lane.kind === 'inbox' || lane.kind === 'control' ? this.subscriptions.prepareFence(channels) : null
     let reply
     try {
       reply = await this._run(REDIS_COMMANDS.commit, {
@@ -157,24 +159,25 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
         retain: opts?.retain === true,
         closingLease: opts?.closingLease,
         requiredCellKeys: opts?.requiredCellKeys ?? [],
-        fenceTokens: fence.tokens,
+        fenceTokens: fence?.tokens ?? NO_FENCE_TOKENS,
       })
     } catch (error) {
-      fence.cancel()
+      fence?.cancel()
       throw error
     }
     if ('stale' in reply) {
-      fence.cancel()
+      fence?.cancel()
       return reply
     }
-    // The frame carries the fence token, so observing the fence proves local dispatch.
-    return {
+    const accepted: CommitAccepted = {
       accepted: true,
       seq: reply.seq,
       timestamp: reply.timestamp,
       ...(this._reportsReceivers ? { receivers: reply.receivers } : {}),
-      delivery: fence.delivery,
     }
+    // The frame carries the fence token, so observing the fence proves local dispatch.
+    if (fence !== null) accepted.delivery = fence.delivery
+    return accepted
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {

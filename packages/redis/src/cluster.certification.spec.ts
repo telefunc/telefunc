@@ -35,6 +35,7 @@ const CLUSTER_NODES = rawNodes.split(',').map((entry): RedisClusterNode => {
 })
 if (CLUSTER_NODES.length !== 3) throw new Error('Redis Cluster CI certification requires exactly three masters')
 const SEMANTIC_LANE: LaneId = { kind: 'semantic' }
+const INBOX_LANE: LaneId = { kind: 'inbox', member: 'member' }
 const CONTROL_LANE: LaneId = { kind: 'control' }
 describe('Redis real three-master Cluster CI certification', () => {
   let cluster: Cluster
@@ -144,12 +145,12 @@ describe('Redis real three-master Cluster CI certification', () => {
         expect('cells' in page && [...page.cells.keys()]).toEqual(['cell} escape'])
       const firstSubscription = subscribe(backend, roomId, inc, () => {})
       await firstSubscription.ready
-      await accepted(
+      accepted(
         await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('payload'), {
           retain: true,
           requiredCellKeys: ['cell} escape'],
         }),
-      ).delivery
+      )
       const currentCells = await backend.readCells(roomId, inc, { keys: ['cell} escape'] })
       if ('staleInc' in currentCells) throw new Error('cell fence generation vanished')
       expect(await backend.readCells(roomId, inc, { prefix: 'cell}' })).toEqual({
@@ -167,7 +168,7 @@ describe('Redis real three-master Cluster CI certification', () => {
       ).toEqual({ stale: 'cell', key: 'cell} escape' })
       await backend.deleteRetained(roomId, inc, SEMANTIC_LANE)
       const binary: LaneId = { kind: 'binary', member: 'member} escape', track: 'track} escape' }
-      await accepted(await backend.commitLane(roomId, inc, binary, bytes('frame'))).delivery
+      accepted(await backend.commitLane(roomId, inc, binary, bytes('frame')))
       // Each reads where its lanes start as it goes live.
       const starting = [
         ownSubscription(backend.subscribeLane(roomId, inc, { kind: 'binary-all', member: 'member} escape' }, () => {})),
@@ -367,7 +368,6 @@ process.exit(0)`,
     const orderingKey = orderKey(prefix, roomId, inc, encodeLaneKey(SEMANTIC_LANE))
     await cluster.set(orderingKey, `${Number.MAX_SAFE_INTEGER - 1}:1`)
     const last = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from('last'), { retain: true }))
-    await last.delivery
     await waitFor(() => observed.length === 1)
     expect(last.seq).toBe(Number.MAX_SAFE_INTEGER)
     expect(observed).toEqual([Number.MAX_SAFE_INTEGER])
@@ -473,8 +473,7 @@ process.exit(0)`,
     await waitFor(() => states.includes('lost') && subscription.state() === 'ready')
     expect(injectedFailure).toBe(true)
     expect(opens).toBeGreaterThanOrEqual(3)
-    const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('recovered')))
-    await committed.delivery
+    accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('recovered')))
     await waitFor(() => observed.length === 1)
     expect(states).toContain('lost')
     expect(observed).toEqual(['recovered'])
@@ -494,7 +493,7 @@ process.exit(0)`,
     const held: Array<[Buffer, Buffer]> = []
     let holding = false
     await open(backend, roomId, inc)
-    const subscription = subscribe(backend, roomId, inc, receiver)
+    const subscription = ownSubscription(backend.subscribeLane(roomId, inc, INBOX_LANE, receiver))
     subscription.onStateChange((state) => states.push(state))
     await subscription.ready
     const subscriber = subscribers[0]
@@ -512,8 +511,8 @@ process.exit(0)`,
     }
     onTestFinished(() => setHolding(false))
     setHolding(true)
-    const lateFirst = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('late-first')))
-    const lateSecond = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('late-second')))
+    const lateFirst = deliveryOf(accepted(await backend.commitLane(roomId, inc, INBOX_LANE, bytes('late-first'))))
+    const lateSecond = deliveryOf(accepted(await backend.commitLane(roomId, inc, INBOX_LANE, bytes('late-second'))))
     await waitFor(() => held.length === 2)
     setHolding(false)
     // Each commit's message carries the fence token this instance armed, ahead of its frame.
@@ -524,23 +523,23 @@ process.exit(0)`,
     // order, each fence settling then.
     const [later, earlier] = held.sort(([, left], [, right]) => seqOf(right) - seqOf(left))
     dispatch(...later!)
-    expect(await settlesWithin(lateSecond.delivery, 100)).toBe(false)
+    expect(await settlesWithin(lateSecond, 100)).toBe(false)
     dispatch(...earlier!)
-    await Promise.all([lateFirst.delivery, lateSecond.delivery])
+    await Promise.all([lateFirst, lateSecond])
     expect(observed).toEqual(['late-first', 'late-second'])
     held.length = 0
     setHolding(true)
-    const committed = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, bytes('old-epoch')))
-    const deliveryOutcome = committed.delivery.catch((error: unknown) => error)
+    const committed = deliveryOf(accepted(await backend.commitLane(roomId, inc, INBOX_LANE, bytes('old-epoch'))))
+    const deliveryOutcome = committed.catch((error: unknown) => error)
     await waitFor(() => held.length === 1)
-    const expectedChannel = channelKey(prefix, roomId, inc, encodeLaneKey(SEMANTIC_LANE))
+    const expectedChannel = channelKey(prefix, roomId, inc, encodeLaneKey(INBOX_LANE))
     expect(held[0]![0].toString()).toBe(expectedChannel)
     const message = held[0]![1]
     expect(message[0]).toBe(REDIS_DELIVERY_FENCE_BYTE)
     expect(
       Buffer.from(decodeOrderingFrame(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)).payload).toString(),
     ).toBe('old-epoch')
-    expect(await settlesWithin(committed.delivery, 100)).toBe(false)
+    expect(await settlesWithin(committed, 100)).toBe(false)
     const first = await waitForValue(async () =>
       (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
     )
@@ -582,7 +581,7 @@ process.exit(0)`,
       )
       await subscription.ready
       const result = accepted(await backend.commitLane(roomId, inc, SEMANTIC_LANE, Buffer.from(scenario.label)))
-      await result.delivery
+      await waitFor(() => observed.length === 1)
       expect(observed).toEqual([scenario.label])
       expect(result.receivers).toBeUndefined()
     }
@@ -802,6 +801,10 @@ async function close(
 function accepted(result: Awaited<ReturnType<ManagedBackend['commitLane']>>): CommitAccepted {
   if (!('accepted' in result)) throw new Error('commit was unexpectedly stale')
   return result
+}
+function deliveryOf(commit: CommitAccepted): Promise<void> {
+  if (commit.delivery === undefined) throw new Error('an inbox commit has no delivery')
+  return commit.delivery
 }
 const uniquePrefix = (label: string): string => `redis-cluster-ci:${process.pid}:${Date.now().toString(36)}:${label}:`
 const clientIdentity = (client: { id: number; owner: Master }): string => `${client.owner.id}:${client.id}`

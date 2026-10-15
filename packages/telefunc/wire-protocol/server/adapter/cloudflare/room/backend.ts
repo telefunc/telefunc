@@ -110,8 +110,9 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
       ? session.room.callAuthority(roomId, () => this.#stub(roomId), commit)
       : commit(this.#stub(roomId)))
     if ('stale' in wire) return wire
-    const delivery = this.#stub(roomId).awaitDelivery(wire.deliveryToken)
-    return { accepted: true, seq: wire.seq, timestamp: wire.timestamp, receivers: wire.receivers, delivery }
+    const { seq, timestamp, receivers, deliveryToken } = wire
+    if (deliveryToken === undefined) return { accepted: true, seq, timestamp, receivers }
+    return { accepted: true, seq, timestamp, receivers, delivery: this.#stub(roomId).awaitDelivery(deliveryToken) }
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {

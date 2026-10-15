@@ -31,8 +31,8 @@ class Fanout {
     this.#sessions = sessions
   }
 
-  /** Hands a committed frame to every route's session DO; the returned token awaits the handoffs. */
-  send(routes: RouteInstallation[], payload: Uint8Array, info: OrderingInfo): string {
+  /** Hands a committed frame to every route's session DO; the returned delivery settles once every handoff did. */
+  send(routes: RouteInstallation[], payload: Uint8Array, info: OrderingInfo): Promise<void> {
     const handoffs = routes.map(async (route) =>
       this.#calls.call(
         route.sessionDoId,
@@ -40,11 +40,13 @@ class Fanout {
         (session) => session.telefuncRoomDeliver({ ...route, payload, info }),
       ),
     )
+    return Promise.allSettled(handoffs).then((outcomes) => reportLostDeliveries('Cloudflare Room delivery', outcomes))
+  }
+
+  /** The token `awaitDelivery` awaits `delivery` by. */
+  tokenOf(delivery: Promise<void>): string {
     this.#rotate()
     const token = crypto.randomUUID()
-    const delivery = Promise.allSettled(handoffs).then((outcomes) =>
-      reportLostDeliveries('Cloudflare Room delivery', outcomes),
-    )
     this.#deliveries.set(token, delivery)
     return token
   }

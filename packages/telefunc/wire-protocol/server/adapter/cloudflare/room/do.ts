@@ -62,7 +62,7 @@ import {
 } from './storage.js'
 
 type CommitWire =
-  | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken: string }
+  | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken?: string }
   | StaleCommit
 type RegisterWire = { ok: true } | { rejected: true; reason: string }
 
@@ -146,8 +146,10 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     )
     if ('stale' in outcome) return outcome
     const { seq, timestamp, routes } = outcome
-    const deliveryToken = this.#fanout.send(routes, payload, { seq, timestamp })
-    return { accepted: true, seq, timestamp, receivers: routes.length, deliveryToken }
+    const delivery = this.#fanout.send(routes, payload, { seq, timestamp })
+    if (lane.kind !== 'inbox' && lane.kind !== 'control')
+      return { accepted: true, seq, timestamp, receivers: routes.length }
+    return { accepted: true, seq, timestamp, receivers: routes.length, deliveryToken: this.#fanout.tokenOf(delivery) }
   }
 
   async awaitDelivery(token: string): Promise<void> {

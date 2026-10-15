@@ -35,6 +35,7 @@ import {
 } from '../room/semantics.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
 import type { BroadcastKind } from '../../shared-ws.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
@@ -377,19 +378,21 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const binary = lane.kind === 'binary'
     const everyTrack = binary ? (gen.everyTrackSubs.get(lane.member) ?? NO_TARGETS) : NO_TARGETS
     const everyMember = binary ? (gen.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
+    const delivered = lane.kind === 'inbox' || lane.kind === 'control' ? createDeferred() : null
     // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
-    const delivery = new Promise<void>((resolve) =>
-      queueMicrotask(() =>
-        this._deliver(() => {
-          for (const target of targets) target.deliver(copyBytes(frame), mark)
-          for (const target of everyTrack) target.deliver(copyBytes(frame), mark)
-          for (const target of everyMember) target.deliver(copyBytes(frame), mark)
-          resolve()
-        }),
-      ),
+    queueMicrotask(() =>
+      this._deliver(() => {
+        for (const target of targets) target.deliver(copyBytes(frame), mark)
+        for (const target of everyTrack) target.deliver(copyBytes(frame), mark)
+        for (const target of everyMember) target.deliver(copyBytes(frame), mark)
+        delivered?.resolve()
+      }),
     )
     const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack) + sumReceiverCounts(everyMember)
-    return { accepted: true, ...mark, receivers, delivery }
+    // A commit past a turn's deliveries waits for the next turn, as a network write would, so commits can't outrun them.
+    if (this._deliveries.length - this._next >= DELIVERIES_PER_TURN) await new Promise<void>(nextTurn)
+    if (delivered === null) return { accepted: true, ...mark, receivers }
+    return { accepted: true, ...mark, receivers, delivery: delivered.promise }
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {

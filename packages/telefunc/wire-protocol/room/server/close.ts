@@ -3,8 +3,7 @@ export { closeIncarnation, acquireClosingLease, finishClose, cleanupFinalizedInc
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
-import type { RoomCtrlEnvelope } from '../protocol.js'
-import { CONTROL_LANE, commitRoomLane, configFromHead, encodeRoomRecord } from './lanes.js'
+import { commitControl, configFromHead } from './lanes.js'
 
 const ROOM_TOMBSTONE_TTL_MS = 60_000
 const ROOM_CLOSE_LEASE_MS = 15_000
@@ -50,13 +49,7 @@ async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHe
   const inc = closing.currentInc
   const lease = closing.closeLease
   assert(inc !== null && lease !== undefined) // the closing head acquireClosingLease just wrote
-  const closedEvent = await commitRoomLane(
-    roomId,
-    inc,
-    CONTROL_LANE,
-    encodeRoomRecord({ __r: 'closed' } satisfies RoomCtrlEnvelope),
-    { closingLease: lease.id },
-  )
+  const closedEvent = await commitControl(roomId, inc, { __r: 'closed' }, { closingLease: lease.id })
   if ('stale' in closedEvent) return false
   const finalized = await backend.compareExchangeHead(
     roomId,

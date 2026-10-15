@@ -1762,23 +1762,48 @@ describe('Room public behavior', () => {
     finalizing.resolve()
     await closing
   })
-  it("treats a delivery handoff that never settles or rejects as lost, not as the publisher's failure", async () => {
+  it("treats a delivery handoff that never settles or rejects as lost, not as the sender's failure", async () => {
     vi.useFakeTimers()
     const room = await Room.create('lost-delivery')
-    const member = await room.join()
+    const sender = await room.join()
+    const recipient = await room.join()
     const commitLane = driver.commitLane.bind(driver)
     const handoffs = [() => new Promise<void>(() => {}), () => Promise.reject(new Error('fence cancelled'))]
     vi.spyOn(driver, 'commitLane').mockImplementation(async (...args) => {
       const result = await commitLane(...args)
-      return 'stale' in result ? result : { ...result, delivery: handoffs.shift()!() }
+      return 'stale' in result || args[2].kind !== 'inbox' ? result : { ...result, delivery: handoffs.shift()!() }
     })
     const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const publishing = member.publish('lost')
-    // The member's next publish commits without waiting on the handoff still pending.
-    await expect(member.publish('rejected')).resolves.toMatchObject({ seq: expect.any(Number) })
+    const sending = sender.send(recipient.id, 'lost')
+    // The member's next message commits without waiting on the handoff still pending.
+    await expect(sender.send(recipient.id, 'rejected')).resolves.toMatchObject({ seq: expect.any(Number) })
     await vi.advanceTimersByTimeAsync(ROOM_HORIZON_MS)
-    await expect(publishing).resolves.toMatchObject({ seq: expect.any(Number) })
+    await expect(sending).resolves.toMatchObject({ seq: expect.any(Number) })
     expect(report).toHaveBeenCalled()
+  })
+  it('does not show a member again whose own join frame reaches its server after its leave', async () => {
+    const room = await Room.create('late-own-join')
+    const seen: string[] = []
+    room.onJoin((member) => seen.push(`join ${member.id}`))
+    room.onLeave((member) => seen.push(`leave ${member.id}`))
+    // Deliveries queued ahead of the join's, as on a busy server.
+    for (let i = 0; i < 4_096; i++) driver.publish({ key: 'busy', kind: 'text' }, 'busy')
+    const member = await room.join()
+    await member.leave()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(seen).toEqual([`join ${member.id}`, `leave ${member.id}`])
+  })
+  it('resolves a publish and an announcement without waiting for a delivery handoff', async () => {
+    const room = await Room.create('undelivered')
+    const member = await room.join()
+    const commitLane = driver.commitLane.bind(driver)
+    vi.spyOn(driver, 'commitLane').mockImplementation(async (...args) => {
+      const result = await commitLane(...args)
+      return 'stale' in result ? result : { ...result, delivery: new Promise<void>(() => {}) }
+    })
+    await member.publish('text')
+    await member.publishBinary(new Uint8Array([1]))
+    await Room.announce(room.id, 'notice')
   })
   it('applies room-wide and member-specific binary wants to both subscription and demand', async () => {
     const room = await Room.create('binary-pairs')
@@ -3924,7 +3949,7 @@ describe('Room public behavior', () => {
       if (!isJoin || !('accepted' in result)) return result
       committed.resolve()
       // Its delivery is confirmed late, as when one of a Cloudflare room's session DOs is slow.
-      return { ...result, delivery: result.delivery.then(() => confirm.promise) }
+      return { ...result, delivery: result.delivery!.then(() => confirm.promise) }
     })
     const joining = room.join({ identity: 'user-1' }).catch((error: unknown) => error)
     await committed.promise

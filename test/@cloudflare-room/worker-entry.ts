@@ -41,6 +41,8 @@ const broadcast = new CloudflareBroadcast({
 })
 installBackend(() => new CloudflareBackend({ rooms: () => workerEnv.TELEFUNC, broadcast }), ['cloudflare-room-ci'])
 const textEncoder = new TextEncoder()
+const INBOX_LANE = { kind: 'inbox', member: 'member' } as const
+const INBOX_LANE_KEY = 'inbox:member'
 // The isolate's intervals, each with the session DO whose call made it and how often it has fired.
 const intervals: { by: string; fired: number }[] = []
 let makingFor = ''
@@ -290,11 +292,11 @@ function roomProbe(env: Env, suffix: string, name: string) {
   const authority = env.ROOM.get(env.ROOM.idFromName(roomId)) as unknown as Authority
   const lease = (role = 'lease') => `${name}-${role}-${suffix}`
   const open = (operation = `${name} open`) => openHead(authority, inc, operation)
-  const join = async (sessionId: DurableObjectId, role = 'lease') => {
+  const join = async (sessionId: DurableObjectId, role = 'lease', laneKey = 'semantic') => {
     const registration = await authority.registerRoute({
       roomId,
       inc,
-      laneKey: 'semantic',
+      laneKey,
       sessionDoId: sessionId.toString(),
       leaseId: lease(role),
     })
@@ -306,19 +308,20 @@ function roomProbe(env: Env, suffix: string, name: string) {
     authority,
     open,
     join,
+    /** An inbox commit, the one kind whose delivery its committer awaits. */
     async commit(payload: string | number, operation: string) {
       const frame = typeof payload === 'string' ? textEncoder.encode(payload) : new Uint8Array([payload])
-      return accepted(await authority.commitLane(inc, { kind: 'semantic' }, frame), operation)
+      return accepted(await authority.commitLane(inc, INBOX_LANE, frame), operation)
     },
     scheduledAlarm: () => authority.scheduledAlarm(),
-    settle: (commit: Extract<CommitWire, { accepted: true }>) => authority.awaitDelivery(commit.deliveryToken),
+    settle: (commit: Extract<CommitWire, { accepted: true }>) => authority.awaitDelivery(commit.deliveryToken!),
   }
 }
 async function lostTarget(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'lost-target')
   await probe.open()
   await session(env, suffix).refuse()
-  await probe.join(sessionOf(env, suffix))
+  await probe.join(sessionOf(env, suffix), 'lease', INBOX_LANE_KEY)
   const commit = await probe.commit(1, 'lost target')
   return { receivers: commit.receivers, settlement: await rejectionOf(probe.settle(commit), 'lost-target settlement') }
 }
@@ -326,7 +329,7 @@ async function lostTarget(env: Env, suffix: string) {
 async function pipelinedDelivery(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'pipelined')
   await probe.open()
-  await probe.join(sessionOf(env, suffix))
+  await probe.join(sessionOf(env, suffix), 'lease', INBOX_LANE_KEY)
   const frames = ['hold', ...Array.from({ length: 10 }, (_, index) => `frame-${index}`)]
   const commits = await Promise.all(frames.map((frame) => probe.commit(frame, `pipelined ${frame}`)))
   const whileHeld = await poll(
@@ -362,15 +365,18 @@ async function everyTrackRoutes(env: Env, suffix: string) {
   ] as const) {
     const frame = textEncoder.encode(text)
     const commit = accepted(await probe.authority.commitLane(probe.inc, { kind: 'binary', member, track }, frame), text)
-    await probe.settle(commit)
     receivers.push(commit.receivers)
   }
-  const arrived = (role: string) => session(env, `${role}-${suffix}`).arrived()
+  const arrived = (role: string, count: number) =>
+    poll(
+      () => session(env, `${role}-${suffix}`).arrived(),
+      (frames) => frames.length >= count,
+    )
   return {
     receivers,
-    everyTrack: await arrived('every-track'),
-    everyMember: await arrived('every-member'),
-    camera: await arrived('camera'),
+    everyTrack: await arrived('every-track', 3),
+    everyMember: await arrived('every-member', 3),
+    camera: await arrived('camera', 2),
   }
 }
 // The camera's every-member session from its route on, through another every-member route coming and going, its own
@@ -394,7 +400,6 @@ async function everyMemberRoutes(env: Env, suffix: string) {
     const frame = textEncoder.encode(text)
     const lane = { kind: 'binary', member: 'm', track: 'camera' } as const
     const commit = accepted(await probe.authority.commitLane(probe.inc, lane, frame), text)
-    await probe.settle(commit)
     receivers.push(commit.receivers)
   }
   await commit('unrouted')
@@ -407,7 +412,11 @@ async function everyMemberRoutes(env: Env, suffix: string) {
   await commit('unsubscribed')
   await register('camera', 'binary-track:camera')
   await commit('rerouted')
-  return { receivers, camera: await session(env, `camera-${suffix}`).arrived() }
+  const camera = await poll(
+    () => session(env, `camera-${suffix}`).arrived(),
+    (frames) => frames.length >= 3,
+  )
+  return { receivers, camera }
 }
 async function alarmScheduling(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)
@@ -543,11 +552,7 @@ async function largeRetainedReplay(env: Env, suffix: string) {
   payload[0] = 0x11
   payload[payload.length - 1] = 0xee
   const lane = { kind: 'binary' as const, member: 'member', track: 'track' }
-  const commit = accepted(
-    await probe.authority.commitLane(probe.inc, lane, payload, { retain: true }),
-    'large retained',
-  )
-  await probe.settle(commit)
+  accepted(await probe.authority.commitLane(probe.inc, lane, payload, { retain: true }), 'large retained')
   const retained = await probe.authority.readRetained(probe.inc, lane)
   const replayed = (retained as { payload?: unknown } | null)?.payload
   if (!(replayed instanceof Uint8Array)) throw new Error('large retained replay did not return native bytes')

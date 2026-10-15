@@ -32,7 +32,7 @@ import { GossipOutbox } from './gossip.js'
 import {
   CONTROL_LANE,
   SEMANTIC_LANE,
-  commitRoomLane,
+  commitControl,
   decodeDemandPage,
   decodeLaneEnvelope,
   decodeRoomText,
@@ -400,7 +400,7 @@ class RoomReplica {
   _askDemand(of?: string): void {
     const ask = { __r: 'demand-ask', instance: this.report.instance, ...(of && { of }) } satisfies RoomCtrlEnvelope
     // A stale commit is a closed room's, which has no demand.
-    void commitRoomLane(this.id, this._inc, CONTROL_LANE, encodeRoomRecord(ask)).catch(reportRoomError)
+    void commitControl(this.id, this._inc, ask).catch(reportRoomError)
   }
   /** @internal */
   _forgetDemand(): void {

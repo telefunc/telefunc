@@ -2,7 +2,7 @@ export {
   CONTROL_LANE,
   DEMAND_LANE,
   SEMANTIC_LANE,
-  commitRoomLane,
+  commitControl,
   commitRoomLaneOrThrow,
   commitToInbox,
   openConfig,
@@ -84,29 +84,6 @@ function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | 
   return configFromHead(current)
 }
 
-async function commitRoomLane(
-  id: string,
-  inc: string,
-  lane: LaneId,
-  payload: Uint8Array,
-  opts?: CommitOptions,
-): Promise<CommitAccepted | StaleCommit> {
-  const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
-  if ('stale' in result) return result
-  // Delivery is at-most-once: a handoff that rejects or never settles is lost, not the caller's failure.
-  const delivered = raceTimeout(
-    result.delivery.then(
-      () => true,
-      () => false,
-    ),
-    ROOM_HORIZON_MS,
-    () => false,
-  )
-  if (!(await delivered))
-    reportRoomError(new Error(`Room delivery handoff lost (rejected or unconfirmed within the horizon): ${id}`))
-  return result
-}
-
 async function commitRoomLaneOrThrow(
   id: string,
   inc: string,
@@ -114,13 +91,14 @@ async function commitRoomLaneOrThrow(
   payload: Uint8Array,
   opts?: Omit<CommitOptions, 'closingLease'>,
 ): Promise<CommitAccepted> {
-  const result = await commitRoomLane(id, inc, lane, payload, opts)
+  const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
   if ('stale' in result) throw staleCommitError(id, result)
   return result
 }
 
-/** Commits `envelope` to its recipient's inbox, requiring the recipient's member cell and each of `requiring`'s. A
- *  closed room throws; a required member that left is returned as `gone`, for the caller to throw or skip. */
+/** Commits `envelope` to its recipient's inbox, requiring the recipient's member cell and each of `requiring`'s, and
+ *  waits for its handoff up to the horizon. A closed room throws; a required member that left is returned as `gone`,
+ *  for the caller to throw or skip. */
 async function commitToInbox(
   roomId: string,
   inc: string,
@@ -129,10 +107,39 @@ async function commitToInbox(
 ): Promise<CommitAccepted | { gone: string }> {
   const lane = { kind: 'inbox', member: envelope.to } as const
   const requiredCellKeys = [...requiring, envelope.to].map(memberCellKey)
-  const result = await commitRoomLane(roomId, inc, lane, encodeRoomRecord(envelope), { requiredCellKeys })
-  if (!('stale' in result)) return result
-  if (result.stale === 'cell') return { gone: memberIdOfCellKey(result.key) }
-  throw roomClosedError(roomId)
+  const result = await getRoomBackend().commitLane(roomId, inc, lane, encodeRoomRecord(envelope), { requiredCellKeys })
+  if ('stale' in result && result.stale === 'cell') return { gone: memberIdOfCellKey(result.key) }
+  if ('stale' in result) throw roomClosedError(roomId)
+  await handedOff(roomId, result)
+  return result
+}
+
+/** Commits `event` on the control lane and waits for its handoff up to the horizon. A server applies its own joins and
+ *  leaves as it commits them, so a join's frame must not reach it after the member's leave. */
+async function commitControl(
+  roomId: string,
+  inc: string,
+  event: RoomCtrlEnvelope,
+  opts?: CommitOptions,
+): Promise<CommitAccepted | StaleCommit> {
+  const result = await getRoomBackend().commitLane(roomId, inc, CONTROL_LANE, encodeRoomRecord(event), opts)
+  if (!('stale' in result)) await handedOff(roomId, result)
+  return result
+}
+
+/** Delivery is at-most-once: a handoff that rejects or never settles is lost, not the committer's failure. */
+async function handedOff(roomId: string, commit: CommitAccepted): Promise<void> {
+  assert(commit.delivery !== undefined)
+  const delivered = raceTimeout(
+    commit.delivery.then(
+      () => true,
+      () => false,
+    ),
+    ROOM_HORIZON_MS,
+    () => false,
+  )
+  if (!(await delivered))
+    reportRoomError(new Error(`Room delivery handoff lost (rejected or unconfirmed within the horizon): ${roomId}`))
 }
 
 function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
@@ -147,7 +154,8 @@ async function publishCtrl(
   event: RoomCtrlEnvelope,
   opts?: { requiredCellKeys: string[] },
 ): Promise<void> {
-  await commitRoomLaneOrThrow(roomId, inc, CONTROL_LANE, encodeRoomRecord(event), opts)
+  const result = await commitControl(roomId, inc, event, opts)
+  if ('stale' in result) throw staleCommitError(roomId, result)
 }
 
 /** Required cells are member records, so a missing one names the member that left. */

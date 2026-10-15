@@ -17,11 +17,15 @@ function sessions(deliver: (request: RoomSessionDeliveryRequest, stub: number) =
   }
 }
 
+function tokenOfSent(fanout: Fanout, seq: number): string {
+  return fanout.tokenOf(fanout.send([route], new Uint8Array([seq]), { seq, timestamp: 1 }))
+}
+
 test('does not alias an old delivery token to a reconstructed authority attempt', async () => {
   const delivered = sessions(async () => {})
-  const oldToken = new Fanout(delivered).send([route], new Uint8Array([1]), { seq: 1, timestamp: 1 })
+  const oldToken = tokenOfSent(new Fanout(delivered), 1)
   const reconstructedAuthority = new Fanout(delivered)
-  const newToken = reconstructedAuthority.send([route], new Uint8Array([2]), { seq: 2, timestamp: 1 })
+  const newToken = tokenOfSent(reconstructedAuthority, 2)
 
   await expect(reconstructedAuthority.awaitDelivery(oldToken)).rejects.toThrow('unknown delivery token')
   await expect(reconstructedAuthority.awaitDelivery(newToken)).resolves.toBeUndefined()
@@ -37,13 +41,9 @@ test("a failed handoff is loss: its delivery settles, the loss is logged, and th
         handedTo.push(stub)
       }),
     )
-    await expect(
-      fanout.awaitDelivery(fanout.send([route], new Uint8Array([1]), { seq: 1, timestamp: 1 })),
-    ).resolves.toBeUndefined()
+    await expect(fanout.awaitDelivery(tokenOfSent(fanout, 1))).resolves.toBeUndefined()
     expect(report).toHaveBeenCalledWith('Cloudflare Room delivery lost to 1/1 Durable Objects: Error: session reset')
-    await expect(
-      fanout.awaitDelivery(fanout.send([route], new Uint8Array([2]), { seq: 2, timestamp: 1 })),
-    ).resolves.toBeUndefined()
+    await expect(fanout.awaitDelivery(tokenOfSent(fanout, 2))).resolves.toBeUndefined()
     // A stub that rejected may be broken, so the frame after the loss went through a fresh one.
     expect(handedTo).toEqual([1])
   } finally {
@@ -55,9 +55,9 @@ test('forgets a delivery token nobody awaits within two horizons', async () => {
   vi.useFakeTimers({ toFake: ['Date'] })
   try {
     const fanout = new Fanout(sessions(async () => {}))
-    const unawaited = fanout.send([route], new Uint8Array([1]), { seq: 1, timestamp: 1 })
+    const unawaited = tokenOfSent(fanout, 1)
     vi.advanceTimersByTime(ROOM_HORIZON_MS)
-    const late = fanout.send([route], new Uint8Array([2]), { seq: 2, timestamp: 1 })
+    const late = tokenOfSent(fanout, 2)
     vi.advanceTimersByTime(ROOM_HORIZON_MS)
     await expect(fanout.awaitDelivery(late)).resolves.toBeUndefined()
     await expect(fanout.awaitDelivery(unawaited)).rejects.toThrow('unknown delivery token')

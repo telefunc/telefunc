@@ -160,7 +160,7 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     expect(Math.min(...gaps)).toBeLessThanOrEqual(50)
   })
 
-  it("delivers each of a member's binary commits to its every-track subscription with its own track's seq before the commit's delivery settles", async () => {
+  it("delivers each of a member's binary commits to its every-track subscription with its own track's seq", async () => {
     installRedis(ownClient(connect()), { prefix: uniquePrefix('every-track') })
     onTestFinished(() => disposeBackend())
     const backend = getRoomBackend()
@@ -178,7 +178,6 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     )
     onTestFinished(() => everyTrack.unsubscribe())
     await everyTrack.ready
-    const seen: string[][] = []
     for (const [member, track, text] of [
       ['m', 'camera', 'camera-1'],
       ['m', 'mic', 'mic-1'],
@@ -187,18 +186,11 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     ] as const) {
       const commit = await backend.commitLane('every-track', 'inc', { kind: 'binary', member, track }, bytes(text))
       if (!('accepted' in commit)) throw new Error('the room is gone')
-      await commit.delivery
-      seen.push([...received])
     }
-    expect(seen).toEqual([
-      ['camera-1@1'],
-      ['camera-1@1', 'mic-1@1'],
-      ['camera-1@1', 'mic-1@1'],
-      ['camera-1@1', 'mic-1@1', 'camera-2@2'],
-    ])
+    await vi.waitFor(() => expect(received).toEqual(['camera-1@1', 'mic-1@1', 'camera-2@2']))
   })
 
-  it("delivers each member's binary commits on a track to its every-member subscription with its own lane's seq before the commit's delivery settles", async () => {
+  it("delivers each member's binary commits on a track to its every-member subscription with its own lane's seq", async () => {
     installRedis(ownClient(connect()), { prefix: uniquePrefix('every-member') })
     onTestFinished(() => disposeBackend())
     const backend = getRoomBackend()
@@ -216,7 +208,6 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     )
     onTestFinished(() => everyMember.unsubscribe())
     await everyMember.ready
-    const seen: string[][] = []
     for (const [member, track, text] of [
       ['a', 'mic', 'a-1'],
       ['b', 'mic', 'b-1'],
@@ -225,10 +216,8 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     ] as const) {
       const commit = await backend.commitLane('every-member', 'inc', { kind: 'binary', member, track }, bytes(text))
       if (!('accepted' in commit)) throw new Error('the room is gone')
-      await commit.delivery
-      seen.push([...received])
     }
-    expect(seen).toEqual([['a-1@1'], ['a-1@1', 'b-1@1'], ['a-1@1', 'b-1@1'], ['a-1@1', 'b-1@1', 'a-2@2']])
+    await vi.waitFor(() => expect(received).toEqual(['a-1@1', 'b-1@1', 'a-2@2']))
   })
 
   it("gives a room-wide subscriber that appears mid-stream a track's retained frame, and every frame after it", async () => {
