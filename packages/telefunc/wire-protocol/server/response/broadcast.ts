@@ -15,8 +15,10 @@ const broadcastReplacer: ReplacerType<BroadcastContract, ServerReplacerContext> 
   replace(broadcast, context) {
     const maxFrameBytes = getAdapterMaxFrameBytes()
     context.registerChannel(broadcast)
+    const metadata: BroadcastContract['metadata'] = { channelId: broadcast.id, key: broadcast.key }
+    if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
     return {
-      metadata: { channelId: broadcast.id, key: broadcast.key, ...(maxFrameBytes && { maxFrameBytes }) },
+      metadata,
       async close() {
         await broadcast.close()
       },
