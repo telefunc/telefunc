@@ -83,7 +83,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
 
   async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
     const { seq, timestamp, receivers } = await this._run(REDIS_COMMANDS.publish, { route, payload })
-    return { seq, timestamp, ...(this._reportsReceivers ? { receivers } : {}) }
+    return { seq, timestamp, receivers: this._reportsReceivers ? receivers : undefined }
   }
 
   readHead(roomId: string): Promise<RoomHead | null> {
@@ -173,7 +173,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
       accepted: true,
       seq: reply.seq,
       timestamp: reply.timestamp,
-      ...(this._reportsReceivers ? { receivers: reply.receivers } : {}),
+      receivers: this._reportsReceivers ? reply.receivers : undefined,
     }
     // The frame carries the fence token, so observing the fence proves local dispatch.
     if (fence !== null) accepted.delivery = fence.delivery

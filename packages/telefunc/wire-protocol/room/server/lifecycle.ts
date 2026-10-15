@@ -57,9 +57,11 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
   const joins = counters.get(JOINS_CELL_KEY)
   assert(holds !== undefined && joins !== undefined)
   const at = readAt ?? Math.max(holds.changedAt, joins.changedAt)
-  const record: HoldRecord = { ...config, holds: holds.value, joins: joins.value, readAt: at }
+  const { emptyTimeout, departureTimeout } = config
+  const record: HoldRecord = { emptyTimeout, departureTimeout, holds: holds.value, joins: joins.value, readAt: at }
   const timeout = unheldTimeout(record)
-  return record.holds > 0 || timeout === Infinity ? record : { ...record, closesAt: holds.changedAt + timeout }
+  if (record.holds <= 0 && timeout !== Infinity) record.closesAt = holds.changedAt + timeout
+  return record
 }
 
 /** The hold record a commit of `holdCounts(config, delta, joining)` left, and the counts before it. */
@@ -165,7 +167,7 @@ async function extendLapse({ id, inc }: RoomIncarnation, record: HoldRecord, fir
     const result = await backend.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
-      { head: { currentInc: inc, state: 'open', config: head.config }, ...(ttlMs === undefined ? {} : { ttlMs }) },
+      { head: { currentInc: inc, state: 'open', config: head.config }, ttlMs },
     )
     return 'conflict' in result ? CX_CONFLICT : undefined
   })

@@ -24,14 +24,9 @@ type StoredHead = Omit<RoomHead, 'expiresAt'> & { expiresAt: number | null }
 function materializeHead(next: HeadNext, now: number, rev: string): StoredHead {
   const { currentInc, state, config, closeLease } = next.head
   const { ttlMs } = next
-  return {
-    rev,
-    currentInc,
-    state,
-    config,
-    expiresAt: ttlMs === undefined ? null : now + ttlMs,
-    ...(closeLease === undefined ? {} : { closeLease: { id: closeLease.id, until: now + closeLease.durationMs } }),
-  }
+  const stored: StoredHead = { rev, currentInc, state, config, expiresAt: ttlMs === undefined ? null : now + ttlMs }
+  if (closeLease !== undefined) stored.closeLease = { id: closeLease.id, until: now + closeLease.durationMs }
+  return stored
 }
 
 /** A stored head as a read hands it out, with the `config` bytes the driver hands out. */

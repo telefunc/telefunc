@@ -383,8 +383,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack) + sumReceiverCounts(everyMember)
     // A commit past a turn's deliveries waits for the next turn, as a network write would, so commits can't outrun them.
     if (this._deliveries.length - this._next >= DELIVERIES_PER_TURN) await new Promise<void>(nextTurn)
-    if (delivered === null) return { accepted: true, ...mark, receivers }
-    return { accepted: true, ...mark, receivers, delivery: delivered.promise }
+    if (delivered === null) return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers }
+    return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {

@@ -19,7 +19,7 @@ function decodeSessionRecord(raw: Uint8Array): SessionRecord {
 
 /** A lease from `now`, the authority time its exchange read. */
 function sessionRecordBytes(now: number, cleaner?: string): Uint8Array {
-  const record: SessionRecord = { until: now + ROOM_SESSION_TTL_MS, ...(cleaner === undefined ? {} : { cleaner }) }
+  const record: SessionRecord = { until: now + ROOM_SESSION_TTL_MS, cleaner }
   return new TextEncoder().encode(JSON.stringify(record))
 }
 
