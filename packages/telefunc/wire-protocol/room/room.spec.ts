@@ -7013,12 +7013,15 @@ function delayDriverLane(matches: (lane: SubscribedLane) => boolean, on = here):
   const { driver } = on
   const bind = driver.subscriptions.bind.bind(driver.subscriptions)
   const releases: Array<() => void> = []
+  let released = false
   vi.spyOn(driver.subscriptions, 'bind').mockImplementation((source) => {
     const binding = bind(source)
     if (!('lane' in source) || !matches(source.lane)) return binding
     return {
       ...binding,
       open: (receiver, localReceiverCount): SubscriptionAttempt => {
+        // A planning pass opens a lane set a slice at a time, so some lanes of it can open after the release.
+        if (released) return binding.open(receiver, localReceiverCount)
         let inner: SubscriptionAttempt | null = null
         let state: SubscriptionState = 'establishing'
         const listeners = new Set<(next: SubscriptionState) => void>()
@@ -7042,6 +7045,7 @@ function delayDriverLane(matches: (lane: SubscribedLane) => boolean, on = here):
     }
   })
   return () => {
+    released = true
     for (const release of releases.splice(0)) release()
   }
 }
