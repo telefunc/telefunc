@@ -4857,6 +4857,13 @@ describe('client Room lifecycle', () => {
       expect(gc.closed()).toBe(1)
     })
   })
+  it('counts a member of the seed that leaves before the first roster out at once, and a hidden one not at all', () => {
+    const { client, emit } = fakeClient('pre-roster-leave', undefined, { count: 2 })
+    emit({ __r: 'leave', id: crypto.randomUUID(), hidden: true })
+    expect(client.count).toBe(2)
+    emit({ __r: 'leave', id: crypto.randomUUID() }, 2)
+    expect(client.count).toBe(1)
+  })
   it('does not emit onEmpty from a partial pre-roster member map', () => {
     const { client, emit } = fakeClient('pre-roster-empty', undefined, { count: 2 })
     const memberId = crypto.randomUUID()

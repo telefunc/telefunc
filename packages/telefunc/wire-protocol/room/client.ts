@@ -254,7 +254,7 @@ class ClientRoom extends RoomStateView implements Room {
         this._model.applyJoin(joinedMember(event))
         return
       case 'leave':
-        this._model.applyLeave(event.id, leaveCauseFromWire(event))
+        this._model.applyRelayedLeave(event.id, leaveCauseFromWire(event), event.hidden === true)
         return
       case 'p-meta':
         this._acceptParticipantMeta(event.id, event)
