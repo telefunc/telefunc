@@ -219,9 +219,9 @@ class RoomWrites {
   }
 
   /** A sender that left had its wait failed by its leave; only a closed room is an error. */
-  async publishDmAck(to: string, ackId: string, reply: DmReply): Promise<unknown> {
+  async publishDmAck(to: string, ackId: string, reply: DmReply): Promise<void> {
     await storeDmReply(this._host.id, this._host._incarnation.inc, to, ackId, reply)
-    return await commitToInbox(this._host.id, this._host._incarnation.inc, { __r: 'dm-ack', to, ackId, ...reply })
+    await commitToInbox(this._host.id, this._host._incarnation.inc, { __r: 'dm-ack', to, ackId, ...reply })
   }
 
   private async _resolveMember(id: string): Promise<Sender | null> {
