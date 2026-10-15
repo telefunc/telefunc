@@ -35,12 +35,12 @@ class CloudflareRoomSessionManager {
     openAuthority: () => CloudflareRoomAuthorityStub,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
+    const route = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, leaseId: crypto.randomUUID() }
     const callAuthority: AuthorityCall = (invoke) => this.callAuthority(roomId, openAuthority, invoke)
-    const source = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, callAuthority }
-    const key = entryKey(source)
-    const attempt: CloudflareRoomSubscriptionAttempt = new CloudflareRoomSubscriptionAttempt(source, receiver, {
-      onClosed: () => this.#entries.delete(key),
-    })
+    const key = entryKey(route)
+    const attempt = new CloudflareRoomSubscriptionAttempt(route, callAuthority, receiver, () =>
+      this.#entries.delete(key),
+    )
     this.#entries.set(key, attempt)
     attempt.start()
     return attempt
@@ -68,12 +68,6 @@ class CloudflareRoomSessionManager {
 /** A call to the room's authority through the session's ordered stub for it. */
 type AuthorityCall = <T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>) => Promise<T>
 
-type CloudflareRoomSubscriptionSource = Omit<RouteInstallation, 'leaseId'> & { callAuthority: AuthorityCall }
-
-type CloudflareRoomSubscriptionOptions = {
-  onClosed(): void
-}
-
 /** Ready once the authority has durably registered this attempt's exact route; Room owns retry and replacement. */
 class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   readonly #callAuthority: AuthorityCall
@@ -82,17 +76,12 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   readonly #onClosed: () => void
   #cancelRenewal: (() => void) | null = null
 
-  constructor(
-    source: CloudflareRoomSubscriptionSource,
-    receiver: BackendReceiver,
-    options: CloudflareRoomSubscriptionOptions,
-  ) {
+  constructor(route: RouteInstallation, callAuthority: AuthorityCall, receiver: BackendReceiver, onClosed: () => void) {
     super()
-    const { callAuthority, ...route } = source
     this.#callAuthority = callAuthority
-    this.#route = { ...route, leaseId: crypto.randomUUID() }
+    this.#route = route
     this.#receiver = receiver
-    this.#onClosed = options.onClosed
+    this.#onClosed = onClosed
   }
 
   start(): void {
