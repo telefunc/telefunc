@@ -179,15 +179,12 @@ function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: num
 }
 
 class MemorySubscriptionAttempt extends DriverAttempt {
-  private readonly _receiver: BackendReceiver<BackendPayload>
-  private readonly _localReceiverCount: () => number
-  private readonly _detach: () => void
-
-  constructor(receiver: BackendReceiver<BackendPayload>, localReceiverCount: () => number, detach: () => void) {
+  constructor(
+    private readonly _receiver: BackendReceiver<BackendPayload>,
+    private readonly _localReceiverCount: () => number,
+    private readonly _detach: () => void,
+  ) {
     super()
-    this._receiver = receiver
-    this._localReceiverCount = localReceiverCount
-    this._detach = detach
     this.transition('ready')
   }
 
