@@ -35,7 +35,7 @@ import {
   type InboxMessage,
   type RoomSnapshotMetadata,
 } from './protocol.js'
-import { type RoomDemandPage } from './server/protocol.js'
+import { type DemandEntry, type RoomDemandPage } from './server/protocol.js'
 import {
   HOLDS_CELL_KEY,
   JOINS_CELL_KEY,
@@ -5874,7 +5874,7 @@ describe('room protocol validation', () => {
     })
     const { report } = spyGossip(room)
     const entries = (ROOM_GOSSIP_IN_FLIGHT_MAX + 1) * ROOM_DEMAND_PAGE_ENTRIES
-    for (const track of trackNames(entries)) report._publish({ member: member.id, track }, true)
+    for (const track of trackNames(entries)) report['_tell']({ member: member.id, track }, true)
     await vi.waitFor(
       () => expect({ pages: pages >= ROOM_GOSSIP_IN_FLIGHT_MAX + 1, inFlight }).toEqual({ pages: true, inFlight: 0 }),
       {
@@ -6004,7 +6004,7 @@ describe('room protocol validation', () => {
       return commitLane(...args)
     })
     const { report } = spyGossip(room)
-    for (const track of trackNames(100 * ROOM_GOSSIP_IN_FLIGHT_MAX)) report._publish({ member: member.id, track }, true)
+    for (const track of trackNames(100 * ROOM_GOSSIP_IN_FLIGHT_MAX)) report['_tell']({ member: member.id, track }, true)
     await Room.close(room.id)
     await new Promise((resolve) => setTimeout(resolve, 100))
     expect(afterClose).toBe(0)
@@ -6513,7 +6513,7 @@ function trackNames(count: number): string[] {
 /** The room's demand report, and the entries its instance tells from now on. */
 function spyGossip(room: Room | ServerRoom) {
   const report = (room as ServerRoom)._replica.report
-  return { report, published: vi.spyOn(report, '_publish') }
+  return { report, published: vi.spyOn(report as unknown as { _tell(entry: DemandEntry, on: boolean): void }, '_tell') }
 }
 /** The whole report told again, all at once. */
 function tellAgain(report: DemandReport): void {

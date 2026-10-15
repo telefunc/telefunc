@@ -140,26 +140,21 @@ class DemandReport {
     const told = this._told
     for (const [member, tracks] of told.pairs)
       for (const track of tracks) {
-        this._publish({ member, track }, true)
+        this._tell({ member, track }, true)
         yield
       }
     for (const member of told.members) {
-      this._publish({ member }, true)
+      this._tell({ member }, true)
       yield
     }
     for (const member of told.fetched) {
-      this._publish({ member, byMember: true }, true)
+      this._tell({ member, byMember: true }, true)
       yield
     }
     for (const [track, entry] of told.tracks) {
-      this._publish(trackEntry(track, entry), true)
+      this._tell(trackEntry(track, entry), true)
       yield
     }
-  }
-
-  /** @internal */
-  _publish(entry: DemandEntry, on: boolean): void {
-    this._tell(entry, on)
   }
 
   /** Ons go before offs, so no pair reads as unreceived while one state hands over to another: a track of every member
@@ -177,21 +172,21 @@ class DemandReport {
       for (const track of byTrack) {
         if (hasEntry(planned.pairs, member, track) && !hasEntry(told.pairs, member, track)) {
           toggleEntry(told.pairs, member, track, true)
-          this._publish({ member, track }, true)
+          this._tell({ member, track }, true)
         }
         yield
       }
     for (const member of members) {
       if (planned.members.has(member) && !told.members.has(member)) {
         told.members.add(member)
-        this._publish({ member }, true)
+        this._tell({ member }, true)
       }
       yield
     }
     for (const member of fetched) {
       if (planned.fetched.has(member) && !told.fetched.has(member)) {
         told.fetched.add(member)
-        this._publish({ member, byMember: true }, true)
+        this._tell({ member, byMember: true }, true)
       }
       yield
     }
@@ -200,7 +195,7 @@ class DemandReport {
       if (planned.tracks.has(track) && told.tracks.get(track)?.byMember !== byMember) {
         const entry = { except: new Set(planned.except.get(track)), byMember }
         told.tracks.set(track, entry)
-        this._publish(trackEntry(track, entry), true)
+        this._tell(trackEntry(track, entry), true)
       }
       yield
     }
@@ -212,7 +207,7 @@ class DemandReport {
           !hasEntry(planned.except, track, member) &&
           was?.except.delete(member) === true
         )
-          this._publish({ track, member, except: true }, false)
+          this._tell({ track, member, except: true }, false)
         yield
       }
     for (const [track, byTrack] of except)
@@ -220,7 +215,7 @@ class DemandReport {
         const was = told.tracks.get(track)
         if (planned.tracks.has(track) && hasEntry(planned.except, track, member) && was?.except.has(member) === false) {
           was.except.add(member)
-          this._publish({ track, member, except: true }, true)
+          this._tell({ track, member, except: true }, true)
         }
         yield
       }
@@ -228,18 +223,18 @@ class DemandReport {
       const was = told.tracks.get(track)
       if (!planned.tracks.has(track) && was !== undefined) {
         told.tracks.delete(track)
-        this._publish(trackEntry(track, was), false)
+        this._tell(trackEntry(track, was), false)
       }
       yield
     }
     for (const member of fetched) {
-      if (!planned.fetched.has(member) && told.fetched.delete(member)) this._publish({ member, byMember: true }, false)
+      if (!planned.fetched.has(member) && told.fetched.delete(member)) this._tell({ member, byMember: true }, false)
       yield
     }
     for (const member of members) {
       if (!planned.members.has(member) && told.members.has(member)) {
         told.members.delete(member)
-        this._publish({ member }, false)
+        this._tell({ member }, false)
       }
       yield
     }
@@ -247,7 +242,7 @@ class DemandReport {
       for (const track of byTrack) {
         if (!hasEntry(planned.pairs, member, track) && hasEntry(told.pairs, member, track)) {
           toggleEntry(told.pairs, member, track, false)
-          this._publish({ member, track }, false)
+          this._tell({ member, track }, false)
         }
         yield
       }
