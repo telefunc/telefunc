@@ -335,7 +335,8 @@ class ClientRoom extends RoomStateView implements Room {
     // A part lost while offline: the next attach sends the whole roster again.
     if (stream === null || parts === null || part !== parts.next) {
       if (stream !== null) stream.parts = null
-      return this._stopRosterEvents()
+      this._stopRosterEvents()
+      return
     }
     for (const member of members) {
       parts.members.push(member)
@@ -391,7 +392,10 @@ class ClientRoom extends RoomStateView implements Room {
    *  the room-wide text wants and those of `member`, whose listeners changed, or the one binary want that did. */
   private _syncWants(member: string | null, binary: BinaryWantChange | null): void {
     const state = this._state
-    if (this._model.closed) return this._stub._setSubscribed('text', false) // a closed room takes no declaration
+    if (this._model.closed) {
+      this._stub._setSubscribed('text', false) // a closed room takes no declaration
+      return
+    }
     const text = state.textWants()
     this._stub._setSubscribed('text', text.all)
     // Declared under the room-wide stream too, so the server keeps these members' lane when that stream stops.
