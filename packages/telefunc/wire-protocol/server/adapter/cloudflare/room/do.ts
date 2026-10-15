@@ -107,30 +107,34 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   async commitLane(inc: string, lane: LaneId, payload: Uint8Array, opts?: CommitOptions): Promise<CommitWire> {
     const now = Date.now()
     const key = encodeLaneKey(lane)
-    const outcome = this.#transaction(
-      (sql): StaleCommit | { seq: number; timestamp: number; routes: RouteInstallation[] } => {
-        if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now))
-          return { stale: 'incarnation' }
-        if (opts?.requiredCellKeys !== undefined) {
-          const required = readCells(sql, inc, { keys: opts.requiredCellKeys }, now)
-          assert(!('staleInc' in required)) // the precondition just found this incarnation open
-          const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
-          if (missing !== undefined) return { stale: 'cell', key: missing }
-        }
-        const mark = advanceOrder(sql, inc, key, now)
-        if (opts?.retain === true) installRetained(sql, inc, lane, payload, mark)
-        // A binary commit also reaches its member's every-track lane and its track's every-member lane.
-        const laneKeys =
-          lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
-        return { ...mark, routes: snapshotRoutes(sql, inc, laneKeys, now) }
-      },
-    )
+    const outcome = this.#transaction((sql): StaleCommit | { mark: OrderingInfo; routes: RouteInstallation[] } => {
+      if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now))
+        return { stale: 'incarnation' }
+      if (opts?.requiredCellKeys !== undefined) {
+        const required = readCells(sql, inc, { keys: opts.requiredCellKeys }, now)
+        assert(!('staleInc' in required)) // the precondition just found this incarnation open
+        const missing = opts.requiredCellKeys.find((cell) => !required.cells.has(cell))
+        if (missing !== undefined) return { stale: 'cell', key: missing }
+      }
+      const mark = advanceOrder(sql, inc, key, now)
+      if (opts?.retain === true) installRetained(sql, inc, lane, payload, mark)
+      // A binary commit also reaches its member's every-track lane and its track's every-member lane.
+      const laneKeys =
+        lane.kind === 'binary' ? [key, everyTrackLaneKey(lane.member), everyMemberLaneKey(lane.track)] : [key]
+      return { mark, routes: snapshotRoutes(sql, inc, laneKeys, now) }
+    })
     if ('stale' in outcome) return outcome
-    const { seq, timestamp, routes } = outcome
-    const delivery = this.#fanout.send(routes, payload, { seq, timestamp })
+    const { mark, routes } = outcome
+    const delivery = this.#fanout.send(routes, payload, mark)
     if (lane.kind !== 'inbox' && lane.kind !== 'control')
-      return { accepted: true, seq, timestamp, receivers: routes.length }
-    return { accepted: true, seq, timestamp, receivers: routes.length, deliveryToken: this.#fanout.tokenOf(delivery) }
+      return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers: routes.length }
+    return {
+      accepted: true,
+      seq: mark.seq,
+      timestamp: mark.timestamp,
+      receivers: routes.length,
+      deliveryToken: this.#fanout.tokenOf(delivery),
+    }
   }
 
   async awaitDelivery(token: string): Promise<void> {
