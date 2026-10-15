@@ -126,15 +126,14 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     if ('stale' in outcome) return outcome
     const { mark, routes } = outcome
     const delivery = this.#fanout.send(routes, payload, mark)
-    if (lane.kind !== 'inbox' && lane.kind !== 'control')
-      return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers: routes.length }
-    return {
+    const receipt: Extract<CommitWire, { accepted: true }> = {
       accepted: true,
       seq: mark.seq,
       timestamp: mark.timestamp,
       receivers: routes.length,
-      deliveryToken: this.#fanout.tokenOf(delivery),
     }
+    if (lane.kind === 'inbox' || lane.kind === 'control') receipt.deliveryToken = this.#fanout.tokenOf(delivery)
+    return receipt
   }
 
   async awaitDelivery(token: string): Promise<void> {
@@ -158,8 +157,8 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   }
 
   async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
+    const now = Date.now()
     const result = this.#transaction((sql): RegisterWire => {
-      const now = Date.now()
       if (!isOpenIncarnation(readLiveHead(sql, now), route.inc))
         return { rejected: true, reason: `room has no open incarnation '${route.inc}'` }
       upsertRoute(sql, route, now)
