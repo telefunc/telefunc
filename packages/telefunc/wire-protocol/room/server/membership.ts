@@ -76,7 +76,6 @@ async function readPrefix(roomId: string, inc: string, prefix: string): Promise<
   return (await readPrefixAt(roomId, inc, prefix)).cells
 }
 
-/** `now` is the authority time of the last page. */
 /** Cells read, and the authority time of the last page's read. */
 type CellsAt = { cells: Map<string, Uint8Array>; now: number }
 
