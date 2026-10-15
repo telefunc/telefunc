@@ -350,7 +350,7 @@ describe('Room public behavior', () => {
     const { stub, peer } = serve(room)
     const reconciled = await joinThrough(stub)
     const vanished = await joinThrough(stub)
-    await vi.waitFor(() => expect(memberEvents(peer, vanished).map((event) => event.__r)).toEqual(['join']))
+    await vi.waitFor(() => expect(memberEvents(peer, vanished).map((event) => event.__r)).toEqual(['joined', 'join']))
     const causes: unknown[] = []
     room.onLeave((_, cause) => causes.push(cause))
     const leaves = (id: string) => memberEvents(peer, id).filter((event) => event.__r === 'leave')
@@ -5010,6 +5010,37 @@ describe('client Room lifecycle', () => {
     expect(causes).toEqual(['removed'])
     expect(client.count).toBe(0)
   })
+  it("reports another member's leave with its cause to a page that reconnects while its own join is pending", async () => {
+    const room = (await Room.create('reattach-during-join')) as ServerRoom
+    const other = await room.join()
+    const stub = register(room)
+    const first = attachPeer(stub)
+    await vi.waitFor(() => expect(rosterEnded(first)).toBe(true))
+    const ack = createDeferred<{ id: string; joinedAt: number }>()
+    const { client, emit } = fakeClient(room.id, {
+      send: async (message) => ((message as { __r?: string }).__r === 'req-join' ? await ack.promise : undefined),
+    })
+    const feed = (frames: ReturnType<Peer['decoded']>) => {
+      for (const frame of frames) if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
+    }
+    feed(first.decoded())
+    const causes: unknown[] = []
+    client.onLeave((member, cause) => causes.push([member.id === other.id, cause.type]))
+    const lastSeq = Math.max(...first.decoded().map((frame) => ('seq' in frame ? frame.seq : 0)))
+    stub._onPeerDisconnect(first.peer, 1_000)
+    const joining = client.join()
+    await other.leave()
+    // Back online: the replayed leave, then a fresh roster without `other`, all before the join's answer.
+    const second = attachPeer(stub, lastSeq)
+    await vi.waitFor(() => expect(rosterEnded(second)).toBe(true))
+    const fed = second.decoded().length
+    feed(second.decoded())
+    const id = await joinThrough(stub)
+    feed(second.decoded().slice(fed))
+    ack.resolve({ id, joinedAt: Date.now() })
+    await joining
+    expect(causes).toEqual([[true, 'left']])
+  })
   it('sends DMs from a client participant, and rejects an option a client call does not have', async () => {
     const requests: unknown[] = []
     const { id, ack, emit, joining, client } = await pendingClientJoin('client-unknown-options', (message) => {
@@ -6608,9 +6639,9 @@ function serve(room: ServerRoom): { stub: RoomStubChannel; peer: Peer } {
   const stub = register(room)
   return { stub, peer: attachPeer(stub) }
 }
-/** A client's join through its Room stub; returns the member id. */
+/** A client's first join through its Room stub; returns the member id. */
 async function joinThrough(stub: RoomStubChannel, meta: ParticipantMeta = {}): Promise<string> {
-  return ((await stub._handleRequest({ __r: 'req-join', meta, selfDelivery: true })) as { id: string }).id
+  return ((await stub._handleRequest({ __r: 'req-join', reqId: 0, meta, selfDelivery: true })) as { id: string }).id
 }
 async function createTail(id: string) {
   await Room.create(id)
@@ -6797,8 +6828,10 @@ async function pendingClientJoin(roomId: string, onSend?: (message: unknown) => 
   const ack = createDeferred<{ id: string; joinedAt: number }>()
   const { fake, client, emit } = fakeClient(roomId, {
     send: async (message) => {
-      if ((message as { __r?: string }).__r === 'req-join') return await ack.promise
-      return await onSend?.(message)
+      const request = message as { __r?: string; reqId?: number }
+      if (request.__r !== 'req-join') return await onSend?.(message)
+      emit({ __r: 'joined', reqId: request.reqId, id }, 0)
+      return await ack.promise
     },
   })
   const joining = client.join()

@@ -7,6 +7,7 @@ export type {
   RemoteParticipantMetadata,
   RoomEnvelope,
   RoomRosterEvent,
+  RoomJoinedEvent,
   RoomDemandEvent,
   RoomCtrlEnvelope,
   RoomMetaEntry,
@@ -101,6 +102,8 @@ type RoomRosterEvent =
   | { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true }
   | { __r: 'roster-error' }
   | { __r: 'rewound' }
+/** To the client whose `req-join` (`reqId`) admitted the member, before any event naming it. */
+type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }
 /** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a reattached client
  *  gets the member's whole wanted set, since its offline buffer may have dropped changes. */
 type RoomDemandEvent =
@@ -131,7 +134,7 @@ type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false
 
 /** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast subscription, which reattaches before `onOpen`. */
 type RoomStubRequest =
-  | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
+  | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
   | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }

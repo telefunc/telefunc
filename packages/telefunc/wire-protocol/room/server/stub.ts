@@ -49,6 +49,7 @@ import {
   type RoomDataPublish,
   type RoomDemandEvent,
   type RoomDmEnvelope,
+  type RoomJoinedEvent,
   type RoomRosterEvent,
 } from '../protocol.js'
 import { type RoomDataEnvelope } from './protocol.js'
@@ -96,7 +97,7 @@ abstract class RoomRequestChannel extends ServerChannel {
 }
 
 /** An event an instance originates, outside any lane's order. */
-function unorderedEventText(event: RoomCtrlEnvelope | RoomRosterEvent | RoomDemandEvent): string {
+function unorderedEventText(event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent): string {
   return encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() })
 }
 
@@ -286,9 +287,11 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     return id
   }
 
-  _addMember(id: string, selfDelivery: boolean): void {
+  /** Takes the member its client's `req-join` (`reqId`) admitted, and tells the client before any event naming it. */
+  _addMember(reqId: number, id: string, selfDelivery: boolean): void {
     this._members.add(id)
     if (!selfDelivery) this._selfSuppressed.add(id)
+    this._sendPublish(unorderedEventText({ __r: 'joined', reqId, id }))
   }
 
   _forgetMember(id: string): void {

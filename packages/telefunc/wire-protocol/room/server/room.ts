@@ -398,7 +398,7 @@ class ServerRoom extends RoomStateView implements Room {
       hidden: false,
     }
     await this._admit(admission, () => {
-      stub._addMember(admission.id, req.selfDelivery)
+      stub._addMember(req.reqId, admission.id, req.selfDelivery)
       if (this._stubs.has(stub)) {
         this._stubOf.set(admission.id, stub)
         this._replica.own(admission.id, this)

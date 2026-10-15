@@ -25,6 +25,7 @@ import {
   type RoomDmEnvelope,
   type SenderStamp,
   type RoomEnvelope,
+  type RoomJoinedEvent,
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
@@ -47,7 +48,9 @@ import type {
 } from './types.js'
 
 /** The member an event concerns while that member's join may still be settling. */
-function heldMemberOf(event: RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent): string | null {
+function heldMemberOf(
+  event: RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent,
+): string | null {
   switch (event.__r) {
     case 'dm':
       return event.to
@@ -63,6 +66,8 @@ function heldMemberOf(event: RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | R
 
 /** One awaiter of a conflated publish, resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
+/** A join awaiting its ack: the member the server admitted, once `joined` names it, and the events naming that member. */
+type PendingJoin = { id: string | null; held: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> }
 type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
 
 /** A server room through one Broadcast stub: its frames carry events and data, its acked messages requests. */
@@ -73,9 +78,11 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly _model: RoomModel
   protected readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
-  /** Joins awaiting their ack. The server relays to a member from its admission, before the ack registers it here, so events naming an unknown member wait for the joins to settle. */
-  private _pendingJoins = 0
-  private _heldForJoins: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> = []
+  /** Joins awaiting their ack, by request, and by the member `joined` named. The server relays to a member from its
+   *  admission, before the ack registers it here, so events naming it wait for its ack. */
+  private readonly _joins = new Map<number, PendingJoin>()
+  private readonly _joiners = new Map<string, PendingJoin>()
+  private _joinReqs = 0
   /** The wants the server stub holds, as last declared; a fresh stub holds none. */
   private _declaredAnnounce = false
   private readonly _declaredText = new Set<string>()
@@ -135,9 +142,11 @@ class ClientRoom extends RoomStateView implements Room {
       'join() options.hidden is server-side only: a hidden participant is created by the granting telefunction (server-side join({ hidden: true })), not by a client.',
     )
     const { meta, selfDelivery } = normalizeJoinOptions(options)
-    this._pendingJoins++
+    const reqId = this._joinReqs++
+    const join: PendingJoin = { id: null, held: [] }
+    this._joins.set(reqId, join)
     try {
-      const { id, joinedAt } = (await this._request({ __r: 'req-join', meta, selfDelivery })) as {
+      const { id, joinedAt } = (await this._request({ __r: 'req-join', reqId, meta, selfDelivery })) as {
         id: string
         joinedAt: number
       }
@@ -151,15 +160,10 @@ class ClientRoom extends RoomStateView implements Room {
       this._model.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
       return participant
     } finally {
-      this._pendingJoins--
-      const held = this._heldForJoins
-      this._heldForJoins = []
-      for (const { envelope, rawInfo } of held) this._onEnvelope(envelope, rawInfo)
+      this._joins.delete(reqId)
+      if (join.id !== null) this._joiners.delete(join.id)
+      for (const { envelope, rawInfo } of join.held) this._onEnvelope(envelope, rawInfo)
     }
-  }
-
-  private _holdsForJoin(memberId: string): boolean {
-    return this._pendingJoins > 0 && !this._localParticipants.has(memberId)
   }
 
   async getParticipants(options?: { hidden?: boolean }): Promise<RemoteParticipant[]> {
@@ -231,13 +235,21 @@ class ClientRoom extends RoomStateView implements Room {
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     assert(hasRoomTag(envelope))
-    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomDemandEvent
+    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
     const member = heldMemberOf(event)
-    if (member !== null && this._holdsForJoin(member)) {
-      this._heldForJoins.push({ envelope, rawInfo })
+    const join = member === null ? undefined : this._joiners.get(member)
+    if (join !== undefined) {
+      join.held.push({ envelope, rawInfo })
       return
     }
     switch (event.__r) {
+      case 'joined': {
+        const joined = this._joins.get(event.reqId)
+        if (joined === undefined) return
+        joined.id = event.id
+        this._joiners.set(event.id, joined)
+        return
+      }
       case 'roster':
         this._onRosterPart(event)
         return

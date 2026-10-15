@@ -48,6 +48,10 @@ function flag(value: unknown, what: string): boolean {
   if (typeof value !== 'boolean') malformed(what)
   return value
 }
+function integer(value: unknown, what: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) malformed(what)
+  return value
+}
 function optionalTrue(value: unknown, what: string): boolean {
   if (value !== undefined && value !== true) malformed(what)
   return value === true
@@ -57,7 +61,12 @@ function decodeRoomRequest(value: unknown): RoomRequest {
   const req = record(value, 'request')
   switch (req.__r) {
     case 'req-join':
-      return { __r: 'req-join', meta: record(req.meta, 'join meta'), selfDelivery: flag(req.selfDelivery, 'join') }
+      return {
+        __r: 'req-join',
+        reqId: integer(req.reqId, 'join'),
+        meta: record(req.meta, 'join meta'),
+        selfDelivery: flag(req.selfDelivery, 'join'),
+      }
     case 'req-leave':
       return { __r: 'req-leave', id: memberId(req.id, 'leave') }
     case 'req-set-meta':
