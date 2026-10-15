@@ -24,15 +24,17 @@ export type { CellPage }
 
 // Room-DO `transactionSync` makes head CX, cell batches, and order advance atomic under authority time.
 
-import type {
-  CellCounter,
-  CellsCx,
-  CxResult,
-  HeadCx,
-  HeadNext,
-  CellSelector,
-  CellsRead,
-  DirectoryPage,
+import {
+  CELL_PAGE_SIZE,
+  DIRECTORY_PAGE_SIZE,
+  type CellCounter,
+  type CellsCx,
+  type CxResult,
+  type HeadCx,
+  type HeadNext,
+  type CellSelector,
+  type CellsRead,
+  type DirectoryPage,
 } from '../../../../backend/room/contract.js'
 import {
   countCell,
@@ -81,9 +83,6 @@ function initSchema(sql: SqlStorage): void {
     CREATE INDEX IF NOT EXISTS directory_check_at ON directory(check_at);
   `)
 }
-
-const DIRECTORY_PAGE_SIZE = 100
-const CELL_PAGE_SIZE = 1024
 
 // A NULL check_at is never due.
 function directoryPut(sql: SqlStorage, roomId: string, incTag: string, checkAt: number): void {

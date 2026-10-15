@@ -1,3 +1,4 @@
+export { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE }
 export type {
   CellMutation,
   CellExpectation,
@@ -28,6 +29,11 @@ export type {
 
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
+
+/** The cells a prefix read's page holds. */
+const CELL_PAGE_SIZE = 1024
+/** The entries a directory list's or due read's page holds. */
+const DIRECTORY_PAGE_SIZE = 100
 
 /** Each lane is its own ordering domain: one semantic, one control, one demand, one per member for inbox, and one per
  *  (member, track) for binary. */
