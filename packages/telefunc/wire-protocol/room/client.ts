@@ -68,6 +68,9 @@ function heldMemberOf(event: ClientRoomEvent): string | null {
 
 /** One awaiter of a conflated publish, resolved with the winning send's receipt (see `_drainCoalesce`). */
 type CoalesceWaiter = { resolve: (ack: ChannelPublishAck) => void; reject: (err: unknown) => void }
+/** A key's conflation: at most one send in flight, while the newest value waits in `pending`, superseding any
+ *  earlier one. */
+type CoalesceSlot = { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
 /** A join awaiting its ack: the member the server admitted, once `joined` names it, and the events naming that member. */
 type PendingJoin = { id: string | null; held: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> }
 /** The rosters streaming in or applying, from the first part of the first until the last applies. */
@@ -433,11 +436,8 @@ class ClientRoom extends RoomStateView implements Room {
 }
 
 abstract class ClientParticipantBase extends ParticipantBase {
-  /** Per-key conflation state for `publish(data, { coalesce })`: at most one in-flight send per key; while it's in flight the newest value waits in `pending` and supersedes any earlier one. */
-  private readonly _coalescers = new Map<
-    string,
-    { sending: boolean; pending: { data: unknown; retain?: boolean; waiters: CoalesceWaiter[] } | null }
-  >()
+  /** `publish(data, { coalesce })`'s conflation, by key. */
+  private readonly _coalescers = new Map<string, CoalesceSlot>()
   private readonly _wantedTracks = new Set<TrackKey>()
   private readonly _bufferLimit: number
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
