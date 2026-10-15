@@ -1,6 +1,7 @@
 export { LaneSubscription }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
+import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
 import type { BackendSubscription } from '../../backend/subscription.js'
 assertIsNotBrowser()
 
@@ -13,7 +14,7 @@ class LaneSubscription {
   private _subscribe: (() => BackendSubscription) | null = null
   private _unobserve: (() => void) | null = null
   private _readyPromise = Promise.resolve()
-  private _resolveReady: (() => void) | null = null
+  private _pendingReady: Deferred<void> | null = null
   private _delivering = false
 
   constructor(
@@ -122,18 +123,17 @@ class LaneSubscription {
   }
 
   private _ensurePendingReady(): void {
-    if (this._resolveReady !== null) return
-    this._readyPromise = new Promise<void>((resolve) => {
-      this._resolveReady = resolve
-    })
+    if (this._pendingReady !== null) return
+    this._pendingReady = createDeferred()
+    this._readyPromise = this._pendingReady.promise
     this._onPending(this, true)
   }
 
   private _settleReady(): void {
     if (this._subscribe !== null) this._delivering = true
-    if (this._resolveReady === null) return
-    this._resolveReady()
-    this._resolveReady = null
+    if (this._pendingReady === null) return
+    this._pendingReady.resolve()
+    this._pendingReady = null
     this._onPending(this, false)
   }
 }
