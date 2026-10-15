@@ -282,6 +282,35 @@ describe('memory backend behind the supervised consumer', () => {
     })
     await everyMember.unsubscribe()
   })
+  it('readies a lane subscribed while a commit is being delivered only once the lanes it was committed to have it', async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'handoff',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    const events: string[] = []
+    const everyMember = backend.subscribeLane(
+      'handoff',
+      'inc-1',
+      { kind: 'binary-track', track: 'mic' },
+      (payload) => void events.push(`every-member lane: ${decoder.decode(payload)}`),
+    )
+    await everyMember.ready
+    const commit = backend.commitLane(
+      'handoff',
+      'inc-1',
+      { kind: 'binary', member: 'a', track: 'mic' },
+      encoder.encode('1'),
+    )
+    // The lane replacing the every-member lane: once it is ready, the room stops the every-member lane.
+    const everyTrack = backend.subscribeLane('handoff', 'inc-1', { kind: 'binary-all', member: 'a' }, () => {})
+    if (everyTrack.state() === 'ready') events.push('every-track lane ready')
+    everyTrack.onStateChange((state) => void (state === 'ready' && events.push('every-track lane ready')))
+    await Promise.all([everyTrack.ready, commit])
+    expect(events).toEqual(['every-member lane: 1', 'every-track lane ready'])
+    await Promise.all([everyMember.unsubscribe(), everyTrack.unsubscribe()])
+  })
   it("lists one member's retained binary lanes from its own index, not by scanning the room's", async () => {
     const backend = getRoomBackend()
     await backend.compareExchangeHead(

@@ -178,6 +178,9 @@ class MemorySubscriptionAttempt extends DriverAttempt {
     private readonly _detach: () => void,
   ) {
     super()
+  }
+
+  establish(): void {
     this.transition('ready')
   }
 
@@ -203,6 +206,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   private readonly _deliveries: Array<() => void> = []
   private _next = 0
   private _deliveredThisTurn = 0
+  /** Lane commits whose delivery is not queued yet. */
+  private _committing = 0
   constructor(options: MemoryBackendOptions = {}) {
     this._state = options.state ?? new MemoryBackendState()
     this.subscriptions = {
@@ -355,14 +360,16 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const everyMember = binary ? (gen.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
     const delivered = lane.kind === 'inbox' || lane.kind === 'control' ? createDeferred() : null
     // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
-    queueMicrotask(() =>
+    this._committing++
+    queueMicrotask(() => {
+      this._committing--
       this._deliver(() => {
         for (const target of targets) target.deliver(copyBytes(frame), mark)
         for (const target of everyTrack) target.deliver(copyBytes(frame), mark)
         for (const target of everyMember) target.deliver(copyBytes(frame), mark)
         delivered?.resolve()
-      }),
-    )
+      })
+    })
     const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack) + sumReceiverCounts(everyMember)
     // A commit past a turn's deliveries waits for the next turn, as a network write would, so commits can't outrun them.
     if (this._deliveries.length - this._next >= DELIVERIES_PER_TURN) await new Promise<void>(nextTurn)
@@ -438,6 +445,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       removeSubscription(subs, key, sub),
     )
     subs.set(key, [...(subs.get(key) ?? []), sub])
+    // Ready once what was committed before it is delivered, as a network subscriber hears its confirmation after the
+    // messages sent before it: a lane it replaces delivers those first.
+    if (this._committing === 0 && this._deliveries.length === this._next) sub.establish()
+    else queueMicrotask(() => this._deliver(() => sub.establish()))
     return sub
   }
 
