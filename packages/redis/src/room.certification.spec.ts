@@ -910,7 +910,7 @@ process.exit(0)`,
   let output = ''
   server.stdout.on('data', (chunk) => (output += chunk))
   return new Promise((resolve, reject) =>
-    server.on('exit', (code) => (code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`exit ${code}`)))),
+    server.on('close', (code) => (code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`exit ${code}`)))),
   )
 }
 
@@ -999,7 +999,7 @@ process.exit(0)`,
   let output = ''
   server.stdout.on('data', (chunk) => (output += chunk))
   return new Promise((resolve, reject) =>
-    server.on('exit', (code) => (code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`exit ${code}`)))),
+    server.on('close', (code) => (code === 0 ? resolve(JSON.parse(output)) : reject(new Error(`exit ${code}`)))),
   )
 }
 
