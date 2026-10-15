@@ -48,10 +48,11 @@ import type {
   Sender,
 } from './types.js'
 
+/** What a room's stub relays to its client on the text lane. */
+type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
+
 /** The member an event concerns while that member's join may still be settling. */
-function heldMemberOf(
-  event: RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent,
-): string | null {
+function heldMemberOf(event: ClientRoomEvent): string | null {
   switch (event.__r) {
     case 'dm':
       return event.to
@@ -237,7 +238,7 @@ class ClientRoom extends RoomStateView implements Room {
 
   private _onEnvelope(envelope: unknown, rawInfo: ChannelPublishInfo): void {
     assert(hasRoomTag(envelope))
-    const event = envelope as RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
+    const event = envelope as ClientRoomEvent
     const member = heldMemberOf(event)
     const join = member === null ? undefined : this._joiners.get(member)
     if (join !== undefined) {
