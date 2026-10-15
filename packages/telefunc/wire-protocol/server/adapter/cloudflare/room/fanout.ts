@@ -37,7 +37,7 @@ class Fanout {
       this.#calls.call(
         route.sessionDoId,
         () => this.#sessions.get(this.#sessions.idFromString(route.sessionDoId)),
-        (session) => session.telefuncRoomDeliver({ ...route, payload, info }),
+        (session) => session.telefuncRoomDeliver({ route, payload, info }),
       ),
     )
     return Promise.allSettled(handoffs).then((outcomes) => reportLostDeliveries('Cloudflare Room delivery', outcomes))

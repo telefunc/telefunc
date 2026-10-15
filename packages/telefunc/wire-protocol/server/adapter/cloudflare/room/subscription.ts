@@ -11,7 +11,8 @@ import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub } from './backend.js'
 import type { RegisterWire } from './do.js'
 
-type RoomSessionDeliveryRequest = RouteInstallation & {
+type RoomSessionDeliveryRequest = {
+  route: RouteInstallation
   payload: Uint8Array
   info: OrderingInfo
 }
@@ -59,8 +60,8 @@ class CloudflareRoomSessionManager {
   /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
    *  the authority's route lapses with the lease. */
   deliver(request: RoomSessionDeliveryRequest): void {
-    const entry = this.#entries.get(entryKey(request))
-    if (entry?.leaseId !== request.leaseId) return
+    const entry = this.#entries.get(entryKey(request.route))
+    if (entry?.leaseId !== request.route.leaseId) return
     entry.deliver(request.payload, request.info)
   }
 }

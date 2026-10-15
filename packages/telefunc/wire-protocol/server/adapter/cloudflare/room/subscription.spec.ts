@@ -7,8 +7,7 @@ import { CloudflareRoomSessionManager, type CloudflareRoomSubscriptionAttempt } 
 const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const
 const route = { roomId: 'room', inc: 'inc', laneKey: encodeLaneKey({ kind: 'semantic' }), sessionDoId: 'session' }
 const frame = (byte: number, leaseId: string) => ({
-  ...route,
-  leaseId,
+  route: { ...route, leaseId },
   payload: new Uint8Array([byte]),
   info: { seq: byte, timestamp: 1 },
 })
