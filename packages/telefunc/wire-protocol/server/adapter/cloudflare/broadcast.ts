@@ -269,14 +269,10 @@ class CloudflareBroadcastMember {
   ): CloudflareBroadcastSubscriptionAttempt {
     const routeKey = broadcastRouteKey(route)
     const memberRoute = this.#ensureRoute(route, routeKey)
-    const attempt: CloudflareBroadcastSubscriptionAttempt = new CloudflareBroadcastSubscriptionAttempt(
-      memberRoute,
-      receiver,
-      async () => {
-        this.#subscriptions.delete(routeKey)
-        await this.#teardownIfEmpty(routeKey)
-      },
-    )
+    const attempt = new CloudflareBroadcastSubscriptionAttempt(memberRoute, receiver, async () => {
+      this.#subscriptions.delete(routeKey)
+      await this.#teardownIfEmpty(routeKey)
+    })
     this.#subscriptions.set(routeKey, attempt)
     return attempt
   }
