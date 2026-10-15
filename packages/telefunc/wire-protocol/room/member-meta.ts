@@ -91,7 +91,8 @@ class MemberMeta {
       return 'applied'
     }
     if (update.seq > this._seq + 1) return 'gap'
-    ;(this._merges ??= []).push(update.attrs)
+    this._merges ??= []
+    this._merges.push(update.attrs)
     this._mergedKeys += Object.keys(update.attrs).length
     this._seq = update.seq
     if (this._mergedKeys > Math.max(MEMBER_META_MERGES_HELD_MIN, this._keys)) this._fold(this._merges)
