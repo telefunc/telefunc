@@ -24,8 +24,10 @@ const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = 
       }
       return fn(...args)
     })
+    const metadata: FunctionContract['metadata'] = { channelId: channel.id }
+    if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
     return {
-      metadata: { channelId: channel.id, ...(maxFrameBytes && { maxFrameBytes }) },
+      metadata,
       async close() {
         await channel.close()
       },

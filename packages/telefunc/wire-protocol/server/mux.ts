@@ -472,11 +472,11 @@ class ChannelMux {
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
   ): Promise<ReconcileOutcome | null> {
-    const now = performance.now()
-    entry.state.lastReceivedAt = now
-    entry.state.deliveries.note(now, rawFrame.byteLength)
-    this.answerArrival(entry, connection)
     const { state } = entry
+    const now = performance.now()
+    state.lastReceivedAt = now
+    state.deliveries.note(now, rawFrame.byteLength)
+    this.answerArrival(entry, connection)
     let frame: Uint8Array<ArrayBuffer> | null
     try {
       const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
