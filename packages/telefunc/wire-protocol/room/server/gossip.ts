@@ -64,11 +64,7 @@ class GossipOutbox {
   private _send(): void {
     const slice = this._slice
     if (slice === null || this._yielding) return
-    for (
-      ;
-      this._inFlight < ROOM_GOSSIP_IN_FLIGHT_MAX && (this._waiting.length > 0 || this._renewing);
-      this._inFlight++
-    ) {
+    while (this._inFlight < ROOM_GOSSIP_IN_FLIGHT_MAX && (this._waiting.length > 0 || this._renewing)) {
       if (slice.over) {
         this._yielding = true
         void slice.next().then(() => {
@@ -81,6 +77,7 @@ class GossipOutbox {
       const wants: Want[] = []
       while (wants.length < ROOM_DEMAND_PAGE_ENTRIES && this._waiting.length > 0) wants.push(this._waiting.shift()!)
       const page: RoomDemandPage = { __r: 'demand', instance: this._instance, page: ++this._pages, wants }
+      this._inFlight++
       // A stale commit is a closed room's: its gossip has no reader.
       void getRoomBackend()
         .commitLane(this._roomId, this._inc, DEMAND_LANE, encodeDemandPage(page))
