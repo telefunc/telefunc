@@ -73,7 +73,7 @@ The client default is `['sse', 'ws']` — start on SSE, then upgrade to WebSocke
 
 All channels share a single multiplexed connection per server URL, so opening many channels doesn't open many connections.
 
-> On Node.js, set `requestTimeout = 0` on your HTTP server (with Express, `app.listen(3000).requestTimeout = 0`): otherwise, in browsers such as Chrome, Node.js ends a page's `'sse'` connection every 300 seconds and the page reconnects.
+> On Node.js behind an HTTP/2 proxy, set `requestTimeout = 0` on your HTTP server (with Express, `app.listen(3000).requestTimeout = 0`): otherwise, in browsers such as Chrome, Node.js ends a page's `'sse'` connection every 300 seconds and the page reconnects.
 
 ### Comparison
 
