@@ -151,8 +151,7 @@ function prefixEnd(prefix: string): string | null {
 
 // A lapsed tombstone reads absent; `now` is authority time.
 function readLiveHead(sql: SqlStorage, now: number): StoredHead | null {
-  const rows = sql.exec<HeadRow>('SELECT * FROM head WHERE id = 1').toArray()
-  const row = rows[0]
+  const row = sql.exec<HeadRow>('SELECT * FROM head WHERE id = 1').toArray()[0]
   if (row === undefined) return null
   if (row.expires_at !== null && row.expires_at <= now) return null
   const head: StoredHead = {
