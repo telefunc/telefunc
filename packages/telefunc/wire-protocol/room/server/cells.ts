@@ -74,7 +74,7 @@ function sessionMemberCellKey(session: string, memberId: string): string {
   return sessionMemberCellPrefix(session) + memberId
 }
 function memberIdOfSessionMemberKey(key: string): string {
-  return key.slice(key.indexOf(':', 3) + 1)
+  return key.slice(key.lastIndexOf(':') + 1)
 }
 /** One per page holding the room: its view, under the session that wrote it. */
 function sessionViewCellPrefix(session: string): string {
