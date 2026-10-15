@@ -68,14 +68,6 @@ class RoomSubscriptions {
   // Every lane shares these, so an owned member's inbox lane makes none; declared before the lanes made here.
   private readonly _onLaneTerminal = (slot: LaneSubscription, error?: unknown) => this._onTerminal(slot, error)
   private readonly _onLaneRecovered = () => void this._host.sync.reconcileAuthority().catch(reportRoomError)
-  private readonly _onBinaryPending = (slot: LaneSubscription, pending: boolean) => {
-    if (!pending) {
-      this._binaryPending.delete(slot)
-      return
-    }
-    this._binaryPending.add(slot)
-    this._binaryReady = null
-  }
   /** Whether some handle observes the room, which the control lane serves. */
   private _observing = false
   private readonly _control = this._newLaneSubscription()
@@ -760,6 +752,15 @@ class RoomSubscriptions {
       queue()
       this._schedulePlan()
     })
+  }
+
+  private _onBinaryPending(slot: LaneSubscription, pending: boolean): void {
+    if (!pending) {
+      this._binaryPending.delete(slot)
+      return
+    }
+    this._binaryPending.add(slot)
+    this._binaryReady = null
   }
 
   private _onTerminal(slot: LaneSubscription, failure?: unknown): void {
