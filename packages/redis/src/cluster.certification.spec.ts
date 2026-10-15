@@ -11,7 +11,7 @@ import {
   getRoomBackend,
 } from '../../telefunc/dist/wire-protocol/backend/install.js'
 import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
-import { broadcastSequenceKey, channelKey, generationKeysKey, headKey, orderKey } from './keys.js'
+import { broadcastSequenceKey, channelKey, headKey, orderKey, retainedLanesKey } from './keys.js'
 import { REDIS_COMMANDS, REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 type RedisClusterNode = { host: string; port: number }
 type Master = RedisClusterNode & { id: string; ranges: Array<[number, number]>; client: Redis }
@@ -375,7 +375,7 @@ process.exit(0)`,
     expect(retained?.seq).toBe(Number.MAX_SAFE_INTEGER)
     expect([...new Uint8Array(retained?.payload ?? [])]).toEqual([...Buffer.from('last')])
   })
-  it('keeps the generation manifest complete across a reshard', async () => {
+  it("lists a generation's retained lanes across a reshard", async () => {
     const prefix = uniquePrefix('reshard-inventory')
     const client = ownCluster()
     await client.ping()
@@ -393,7 +393,7 @@ process.exit(0)`,
     const smembers = commandClient.smembers.bind(commandClient)
     let relocation: Promise<void> | undefined
     vi.spyOn(commandClient, 'smembers').mockImplementation((async (key: string) => {
-      if (key === generationKeysKey(prefix, roomId, inc)) await (relocation ??= moveSlot(slotNumber, source, target))
+      if (key === retainedLanesKey(prefix, roomId, inc)) await (relocation ??= moveSlot(slotNumber, source, target))
       return await smembers(key)
     }) as never)
     try {

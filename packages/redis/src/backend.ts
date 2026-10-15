@@ -40,7 +40,7 @@ import {
   orderKey,
   assertKeyPrefix,
   retainedKey,
-  retainedKeyPrefix,
+  retainedLanesKey,
   retainedOfKey,
   retainedOfTrackKey,
   commitChannels,
@@ -202,16 +202,13 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
-    if (of !== undefined) {
-      const index =
+    let index = retainedLanesKey(this._prefix, roomId, inc)
+    if (of !== undefined)
+      index =
         'member' in of
           ? retainedOfKey(this._prefix, roomId, inc, of.member)
           : retainedOfTrackKey(this._prefix, roomId, inc, of.track)
-      return (await this._publisher.smembers(index)).map(decodeLaneKey)
-    }
-    const prefix = retainedKeyPrefix(this._prefix, roomId, inc)
-    const keys = (await this._generationKeys(roomId, inc)).filter((key) => key.startsWith(prefix))
-    return keys.map((physical) => decodeLaneKey(physical.slice(prefix.length)))
+    return (await this._publisher.smembers(index)).map(decodeLaneKey)
   }
 
   deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
@@ -308,10 +305,6 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
       for (const [i, laneKey] of page.lanes.entries()) if (marks[i] !== null) starts.set(laneKey, marks[i]!)
     } while (cursor !== '0')
     return starts
-  }
-
-  private _generationKeys(roomId: string, inc: string): Promise<string[]> {
-    return this._publisher.smembers(generationKeysKey(this._prefix, roomId, inc))
   }
 
   private async _run<Input, Output>(command: RedisCommand<Input, Output>, input: Input): Promise<Output> {

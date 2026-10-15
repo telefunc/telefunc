@@ -37,6 +37,7 @@ import {
   memberOrderKey,
   orderKey,
   retainedKey,
+  retainedLanesKey,
   retainedOfKey,
   retainedOfTrackKey,
   revKey,
@@ -330,7 +331,8 @@ return reply
 //         [7]=a binary lane's member's every-track channel (another lane repeats [4])
 //         [8]=a retained binary lane's member's retained lanes [9]=its track's retained lanes (another commit repeats
 //         [3] for both) [10]=a binary lane's track's every-member channel (another lane repeats [4]) [11]=a binary
-//         lane's track's lane set, which its first commit enters (another lane repeats [2])
+//         lane's track's lane set, which its first commit enters (another lane repeats [2]) [12]=the generation's
+//         retained lanes
 //   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
 //         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9]=the same as [6] for
 //         [10] or '' [10..]=required live cells
@@ -384,7 +386,8 @@ local frame = tf_ordering_frame(seq, ts, ARGV[5])
 if ARGV[4] == '1' then
   -- A lane holding a retained frame is already indexed: its frame and index entries leave together.
   if redis.call('EXISTS', retained_key) == 0 then
-    redis.call('SADD', generation_keys_key, retained_key)
+    redis.call('SADD', generation_keys_key, retained_key, KEYS[12])
+    redis.call('SADD', KEYS[12], ARGV[8])
     if ARGV[2] == 'binary' then
       redis.call('SADD', KEYS[8], ARGV[8])
       redis.call('SADD', KEYS[9], ARGV[8])
@@ -411,8 +414,8 @@ return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',
 
 // Deletes one lane's retained frame, optionally only while it still holds seq ARGV[1].
 //   KEYS: [1]=generation-keys [2]=retained [3]=a binary lane's member's retained lanes [4]=its track's retained lanes
-//         (another lane repeats [2] for both)
-//   ARGV: [1]=ifSeq or '' [2]=a binary lane's key or ''
+//         (another lane repeats [2] for both) [5]=the generation's retained lanes
+//   ARGV: [1]=ifSeq or '' [2]=lane kind [3]=lane key
 const RETAINED_DELETE_LUA = `
 if ARGV[1] ~= '' then
   local frame = redis.call('GET', KEYS[2])
@@ -421,10 +424,11 @@ if ARGV[1] ~= '' then
   if seq_hi * 4294967296 + seq_lo ~= tonumber(ARGV[1]) then return 0 end
 end
 redis.call('SREM', KEYS[1], KEYS[2])
-if ARGV[2] ~= '' then
-  redis.call('SREM', KEYS[3], ARGV[2])
+redis.call('SREM', KEYS[5], ARGV[3])
+if ARGV[2] == 'binary' then
+  redis.call('SREM', KEYS[3], ARGV[3])
   if redis.call('SCARD', KEYS[3]) == 0 then redis.call('SREM', KEYS[1], KEYS[3]) end
-  redis.call('SREM', KEYS[4], ARGV[2])
+  redis.call('SREM', KEYS[4], ARGV[3])
   if redis.call('SCARD', KEYS[4]) == 0 then redis.call('SREM', KEYS[1], KEYS[4]) end
 end
 return redis.call('DEL', KEYS[2])
@@ -717,7 +721,7 @@ const REDIS_COMMANDS = {
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: 11,
+    numberOfKeys: 12,
     invoke: (prefix, input: CommitInput) => {
       const { roomId, inc, lane, laneKey, channels } = input
       const retained = retainedKey(prefix, roomId, inc, laneKey)
@@ -739,6 +743,7 @@ const REDIS_COMMANDS = {
           indexed ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
           channels.everyMember ?? channels.lane,
           lane.kind === 'binary' ? trackLanesKey(prefix, roomId, inc, lane.track) : order,
+          retainedLanesKey(prefix, roomId, inc),
         ],
         argv: [
           inc,
@@ -765,7 +770,7 @@ const REDIS_COMMANDS = {
   retainedDelete: command({
     name: 'tfRoomRetainedDelete',
     lua: RETAINED_DELETE_LUA,
-    numberOfKeys: 4,
+    numberOfKeys: 5,
     invoke: (prefix, { roomId, inc, lane, ifSeq }: RoomInc & { lane: LaneId; ifSeq: number | undefined }) => {
       const laneKey = encodeLaneKey(lane)
       const retained = retainedKey(prefix, roomId, inc, laneKey)
@@ -776,8 +781,9 @@ const REDIS_COMMANDS = {
           retained,
           binary ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
           binary ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
+          retainedLanesKey(prefix, roomId, inc),
         ],
-        argv: [ifSeq === undefined ? '' : String(ifSeq), binary ? laneKey : ''],
+        argv: [ifSeq === undefined ? '' : String(ifSeq), lane.kind, laneKey],
       }
     },
     parse: () => {},

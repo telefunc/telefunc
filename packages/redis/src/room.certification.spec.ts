@@ -3,6 +3,7 @@ import { Cluster, Redis } from 'ioredis'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { installRedis } from './index.js'
 import { RedisBackend } from './backend.js'
+import { generationKeysKey } from './keys.js'
 import { encodeLaneKey } from 'telefunc/__internal'
 import { disposeBackend, getRoomBackend } from '../../telefunc/dist/wire-protocol/backend/install.js'
 import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
@@ -314,19 +315,16 @@ await read()`,
     for (const lane of [binary('m', 'camera'), binary('m', ''), binary('other', ''), { kind: 'semantic' } as const])
       await backend.commitLane('retained-of', 'inc', lane, bytes('frame'), { retain: true })
     const listed = async () => (await backend.listRetained('retained-of', 'inc', { member: 'm' })).map(encodeLaneKey)
-    const generationKeys = () =>
-      (backend as unknown as { _generationKeys(roomId: string, inc: string): Promise<string[]> })._generationKeys(
-        'retained-of',
-        'inc',
-      )
     expect((await listed()).sort()).toEqual(['binary:m:', 'binary:m:camera'])
     await backend.deleteRetained('retained-of', 'inc', binary('m', 'camera'))
     expect(await listed()).toEqual(['binary:m:'])
-    const before = await generationKeys()
+    const before = await generationKeys(backend, 'retained-of', 'inc')
     await backend.deleteRetained('retained-of', 'inc', binary('m', ''))
     expect(await listed()).toEqual([])
     // The retained frame and the member's set leave the generation's keys together.
-    expect(before.length - (await generationKeys()).length).toBe(2)
+    expect(before.length - (await generationKeys(backend, 'retained-of', 'inc')).length).toBe(2)
+    await backend.deleteRetained('retained-of', 'inc', { kind: 'semantic' })
+    expect((await backend.listRetained('retained-of', 'inc')).map(encodeLaneKey)).toEqual(['binary:other:'])
   })
 
   it('keeps no lane order key for any of 100 members that received a DM, published on a track and left', async () => {
@@ -345,10 +343,7 @@ await read()`,
     }
     const backend = new RedisBackend({ redis, prefix })
     const inc = (await backend.readHead(room.id))!.currentInc!
-    const generationKeys = await (
-      backend as unknown as { _generationKeys(roomId: string, inc: string): Promise<string[]> }
-    )._generationKeys(room.id, inc)
-    const orderKeys = generationKeys.filter((key) => /:g:[^:]+:(o|om|lt):/.test(key))
+    const orderKeys = (await generationKeys(backend, room.id, inc)).filter((key) => /:g:[^:]+:(o|om|lt):/.test(key))
     expect(orderKeys).toEqual([expect.stringMatching(/:o:control$/)])
   })
 
@@ -423,25 +418,24 @@ await read()`,
       { kind: 'semantic' } as const,
     ])
       await backend.commitLane('retained-of-track', 'inc', lane, bytes('frame'), { retain: true })
-    const internals = backend as unknown as { _generationKeys(roomId: string, inc: string): Promise<string[]> }
-    const generationKeys = () => internals._generationKeys('retained-of-track', 'inc')
-    const scan = vi.spyOn(internals, '_generationKeys')
+    const { _publisher, _prefix } = backend as unknown as { _publisher: Redis | Cluster; _prefix: string }
+    const reads = vi.spyOn(_publisher, 'smembers')
     const listed = async (track: string) =>
       (await backend.listRetained('retained-of-track', 'inc', { track })).map(encodeLaneKey).sort()
     expect(await listed('camera')).toEqual(['binary:a:camera', 'binary:b:camera'])
     expect(await listed('camera:1')).toEqual(['binary:a:camera%3A1'])
     expect(await listed('mic')).toHaveLength(100)
-    expect(scan).not.toHaveBeenCalled()
+    expect(reads).not.toHaveBeenCalledWith(generationKeysKey(_prefix, 'retained-of-track', 'inc'))
     // A member's leave deletes its lanes one by one.
     await backend.deleteRetained('retained-of-track', 'inc', binary('a', 'camera'))
     expect(await listed('camera')).toEqual(['binary:b:camera'])
     // Retaining again on a lane that holds a retained frame keeps one entry per index.
     await backend.commitLane('retained-of-track', 'inc', binary('b', 'camera'), bytes('newer'), { retain: true })
-    const before = await generationKeys()
+    const before = await generationKeys(backend, 'retained-of-track', 'inc')
     await backend.deleteRetained('retained-of-track', 'inc', binary('b', 'camera'))
     expect(await listed('camera')).toEqual([])
     // The retained frame, its member's set and its track's set leave the generation's keys together.
-    expect(before.length - (await generationKeys()).length).toBe(3)
+    expect(before.length - (await generationKeys(backend, 'retained-of-track', 'inc')).length).toBe(3)
     await backend.commitLane('retained-of-track', 'inc', binary('a', 'camera'), bytes('again'), { retain: true })
     expect(await listed('camera')).toEqual(['binary:a:camera'])
     await backend.dropGeneration('retained-of-track', 'inc')
@@ -532,15 +526,14 @@ await read()`,
     await Room.setAttributes(room.id, { a: 1 })
     const backend = new RedisBackend({ redis, prefix })
     const inc = (await backend.readHead(room.id))!.currentInc!
-    type Internals = { _prefix: string; _generationKeys(roomId: string, inc: string): Promise<string[]> }
-    const internals = backend as unknown as Internals
+    const internals = backend as unknown as { _prefix: string }
     // A failover onto a replica that missed every write after now: each of the generation's keys as it is now.
     const index = `${internals._prefix}room:{${encodeURIComponent(room.id)}}:g:${inc}:keys`
-    const kept = [index, ...(await internals._generationKeys(room.id, inc))]
+    const kept = [index, ...(await generationKeys(backend, room.id, inc))]
     const dumps = await Promise.all(kept.map((key) => redis.dumpBuffer(key)))
     await Room.setAttributes(room.id, { lost: 1 })
     await member.setAttributes({ v: 'lost' })
-    for (const key of await internals._generationKeys(room.id, inc)) if (!kept.includes(key)) await redis.del(key)
+    for (const key of await generationKeys(backend, room.id, inc)) if (!kept.includes(key)) await redis.del(key)
     for (const [i, key] of kept.entries()) await redis.restore(key, 0, dumps[i]!, 'REPLACE')
     await new Promise((resolve) => setTimeout(resolve, 2))
     await Room.setAttributes(room.id, { b: 2 })
@@ -1217,6 +1210,11 @@ process.exit(0)`,
     send: (text) => void server.stdin.write(`${text}\n`),
     kill: () => void server.kill('SIGKILL'),
   }
+}
+
+function generationKeys(backend: RedisBackend, roomId: string, inc: string): Promise<string[]> {
+  const { _publisher, _prefix } = backend as unknown as { _publisher: Redis | Cluster; _prefix: string }
+  return _publisher.smembers(generationKeysKey(_prefix, roomId, inc))
 }
 
 function ownClient<Client extends Redis | Cluster>(client: Client): Client {

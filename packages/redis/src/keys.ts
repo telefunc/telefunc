@@ -12,8 +12,8 @@ export {
   orderKey,
   memberOrderKey,
   trackLanesKey,
-  retainedKeyPrefix,
   retainedKey,
+  retainedLanesKey,
   retainedOfKey,
   retainedOfTrackKey,
   channelKey,
@@ -91,11 +91,12 @@ function memberOrderKey(prefix: string, roomId: string, inc: string, member: str
 function trackLanesKey(prefix: string, roomId: string, inc: string, track: string): string {
   return `${genPrefix(prefix, roomId, inc)}:lt:${encodeURIComponent(track)}`
 }
-function retainedKeyPrefix(prefix: string, roomId: string, inc: string): string {
-  return `${genPrefix(prefix, roomId, inc)}:rt:`
-}
 function retainedKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
-  return `${retainedKeyPrefix(prefix, roomId, inc)}${laneKey}`
+  return `${genPrefix(prefix, roomId, inc)}:rt:${laneKey}`
+}
+/** The lane keys of the generation's retained frames. */
+function retainedLanesKey(prefix: string, roomId: string, inc: string): string {
+  return `${genPrefix(prefix, roomId, inc)}:rtl`
 }
 /** The lane keys of one member's retained binary frames. */
 function retainedOfKey(prefix: string, roomId: string, inc: string, member: string): string {
