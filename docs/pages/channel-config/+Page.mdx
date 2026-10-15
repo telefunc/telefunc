@@ -34,7 +34,7 @@ config.channel = {
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
 > - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit`/`bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
 > - `NetworkError` right after a reconnect, whose error message names a replay buffer → `await` your `send()`s, or raise that replay buffer.
-> - Want to cap memory → lower the replay buffers (a maximum per channel, not memory each channel takes). Channels can then be slower over long-distance connections.
+> - Want to cap memory → lower the replay buffers. Each caps what one channel holds; a channel doesn't reserve it up front. Channels can then be slower over long-distance connections.
 
 <ConfigWhereServer />
 
