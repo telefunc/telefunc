@@ -334,10 +334,11 @@ class ClientRoom extends RoomStateView implements Room {
       this._rosterStream.parts = { members: [], next: 0 }
     }
     const stream = this._rosterStream
-    const parts = stream?.parts ?? null
+    if (stream === null) return
+    const parts = stream.parts
     // A part lost while offline: the next attach sends the whole roster again.
-    if (stream === null || parts === null || part !== parts.next) {
-      if (stream !== null) stream.parts = null
+    if (parts === null || part !== parts.next) {
+      stream.parts = null
       this._stopRosterEvents()
       return
     }
