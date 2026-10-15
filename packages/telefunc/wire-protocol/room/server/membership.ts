@@ -22,7 +22,13 @@ import { Slice } from '../slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
 import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
 import { roomClosedError } from '../errors.js'
-import { leaveCauseToWire, type DmReply, type MemberSnapshot, type WireLeaveCause } from '../protocol.js'
+import {
+  leaveCauseToWire,
+  type DmReply,
+  type MemberSnapshot,
+  type RoomCtrlEnvelope,
+  type WireLeaveCause,
+} from '../protocol.js'
 import { type HoldConfig, type RoomDataEnvelope, type RoomMemberRecord } from './protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 import {
@@ -361,20 +367,12 @@ async function removeMemberCells(
       const raw = cells.get(memberKey)
       const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
       if (record === null) return { value: { cleanup: pending, config: null }, mutations: [] }
-      const cleanup: PendingMemberCleanup = {
-        cause: leaveCauseToWire(cause),
-        session: record.session,
-        ...(record.hidden ? { hidden: true } : {}),
-      }
+      const cleanup: PendingMemberCleanup = { cause: leaveCauseToWire(cause), session: record.session }
+      if (record.hidden) cleanup.hidden = true
       const config = record.hidden ? null : room.hold
-      return {
-        value: { cleanup: true, config },
-        mutations: [
-          ...removedKeys.map((key) => ({ key, bytes: null })),
-          ...(pending ? [] : [{ key: cleanupKey, bytes: encodeRoomRecord(cleanup) }]),
-        ],
-        counts: holdCounts(config, -1),
-      }
+      const mutations: CellMutation[] = removedKeys.map((key) => ({ key, bytes: null }))
+      if (!pending) mutations.push({ key: cleanupKey, bytes: encodeRoomRecord(cleanup) })
+      return { value: { cleanup: true, config }, mutations, counts: holdCounts(config, -1) }
     },
   )
   afterHoldChange(room, holdChange(outcome.config, counters, -1))
@@ -456,14 +454,15 @@ function* numbered<T>(items: Iterable<T>): Generator<readonly [number, T]> {
 }
 
 function memberSnapshot(id: string, record: RoomMemberRecord, meta: ParticipantMeta): MemberSnapshot {
-  return {
+  const snapshot: MemberSnapshot = {
     id,
     meta,
     joinedAt: record.joinedAt,
     metaSeq: record.metaSeq,
     identity: record.identity ?? null,
-    ...(record.hidden ? { hidden: true } : {}),
   }
+  if (record.hidden) snapshot.hidden = true
+  return snapshot
 }
 
 async function reapAndCountPresence(room: RoomIncarnation): Promise<number> {
@@ -503,12 +502,9 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
   await getRoomBackend().dropLaneOrders(roomId, inc, memberId)
   await dropMemberMeta(roomId, inc, memberId)
   await dropCells(roomId, inc, dmReplyCellPrefix(memberId))
-  await commitControlOrThrow(roomId, inc, {
-    __r: 'leave',
-    id: memberId,
-    ...cleanup.cause,
-    ...(cleanup.hidden ? { hidden: true } : {}),
-  })
+  const leave: Extract<RoomCtrlEnvelope, { __r: 'leave' }> = { __r: 'leave', id: memberId, ...cleanup.cause }
+  if (cleanup.hidden) leave.hidden = true
+  await commitControlOrThrow(roomId, inc, leave)
   // The mark goes last, so a session's cleaner finds the member until its leave is out.
   const mark = sessionMemberCellKey(cleanup.session, memberId)
   await mutateCells(roomId, inc, [key, mark], (cells) => ({
