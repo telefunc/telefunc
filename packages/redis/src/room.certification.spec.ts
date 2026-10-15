@@ -777,7 +777,7 @@ await read()`,
       onTestFinished(() => Room.close(id))
       room.onLeave(() => {})
       await room.getParticipants()
-      const inc = (room as unknown as { _inc: string })._inc
+      const inc = (room as unknown as { _incarnation: { inc: string } })._incarnation.inc
       const control = getRoomBackend().subscribeLane(id, inc, { kind: 'control' }, (payload) => {
         const event = JSON.parse(Buffer.from(payload as Uint8Array).toString()) as { __r: string; id?: string }
         if (event.__r !== 'leave') return

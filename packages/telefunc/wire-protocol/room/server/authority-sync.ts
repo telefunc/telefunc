@@ -19,7 +19,6 @@ assertIsNotBrowser()
 /** The replica whose view the sync keeps: what it renews, and where what the sync reads applies. */
 type SyncHost = {
   readonly id: string
-  readonly _inc: string
   readonly _incarnation: RoomIncarnation
   /** Read-only here: every change goes through the host's methods. */
   readonly model: Pick<RoomModel, 'closed' | 'metaWaiting' | 'metaSeq' | 'rosterKnown' | 'recordingMembership'>
@@ -70,7 +69,7 @@ class AuthoritySync {
   async reconcileAuthority(): Promise<void> {
     const host = this._host
     if (host.model.closed || !(await this._reconcileMeta())) return
-    await dropReplacedMetaGenerations(host.id, host._inc)
+    await dropReplacedMetaGenerations(host.id, host._incarnation.inc)
     await this.refreshMembers()
   }
 
@@ -79,7 +78,7 @@ class AuthoritySync {
   private async _checkAuthority(): Promise<void> {
     const host = this._host
     if (host.model.closed || !(await this._reconcileMeta())) return
-    await dropReplacedMetaGenerations(host.id, host._inc)
+    await dropReplacedMetaGenerations(host.id, host._incarnation.inc)
     await reapLapsedSessions(host._incarnation)
     const before = this._covered
     const mark = await this._controlMark()
@@ -145,7 +144,7 @@ class AuthoritySync {
 
   private async _controlMark(): Promise<number> {
     const host = this._host
-    return (await getRoomBackend().readLaneOrder(host.id, host._inc, CONTROL_LANE))?.seq ?? 0
+    return (await getRoomBackend().readLaneOrder(host.id, host._incarnation.inc, CONTROL_LANE))?.seq ?? 0
   }
 
   /** A meta change waits on one before it. Unless that one arrives, a whole read repairs the gap

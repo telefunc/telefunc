@@ -77,7 +77,6 @@ class ServerRoom extends RoomStateView implements Room {
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
 
   /** Every authority check and member write carries this incarnation, rejecting stale handles after recreate. */
-  readonly _inc: string
   /** @internal */ readonly _incarnation: RoomIncarnation
   /** @internal What this process shares of the incarnation. */ readonly _replica: RoomReplica
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
@@ -98,7 +97,6 @@ class ServerRoom extends RoomStateView implements Room {
   constructor(replica: RoomReplica) {
     super()
     this._replica = replica
-    this._inc = replica._inc
     this._incarnation = replica._incarnation
     this._state = new RoomState({
       owner: this,
@@ -194,7 +192,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._assertAdmitted(id)
       this._admissions.set(id, 'committed')
       // A member removed meanwhile gets no join after its leave, here or anywhere.
-      await commitControlOrThrow(this.id, this._inc, join, { requiredCellKeys: [memberCellKey(id)] })
+      await commitControlOrThrow(this.id, this._incarnation.inc, join, { requiredCellKeys: [memberCellKey(id)] })
       this._assertAdmitted(id)
       this._admissions.delete(id)
       this._replica.applyControl(join)

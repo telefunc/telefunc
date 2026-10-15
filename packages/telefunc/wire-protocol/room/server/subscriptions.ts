@@ -16,6 +16,7 @@ import { reportRoomError } from './errors.js'
 import { LaneSubscription } from './lane-subscription.js'
 import { Slice } from '../slice.js'
 import type { LaneHolder } from './replay.js'
+import type { RoomIncarnation } from './lifecycle.js'
 import type { AuthoritySync } from './authority-sync.js'
 import { WantsIndex } from './wants-index.js'
 import { runAll, toggle, toggleEntry } from './sets.js'
@@ -25,7 +26,7 @@ assertIsNotBrowser()
 /** The replica these subscriptions serve: it aggregates every handle's holders and applies what the lanes carry. */
 type SubscriptionHost = {
   readonly id: string
-  readonly _inc: string
+  readonly _incarnation: RoomIncarnation
   /** Read-only here: every change goes through the host's methods. */
   readonly model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'memberCount' | 'hasMember'>
   /** What keeps the view in step with the authority, and runs the heartbeat. */
@@ -288,13 +289,13 @@ class RoomSubscriptions {
     const observing = open && host._observed()
     const becomesObserved = observing && !this._observing
     this._control.sync(observing, () =>
-      getRoomBackend().subscribeLane(host.id, host._inc, CONTROL_LANE, (payload, info) =>
+      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, CONTROL_LANE, (payload, info) =>
         host._onControl(decodeRoomText(payload), info),
       ),
     )
     this._observing = observing
     this._semantic.sync(open && (host._holdsTail() || this._wants.wantsText), () =>
-      getRoomBackend().subscribeLane(host.id, host._inc, SEMANTIC_LANE, (payload, info) =>
+      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, SEMANTIC_LANE, (payload, info) =>
         host._onTextData(decodeRoomText(payload), info),
       ),
     )
@@ -621,7 +622,7 @@ class RoomSubscriptions {
       establishing.lanes.add(lane)
       this._everyTrack.set(member, lane)
       lane.sync(true, () =>
-        getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary-all', member }, (framed, info) =>
+        getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'binary-all', member }, (framed, info) =>
           host._onBinary(framed, info),
         ),
       )
@@ -642,7 +643,7 @@ class RoomSubscriptions {
     establishing.lanes.add(lane)
     this._everyMember.set(track, lane)
     lane.sync(true, () =>
-      getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary-track', track }, (framed, info) =>
+      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'binary-track', track }, (framed, info) =>
         host._onBinary(framed, info),
       ),
     )
@@ -662,8 +663,11 @@ class RoomSubscriptions {
     toggleEntry(this._binaryTracks, member, track, true)
     toggleEntry(this._trackMembers, track, member, true)
     lane.sync(true, () =>
-      getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'binary', member, track }, (framed, info) =>
-        host._onBinary(framed, info),
+      getRoomBackend().subscribeLane(
+        host.id,
+        host._incarnation.inc,
+        { kind: 'binary', member, track },
+        (framed, info) => host._onBinary(framed, info),
       ),
     )
     return lane
@@ -703,7 +707,7 @@ class RoomSubscriptions {
     let slot = this._inbox.get(member)
     if (!slot) this._inbox.set(member, (slot = this._newLaneSubscription()))
     slot.sync(true, () =>
-      getRoomBackend().subscribeLane(host.id, host._inc, { kind: 'inbox', member }, (payload, info) =>
+      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'inbox', member }, (payload, info) =>
         host._onDm(decodeRoomText(payload), info),
       ),
     )
@@ -719,7 +723,7 @@ class RoomSubscriptions {
     const lane = this._demandLane
     if (!host.model.closed && !host._ownedMembers()[Symbol.iterator]().next().done)
       return lane.sync(true, () =>
-        getRoomBackend().subscribeLane(host.id, host._inc, DEMAND_LANE, (payload) =>
+        getRoomBackend().subscribeLane(host.id, host._incarnation.inc, DEMAND_LANE, (payload) =>
           host._onDemand(decodeRoomText(payload)),
         ),
       )

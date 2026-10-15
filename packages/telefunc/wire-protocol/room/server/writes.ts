@@ -35,7 +35,6 @@ assertIsNotBrowser()
 /** The handle the writes go out through. */
 type WritesHost = {
   readonly id: string
-  readonly _inc: string
   readonly _incarnation: RoomIncarnation
   readonly _model: Pick<RoomModel, 'closed' | 'memberMetaSeq'>
   readonly _state: Pick<RoomState, 'getRemote'>
@@ -78,7 +77,7 @@ class RoomWrites {
       const { update, hidden, replaced } = await writeMemberMeta(host._incarnation, id, write)
       const accepted = { __r: 'p-meta', id, ...update, ...(hidden ? { hidden: true } : {}) } as const
       host._replica.applyControl(accepted)
-      const publishing = commitControlOrThrow(host.id, host._inc, accepted)
+      const publishing = commitControlOrThrow(host.id, host._incarnation.inc, accepted)
       sent()
       await publishing
       if (replaced !== null) await dropMemberMetaGeneration(host._incarnation, id, replaced)
@@ -93,7 +92,7 @@ class RoomWrites {
       const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...this._stampOf(from, sender) }
       const record = encodeRoomRecord(envelope)
       const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitRoomLaneOrThrow(host.id, host._inc, SEMANTIC_LANE, record, opts)
+      const committing = commitRoomLaneOrThrow(host.id, host._incarnation.inc, SEMANTIC_LANE, record, opts)
       sent()
       return { sender, commit: await committing }
     })
@@ -111,7 +110,7 @@ class RoomWrites {
       if (planned !== null) await planned
       host._replica.demand.published(from, lane.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitRoomLaneOrThrow(host.id, host._inc, lane, framed, opts)
+      const committing = commitRoomLaneOrThrow(host.id, host._incarnation.inc, lane, framed, opts)
       sent()
       return { sender, commit: await committing }
     })
@@ -200,7 +199,7 @@ class RoomWrites {
   private async _settleTimedOut(from: string, ackId: string): Promise<void> {
     let reply: DmReply
     try {
-      reply = (await takeDmReply(this._host.id, this._host._inc, from, ackId)) ?? DM_FAILURE.timeout
+      reply = (await takeDmReply(this._host.id, this._host._incarnation.inc, from, ackId)) ?? DM_FAILURE.timeout
     } catch (err) {
       reply = toRoomFailure(err, reportRoomError)
     }
@@ -223,7 +222,7 @@ class RoomWrites {
       data,
       ...(ackId ? { ackId } : {}),
     }
-    const receipt = await commitToInbox(host.id, host._inc, envelope, [from])
+    const receipt = await commitToInbox(host.id, host._incarnation.inc, envelope, [from])
     if ('gone' in receipt) throw participantGoneError(receipt.gone)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._of.guards()?.onAfterSend
@@ -233,8 +232,8 @@ class RoomWrites {
 
   /** A sender that left had its wait failed by its leave; only a closed room is an error. */
   async publishDmAck(to: string, ackId: string, reply: DmReply): Promise<unknown> {
-    await storeDmReply(this._host.id, this._host._inc, to, ackId, reply)
-    return await commitToInbox(this._host.id, this._host._inc, { __r: 'dm-ack', to, ackId, ...reply })
+    await storeDmReply(this._host.id, this._host._incarnation.inc, to, ackId, reply)
+    return await commitToInbox(this._host.id, this._host._incarnation.inc, { __r: 'dm-ack', to, ackId, ...reply })
   }
 
   private async _resolveMember(id: string): Promise<Sender | null> {

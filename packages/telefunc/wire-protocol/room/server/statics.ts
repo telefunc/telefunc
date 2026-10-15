@@ -219,8 +219,8 @@ async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room>
   const room = await openRoom(id)
   // Repairs the listing of a creator that crashed between its head and directory writes.
   const { head } = result
-  const expiresAt = head.currentInc === room._inc ? head.expiresAt : undefined
-  await listRoom(getRoomBackend(), id, room._inc, room._incarnation.hold, expiresAt)
+  const expiresAt = head.currentInc === room._incarnation.inc ? head.expiresAt : undefined
+  await listRoom(getRoomBackend(), id, room._incarnation.inc, room._incarnation.hold, expiresAt)
   return room
 }
 

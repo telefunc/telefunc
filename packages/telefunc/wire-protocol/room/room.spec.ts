@@ -185,14 +185,14 @@ function serverOf(room: Room | ServerRoom): Server {
  *  session's cell key. */
 async function lapseSessionOf(room: ServerRoom, memberId: string): Promise<string> {
   const memberKey = memberCellKey(memberId)
-  const member = await driver.readCells(room.id, room._inc, { keys: [memberKey] })
+  const member = await driver.readCells(room.id, room._incarnation.inc, { keys: [memberKey] })
   if ('staleInc' in member) throw new Error('unexpected stale generation')
   const key = sessionCellKey((parse(decoder.decode(member.cells.get(memberKey)!)) as { session: string }).session)
-  const session = await driver.readCells(room.id, room._inc, { keys: [key] })
+  const session = await driver.readCells(room.id, room._incarnation.inc, { keys: [key] })
   if ('staleInc' in session) throw new Error('unexpected stale generation')
   const lapsed = { key, bytes: encoder.encode(stringify({ until: session.now - 1 })) }
   const cx = { expect: [{ key, version: session.versions.get(key)! }], mutations: [lapsed] }
-  expect(await driver.compareExchangeCells(room.id, room._inc, cx)).toEqual({ committed: new Map() })
+  expect(await driver.compareExchangeCells(room.id, room._incarnation.inc, cx)).toEqual({ committed: new Map() })
   return key
 }
 describe('Room public behavior', () => {
@@ -305,7 +305,7 @@ describe('Room public behavior', () => {
     await Promise.all(Array.from({ length: 1_000 }, (_, i) => room.join({ identity: `user-${i % 50}` })))
     expect(conflicts).toBe(0)
     expect(await Room.getParticipants(room.id)).toHaveLength(1_000)
-    const read = await readCells(room.id, room._inc, { keys: [HOLDS_CELL_KEY] })
+    const read = await readCells(room.id, room._incarnation.inc, { keys: [HOLDS_CELL_KEY] })
     if ('staleInc' in read) throw new Error('the room is gone')
     expect(JSON.parse(decoder.decode(read.cells.get(HOLDS_CELL_KEY)!))).toMatchObject({ value: 1_000 })
   })
@@ -528,7 +528,7 @@ describe('Room public behavior', () => {
   })
   it('creates, lists, updates, closes fully, and recreates a genuinely fresh domain', async () => {
     const room = (await Room.create('lifecycle', { meta: { topic: 'one' } })) as unknown as ServerRoom
-    const firstInc = room._inc
+    const firstInc = room._incarnation.inc
     const me = await room.join({ meta: { name: 'Alice' } })
     const observer = await Room.get('lifecycle')
     let closed = 0
@@ -549,7 +549,7 @@ describe('Room public behavior', () => {
     await expect(room.join()).rejects.toThrow(/closed/i)
     await expect(Room.get('lifecycle')).rejects.toThrow('Room not found')
     const recreated = (await Room.create('lifecycle')) as ServerRoom
-    expect(recreated._inc).not.toBe(firstInc)
+    expect(recreated._incarnation.inc).not.toBe(firstInc)
     expect(await recreated.getParticipants()).toEqual([])
   })
   it('reports directory registration failure and repairs the open head on getOrCreate', async () => {
@@ -562,7 +562,7 @@ describe('Room public behavior', () => {
     await expect(Room.create('index-repair')).rejects.toThrow('index registration failure')
     const open = (await driver.readHead('index-repair'))!
     expect(open).toMatchObject({ state: 'open', currentInc: expect.any(String) })
-    expect(((await Room.getOrCreate('index-repair')) as ServerRoom)._inc).toBe(open.currentInc)
+    expect(((await Room.getOrCreate('index-repair')) as ServerRoom)._incarnation.inc).toBe(open.currentInc)
     expect((await Room.list()).map(({ id }) => id)).toContain('index-repair')
   })
   it('waits for an active close lease and takes over until the head is closed', async () => {
@@ -590,7 +590,7 @@ describe('Room public behavior', () => {
     await vi.advanceTimersByTimeAsync(900)
     expect(settled).toBe(false)
     expect(await driver.readHead(room.id)).toMatchObject({
-      currentInc: room._inc,
+      currentInc: room._incarnation.inc,
       state: 'closing',
       closeLease: { id: leased.head.closeLease?.id },
     })
@@ -600,7 +600,7 @@ describe('Room public behavior', () => {
   })
   it('retries generation cleanup after the head was durably finalized', async () => {
     const room = (await Room.create('finalized-cleanup-retry')) as ServerRoom
-    const inc = room._inc
+    const inc = room._incarnation.inc
     await room.join()
     vi.spyOn(driver, 'dropGeneration').mockRejectedValueOnce(new Error('transient generation cleanup failure'))
     await expect(Room.close(room.id)).rejects.toThrow('transient generation cleanup failure')
@@ -613,7 +613,7 @@ describe('Room public behavior', () => {
   it('reports an active close lease and lets the caller retry after its deadline', async () => {
     vi.useFakeTimers()
     const room = (await Room.create('get-or-create-closing')) as ServerRoom
-    const firstInc = room._inc
+    const firstInc = room._incarnation.inc
     const current = (await driver.readHead(room.id))!
     await driver.compareExchangeHead(
       room.id,
@@ -635,7 +635,7 @@ describe('Room public behavior', () => {
     })
     await vi.advanceTimersByTimeAsync(1_100)
     const recreated = (await Room.getOrCreate(room.id)) as ServerRoom
-    expect(recreated._inc).not.toBe(firstInc)
+    expect(recreated._incarnation.inc).not.toBe(firstInc)
     expect(recreated.isClosed).toBe(false)
   })
   it('tears down an observing instance when another instance closes the room', async () => {
@@ -1731,7 +1731,7 @@ describe('Room public behavior', () => {
     await expect(Room.close(room.id)).rejects.toThrow('connection lost')
     await vi.advanceTimersByTimeAsync(60_000)
     await Room.list()
-    expect(memoryState.rooms.get(room.id)?.gens.has(room._inc) ?? false).toBe(false)
+    expect(memoryState.rooms.get(room.id)?.gens.has(room._incarnation.inc) ?? false).toBe(false)
   })
   it("drops a lapsed room's data and listing once a later room is created, with no Room.list() call", async () => {
     vi.useFakeTimers()
@@ -1761,7 +1761,7 @@ describe('Room public behavior', () => {
       expect(cx).toHaveBeenCalledWith(room.id, expect.objectContaining({ form: 'finalize' }), expect.anything()),
     )
     await Room.list()
-    expect(memoryState.rooms.get(room.id)?.gens.has(room._inc)).toBe(true)
+    expect(memoryState.rooms.get(room.id)?.gens.has(room._incarnation.inc)).toBe(true)
     finalizing.resolve()
     await closing
   })
@@ -2145,13 +2145,13 @@ describe('Room public behavior', () => {
     const ids = async () => (await observer.getParticipants()).map(({ id }) => id).sort()
     const first = await remote.join()
     await vi.waitFor(async () => expect(await ids()).toEqual([first.id]))
-    const order = memoryState.rooms.get(room.id)!.gens.get(room._inc)!.order
+    const order = memoryState.rooms.get(room.id)!.gens.get(room._incarnation.inc)!.order
     const before = order.get('control')!
     const lost = await remote.join()
     await vi.waitFor(async () => expect(await ids()).toContain(lost.id))
     // The new master missed the second join: its member's cell and its control commit.
     const removal = { expect: [], mutations: [{ key: memberCellKey(lost.id), bytes: null }] }
-    await driver.compareExchangeCells(room.id, room._inc, removal)
+    await driver.compareExchangeCells(room.id, room._incarnation.inc, removal)
     order.set('control', before)
     vi.advanceTimersByTime(1)
     const next = await remote.join()
@@ -2167,7 +2167,7 @@ describe('Room public behavior', () => {
     observer.subscribe((data) => received.push(data))
     const member = await (await joiner.Room.get(room.id)).join()
     await member.publish('one')
-    const order = memoryState.rooms.get(room.id)!.gens.get(room._inc)!.order
+    const order = memoryState.rooms.get(room.id)!.gens.get(room._incarnation.inc)!.order
     const before = order.get('semantic')!
     await member.publish('lost')
     await vi.waitFor(() => expect(received).toEqual(['one', 'lost']))
@@ -2233,7 +2233,7 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(room.id)) as ServerRoom
     observer.onUpdate(() => {})
     const generations = async () => {
-      const read = await driver.readCells(room.id, room._inc, { prefix: 'meta:k:' })
+      const read = await driver.readCells(room.id, room._incarnation.inc, { prefix: 'meta:k:' })
       if ('staleInc' in read) throw new Error('the room is gone')
       return new Set([...read.cells.keys()].map((key) => key.split(':')[2]))
     }
@@ -2396,7 +2396,7 @@ describe('Room public behavior', () => {
     vi.useRealTimers()
     handled.resolve()
     await vi.waitFor(() => expect(lost).toBe(true))
-    const generation = memoryState.rooms.get(room.id)!.gens.get(room._inc)!
+    const generation = memoryState.rooms.get(room.id)!.gens.get(room._incarnation.inc)!
     const replies = () => [...generation.cells.keys()].filter((key) => key.startsWith('ack:'))
     expect(replies()).toHaveLength(1)
     await sender.leave()
@@ -2990,7 +2990,7 @@ describe('Room public behavior', () => {
     stub.abort()
     expect(stubIndexOf(room).size).toBe(0) // before the departed member's eviction settles
     // Its eviction removes the member cell, and its cleanup the cleanup cell last.
-    const cells = memoryState.rooms.get(room.id)!.gens.get(room._inc)!.cells
+    const cells = memoryState.rooms.get(room.id)!.gens.get(room._incarnation.inc)!.cells
     await vi.waitFor(() => expect([...cells.keys()].filter((key) => /^(m|cleanup):/.test(key))).toEqual([]))
   })
   it("keeps no order for a sender that left in a stub that didn't hold it", async () => {
@@ -3359,7 +3359,7 @@ describe('Room public behavior', () => {
     bob.listen((data) => inbox.push(data))
     await expect(alice.publish('blocked', { retain: true })).rejects.toThrow('no publish')
     expect(published).toEqual([])
-    expect(await driver.readRetained(room.id, room._inc, semanticLane)).toBeNull()
+    expect(await driver.readRetained(room.id, room._incarnation.inc, semanticLane)).toBeNull()
     await alice.publish('ok')
     await expect(alice.send(bob.id, 'blocked')).rejects.toThrow('no send')
     await alice.send(bob.id, 'ok')
@@ -3448,7 +3448,7 @@ describe('Room public behavior', () => {
       return realDelete(roomId, inc, lane, opts)
     })
     await Room.removeParticipant(room.id, { id: departing.id })
-    const retained = await driver.readRetained(room.id, room._inc, semanticLane)
+    const retained = await driver.readRetained(room.id, room._incarnation.inc, semanticLane)
     expect(parse(decoder.decode(retained!.payload))).toMatchObject({ from: replacement.id, data: 'new' })
   })
   it('retries retained cleanup after member deletion from durable eviction work', async () => {
@@ -3458,19 +3458,19 @@ describe('Room public behavior', () => {
     await member.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
     vi.spyOn(driver, 'deleteRetained').mockRejectedValueOnce(new Error('transient retained cleanup failure'))
     await expect(member.leave()).rejects.toThrow('transient retained cleanup failure')
-    expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
+    expect(await driver.listRetained(room.id, room._incarnation.inc)).toHaveLength(2)
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
     // A cleanup still pending a heartbeat later was left behind.
     await syncOf(room)._heartbeatTick()
     await syncOf(room)._heartbeatTick()
-    expect(await driver.listRetained(room.id, room._inc)).toEqual([])
+    expect(await driver.listRetained(room.id, room._incarnation.inc)).toEqual([])
   })
   it('names why a commit was stale, so callers need no diagnosis reads', async () => {
     const room = (await Room.create('stale-reason')) as ServerRoom
     const member = await room.join()
-    const current = await driver.readCells(room.id, room._inc, { keys: [memberCellKey(member.id)] })
+    const current = await driver.readCells(room.id, room._incarnation.inc, { keys: [memberCellKey(member.id)] })
     if ('staleInc' in current) throw new Error('room went stale')
-    await driver.compareExchangeCells(room.id, room._inc, {
+    await driver.compareExchangeCells(room.id, room._incarnation.inc, {
       expect: [{ key: memberCellKey(member.id), version: current.versions.get(memberCellKey(member.id))! }],
       mutations: [{ key: memberCellKey(member.id), bytes: null }],
     })
@@ -3528,7 +3528,7 @@ describe('Room public behavior', () => {
     expect(readRetained).toHaveBeenCalledTimes(3)
     expect(listRetained.mock.calls.map(([, , of]) => of)).toEqual([{ track: 'screen' }])
     await retaining[0]!.leave()
-    expect((await driver.listRetained(authority.id, authority._inc, { track: 'screen' })).length).toBe(2)
+    expect((await driver.listRetained(authority.id, authority._incarnation.inc, { track: 'screen' })).length).toBe(2)
   })
   it("gives a room-wide subscriber that appears mid-stream a track's retained frame, and every frame after it", async () => {
     const authority = await Room.create('room-wide-mid-stream')
@@ -3860,7 +3860,9 @@ describe('Room public behavior', () => {
     const listRetained = vi.spyOn(driver, 'listRetained')
     await member.leave()
     expect(listRetained.mock.calls.map(([, , of]) => of)).toEqual([{ member: member.id }])
-    expect(await driver.listRetained(room.id, room._inc)).toEqual([{ kind: 'binary', member: other.id, track: '' }])
+    expect(await driver.listRetained(room.id, room._incarnation.inc)).toEqual([
+      { kind: 'binary', member: other.id, track: '' },
+    ])
   })
   it('drops retained text and binary when a crashed publisher is reaped', async () => {
     vi.useFakeTimers()
@@ -3871,10 +3873,10 @@ describe('Room public behavior', () => {
     room.onLeave((member) => leaves.push(member.id))
     await publisher.publish('text', { retain: true })
     await publisher.publishBinary(new Uint8Array([1]), { track: 'screen', retain: true })
-    expect(await driver.listRetained(room.id, room._inc)).toHaveLength(2)
+    expect(await driver.listRetained(room.id, room._incarnation.inc)).toHaveLength(2)
     vi.setSystemTime(1_000_000 + ROOM_SESSION_TTL_MS + 1)
     expect(await Room.getParticipants(room.id)).toEqual([])
-    expect(await driver.listRetained(room.id, room._inc)).toEqual([])
+    expect(await driver.listRetained(room.id, room._incarnation.inc)).toEqual([])
     expect(leaves).toEqual([publisher.id])
     await expect(Room.removeParticipant(room.id, { identity: 'expired-owner' })).resolves.toBeUndefined()
   })
@@ -4243,7 +4245,7 @@ describe('Room public behavior', () => {
       await member.publishBinary(new Uint8Array([1]), { track: 'camera' })
       await member.leave()
     }
-    const generation = memoryState.rooms.get(room.id)!.gens.get(room._inc)!
+    const generation = memoryState.rooms.get(room.id)!.gens.get(room._incarnation.inc)!
     expect([...generation.order.keys()]).toEqual(['control'])
     expect(generation.memberOrders.size).toBe(0)
   })
@@ -5489,7 +5491,7 @@ describe("a server's session in a room", () => {
         view.onLeave(() => {})
         await view.getParticipants()
       }
-      getRoomBackend().subscribeLane(id, room._inc, { kind: 'control' }, (payload) => {
+      getRoomBackend().subscribeLane(id, room._incarnation.inc, { kind: 'control' }, (payload) => {
         const event = parse(decodeRoomText(payload as Uint8Array)) as { __r: string; id?: string }
         if (event.__r === 'leave') leaves.set(event.id!, (leaves.get(event.id!) ?? 0) + 1)
       })
@@ -6306,7 +6308,7 @@ describe('a room nothing holds closes on its own', () => {
     await (page._replica as unknown as { _views: Map<RoomStubChannel, Promise<void>> })._views.get(stub)
     stub._onPeerClose()
     const holds = async () => {
-      const read = await driver.readCells(room.id, room._inc, { keys: [HOLDS_CELL_KEY] })
+      const read = await driver.readCells(room.id, room._incarnation.inc, { keys: [HOLDS_CELL_KEY] })
       return 'cells' in read ? JSON.parse(decoder.decode(read.cells.get(HOLDS_CELL_KEY)!)).value : null
     }
     await vi.advanceTimersByTimeAsync(0)
@@ -6728,7 +6730,7 @@ async function wideBinaryScenario(id: string, retain: boolean, byte: number) {
   const { stub, peer } = serve(serverRoom)
   const serverSeqs: number[] = []
   if (!retain) serverRoom.subscribeBinary((_data, info) => serverSeqs.push(info.seq))
-  const generation = memoryState.rooms.get(id)!.gens.get(serverRoom._inc)!
+  const generation = memoryState.rooms.get(id)!.gens.get(serverRoom._incarnation.inc)!
   const lane = encodeLaneKey({ kind: 'binary', member: camera.id, track: DEFAULT_TRACK })
   generation.memberOrders.set(camera.id, new Map([[lane, { seq: 0xffff_ffff, timestamp: 10 }]]))
   if (!retain) {
@@ -7013,7 +7015,7 @@ function rejectLaneSubscriptions(kind: SubscribedLane['kind'], diagnostic: strin
 /** Puts the room's generation back as it is now, its cells and its room-wide lanes' order, as a failover onto a master
  *  that missed every write after now leaves it. */
 function failoverPoint(room: ServerRoom): () => void {
-  const generation = memoryState.rooms.get(room.id)!.gens.get(room._inc)!
+  const generation = memoryState.rooms.get(room.id)!.gens.get(room._incarnation.inc)!
   const version = generation.version
   const cells = new Map(generation.cells)
   const cellsByPrefix = new Map([...generation.cellsByPrefix].map(([prefix, keys]) => [prefix, new Set(keys)]))

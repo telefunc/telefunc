@@ -86,7 +86,6 @@ class RoomReplica {
   }
 
   readonly id: string
-  readonly _inc: string
   readonly _incarnation: RoomIncarnation
   readonly model: RoomModel
   readonly demand: RoomDemand
@@ -133,7 +132,6 @@ class RoomReplica {
     seed: { members: MemberSnapshot[] } | { count: number },
   ) {
     this.id = incarnation.id
-    this._inc = incarnation.inc
     this._incarnation = incarnation
     this.model = new RoomModel({
       roomId: incarnation.id,
@@ -259,7 +257,7 @@ class RoomReplica {
     await this.sync.ensureRoster()
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this.plan.semanticReady)
-    const stored = await getRoomBackend().readRetained(this.id, this._inc, SEMANTIC_LANE)
+    const stored = await getRoomBackend().readRetained(this.id, this._incarnation.inc, SEMANTIC_LANE)
     if (stored === null) return
     const serialized = decodeRoomText(stored.payload)
     const event = parse(serialized) as RoomDataEnvelope
@@ -283,12 +281,12 @@ class RoomReplica {
         ? [{ kind: 'binary', member, track }]
         : await backend.listRetained(
             this.id,
-            this._inc,
+            this._incarnation.inc,
             member !== ALL ? { member } : track !== ALL ? { track } : undefined,
           )
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
-      const stored = await backend.readRetained(this.id, this._inc, lane)
+      const stored = await backend.readRetained(this.id, this._incarnation.inc, lane)
       if (stored === null || !this.model.hasMember(lane.member)) continue
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
@@ -387,7 +385,7 @@ class RoomReplica {
   _askDemand(of?: string): void {
     const ask = { __r: 'demand-ask', instance: this.report.instance, ...(of && { of }) } satisfies RoomCtrlEnvelope
     // A stale commit is a closed room's, which has no demand.
-    void commitControl(this.id, this._inc, ask).catch(reportRoomError)
+    void commitControl(this.id, this._incarnation.inc, ask).catch(reportRoomError)
   }
   /** @internal */
   _forgetDemand(): void {
@@ -395,7 +393,7 @@ class RoomReplica {
   }
   /** @internal */
   async _readOpenConfig(): Promise<RoomConfigRecord | null> {
-    return openConfig(await getRoomBackend().readHead(this.id), this._inc)
+    return openConfig(await getRoomBackend().readHead(this.id), this._incarnation.inc)
   }
   /** @internal A newer meta reaching this view through the authority never reached its clients as an event. */
   _applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {
@@ -465,14 +463,14 @@ class RoomReplica {
     if (last === undefined) return
     this._inboxSeqs.set(member, seq)
     if (seq <= last + 1 || !this.acks.waitsOn(member)) return
-    void takeDmReplies(this.id, this._inc, member).then((replies) => {
+    void takeDmReplies(this.id, this._incarnation.inc, member).then((replies) => {
       for (const [ackId, reply] of replies) this.acks.settle(ackId, reply)
     }, reportRoomError)
   }
 
   private _dmAcked(envelope: RoomDmAckEnvelope): void {
     this.acks.settle(envelope.ackId, envelope)
-    void dropDmReply(this.id, this._inc, envelope.to, envelope.ackId).catch(reportRoomError)
+    void dropDmReply(this.id, this._incarnation.inc, envelope.to, envelope.ackId).catch(reportRoomError)
   }
 
   private _relayControl(event: PresenceEvent, wireText: () => string): void {
