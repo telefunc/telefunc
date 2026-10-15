@@ -405,14 +405,14 @@ class CloudflareBroadcast {
       ),
     )
     reportLostDeliveries(`Cloudflare Broadcast delivery of '${key}'`, forwards)
-    return { ...info, receivers: presence.length }
+    return { seq: info.seq, timestamp: info.timestamp, receivers: presence.length }
   }
 
   /** At a bucket coordinator: delivers the authority's sequenced publish to the named member DOs, in arrival order. */
   async forwardToBucket(calls: BroadcastCalls, request: BroadcastForwardRequest): Promise<void> {
-    const { members, ...delivery } = request
+    const delivery = { key: request.key, kind: request.kind, payload: request.payload, info: request.info }
     const deliveries = await Promise.allSettled(
-      members.map((member) =>
+      request.members.map((member) =>
         calls.call(
           member,
           () => this.#stubById(member),

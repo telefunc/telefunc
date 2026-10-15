@@ -220,12 +220,9 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
 type CellRow = { key: string; bytes: ArrayBuffer; version: number }
 function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
   if ('keys' in sel)
-    return sel.keys.flatMap((key) => {
-      const row = sql
-        .exec<Omit<CellRow, 'key'>>('SELECT bytes, version FROM cell WHERE inc = ? AND key = ?', inc, key)
-        .toArray()[0]
-      return row === undefined ? [] : [{ key, ...row }]
-    })
+    return sel.keys.flatMap((key) =>
+      sql.exec<CellRow>('SELECT key, bytes, version FROM cell WHERE inc = ? AND key = ?', inc, key).toArray(),
+    )
   const range = keyRange('key', sel.prefix)
   return sql
     .exec<CellRow>(`SELECT key, bytes, version FROM cell WHERE inc = ? AND ${range.where}`, inc, ...range.args)
@@ -261,10 +258,13 @@ function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: stri
       CELL_PAGE_SIZE,
     )
     .toArray()
-  const cells = new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)]))
-  const versions = new Map(rows.map((row) => [row.key, String(row.version)]))
-  const page = { cells, versions, now }
-  return rows.length === CELL_PAGE_SIZE ? { ...page, cursor: rows[rows.length - 1]!.key } : page
+  const page: Exclude<CellPage, { staleInc: true }> = {
+    cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
+    versions: new Map(rows.map((row) => [row.key, String(row.version)])),
+    now,
+  }
+  if (rows.length === CELL_PAGE_SIZE) page.cursor = rows[rows.length - 1]!.key
+  return page
 }
 
 function readRevision(sql: SqlStorage, inc: string): number {

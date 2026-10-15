@@ -757,7 +757,13 @@ class RoomState {
   }
   /** A binary frame names only its sender's id: one from a member not yet known surfaces as `{ id, meta: {} }`. */
   applyBinary({ from, payload, track, meta }: BinaryFrame, info: ChannelPublishInfo): void {
-    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = { ...info, track: publicTrack(track), meta }
+    const frameInfo: ChannelPublishInfo & BinaryFrameInfo = {
+      key: info.key,
+      seq: info.seq,
+      timestamp: info.timestamp,
+      track: publicTrack(track),
+      meta,
+    }
     const entry = this.model._entry(from)
     const sender = entry ? this._remote(entry) : senderOf(from, {}, null)
     this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))

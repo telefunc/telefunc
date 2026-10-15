@@ -39,7 +39,7 @@ import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type Binary
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import {
   leaveCauseToWire,
-  wireDmFromInbox,
+  dmNotice,
   type DmReply,
   type MemberSnapshot,
   type MemberWants,
@@ -506,11 +506,11 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
     })
 
     participant._setForwarder({
-      deliver: (msg) => this._notify({ __r: 'dm', ...wireDmFromInbox(msg) }),
+      deliver: (msg) => this._notify(dmNotice(msg)),
       // The ack carries the client's reply; a closed stub or a transport rejection means the holder left.
       deliverAck: (msg) => {
         if (this.isClosed) return Promise.resolve(DM_FAILURE.left)
-        return this.send({ __r: 'dm', ...wireDmFromInbox(msg) }, { ack: true }).then(
+        return this.send(dmNotice(msg), { ack: true }).then(
           (reply) => decodeDmReply(reply) ?? DM_FAILURE.malformedReply,
           () => DM_FAILURE.left,
         )

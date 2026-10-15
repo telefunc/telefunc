@@ -1,5 +1,5 @@
 // Room wire envelopes, requests and notices, shared by client and server.
-export { hasRoomTag, joinedMember, inboxMessageFromWire, wireDmFromInbox, leaveCauseFromWire, leaveCauseToWire }
+export { hasRoomTag, joinedMember, inboxMessageFromWire, dmNotice, leaveCauseFromWire, leaveCauseToWire }
 export type {
   MemberSnapshot,
   RoomSnapshotMetadata,
@@ -185,14 +185,16 @@ function inboxMessageFromWire(dm: WireDm): InboxMessage {
   if (dm.ackId) msg.ackId = dm.ackId
   return msg
 }
-function wireDmFromInbox(msg: InboxMessage): WireDm & { fromMeta: ParticipantMeta | null } {
-  return {
+function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm' }> {
+  const notice: Extract<ParticipantStubNotice, { __r: 'dm' }> = {
+    __r: 'dm',
     from: msg.from,
     fromMeta: msg.fromMeta,
-    ...(msg.fromIdentity === null ? {} : { fromIdentity: msg.fromIdentity }),
     data: msg.data,
-    ...(msg.ackId ? { ackId: msg.ackId } : {}),
   }
+  if (msg.fromIdentity !== null) notice.fromIdentity = msg.fromIdentity
+  if (msg.ackId) notice.ackId = msg.ackId
+  return notice
 }
 function leaveCauseFromWire(event: WireLeaveCause): LeaveCause {
   if (event.cause === 'removed') return removedCause(event.reason)
