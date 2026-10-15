@@ -2,7 +2,7 @@
 export type { TelefuncDurableObjectNamespace }
 
 import type { TelefuncBroadcastStub } from './broadcast.js'
-import type { CloudflareRoomAuthorityStub } from './room/backend.js'
+import type { CloudflareRoomAuthorityStub } from './room/do.js'
 import type { RoomSessionStub } from './room/fanout.js'
 
 /** The Telefunc Durable Object binding, typed by the RPC methods its roles call on one another. */

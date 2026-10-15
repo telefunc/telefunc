@@ -8,8 +8,7 @@ import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { DriverAttempt } from '../../../../backend/attempt.js'
 import { OrderedStubs } from '../ordered-stubs.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
-import type { CloudflareRoomAuthorityStub } from './backend.js'
-import type { RegisterWire } from './do.js'
+import type { CloudflareRoomAuthorityStub, RegisterWire } from './do.js'
 
 type RoomSessionDeliveryRequest = {
   route: RouteInstallation

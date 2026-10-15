@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { RoomAuthority }
-export type { CommitWire, RegisterWire }
+export type { CloudflareRoomAuthorityStub, CommitWire, RegisterWire }
 
 // A room's authority owns its time, state and fanout.
 
@@ -60,6 +60,8 @@ type CommitWire =
   | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken?: string }
   | StaleCommit
 type RegisterWire = { ok: true } | { rejected: true; reason: string }
+/** The room authority's own methods, which its Durable Object serves over RPC. */
+type CloudflareRoomAuthorityStub = Omit<RoomAuthority, keyof DurableObject>
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 

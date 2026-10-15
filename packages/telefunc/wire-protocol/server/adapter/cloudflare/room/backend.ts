@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { CloudflareBackend }
-export type { CloudflareRoomAuthorityStub, CloudflareRoomNamespace }
+export type { CloudflareRoomNamespace }
 
 import type {
   BroadcastDriver,
@@ -30,16 +30,12 @@ import type {
 import type { SubscriptionBinding, SubscriptionDriver } from '../../../../backend/subscription.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
 import type { CloudflareBroadcast } from '../broadcast.js'
-import type { RoomAuthority } from './do.js'
-import type { DurableObject } from 'cloudflare:workers'
+import type { CloudflareRoomAuthorityStub } from './do.js'
 import { currentCloudflareSession, requireCloudflareSession } from '../session.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
-
-/** The room authority's own methods, which its Durable Object serves over RPC. */
-type CloudflareRoomAuthorityStub = Omit<RoomAuthority, keyof DurableObject>
 
 type CloudflareRoomNamespace = {
   idFromName(name: string): unknown
