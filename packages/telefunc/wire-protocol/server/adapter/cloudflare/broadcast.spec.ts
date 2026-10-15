@@ -374,6 +374,49 @@ describe('cloudflare broadcast routing', () => {
     _resetBroadcastAdapterForTesting(previousTransport)
   })
 
+  it('delivers the bytes a binary publish waiting for KV presence setup was given, though its caller reuses the buffer', async () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const kv = createMockKV()
+    const previousTransport = getBroadcastAdapter()
+    const published: number[][] = []
+    let releaseKVPut: (() => void) | null = null
+    const kvPutReady = new Promise<void>((resolve) => {
+      releaseKVPut = resolve
+    })
+
+    const originalPut = kv.put.bind(kv)
+    kv.put = (async (key: string, value: string, options?: any) => {
+      await kvPutReady
+      return originalPut(key, value, options)
+    }) as any
+
+    transport.attachBinding(
+      createBasicBinding({
+        onPublish(_id, request) {
+          published.push(Array.from(request.binaryData as Uint8Array))
+          return Promise.resolve({ seq: 1, timestamp: Date.now() })
+        },
+      }),
+      'TelefuncDurableObject',
+    )
+    transport.attachKV(kv)
+    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    _resetBroadcastAdapterForTesting(transport)
+
+    const room = new ServerBroadcast<{ text: string }>({ key: 'room:binary' })
+    room.subscribeBinary(() => {})
+    const bytes = new Uint8Array([1, 2, 3])
+    room.publishBinary(bytes)
+    bytes.set([7, 7, 7])
+
+    releaseKVPut!()
+    await flushCoordinatorTurn()
+
+    expect(published).toEqual([[1, 2, 3]])
+
+    _resetBroadcastAdapterForTesting(previousTransport)
+  })
+
   it('does not deliver locally before ordered publish setup completes', async () => {
     const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
     const kv = createMockKV()

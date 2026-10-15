@@ -437,10 +437,12 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
+        // The caller may reuse or transfer its buffer once the publish returns.
+        const queuedData = new Uint8Array(data)
         return new Promise<BroadcastPublishResult>((resolve, reject) => {
           memberState.pendingPublishes.push({
-            send: () => memberState.publishBinary(data),
-            bytes: data.byteLength,
+            send: () => memberState.publishBinary(queuedData),
+            bytes: queuedData.byteLength,
             pending: { resolve, reject },
           })
         })
