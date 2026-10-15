@@ -492,7 +492,7 @@ test.each((['server', 'page'] as const).flatMap((from) => (['text', 'binary'] as
 )
 
 test.each(['server', 'page'] as const)(
-  "the %s's ack answer of half the replay buffer, sent behind its awaited messages as the credit runs out, arrives after a reconnect",
+  "the %s's ack answer of half the replay buffer, sent behind its awaited message as the credit runs out, arrives after a reconnect",
   async (from) => {
     config.channel = {
       serverReplayBuffer: 2 * KIB,
@@ -513,8 +513,7 @@ test.each(['server', 'page'] as const)(
     ;(from === 'server' ? loop.socket.toPage : loop.socket.toServer).hold()
     // The message's frame, its 7-byte header included, leaves a byte of credit.
     const first = creditOf(answerer) - 1 - 7
-    answerer.send('x'.repeat(first - 2)).catch(() => {})
-    await run(0)
+    await answerer.send('x'.repeat(first - 2))
     // An answer's bytes are its JSON string, quotes included.
     answer('y'.repeat(KIB - 2))
     await run(50)
