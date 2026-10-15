@@ -18,6 +18,8 @@ class RosterStream {
   private _texts: { version: number; parts: Array<{ text: string; hidden: boolean }> } | null = null
   /** A roster reconciling into the view, whose drift reaches its clients once it ends. */
   private _reconciling = false
+  /** The roster stream each stub is being sent; a newer one replaces it. */
+  private readonly _streamOf = new WeakMap<RoomStubChannel, object>()
 
   constructor(
     private readonly _model: RoomModel,
@@ -81,7 +83,7 @@ class RosterStream {
   private async _stream(stubs: RoomStubChannel[]): Promise<void> {
     const stream = {}
     for (const stub of stubs) {
-      stub._rosterStream = stream
+      this._streamOf.set(stub, stream)
       stub._rosterSent = false
     }
     const state = this._model
@@ -101,7 +103,7 @@ class RosterStream {
         }
         chunk.push(next.value)
       }
-      const receiving = stubs.filter((stub) => stub._rosterStream === stream && this._stubs.has(stub))
+      const receiving = stubs.filter((stub) => this._streamOf.get(stub) === stream && this._stubs.has(stub))
       if (receiving.length === 0 || state.closed) return
       // The first roster read adds its members without a change.
       const unchanged = state.rosterKnown && state.version === version

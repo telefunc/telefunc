@@ -145,8 +145,6 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private _trackWants = 0
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private _tail: TailHold | null = null
-  /** @internal The roster stream this client is being sent; a newer one replaces it. */
-  _rosterStream: object | null = null
   /** @internal Whether this client was sent the whole roster since it attached. */
   _rosterSent = false
 
