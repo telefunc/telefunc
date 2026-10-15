@@ -313,9 +313,10 @@ export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
 
-/** Each lane of a channel's replay buffer, text and binary, on the server and on the page: twice the largest window, so
- *  a window grows to `CREDIT_WINDOW_MAX_BYTES` less the most a frame adds to a message (see `replayWindow`). A replay
- *  holds what its peer hasn't acknowledged: for a stream that awaits its sends, its window and a message at most. */
+/** Each lane of a channel's replay buffer, text and binary, on the server and on the page: twice
+ *  `CREDIT_WINDOW_MAX_BYTES`, so a window grows to it less the most a frame adds to a message (see `replayWindow`). A
+ *  replay holds what its peer hasn't acknowledged: for a stream that awaits its sends, its window and a message at
+ *  most. */
 export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
