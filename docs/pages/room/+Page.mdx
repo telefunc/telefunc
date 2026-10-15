@@ -499,7 +499,7 @@ Rooms work across multiple server nodes out of the box with <Link href="/redis">
 - **Crash-safe presence.** A clean `leave()` propagates immediately. After a crash, stale participants are removed automatically.
 - **Tuning presence latency.** A dropped connection is held for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link> before its members leave, so a brief blip does not flap presence; one that goes silent is noticed first, at the ping deadline (twice `config.channel.pingInterval`, which is at least one second). Lower them for snappier away-detection, raise `reconnectTimeout` to ride out flaky mobile networks.
 - **What a room instance costs.** Each `Room.get()` / `Room.getOrCreate()` call returns its own handle, with its own guards; the handles on one server share one view of the room, which, while clients or listeners observe it, renews the server's one lease on its members and the pages it was returned to every 30 seconds, and re-reads the member list only after it missed an event. Opening a handle reads the member list for `count` unless that view already holds it while observed (`getOrCreate()` also writes the room listing). On the server, `getParticipants()` reads the member list too unless the view holds it while observed, and so does a `snapshot()` taken before the view holds it. `Room.list()` reads each listed room's members in turn.
-- **Bounded wait for a new subscription.** While a server's subscription to one of a room's message streams is being set up, that server's publishes and other writes on the stream wait for it, in call order, for up to 60 seconds. They hold at most `config.channel.bufferLimit` (`bufferLimitBinary` for binary) bytes, each counted as its size plus 256 bytes; one past that rejects with `ChannelOverflowError`, as a <Link href="/channel#broadcast">`Broadcast`</Link> publish does.
+- **Bounded wait for a new subscription.** While a server's subscription to one of a room's message streams is being set up, that server's publishes and other writes on the stream wait for it, in call order, for up to 60 seconds. They hold at most `config.channel.bufferLimit` (`bufferLimitBinary` for binary) bytes; one past that rejects with `ChannelOverflowError`, as a <Link href="/channel#broadcast">`Broadcast`</Link> publish does.
 - **Bounded tail.** The `{ tail }` backfill is limited to 256 messages / 1,048,576 characters / 60 seconds. Membership itself is uncapped; use atomic application-level admission for a hard limit (see <Link href="#switching-rooms-capacity">Capacity</Link>).
 
 ## Reference
@@ -578,7 +578,7 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 
 Read-only: `id`, `meta`, `identity`, `selfDelivery`. A participant leaves automatically when its holder's connection is gone, or when the client holding it falls further behind than the server holds for it (`cause: 'disconnected'`).
 
-Before the first `listen()`, a participant holds private messages up to `config.channel.bufferLimit` bytes, each counted as its serialized size plus 64 bytes, and drops the oldest past that. If that message requested an acknowledgement, its sender rejects with an inbox-overflow error; an unacknowledged send has no delivery confirmation.
+Before the first `listen()`, a participant holds private messages up to `config.channel.bufferLimit` bytes and drops the oldest past that. If that message requested an acknowledgement, its sender rejects with an inbox-overflow error; an unacknowledged send has no delivery confirmation.
 
 ### `RemoteParticipant`
 
