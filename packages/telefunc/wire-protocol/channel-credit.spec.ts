@@ -1343,6 +1343,26 @@ test("the server acknowledges at its heartbeat in its PONG's message, and the pa
   expect(pageReplayBytes(page)).toBe(0)
 })
 
+test('on a 10 B/ms uplink, a page that idled an hour after an upload has its next send reach the server within seconds', async () => {
+  const { server, page } = loop.open<string, never>()
+  let got = 0
+  server.listen(() => void got++)
+  await run(100)
+  loop.socket.toServer.bytesPerMs = 10
+  let uploading = true
+  void (async () => {
+    while (uploading) await page.send('x'.repeat(1_000))
+  })()
+  await run(20_000)
+  uploading = false
+  for (let minute = 0; minute < 60; minute++) await run(60_000)
+  const before = got
+  void page.send('x'.repeat(100))
+  await runUntil(() => got > before, 5_000)
+  expect(got).toBe(before + 1)
+  expect(loop.sockets.length).toBe(1)
+})
+
 test('a page taking a push of 128 KiB messages acknowledges them only in the messages it sends anyway, once the server measured the rate', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   let got = 0
