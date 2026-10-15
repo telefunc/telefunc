@@ -147,8 +147,9 @@ async function readRoomMeta(roomId: string, { inc, meta }: RoomConfigRecord): Pr
     }
     const after = await backend.readCells(roomId, inc, { keys: [META_SEQ_CELL_KEY] })
     if ('staleInc' in after) return null
-    if (after.versions.get(META_SEQ_CELL_KEY) === before.versions.get(META_SEQ_CELL_KEY))
+    if (after.versions.get(META_SEQ_CELL_KEY) === before.versions.get(META_SEQ_CELL_KEY)) {
       return { entries: await mergeRuns(runs), seq: decodeCellCounter(seq).value }
+    }
   }
   const read = await backend.readCells(roomId, inc, { prefix: META_CELL_PREFIX })
   if ('staleInc' in read) return null
@@ -294,8 +295,9 @@ async function writeMemberMeta(
     const gen = 'replace' in write ? seq : record.metaGen
     const prefix = memberMetaGenPrefix(id, gen)
     let mutations: CellMutation[]
-    if ('replace' in write) mutations = metaEntriesAt(write.replace, seq).map((entry) => metaKeyMutation(prefix, entry))
-    else {
+    if ('replace' in write) {
+      mutations = metaEntriesAt(write.replace, seq).map((entry) => metaKeyMutation(prefix, entry))
+    } else {
       const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
       const merging = keys.length === 0 ? new Map() : (await readOpenCells(room.id, room.inc, keys)).cells
       mutations = metaChanges(write.merge, prefix, seq, merging).map((change) => changeMutation(prefix, change))

@@ -71,8 +71,9 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     this._prefix = isCluster(this._publisher) ? options.prefix : `${options.prefix}${this._publisher.options.db ?? 0}:`
     // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
     this._reportsReceivers = !isCluster(this._publisher)
-    for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS))
+    for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS)) {
       this._publisher.defineCommand(name, numberOfKeys === null ? { lua } : { numberOfKeys, lua })
+    }
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
       createSubscriber: () => createSubscriberSocket(this._publisher),
@@ -200,11 +201,12 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
 
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
     let index = retainedLanesKey(this._prefix, roomId, inc)
-    if (of !== undefined)
+    if (of !== undefined) {
       index =
         'member' in of
           ? retainedOfKey(this._prefix, roomId, inc, of.member)
           : retainedOfTrackKey(this._prefix, roomId, inc, of.track)
+    }
     return (await this._publisher.smembers(index)).map(decodeLaneKey)
   }
 

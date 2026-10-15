@@ -181,8 +181,9 @@ async function createMember(
       { key: sessionMemberCellKey(hostId, id), bytes: identityTextEncoder.encode(record.identity ?? '') },
       ...memberMetaMutations(id, meta),
     ]
-    if (record.identity !== undefined)
+    if (record.identity !== undefined) {
       mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
+    }
     const plan = () => ({ value: undefined, mutations, counts: holdCounts(config, 1, true) })
     return { keys: mutations.map(({ key }) => key), plan }
   })
@@ -311,10 +312,11 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
   let failure = null as { error: unknown } | null
   const worker = async () => {
     for (let next = pending.next(); next.done !== true; next = pending.next()) {
-      if (slice.over)
+      if (slice.over) {
         await (turn ??= slice.next().then(() => {
           turn = null
         }))
+      }
       try {
         await task(next.value)
       } catch (error) {
@@ -475,11 +477,13 @@ async function reapAndResolveIdentity(room: RoomIncarnation, identity: string): 
 
 async function dropRetainedOwnedBy(roomId: string, inc: string, memberId: string): Promise<void> {
   const backend = getRoomBackend()
-  for (const lane of await backend.listRetained(roomId, inc, { member: memberId }))
+  for (const lane of await backend.listRetained(roomId, inc, { member: memberId })) {
     await backend.deleteRetained(roomId, inc, lane)
+  }
   const text = await backend.readRetained(roomId, inc, SEMANTIC_LANE)
-  if (text !== null && decodeRoomRecord<RoomDataEnvelope>(text.payload).from === memberId)
+  if (text !== null && decodeRoomRecord<RoomDataEnvelope>(text.payload).from === memberId) {
     await backend.deleteRetained(roomId, inc, SEMANTIC_LANE, { ifSeq: text.seq })
+  }
 }
 
 async function finishPendingMemberCleanup(roomId: string, inc: string, memberId: string): Promise<void> {

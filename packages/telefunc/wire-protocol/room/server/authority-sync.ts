@@ -103,11 +103,13 @@ class AuthoritySync {
     this._received = seq
     if (seq <= this._covered + 1) this._covered = Math.max(this._covered, seq)
     this._joinRun()
-    if (this._covered < this._received)
+    if (this._covered < this._received) {
       this._repairSoon('control', () => {
-        if (this._covered < this._received && !this._host.model.closed)
+        if (this._covered < this._received && !this._host.model.closed) {
           void this.reconcileAuthority().catch(reportRoomError)
+        }
       })
+    }
   }
 
   /** The meta and roster cells share the control lane's slot, so a failover rewound them with it. */

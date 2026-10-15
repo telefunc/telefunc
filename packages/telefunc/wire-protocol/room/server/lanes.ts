@@ -142,8 +142,9 @@ async function handedOff(roomId: string, commit: CommitAccepted): Promise<void> 
     ROOM_HORIZON_MS,
     () => false,
   )
-  if (!(await delivered))
+  if (!(await delivered)) {
     reportRoomError(new Error(`Room delivery handoff lost (rejected or unconfirmed within the horizon): ${roomId}`))
+  }
 }
 
 function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {

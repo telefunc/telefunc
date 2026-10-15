@@ -93,8 +93,9 @@ function afterHoldChange(room: RoomIncarnation, change: HoldChange | null): void
   if (change === null) return
   const { before, after } = change
   if (after.closesAt !== undefined) return scheduleClose(room, after.closesAt - after.readAt)
-  if (before.holds === 0 || before.joins > 0 !== after.joins > 0)
+  if (before.holds === 0 || before.joins > 0 !== after.joins > 0) {
     void extendLapse(room, after, before.holds === 0).catch(reportRoomError)
+  }
 }
 
 /** Counts a new room's creation, which a first hold may have counted before it. */

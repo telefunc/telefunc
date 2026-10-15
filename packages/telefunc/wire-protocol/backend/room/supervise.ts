@@ -25,8 +25,9 @@ function describeCommitHold(
 ): SendHold<RoomSubscriptionSource> {
   const source = { roomId, inc, lane }
   const key = roomSubscriptionSourceKey(source)
-  if (lane.kind !== 'binary')
+  if (lane.kind !== 'binary') {
     return { key, sources: [source], weight: heldSendWeight('text', key, () => payload.byteLength, 'Room') }
+  }
   const everyTrack = { roomId, inc, lane: { kind: 'binary-all', member: lane.member } } as const
   const everyMember = { roomId, inc, lane: { kind: 'binary-track', track: lane.track } } as const
   return {

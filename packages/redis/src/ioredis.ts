@@ -27,10 +27,11 @@ function isCluster(redis: RedisClient): redis is Cluster {
  *  only (Room reads are strongly consistent), and ends when the app's client does. */
 function createCommandClient(redis: RedisClient): RedisClient {
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
-  if (redis.options.keyPrefix)
+  if (redis.options.keyPrefix) {
     throw new Error(
       "installRedis(): ioredis keyPrefix isn't supported (it doesn't apply to Pub/Sub channels). Use installRedis(redis, { prefix }) instead",
     )
+  }
   const commands = isCluster(redis)
     ? redis.duplicate([], {
         scaleReads: 'master',
@@ -63,7 +64,9 @@ async function createSubscriberSocket(redis: RedisClient): Promise<SubscriberSoc
     if (node === undefined) throw new Error('Redis Cluster has no available nodes')
     subscriberNodes.set(redis, node)
     source = node
-  } else source = redis
+  } else {
+    source = redis
+  }
   return source.duplicate({
     connectionName: `telefunc-subscriber-${randomUUID()}`,
     autoResubscribe: false,

@@ -233,8 +233,9 @@ class RoomReplica {
         if (this.model.applyParticipantMeta(event.id, event)) relay()
         return
       case 'update':
-        for (const applied of this.model.applyRoomUpdate(event))
+        for (const applied of this.model.applyRoomUpdate(event)) {
           this._relayControl(applied, () => unorderedEventText(applied))
+        }
         return
       case 'closed':
         if (!this.model.applyClosed()) return
@@ -525,7 +526,8 @@ class RoomReplica {
 
 /** The owner that wrote the event flags a hidden member; room-level events always reach clients. */
 function hiddenMemberOf(event: PresenceEvent): string | null {
-  if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta')
+  if (event.__r === 'join' || event.__r === 'leave' || event.__r === 'p-meta') {
     return event.hidden === true ? event.id : null
+  }
   return null
 }

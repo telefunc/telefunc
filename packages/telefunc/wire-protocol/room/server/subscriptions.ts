@@ -305,8 +305,9 @@ class RoomSubscriptions {
       ),
     )
     const needsRoster = host._listened() || (open && this._wants.wantsBinary)
-    if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster))
+    if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
       void host.sync.refreshMembers().catch(reportRoomError)
+    }
     change()
     this._syncDemandLane()
     if (this._planning === null) this._demand.flush()
@@ -320,11 +321,12 @@ class RoomSubscriptions {
         this._counts.clear()
         if (this._counting) this._counting.stale = true
         this._queued.all = true
-      } else
+      } else {
         for (const member of affected) {
           this._dropCounts(member)
           this._queued.members.add(member)
         }
+      }
       yield
     }
   }
@@ -358,7 +360,9 @@ class RoomSubscriptions {
           await this._planRound(slice, plan)
         } else if (this._demand.changed) {
           while (!this._demand.tellUntil(slice.end)) await slice.next()
-        } else return
+        } else {
+          return
+        }
       }
     } finally {
       this._planning = null
@@ -478,8 +482,9 @@ class RoomSubscriptions {
     }
     // Stopping a lane a change meanwhile wants again would only open it again.
     const stillServed = present && (this._wants.wantsEveryTrack(member) || this._overflows(count) || this._byMember)
-    if (!servedByAll && !stillServed && all !== undefined && this._everyTrack.get(member) === all)
+    if (!servedByAll && !stillServed && all !== undefined && this._everyTrack.get(member) === all) {
       this._releaseEveryTrack(member, all)
+    }
   }
 
   /** No want, lane or demand concerns the member, so its plan has nothing to do; the change that concerns it next
@@ -498,8 +503,9 @@ class RoomSubscriptions {
   /** The member's queued pairs; a change that moved it across `ROOM_MEMBER_NAMED_LANES_MAX` replans all of its lanes. */
   private *_planMember(member: string, plan: BinaryPlan): Generator<void> {
     const count = this._counts.get(member)
-    if (plan.all || plan.members.has(member) || (count === undefined && this._present(member)))
+    if (plan.all || plan.members.has(member) || (count === undefined && this._present(member))) {
       return yield* this._syncMemberBinary(member)
+    }
     const overflows = this._overflows(count)
     if (overflows !== this._overflowing.has(member)) return yield* this._syncMemberBinary(member)
     const servedByAll = count !== undefined && (this._wants.wantsEveryTrack(member) || overflows || this._byMember)
@@ -559,8 +565,9 @@ class RoomSubscriptions {
     if (named && !this._byMember) return
     const lane = this._everyMember.get(track)
     if (lane === undefined && named === this._byMemberTracks.has(track)) return
-    for (const member of this._trackMembers.get(track) ?? [])
+    for (const member of this._trackMembers.get(track) ?? []) {
       if (!this._binary.get(inProcessBinaryLaneKey(member, track))!.delivering) return
+    }
     if (this._waitsFor(this._establishingEveryTrack, track)) return
     if (lane !== undefined) {
       this._everyMember.delete(track)
@@ -684,8 +691,9 @@ class RoomSubscriptions {
   /** An every-track lane nothing here wants any more stops once the named lanes and every-member lanes replacing it
    *  deliver; until then, each one's readiness replans the member. */
   private _releaseEveryTrack(member: string, all: LaneSubscription): void {
-    for (const track of this._binaryTracks.get(member) ?? [])
+    for (const track of this._binaryTracks.get(member) ?? []) {
       if (!this._binary.get(inProcessBinaryLaneKey(member, track))!.delivering) return
+    }
     if (this._waitsFor(this._establishingEveryMember, member)) return
     this._everyTrack.delete(member)
     this._stopFanIn(all, this._establishingEveryTrack)
@@ -728,12 +736,13 @@ class RoomSubscriptions {
   private _syncDemandLane(): void {
     const host = this._host
     const lane = this._demandLane
-    if (!host.model.closed && !host._ownedMembers()[Symbol.iterator]().next().done)
+    if (!host.model.closed && !host._ownedMembers()[Symbol.iterator]().next().done) {
       return lane.sync(true, () =>
         getRoomBackend().subscribeLane(host.id, host._incarnation.inc, DEMAND_LANE, (payload) =>
           host._onDemand(decodeRoomText(payload)),
         ),
       )
+    }
     if (!lane.wanted) return
     lane.stop()
     host._forgetDemand()

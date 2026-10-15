@@ -135,8 +135,9 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     )
     for (const channel of attempt.channels) {
       const attempts = this._byChannel.get(channel)
-      if (attempts !== undefined) attempts.add(attempt)
-      else {
+      if (attempts !== undefined) {
+        attempts.add(attempt)
+      } else {
         this._byChannel.set(channel, new Set([attempt]))
         this._changedChannels.add(channel)
       }
@@ -268,8 +269,9 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     // An attempt attached during the SUBSCRIBE above waits for the sync it queued.
     const covered: RedisSubscriptionAttempt[] = []
     for (const attempt of this._unconfirmed) {
-      if (!attempt.awaitsConfirmation()) this._unconfirmed.delete(attempt)
-      else if (attempt.channels.every((channel) => subscribed.has(channel))) {
+      if (!attempt.awaitsConfirmation()) {
+        this._unconfirmed.delete(attempt)
+      } else if (attempt.channels.every((channel) => subscribed.has(channel))) {
         this._unconfirmed.delete(attempt)
         covered.push(attempt)
       }
@@ -355,8 +357,9 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
     this._orders = new Map()
-    for (const [lane, start] of starts)
+    for (const [lane, start] of starts) {
       this._orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, held: null, release: null })
+    }
     const early = this._early
     this._early = []
     this.transition('ready')
@@ -384,8 +387,9 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   }
 
   receive(channel: string, message: Buffer): void {
-    if (channel === this.invalidationChannel)
+    if (channel === this.invalidationChannel) {
       return this.terminate(new Error('Redis generation subscription was invalidated'))
+    }
     if (this.state() === 'ready') return this._receiveFrame(message)
     if (this.awaitsConfirmation()) this._early.push(message)
   }

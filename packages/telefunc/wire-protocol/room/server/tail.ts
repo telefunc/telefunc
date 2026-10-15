@@ -26,8 +26,9 @@ class TailHold {
     if (entry.serialized.length > ROOM_TAIL_HOLD_CODE_UNITS_MAX) return
     this._entries.push(entry)
     this._codeUnits += entry.serialized.length
-    while (this._entries.length > ROOM_TAIL_HOLD_MAX || this._codeUnits > ROOM_TAIL_HOLD_CODE_UNITS_MAX)
+    while (this._entries.length > ROOM_TAIL_HOLD_MAX || this._codeUnits > ROOM_TAIL_HOLD_CODE_UNITS_MAX) {
       this._codeUnits -= this._entries.shift()!.serialized.length
+    }
   }
 
   /** Ends the lease and hands over the held entries, oldest first. */

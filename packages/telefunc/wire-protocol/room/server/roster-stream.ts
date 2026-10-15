@@ -122,8 +122,9 @@ class RosterStream {
         stub._relayEventText(!listed || listed === visible ? (visibleText ??= textOf(visible!)) : textOf(listed))
         if (!more) stub._rosterSent = true
       }
-      if (unchanged && built === undefined && visibleText !== undefined)
+      if (unchanged && built === undefined && visibleText !== undefined) {
         texts[part] = { text: visibleText, hidden: visible!.length < chunk.length }
+      }
       if (!more) return
       if (slice.over) await slice.next()
     }

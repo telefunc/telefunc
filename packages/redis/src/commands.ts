@@ -712,8 +712,9 @@ const REDIS_COMMANDS = {
       const [tag, ...counted] = reply as string[]
       if (tag !== 'committed') return tag as 'conflict' | 'stale-inc'
       const counters = new Map<string, CellCounter>()
-      for (let i = 0; i < counted.length; i += 3)
+      for (let i = 0; i < counted.length; i += 3) {
         counters.set(counted[i]!, { value: Number(counted[i + 1]), changedAt: Number(counted[i + 2]) })
+      }
       return { committed: counters }
     },
   }),

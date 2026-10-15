@@ -423,8 +423,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       const { roomId, inc, lane } = source
       const room = this._state.rooms.get(roomId)
       const head = this._liveHead(room)
-      if (room === undefined || !isOpenIncarnation(head, inc))
+      if (room === undefined || !isOpenIncarnation(head, inc)) {
         throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
+      }
       // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
       const gen = this._generation(room, inc)
       if (lane.kind === 'binary-all') {

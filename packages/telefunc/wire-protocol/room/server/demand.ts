@@ -140,11 +140,12 @@ class DemandReport {
   /** Tells every entry told again: a step per entry. */
   *all(): Generator<void> {
     const told = this._told
-    for (const [member, tracks] of told.pairs)
+    for (const [member, tracks] of told.pairs) {
       for (const track of tracks) {
         this._tell({ member, track }, true)
         yield
       }
+    }
     for (const member of told.members) {
       this._tell({ member }, true)
       yield
@@ -170,7 +171,7 @@ class DemandReport {
     this._changed = new Receives()
     const planned = this._planned
     const told = this._told
-    for (const [member, byTrack] of pairs)
+    for (const [member, byTrack] of pairs) {
       for (const track of byTrack) {
         if (hasEntry(planned.pairs, member, track) && !hasEntry(told.pairs, member, track)) {
           toggleEntry(told.pairs, member, track, true)
@@ -178,6 +179,7 @@ class DemandReport {
         }
         yield
       }
+    }
     for (const member of members) {
       if (planned.members.has(member) && !told.members.has(member)) {
         told.members.add(member)
@@ -201,7 +203,7 @@ class DemandReport {
       }
       yield
     }
-    for (const [track, byTrack] of except)
+    for (const [track, byTrack] of except) {
       for (const member of byTrack) {
         const was = told.tracks.get(track)
         if (planned.tracks.has(track) && !hasEntry(planned.except, track, member) && was?.except.has(member) === true) {
@@ -210,7 +212,8 @@ class DemandReport {
         }
         yield
       }
-    for (const [track, byTrack] of except)
+    }
+    for (const [track, byTrack] of except) {
       for (const member of byTrack) {
         const was = told.tracks.get(track)
         if (planned.tracks.has(track) && hasEntry(planned.except, track, member) && was?.except.has(member) === false) {
@@ -219,6 +222,7 @@ class DemandReport {
         }
         yield
       }
+    }
     for (const track of tracks) {
       const was = told.tracks.get(track)
       if (!planned.tracks.has(track) && was !== undefined) {
@@ -241,7 +245,7 @@ class DemandReport {
       }
       yield
     }
-    for (const [member, byTrack] of pairs)
+    for (const [member, byTrack] of pairs) {
       for (const track of byTrack) {
         if (!hasEntry(planned.pairs, member, track) && hasEntry(told.pairs, member, track)) {
           toggleEntry(told.pairs, member, track, false)
@@ -249,6 +253,7 @@ class DemandReport {
         }
         yield
       }
+    }
   }
 }
 
@@ -292,9 +297,10 @@ class RoomDemand {
     reporter.expiresAt = Date.now() + ROOM_DEMAND_TTL_MS
     reporter.page = page.page
     let tellsAgain = false
-    for (const want of page.wants)
-      if (!('again' in want)) this.take(instance, want, want.on)
-      else if (want.again) {
+    for (const want of page.wants) {
+      if (!('again' in want)) {
+        this.take(instance, want, want.on)
+      } else if (want.again) {
         tellsAgain = true
         reporter.telling++
         reporter.asked = false
@@ -303,6 +309,7 @@ class RoomDemand {
         runAll(this._drop((from, told) => from === instance && told < telling))
         this._settle()
       }
+    }
     // A renewal while asked means the ask or its answer was lost.
     const asksAgain = reporter.asked ? page.wants.length === 0 : !continues
     if (tellsAgain || !asksAgain) return
@@ -324,9 +331,11 @@ class RoomDemand {
    *  keeps its pairs; ownership is fixed from before the member exists anywhere. */
   take(instance: string, entry: DemandEntry, on: boolean): void {
     const telling = this._reporters.get(instance)?.telling ?? 0
-    if ('except' in entry) this._takeTrack(instance, entry, on, telling)
-    else if (!this._ownsMember(entry.member)) return
-    else if ('byMember' in entry) {
+    if ('except' in entry) {
+      this._takeTrack(instance, entry, on, telling)
+    } else if (!this._ownsMember(entry.member)) {
+      return
+    } else if ('byMember' in entry) {
       const { member } = entry
       const held = this._fetched.get(member)?.has(instance) === true
       lease(this._fetched, member, instance, on, telling)
@@ -336,8 +345,9 @@ class RoomDemand {
       const byTrack = getOrCreate(this._pairs, member, () => new Map())
       if (lease(byTrack, track, instance, on, telling)) this._queue(track, member)
       if (byTrack.size === 0) this._pairs.delete(member)
-    } else if (lease(this._members, entry.member, instance, on, telling))
+    } else if (lease(this._members, entry.member, instance, on, telling)) {
       for (const track of this._everyTrackOf(entry.member)) this._queue(track, entry.member)
+    }
     this._settle()
   }
 
@@ -371,11 +381,12 @@ class RoomDemand {
   /** Drops each entry `dropped` names by its reporter and the telling it was last told in: a step per entry. */
   private *_drop(dropped: (instance: string, telling: number) => boolean): Generator<void> {
     for (const [member, byTrack] of this._pairs) {
-      for (const [track, leases] of byTrack)
+      for (const [track, leases] of byTrack) {
         if (lapse(leases, dropped)) {
           byTrack.delete(track)
           this._queue(track, member)
         }
+      }
       if (byTrack.size === 0) this._pairs.delete(member)
       yield
     }
@@ -387,20 +398,22 @@ class RoomDemand {
       yield
     }
     for (const [member, leases] of this._fetched) {
-      for (const [instance, telling] of leases)
+      for (const [instance, telling] of leases) {
         if (dropped(instance, telling)) {
           leases.delete(instance)
           this._queueFetched(instance, member)
         }
+      }
       if (leases.size === 0) this._fetched.delete(member)
       yield
     }
     for (const [track, leases] of this._tracks) {
-      for (const [instance, held] of leases)
+      for (const [instance, held] of leases) {
         if (dropped(instance, held.telling)) {
           leases.delete(instance)
           this._queueLease(track, instance, held, undefined)
         }
+      }
       if (leases.size === 0) this._tracks.delete(track)
       yield
     }
@@ -418,8 +431,9 @@ class RoomDemand {
     this._members.delete(member)
     this._fetched.delete(member)
     this._published.delete(member)
-    for (const [track, members] of this._told)
+    for (const [track, members] of this._told) {
       if (members.delete(member) && members.size === 0) this._told.delete(track)
+    }
   }
 
   /** The room closed: it holds no demand from now on, so its members' leaves forget nothing one at a time. */
@@ -469,12 +483,15 @@ class RoomDemand {
    *  another reporter's lease of it of every member leaves out, else those one lease excepts and the other not when both
    *  are fetched alike, else every member. */
   private _queueLease(track: string, instance: string, was: TrackLease | undefined, now: TrackLease | undefined): void {
-    for (const [other, lease] of this._tracks.get(track) ?? [])
+    for (const [other, lease] of this._tracks.get(track) ?? []) {
       if (other !== instance && !lease.byMember) return this._queueEach(track, lease.except)
+    }
     if (was !== undefined && now !== undefined && was.byMember === now.byMember) {
       for (const member of was.except) if (!now.except.has(member)) this._queue(track, member)
       for (const member of now.except) if (!was.except.has(member)) this._queue(track, member)
-    } else this._queue(track, ALL)
+    } else {
+      this._queue(track, ALL)
+    }
   }
 
   /** The member, on each track `instance` fetches by member. */
@@ -502,11 +519,12 @@ class RoomDemand {
     const steps = this._evaluations()
     const run = (): void => {
       try {
-        for (let step = steps.next(); !step.done; step = steps.next())
+        for (let step = steps.next(); !step.done; step = steps.next()) {
           if (slice.over) {
             void slice.next().then(run)
             return
           }
+        }
       } catch (error) {
         this._settling = false
         throw error
@@ -539,8 +557,9 @@ class RoomDemand {
     if (this._pairs.get(member)?.has(track)) return true
     const published = track === DEFAULT_TRACK || this._published.get(member)?.has(track) === true
     if (published && this._members.has(member)) return true
-    for (const { instance, except, byMember } of this._tracks.get(track)?.values() ?? [])
+    for (const { instance, except, byMember } of this._tracks.get(track)?.values() ?? []) {
       if (!except.has(member) && (!byMember || this._fetched.get(member)?.has(instance) === true)) return true
+    }
     return false
   }
 

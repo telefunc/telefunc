@@ -364,9 +364,11 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _relayText(serialized: string, texts: MemberMessageTexts, from: string, ord: WirePublishInfo): void {
-    if (this._tail !== null) this._tail.push({ serialized, ord, from })
-    else if (this._wantsTextFrom(from))
+    if (this._tail !== null) {
+      this._tail.push({ serialized, ord, from })
+    } else if (this._wantsTextFrom(from)) {
       this._relayTextLive(from, this._namesSender(from) ? texts.unstamped() : texts.stamped(), ord)
+    }
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
@@ -394,8 +396,9 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void {
-    if (this._replay.admitBinary(frame.from, frame.track, info))
+    if (this._replay.admitBinary(frame.from, frame.track, info)) {
       this._sendPublishBinary(encodePublishBinary(framed, info))
+    }
   }
 
   private _relayTextLive(key: string, wireText: string, ord: WirePublishInfo): void {

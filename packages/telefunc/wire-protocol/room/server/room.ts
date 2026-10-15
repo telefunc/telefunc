@@ -218,8 +218,9 @@ class ServerRoom extends RoomStateView implements Room {
     this._assertAdmitted(id)
   }
   private _assertAdmitted(id: string): void {
-    if (this._admissions.get(id) === 'abandoned')
+    if (this._admissions.get(id) === 'abandoned') {
       throw this._model.closed ? roomClosedError(this.id) : participantLeftError()
+    }
   }
   private _abandonAdmission(id: string, cause: LeaveCause): void {
     this._admissions.delete(id)
@@ -293,8 +294,9 @@ class ServerRoom extends RoomStateView implements Room {
     const holder = this._holderOf(envelope.to)
     // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
     if (holder instanceof RoomStubChannel) {
-      if (envelope.fromMetaSeq !== undefined)
+      if (envelope.fromMetaSeq !== undefined) {
         this._replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
+      }
       const texts = new MemberMessageTexts(serialized, info, () => {
         const { fromMeta, fromMetaSeq, fromIdentity, ...unstamped } = envelope
         return unstamped
@@ -363,8 +365,9 @@ class ServerRoom extends RoomStateView implements Room {
     if (!this._stubs.has(stub)) return
     this._replica.roster.sendTo(stub)
     stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
-    for (const member of stub._heldMembers())
+    for (const member of stub._heldMembers()) {
       stub._relayEvent({ __r: 'demand-state', member, tracks: this._replica.demand.wanted(member) })
+    }
   }
   private _detachStub(stub: RoomStubChannel): void {
     this._stubs.delete(stub)

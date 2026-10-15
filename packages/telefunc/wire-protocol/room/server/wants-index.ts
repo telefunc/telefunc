@@ -55,18 +55,21 @@ class WantsIndex {
     const scopeLists: Iterable<string | All>[] = ids
       ? [[ALL], ids]
       : [[ALL], indexed.binary.keys(), wants?.members.keys() ?? []]
-    for (const scopes of scopeLists)
+    for (const scopes of scopeLists) {
       for (const scope of scopes) {
         const next = coverKeys(scope === ALL ? wants?.everyMember : wants?.members.get(scope))
         const prev = new Set(indexed.binary.get(scope))
         const affected = new Set<string>()
         let all = false
-        for (const key of prev)
+        for (const key of prev) {
           if (!next.has(key)) all = addAffected(this._cover(holder, scope, key, false), affected) || all
-        for (const key of next)
+        }
+        for (const key of next) {
           if (!prev.has(key)) all = addAffected(this._cover(holder, scope, key, true), affected) || all
+        }
         yield all ? 'all' : affected
       }
+    }
     if (gone) this._indexed.delete(holder)
   }
 
@@ -82,7 +85,7 @@ class WantsIndex {
     if (announce !== indexed.announce) this._announce += announce ? 1 : -1
     indexed.announce = announce
     // Read live: a member listed twice is indexed already when its second step comes.
-    for (const ids of members ? [members] : [indexed.textMembers, text?.members ?? []])
+    for (const ids of members ? [members] : [indexed.textMembers, text?.members ?? []]) {
       for (const id of ids) {
         const wantsText = text?.members.has(id) ?? false
         if (wantsText !== indexed.textMembers.has(id)) {
@@ -91,6 +94,7 @@ class WantsIndex {
         }
         yield
       }
+    }
   }
 
   /** Indexes one change of the holder's binary wants; the affected members' pairs of its track may have changed. */
@@ -122,8 +126,9 @@ class WantsIndex {
 
   /** The tracks some holder names of the member alone and none names of every member. */
   *memberTracksOf(member: string): Generator<TrackKey> {
-    for (const track of this._members.get(member)?.keys() ?? [])
+    for (const track of this._members.get(member)?.keys() ?? []) {
       if (track !== ALL && !this._everyMember.has(track)) yield track
+    }
   }
 
   /** The members some holder names `track` of alone. */
@@ -178,8 +183,9 @@ class WantsIndex {
     except?: LaneHolder,
   ): boolean {
     // Each coverer suppresses only members it holds, so this stops within a few.
-    for (const holders of coverers)
+    for (const holders of coverers) {
       for (const holder of holders ?? []) if (holder !== except && holder._wantsBinary(member, track)) return true
+    }
     return false
   }
 

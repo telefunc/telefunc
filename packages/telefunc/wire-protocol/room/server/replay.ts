@@ -128,13 +128,15 @@ class LocalHolder implements LaneHolder {
   }
 
   relayAnnouncement(data: unknown, info: WirePublishInfo): void {
-    if (this._state.wantsAnnounce && this._replay.admit(ANNOUNCE_KEY, info))
+    if (this._state.wantsAnnounce && this._replay.admit(ANNOUNCE_KEY, info)) {
       this._state.applyAnnounce(data, this._publishInfo(info))
+    }
   }
 
   relayBinary(frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._wantsBinary(frame.from, frame.track) && this._replay.admitBinary(frame.from, frame.track, info))
+    if (this._wantsBinary(frame.from, frame.track) && this._replay.admitBinary(frame.from, frame.track, info)) {
       this._applyBinary(frame, info)
+    }
   }
 
   _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo): void {
