@@ -262,8 +262,8 @@ async function reapSessions(room: RoomIncarnation, { cells, now }: CellsAt): Pro
     if (decodeSessionRecord(raw).until >= now) continue
     lapsed = true
     const { value: claimed } = await mutateCells(room.id, room.inc, [key], (current, at) => {
-      const record = current.has(key) ? decodeSessionRecord(current.get(key)!) : null
-      if (record === null || record.until >= at) return { value: false, mutations: [] }
+      const latest = current.get(key)
+      if (latest === undefined || decodeSessionRecord(latest).until >= at) return { value: false, mutations: [] }
       return { value: true, mutations: [{ key, bytes: sessionRecordBytes(at, cleaner) }] }
     })
     if (claimed) await cleanSession(room, key.slice(SESSION_CELL_PREFIX.length), cleaner)
