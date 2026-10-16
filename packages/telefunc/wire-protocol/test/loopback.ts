@@ -1,6 +1,4 @@
-export { Pipe, lengthPrefixed, postBody }
-
-import { decodeU32 } from '../frame.js'
+export { Pipe }
 
 /** One direction of a link: what is pushed leaves once what was pushed before it has, at `bytesPerMs`, and arrives
  *  `latencyMs` after it left. One delivery hands over `readBytes` at most, as a socket read does: the receiver's
@@ -68,27 +66,4 @@ class Pipe {
       Math.max(0, this.queue[0]!.at - Date.now()),
     )
   }
-}
-
-/** `[u32 length][bytes]` chunks, each `prefixed` and its `frame`: an SSE POST's metadata header, then its frames. */
-function lengthPrefixed(bytes: Uint8Array): { prefixed: Uint8Array; frame: Uint8Array }[] {
-  const chunks: { prefixed: Uint8Array; frame: Uint8Array }[] = []
-  let offset = 0
-  while (offset + 4 <= bytes.length) {
-    const length = decodeU32(bytes.subarray(offset, offset + 4) as Uint8Array<ArrayBuffer>)
-    chunks.push({
-      prefixed: bytes.subarray(offset, offset + 4 + length),
-      frame: bytes.subarray(offset + 4, offset + 4 + length),
-    })
-    offset += 4 + length
-  }
-  return chunks
-}
-
-/** An SSE POST's Blob body: its metadata header, then its frames. */
-async function postBody(
-  blob: Blob,
-): Promise<{ metadata: { connId: string; streamResponse?: boolean }; frames: Uint8Array[] }> {
-  const [metadata, ...frames] = lengthPrefixed(new Uint8Array(await blob.arrayBuffer())).map(({ frame }) => frame)
-  return { metadata: JSON.parse(new TextDecoder().decode(metadata)), frames }
 }

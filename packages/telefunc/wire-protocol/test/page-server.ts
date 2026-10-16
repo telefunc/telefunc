@@ -1,4 +1,4 @@
-export { Net, page, register }
+export { Net, lengthPrefixed, page, postBody, register }
 export type { Traffic, Wire }
 
 import type { Peer } from 'crossws'
@@ -14,7 +14,6 @@ import { getTelefuncChannelHooks } from '../server/ws.js'
 import { TAG } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { base64urlToUint8Array } from '../base64url.js'
-import { lengthPrefixed } from './loopback.js'
 
 /** One way of a link that carries `rate` bytes a second: what is written to it arrives in order, as fast as that. */
 class Rate {
@@ -452,4 +451,27 @@ function webSocketTo(net: Net): new (url: string) => unknown {
       else this.onclose?.()
     }
   }
+}
+
+/** `[u32 length][bytes]` chunks, each `prefixed` and its `frame`: an SSE POST's metadata header, then its frames. */
+function lengthPrefixed(bytes: Uint8Array): { prefixed: Uint8Array; frame: Uint8Array }[] {
+  const chunks: { prefixed: Uint8Array; frame: Uint8Array }[] = []
+  let offset = 0
+  while (offset + 4 <= bytes.length) {
+    const length = decodeU32(bytes.subarray(offset, offset + 4) as Uint8Array<ArrayBuffer>)
+    chunks.push({
+      prefixed: bytes.subarray(offset, offset + 4 + length),
+      frame: bytes.subarray(offset + 4, offset + 4 + length),
+    })
+    offset += 4 + length
+  }
+  return chunks
+}
+
+/** An SSE POST's Blob body: its metadata header, then its frames. */
+async function postBody(
+  blob: Blob,
+): Promise<{ metadata: { connId: string; streamResponse?: boolean }; frames: Uint8Array[] }> {
+  const [metadata, ...frames] = lengthPrefixed(new Uint8Array(await blob.arrayBuffer())).map(({ frame }) => frame)
+  return { metadata: JSON.parse(new TextDecoder().decode(metadata)), frames }
 }
