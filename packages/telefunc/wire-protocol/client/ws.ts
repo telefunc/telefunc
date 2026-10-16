@@ -376,12 +376,15 @@ function receiveMessage(
   try {
     const frames = isOneFrame(raw) ? null : Array.from(messageFrames(raw))
     const own = frames === null ? raw : frames.pop()!
-    riding = frames?.map((each) => {
-      const frame = decode(each)
-      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
-      if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
-      return { frame, bytes: each.byteLength }
-    })
+    if (frames !== null) {
+      riding = []
+      for (const each of frames) {
+        const frame = decode(each)
+        pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
+        if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
+        riding.push({ frame, bytes: each.byteLength })
+      }
+    }
     const frame = decode(own)
     if (frame.tag === TAG.ANNOUNCE) pieces.announce(frame.bytes, at, frame.floor)
     else if (frame.tag === TAG.PIECE) {
