@@ -899,7 +899,7 @@ function parseCells(
   return { cells, versions, now: Number(now.toString()) }
 }
 
-/** A copy: ioredis holds a command's arguments while it connects or retries, and the caller may reuse its buffer. */
+/** A copy, as ioredis may hold a command past the call (connecting, auto-pipelining, a NOSCRIPT or TRYAGAIN retry). */
 function toBuffer(bytes: Uint8Array): Buffer {
   return Buffer.from(bytes)
 }

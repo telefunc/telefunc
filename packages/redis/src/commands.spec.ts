@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest'
 import { REDIS_COMMANDS } from './commands.js'
 
-// ioredis holds a command's arguments while it connects or retries, past the call that made them.
+// ioredis may hold a command's arguments past the call that made them (connecting, auto-pipelining, a retry).
 test("a binary publish's arguments hold their own bytes, so the caller reusing its buffer changes nothing sent", () => {
   const payload = new Uint8Array([1, 1, 1])
   const { argv } = REDIS_COMMANDS.publish.invoke('tf:', { route: { key: 'k', kind: 'binary' }, payload })
