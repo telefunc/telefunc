@@ -37,12 +37,13 @@ class PathRoom implements SendRoom {
   private inPathAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** `transmit` and `queued` as `PieceSender`'s. */
+  /** `transmit`, `queued` and `pingInterval` as `PieceSender`'s. */
   constructor(
     transmit: (message: Uint8Array<ArrayBuffer>) => void,
     private readonly queued: () => number,
+    pingInterval: number,
   ) {
-    this.sender = new PieceSender(transmit, queued, new Link(), this)
+    this.sender = new PieceSender(transmit, queued, pingInterval, new Link(), this)
   }
 
   /** Sends `frame` through the sender. */

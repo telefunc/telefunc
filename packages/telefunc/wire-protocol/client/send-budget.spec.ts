@@ -28,19 +28,19 @@ function open() {
   const prober = new PieceSender(
     () => {},
     () => 0,
+    5_000,
     uplink.link,
   )
-  prober.setPingInterval(5_000)
   prober.send(data(PROBE))
   prober.acknowledged({ bytes: WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, heldMs: 0, spanUs: 0 })
   prober.acknowledged({ bytes: PROBE, heldMs: 0, spanUs: 0 })
   const budget = new SendBudget(
     () => {},
     () => 0,
+    5_000,
     uplink,
     () => {},
   )
-  budget.sender.setPingInterval(5_000)
   let sent = 0
   /** Sends a data frame and has the server acknowledge it `spanMs` after the one before it. The allowance, with nothing
    *  unacknowledged. */

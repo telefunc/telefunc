@@ -83,7 +83,6 @@ class PieceSender {
   private namedFloor = 0
   /** With no rate measured, a frame this size or smaller goes unannounced. */
   private unannouncedUpTo = WIRE_PROBE_FIRST_BYTES
-  private pingInterval = 0
   /** A frame this size or smaller goes whole, a larger one in pieces this size (see `setWholeUpTo`). */
   private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
   /** The most bytes a message of whole frames carries: what a frame of them could, whole and unannounced. */
@@ -109,10 +108,14 @@ class PieceSender {
     private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
     /** The bytes its socket holds unsent. */
     private readonly queued: () => number,
+    /** Its wire's ping interval, which sizes the frames it sends whole. */
+    private pingInterval: number,
     /** Its wire's: the rates it measures go there. */
     private readonly link = new Link(),
     private readonly room = UNBOUNDED,
-  ) {}
+  ) {
+    this.setWholeUpTo()
+  }
 
   /** The bytes of the messages for the socket, and of the frames sent, those it holds. */
   get sentBytes(): number {
@@ -134,7 +137,6 @@ class PieceSender {
     this.carried.push(frame)
   }
 
-  /** Its wire's ping interval, which sizes the frames it sends whole. */
   setPingInterval(ms: number): void {
     this.pingInterval = ms
     this.setWholeUpTo()

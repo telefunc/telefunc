@@ -214,6 +214,7 @@ class WsTransport implements UpgradeTarget {
     const budget = new SendBudget(
       (message) => ws.send(message),
       () => ws.bufferedAmount,
+      this.pingInterval,
       uplink,
       () => {
         if (this.ws !== ws) return
@@ -222,7 +223,6 @@ class WsTransport implements UpgradeTarget {
       },
     )
     const { sender } = budget
-    sender.setPingInterval(this.pingInterval)
     return {
       uplink,
       budget,

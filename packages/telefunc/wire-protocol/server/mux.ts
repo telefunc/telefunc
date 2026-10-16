@@ -266,9 +266,9 @@ class ChannelMux {
       ? new PathRoom(
           (message) => transport.sendNow(connection, message),
           () => transport.bufferedAmount(connection) ?? 0,
+          this.options.pingInterval,
         )
       : null
-    room?.sender.setPingInterval(this.options.pingInterval)
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,

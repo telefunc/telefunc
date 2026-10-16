@@ -44,15 +44,16 @@ class SendBudget implements SendRoom {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   private paceDue = 0
 
-  /** `transmit` and `queued` as `PieceSender`'s. */
+  /** `transmit`, `queued` and `pingInterval` as `PieceSender`'s. */
   constructor(
     transmit: (message: Uint8Array<ArrayBuffer>) => void,
     queued: () => number,
+    pingInterval: number,
     private readonly uplink: Uplink,
     /** Called when the timer finds the uplink drained some of what it held. */
     private readonly onRoom: () => void,
   ) {
-    this.sender = new PieceSender(transmit, queued, uplink.link, this)
+    this.sender = new PieceSender(transmit, queued, pingInterval, uplink.link, this)
   }
 
   /** Sends `frame` through the sender. */
