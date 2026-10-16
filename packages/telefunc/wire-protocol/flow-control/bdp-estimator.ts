@@ -10,6 +10,7 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 import type { Link, SendWait } from '../link.js'
+import type { BdpPingAck } from '../shared-ws.js'
 
 /** Per-axis verdict on a settled probe. `grow` = the sample saturated ≥ 2/3 of the current window, which is not at
  *  cap, and for the byte window, the sample leaves the sender's queue out: taken at the path's round trip where an
@@ -135,9 +136,7 @@ class BdpEstimator {
    *  per-axis grow suggestions. Caller decides whether to actually `growBytes()` / `growMsgs()` (e.g. after applying the
    *  CPU-lag gate). */
   onPingAck(
-    probe: number,
-    senderBacklog: number,
-    senderPathRtt: number,
+    { probe, backlog: senderBacklog, pathRtt: senderPathRtt }: BdpPingAck,
     deliveredBefore: (ms: number) => number,
     sendWait: SendWait | null = null,
   ): GrowDecision {

@@ -13,7 +13,7 @@ import {
   FC_SELF_TIME_WINDOW_MS,
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
-import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES } from '../shared-ws.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type BdpPingAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
@@ -263,8 +263,8 @@ class FlowControl {
    *  Each axis grows iff its own sample saturated ≥ 2/3 of its current window, the byte sample leaving out the peer's
    *  queue (see `BdpEstimator`), AND our own self-utilisation is below threshold. On growth, the new limit goes out to
    *  the peer immediately. */
-  onPingAck(probe: number, peerBacklog: number, peerPathRtt: number, deliveredBefore: (ms: number) => number): void {
-    const suggest = this._bdp.onPingAck(probe, peerBacklog, peerPathRtt, deliveredBefore, this._wireWait())
+  onPingAck(ack: BdpPingAck, deliveredBefore: (ms: number) => number): void {
+    const suggest = this._bdp.onPingAck(ack, deliveredBefore, this._wireWait())
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'

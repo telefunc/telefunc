@@ -49,6 +49,7 @@ import {
 } from '../shared-ws.js'
 import type {
   AckResultStatus,
+  BdpPingAck,
   ChannelFrame,
   DecodedFrame,
   PingEntry,
@@ -152,7 +153,7 @@ interface MuxConnection {
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
-  sendBdpPingAck(channel: MuxChannel, probe: number, backlog: number, pathRtt: number): void
+  sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
   /** The bytes the wire delivered in the `ms` before it last delivered: before a frame handled as it arrives. */
@@ -763,7 +764,7 @@ class ClientConnection implements MuxConnection {
     this.sendUnsequenced(ix, encode.bdpPing(ix, probe), 'flow-control')
   }
 
-  sendBdpPingAck(channel: MuxChannel, probe: number, backlog: number, pathRtt: number): void {
+  sendBdpPingAck(channel: MuxChannel, { probe, backlog, pathRtt }: BdpPingAck): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     this.sendUnsequenced(ix, encode.bdpPingAck(ix, probe, backlog, pathRtt), 'flow-control')

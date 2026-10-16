@@ -44,6 +44,7 @@ export type {
   PingEntry,
   PongEntry,
   PiecesAck,
+  BdpPingAck,
   WirePublishInfo,
 }
 
@@ -348,9 +349,7 @@ type ChannelCtrlFrame =
   | { tag: typeof TAG.BROADCAST_SUB; index: number; binary: boolean }
   | { tag: typeof TAG.BROADCAST_UNSUB; index: number; binary: boolean }
   | { tag: typeof TAG.BDP_PING; index: number; probe: number }
-  /** `backlog` in bytes, `Infinity` where the credit didn't run out; `pathRtt` in ms, `Infinity` where the sender measured
-   *  none. */
-  | { tag: typeof TAG.BDP_PING_ACK; index: number; probe: number; backlog: number; pathRtt: number }
+  | ({ tag: typeof TAG.BDP_PING_ACK; index: number } & BdpPingAck)
   /** `lastSeq` is null when the channel wasn't attached. */
   | { tag: typeof TAG.ATTACH_RESULT; index: number; lastSeq: number | null }
 
@@ -362,6 +361,10 @@ type SequencedFrame =
   | Extract<ChannelCtrlFrame, { tag: typeof TAG.CLOSE | typeof TAG.CLOSE_ACK | typeof TAG.ABORT | typeof TAG.ERROR }>
 
 type PiecesAck = { bytes: number; heldMs: number; spanUs: number }
+
+/** `backlog` in bytes, `Infinity` where the credit didn't run out; `pathRtt` in ms, `Infinity` where the sender measured
+ *  none. */
+type BdpPingAck = { probe: number; backlog: number; pathRtt: number }
 
 type ConnCtrlFrame =
   | { tag: typeof TAG.PING; ended: PingEntry[]; took: number }

@@ -298,7 +298,7 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
     const { flow, emit } = makeFlow()
     flow.onReceived(1)
     flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, 0, Infinity, upToAck)
+    flow.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity }, upToAck)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES * 2)
     // BDP growth itself emits a WINDOW with the new value; reset the spy so the
     // consumption assertions below are clean.
@@ -319,7 +319,7 @@ describe('FlowControl — BDP integration', () => {
   const cycle = ({ flow, emit }: { flow: FlowControl; emit: Emit }, sampleBytes: number) => {
     flow.onReceived(1)
     flow.onReceived(sampleBytes)
-    flow.onPingAck(emit.probe, 0, Infinity, upToAck)
+    flow.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity }, upToAck)
   }
 
   it('emits BDP_PING on the first onReceived', () => {
@@ -401,7 +401,7 @@ describe('FlowControl — what the wire held as the credit ran out', () => {
     const { flow, emit } = makeFlow()
     flow.onReceived(1)
     flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, HELD, Infinity, upToAck)
+    flow.onPingAck({ probe: emit.probe, backlog: HELD, pathRtt: Infinity }, upToAck)
     expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
   })
 })
@@ -416,7 +416,7 @@ describe('FlowControl — reattach', () => {
     // Grow W via BDP first — fire ping, accumulate saturating sample, settle.
     flow.onReceived(1)
     flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck(emit.probe, 0, Infinity, upToAck)
+    flow.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity }, upToAck)
     const grownWindow = flow.byteWindow
     expect(grownWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
     flow.onConsumed(100)
@@ -658,7 +658,10 @@ async function runPath({
     attached = true
   })
   if (senderProbe !== undefined) {
-    toSender.push({ at: 2 * delayMs, deliver: () => sender.onPingAck(senderProbe, Infinity, Infinity, upToAck) })
+    toSender.push({
+      at: 2 * delayMs,
+      deliver: () => sender.onPingAck({ probe: senderProbe, backlog: Infinity, pathRtt: Infinity }, upToAck),
+    })
   }
   let blocked = false
   let budget = 0
@@ -700,7 +703,7 @@ async function runPath({
       deliveries.note(now, size(frame))
       if ('backlog' in frame) {
         const ack = deliveries.last
-        receiver.onPingAck(frame.probe, frame.backlog, frame.pathRtt, (ms) => deliveries.before(ack, ms))
+        receiver.onPingAck(frame, (ms) => deliveries.before(ack, ms))
         continue
       }
       receiver.onReceived(frame.bytes)
