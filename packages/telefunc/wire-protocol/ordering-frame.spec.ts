@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { decodeOrderingFrame, encodeOrderingFrame } from './ordering-frame.js'
+
 describe('ordering frame', () => {
   it('encodes the wide ordering frame as four big-endian u32 words ahead of the payload', () => {
     const payload = new Uint8Array([1, 255])
