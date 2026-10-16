@@ -189,30 +189,19 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   override _onPeerSubscription(binary: boolean, subscribed: boolean): void {
-    if (subscribed) this._onPeerBroadcastSubscribe(binary)
-    else this._onPeerBroadcastUnsubscribe(binary)
-  }
-
-  _onPeerBroadcastSubscribe(binary: boolean): void {
-    this._ensureBroadcast()
-    if (binary) {
-      this._peerSubscribedBinary = true
-      this._subscribeBinaryBroadcast()
-    } else {
-      this._peerSubscribedText = true
-      this._subscribeBroadcast()
+    if (binary) this._peerSubscribedBinary = subscribed
+    else this._peerSubscribedText = subscribed
+    if (subscribed) {
+      this._ensureBroadcast()
+      if (binary) this._subscribeBinaryBroadcast()
+      else this._subscribeBroadcast()
+      return
     }
-  }
-
-  _onPeerBroadcastUnsubscribe(binary: boolean): void {
-    if (binary) {
-      this._peerSubscribedBinary = false
-      if (this._broadcastBinaryListeners.size > 0) return
+    if (binary && this._broadcastBinaryListeners.size === 0) {
       this._unsubBinaryBroadcast?.()
       this._unsubBinaryBroadcast = null
-    } else {
-      this._peerSubscribedText = false
-      if (this._broadcastListeners.size > 0) return
+    }
+    if (!binary && this._broadcastListeners.size === 0) {
       this._unsubBroadcast?.()
       this._unsubBroadcast = null
     }
