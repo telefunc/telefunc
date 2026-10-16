@@ -12,7 +12,8 @@ export type {
 import type { DmReply, SenderStamp } from '../protocol.js'
 import type { RoomMeta } from '../types.js'
 
-/** The head's config. `meta` is the one the room was created with, until its first meta write (see `meta.ts`). `inc` is random, not a counter: a room recreated after its tombstone lapses can't reuse an id a stale handle holds. */
+/** The head's config. `meta` is the one the room was created with, until its first meta write (see `meta.ts`). `inc`
+ *  is random, not a counter: a room recreated after its tombstone lapses can't reuse an id a stale handle holds. */
 type RoomConfigRecord = {
   meta: RoomMeta
   inc: string
@@ -48,16 +49,16 @@ type DemandEntry =
   | { track: string; except: readonly string[]; byMember?: true }
   | { track: string; member: string; except: true }
 /** Demand between instances, on the demand lane: entries one instance starts or stops receiving, in the order it told
- *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`, its `page`th page. Its entries from `{ again: true }` to `{ again: false }`
- *  are all it receives. */
+ *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`, its `page`th page. Its entries from `{ again: true }` to
+ *  `{ again: false }` are all it receives. */
 type RoomDemandPage = {
   __r: 'demand'
   instance: string
   page: number
   wants: Array<({ on: boolean } & DemandEntry) | { again: boolean }>
 }
-/** A member's message on the lane; its order rides the transport frame. Stamped, so a receiver behind on the roster still
- *  names the sender. */
+/** A member's message on the lane; its order rides the transport frame. Stamped, so a receiver behind on the roster
+ *  still names the sender. */
 type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown } & SenderStamp
 /** An ack DM's reply, on the original sender's inbox lane. */
 type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
