@@ -1,9 +1,8 @@
 export { FlowControl, replayWindow }
-export type { ByteWindowKind, FlowControlEmit }
+export type { AttachedWire, ByteWindowKind, FlowControlEmit }
 
 import { BdpEstimator } from './bdp-estimator.js'
 import type { Link, SendWait } from '../link.js'
-import type { Uplink } from '../client/uplink.js'
 import { macrotaskYield } from './macrotask-yield.js'
 import {
   CREDIT_MSG_WINDOW_INITIAL,
@@ -30,6 +29,15 @@ interface FlowControlEmit {
   bdpPing(probe: number): void
 }
 
+/** The page's uplink, as a channel's credit reads it. */
+type AttachedWire = SendWait & {
+  readonly link: Link
+  readonly refreshes: { wait(): number }
+  granted(bytes: number): void
+  creditArrived(bytes: number): void
+  noteWait(wait: number): void
+}
+
 /** The largest window a receiver grants a sender whose replay buffer's lanes hold `text` and `binary` bytes: half the
  *  smaller, less the most a frame adds to a message, so what credit lets be in flight, and the frame of a message or
  *  ack answer up to half sent as the credit ran out, fit it. At least a byte, so credit lets a message through each
@@ -42,7 +50,7 @@ function replayWindow(text: number, binary: number): number {
 class FlowControl {
   private _bdp = new BdpEstimator()
   /** The page's uplink of the last `attach`. */
-  private _uplink: Uplink | null = null
+  private _uplink: AttachedWire | null = null
   // Sender side: what this side has sent, and the peer's limits.
   private _sentBytes = 0
   private _sentMessages = 0
@@ -316,15 +324,14 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Attach on `uplink`'s wire. The wire of the last attach lost nothing to repair, and still answers the probe in
-   *  flight. */
-  attach(uplink: Uplink): void {
-    if (uplink !== this._uplink) {
-      this._uplink = uplink
-      uplink.granted(this._grantedBytes - this._receivedBytes)
+  /** Attach on `wire`. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
+  attach(wire: AttachedWire): void {
+    if (wire !== this._uplink) {
+      this._uplink = wire
+      wire.granted(this._grantedBytes - this._receivedBytes)
       this.reattach()
     }
-    this._bdp.attach(uplink.link)
+    this._bdp.attach(wire.link)
   }
 
   /** Attach on another wire than the last, or the first. The probe in flight rode the prior wire, and the limits go out
