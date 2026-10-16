@@ -31,8 +31,7 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   heartbeat: Heartbeat | null = null
-  /** The probe's socket, with the ends it keeps as the transport adopts it: the server counts every frame the socket
-   *  carries. */
+  /** The probe's socket and ends, kept as the transport adopts it: the server counts every frame the socket carries. */
   private probed: { ws: WebSocket; ends: WsEnds } | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null

@@ -87,8 +87,7 @@ class FlowControl {
   /** Bytes sent since this side's sender last yielded or waited. */
   private _unyieldedBytes = 0
   private _shutdown = false
-  /** Since this side last answered a `BDP_PING`: the least its wire held whenever its credit ran out, as more came or as
-   *  the ping did, 0 where the runtime can't tell, `Infinity` while it didn't. */
+  /** Since it last answered a `BDP_PING`, the least its wire held as credit ran out; 0: unknown, `Infinity`: none. */
   private _leastBacklog = Infinity
 
   // Self-utilisation rolling-sum state. Two buckets, phase-weighted blend.

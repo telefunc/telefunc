@@ -264,8 +264,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Called by transport connection ──
 
-  /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
-   *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
+  /** @internal Probes a path it hasn't measured, unless its flow-control frames wait for a batched POST. */
   _reattachState(batched: boolean, uplink: Uplink): ReattachState {
     const probe = batched ? undefined : this._flow.probeAttach(uplink.link)
     return probe === undefined ? {} : { probe }
@@ -710,8 +709,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
 
-  /** @internal Every (re)attach declares the subscriptions: a SUB or UNSUB written to a wire that died isn't replayed.
-   *  Publishes start no BDP probe, so it probes no path. */
+  /** @internal Declares the subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed. */
   override _reattachState(): ReattachState {
     return { broadcast: this._subscribed }
   }

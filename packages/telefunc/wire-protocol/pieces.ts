@@ -171,8 +171,7 @@ class PieceSender {
     )
   }
 
-  /** Whether `frame`, sent while the rest of a data frame waits for room, goes ahead of it: a frame that isn't data and
-   *  goes whole, as a flow-control frame does. */
+  /** While the rest of a data frame waits for room, a frame that isn't data and goes whole goes first. */
   private passesRest(frame: Uint8Array<ArrayBuffer>): boolean {
     return !isSequencedTag(frame[0]!) && frame.byteLength <= this.wholeUpTo
   }
@@ -239,8 +238,7 @@ class PieceSender {
     this.flush()
   }
 
-  /** Before a message that gathers nothing: the frames sent before it don't wait for its bytes, but those carried, which
-   *  ride on it. */
+  /** Before a message that gathers nothing: frames sent before it go ahead, and those only carried ride on it. */
   private handGathered(): void {
     if (this.gatheredOwn) this.flush()
   }
@@ -270,8 +268,7 @@ class PieceSender {
     const room = Math.max(0, Math.floor(this.room.dataRoom()))
     const end = isSequencedTag(frame[0]!) && this.room.cuts ? Math.min(bytes, offset + room) : bytes
     if (end === offset) return this.hold(frame, offset)
-    // The first of a frame over `wholeUpTo` is empty: its receiver hears of the frame at once, and acknowledges its first
-    // two pieces at once. One cut only for room is no measure.
+    // An empty first piece has the first two acknowledged at once; a frame cut only for room is no measure.
     if (offset === 0 && bytes > this.wholeUpTo) this.sendEmptyPiece(bytes)
     const size = Math.max(1, Math.floor(this.wholeUpTo))
     const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
@@ -387,8 +384,7 @@ class PieceSender {
   }
 
   private track(crossingBytes: number, at: number, probe: boolean): void {
-    // What its socket holds unsent crosses before it, and what it gathered ahead of it; a browser may count the
-    // message it is sending in full, so less the largest message.
+    // What its socket holds and what it gathered cross first, less the largest message, which a browser may count.
     this.unacknowledged.push({
       crossing: Math.max(0, this.queued() + this.gatheredBytes - this.largest) + crossingBytes,
       at,
@@ -450,8 +446,7 @@ class PieceSender {
     }
     while (this.unacknowledged.length > 0 && this.unacknowledged.peek()!.end <= this.acknowledgedBytes) {
       const sent = this.unacknowledged.shift()!
-      // Within one tick of a coarsened clock a sample says nothing of the rate, but a probe's, which is small: it
-      // crossed within a tick.
+      // A sample within one tick of a coarse clock says nothing, but a probe's, which is small, crossed within one.
       if (sent.probe) this.rise(sent.crossing / Math.max(arrived - sent.at, WIRE_PROBE_CLOCK_MS), arrived)
       else if (arrived > sent.at) this.rise(sent.crossing / (arrived - sent.at), arrived)
     }

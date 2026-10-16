@@ -1,21 +1,6 @@
 import { chargedBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
 
-/**
- * High-performance replay buffer for outgoing WebSocket data frames.
- *
- * Stores encoded frames keyed by monotonic sequence number for replay on reconnect, until the peer acknowledges them,
- * however long that takes: its channel lets it go when it gives up on a peer away for `reconnectTimeout`. Bounded by
- * the bytes of the frames, what flow control counts: oldest entries are evicted when full. A budget lowered while
- * the peer lacks frames sent under the higher one applies once the peer has them.
- *
- * A frame goes in the lane its tag names (`replayLaneOf`), each with its own byte budget, none for the frame that ends
- * a channel.
- *
- * A frame larger than its lane's budget isn't stored. `getAfter` gives a peer
- * all it lacks, or null if a dropped frame is among it.
- *
- * Requires non-decreasing seq values.
- */
+/** Sent sequenced frames till their peer acks them, in lanes by tag; a data lane evicts its oldest past its budget. */
 export class ReplayBuffer {
   private readonly lanes: Record<ReplayLaneKind, ReplayLane>
   private readonly allLanes: readonly ReplayLane[]
@@ -42,8 +27,7 @@ export class ReplayBuffer {
     this.allLanes = Object.values(this.lanes)
   }
 
-  /** Applies new budgets to what is stored and to what comes next. One lower than a lane's applies once the peer has
-   *  every seq issued before it was first set: flow control let them be in flight under the higher one. */
+  /** A budget lower than a lane's applies once the peer has every seq issued before: they flew under the higher one. */
   setLimits(maxBytes: number, binaryMaxBytes: number): void {
     const budgets = laneBudgets(maxBytes, binaryMaxBytes)
     const unacknowledged = this.acknowledgedSeq < this._seq
@@ -61,10 +45,7 @@ export class ReplayBuffer {
     return ++this._seq
   }
 
-  /**
-   * Store an already-encoded sequenced frame in its lane.
-   * @returns `true` if the frame was stored, `false` if it was larger than its lane's budget.
-   */
+  /** Stores an encoded sequenced frame in its lane; false where it is larger than the lane's budget. */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     this.pushed(seq)
     return this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
@@ -80,8 +61,7 @@ export class ReplayBuffer {
     for (const kind of LANE_KINDS) this.lanes[kind].setBudget(budgets[kind])
   }
 
-  /** The frames with afterSeq < seq <= throughSeq, merged by seq, or null if it dropped one of them to stay within its
-   *  budget. */
+  /** The frames with afterSeq < seq <= throughSeq, by seq, or null if it dropped one of them. */
   getAfter(afterSeq: number, throughSeq = Infinity): Uint8Array<ArrayBuffer>[] | null {
     let run: Run = { seqs: [], frames: [] }
     for (const lane of this.allLanes) run = mergeBySeq(run, lane.getAfter(afterSeq, throughSeq))
@@ -173,10 +153,7 @@ class ReplayLane {
     return this.maxBytes
   }
 
-  /**
-   * Store an already-encoded frame.
-   * @returns `true` if the frame was stored, `false` if it was larger than the budget.
-   */
+  /** Stores an encoded frame; false where it is larger than the budget. */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     const bytes = chargedBytes(frame)
     if (bytes > this.maxBytes) return false

@@ -85,13 +85,10 @@ export const STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS = 3_000
 
 // ===== SSE -> WS upgrade =====
 
-/** Batch mode only: how long the barrier waits for a natural outbox drain before flushing it
- *  itself, or, with a POST still out, putting the upgrade off until the outbox drained. On a duplex upstream the
- *  barrier is just the last frame pushed onto the open body. */
+/** Batch mode: the barrier's wait for an outbox drain, before it flushes it or, with a POST out, defers the upgrade. */
 export const UPGRADE_DRAIN_TIMEOUT_MS = 2_000
 
-/** Post-flip wait for the join limbs. FIN on the old wire: 2 s from the flip or from the last bytes it delivered,
- *  whichever is later. RECONCILED on the new: 2 s from the flip. */
+/** Post-flip wait: FIN on the old wire from the flip or its last delivery if later, RECONCILED on the new one. */
 export const UPGRADE_HANDOFF_JOIN_TIMEOUT_MS = 2_000
 
 /** Past either bound the upgrade is abandoned rather than letting a stalled join buffer forever. */
@@ -107,9 +104,7 @@ export const UPGRADE_STAGE_TTL_MS = 10_000
 /** Longest channel id the wire will carry. */
 export const UPGRADE_MAX_ID_BYTES = 256
 
-/** Worst case for one open entry beyond its id: the key names, `"ix":65535`,
- *  `"lastSeq":9007199254740991`, `"initial":true`, `"broadcast":{"text":false,"binary":false}`, `"probe":4294967295`
- *  and the separator. */
+/** Worst case for one open entry beyond its id: its other keys at their largest values, and the separator. */
 const RECONCILE_ENTRY_ENVELOPE_BYTES = 124
 
 /** Bounds what unauthenticated PREPARE frames can pin in memory before any of them commits. */
@@ -157,9 +152,7 @@ export const SSE_POST_IDLE_FLUSH_DELAY_MS = 50
 /** Idle window used to decide whether the next upstream SSE batch is post-idle. */
 export const SSE_FLUSH_THROTTLE_MS = 300
 
-/** A batch POST out longer than this, plus its bytes at `SSE_POST_MIN_BYTES_PER_S`, is lost with its wire. Only the page
- *  can tell, and nothing it observes separates a lost POST from one a proxy that buffers request bodies holds back from
- *  the server, so a wire is held to the slowest rate it takes an upload at. */
+/** A POST out longer than this plus its bytes at `SSE_POST_MIN_BYTES_PER_S` is lost: a proxy may hold bodies back. */
 export const SSE_POST_FLOOR_MS = 30_000
 export const SSE_POST_MIN_BYTES_PER_S = 16 * 1024
 
@@ -185,11 +178,9 @@ export const TIMER_DELAY_MAX_MS = 2 ** 31 - 1
 
 /** A receiver acknowledges a frame over this size, or, where its peer holds data back, this many bytes of any frames. */
 export const WIRE_PIECES_ACK_BYTES = 16 * 1024
-/** With no rate measured, the second of the two pieces a frame starts with, sent back to back: the time between their
- *  arrivals measures the rate the frames after it are cut by. A frame up to twice this goes whole. */
+/** The second of a frame's first two pieces with no rate measured: their arrivals' gap measures the rate. */
 export const WIRE_PROBE_PAIR_BYTES = 2 * 1024
-/** The most the first message a WebSocket announces carries, before its receiver dated any: what a ping deadline carries
- *  on any link a PING crosses. */
+/** The most a WebSocket's first announced message carries: what a ping deadline carries on any link a PING crosses. */
 export const WIRE_PROBE_FIRST_BYTES = 64
 /** The least time a probe's measure takes: the coarsest clock a browser gives a page. */
 export const WIRE_PROBE_CLOCK_MS = 1
@@ -199,8 +190,7 @@ export const WIRE_PIECE_RATE_MARGIN = 8
 export const WIRE_GATHER_BYTES = 64 * 1024
 /** An announced message may carry twice the one before it, or this many bytes whatever that carried. */
 export const WIRE_ANNOUNCED_MIN_BYTES = 8 * 1024
-/** A receiver waits for the next announced message this many times as long as it takes at the rate the one before came
- *  at. */
+/** A receiver waits this many times as long for the next announced message as it takes at the last one's rate. */
 export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
 /** How long a measured rate stands after it last rose: past it, the next measure replaces it, lower or not. */
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
@@ -208,9 +198,7 @@ export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 export const WIRE_PIECES_ACK_GAP_MS = 50
 /** The same where its peer holds data back by what it acknowledges (see `client/send-budget.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
-/** Where its peer holds data back, a receiver acknowledges data at most this long after it arrived, once
- *  `WIRE_SEND_ACK_MIN_BYTES` are unacknowledged: on a slow uplink its peer learns the rate data arrives at from a few
- *  KiB, not 16. */
+/** Where its peer holds data back, a receiver acks data this soon once `WIRE_SEND_ACK_MIN_BYTES` wait, not 16 KiB. */
 export const WIRE_SEND_ACK_MS = 25
 /** What such an acknowledgement covers at least: its own bytes stay under 1% of it. */
 export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
@@ -218,14 +206,11 @@ export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
 export const WIRE_ACK_SHARE = 0.0025
 /** The most its window refreshes take, which move the download's credit. */
 export const WIRE_REFRESH_SHARE = 0.0075
-/** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
- *  least (see `client/send-budget.ts`). */
+/** The least a page's server may leave unacknowledged while the page hands its WebSocket data. */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
-/** A server hands its socket data while the path to its page holds less than what the page takes in this many of the
- *  least round trip, or `WIRE_SEND_AHEAD_MIN_BYTES` if more (see `server/path-room.ts`). */
+/** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
-/** How long a data frame of the page's may wait in the queues of its wire, as its server's acknowledgements measure it,
- *  before the page stops handing a WebSocket more (see `client/send-budget.ts`). */
+/** How long a page's data frame may wait in its wire's queues, as acknowledgements measure it, before it holds back. */
 export const WIRE_QUEUE_DELAY_MS = 300
 /**
  * Maximum bytes buffered per channel for text messages sent before a peer connects.
