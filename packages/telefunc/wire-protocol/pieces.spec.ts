@@ -209,7 +209,7 @@ test('a frame held for room goes, once room comes, in one message behind what wa
     (message) => void transmitted.push(message),
     () => 0,
     link,
-    { dataRoom: () => dataRoom, handed: () => {}, sentFrame: () => {} },
+    { whole: false, dataRoom: () => dataRoom, handed: () => {}, sentFrame: () => {} },
   )
   sender.send(data(1_000), 5_000)
   expect(transmitted).toEqual([])

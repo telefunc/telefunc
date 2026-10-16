@@ -237,6 +237,9 @@ export const WIRE_REFRESH_SHARE = 0.0075
 /** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
  *  least (see `client/send-budget.ts`). */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
+/** A server hands its socket data while the path to its page holds less than what the page takes in this many of the
+ *  least round trip, or `WIRE_SEND_AHEAD_MIN_BYTES` if more (see `server/path-room.ts`). */
+export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
 /** How long a data frame of the page's may wait in the queues of its wire, as its server's acknowledgements measure it,
  *  before the page stops handing a WebSocket more (see `client/send-budget.ts`). */
 export const WIRE_QUEUE_DELAY_MS = 300

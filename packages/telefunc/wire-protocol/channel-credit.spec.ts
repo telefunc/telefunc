@@ -2079,6 +2079,47 @@ test("a window refresh, a BDP_PING_ACK and a RECONCILE the page sends while an u
   expect(sentTwice).toBeLessThanOrEqual(0)
 })
 
+test("a PIECES_ACK and a window refresh the server sends while a download fills its downlink reach the page within a few round trips, not behind the download's window, and both directions keep their link full", async () => {
+  const upload = loop.open<Uint8Array, Uint8Array>()
+  const download = loop.open<Uint8Array, Uint8Array>()
+  const got = { uploaded: 0, downloaded: 0 }
+  upload.server.listenBinary((data) => void (got.uploaded += data.byteLength))
+  download.page.listenBinary((data) => void (got.downloaded += data.byteLength))
+  await run(100)
+  const socket = loop.socket
+  socket.toServer.bytesPerMs = socket.toPage.bytesPerMs = 1_250 // 1.25 MB/s each way
+  const arrived: [number, number][] = []
+  const onmessage = socket.onmessage!
+  socket.onmessage = (event) => {
+    const message = new Uint8Array(event.data)
+    for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) arrived.push([frame[0]!, Date.now()])
+    onmessage(event)
+  }
+  const chunk = new Uint8Array(64 * 1024)
+  void (async () => {
+    while (!upload.page.isClosed) await upload.page.sendBinary(chunk)
+  })().catch(() => {})
+  void (async () => {
+    while (!download.server.isClosed) await download.server.sendBinary(chunk)
+  })().catch(() => {})
+  await run(3_000)
+  const marks = { at: Date.now(), ...got }
+  await run(4_000)
+  /** How long each frame of `tag` that the server sent after the mark took to reach the page. */
+  const waits = (tag: number) => {
+    const departures = loop.sent.server.flatMap(([sent], i) => (sent === tag ? [loop.sentAt.server[i]!] : []))
+    const arrivals = arrived.flatMap(([frame, at]) => (frame === tag ? [at] : []))
+    return arrivals.flatMap((at, i) => (departures[i]! >= marks.at ? [at - departures[i]!] : []))
+  }
+  for (const tag of [TAG.PIECES_ACK, TAG.WINDOW]) {
+    const delays = waits(tag)
+    expect(delays.length, `frames of tag ${tag}`).toBeGreaterThan(0)
+    expect(Math.max(...delays), `the longest wait of tag ${tag}`).toBeLessThan(600)
+  }
+  expect(got.uploaded - marks.uploaded).toBeGreaterThan(0.9 * 4_000 * 1_250)
+  expect(got.downloaded - marks.downloaded).toBeGreaterThan(0.9 * 4_000 * 1_250)
+})
+
 test('a channel the page closes right after sends its slow uplink held back delivers them all, in order, before it closes', async () => {
   const { server, page } = loop.open<Uint8Array, never>()
   const got: number[] = []

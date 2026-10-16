@@ -49,7 +49,8 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PieceSender } from '../pieces.js'
+import type { PieceSender } from '../pieces.js'
+import { PathRoom } from './path-room.js'
 import { ServerPieceReceiver } from './server-piece-receiver.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from './socket-wait.js'
@@ -142,7 +143,7 @@ type ConnectionState = {
   frameDelivery: number
   /** When the last PONG went out. */
   pongedAt: number
-  pieces: { sender: PieceSender; receiver: ServerPieceReceiver } | null
+  pieces: { room: PathRoom; sender: PieceSender; receiver: ServerPieceReceiver } | null
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -268,8 +269,8 @@ class ChannelMux {
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
     const wait = new SocketWait(() => this.bufferedAmount(connection))
     const recvBacklog = { bytes: 0, frames: 0 }
-    const sender = transport.wholeMessages
-      ? new PieceSender(
+    const room = transport.wholeMessages
+      ? new PathRoom(
           (message) => transport.sendNow(connection, message),
           () => transport.bufferedAmount(connection) ?? 0,
         )
@@ -281,11 +282,12 @@ class ChannelMux {
         deliveries: new Deliveries(),
         frameDelivery: 0,
         pongedAt: performance.now(),
-        pieces: sender && {
-          sender,
+        pieces: room && {
+          room,
+          sender: room.sender,
           receiver: new ServerPieceReceiver(
             (frame) => this.send(connection, frame),
-            (ack) => sender.carry(ack),
+            (ack) => room.sender.carry(ack),
           ),
         },
         terminatePermanently: false,
@@ -305,7 +307,7 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         carry: (frame) => {
-          if (sender) sender.carry(() => frame as Uint8Array<ArrayBuffer>)
+          if (room) room.sender.carry(() => frame as Uint8Array<ArrayBuffer>)
           else this.send(connection, frame as Uint8Array<ArrayBuffer>)
         },
         bufferedAmount: () => this.bufferedAmount(connection),
@@ -362,7 +364,7 @@ class ChannelMux {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
-    entry.state.pieces?.sender.close()
+    entry.state.pieces?.room.close()
     this.clearPingTimer(entry.state)
     entry.state.awaited.stop()
     this.connectionEntries.delete(connection)
@@ -596,7 +598,7 @@ class ChannelMux {
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      const known = entry.state.pieces?.sender.acknowledged(frame)
+      const known = entry.state.pieces?.room.acknowledged(frame)
       assertProtocol(known, 'PIECES_ACK for nothing sent')
       return null
     }
@@ -1072,7 +1074,7 @@ class ChannelMux {
     }
     state.sendHeadroom -= frame.byteLength
     state.wait.handed(frame.byteLength, !isSequencedTag(frame[0]!))
-    if (state.pieces) state.pieces.sender.send(frame, this.options.pingInterval)
+    if (state.pieces) state.pieces.room.send(frame, this.options.pingInterval)
     else entry.transport.sendNow(connection, frame)
   }
 
