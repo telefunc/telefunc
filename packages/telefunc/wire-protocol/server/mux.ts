@@ -1069,26 +1069,16 @@ class ChannelMux {
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. A wire that's gone holds nothing. */
   private bufferedAmount(connection: Wire): number | undefined {
-    return this.withUnhanded(connection, (transport) => transport.bufferedAmount(connection))
-  }
-
-  /** What a frame that goes at once waits behind in its socket, and what its piece sender hasn't handed it. */
-  private queuedAhead(connection: Wire): number | undefined {
-    return this.withUnhanded(
-      connection,
-      (transport) => transport.queuedAhead?.(connection) ?? transport.bufferedAmount(connection),
-    )
-  }
-
-  /** `read`'s bytes of its socket, and what its piece sender hasn't handed it. A wire that's gone holds nothing. */
-  private withUnhanded(
-    connection: Wire,
-    read: (transport: ServerTransport<Wire>) => number | undefined,
-  ): number | undefined {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return 0
-    const socket = read(entry.transport)
+    const socket = entry.transport.bufferedAmount(connection)
     return socket === undefined ? undefined : socket + (entry.state.pieces?.room.sender.unhandedBytes ?? 0)
+  }
+
+  /** What a frame that goes at once counts as ahead of it: the transport's `queuedAhead` where it has one. */
+  private queuedAhead(connection: Wire): number | undefined {
+    const transport = this.connectionEntries.get(connection)?.transport
+    return transport?.queuedAhead ? transport.queuedAhead(connection) : this.bufferedAmount(connection)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {
