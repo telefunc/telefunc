@@ -2,13 +2,11 @@ export { SocketWait }
 
 import { DRAIN_SPAN_MS, Waits, newestFastest, type SendWait } from '../link.js'
 
-/** On the server, how long the frames that go at once wait behind what its socket holds (see `SendWait`): what the
- *  runtime says the socket holds, over the fastest of the newest rates it drained at while it held data. Where the
- *  runtime hides it, none. */
+/** The wait of a frame that goes at once: what the socket and piece sender hold, over the fastest newest drain rate. */
 class SocketWait implements SendWait {
   private drainRate = 0
   private readonly drainRates: number[] = []
-  /** The span being measured: when it started, what the socket held then, and the bytes handed since. */
+  /** The span being measured: when it started, what it held then, and the bytes sent since. */
   private spanFrom = 0
   private spanHeld = 0
   private spanHanded = 0
@@ -16,7 +14,7 @@ class SocketWait implements SendWait {
 
   constructor(private readonly held: () => number | undefined) {}
 
-  /** Notes `bytes` about to be handed to the socket, of a frame that goes at once if `atOnce`. */
+  /** Notes `bytes` about to be sent, of a frame that goes at once if `atOnce`. */
   handed(bytes: number, atOnce: boolean): void {
     const now = performance.now()
     if (now - this.spanFrom >= DRAIN_SPAN_MS) this.measure(now)

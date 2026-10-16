@@ -64,7 +64,7 @@ class WsTransport implements UpgradeTarget {
       return null
     }
     ws.binaryType = 'arraybuffer'
-    const ends = this.pieceEnds(ws)
+    const ends = this.wsEnds(ws)
     const { budget, pieces } = ends
     const { sender } = budget
 
@@ -87,7 +87,7 @@ class WsTransport implements UpgradeTarget {
       onClose?.()
     }
     ws.onerror = () => {}
-    ws.onopen = () => sender.send(encode.ping(), this.pingInterval)
+    ws.onopen = () => sender.send(encode.ping())
 
     // First pong proves the wire is alive — consumer reassigns onPong/onClose after the await.
     const ready = await new Promise<boolean>((resolve) => {
@@ -109,10 +109,12 @@ class WsTransport implements UpgradeTarget {
     }
 
     this.probed = { ws, ends }
+    // A RECONCILED may have come while it waited for the PONG.
+    sender.setPingInterval(this.pingInterval)
     return {
       ping: () => {
         try {
-          sender.send(withTook(encode.ping(), pieces.took), this.pingInterval)
+          sender.send(withTook(encode.ping(), pieces.took))
         } catch {}
       },
       onPong: (cb) => {
@@ -123,7 +125,7 @@ class WsTransport implements UpgradeTarget {
       },
       send: (frame) => {
         try {
-          sender.send(frame, this.pingInterval)
+          sender.send(frame)
         } catch {
           // Socket died between the open event and this send — `onClose` aborts the attempt.
         }
@@ -173,7 +175,7 @@ class WsTransport implements UpgradeTarget {
       this.handleOpen(ws)
     }
 
-    this.setupHandlers(ws, this.pieceEnds(ws))
+    this.setupHandlers(ws, this.wsEnds(ws))
   }
 
   private handleOpen(ws: WebSocket): void {
@@ -207,7 +209,7 @@ class WsTransport implements UpgradeTarget {
   }
 
   /** Every frame `ws` carries goes through its budget's sender, which counts the bytes its receiver acknowledges. */
-  private pieceEnds(ws: WebSocket): WsEnds {
+  private wsEnds(ws: WebSocket): WsEnds {
     const uplink = new Uplink()
     const budget = new SendBudget(
       (message) => ws.send(message),
@@ -220,11 +222,12 @@ class WsTransport implements UpgradeTarget {
       },
     )
     const { sender } = budget
+    sender.setPingInterval(this.pingInterval)
     return {
       uplink,
       budget,
       pieces: new PagePieceReceiver(
-        (frame) => sender.send(frame, this.pingInterval),
+        (frame) => sender.send(frame),
         (ack) => sender.carry(ack),
         uplink,
       ),
@@ -280,12 +283,12 @@ class WsTransport implements UpgradeTarget {
   sendFrame(frame: OutboundFrame): void {
     assert(this.ws && this.ends)
     if (frame.kind === 'acknowledgement') this.ends.budget.sender.carry(() => frame.frame)
-    else this.ends.budget.send(frame.frame, this.pingInterval)
+    else this.ends.budget.send(frame.frame)
   }
 
   sendRoom(): number {
     assert(this.ends)
-    return this.ends.budget.room
+    return this.ends.budget.sendRoom
   }
 
   get uplink(): Uplink {
@@ -321,6 +324,8 @@ class WsTransport implements UpgradeTarget {
   applyReconciledSettings(ctrl: ReconciledPayload): void {
     assert(this.ends) // a RECONCILED came on its wire
     this.pingInterval = ctrl.pingInterval
+    this.ends.budget.sender.setPingInterval(this.pingInterval)
+    this.probed?.ends.budget.sender.setPingInterval(this.pingInterval)
     // The server sends nothing on a wire before the page's first frame arrived: that frame crossed by now.
     this.ends.budget.sender.answered(performance.now())
   }
@@ -328,7 +333,7 @@ class WsTransport implements UpgradeTarget {
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.ends)
-    this.ends.budget.sender.send(withTook(frame, this.ends.pieces.took), this.pingInterval)
+    this.ends.budget.sender.send(withTook(frame, this.ends.pieces.took))
   }
 
   dispose(): void {
@@ -357,9 +362,7 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** Takes a WebSocket message `raw` that arrived at `at`, which its receiver acknowledges as `PagePieceReceiver` says,
- *  and hands `take` its frames, with `at`, none for a piece before its frame's last. Returns false where its wire closes: for bytes
- *  that close it, before `take` had any, or once `take` returned false. */
+/** Hands `take` the frames of a WebSocket message that arrived at `at`; false where its wire closes. */
 function receiveMessage(
   pieces: PagePieceReceiver,
   raw: Uint8Array<ArrayBuffer>,
@@ -367,39 +370,36 @@ function receiveMessage(
   take: (frame: DecodedFrame, byteLength: number, at: number) => boolean,
 ): boolean {
   // The frames before a message's last ride on it: each taken as it would be alone, but not dated apart from the last.
-  let riding: { frames: Uint8Array<ArrayBuffer>[]; decoded: DecodedFrame[] } | undefined
-  let frame: DecodedFrame | null
+  let riding: { frame: DecodedFrame; bytes: number }[] | undefined
+  let last: DecodedFrame | null = null
+  let lastBytes = 0
   try {
-    if (!isOneFrame(raw)) {
-      const frames = Array.from(messageFrames(raw))
-      raw = frames.pop()!
-      riding = { frames, decoded: [] }
-      for (const each of frames) {
-        const decoded = decode(each)
-        pieces.arrived(each.byteLength, isSequencedTag(decoded.tag), at, true)
-        if (fixedBytes(decoded.tag) === 0) pieces.tookLength(LENGTH_BYTES)
-        riding.decoded.push(decoded)
-      }
-    }
-    frame = decode(raw)
-    if (frame.tag === TAG.ANNOUNCE) {
-      pieces.announce(frame.bytes, at, frame.floor)
-      frame = null
-    } else if (frame.tag === TAG.PIECE) {
+    const frames = isOneFrame(raw) ? null : Array.from(messageFrames(raw))
+    const own = frames === null ? raw : frames.pop()!
+    riding = frames?.map((each) => {
+      const frame = decode(each)
+      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
+      if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
+      return { frame, bytes: each.byteLength }
+    })
+    const frame = decode(own)
+    if (frame.tag === TAG.ANNOUNCE) pieces.announce(frame.bytes, at, frame.floor)
+    else if (frame.tag === TAG.PIECE) {
       const whole = pieces.add(frame.total, frame.piece, at)
-      frame = null
       if (whole !== null) {
-        raw = whole
-        frame = decode(raw)
+        last = decode(whole)
+        lastBytes = whole.byteLength
       }
-    } else pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at, false)
+    } else {
+      pieces.arrived(own.byteLength, isSequencedTag(frame.tag), at, false)
+      last = frame
+      lastBytes = own.byteLength
+    }
   } catch {
     return false
   }
   if (riding !== undefined) {
-    for (let i = 0; i < riding.frames.length; i++) {
-      if (!take(riding.decoded[i]!, riding.frames[i]!.byteLength, at)) return false
-    }
+    for (const { frame, bytes } of riding) if (!take(frame, bytes, at)) return false
   }
-  return frame === null || take(frame, raw.byteLength, at)
+  return last === null || take(last, lastBytes, at)
 }

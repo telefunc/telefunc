@@ -20,13 +20,11 @@ class Uplink implements SendWait {
   private queuedAt = 0
   /** How long the frames that go at once waited behind the uplink, and data did as the peer acknowledged it. */
   private readonly waits = new Waits()
-  /** The credit the channels on this wire granted the peer that reached it, each grant on its way and when it reaches
-   *  it, and the bytes that arrived against it. */
+  /** The credit the channels on this wire granted the peer that reached it. */
   private grantedBytes = 0
   private readonly grants = new Fifo<{ bytes: number; at: number }>()
   private creditArrivedBytes = 0
-  /** In bytes per ms: the fastest of the newest rates the peer's messages arrived at while they kept coming, 0 before
-   *  any. The bytes of the span being measured, since when, and when the newest arrived. */
+  /** In bytes per ms: the fastest of the newest rates the peer's messages arrived at while they kept coming. */
   private deliveryRate = 0
   private readonly deliveryRates: number[] = []
   private deliveredBytes = 0
@@ -35,8 +33,7 @@ class Uplink implements SendWait {
   /** The span being measured started as the one before it ended, not after a pause. */
   private deliveryGoesOn = false
   readonly link = new Link()
-  /** The acknowledgements and the window refreshes of what this side receives, each kind within its share of the rate
-   *  the link carries. */
+  /** The acknowledgements and the window refreshes of what this side receives, each within its share of the link. */
   readonly acks = new Share(this.link, WIRE_ACK_SHARE)
   readonly refreshes = new Share(this.link, WIRE_REFRESH_SHARE)
 
@@ -52,8 +49,7 @@ class Uplink implements SendWait {
     this.creditArrivedBytes += bytes
   }
 
-  /** A message of `bytes` from the peer arrived at `at`. After a pause a new span starts: the rate is the link's while
-   *  messages keep coming. */
+  /** A message of `bytes` from the peer arrived at `at`; after a pause a new span starts. */
   delivered(bytes: number, at: number): void {
     if (at - this.deliveredAt > DRAIN_SPAN_MS) {
       this.deliveredFrom = this.deliveredAt = at
@@ -71,8 +67,7 @@ class Uplink implements SendWait {
     this.deliveryGoesOn = true
   }
 
-  /** How long a frame the peer sends now waits behind what it sent before: while its messages keep coming at half the
-   *  rate they came at or more, what the credit it has lets it have sent and not yet arrived, at that rate; else none. */
+  /** How long a frame the peer sends now waits behind what it sent before, while its messages keep coming. */
   peerQueueWait(): number {
     const now = performance.now()
     if (this.deliveryRate === 0 || now - this.deliveredAt > DRAIN_SPAN_MS) return 0
@@ -92,8 +87,7 @@ class Uplink implements SendWait {
     while (this.grants.length > 0 && this.grants.peek()!.at <= now) this.grantedBytes += this.grants.shift()!.bytes
   }
 
-  /** In bytes per ms, the slower of the drain rate and the rate the newest acknowledgement that spanned any time says
-   *  data arrived at. */
+  /** In bytes per ms, the slower of the drain rate and the rate the newest acknowledgement says data arrived at. */
   uplinkRate(): number {
     return this.arrivalRate > 0 ? Math.min(this.drainRate, this.arrivalRate) : this.drainRate
   }
@@ -116,8 +110,7 @@ class Uplink implements SendWait {
     return this.queued
   }
 
-  /** Notes `bytes` handed to the socket, and returns what the uplink held ahead of them. Before a rate is
-   *  measured, what the peer acknowledges alone bounds what the uplink holds. */
+  /** Notes `bytes` handed to the socket, and returns what the uplink held ahead of them. */
   handed(bytes: number): number {
     if (this.drainRate === 0) return 0
     const ahead = this.inUplink()
@@ -125,8 +118,7 @@ class Uplink implements SendWait {
     return ahead
   }
 
-  /** The peer acknowledged all but `unacknowledged` bytes: those left the uplink, though the rate measured so far says
-   *  they could still be there. */
+  /** The peer acknowledged all but `unacknowledged` bytes: those left the uplink, whatever the rate says. */
   acknowledged(unacknowledged: number): void {
     this.queued = Math.min(this.inUplink(), unacknowledged)
   }
@@ -153,8 +145,7 @@ class Uplink implements SendWait {
   }
 }
 
-/** Frames of one kind that take at most `share` of the rate their link carries (`Link.fastest`): each waits its turn, none
- *  before a rate is measured. */
+/** Frames of one kind that take at most `share` of the rate their link carries, none before a rate is measured. */
 class Share {
   private at = 0
 

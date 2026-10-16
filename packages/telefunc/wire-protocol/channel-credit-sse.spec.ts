@@ -15,6 +15,7 @@ import { getTelefuncSseChannelHooks } from './server/sse.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH } from './constants.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
 import { Pipe } from './test/loopback.js'
+import { flowOf, produce, run, runUntil } from './test/channel-specs.js'
 
 const LATENCY_MS = 25
 /** What one read of a request body hands the server, or of the event stream the page, as a socket read does. */
@@ -128,29 +129,12 @@ function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; re
 
 let current: ReturnType<typeof link> | null = null
 
-const run = (ms: number) => vi.advanceTimersByTimeAsync(ms)
-
-/** Runs until `done`, `ms` at most: an unshaped link carries as much as its windows let, and each simulated ms of it
- *  costs real time. */
-async function runUntil(done: () => boolean, ms: number): Promise<void> {
-  for (let at = 0; at < ms && !done(); at += 50) await run(50)
-}
-
-/** `for (;;) await channel.send(next)`, the channel page's backpressure loop. */
-function produce(channel: { send(data: string): Promise<void>; isClosed: boolean }, message: string) {
-  void (async () => {
-    while (!channel.isClosed) await channel.send(message)
-  })().catch(() => {})
-}
-
 /** What arrives on `channel`, in bytes. */
 function received(channel: { listen(cb: (data: string) => void): unknown }) {
   const got = { bytes: 0 }
   channel.listen((data) => void (got.bytes += data.length))
   return got
 }
-
-const flowOf = (channel: unknown) => (channel as { _flow: { byteWindow: number } })._flow
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -174,7 +158,7 @@ describe('over SSE with batch POSTs', () => {
     sse.up.bytesPerMs = 1_250
     const upload = sse.open<string, never>()
     const got = received(upload.server)
-    produce(upload.page, 'x'.repeat(64 * KIB))
+    produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
     await run(30_000)
     expect(sse.batched).toBe(true)
     expect(flowOf(upload.server).byteWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
@@ -186,7 +170,7 @@ describe('over SSE with batch POSTs', () => {
     sse.down.bytesPerMs = 1_250
     const download = sse.open<never, string>()
     const got = received(download.page)
-    produce(download.server, 'x'.repeat(64 * KIB))
+    produce(download.server, { message: () => 'x'.repeat(64 * KIB) })
     await run(30_000)
     expect(sse.batched).toBe(true)
     expect(flowOf(download.page).byteWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES_BATCH)
@@ -202,8 +186,8 @@ describe.each([
     const sse = (current = link({ batched }))
     const upload = sse.open<string, never>()
     received(upload.server)
-    produce(upload.page, 'x'.repeat(64 * KIB))
-    await runUntil(() => flowOf(upload.server).byteWindow > CREDIT_WINDOW_INITIAL_BYTES, 1_500)
+    produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
+    await runUntil(() => flowOf(upload.server).byteWindow > CREDIT_WINDOW_INITIAL_BYTES, 1_500, 50)
     expect(sse.batched).toBe(batched)
     expect(flowOf(upload.server).byteWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
   })
@@ -212,8 +196,8 @@ describe.each([
     const sse = (current = link({ batched }))
     const download = sse.open<never, string>()
     received(download.page)
-    produce(download.server, 'x'.repeat(64 * KIB))
-    await runUntil(() => flowOf(download.page).byteWindow > pageWindow, 1_500)
+    produce(download.server, { message: () => 'x'.repeat(64 * KIB) })
+    await runUntil(() => flowOf(download.page).byteWindow > pageWindow, 1_500, 50)
     expect(sse.batched).toBe(batched)
     expect(flowOf(download.page).byteWindow).toBeGreaterThan(pageWindow)
   })
@@ -239,7 +223,7 @@ test('on a downlink slower than a message per pong deadline, the page keeps its 
   const download = sse.open<never, string>()
   const got = received(download.page)
   await run(100)
-  produce(download.server, 'x'.repeat(512 * KIB))
+  produce(download.server, { message: () => 'x'.repeat(512 * KIB) })
   await run(30_000)
   expect(sse.streams).toBe(1)
   expect(got.bytes).toBeGreaterThanOrEqual(3 * 512 * KIB)

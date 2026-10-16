@@ -3,27 +3,20 @@
 // ClientChannel against the real server over each wire.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import type { Peer } from 'crossws'
 
 import { ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
 import { getChannelMux } from '../server/mux.js'
-import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { getTelefuncChannelHooks } from '../server/ws.js'
 import { TAG } from '../shared-ws.js'
-import { decodeU32 } from '../frame.js'
-import { base64urlToUint8Array } from '../base64url.js'
 import { config as serverConfig, getServerConfig } from '../../node/server/serverConfig.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isAbort } from '../../shared/Abort.js'
-import { lengthPrefixed } from '../test/loopback.js'
+import { Net, sseFetch, webSocketTo, type Traffic } from '../test/page-server.js'
 
 type Wire = 'sse' | 'sse-batch' | 'ws'
 const WIRES: Wire[] = ['sse', 'sse-batch', 'ws']
-
-/** What crossed the wire: the page's requests (a WebSocket counts one), and each direction's frame tags in order. */
-type Traffic = { requests: number; toServer: number[]; toPage: number[] }
 
 // Before the first reconcile, so every RECONCILED offers a page the WebSocket.
 getTelefuncChannelHooks()
@@ -47,26 +40,23 @@ function page(
   wire: Wire,
   { upgrade = false, delays = {} as Partial<Record<number, number>>, refusedAfter = 0, postMs = 0 } = {},
 ) {
-  const traffic: Traffic = { requests: 0, toServer: [], toPage: [] }
-  /** Ends a wire as a network drop does, the latest last. */
-  const cuts: (() => void)[] = []
-  const failing: FailingPost = { next: null, holdEnd: null }
-  const upload: Upload = { endAfterNextReconcile: false, refusedAfter, postMs }
-  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(traffic, cuts, delays))
-  if (wire !== 'ws') config.fetch = sseServer(traffic, wire === 'sse-batch', cuts, delays, failing, upload)
+  const net = new Net()
+  net.delays = delays
+  net.refusedAfter = refusedAfter
+  net.postMs = postMs
+  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(net))
+  if (wire !== 'ws') config.fetch = sseFetch(net, wire === 'sse-batch')
   const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
   const connectionKey = crypto.randomUUID()
   return {
-    traffic,
-    cut: () => cuts.at(-1)!(),
+    traffic: net.traffic,
+    /** Ends the latest wire as a network drop does. */
+    cut: () => net.links.at(-1)!.drop(),
     /** How many wires the page opened. */
-    wires: () => cuts.length,
-    /** The next batch POST carrying a RECONCILE fails, before or after the server reads it. */
-    failNextReconcilePost: (after: 'read' | 'unread') => void (failing.next = after),
-    /** The body of the next batch POST carrying a RECONCILE ends `ms` after its frames, which the server reads at once. */
-    holdNextReconcilePost: (ms: number) => void (failing.holdEnd = ms),
-    /** The upload request loses what follows the next RECONCILE it carries, and ends 50 ms later. */
-    endUploadAfterNextReconcile: () => void (upload.endAfterNextReconcile = true),
+    wires: () => net.links.length,
+    failNextReconcilePost: (after: 'read' | 'unread') => void (net.failNextReconcilePost = after),
+    holdNextReconcilePost: (ms: number) => void (net.holdNextReconcilePost = ms),
+    endUploadAfterNextReconcile: () => void (net.endUploadAfterNextReconcile = true),
     /** A channel the page opens, such as a call's callback. */
     channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string = crypto.randomUUID()) {
       return new ClientChannel<ClientToServer, ServerToClient>({
@@ -106,187 +96,6 @@ async function searchBox(channel: ReturnType<typeof page>['channel'], keystrokes
     await vi.advanceTimersByTimeAsync(everyMs)
   }
   return { openedAfter, networkErrors }
-}
-
-type FailingPost = { next: 'read' | 'unread' | null; holdEnd: number | null }
-type Upload = { endAfterNextReconcile: boolean; refusedAfter: number; postMs: number }
-
-function sseServer(
-  traffic: Traffic,
-  refuseUpload: boolean,
-  cuts: (() => void)[],
-  delays: Partial<Record<number, number>>,
-  failing: FailingPost,
-  upload: Upload,
-): typeof fetch {
-  const sse = getTelefuncSseChannelHooks()
-  return (async (url: string, init: RequestInit) => {
-    traffic.requests++
-    const body = init.body as Blob | ReadableStream<Uint8Array>
-    // A browser that can't stream a request body (Firefox, Safari) gets a 400 and the page sends batch POSTs.
-    if (!(body instanceof Blob) && refuseUpload) {
-      if (upload.refusedAfter) await new Promise((resolve) => setTimeout(resolve, upload.refusedAfter))
-      return new Response('', { status: 400 })
-    }
-    // Bytes rather than the Blob: a Request reads a Blob body on a later event-loop turn, which fake timers don't give.
-    let logged: Uint8Array | ReadableStream<Uint8Array>
-    let fails: FailingPost['next'] = null
-    if (body instanceof Blob) {
-      logged = new Uint8Array(await body.arrayBuffer())
-      const frames = lengthPrefixed(logged)
-        .slice(1)
-        .map(({ frame }) => frame)
-      for (const frame of frames) traffic.toServer.push(frame[0]!)
-      const reconcilePost =
-        !JSON.stringify(init.headers).includes('text/event-stream') &&
-        frames.some((frame) => frame[0] === TAG.RECONCILE)
-      if (failing.next && reconcilePost) [fails, failing.next] = [failing.next, null]
-      if (fails === 'unread') throw new TypeError('fetch failed')
-      const held = failing.holdEnd !== null && reconcilePost
-      const holdEnd = held ? failing.holdEnd! : upload.postMs
-      if (held || (holdEnd > 0 && !JSON.stringify(init.headers).includes('text/event-stream'))) {
-        if (held) failing.holdEnd = null
-        const [bytes, ms] = [logged, holdEnd]
-        logged = new ReadableStream<Uint8Array>({
-          start: (controller) => controller.enqueue(bytes),
-          pull: async (controller) => {
-            await new Promise((resolve) => setTimeout(resolve, ms))
-            controller.close()
-          },
-        })
-      }
-    } else {
-      logged = body.pipeThrough(framesThrough((frame) => traffic.toServer.push(frame[0]!), upload))
-    }
-    const request = new Request(url, { method: 'POST', body: logged, duplex: 'half' } as RequestInit)
-    const response = (await sse.handleRequest(request))!
-    if (fails === 'read') throw new TypeError('fetch failed')
-    const responseBody =
-      response.body instanceof ReadableStream
-        ? response.body.pipeThrough(eventsThrough((frame) => traffic.toPage.push(frame[0]!), cuts, delays))
-        : (response.body as string)
-    return new Response(responseBody, {
-      status: response.statusCode,
-      headers: { 'Content-Type': response.contentType },
-    })
-  }) as typeof fetch
-}
-
-/** Passes an upload POST's body through, calling `onFrame` with each frame after its metadata header. */
-function framesThrough(onFrame: (frame: Uint8Array) => void, upload: Upload) {
-  let pending = new Uint8Array(0)
-  let seenMetadata = false
-  let losing = false
-  return new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      if (losing) return
-      const joined = new Uint8Array(pending.length + chunk.length)
-      joined.set(pending)
-      joined.set(chunk, pending.length)
-      let offset = 0
-      while (offset + 4 <= joined.length) {
-        const length = decodeU32(joined.subarray(offset, offset + 4) as Uint8Array<ArrayBuffer>)
-        if (offset + 4 + length > joined.length) break
-        const frame = joined.slice(offset + 4, offset + 4 + length)
-        controller.enqueue(joined.slice(offset, offset + 4 + length))
-        offset += 4 + length
-        if (!seenMetadata) {
-          seenMetadata = true
-          continue
-        }
-        onFrame(frame)
-        if (upload.endAfterNextReconcile && frame[0] === TAG.RECONCILE) {
-          upload.endAfterNextReconcile = false
-          losing = true
-          setTimeout(() => controller.terminate(), 50)
-          return
-        }
-      }
-      pending = joined.slice(offset)
-    },
-  })
-}
-
-/** Passes an SSE downstream through, calling `onFrame` with each frame it carries. */
-function eventsThrough(
-  onFrame: (frame: Uint8Array) => void,
-  cuts: (() => void)[],
-  delays: Partial<Record<number, number>>,
-) {
-  const decoder = new TextDecoder()
-  const encoder = new TextEncoder()
-  let text = ''
-  let delivered = Promise.resolve()
-  return new TransformStream<Uint8Array, Uint8Array>({
-    start: (controller) => void cuts.push(() => controller.terminate()),
-    transform(chunk, controller) {
-      text += decoder.decode(chunk, { stream: true })
-      let end: number
-      while ((end = text.indexOf('\n\n')) !== -1) {
-        const event = text.slice(0, end)
-        text = text.slice(end + 2)
-        const frame = event.startsWith('data: ') ? base64urlToUint8Array(event.slice('data: '.length)) : null
-        if (frame) onFrame(frame)
-        const delay = frame ? delays[frame[0]!] : undefined
-        const bytes = encoder.encode(`${event}\n\n`)
-        delivered = delivered
-          .then(() => delay && new Promise((resolve) => setTimeout(resolve, delay)))
-          .then(() => controller.enqueue(bytes))
-      }
-    },
-    flush: () => delivered,
-  })
-}
-
-/** A `WebSocket` whose far end is the server's crossws hooks. */
-function webSocketTo(traffic: Traffic, cuts: (() => void)[], delays: Partial<Record<number, number>>) {
-  const hooks = getTelefuncChannelHooks()
-  return class {
-    static readonly OPEN = 1
-    readyState = 0
-    binaryType = 'blob'
-    onopen: (() => void) | null = null
-    onmessage: ((event: { data: ArrayBuffer }) => void) | null = null
-    onclose: (() => void) | null = null
-    onerror: (() => void) | null = null
-    private readonly peer = {
-      context: {},
-      // It hands each frame on as it is sent, so its socket holds none.
-      websocket: { bufferedAmount: 0 },
-      send: (frame: Uint8Array) => {
-        traffic.toPage.push(frame[0]!)
-        const data = frame.slice().buffer
-        const deliver = () => this.onmessage?.({ data })
-        const delay = delays[frame[0]!]
-        if (delay) setTimeout(deliver, delay)
-        else queueMicrotask(deliver)
-      },
-      terminate: () => this.close(),
-    } as unknown as Peer
-    constructor(_url: string) {
-      traffic.requests++
-      cuts.push(() => this.end(1006))
-      queueMicrotask(async () => {
-        await hooks.open!(this.peer)
-        this.readyState = 1
-        this.onopen?.()
-      })
-    }
-    send(data: Uint8Array) {
-      traffic.toServer.push(data[0]!)
-      const frame = data.slice()
-      void hooks.message!(this.peer, { uint8Array: () => frame } as never)
-    }
-    close() {
-      this.end(1000)
-    }
-    private end(code: number) {
-      if (this.readyState === 3) return
-      this.readyState = 3
-      void hooks.close!(this.peer, { code } as never)
-      this.onclose?.()
-    }
-  }
 }
 
 describe.each(WIRES)('over %s', (wire) => {

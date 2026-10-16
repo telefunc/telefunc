@@ -3,6 +3,8 @@ import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
 import { muxChannelStub } from '../test/mux-channel-stub.js'
+import { reconciled } from '../test/channel-specs.js'
+import { postBody } from '../test/loopback.js'
 import { SSE_POST_TARGET_MS, STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS } from '../constants.js'
 import { ClientBroadcast, ClientChannel } from './channel.js'
 import { config } from '../../client/clientConfig.js'
@@ -11,7 +13,6 @@ import { ServerBroadcast } from '../server/server-broadcast.js'
 import { getChannelMux } from '../server/mux.js'
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { decode, encode, TAG } from '../shared-ws.js'
-import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 
 afterEach(() => {
@@ -26,40 +27,21 @@ async function advanceUntil(done: () => boolean, ms: number) {
   for (let waited = 0; waited < ms && !done(); waited += 10) await vi.advanceTimersByTimeAsync(10)
 }
 
-async function parseBlobBody(
-  blob: Blob,
-): Promise<{ metadata: { connId: string; streamResponse?: boolean }; frames: Uint8Array[] }> {
-  const bytes = new Uint8Array(await blob.arrayBuffer())
-  let offset = 0
-  const next = (): Uint8Array => {
-    const length = decodeU32(bytes.subarray(offset, offset + 4) as never)
-    offset += 4
-    const chunk = bytes.subarray(offset, offset + length)
-    offset += length
-    return chunk
-  }
-  const metadata = JSON.parse(new TextDecoder().decode(next()))
-  const frames: Uint8Array[] = []
-  while (offset < bytes.length) frames.push(next())
-  return { metadata, frames }
-}
-
 /** The server's RECONCILED, attaching `ixes`, which have of the page's frames up to `lastSeqs`'s. */
-const reconciled = (ixes: number[], lastSeqs = new Map<number, number>()) =>
-  encode.reconciled({
-    sessionId: crypto.randomUUID(),
-    open: ixes.map((ix) => ({ ix, lastSeq: lastSeqs.get(ix) ?? 0 })),
-    reconnectTimeout: 60_000,
-    idleTimeout: 60_000,
-    pingInterval: 100_000,
-    serverReplayBuffer: 1_000_000,
-    serverReplayBufferBinary: 2_000_000,
-    clientReplayBuffer: 1_000_000,
-    clientReplayBufferBinary: 2_000_000,
-    sseFlushThrottle: 0,
-    ssePostIdleFlushDelay: 0,
-    transports: ['sse'],
-  })
+const reconciledOf = (ixes: number[], lastSeqs = new Map<number, number>()) =>
+  encode.reconciled(
+    reconciled({
+      sessionId: crypto.randomUUID(),
+      open: ixes.map((ix) => ({ ix, lastSeq: lastSeqs.get(ix) ?? 0 })),
+      pingInterval: 100_000,
+      serverReplayBuffer: 1_000_000,
+      serverReplayBufferBinary: 2_000_000,
+      clientReplayBuffer: 1_000_000,
+      clientReplayBufferBinary: 2_000_000,
+      sseFlushThrottle: 0,
+      ssePostIdleFlushDelay: 0,
+    }),
+  )
 
 /** A server the test drives: it streams what the test sends down the latest SSE wire, hands each frame of a batch
  *  POST to `onBatchFrame`, and leaves the upload POST unsettled until the test settles it. What the test sends before
@@ -86,7 +68,7 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
     sendOnWire: (wire: number, frame: Uint8Array) => opened[wire]!.write(frame),
     /** The latest wire's POSTs are answered 400 from now on, as the server does once it cut the wire. */
     cutWire: () => void cut.add(opened.at(-1)!.connId),
-    reconcile: () => emit(() => reconciled([server.ix])),
+    reconcile: () => emit(() => reconciledOf([server.ix])),
     // A browser that can't stream a request body (Firefox) sends it as "[object ReadableStream]", and the server
     // answers 400 without reading a frame or sending the open-ack.
     refuseUpload: () => server.settleUpload(new Response('bad request', { status: 400 })),
@@ -103,7 +85,7 @@ function fakeServer(onBatchFrame: (frame: ReturnType<typeof decode>) => void = (
         uploadSettlement = null
         return settlement ?? (await new Promise<Response>((resolve) => (pendingUpload = resolve)))
       }
-      const { metadata, frames } = await parseBlobBody(body)
+      const { metadata, frames } = await postBody(body)
       if (!metadata.streamResponse) {
         let crossed = 0
         for (const raw of frames) {
@@ -191,7 +173,7 @@ describe('an upload POST whose open-ack never comes', () => {
     await vi.advanceTimersByTimeAsync(100)
     /** The server runs what reached it of the upload only now, as one whose open-ack the page got too late. */
     const readUploadLate = async () => {
-      const { frames } = await parseBlobBody(new Blob(uploaded as BlobPart[]))
+      const { frames } = await postBody(new Blob(uploaded as BlobPart[]))
       const texts = frames.map((raw) => decode(raw as never)).filter((frame) => frame.tag === TAG.TEXT)
       for (const frame of texts) serverChannel._dispatchFrame(frame)
       return texts.length
@@ -236,7 +218,7 @@ describe('an upload POST a proxy holds until its body ends', () => {
     config.fetch = (async (_url: string, init: RequestInit) => {
       const body = init.body as unknown
       if (body instanceof Blob) {
-        if ((await parseBlobBody(body)).metadata.streamResponse) await connected
+        if ((await postBody(body)).metadata.streamResponse) await connected
         return await toServer(body)
       }
       upload = { ended: new Response(body as ReadableStream).arrayBuffer(), signal: init.signal! }
@@ -325,7 +307,7 @@ test("a batch POST still in flight for a dead wire can't unsubscribe the listene
     const body = init.body as unknown
     // A browser that can't stream a request body (Firefox, Safari) is answered 400: the page sends batch POSTs.
     if (!(body instanceof Blob)) return new Response('bad request', { status: 400 })
-    if ((await parseBlobBody(body)).metadata.streamResponse) {
+    if ((await postBody(body)).metadata.streamResponse) {
       wires++
       const reader = (await toServer(body)).body!.getReader()
       let cut = false
@@ -391,7 +373,7 @@ test("a reconnect's wire gets its own connection id, so a POST still in flight f
   const connIds: string[] = []
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     if (init.body instanceof Blob) {
-      connIds.push(((await parseBlobBody(init.body)).metadata as { connId: string }).connId)
+      connIds.push(((await postBody(init.body)).metadata as { connId: string }).connId)
     }
     return await new Promise<Response>(() => {})
   }) as unknown as typeof fetch
@@ -578,8 +560,8 @@ test("a RECONCILED that comes on an SSE wire the page gave up doesn't settle the
   void connection.transport.flushOutbox() // its heartbeat delay passed
   await advanceUntil(() => server.wires === 2, 2_000)
   expect(server.wires).toBe(2)
-  server.sendOnWire(0, reconciled([0, 1]))
-  server.sendOnWire(1, reconciled([0, 1, 2]))
+  server.sendOnWire(0, reconciledOf([0, 1]))
+  server.sendOnWire(1, reconciledOf([0, 1, 2]))
   await vi.advanceTimersByTimeAsync(20)
   expect([...connection.channels.values()].map((entry) => entry.state.tag)).toEqual(['open', 'open', 'open'])
   connection.dispose()
@@ -643,7 +625,7 @@ describe('a slow uplink', () => {
       if (frame.tag === TAG.RECONCILE) {
         reconcileArrivals.push(Date.now())
         const ixes = frame.payload.open.map((entry) => entry.ix)
-        setTimeout(() => server.send(reconciled(ixes, lastSeqs)), 20)
+        setTimeout(() => server.send(reconciledOf(ixes, lastSeqs)), 20)
       }
     })
     server = page.server

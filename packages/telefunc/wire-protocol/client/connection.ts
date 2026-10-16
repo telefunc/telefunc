@@ -49,6 +49,7 @@ import {
 } from '../shared-ws.js'
 import type {
   AckResultStatus,
+  BdpPingAck,
   ChannelFrame,
   DecodedFrame,
   PingEntry,
@@ -101,7 +102,7 @@ type ProbeSession = {
  *  leaves the wire usable. */
 type BarrierEmission = 'emitted' | 'not-emitted'
 
-type OutboundFrameKind = 'reconcile' | 'control' | ByteWindowKind | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'released' | 'control' | ByteWindowKind | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind
@@ -125,7 +126,7 @@ interface MuxChannel {
   _onTransportClose(err?: Error): void
   /** What this channel declares in its RECONCILE entry on every (re)attach, on `uplink`'s wire, whose flow-control
    *  frames wait for a batched POST when `batched`. */
-  _reattachState(uplink: Uplink, batched: boolean): ReattachState
+  _reattachState(batched: boolean, uplink: Uplink): ReattachState
   /** Its RECONCILE entry's `probe` was answered by the RECONCILED. */
   _onProbeAnswered(probe: number): void
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
@@ -152,7 +153,7 @@ interface MuxConnection {
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
-  sendBdpPingAck(channel: MuxChannel, probe: number, backlog: number, pathRtt: number): void
+  sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
   /** The bytes the wire delivered in the `ms` before it last delivered: before a frame handled as it arrives. */
@@ -707,7 +708,7 @@ class ClientConnection implements MuxConnection {
       this.heldForRoomBytes -= frame.byteLength
       room -= frame.byteLength
       this.replayBuffers.get(channelIx)!.push(seq, frame)
-      this.transport.sendFrame({ kind: 'reconcile', frame })
+      this.transport.sendFrame({ kind: 'released', frame })
     }
     this.startTtlIfIdle()
   }
@@ -746,27 +747,19 @@ class ClientConnection implements MuxConnection {
   }
 
   sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0), kind)
+    this.sendUnsequenced(channel, kind, (ix) => encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0))
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.msgWindow(ix, limit), urgent ? 'urgent-flow-control' : 'flow-control')
+    this.sendUnsequenced(channel, urgent ? 'urgent-flow-control' : 'flow-control', (ix) => encode.msgWindow(ix, limit))
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.bdpPing(ix, probe), 'flow-control')
+    this.sendUnsequenced(channel, 'flow-control', (ix) => encode.bdpPing(ix, probe))
   }
 
-  sendBdpPingAck(channel: MuxChannel, probe: number, backlog: number, pathRtt: number): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.bdpPingAck(ix, probe, backlog, pathRtt), 'flow-control')
+  sendBdpPingAck(channel: MuxChannel, { probe, backlog, pathRtt }: BdpPingAck): void {
+    this.sendUnsequenced(channel, 'flow-control', (ix) => encode.bdpPingAck(ix, probe, backlog, pathRtt))
   }
 
   bufferedAmount(): number {
@@ -777,9 +770,16 @@ class ClientConnection implements MuxConnection {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
-  /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait: a limit is cumulative, so one
-   *  that waited is still right. */
-  private sendUnsequenced(ix: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
+  /** Sends the frame `buildFrame` builds, which takes no seq, or queues it while its channel's sends wait: a limit is
+   *  cumulative, so one that waited is still right. */
+  private sendUnsequenced(
+    channel: MuxChannel,
+    kind: OutboundFrameKind,
+    buildFrame: (ix: number) => Uint8Array<ArrayBuffer>,
+  ): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    const frame = buildFrame(ix)
     if (!this.canSendImmediately(ix)) {
       this.settleQueue().push({ frame, channelIx: ix, seq: undefined })
       return
@@ -788,15 +788,11 @@ class ClientConnection implements MuxConnection {
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.broadcastSub(ix, binary), 'control')
+    this.sendUnsequenced(channel, 'control', (ix) => encode.broadcastSub(ix, binary))
   }
 
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.broadcastUnsub(ix, binary), 'control')
+    this.sendUnsequenced(channel, 'control', (ix) => encode.broadcastUnsub(ix, binary))
   }
 
   _onTransportOpen(transport: ClientChannelTransport): void {
@@ -1083,7 +1079,7 @@ class ClientConnection implements MuxConnection {
     const { from, buffer, deferredOmitted } = this.exitUpgradeCommitting()
     this.retireOldWire(from)
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
-    this.releaseDeferredOmitted(deferredOmitted)
+    this.closeUnacknowledged(deferredOmitted)
     for (const entry of buffer.new) this.dispatchFrame(entry.frame)
     this.flushPendingRegisterReconcile()
     this.startTtlIfIdle()
@@ -1179,7 +1175,7 @@ class ClientConnection implements MuxConnection {
     const abandoned = this.teardownUpgrade()
     if (abandoned) {
       for (const entry of abandoned.buffer.old) this.dispatchFrame(entry.frame)
-      this.releaseDeferredOmitted(abandoned.deferredOmitted)
+      this.closeUnacknowledged(abandoned.deferredOmitted)
     }
     this.upgradeDisabled = true
     this.transport.abandonActiveTransport()
@@ -1469,7 +1465,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState(uplink, batched)
+      const state = entry.channel._reattachState(batched, uplink)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)
@@ -1587,9 +1583,7 @@ class ClientConnection implements MuxConnection {
           deferredOmitted.push(ix)
           continue
         }
-        const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
-        this.releaseChannel(ix, entry.channel)
-        entry.channel._onTransportClose(err)
+        this.closeUnacknowledged([ix])
         continue
       }
       if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
@@ -1613,7 +1607,7 @@ class ClientConnection implements MuxConnection {
     return { frames: releaseFrames, channelsToOpen, reconcileComplete: !hasNewChannels }
   }
 
-  private releaseDeferredOmitted(ixes: number[]): void {
+  private closeUnacknowledged(ixes: number[]): void {
     for (const ix of ixes) {
       const entry = this.channels.get(ix)
       if (!entry) continue
@@ -1632,7 +1626,7 @@ class ClientConnection implements MuxConnection {
     if (!this.awaitedIxes.delete(ix)) return
     const entry = this.channels.get(ix)!
     if (lastSeq === null) {
-      this.releaseDeferredOmitted([ix])
+      this.closeUnacknowledged([ix])
     } else {
       const opened = entry.state.tag === 'pending'
       if (opened) this.enterChannelOpen(ix)
@@ -1653,7 +1647,7 @@ class ClientConnection implements MuxConnection {
   private replayTo(ix: number, entry: ChannelEntry, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
     this.serverHasThrough(ix, lastSeq)
     const missed = this.replayBuffers.get(ix)!.getAfter(lastSeq, throughSeq)
-    if (missed !== null) return missed.map((frame) => ({ kind: 'reconcile', frame }))
+    if (missed !== null) return missed.map((frame) => ({ kind: 'released', frame }))
     // One the server ended needs nothing more.
     if (entry.state.tag === 'closed' && entry.state.delivered) return []
     return [this.loseChannel(ix, entry)]
@@ -1721,7 +1715,7 @@ class ClientConnection implements MuxConnection {
         room -= frame.byteLength
         this.replayBuffers.get(channelIx)?.push(seq, frame)
       }
-      frames.push({ kind: 'reconcile', frame })
+      frames.push({ kind: 'released', frame })
     }
     sendBuffer.length = writeIx
     return frames

@@ -8,7 +8,7 @@ import {
   WIRE_SEND_ACK_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../constants.js'
-import { PieceSender } from '../pieces.js'
+import { PieceSender, type SendRoom } from '../pieces.js'
 import type { Uplink } from './uplink.js'
 import { isSequencedTag, type PiecesAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
@@ -21,12 +21,12 @@ const LEAST_OVER_SLACK_BYTES = 1024
 /** Parts of data handed within this long of one another make one sample. */
 const SAMPLE_MERGE_MS = 1
 
-/** Data handed to the socket at once: where it ends, of all the sender handed, its bytes, what the uplink held ahead of
- *  it, and when. */
+/** Data handed to the socket at once; `ahead` is what the uplink held ahead of it. */
 type SentData = { end: number; bytes: number; ahead: number; at: number }
 
 /** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
-class SendBudget {
+class SendBudget implements SendRoom {
+  readonly cuts = true
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
   /** The allowance as measured delays moved it, null before the first: till then it is the least. */
@@ -37,9 +37,7 @@ class SendBudget {
   private arrivedAt = 0
   /** The least one-way delay of data on the path, up to the offset between the clocks. */
   private leastDelay = Number.POSITIVE_INFINITY
-  /** The least time an acknowledgement took back, up to the same offset, and how much longer the newest took: behind
-   *  what the server sends, which a download fills, and no queue of the uplink's. Its wait falls no faster than time
-   *  passes. */
+  /** The least time an acknowledgement took back, up to the same offset: behind no queue of the uplink's. */
   private leastBack = Number.POSITIVE_INFINITY
   private lateMs = 0
   private lateAt = 0
@@ -54,22 +52,18 @@ class SendBudget {
     /** Called when the timer finds the uplink drained some of what it held. */
     private readonly onRoom: () => void,
   ) {
-    this.sender = new PieceSender(transmit, queued, uplink.link, {
-      dataRoom: () => this.roomPast(this.sender.transmittedBytes),
-      handed: (bytes, data) => this.handed(bytes, data),
-      sentFrame: (tag, bytes) => uplink.sentFrame(tag, bytes),
-    })
+    this.sender = new PieceSender(transmit, queued, uplink.link, this)
   }
 
   /** Sends `frame` through the sender. */
-  send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
+  send(frame: Uint8Array<ArrayBuffer>): void {
     if (isSequencedTag(frame[0]!)) {
-      this.sender.send(frame, pingInterval)
+      this.sender.send(frame)
       return this.pace()
     }
     // What it waits behind: the uplink holds it too once handed.
     const wait = this.uplink.waitNow()
-    this.sender.send(frame, pingInterval)
+    this.sender.send(frame)
     this.uplink.noteWait(wait)
   }
 
@@ -77,8 +71,18 @@ class SendBudget {
     return this.movedAllowance ?? this.least
   }
 
+  /** `SendRoom`: the room less what the sender handed. */
+  dataRoom(): number {
+    return this.roomPast(this.sender.transmittedBytes)
+  }
+
+  /** `SendRoom`: a PIECES_ACK or a window refresh takes its share of the uplink. */
+  sentFrame(tag: number, bytes: number): void {
+    this.uplink.sentFrame(tag, bytes)
+  }
+
   /** The bytes of data it takes now: none, once the room is used or data waits for it. */
-  get room(): number {
+  get sendRoom(): number {
     return this.roomPast(this.sender.sentBytes)
   }
 
@@ -128,7 +132,7 @@ class SendBudget {
    *  again once the uplink carried what its server acknowledges at once, or all it holds. */
   private pace(): void {
     const { drainRate } = this.uplink
-    if (drainRate === 0 || this.room > 0 || this.paceTimer !== null) return
+    if (drainRate === 0 || this.sendRoom > 0 || this.paceTimer !== null) return
     const queued = this.uplink.inUplink()
     if (queued === 0) return
     const ms = Math.max(1, Math.min(queued, WIRE_PIECES_ACK_BYTES) / drainRate)
@@ -142,9 +146,8 @@ class SendBudget {
     this.pace()
   }
 
-  /** Notes `bytes` the sender handed the socket: all are in the uplink, and data is dated. Parts of data handed within
-   *  `SAMPLE_MERGE_MS` of one another make one sample, dated by the first. */
-  private handed(bytes: number, data: boolean): void {
+  /** `SendRoom`: notes `bytes` the sender handed the socket; data handed within `SAMPLE_MERGE_MS` makes one sample. */
+  handed(bytes: number, data: boolean): void {
     const ahead = this.uplink.handed(bytes)
     if (!data) return
     const end = this.sender.transmittedBytes
@@ -156,8 +159,7 @@ class SendBudget {
     } else this.sent.push({ end, bytes, ahead, at })
   }
 
-  /** Moves the allowance by the delay of `newest`, the newest data an acknowledgement of `newly` bytes covered, `spanMs`
-   *  after the data the one before covered. */
+  /** Moves the allowance by the delay of `newest`, the newest data an acknowledgement of `newly` bytes covered. */
   private measure(newest: SentData, newly: number, spanMs: number): void {
     const delay = this.arrivedAt - newest.at
     const { drainRate } = this.uplink
@@ -178,8 +180,7 @@ class SendBudget {
     this.movedAllowance = Math.min(CREDIT_WINDOW_MAX_BYTES, Math.max(least, allowance))
   }
 
-  /** The least allowance: what the server takes in `WIRE_QUEUE_DELAY_MS`, more than it takes before it acknowledges,
-   *  and `WIRE_SEND_AHEAD_MIN_BYTES` at most or before its rate is measured. */
+  /** The least allowance: what the server takes in `WIRE_QUEUE_DELAY_MS`, more than it takes before it acknowledges. */
   private get least(): number {
     const { drainRate } = this.uplink
     if (drainRate === 0) return WIRE_SEND_AHEAD_MIN_BYTES
@@ -189,8 +190,7 @@ class SendBudget {
     )
   }
 
-  /** What the server may have taken before it acknowledges: `WIRE_PIECES_ACK_BYTES` at most, and where less,
-   *  `WIRE_SEND_ACK_MIN_BYTES` and what the uplink carries in `WIRE_SEND_ACK_MS` after them. */
+  /** What the server may have taken before it acknowledges: `WIRE_PIECES_ACK_BYTES` at most. */
   private get slack(): number {
     const { drainRate } = this.uplink
     if (drainRate === 0) return WIRE_PIECES_ACK_BYTES

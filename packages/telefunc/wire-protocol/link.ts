@@ -3,8 +3,7 @@ export type { SendWait }
 
 import { WIRE_PIECE_RATE_WINDOW_MS } from './constants.js'
 
-/** The least span of arrivals a rate the peer took data at is measured over: a frame arrives whole, so a shorter span
- *  can count one that took longer. */
+/** The least span a rate is measured over: a frame arrives whole, so a shorter span can count one that took longer. */
 const DRAIN_SPAN_MS = 100
 /** A wire drains at the fastest of this many of the newest such rates. */
 const DRAIN_RATES = 8
@@ -32,12 +31,10 @@ type SendWait = {
 class Link {
   /** The least round trip an attach's probe or a later ping took on this wire, `Infinity` before a probe's answer. */
   pathRtt = Number.POSITIVE_INFINITY
-  /** In bytes per ms, from a frame sent to its arrival: never faster than it and what was queued ahead of it crossed.
-   *  Past `WIRE_PIECE_RATE_WINDOW_MS` after it last rose, the next measure replaces it. 0 before any. */
+  /** In bytes per ms, from a frame sent to its arrival, 0 before any; the next measure replaces one that lapsed. */
   fastest = 0
   private roseAt = 0
-  /** In bytes per ms, a rate the link carries at least, by what crossed by an answer, a heartbeat or an
-   *  acknowledgement. */
+  /** In bytes per ms, a rate the link carries at least: what an answer, a heartbeat or an acknowledgement showed. */
   floor = 0
 
   /** Takes a round trip a probe on this wire took. */
@@ -66,8 +63,7 @@ class Link {
   }
 }
 
-/** Waits by when they were seen, for `WAITS_KEPT_MS`. Each drops the earlier ones no longer than it, so the longest since
- *  an instant is the first at or after it, found by halving. */
+/** Waits by when they were seen, for `WAITS_KEPT_MS`; each drops the earlier ones no longer than it. */
 class Waits {
   private at: number[] = []
   private wait: number[] = []

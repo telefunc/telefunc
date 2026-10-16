@@ -18,9 +18,6 @@ const EMPTY = new Uint8Array(0)
 class SSEStreamReader extends BaseStreamReader {
   private reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>
   private binary: Uint8Array<ArrayBuffer> = EMPTY
-  /** Events decoded since `binary`, joined once `readExact` has its bytes. */
-  private events: Uint8Array<ArrayBuffer>[] = []
-  private eventBytes = 0
   private sse = new SSEEvents()
 
   constructor(
@@ -43,7 +40,9 @@ class SSEStreamReader extends BaseStreamReader {
   }
 
   async readExact(n: number): Promise<Uint8Array<ArrayBuffer>> {
-    while (this.binary.length + this.eventBytes < n) {
+    let parts: Uint8Array<ArrayBuffer>[] | undefined
+    let length = this.binary.length
+    while (length < n) {
       let done: boolean
       let value: Uint8Array<ArrayBuffer> | undefined
       let readError: unknown
@@ -60,21 +59,15 @@ class SSEStreamReader extends BaseStreamReader {
         if (this.cancelled) return EMPTY
         throw readError ?? new Error('Connection lost — server closed the SSE stream before all data was received.')
       }
-      this.sse.push(value!, this.onEvent)
+      const gathered = (parts ??= this.binary.length > 0 ? [this.binary] : [])
+      this.sse.push(value!, (event) => {
+        gathered.push(event)
+        length += event.length
+      })
     }
-    if (this.events.length > 0) {
-      const parts = this.binary.length > 0 ? [this.binary, ...this.events] : this.events
-      this.binary = parts.length === 1 ? parts[0]! : concatAll(parts)
-      this.events = []
-      this.eventBytes = 0
-    }
+    if (parts) this.binary = parts.length === 1 ? parts[0]! : concatAll(parts)
     const result = this.binary.subarray(0, n)
     this.binary = n < this.binary.length ? this.binary.subarray(n) : EMPTY
     return result
-  }
-
-  private onEvent = (event: Uint8Array<ArrayBuffer>) => {
-    this.events.push(event)
-    this.eventBytes += event.length
   }
 }

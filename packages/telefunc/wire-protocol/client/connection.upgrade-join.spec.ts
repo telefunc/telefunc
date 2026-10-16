@@ -11,6 +11,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection } from './connection.js'
 import { muxChannelStub } from '../test/mux-channel-stub.js'
+import { lengthPrefixed } from '../test/loopback.js'
+import { reconciled } from '../test/channel-specs.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import type { DecodedFrame, ReconciledPayload } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
@@ -59,21 +61,19 @@ class FakeWebSocket {
   }
 }
 
-function reconciled({ ix, ...overrides }: { ix: number; sessionId: string } & Partial<ReconciledPayload>) {
-  return encode.reconciled({
-    open: [{ ix, lastSeq: 0 }],
-    reconnectTimeout: 60_000,
-    idleTimeout: 60_000,
-    pingInterval: 100_000,
-    serverReplayBuffer: 1_000_000,
-    serverReplayBufferBinary: 2_000_000,
-    clientReplayBuffer: 1_000_000,
-    clientReplayBufferBinary: 2_000_000,
-    sseFlushThrottle: 300,
-    ssePostIdleFlushDelay: 50,
-    transports: ['sse', 'ws'],
-    ...overrides,
-  })
+function reconciledOf({ ix, ...overrides }: { ix: number; sessionId: string } & Partial<ReconciledPayload>) {
+  return encode.reconciled(
+    reconciled({
+      open: [{ ix, lastSeq: 0 }],
+      pingInterval: 100_000,
+      serverReplayBuffer: 1_000_000,
+      serverReplayBufferBinary: 2_000_000,
+      clientReplayBuffer: 1_000_000,
+      clientReplayBufferBinary: 2_000_000,
+      transports: ['sse', 'ws'],
+      ...overrides,
+    }),
+  )
 }
 
 /** SSE downstream the client reads (server→client on the old wire). */
@@ -86,18 +86,6 @@ function makeDownstream() {
     open: () => controller.enqueue(enc.encode(': open\n\n')),
     push: (frame: Uint8Array) => controller.enqueue(enc.encode(`data: ${uint8ArrayToBase64url(bytes(frame))}\n\n`)),
   }
-}
-
-function parseLengthPrefixed(buf: Uint8Array): Uint8Array[] {
-  const out: Uint8Array[] = []
-  let off = 0
-  while (off + 4 <= buf.length) {
-    const len = decodeU32(bytes(buf.subarray(off, off + 4)))
-    off += 4
-    out.push(buf.subarray(off, off + len))
-    off += len
-  }
-  return out
 }
 
 type Harness = {
@@ -131,7 +119,7 @@ async function upgradeToBarrier(): Promise<Harness> {
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     const body = init.body as unknown
     if (body instanceof Blob) {
-      const frames = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
+      const frames = lengthPrefixed(new Uint8Array(await body.arrayBuffer())).map(({ frame }) => frame)
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]!))
       for (const raw of frames.slice(1)) {
         const frame = decode(bytes(raw))
@@ -140,7 +128,7 @@ async function upgradeToBarrier(): Promise<Harness> {
       }
       if (!metadata.streamResponse) return new Response('', { status: 200 })
       downstream.open()
-      downstream.push(reconciled({ ix, sessionId }))
+      downstream.push(reconciledOf({ ix, sessionId }))
       return new Response(downstream.stream as BodyInit, {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
@@ -224,14 +212,16 @@ async function stageBatchUpgrade() {
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     const body = init.body as unknown
     if (!(body instanceof Blob)) throw new TypeError('upload streams are not supported')
-    const [metadata, ...frames] = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
+    const [metadata, ...frames] = lengthPrefixed(new Uint8Array(await body.arrayBuffer())).map(({ frame }) => frame)
     const decoded = frames.map((raw) => decode(bytes(raw)))
     if (JSON.parse(new TextDecoder().decode(metadata)).streamResponse) {
       streams++
       const reconcile = decoded.find((frame) => frame.tag === TAG.RECONCILE)!
       const ix = reconcile.tag === TAG.RECONCILE ? reconcile.payload.open[0]!.ix : 0
       downstream.open()
-      downstream.push(reconciled({ ix, sessionId: crypto.randomUUID(), sseFlushThrottle: 0, ssePostIdleFlushDelay: 0 }))
+      downstream.push(
+        reconciledOf({ ix, sessionId: crypto.randomUUID(), sseFlushThrottle: 0, ssePostIdleFlushDelay: 0 }),
+      )
       return new Response(downstream.stream as BodyInit, {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
@@ -305,7 +295,7 @@ describe('SSE→WS handoff join', () => {
     await settle()
     expect(h.dispatched).toEqual([])
 
-    h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
     await settle()
     expect(h.dispatched, 'RECONCILED alone must not end the join — FIN is still outstanding').toEqual([])
 
@@ -324,7 +314,7 @@ describe('SSE→WS handoff join', () => {
     expect(h.dispatched, 'FIN alone must not end the join — COMMITTED is still outstanding').toEqual([])
 
     h.probe.deliver(encode.text(h.ix, '"new-1"', 2))
-    h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
     await settle()
     expect(h.dispatched.map((f) => (f as { text: string }).text)).toEqual(['"old-1"', '"new-1"'])
   })
@@ -333,7 +323,7 @@ describe('SSE→WS handoff join', () => {
     fakeTimers()
     const h = await upgradeToBarrier()
     const { upgradeId } = await h.barrierSent
-    h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
     // What the old wire still carries takes 6 s to arrive, and its FIN comes behind it.
     const texts = Array.from({ length: 12 }, (_, i) => `"old-${i + 1}"`)
     for (const [i, text] of texts.entries()) {
@@ -351,7 +341,7 @@ describe('SSE→WS handoff join', () => {
     fakeTimers()
     const h = await upgradeToBarrier()
     const { upgradeId } = await h.barrierSent
-    h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
     for (let i = 1; i <= 6; i++) {
       h.pushOld(encode.text(h.ix, `"old-${i}"`, i))
       await vi.advanceTimersByTimeAsync(500)
@@ -367,7 +357,7 @@ describe('SSE→WS handoff join', () => {
     const h = await upgradeToBarrier()
     await h.barrierSent
 
-    h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId: 'someone-elses' }))
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId: 'someone-elses' }))
     h.pushOld(encode.fin())
     h.probe.deliver(encode.text(h.ix, '"new-1"', 1))
     await settle()

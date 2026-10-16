@@ -5,7 +5,6 @@
 // server over each wire.
 
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
-import type { Peer } from 'crossws'
 import '../../node/server/async_hooks.js'
 
 import { ClientChannel } from './channel.js'
@@ -15,21 +14,19 @@ import { config } from '../../client/clientConfig.js'
 import { ServerChannel } from '../server/channel.js'
 import { getChannelMux } from '../server/mux.js'
 import { pumpProducerToChannel } from '../server/response/ChannelResponseBody.js'
-import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { getTelefuncChannelHooks } from '../server/ws.js'
 import { ChannelStreamSource } from '../ChannelStreamSource.js'
 import type { ReplayBuffer } from '../replay-buffer.js'
 import { TAG, decode, type ReconcilePayload } from '../shared-ws.js'
 import { isAbort } from '../../shared/Abort.js'
 import { NetworkError } from '../../shared/NetworkError.js'
-import { decodeU32 } from '../frame.js'
-import { base64urlToUint8Array } from '../base64url.js'
 import { SSE_FLUSH_THROTTLE_MS, SSE_POST_MAX_BYTES, STREAM_TRANSPORT } from '../constants.js'
 import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { createRequestContext } from '../../node/server/context/requestContext.js'
 import { parseResponse } from './response/parse.js'
-import { lengthPrefixed } from '../test/loopback.js'
+import { Net, sseFetch, webSocketTo } from '../test/page-server.js'
+import { flowOf } from '../test/channel-specs.js'
 
 /** `sse-late-upload`: SSE whose upload request reaches the server 500 ms after the request that opens the wire, as one
  *  that opens a connection of its own may. */
@@ -56,116 +53,11 @@ afterEach(() => {
   ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
 })
 
-/** One way of a link that carries `rate` bytes a second: what is written to it arrives in order, as fast as that. */
-class Pipe {
-  private busyUntil = 0
-  constructor(private readonly rate: number) {}
-  /** When `bytes` written now have arrived. */
-  arrival(bytes: number): number {
-    this.busyUntil = Math.max(Date.now(), this.busyUntil) + (bytes / this.rate) * 1_000
-    return this.busyUntil
-  }
-  /** Bytes written to it that haven't arrived, as a socket's `bufferedAmount` says them. */
-  get bufferedAmount(): number {
-    return (Math.max(0, this.busyUntil - Date.now()) * this.rate) / 1_000
-  }
-}
-
-const until = (at: number) => new Promise<void>((resolve) => setTimeout(resolve, at - Date.now()))
-
-/** One wire of the page's connection: a WebSocket, or an SSE downstream and the POSTs that go with it. */
-type Link = {
-  /** Nothing either end writes to it arrives, and nothing tells either end. */
-  dead: boolean
-  /** Its batch POSTs stay in flight. */
-  holdingPosts: boolean
-  /** How it carries what the server writes to the page, and what the page writes to the server: at once if null. */
-  down: Pipe | null
-  up: Pipe | null
-}
-
-/** The network between the page and the server. */
-class Net {
-  readonly links: Link[] = []
-  /** The page's attempts to open a wire fail. */
-  refusing = false
-  /** Bytes a second each way of the wires the page opens from now on: 0 carries at once. */
-  readonly rate = { down: 0, up: 0 }
-  /** Milliseconds after the page makes it that an upload request reaches the server, as one that opens a connection of
-   *  its own does. */
-  uploadLag = 0
-  private readonly byConnId = new Map<string, Link>()
-  private readonly losing = new Set<number>()
-  private readonly onPageGets = new Map<number, (frame: Uint8Array) => void>()
-  private readonly onPageSends = new Map<number, (frame: Uint8Array) => void>()
-  private readonly onServerSends = new Map<number, (frame: Uint8Array) => void>()
-  open(connId?: string): Link {
-    const link = {
-      dead: false,
-      holdingPosts: false,
-      down: this.rate.down ? new Pipe(this.rate.down) : null,
-      up: this.rate.up ? new Pipe(this.rate.up) : null,
-    }
-    this.links.push(link)
-    if (connId) this.byConnId.set(connId, link)
-    return link
-  }
-  linkOf(connId: string): Link | undefined {
-    return this.byConnId.get(connId)
-  }
-  /** Every wire goes silent at once, as in a network blip. What the page opens afterwards gets through. */
-  die(): void {
-    for (const link of this.links) link.dead = true
-  }
-  /** Every wire goes silent, and the page's attempts to open another fail, until `heal`. */
-  cut(): void {
-    this.refusing = true
-    this.die()
-  }
-  heal(): void {
-    this.refusing = false
-  }
-  /** Runs `then` once, as the page receives its next frame of `tag`: that frame still arrives. */
-  whenPageGets(tag: number, then: () => void): void {
-    this.onPageGets.set(tag, then)
-  }
-  /** Runs `then` once, as the page writes its next frame of `tag` to the wire: that frame is lost if it kills it. */
-  whenPageSends(tag: number, then: (frame: Uint8Array) => void): void {
-    this.onPageSends.set(tag, then)
-  }
-  /** Runs `then` once, as the server writes its next frame of `tag` to the page: that frame is lost if it kills it. */
-  whenServerSends(tag: number, then: () => void): void {
-    this.onServerSends.set(tag, then)
-  }
-  pageGets(frame: Uint8Array): void {
-    this.fire(this.onPageGets, frame)
-  }
-  pageSends(frame: Uint8Array): void {
-    this.fire(this.onPageSends, frame)
-  }
-  serverSends(frame: Uint8Array): void {
-    this.fire(this.onServerSends, frame)
-  }
-  /** The page's next frame of `tag` is lost, and its wire lives on: a loss no replay repairs. */
-  losePageFrame(tag: number): void {
-    this.losing.add(tag)
-  }
-  loses(frame: Uint8Array): boolean {
-    return this.losing.delete(frame[0]!)
-  }
-  private fire(hooks: Map<number, (frame: Uint8Array) => void>, frame: Uint8Array): void {
-    const then = hooks.get(frame[0]!)
-    if (!then) return
-    hooks.delete(frame[0]!)
-    then(frame)
-  }
-}
-
 /** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket. */
 function page(wire: Wire, { upgrade = false } = {}) {
   const net = new Net()
   if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(net))
-  if (wire !== 'ws') config.fetch = sseServer(net, wire === 'sse-batch')
+  if (wire !== 'ws') config.fetch = sseFetch(net, wire === 'sse-batch')
   if (wire === 'sse-late-upload') net.uploadLag = 500
   const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
   const connectionKey = crypto.randomUUID()
@@ -208,221 +100,12 @@ function closedWith(channel: { onClose(callback: (err?: Error) => void): void })
   return closed
 }
 
-const flowOf = (channel: unknown) => (channel as { _flow: { byteWindow: number } })._flow
-
 /** Expects the error a channel ends with when a reconnect needs messages `side`'s replay buffer dropped. */
 function expectLost(err: unknown, side: 'server' | 'client') {
   expect(err).toBeInstanceOf(NetworkError)
   expect((err as NetworkError).message).toBe(
     `Channel closed: a reconnect needed messages the ${side}'s replay buffer had dropped to stay within its size. Raise config.channel.${side}ReplayBuffer, or ${side}ReplayBufferBinary for binary messages and streams.`,
   )
-}
-
-function sseServer(net: Net, refuseUpload: boolean): typeof fetch {
-  const sse = getTelefuncSseChannelHooks()
-  return (async (url: string, init: RequestInit) => {
-    const aborted = new Promise<never>((_resolve, reject) =>
-      init.signal?.addEventListener('abort', () =>
-        reject(new DOMException('The operation was aborted.', 'AbortError')),
-      ),
-    )
-    aborted.catch(() => {})
-    const body = init.body as Blob | ReadableStream<Uint8Array>
-    if (net.refusing) throw new TypeError('fetch failed')
-    if (!(body instanceof Blob)) {
-      // A browser that can't stream a request body (Firefox, Safari) gets a 400 and the page sends batch POSTs.
-      if (refuseUpload) return new Response('', { status: 400 })
-      if (net.uploadLag) await until(Date.now() + net.uploadLag)
-      const request = new Request(url, {
-        method: 'POST',
-        body: body.pipeThrough(uploadThrough(net)),
-        duplex: 'half',
-      } as RequestInit)
-      const response = (await Promise.race([sse.handleRequest(request), aborted]))!
-      return new Response(response.body as string, { status: response.statusCode })
-    }
-    // Bytes rather than the Blob: a Request reads a Blob body on a later event-loop turn, which fake timers don't give.
-    const bytes = new Uint8Array(await body.arrayBuffer())
-    const [metadata, ...frames] = lengthPrefixed(bytes).map(({ frame }) => frame)
-    const { connId, streamResponse } = JSON.parse(new TextDecoder().decode(metadata)) as {
-      connId: string
-      streamResponse?: true
-    }
-    const link = streamResponse ? net.open(connId) : net.linkOf(connId)!
-    for (const frame of frames) {
-      if (link.dead) break
-      net.pageSends(frame)
-    }
-    if (link.dead || (link.holdingPosts && !streamResponse)) return await aborted
-    const request = link.up
-      ? new Request(url, { method: 'POST', body: carried(bytes, link, link.up), duplex: 'half' } as RequestInit)
-      : new Request(url, { method: 'POST', body: bytes })
-    // A body cut by the link's death fails the server's read, which nothing tells the page.
-    const response = await sse.handleRequest(request).catch(() => null)
-    if (link.dead || !response) return await aborted
-    const responseBody =
-      response.body instanceof ReadableStream ? downstream(response.body, link, net) : (response.body as string)
-    return new Response(responseBody, {
-      status: response.statusCode,
-      headers: { 'Content-Type': response.contentType },
-    })
-  }) as typeof fetch
-}
-
-/** A POST's body on its way to the server over `pipe`: each chunk once the link carried it, and none once it died. */
-function carried(bytes: Uint8Array, link: Link, pipe: Pipe): ReadableStream<Uint8Array> {
-  const chunks = lengthPrefixed(bytes).map(({ prefixed }) => ({ prefixed, at: pipe.arrival(prefixed.byteLength) }))
-  let next = 0
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      await until(chunks[next]!.at)
-      if (link.dead) return controller.error(new TypeError('network error'))
-      controller.enqueue(chunks[next++]!.prefixed)
-      if (next === chunks.length) controller.close()
-    },
-  })
-}
-
-/** An upload request's body on its way to the server: what the page writes once its wire died is lost. */
-function uploadThrough(net: Net) {
-  let pending = new Uint8Array(0)
-  let link: Link | undefined
-  return new TransformStream<Uint8Array, Uint8Array>({
-    async transform(chunk, controller) {
-      const joined = new Uint8Array(pending.length + chunk.length)
-      joined.set(pending)
-      joined.set(chunk, pending.length)
-      let offset = 0
-      while (offset + 4 <= joined.length) {
-        const length = decodeU32(joined.subarray(offset, offset + 4) as Uint8Array<ArrayBuffer>)
-        if (offset + 4 + length > joined.length) break
-        const prefixed = joined.slice(offset, offset + 4 + length)
-        const frame = prefixed.subarray(4)
-        offset += 4 + length
-        if (!link) {
-          link = net.linkOf((JSON.parse(new TextDecoder().decode(frame)) as { connId: string }).connId)
-        } else {
-          if (!link.dead) net.pageSends(frame)
-          if (link.up) await until(link.up.arrival(prefixed.byteLength))
-          if (link.dead) continue
-        }
-        controller.enqueue(prefixed)
-      }
-      pending = joined.slice(offset)
-    },
-  })
-}
-
-/** An SSE downstream on its way to the page: once its wire died nothing arrives, not even its end. */
-function downstream(body: ReadableStream<Uint8Array>, link: Link, net: Net): ReadableStream<Uint8Array> {
-  const reader = body.getReader()
-  const decoder = new TextDecoder()
-  const encoder = new TextEncoder()
-  let text = ''
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) {
-          if (link.dead) return await new Promise<void>(() => {})
-          controller.close()
-          return
-        }
-        text += decoder.decode(value, { stream: true })
-        let delivered = false
-        let end: number
-        while ((end = text.indexOf('\n\n')) !== -1) {
-          const event = text.slice(0, end)
-          text = text.slice(end + 2)
-          const frame = event.startsWith('data: ') ? base64urlToUint8Array(event.slice('data: '.length)) : null
-          if (frame && !link.dead) net.serverSends(frame)
-          if (link.down) await until(link.down.arrival(event.length + 2))
-          if (link.dead) continue
-          if (frame) net.pageGets(frame)
-          controller.enqueue(encoder.encode(`${event}\n\n`))
-          delivered = true
-        }
-        if (delivered) return
-      }
-    },
-    cancel: (reason) => (link.dead ? undefined : reader.cancel(reason)),
-  })
-}
-
-/** A `WebSocket` whose far end is the server's crossws hooks. */
-function webSocketTo(net: Net) {
-  const hooks = getTelefuncChannelHooks()
-  return class {
-    static readonly OPEN = 1
-    readyState = 0
-    binaryType = 'blob'
-    onopen: (() => void) | null = null
-    onmessage: ((event: { data: ArrayBuffer }) => void) | null = null
-    onclose: (() => void) | null = null
-    onerror: (() => void) | null = null
-    private readonly link = net.open()
-    private readonly peer = {
-      context: {},
-      // It hands each frame on as it is sent, or holds what its link hasn't carried.
-      websocket: this.link.down ?? { bufferedAmount: 0 },
-      send: (frame: Uint8Array) => {
-        if (!this.link.dead) net.serverSends(frame)
-        if (this.link.dead) return
-        const data = frame.slice().buffer
-        if (this.link.down) {
-          void until(this.link.down.arrival(frame.byteLength)).then(() => {
-            if (this.link.dead) return
-            net.pageGets(new Uint8Array(data))
-            this.onmessage?.({ data })
-          })
-          return
-        }
-        net.pageGets(frame)
-        queueMicrotask(() => this.onmessage?.({ data }))
-      },
-      // A socket the server destroys closes with 1006, without a close frame.
-      terminate: () => this.end(1006),
-    } as unknown as Peer
-    constructor(_url: string) {
-      queueMicrotask(async () => {
-        if (net.refusing) {
-          this.readyState = 3
-          this.onclose?.()
-          return
-        }
-        await hooks.open!(this.peer)
-        this.readyState = 1
-        this.onopen?.()
-      })
-    }
-    get bufferedAmount(): number {
-      return this.link.up?.bufferedAmount ?? 0
-    }
-    send(data: Uint8Array) {
-      const frame = data.slice()
-      if (!this.link.dead) net.pageSends(frame)
-      if (this.link.dead || net.loses(frame)) return
-      if (this.link.up) {
-        void until(this.link.up.arrival(frame.byteLength)).then(() => {
-          if (!this.link.dead) void hooks.message!(this.peer, { uint8Array: () => frame } as never)
-        })
-        return
-      }
-      void hooks.message!(this.peer, { uint8Array: () => frame } as never)
-    }
-    close() {
-      this.end(1000)
-    }
-    private end(code: number) {
-      if (this.readyState === 3) return
-      this.readyState = 3
-      if (this.link.dead) return
-      void hooks.close!(this.peer, { code } as never)
-      // The page hears of it once its link carried what went before.
-      if (this.link.down) void until(this.link.down.arrival(0)).then(() => this.onclose?.())
-      else this.onclose?.()
-    }
-  }
 }
 
 describe.each(WIRES)('over %s', (wire) => {

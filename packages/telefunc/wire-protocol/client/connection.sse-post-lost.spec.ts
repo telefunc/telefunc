@@ -57,7 +57,8 @@ function setup() {
     }
     return false
   }
-  const state = { wires: 0, held: [] as number[], hold: null as Hold | null, answering: 0 }
+  /** `answered`: the response of each POST but the stream-response one, which carries the wire. */
+  const state = { wires: 0, held: [] as number[], hold: null as Hold | null, answering: 0, answered: [] as Response[] }
   config.fetch = (async (_url: string, init: RequestInit) => {
     const body = init.body as unknown
     state.answering++
@@ -69,7 +70,7 @@ function setup() {
   }) as unknown as typeof fetch
   const answer = async (body: unknown, init: RequestInit): Promise<Response> => {
     // A browser that can't stream a request body (Firefox, Safari) is answered 400: the page sends batch POSTs.
-    if (!(body instanceof Blob)) return new Response('bad request', { status: 400 })
+    if (!(body instanceof Blob)) return answered(new Response('bad request', { status: 400 }))
     if ((await metadataOf(body)).streamResponse) {
       state.wires++
       const reader = (await toServer(body)).body!.getReader()
@@ -92,7 +93,7 @@ function setup() {
     }
     const hold = state.hold
     // The POST the test holds is the one carrying its message, not a PING's that may go first.
-    if (hold === null || !(await carriesMessage(body))) return await toServer(body)
+    if (hold === null || !(await carriesMessage(body))) return answered(await toServer(body))
     state.hold = null
     state.held.push(body.size)
     state.answering--
@@ -100,7 +101,11 @@ function setup() {
       init.signal?.addEventListener('abort', () => reject(init.signal!.reason))
       if (hold.tag === 'slow') setTimeout(resolve, (body.size * 8 * 1000) / hold.bitsPerSecond)
     }).finally(() => state.answering++)
-    return await toServer(body)
+    return answered(await toServer(body))
+  }
+  const answered = (response: Response) => {
+    state.answered.push(response)
+    return response
   }
 
   const received: (number | string)[] = []
@@ -174,6 +179,30 @@ test("a POST's allowance grows with its bytes: a lost one of 2 MiB is cut past t
   await advance(10_000)
   await vi.waitFor(() => expect(received).toEqual([1, 2 * MIB]), { timeout: 5_000 })
   expect(state.wires).toBe(2)
+  page.abort()
+})
+
+test('the page reads the response of its stream-request POST, every batch POST and a PING sent on its own', async () => {
+  const { state, received, page, advance } = setup()
+  void page.send(1)
+  await vi.waitFor(() => expect(received).toEqual([1]))
+
+  // A POST out for longer than the heartbeat's interval sends the PING held behind it on its own.
+  state.hold = { tag: 'slow', bitsPerSecond: 100_000 }
+  void page.send('x'.repeat(200_000))
+  await vi.waitFor(() => expect(state.held).toHaveLength(1))
+  const before = state.answered.length
+  const uploadMs = (state.held[0]! * 8 * 1000) / 100_000
+  await advance(uploadMs - 1_000)
+  expect(state.answered.length, 'a PING went on its own while the POST was out').toBeGreaterThan(before)
+  await advance(2_000)
+  await vi.waitFor(() => expect(received).toEqual([1, 200_000]), { timeout: 5_000 })
+  await vi.waitFor(() =>
+    expect(
+      state.answered.filter((response) => !response.bodyUsed),
+      'responses left unread',
+    ).toEqual([]),
+  )
   page.abort()
 })
 

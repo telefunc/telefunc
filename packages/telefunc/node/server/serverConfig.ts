@@ -556,7 +556,7 @@ function applyChannelConfig(val: unknown): void {
         assertDuration(
           value,
           configPath,
-          TIMER_DELAY_MAX_MS >> 1,
+          Math.floor(TIMER_DELAY_MAX_MS / 2),
           'as its deadline, twice it, is at most the longest a timer waits',
         )
         next[key] = value

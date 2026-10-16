@@ -16,7 +16,7 @@ class ServerPieceReceiver extends PieceReceiver {
     this.acknowledgeTaken(data, announced)
   }
 
-  protected tookPiece(_whole: boolean, announced: boolean, data: boolean): void {
+  protected tookPiece(_whole: boolean, data: boolean, announced: boolean): void {
     this.acknowledgeTaken(data, announced)
   }
 

@@ -270,7 +270,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
    *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
-  _reattachState(uplink: Uplink, batched: boolean): ReattachState {
+  _reattachState(batched: boolean, uplink: Uplink): ReattachState {
     const probe = batched ? undefined : this._flow.probeAttach(uplink.link)
     return probe === undefined ? {} : { probe }
   }
@@ -425,12 +425,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._flow.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._connection.sendBdpPingAck(this, frame.probe, this._flow.onPing(), this._flow.pathRtt())
+        this._connection.sendBdpPingAck(this, {
+          probe: frame.probe,
+          backlog: this._flow.onPing(),
+          pathRtt: this._flow.pathRtt(),
+        })
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame.probe, frame.backlog, frame.pathRtt, (ms) =>
-          this._connection.deliveredBeforeLast(ms),
-        )
+        this._flow.onPingAck(frame, (ms) => this._connection.deliveredBeforeLast(ms))
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }
