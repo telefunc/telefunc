@@ -39,6 +39,12 @@ class OrderedStubs<Stub> {
     return result
   }
 
+  /** Whether a call to `target` made now waits for a failed line's calls, so it invokes its stub after returning. */
+  waits(target: string): boolean {
+    const line = this.#lines.get(target)
+    return line !== undefined && (line.failed || line.after !== null)
+  }
+
   #settle(target: string, line: Line<Stub>): void {
     if (--line.calls > 0) return
     line.idle.resolve()

@@ -36,24 +36,26 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
 
   const publish = (route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> => {
     const { key, kind } = route
-    // A driver may send later (a queued or re-sent command, an ordered RPC), so bytes are copied: `slice()` of a Node
-    // Buffer is a view. A string can't change.
-    const owned = typeof payload === 'string' ? payload : new Uint8Array(payload)
+    let owned = payload
     return subscriptions.afterEstablished(
       () => publishNow(route, owned),
-      () => ({
-        key,
-        sources: [
-          { key, kind: 'text' },
-          { key, kind: 'binary' },
-        ],
-        weight: heldSendWeight(
-          kind,
-          broadcastRouteKey(route),
-          () => (typeof owned === 'string' ? utf8ByteLength(owned) : owned.byteLength),
-          'Broadcast',
-        ),
-      }),
+      () => {
+        // Read only for a publish that may be held past the call, which keeps the bytes as they are now.
+        if (typeof payload !== 'string') owned = new Uint8Array(payload)
+        return {
+          key,
+          sources: [
+            { key, kind: 'text' },
+            { key, kind: 'binary' },
+          ],
+          weight: heldSendWeight(
+            kind,
+            broadcastRouteKey(route),
+            () => (typeof owned === 'string' ? utf8ByteLength(owned) : owned.byteLength),
+            'Broadcast',
+          ),
+        }
+      },
     )
   }
 

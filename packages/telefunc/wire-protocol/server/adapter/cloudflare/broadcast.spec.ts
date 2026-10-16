@@ -610,13 +610,16 @@ describe('cloudflare broadcast routing', () => {
       scratch[0] = 3
       const later = channel.publishBinary(scratch)
       scratch[0] = 9
+      const last = channel.publishBinary(scratch)
+      scratch[0] = 5
       replies[1]!.resolve({ seq: 2, timestamp: 1 })
       await inFlight
-      await vi.waitFor(() => expect(replies).toHaveLength(3))
+      await vi.waitFor(() => expect(replies).toHaveLength(4))
       replies[2]!.resolve({ seq: 3, timestamp: 1 })
-      await later
+      replies[3]!.resolve({ seq: 4, timestamp: 1 })
+      await Promise.all([later, last])
     })
-    expect(published).toEqual([[1], [1], [3]])
+    expect(published).toEqual([[1], [1], [3], [9]])
   })
 
   it("publishes from outside a session, as from a cron trigger, to the key's authority", async () => {

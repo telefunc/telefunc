@@ -379,6 +379,23 @@ describe('memory backend behind the supervised consumer', () => {
     await backend.dropGeneration('retained-of-track', 'inc-1')
     expect(await listed()).toEqual([])
   })
+  it('keeps a retained frame as committed when a subscriber writes into the bytes it was given', async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'retained-write',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    let delivered = false
+    const subscription = backend.subscribeLane('retained-write', 'inc-1', semanticLane, (payload) => {
+      payload.fill(0)
+      delivered = true
+    })
+    await subscription.ready
+    await backend.commitLane('retained-write', 'inc-1', semanticLane, encoder.encode('one'), { retain: true })
+    await vi.waitFor(() => expect(delivered).toBe(true))
+    expect(decoder.decode((await backend.readRetained('retained-write', 'inc-1', semanticLane))!.payload)).toBe('one')
+  })
   it('does not retain or expose mutable lane aliases', async () => {
     await driver.compareExchangeHead(
       'retained-lane-alias',

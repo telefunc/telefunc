@@ -232,18 +232,17 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const targets = this._state.broadcastSubs[route.kind].get(route.key) ?? []
     // Counted before delivery, which may unsubscribe or subscribe.
     const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
-    const delivery = () => {
-      // A string can't change, so every subscription gets the same one; bytes are copied for each.
-      for (const target of targets) target.deliver(typeof payload === 'string' ? payload : copyBytes(payload), mark)
-    }
     if (this._deliversNow()) {
-      this._deliver(delivery)
+      this._deliver(() => {
+        for (const target of targets) target.deliver(payload, mark)
+      })
       return receipt
     }
+    const held = typeof payload === 'string' ? payload : copyBytes(payload)
     // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
     return new Promise((resolve) => {
       this._deliver(() => {
-        delivery()
+        for (const target of targets) target.deliver(held, mark)
         resolve(receipt)
       })
     })
@@ -386,9 +385,11 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     queueMicrotask(() => {
       this._committing--
       this._deliver(() => {
-        for (const target of targets) target.deliver(copyBytes(frame), mark)
-        for (const target of everyTrack) target.deliver(copyBytes(frame), mark)
-        for (const target of everyMember) target.deliver(copyBytes(frame), mark)
+        // A subscriber may write into the bytes it is given, which a retained frame must not share.
+        const shared = opts?.retain ? copyBytes(frame) : frame
+        for (const target of targets) target.deliver(shared, mark)
+        for (const target of everyTrack) target.deliver(shared, mark)
+        for (const target of everyMember) target.deliver(shared, mark)
         delivered?.resolve()
       })
     })

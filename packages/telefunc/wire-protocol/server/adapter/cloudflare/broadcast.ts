@@ -348,10 +348,12 @@ class CloudflareBroadcast {
    *  the caller gets a native promise: a stub's RpcPromise is callable, which `isPromise` doesn't take for a
    *  promise. */
   async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    const request = { key: route.key, kind: route.kind, payload }
-    const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
     const name = this.#authorityName(route.key)
     const member = currentCloudflareSession()?.broadcast
+    // An RPC reads its arguments as it is made, so only one made after this returns keeps the bytes as they are now.
+    const owned = typeof payload === 'string' || member?.calls.waits(name) !== true ? payload : new Uint8Array(payload)
+    const request = { key: route.key, kind: route.kind, payload: owned }
+    const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
     if (member === undefined) return send(this.#stubByName(name, null))
     return this.#callByName(member.calls, name, member.bucket, send)
   }

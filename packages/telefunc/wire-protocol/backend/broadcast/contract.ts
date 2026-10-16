@@ -18,6 +18,7 @@ type PublishResult = {
 
 /** What a backend implements for Broadcast. */
 type BroadcastDriver = {
+  /** Copies `payload` where it holds it past the call: the caller may reuse its buffer once the call returns. */
   publish<Kind extends BroadcastKind>(
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,

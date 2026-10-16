@@ -874,13 +874,12 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
-  it("hands the driver a publish's bytes as they were at the call, of a Node Buffer too, sent now or held", async () => {
+  it("hands the driver a held publish's bytes as they were at the call, of a Node Buffer too", async () => {
     const attempt = new PendingAttempt()
     const driver = await installOpeningBackend(() => attempt)
-    // A driver may read its payload later, as ioredis does for a queued command.
     const sent: BroadcastPayload[] = []
     vi.spyOn(driver, 'publish').mockImplementation((_route, payload) => {
-      sent.push(payload)
+      sent.push(typeof payload === 'string' ? payload : new Uint8Array(payload))
       return { seq: sent.length, timestamp: 1 }
     })
     const scratch = Buffer.from([1])
@@ -1044,6 +1043,21 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
     expect(mostBehind).toBeLessThanOrEqual(1024)
     for (const stop of stops) stop()
+  })
+  it('delivers the bytes a queued publish was given, though its caller reuses the buffer', async () => {
+    const key = 'broadcast:queued-reused-buffer'
+    const scratch = Buffer.from([1])
+    const received: number[][] = []
+    const stop = Broadcast.subscribeBinary(key, (data) => void received.push(Array.from(data)))
+    // Established, so no publish is held.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    // Spends this turn's deliveries, so the next publish is queued.
+    for (let i = 0; i < 1024; i++) void Broadcast.publish(key, i)
+    const queued = Broadcast.publishBinary(key, scratch)
+    scratch[0] = 2
+    await queued
+    expect(received).toEqual([[1]])
+    stop()
   })
   it('delivers a fan-out published within one turn as it is published', () => {
     const key = 'broadcast:fan-out'
