@@ -200,8 +200,7 @@ class ClientRoom extends RoomStateView implements Room {
     return this._state.getRemote(id)
   }
 
-  /** Plain DM fires local listeners; ack DM returns their reply
-   * through the symmetric `dm-reply`/`dm-ack` path. */
+  /** Plain DM fires local listeners; ack DM returns their reply through the symmetric `dm-reply`/`dm-ack` path. */
   private _deliverDm(participant: ClientRoomParticipant, msg: InboxMessage): void {
     if (msg.ackId === undefined) {
       participant._deliverMessage(msg)
