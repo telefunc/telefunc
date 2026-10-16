@@ -376,8 +376,9 @@ async function everyTrackRoutes(env: Env, suffix: string) {
     ['camera', 'binary:m:camera'],
     ['every-track', 'binary-all:m'],
     ['every-member', 'binary-track:camera'],
-  ] as const)
+  ] as const) {
     await probe.join(sessionOf(env, `${role}-${suffix}`), role, laneKey)
+  }
   const receivers: number[] = []
   for (const [member, track, text] of [
     ['m', 'camera', 'camera-1'],
