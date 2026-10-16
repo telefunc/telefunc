@@ -220,21 +220,7 @@ class SubscriptionSlot {
     let attempt: SubscriptionAttempt
     try {
       attempt = this._config.binding.open(
-        (payload, info) => {
-          if (this._stopPromise !== null) return
-          try {
-            this._config.checkDelivery(payload, info)
-          } catch (error) {
-            return console.error(error)
-          }
-          for (const attachment of this._targets()) {
-            try {
-              attachment.receiver(payload, info)
-            } catch (error) {
-              console.error(error)
-            }
-          }
-        },
+        (payload, info) => this._deliver(payload, info),
         () => this._attachments.size,
       )
     } catch (error) {
@@ -246,6 +232,23 @@ class SubscriptionSlot {
     // A refusal known at once throws from open(), so an attempt opens establishing or ready.
     assert(attempt.state() !== 'closed')
     if (attempt.state() === 'ready') this._becameReady()
+  }
+
+  private _deliver(payload: BackendPayload, info: { seq: number; timestamp: number }): void {
+    if (this._stopPromise !== null) return
+    try {
+      this._config.checkDelivery(payload, info)
+    } catch (error) {
+      console.error(error)
+      return
+    }
+    for (const attachment of this._targets()) {
+      try {
+        attachment.receiver(payload, info)
+      } catch (error) {
+        console.error(error)
+      }
+    }
   }
 
   private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionState, reason?: Error): void {
