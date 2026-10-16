@@ -112,9 +112,8 @@ type ChannelConfigUser = {
   pingInterval?: number
   /**
    * The most bytes of text messages the server keeps per channel, of those it sent that the client hasn't acknowledged,
-   * to replay after a reconnect. The client's window never passes half of this or of `serverReplayBufferBinary`,
-   * whichever is smaller, so what flow control lets be in flight fits, with a message of up to that half: 64 MiB with
-   * the defaults.
+   * to replay after a reconnect. If you `await` your sends, a reconnect loses nothing, as long as each message is at
+   * most half its replay buffer: 64 MiB with the defaults.
    */
   serverReplayBuffer?: number
   /** As `serverReplayBuffer`, for binary messages. */
