@@ -45,10 +45,10 @@ export class ReplayBuffer {
     return ++this._seq
   }
 
-  /** Stores a frame, its seq no less than the last pushed, in its lane; false where it outgrows the lane's budget. */
-  push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
+  /** Stores a frame, its seq no less than the last pushed, in its lane; none larger than the lane's budget. */
+  push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     this.pushed(seq)
-    return this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
+    this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
   }
 
   /** The peer has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
@@ -153,15 +153,14 @@ class ReplayLane {
     return this.maxBytes
   }
 
-  /** Stores an encoded frame; false where it is larger than the budget. */
-  push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
+  /** Stores an encoded frame; none larger than the budget. */
+  push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     const bytes = chargedBytes(frame)
-    if (bytes > this.maxBytes) return false
+    if (bytes > this.maxBytes) return
     this.seqs.push(seq)
     this.frames.push(frame)
     this.totalBytes += bytes
     this.trim()
-    return true
   }
 
   acknowledge(lastSeq: number): void {
