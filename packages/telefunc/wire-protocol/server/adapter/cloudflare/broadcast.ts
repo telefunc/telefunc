@@ -261,7 +261,8 @@ class CloudflareBroadcastMember {
     const memberRoute = this.#ensureRoute(route, routeKey)
     const attempt = new CloudflareBroadcastSubscriptionAttempt(memberRoute, receiver, async () => {
       this.#subscriptions.delete(routeKey)
-      await this.#teardownIfEmpty(routeKey)
+      // An establishing route is released once its presence is recorded, if no subscription remains.
+      if (memberRoute.state !== 'establishing') await this.#release(routeKey, memberRoute)
     })
     this.#subscriptions.set(routeKey, attempt)
     return attempt
@@ -293,13 +294,6 @@ class CloudflareBroadcastMember {
     memberRoute.acknowledgePresence()
     if (!this.#subscriptions.has(routeKey)) return this.#release(routeKey, memberRoute)
     memberRoute.startRefresh(() => this.#recordPresence(memberRoute.route))
-  }
-
-  async #teardownIfEmpty(routeKey: string): Promise<void> {
-    const memberRoute = this.#routes.get(routeKey)
-    // An establishing route is released once its presence is recorded, if no subscription remains.
-    if (memberRoute === undefined || memberRoute.state === 'establishing') return
-    await this.#release(routeKey, memberRoute)
   }
 
   async #release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
