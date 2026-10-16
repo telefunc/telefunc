@@ -39,23 +39,23 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     let owned = payload
     return subscriptions.afterEstablished(
       () => publishNow(route, owned),
-      () => {
-        // Called only for a publish that may wait past this call, so only that one copies the caller's bytes.
-        if (typeof payload !== 'string') owned = new Uint8Array(payload)
-        return {
-          key,
-          sources: [
-            { key, kind: 'text' },
-            { key, kind: 'binary' },
-          ],
-          weight: heldSendWeight(
-            kind,
-            broadcastRouteKey(route),
-            () => (typeof owned === 'string' ? utf8ByteLength(owned) : owned.byteLength),
-            'Broadcast',
-          ),
-        }
-      },
+      () => ({
+        key,
+        sources: [
+          { key, kind: 'text' },
+          { key, kind: 'binary' },
+        ],
+        weight: heldSendWeight(
+          kind,
+          broadcastRouteKey(route),
+          () => (typeof payload === 'string' ? utf8ByteLength(payload) : payload.byteLength),
+          'Broadcast',
+        ),
+        // Only a held publish copies: the caller may reuse its bytes once the publish returns.
+        onHeld: () => {
+          if (typeof payload !== 'string') owned = new Uint8Array(payload)
+        },
+      }),
     )
   }
 

@@ -35,8 +35,9 @@ type Hold = { readonly established: Promise<void>; sends: number }
  *  share; a send its budget can't fit is refused with `overflow()`. */
 type HoldWeight = { budget: string; bytes(): number; fits(bytes: number): boolean; overflow(): Error }
 
-/** What a send waits for, read only while some subscription could be establishing; `sources` share a partition. */
-type SendHold<Source> = { key: string; sources: readonly [Source, ...Source[]]; weight?: HoldWeight }
+/** What a send waits for, read only while some subscription could be establishing; `sources` share a partition.
+ *  `onHeld` runs once the send is held, before `afterEstablished` returns. */
+type SendHold<Source> = { key: string; sources: readonly [Source, ...Source[]]; weight?: HoldWeight; onHeld?(): void }
 
 /** Checks a delivery against the driver contract, once for all its consumers; one it throws for
  *  is reported and dropped. */
@@ -105,10 +106,10 @@ class SubscriptionManager<Source> {
 
   /** Runs `send` once none of its caller's subscriptions on the hold's `sources` is establishing, waiting at most the
    *  hold time; while the caller holds the hold's `key`, its later sends on it queue behind, in call order.
-   *  `describeHold` runs only for a send that may wait. */
+   *  `describeHold` runs only while some subscription establishes or some send is held. */
   afterEstablished<T>(send: () => T | Promise<T>, describeHold: () => SendHold<Source>): T | Promise<T> {
     if (this._establishing === 0 && this._holds.size === 0) return send()
-    const { key, sources, weight } = describeHold()
+    const { key, sources, weight, onHeld } = describeHold()
     // Another partition's subscription (another Cloudflare session's) is not ordered before this send.
     const partition = this._driver.partitionHere(sources[0])
     if (partition === null) return send()
@@ -128,6 +129,7 @@ class SubscriptionManager<Source> {
       if (!weight.fits(held)) return Promise.reject(weight.overflow())
       this._held.set(budget, held)
     }
+    onHeld?.()
     this._holds.set(holdKey, current)
     current.sends++
     // Sent inside the reaction, so a send that finds the hold gone can't reach the driver first.
