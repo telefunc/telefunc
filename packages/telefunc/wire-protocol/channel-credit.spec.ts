@@ -660,14 +660,19 @@ test("a broadcast whose page is cut off further behind than the server's replay 
   expect(seen).toEqual(['before', ...seen.slice(1).map((_, n) => publication(n))])
 })
 
-test.each([false, true])(
-  'a server sendBinary() before its page attaches delivers the bytes it was given, though its caller reuses the buffer (ack: %s)',
-  async (ack) => {
+test.each([
+  [false, 'Uint8Array'],
+  [true, 'Uint8Array'],
+  [false, 'Buffer'],
+  [true, 'Buffer'],
+] as const)(
+  'a server sendBinary() before its page attaches delivers the bytes it was given, though its caller reuses the buffer (ack: %s, a %s)',
+  async (ack, kind) => {
     const { server, page } = loop.open<never, never>()
     const got: number[][] = []
     page.listenBinary((data) => void got.push(Array.from(data)))
     const send = (data: Uint8Array) => (ack ? server.sendBinary(data, { ack: true }) : server.sendBinary(data))
-    const buffer = new Uint8Array([1, 1, 1])
+    const buffer = kind === 'Buffer' ? Buffer.from([1, 1, 1]) : Uint8Array.from([1, 1, 1])
     void send(buffer).catch(() => {})
     buffer.set([2, 2, 2])
     void send(buffer).catch(() => {})
