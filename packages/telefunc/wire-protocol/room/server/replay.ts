@@ -3,7 +3,7 @@ export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
-import { makePublishInfo } from '../../channel.js'
+import { makePublishInfo, type ChannelPublishInfo } from '../../channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binary-wants.js'
@@ -159,7 +159,7 @@ class LocalHolder implements LaneHolder {
     this._state.applyBinary(frame, this._publishInfo(info))
   }
 
-  private _publishInfo(info: WirePublishInfo) {
+  private _publishInfo(info: WirePublishInfo): ChannelPublishInfo {
     return makePublishInfo(this._state.roomId, info.seq, info.timestamp)
   }
 }

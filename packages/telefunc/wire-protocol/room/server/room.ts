@@ -401,7 +401,10 @@ class ServerRoom extends RoomStateView implements Room {
     if (this._stubs.has(stub)) this._replica.plan.memberChanged(member)
   }
 
-  async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
+  async _joinStubMember(
+    stub: RoomStubChannel,
+    req: Extract<RoomRequest, { __r: 'req-join' }>,
+  ): Promise<{ id: string; joinedAt: number }> {
     const admission = {
       id: crypto.randomUUID(),
       meta: ownMetadata(req.meta),

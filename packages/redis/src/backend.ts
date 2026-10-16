@@ -280,7 +280,11 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return await this._run(REDIS_COMMANDS.laneStart, source)
   }
 
-  private async _memberLaneStarts(roomId: string, inc: string, member: string) {
+  private async _memberLaneStarts(
+    roomId: string,
+    inc: string,
+    member: string,
+  ): Promise<Map<string, OrderingInfo> | null> {
     const starts = new Map<string, OrderingInfo>()
     let cursor = '0'
     do {
@@ -292,7 +296,11 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return starts
   }
 
-  private async _trackLaneStarts(roomId: string, inc: string, track: string) {
+  private async _trackLaneStarts(
+    roomId: string,
+    inc: string,
+    track: string,
+  ): Promise<Map<string, OrderingInfo> | null> {
     const starts = new Map<string, OrderingInfo>()
     let cursor = '0'
     do {
