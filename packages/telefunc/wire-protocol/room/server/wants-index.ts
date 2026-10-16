@@ -4,7 +4,7 @@ export type { Affected }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { ALL, DEFAULT_TRACK, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
-import { type TrackWants } from './binary-wants.js'
+import { type BinaryWants, type TrackWants } from './binary-wants.js'
 import type { LaneHolder } from './replay.js'
 import { hasEntry, toggle, toggleEntry } from './sets.js'
 assertIsNotBrowser()
@@ -57,21 +57,24 @@ class WantsIndex {
       ? [[ALL], ids]
       : [[ALL], indexed.binary.keys(), wants?.members.keys() ?? []]
     for (const scopes of scopeLists) {
-      for (const scope of scopes) {
-        const next = coverKeys(scope === ALL ? wants?.everyMember : wants?.members.get(scope))
-        const prev = new Set(indexed.binary.get(scope))
-        const affected = new Set<string>()
-        let all = false
-        for (const key of prev) {
-          if (!next.has(key)) all = addAffected(this._cover(holder, scope, key, false), affected) || all
-        }
-        for (const key of next) {
-          if (!prev.has(key)) all = addAffected(this._cover(holder, scope, key, true), affected) || all
-        }
-        yield all ? 'all' : affected
-      }
+      for (const scope of scopes) yield this._updateScope(holder, indexed, scope, wants)
     }
     if (gone) this._indexed.delete(holder)
+  }
+
+  /** Indexes the holder's binary wants of one scope, and the members it affected. */
+  private _updateScope(holder: LaneHolder, indexed: Indexed, scope: string | All, wants: BinaryWants | null): Affected {
+    const next = coverKeys(scope === ALL ? wants?.everyMember : wants?.members.get(scope))
+    const prev = new Set(indexed.binary.get(scope))
+    const affected = new Set<string>()
+    let all = false
+    for (const key of prev) {
+      if (!next.has(key)) all = addAffected(this._cover(holder, scope, key, false), affected) || all
+    }
+    for (const key of next) {
+      if (!prev.has(key)) all = addAffected(this._cover(holder, scope, key, true), affected) || all
+    }
+    return all ? 'all' : affected
   }
 
   /** Indexes the holder's current text wants, a member per step: its room-wide ones, and those of `members`, or of
