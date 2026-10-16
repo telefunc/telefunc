@@ -67,7 +67,7 @@ function createCloudflareRequest({ colo, continent }: { colo?: string; continent
 /** Cloudflare's SQLite storage API over node:sqlite, as far as the adapter uses it. */
 function createSqlState(): DurableObjectState {
   const db = new DatabaseSync(':memory:')
-  const cursor = (rows: unknown[]) => ({ toArray: () => rows, one: () => rows[0] })
+  const cursor = (rows: unknown[]) => ({ toArray: () => rows })
   const sql = {
     exec(query: string, ...bindings: SQLInputValue[]) {
       if (bindings.length === 0 && !/^\s*SELECT/i.test(query)) {
