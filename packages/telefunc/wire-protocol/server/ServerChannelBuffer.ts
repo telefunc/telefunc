@@ -246,7 +246,7 @@ class BufferLane {
     bytes += callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES
     if (bytes > this.#maxBytes) {
       const overflowErr = new ChannelOverflowError()
-      const dropsPublish = isPublishTag(tag) || this.#tags.slice(this.#head).some(isPublishTag)
+      const dropsPublish = isPublishTag(tag) || this.#holdsPublish()
       this.clear(overflowErr)
       if (dropsPublish) this.droppedPublish = true
       callback?.reject(overflowErr)
@@ -286,6 +286,11 @@ class BufferLane {
   }
 
   // ── Private ──
+
+  #holdsPublish(): boolean {
+    for (let i = this.#head; i < this.#tags.length; i++) if (isPublishTag(this.#tags[i]!)) return true
+    return false
+  }
 
   #evict(): void {
     let evictionErr: ChannelOverflowError | undefined
