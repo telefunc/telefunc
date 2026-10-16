@@ -60,6 +60,7 @@ type AcceptedCommitWire = { accepted: true; seq: number; timestamp: number; rece
 type CommitWire = AcceptedCommitWire | StaleCommit
 
 type RegisterWire = { ok: true } | { rejected: true; reason: string }
+
 /** The room authority's own methods, which its Durable Object serves over RPC. */
 type CloudflareRoomAuthorityStub = Omit<RoomAuthority, keyof DurableObject>
 
