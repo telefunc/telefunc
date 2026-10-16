@@ -191,6 +191,25 @@ describe('client Room lifecycle', () => {
       [null, true],
     ])
   })
+  it('hands listen() an unstamped DM from a member of a roster still streaming in as that member', async () => {
+    const { id, ack, emit, joining } = await pendingClientJoin('dm-pending-sender')
+    ack.resolve({ id, joinedAt: 1 })
+    const participant = await joining
+    const senders: unknown[] = []
+    participant.listen((_data, from) => void senders.push(from))
+    const from = crypto.randomUUID()
+    emit(
+      {
+        __r: 'roster',
+        members: [{ id: from, meta: { name: 'Ada' }, joinedAt: 1, metaSeq: 1, identity: 'ada' }],
+        part: 0,
+        more: true,
+      },
+      1,
+    )
+    emit({ __r: 'dm', to: id, from, data: 'hi' }, 2)
+    expect(senders).toEqual([{ id: from, meta: { name: 'Ada' }, identity: 'ada' }])
+  })
   it("delivers member-addressed events that arrive before the participant's join ack", async () => {
     const replies: unknown[] = []
     const { id, ack, emit, joining, client } = await pendingClientJoin('pre-ack-events', (message) => {
