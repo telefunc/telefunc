@@ -891,46 +891,43 @@ class RoomState {
 
   // ── Private ──
   private _listenersOf(entry: MemberEntry): MemberListeners {
-    let listeners = this._memberListeners.get(entry)
-    if (!listeners) {
-      listeners = { remote: null, dataCbs: null, binary: null, updateCbs: null, leaveCbs: null }
-      this._memberListeners.set(entry, listeners)
-    }
+    const existing = this._memberListeners.get(entry)
+    if (existing !== undefined) return existing
+    const listeners: MemberListeners = { remote: null, dataCbs: null, binary: null, updateCbs: null, leaveCbs: null }
+    this._memberListeners.set(entry, listeners)
     return listeners
   }
 
   private _remote(entry: MemberEntry): RemoteParticipant {
     const listeners = this._listenersOf(entry)
-    let remote = listeners.remote
-    if (!remote) {
-      remote = {
-        id: entry.id,
-        get meta() {
-          return entry.meta.object
-        },
-        get joinedAt() {
-          return entry.joinedAt
-        },
-        get identity() {
-          return entry.identity
-        },
-        subscribe: (cb) => this._registerLive(entry, (listeners.dataCbs ??= new Listeners()), cb),
-        subscribeBinary: (cb, opts) => {
-          const listener = binaryListener(cb, opts)
-          const binary = (listeners.binary ??= { cbs: new Listeners(), tracks: newTrackCounts() })
-          return this._registerLive(entry, binary.cbs, listener, { counts: binary.tracks, track: listener.track })
-        },
-        onUpdate: (cb) => this._registerLive(entry, (listeners.updateCbs ??= new Listeners()), cb),
-        onLeave: (cb: (cause: LeaveCause) => void) => {
-          if (!entry.left) return this._register((listeners.leaveCbs ??= new Listeners()), cb, entry)
-          assert(entry.leaveCause)
-          invokeChannelListener(cb, [entry.leaveCause], this._onCallbackError)
-          return makeDisposer()
-        },
-      }
-      listeners.remote = remote
-      remoteBackings.set(remote, { state: this, entry })
+    if (listeners.remote) return listeners.remote
+    const remote: RemoteParticipant = {
+      id: entry.id,
+      get meta() {
+        return entry.meta.object
+      },
+      get joinedAt() {
+        return entry.joinedAt
+      },
+      get identity() {
+        return entry.identity
+      },
+      subscribe: (cb) => this._registerLive(entry, (listeners.dataCbs ??= new Listeners()), cb),
+      subscribeBinary: (cb, opts) => {
+        const listener = binaryListener(cb, opts)
+        const binary = (listeners.binary ??= { cbs: new Listeners(), tracks: newTrackCounts() })
+        return this._registerLive(entry, binary.cbs, listener, { counts: binary.tracks, track: listener.track })
+      },
+      onUpdate: (cb) => this._registerLive(entry, (listeners.updateCbs ??= new Listeners()), cb),
+      onLeave: (cb: (cause: LeaveCause) => void) => {
+        if (!entry.left) return this._register((listeners.leaveCbs ??= new Listeners()), cb, entry)
+        assert(entry.leaveCause)
+        invokeChannelListener(cb, [entry.leaveCause], this._onCallbackError)
+        return makeDisposer()
+      },
     }
+    listeners.remote = remote
+    remoteBackings.set(remote, { state: this, entry })
     return remote
   }
 
@@ -956,7 +953,7 @@ class RoomState {
       filter && countTrack(filter.counts, filter.track, 1) ? wantOf(entry, filter, true) : null,
     )
     const cleanups = getOrCreate(this._listenerCleanups, list, () => new Set())
-    const unlisten = makeDisposer(() => {
+    return makeDisposer(() => {
       if (remove()) {
         this._bumpListenerCount(
           -1,
@@ -965,7 +962,6 @@ class RoomState {
         )
       }
     }, cleanups)
-    return unlisten
   }
 
   /** A discarded entry's listeners die with it, so the counters let owners drop what it held open. */
