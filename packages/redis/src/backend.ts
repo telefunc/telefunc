@@ -192,11 +192,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
     const frame = await this._publisher.getBuffer(retainedKey(this._prefix, roomId, inc, encodeLaneKey(lane)))
     if (frame === null) return null
-    const {
-      payload,
-      info: { seq, timestamp },
-    } = decodeOrderingFrame(frame)
-    return { payload: Uint8Array.from(payload), seq, timestamp }
+    const { payload, info } = decodeOrderingFrame(frame)
+    return { payload: Uint8Array.from(payload), seq: info.seq, timestamp: info.timestamp }
   }
 
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
