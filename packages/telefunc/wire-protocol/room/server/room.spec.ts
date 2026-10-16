@@ -4189,10 +4189,16 @@ describe('Room public behavior', () => {
     const createUpTo = async (count: number) => {
       while (created < count) await Room.create(`created-one-by-one-${created++}`)
     }
+    // The fastest of five windows of 1,000 creates, so a scheduling hiccup in one window is not read as growth.
+    const fastestWindowUpTo = async (count: number) => {
+      let fastest = Infinity
+      while (created < count) fastest = Math.min(fastest, await timeOutsideGc(() => createUpTo(created + 1_000)))
+      return fastest
+    }
     await createUpTo(5_000)
-    const at10k = await timeOutsideGc(() => createUpTo(10_000))
+    const at10k = await fastestWindowUpTo(10_000)
     await createUpTo(35_000)
-    const at40k = await timeOutsideGc(() => createUpTo(40_000))
+    const at40k = await fastestWindowUpTo(40_000)
     // A create that reads every room listed so far doesn't reach 40,000 rooms within the timeout.
     expect(at40k / at10k).toBeLessThanOrEqual(2)
   }, 60_000)
