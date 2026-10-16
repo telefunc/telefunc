@@ -156,6 +156,43 @@ test('a POST for a wire the server has closed is refused at once, so the page re
   }
 })
 
+test("the data waiting for a page's SSE stream to ask, when the server ends the wire on an oversize frame, reaches the page before its stream ends", async () => {
+  const sse = getTelefuncSseChannelHooks()
+  const channel = new ServerChannel<unknown, string>()
+  let opened = false
+  channel.onOpen(() => void (opened = true))
+  getChannelMux().registerChannel(channel)
+  const connId = crypto.randomUUID()
+  const downstream = openPost({ connId, streamResponse: true })
+  const response = await sse.handleRequest(downstream.request)
+  downstream.push(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
+  downstream.end()
+  await vi.waitFor(() => expect(opened).toBe(true))
+  // Nothing reads the event stream yet, so it asks for none of these.
+  const sent = ['a', 'b', 'c']
+  for (const data of sent) void channel.send(data).catch(() => {})
+  const { events } = getChannelMux().getConnectionByConnId<SseConnection>(connId)!
+  await vi.waitFor(() => expect(events.heldBytes).toBeGreaterThan(events.streamBytes))
+  const batch = openPost({ connId })
+  batch.pushBytes(new Uint8Array([0xff, 0xff, 0xff, 0xff]))
+  batch.end()
+  expect((await sse.handleRequest(batch.request))!.statusCode).toBe(400)
+  expect(getChannelMux().getConnectionByConnId(connId)).toBeUndefined()
+
+  const reader = (response!.body as ReadableStream<Uint8Array>).getReader()
+  const decoder = new TextDecoder()
+  let text = ''
+  for (let read = await reader.read(); !read.done; read = await reader.read()) {
+    text += decoder.decode(read.value, { stream: true })
+  }
+  const got = text
+    .split('\n\n')
+    .filter((event) => event.startsWith('data: '))
+    .map((event) => decode(base64urlToUint8Array(event.slice('data: '.length))))
+    .flatMap((frame) => (frame.tag === TAG.TEXT ? [JSON.parse(frame.text) as string] : []))
+  expect(got).toEqual(sent)
+})
+
 /** An SSE wire whose page has one channel attached, which counts what reaches its listener. */
 async function reconciledSseWire() {
   const sse = getTelefuncSseChannelHooks()
