@@ -51,7 +51,7 @@ Room keeps its state (rooms, members, lane order) in Redis keys with no expiry, 
 
 Keep your Redis masters' clocks synchronized: message timestamps come from them, as does the moment a stopped server's rooms close and its members leave.
 
-On a Redis Cluster, a server sends a room's messages, each member's direct messages, and each binary track at most one message per round trip to Redis.
+On a Redis Cluster, a server sends at most one message per round trip to Redis on each of a room's message streams: its room-wide messages, each member's direct messages, and each binary track.
 
 ## Channels
 
