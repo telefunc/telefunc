@@ -235,7 +235,7 @@ class SseTransport implements UpgradeSource {
       // Metadata header first — the server classifies the POST by it; `streamRequest: true`
       // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
       body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
-      const fetch = this.openStreamRequest(body, uploadAbort.signal)
+      const fetch = this.postAndRead(body, uploadAbort.signal, { duplex: 'half' })
       this.streamRequest = { tag: 'active', body, unconfirmed: [] }
       fetchEndedP = (async (): Promise<'fetch-ended'> => {
         try {
@@ -609,13 +609,6 @@ class SseTransport implements UpgradeSource {
   }
 
   // ── Persistent client→server stream-request POST (half-duplex streaming body) ──
-
-  /** Half-duplex POST. Resolves on body-end, rejects on fetch error. */
-  /** `PushReadableStream` IS-A `ReadableStream` — fetch reads it directly, the producer's
-   *  `push(chunk)` lands in the same stream's queue, no async-iterator adapter in between. */
-  private openStreamRequest(body: PushReadableStream<Uint8Array<ArrayBuffer>>, signal: AbortSignal): Promise<unknown> {
-    return this.postAndRead(body, signal, { duplex: 'half' })
-  }
 
   private closeStreamRequest(): void {
     // Only 'active' has a body to close; 'failed' is sticky-terminal so don't regress to 'idle'.
