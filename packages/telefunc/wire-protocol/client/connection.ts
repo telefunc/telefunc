@@ -747,27 +747,19 @@ class ClientConnection implements MuxConnection {
   }
 
   sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0), kind)
+    this.sendUnsequenced(channel, kind, (ix) => encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0))
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.msgWindow(ix, limit), urgent ? 'urgent-flow-control' : 'flow-control')
+    this.sendUnsequenced(channel, urgent ? 'urgent-flow-control' : 'flow-control', (ix) => encode.msgWindow(ix, limit))
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.bdpPing(ix, probe), 'flow-control')
+    this.sendUnsequenced(channel, 'flow-control', (ix) => encode.bdpPing(ix, probe))
   }
 
   sendBdpPingAck(channel: MuxChannel, { probe, backlog, pathRtt }: BdpPingAck): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.bdpPingAck(ix, probe, backlog, pathRtt), 'flow-control')
+    this.sendUnsequenced(channel, 'flow-control', (ix) => encode.bdpPingAck(ix, probe, backlog, pathRtt))
   }
 
   bufferedAmount(): number {
@@ -778,9 +770,16 @@ class ClientConnection implements MuxConnection {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
-  /** Sends `frame`, which takes no seq, or queues it while its channel's sends wait: a limit is cumulative, so one
-   *  that waited is still right. */
-  private sendUnsequenced(ix: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
+  /** Sends the frame `buildFrame` builds, which takes no seq, or queues it while its channel's sends wait: a limit is
+   *  cumulative, so one that waited is still right. */
+  private sendUnsequenced(
+    channel: MuxChannel,
+    kind: OutboundFrameKind,
+    buildFrame: (ix: number) => Uint8Array<ArrayBuffer>,
+  ): void {
+    const ix = this.channelIndex.get(channel)
+    if (ix === undefined) return
+    const frame = buildFrame(ix)
     if (!this.canSendImmediately(ix)) {
       this.settleQueue().push({ frame, channelIx: ix, seq: undefined })
       return
@@ -789,15 +788,11 @@ class ClientConnection implements MuxConnection {
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.broadcastSub(ix, binary), 'control')
+    this.sendUnsequenced(channel, 'control', (ix) => encode.broadcastSub(ix, binary))
   }
 
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.sendUnsequenced(ix, encode.broadcastUnsub(ix, binary), 'control')
+    this.sendUnsequenced(channel, 'control', (ix) => encode.broadcastUnsub(ix, binary))
   }
 
   _onTransportOpen(transport: ClientChannelTransport): void {
