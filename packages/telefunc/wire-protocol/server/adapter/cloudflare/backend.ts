@@ -159,18 +159,17 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
   }
 
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
-    if (!('roomId' in source)) {
-      const member = requireCloudflareSession().broadcast
+    const session = requireCloudflareSession()
+    if ('roomId' in source) {
       return {
-        partition: member.partition,
-        open: (receiver) => member.openSubscription(source, receiver),
+        partition: session.room.partition,
+        // A route call line opens a fresh stub, like a commit's: a stub that rejected may be broken.
+        open: (receiver) => session.room.openSubscription(source, () => this.#stub(source.roomId), receiver),
       }
     }
-    const manager = requireCloudflareSession().room
     return {
-      partition: manager.partition,
-      // A route call line opens a fresh stub, like a commit's: a stub that rejected may be broken.
-      open: (receiver) => manager.openSubscription(source, () => this.#stub(source.roomId), receiver),
+      partition: session.broadcast.partition,
+      open: (receiver) => session.broadcast.openSubscription(source, receiver),
     }
   }
 
