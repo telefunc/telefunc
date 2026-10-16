@@ -313,23 +313,23 @@ function roomProbe(env: Env, suffix: string, name: string) {
   const roomId = `${name}-${suffix}`
   const inc = `${name}-inc-${suffix}`
   const authority = env.ROOM.get(env.ROOM.idFromName(roomId)) as unknown as Authority
-  const lease = (role = 'lease') => `${name}-${role}-${suffix}`
   const open = (operation = `${name} open`) => openHead(authority, inc, operation)
-  const join = async (sessionId: DurableObjectId, role = 'lease', laneKey = 'semantic') => {
-    const registration = await authority.registerRoute({
-      roomId,
-      inc,
-      laneKey,
-      sessionDoId: sessionId.toString(),
-      leaseId: lease(role),
-    })
+  const route = (sessionId: DurableObjectId, { role = 'lease', laneKey = 'semantic', inc: routeInc = inc } = {}) => ({
+    roomId,
+    inc: routeInc,
+    laneKey,
+    sessionDoId: sessionId.toString(),
+    leaseId: `${name}-${role}-${suffix}`,
+  })
+  const join = async (sessionId: DurableObjectId, options?: { role?: string; laneKey?: string }) => {
+    const registration = await authority.registerRoute(route(sessionId, options))
     if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
   }
   return {
-    roomId,
     inc,
     authority,
     open,
+    route,
     join,
     /** An inbox commit, the one kind whose delivery its committer awaits. */
     async commit(payload: string | number, operation: string) {
@@ -345,7 +345,7 @@ async function lostTarget(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'lost-target')
   await probe.open()
   await session(env, suffix).refuse()
-  await probe.join(sessionOf(env, suffix), 'lease', INBOX_LANE_KEY)
+  await probe.join(sessionOf(env, suffix), { laneKey: INBOX_LANE_KEY })
   const commit = await probe.commit(1, 'lost target')
   return { receivers: commit.receivers, settlement: await rejectionOf(probe.settle(commit), 'lost-target settlement') }
 }
@@ -354,7 +354,7 @@ async function lostTarget(env: Env, suffix: string) {
 async function pipelinedDelivery(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'pipelined')
   await probe.open()
-  await probe.join(sessionOf(env, suffix), 'lease', INBOX_LANE_KEY)
+  await probe.join(sessionOf(env, suffix), { laneKey: INBOX_LANE_KEY })
   const frames = ['hold', ...Array.from({ length: 10 }, (_, index) => `frame-${index}`)]
   const commits = await Promise.all(frames.map((frame) => probe.commit(frame, `pipelined ${frame}`)))
   const whileHeld = await poll(
@@ -377,7 +377,7 @@ async function everyTrackRoutes(env: Env, suffix: string) {
     ['every-track', 'binary-all:m'],
     ['every-member', 'binary-track:camera'],
   ] as const) {
-    await probe.join(sessionOf(env, `${role}-${suffix}`), role, laneKey)
+    await probe.join(sessionOf(env, `${role}-${suffix}`), { role, laneKey })
   }
   const receivers: number[] = []
   for (const [member, track, text] of [
@@ -410,13 +410,7 @@ async function alarmScheduling(env: Env, suffix: string) {
   const head = await probe.open()
   await probe.join(sessionId)
   const afterRoute = (await probe.scheduledAlarm()) === null ? 'idle' : 'armed'
-  await probe.authority.unsubscribeRoute({
-    roomId: probe.roomId,
-    inc: probe.inc,
-    laneKey: 'semantic',
-    sessionDoId: sessionId.toString(),
-    leaseId: `alarm-lease-${suffix}`,
-  })
+  await probe.authority.unsubscribeRoute(probe.route(sessionId))
   const afterUnsubscribe = await probe.scheduledAlarm()
   // A head naming another incarnation leaves the first one's generation orphaned.
   const next = { head: { currentInc: `${probe.inc}-next`, state: 'open' as const, config: head.config } }
@@ -425,22 +419,11 @@ async function alarmScheduling(env: Env, suffix: string) {
   const afterReopen = retry === null ? 'idle' : 'armed'
   // The orphan's sweep is due: a later route registration doesn't push its retry out.
   await new Promise((resolve) => setTimeout(resolve, 20))
-  const registration = await probe.authority.registerRoute({
-    roomId: probe.roomId,
-    inc: `${probe.inc}-next`,
-    laneKey: 'semantic',
-    sessionDoId: sessionId.toString(),
-    leaseId: `alarm-next-lease-${suffix}`,
-  })
+  const nextRoute = probe.route(sessionId, { role: 'next-lease', inc: `${probe.inc}-next` })
+  const registration = await probe.authority.registerRoute(nextRoute)
   if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
   const retryKept = (await probe.scheduledAlarm()) === retry
-  await probe.authority.unsubscribeRoute({
-    roomId: probe.roomId,
-    inc: `${probe.inc}-next`,
-    laneKey: 'semantic',
-    sessionDoId: sessionId.toString(),
-    leaseId: `alarm-next-lease-${suffix}`,
-  })
+  await probe.authority.unsubscribeRoute(nextRoute)
   await probe.authority.fireAlarm()
   return { idle, afterRoute, afterUnsubscribe, afterReopen, retryKept, afterAlarm: await probe.scheduledAlarm() }
 }
@@ -450,10 +433,9 @@ async function routeRenewal(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'renewal')
   await probe.open()
   await probe.join(sessionId)
-  const route = { roomId: probe.roomId, inc: probe.inc, laneKey: 'semantic', sessionDoId: sessionId.toString() }
   return {
-    live: await probe.authority.renewRoute({ ...route, leaseId: `renewal-lease-${suffix}` }),
-    otherLease: await probe.authority.renewRoute({ ...route, leaseId: 'another-lease' }),
+    live: await probe.authority.renewRoute(probe.route(sessionId)),
+    otherLease: await probe.authority.renewRoute(probe.route(sessionId, { role: 'another-lease' })),
   }
 }
 
