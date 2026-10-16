@@ -1,5 +1,5 @@
 import { expect, test, vi } from 'vitest'
-import { getTelefuncSseChannelHooks } from './sse.js'
+import { getTelefuncSseChannelHooks, type SseConnection } from './sse.js'
 import { getChannelMux } from './mux.js'
 import { ServerChannel } from './channel.js'
 import { encodeSseBatch, encodeSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
@@ -10,8 +10,6 @@ import { Readable } from 'node:stream'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import { CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel-errors.js'
-import type { PushReadable } from '../push-readable.js'
-import type { PushReadableStream } from '../push-readable-stream.js'
 import { loadStreamNodeModuleOnce } from '../../utils/loadStreamNodeModule.js'
 
 function openPost(metadata: SseRequestMetadata) {
@@ -230,13 +228,11 @@ test.each([
     getChannelMux().registerChannel(channel)
     const connId = crypto.randomUUID()
     const downstream = openPost({ connId, streamResponse: true })
-    const response = node
-      ? await sse.handleRequest(downstream.request, Readable.fromWeb(downstream.request.body! as never))
-      : await sse.handleRequest(downstream.request)
+    await (node
+      ? sse.handleRequest(downstream.request, Readable.fromWeb(downstream.request.body! as never))
+      : sse.handleRequest(downstream.request))
     // Nothing reads the event stream. What it holds, and the data waiting for it to ask.
-    const body = response!.body as PushReadable | PushReadableStream
-    const held = () =>
-      body.bufferedAmount + getChannelMux().getConnectionByConnId<{ waitingBytes: number }>(connId)!.waitingBytes
+    const held = () => getChannelMux().getConnectionByConnId<SseConnection>(connId)!.events.heldBytes
     downstream.push(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
     downstream.end()
     await vi.waitFor(() => expect(opened).toBe(true))
