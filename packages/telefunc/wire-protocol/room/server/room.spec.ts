@@ -4189,9 +4189,9 @@ describe('Room public behavior', () => {
     const createUpTo = async (count: number) => {
       while (created < count) await Room.create(`created-one-by-one-${created++}`)
     }
-    await createUpTo(9_000)
+    await createUpTo(5_000)
     const at10k = await timeOutsideGc(() => createUpTo(10_000))
-    await createUpTo(39_000)
+    await createUpTo(35_000)
     const at40k = await timeOutsideGc(() => createUpTo(40_000))
     // A create that reads every room listed so far doesn't reach 40,000 rooms within the timeout.
     expect(at40k / at10k).toBeLessThanOrEqual(2)
