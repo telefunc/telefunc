@@ -189,9 +189,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._isClosed
   }
 
-  /** @internal — Register a one-shot callback that fires when the transport shuts down, with whether the channel keeps
-   *  what its page may still lack of it (see `_release`), and whether its page is attached. Replaces any previously
-   *  registered callback. */
+  /** @internal Replaces the one-shot shutdown callback: `keep` if it keeps what its page may lack (see `_release`). */
   _onShutdown(cb: (keep: boolean, pageAttached: boolean) => void): void {
     this._shutdownCallback = cb
   }
@@ -289,10 +287,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return this._flow.decrement(this._peer.sendBinary(data))
   }
 
-  /** @internal The most this channel's flow control lets wait on its wire for a page that reads: its credit, which a
-   *  page never grants past `CREDIT_WINDOW_MAX_BYTES`, what `_pastCreditAllowance` lets past it, and what it buffered
-   *  while the page was offline, `bufferLimit` of text and `bufferLimitBinary` of binary, which an attach sends at once
-   *  whatever the credit. What a reattach replays is what the first two let go out. */
+  /** @internal The most that may wait on its wire for a reading page: credit, the allowance past it, offline buffers. */
   _sendAllowance(): number {
     return CREDIT_WINDOW_MAX_BYTES + this._pastCreditAllowance() + this._bufferLimit + this._bufferLimitBinary
   }
@@ -684,9 +679,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown(undefined, { pageGone: true })
   }
 
-  /** @internal Its replay no longer holds what its page lacks of it: the channel ends on both ends, `peer` telling its
-   *  page so in place of the replay. What it made while no peer was attached is dropped, as it would reach the page
-   *  past the hole. */
+  /** @internal Its replay lost what its page lacks: drops what it made offline and ends, `peer` telling the page. */
   _onReplayLost(peer: IndexedPeer): void {
     const err = replayLossError('server')
     this._dropPending(err)

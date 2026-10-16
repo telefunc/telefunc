@@ -25,9 +25,7 @@ async function readSessionPin(
   return pin && { sessionInstanceName: pin.s, locationBucket: pin.b }
 }
 
-/** The Worker routes a token by its KV pin. The session Durable Object writes the pin, once and again before it lapses:
- *  a Worker reads KV through a cache that keeps a miss up to 60 s, so it would write on every request of a page's first
- *  minute. */
+/** The session Durable Object, not the Worker, writes each pin: a Worker's KV read caches a miss up to 60 s. */
 class SessionPins {
   /** When each session token this isolate's Durable Objects serve is due to be pinned, in the order they were pinned. */
   private readonly dueAt = new Map<string, number>()

@@ -42,10 +42,7 @@ function telefunc(): TelefuncServe {
   return {
     websocket: {
       ...ws.websocket,
-      // Bun drops a send once 16 MiB wait on the socket (its default backpressureLimit), leaving a gap in a channel,
-      // and closing there instead would cut a credited stream, whose windows can hold more. 0 is no limit in
-      // uWebSockets, as on Node's ws and Deno's WebSocket: channels bound what they send past credit by
-      // getBufferedAmount().
+      // Bun drops sends past 16 MiB queued, a gap in a channel; channels bound what waits by getBufferedAmount().
       backpressureLimit: 0,
       // Bun closes the socket on a message over 16 MiB by default, below the frames telefunc accepts.
       maxPayloadLength: WIRE_MAX_RAW_FRAME_BYTES,

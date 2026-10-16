@@ -7,9 +7,7 @@ import type { PiecesAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
-/** The data a server lets the path to its page hold: what the rate its page's acknowledgements measure carries in
- *  `WIRE_SEND_AHEAD_ROUND_TRIPS` of the least round trip, and `WIRE_SEND_AHEAD_MIN_BYTES` at least. The rest waits whole
- *  in its sender, where its acknowledgements and window refreshes pass it. */
+/** The path holds `WIRE_SEND_AHEAD_ROUND_TRIPS` least round trips at the drain rate; the rest waits in its sender. */
 class PathRoom implements SendRoom {
   readonly cuts = false
   /** Every frame the WebSocket carries goes through it. */

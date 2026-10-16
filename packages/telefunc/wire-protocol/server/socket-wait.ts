@@ -2,10 +2,7 @@ export { SocketWait }
 
 import { DRAIN_SPAN_MS, Waits, newestFastest, type SendWait } from '../link.js'
 
-/** On the server, the wait it reports for the frames that go at once (see `SendWait`): what its socket holds and its
- *  piece sender hasn't handed it, over the fastest of the newest rates that drained while it held data. Such a frame
- *  passes the data the sender holds back for room; counting it stands in for the queues past the socket the runtime
- *  doesn't report. Where the runtime hides what its socket holds, none. */
+/** The wait of a frame that goes at once: what the socket and piece sender hold, over the fastest newest drain rate. */
 class SocketWait implements SendWait {
   private drainRate = 0
   private readonly drainRates: number[] = []

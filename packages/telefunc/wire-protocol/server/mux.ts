@@ -150,20 +150,17 @@ type ConnectionState = {
   retiredByBarrier: boolean
   recvBacklog: RecvBacklog
   awaited: AwaitedChannels
-  /** What may be written to the wire before its backlog, which only writes grow, can pass what its channels' flow
-   *  control allowed when it was last read (see `WIRE_SEND_BACKLOG_BASE_BYTES`), and is read again. */
+  /** What may be written before the backlog is read again against what its channels' flow control allows. */
   sendHeadroom: number
   /** The largest frame sent on the wire. */
   largestSent: number
   /** Its backlog passed that, and the wire is being terminated. */
   pastSendBacklog: boolean
-  /** Channels attaching to the wire in this turn, before its session holds them: what they send as they attach (their
-   *  replay, what they buffered, what `onOpen` sends) counts under their flow control too. */
+  /** Channels attaching in this turn, before its session holds them: what they send counts in the headroom too. */
   attaching: Set<ServerChannel>
   /** How long the frames that go at once wait behind what the socket holds. */
   wait: SocketWait
-  /** Each probed entry's index and probe, of the RECONCILE it reads, until its RECONCILED answers them: a frame that
-   *  goes ahead of that goes behind a BDP_PING_ACK for each. */
+  /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   probed: { ix: number; probe: number }[]
 }
 
@@ -236,10 +233,7 @@ class ChannelMux {
     this.sessions.removeChannel(channelId)
   }
 
-  /** An ended channel stays attachable, so what its page lacks of it replays, until the page takes nothing more of it
-   *  (see `_pageNeedsNothing`), leaves it out of a RECONCILE or closes its wire for good, or stays away
-   *  `reconnectTimeout`, since it ended or since its page left, as a channel that lives waits for it. Called again as
-   *  its page attaches it or leaves it. */
+  /** Keeps an ended channel attachable until its page needs nothing of it, leaves it, or is away `reconnectTimeout`. */
   private keepEnded(channel: ServerChannel, pageAttached: boolean): void {
     const timer = this.endedChannels.get(channel)
     if (timer) clearTimeout(timer)
@@ -421,9 +415,7 @@ class ChannelMux {
     return outcome
   }
 
-  /** PING bypasses the recv chain — serializing it would tie liveness to the slowest
-   *  awaitable on the connection. A frame its pieces completed (`pieced`) was counted as they arrived; one `riding` ahead
-   *  of its message's last isn't dated apart from it (see `PieceReceiver.arrived`). */
+  /** PING and PIECES_ACK skip the recv chain, which would tie liveness to its slowest handler. */
   private dispatchFrame(
     entry: ConnectionEntry,
     connection: Wire,
@@ -509,9 +501,7 @@ class ChannelMux {
     if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
   }
 
-  /** Control frames are bounded by what the protocol itself can describe; only the data plane carries user payloads and
-   *  gets the multi-megabyte allowance, as does a piece of any frame, whose whole is bounded by its own tag once complete.
-   *  The backlog allows a full window per channel attached to the wire, on top of the base (see `WIRE_RECV_BACKLOG_BASE_BYTES`). */
+  /** Only data frames and pieces get the raw frame cap; the backlog adds a full window per channel of the session. */
   private isOverBudget(entry: ConnectionEntry, connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): boolean {
     const tag = peekTag(rawFrame)
     const maxFrameBytes =
@@ -605,10 +595,7 @@ class ChannelMux {
     return null
   }
 
-  /** The page lists its closed channels the server attached, each with how far it has what the server sent on it. Each
-   *  is answered with how far the server has what the page sent on it, or that the server no longer holds it: one that
-   *  ended here is let go, as the page takes nothing more of it. Only the wire its session is on answers: that session
-   *  has each channel the page lists that the server holds. */
+  /** Answers each closed channel the page lists on its session's wire: how far the server has it, or null once gone. */
   private answerPing(entry: ConnectionEntry, connection: Wire, ended: PingEntry[]): PongEntry[] {
     assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     const sessionId = entry.transport.getSessionId(connection)
@@ -848,9 +835,7 @@ class ChannelMux {
     return handles
   }
 
-  /** Null leaves the channel out of the RECONCILED. The wire awaits an initial one the server hasn't registered, and
-   *  one it awaits stays out until attached; its ATTACH_RESULT settles it. Later reconciles fail fast if the channel
-   *  is gone. */
+  /** Null leaves it out of the RECONCILED; an initial channel not yet registered is awaited until its ATTACH_RESULT. */
   private attach(
     open: ReconcileOpenEntry,
     entry: ConnectionEntry,
@@ -953,9 +938,7 @@ class ChannelMux {
     }
   }
 
-  /** Attaches an `IndexedPeer`, after draining, with `replay`, the replay frames missed since `lastSeq` (sends are
-   *  sync, see `send`). If the replay no longer holds them the channel ends instead. Returns null if the channel shut
-   *  down and kept nothing for its page. */
+  /** With `replay`, sends what the page missed, or ends the channel if the replay lost it; null if it kept nothing. */
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
@@ -1037,11 +1020,7 @@ class ChannelMux {
 
   // ── Per-connection plumbing (send, recv chain, ping) ────────────────
 
-  /** Sole server→client send path; sync so wire order = call order. What a channel's sends and publishes queue on it
-   *  is bounded by the channel's credit (see `flow-control/`) and, past that, by how far behind it lets its peer be. A
-   *  frame for a wire that closed is committed all the same: it replays as one a dying wire lost does. So is one for a
-   *  wire found holding more than that allows, which takes no more frames and is terminated after this turn as the
-   *  ping deadline terminates one: the page reconnects, and what it lost replays from there. */
+  /** Sole send path, sync so wire order is call order; a frame for a closed or over-backlog wire commits anyway. */
   private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
     onCommit?.()
     const entry = this.connectionEntries.get(connection)
@@ -1156,14 +1135,12 @@ class SessionRegistry {
     return this.bySession.get(sessionId)
   }
 
+  /** Stores no empty session: a transient close leaves it, and no channel's removal deletes it. */
   setSession(sessionId: string, handles: Iterable<ChannelHandle>): void {
     this.removeSession(sessionId)
     for (const h of handles) this.add(sessionId, h)
   }
 
-  /** An empty session is never stored: it has nothing to route, detach, or recovery-fail, and storing
-   *  it would leak, as only `removeSession` (a future reconcile naming this id, or a permanent close)
-   *  ever deletes entries, and a session abandoned by a transient close sees neither. */
   add(sessionId: string, h: ChannelHandle): void {
     let session = this.bySession.get(sessionId)
     if (!session) {
