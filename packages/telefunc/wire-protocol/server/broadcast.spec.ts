@@ -1030,6 +1030,21 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     expect(seen).toEqual(acks.map((ack, i) => [i % 2 === 0 ? 'text' : 'binary', ack.seq]))
     for (const stop of stops) stop()
   })
+  it("holds a publisher awaiting each publish within one turn's deliveries of its subscribers, text and binary", async () => {
+    const key = 'broadcast:awaited'
+    let delivered = 0
+    const stops = [
+      Broadcast.subscribe(key, () => void delivered++),
+      Broadcast.subscribeBinary(key, () => void delivered++),
+    ]
+    let mostBehind = 0
+    for (let published = 1; published <= 8192; published++) {
+      await (published % 2 === 0 ? Broadcast.publish(key, published) : Broadcast.publishBinary(key, new Uint8Array(1)))
+      mostBehind = Math.max(mostBehind, published - delivered)
+    }
+    expect(mostBehind).toBeLessThanOrEqual(1024)
+    for (const stop of stops) stop()
+  })
   it('delivers a fan-out published within one turn as it is published', () => {
     const key = 'broadcast:fan-out'
     let received = 0

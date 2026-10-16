@@ -227,16 +227,30 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     }
   }
 
-  publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult {
+  publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
     const mark = advanceOrder(this._state.broadcastOrder, route.key, this._state.now())
     const targets = this._state.broadcastSubs[route.kind].get(route.key) ?? []
     // Counted before delivery, which may unsubscribe or subscribe.
-    const receivers = sumReceiverCounts(targets)
-    this._deliver(() => {
+    const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
+    const delivery = () => {
       // A string can't change, so every subscription gets the same one; bytes are copied for each.
       for (const target of targets) target.deliver(typeof payload === 'string' ? payload : copyBytes(payload), mark)
+    }
+    if (this._deliversNow()) {
+      this._deliver(delivery)
+      return receipt
+    }
+    // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
+    return new Promise((resolve) => {
+      this._deliver(() => {
+        delivery()
+        resolve(receipt)
+      })
     })
-    return { seq: mark.seq, timestamp: mark.timestamp, receivers }
+  }
+
+  private _deliversNow(): boolean {
+    return this._deliveries.length === this._next && this._deliveredThisTurn < DELIVERIES_PER_TURN
   }
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
