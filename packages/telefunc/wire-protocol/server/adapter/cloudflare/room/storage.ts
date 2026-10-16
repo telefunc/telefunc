@@ -94,8 +94,8 @@ function directoryPut(sql: SqlStorage, roomId: string, incTag: string, checkAt: 
   )
 }
 
+/** Deletes iff the stored tag matches (a stale tag is a no-op). */
 function directoryDelete(sql: SqlStorage, roomId: string, incTag: string): void {
-  // Deletes iff the stored tag matches (a stale tag is a no-op).
   sql.exec('DELETE FROM directory WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
 }
 
