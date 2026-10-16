@@ -49,8 +49,7 @@ class LaneSubscription {
   sync(want: boolean, subscribe: () => BackendSubscription): void {
     if (!want) return this.stop()
     this._subscribe = subscribe
-    if (this._subscription !== null) return
-    this.retry()
+    this.resume()
   }
 
   /** Opens an attempt of a wanted slot that has none, once its recovery gave up. */
