@@ -11,7 +11,7 @@ function sqliteStorage(): { storage: DurableObjectStorage; plans: string[] } {
     exec(query: string, ...bindings: SQLInputValue[]) {
       if (/^\s*SELECT/i.test(query)) {
         const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(...bindings) as Array<{ detail: string }>
-        plans.push(...plan.map((step) => step.detail))
+        for (const step of plan) plans.push(step.detail)
         const rows = db.prepare(query).all(...bindings)
         return { toArray: () => rows }
       }
