@@ -180,9 +180,7 @@ class SseTransport implements UpgradeSource {
     if (deadline <= now || this.sendRoom() <= 0) void this.flushOutbox()
   }
 
-  /** While a POST is out, what joins the outbox goes into the next one's body a MiB at a time, so the flush after the
-   *  answer copies only the rest. Held with the first and last entries it covers: the outbox only grows at its end, or
-   *  is replaced or prepended to, which changes its first entry. */
+  /** While a POST is out, folds the outbox into the next body a MiB at a time: the flush after copies only the rest. */
   private foldOutbox(): void {
     if (this.unfolded < SSE_FOLD_BYTES) return
     this.unfolded = 0
@@ -223,8 +221,7 @@ class SseTransport implements UpgradeSource {
       abortController.signal,
       { accept: 'text/event-stream' },
     )
-    // The duplex:'half' POST ends with its body, or earlier when something on the way cuts it (Node's `requestTimeout`).
-    // `fetchEndedP` catches its rejection eagerly so it's always handled even if openStream exits early.
+    // The POST ends with its body or when cut on the way; `fetchEndedP` handles its rejection if openStream exits.
     let fetchEndedP: Promise<'fetch-ended'> | undefined
     let uploadBody: PushReadableStream<Uint8Array<ArrayBuffer>> | undefined
     const uploadAbort = new AbortController()
@@ -350,10 +347,7 @@ class SseTransport implements UpgradeSource {
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
-    // A dead wire's outbox carries only its window refreshes. This reconcile declares every channel and its
-    // subscriptions, and sequenced frames, a close request among them, replay after RECONCILED from the server's
-    // lastSeq: sent first, they could overtake older ones a POST still in flight carries, whose frames the server would
-    // then drop as duplicates.
+    // Sequenced frames replay after RECONCILED: sent now, they'd pass a POST in flight, making its frames duplicates.
     const movedOutbox = this.outbox.filter(isWindowRefresh)
     this.outbox = []
     this.outboxBytes = 0
@@ -399,8 +393,7 @@ class SseTransport implements UpgradeSource {
         if (!response.ok) throw new Error('POST failed')
         this.sizePosts(body.size, Date.now() - now)
       } catch {
-        // Its wire has ended already: what the POST carried goes the way of that wire's outbox (stageInitialBatch),
-        // also when the next wire has reconciled already.
+        // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
         if (wire !== this.transportAbort) {
           const refreshes = queued.filter(isWindowRefresh)
           this.outbox = refreshes.concat(this.outbox)
@@ -423,8 +416,7 @@ class SseTransport implements UpgradeSource {
     }
   }
 
-  /** A POST of `bytes` that took `ms` sizes the next ones to take `SSE_POST_TARGET_MS`: past it they shrink to what the
-   *  bytes took, and under it they grow once one was full. */
+  /** Sizes next POSTs to what this one's rate carries in `SSE_POST_TARGET_MS`, unless it was quicker and not full. */
   private sizePosts(bytes: number, ms: number): void {
     if (ms < SSE_POST_TARGET_MS && bytes < this.postBytes) return
     this.postBytes = Math.min(
@@ -455,8 +447,7 @@ class SseTransport implements UpgradeSource {
     this.settleDrained()
   }
 
-  /** A PING still held behind the POST out at its deadline goes on its own: the next POST would bring it past the
-   *  server's ping deadline. */
+  /** A PING still held at its deadline goes alone: the next POST would bring it past the server's ping deadline. */
   private unholdPing(entry: OutboxEntry): void {
     setTimeout(
       () => {
@@ -508,8 +499,7 @@ class SseTransport implements UpgradeSource {
     } catch {}
   }
 
-  /** What a POST under way carries has gone out. The control frames that wait for the next one aren't counted: a channel
-   *  out of credit with only those waiting was starved. */
+  /** Not the control frames waiting for the next POST: a channel out of credit with only those waiting was starved. */
   bufferedAmount(): number {
     if (this.streamRequest.tag === 'active') return this.streamRequest.body.bufferedAmount
     let bytes = 0
@@ -538,8 +528,7 @@ class SseTransport implements UpgradeSource {
       case 'acknowledgement':
       case 'ack':
       case 'data':
-        // A throttle after the last POST started, not after this frame: a frame that comes as that POST's credit
-        // returns would otherwise hold the next POST a throttle past it.
+        // From the last POST's start: a frame coming as that POST's credit returns would hold the next one longer.
         return Math.max(now + this.postIdleFlushDelayMs, this.lastPostStartedAt + this.flushThrottleMs)
     }
   }
@@ -629,8 +618,7 @@ function isWindowRefresh({ frame }: OutboxEntry): boolean {
   return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW
 }
 
-/** `onChunk`: each read of the stream, so an event that takes longer than the pong deadline to arrive whole shows the
- *  wire alive while it arrives. */
+/** `onChunk`: each read, so an event taking longer than the pong deadline to arrive shows the wire alive meanwhile. */
 function createSseEventStreamReader(
   reader: ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
   abortController: AbortController,

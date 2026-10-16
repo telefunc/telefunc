@@ -22,8 +22,8 @@ class Deliveries {
     this.count++
   }
 
-  /** The bytes delivered in the `ms` before delivery `n`, not counting it. Where that reaches past the deliveries kept,
-   *  the rate over those kept times `ms`, and `Infinity` where none before `n` is kept. */
+  /** Bytes in the `ms` before delivery `n`, at their rate beyond those kept; `Infinity` if `n` isn't kept or the kept
+   *  ones span no time. */
   before(n: number, ms: number): number {
     if (n === 0) return 0
     const oldest = Math.max(0, this.count - KEPT)

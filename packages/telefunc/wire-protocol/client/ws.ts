@@ -31,8 +31,7 @@ class WsTransport implements UpgradeTarget {
   readonly reconcileMode = 'release-after-reconciled' as const
   readonly batched = false
   heartbeat: Heartbeat | null = null
-  /** The probe's socket, with the ends it keeps as the transport adopts it: the server counts every frame the socket
-   *  carries. */
+  /** The probe's socket and ends, kept as the transport adopts it: the server counts every frame the socket carries. */
   private probed: { ws: WebSocket; ends: WsEnds } | null = null
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
@@ -214,6 +213,7 @@ class WsTransport implements UpgradeTarget {
     const budget = new SendBudget(
       (message) => ws.send(message),
       () => ws.bufferedAmount,
+      this.pingInterval,
       uplink,
       () => {
         if (this.ws !== ws) return
@@ -222,7 +222,6 @@ class WsTransport implements UpgradeTarget {
       },
     )
     const { sender } = budget
-    sender.setPingInterval(this.pingInterval)
     return {
       uplink,
       budget,
@@ -376,12 +375,15 @@ function receiveMessage(
   try {
     const frames = isOneFrame(raw) ? null : Array.from(messageFrames(raw))
     const own = frames === null ? raw : frames.pop()!
-    riding = frames?.map((each) => {
-      const frame = decode(each)
-      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
-      if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
-      return { frame, bytes: each.byteLength }
-    })
+    if (frames !== null) {
+      riding = []
+      for (const each of frames) {
+        const frame = decode(each)
+        pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
+        if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
+        riding.push({ frame, bytes: each.byteLength })
+      }
+    }
     const frame = decode(own)
     if (frame.tag === TAG.ANNOUNCE) pieces.announce(frame.bytes, at, frame.floor)
     else if (frame.tag === TAG.PIECE) {

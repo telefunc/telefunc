@@ -15,17 +15,27 @@ import { getTelefuncSseChannelHooks } from './server/sse.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH } from './constants.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
 import { Pipe } from './test/loopback.js'
-import { flowOf, produce, run, runUntil } from './test/channel-specs.js'
+import { flowOf, produce, run } from './test/channel-specs.js'
 
 const LATENCY_MS = 25
 /** What one read of a request body hands the server, or of the event stream the page, as a socket read does. */
 const CHUNK_BYTES = 16 * 1024
 const KIB = 1024
 
+/** Runs until `done`, `maxMs` at most, in steps of 50 ms. */
+async function runUntil(done: () => boolean, maxMs: number): Promise<void> {
+  for (let elapsed = 0; elapsed < maxMs && !done(); elapsed += 50) await run(50)
+}
+
 /** The page's end of the link, and the server's SSE handler at the other. `batched`: the page's streaming upload is
  *  refused, as a browser that can't stream a request body gets, `refusedAfter` ms after it went out, and the page sends
- *  batch POSTs. */
-function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; refusedAfter?: number }) {
+ *  batch POSTs. `downHolds`: the most the downlink takes of the server's event stream before what it carries arrives, as
+ *  a socket's send buffer does; else it takes the stream as the server writes it. */
+function link({
+  batched,
+  refusedAfter = 2 * LATENCY_MS,
+  downHolds = Number.POSITIVE_INFINITY,
+}: { batched: boolean; refusedAfter?: number; downHolds?: number }) {
   const up = new Pipe(LATENCY_MS)
   const down = new Pipe(LATENCY_MS)
   const sse = getTelefuncSseChannelHooks()
@@ -76,9 +86,9 @@ function link({ batched, refusedAfter = 2 * LATENCY_MS }: { batched: boolean; re
             toPage.error(new DOMException('The operation was aborted.', 'AbortError'))
             void events.cancel()
           })
-          // Taken as the server writes it, so its stream reads empty while the link carries it.
           void (async () => {
             for (;;) {
+              while (down.bytes >= downHolds) await new Promise((resolve) => setTimeout(resolve, 1))
               const { done, value } = await events.read().catch(() => ({ done: true, value: undefined }))
               if (done) return down.push(0, () => signal.aborted || toPage.close())
               for (let offset = 0; offset < value!.byteLength; offset += CHUNK_BYTES) {
@@ -187,7 +197,7 @@ describe.each([
     const upload = sse.open<string, never>()
     received(upload.server)
     produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
-    await runUntil(() => flowOf(upload.server).byteWindow > CREDIT_WINDOW_INITIAL_BYTES, 1_500, 50)
+    await runUntil(() => flowOf(upload.server).byteWindow > CREDIT_WINDOW_INITIAL_BYTES, 1_500)
     expect(sse.batched).toBe(batched)
     expect(flowOf(upload.server).byteWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
   })
@@ -197,10 +207,44 @@ describe.each([
     const download = sse.open<never, string>()
     received(download.page)
     produce(download.server, { message: () => 'x'.repeat(64 * KIB) })
-    await runUntil(() => flowOf(download.page).byteWindow > pageWindow, 1_500, 50)
+    await runUntil(() => flowOf(download.page).byteWindow > pageWindow, 1_500)
     expect(sse.batched).toBe(batched)
     expect(flowOf(download.page).byteWindow).toBeGreaterThan(pageWindow)
   })
+})
+
+/** A batched upload and a download of 64 KiB messages at 1,250 B/ms each way, the link taking 256 KiB of the stream. */
+function uploadBesideDownload() {
+  const sse = (current = link({ batched: true, downHolds: 256 * KIB }))
+  sse.up.bytesPerMs = sse.down.bytesPerMs = 1_250
+  const upload = sse.open<string, never>()
+  const download = sse.open<never, string>()
+  const got = received(upload.server)
+  received(download.page)
+  produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
+  produce(download.server, { message: () => 'x'.repeat(64 * KIB) })
+  return { sse, upload, got }
+}
+
+// The server's event stream carries the download and the WINDOW frames that let the page upload, so a WINDOW that
+// waits behind the download the stream holds holds the upload back.
+test("on a link that takes a socket's send buffer of the server's event stream, a page's batched upload beside a download keeps the uplink's pace", async () => {
+  const { sse, got } = uploadBesideDownload()
+  await run(10_000)
+  const mark = got.bytes
+  await run(20_000)
+  expect(sse.batched).toBe(true)
+  expect((got.bytes - mark) / 20_000).toBeGreaterThan(0.75 * 1_250)
+})
+
+// The server's ping for the upload's window passes the download waiting for the event stream to ask: a wait that counted
+// that download would take more than the whole round trip off it.
+test("while the server's event stream holds a download, its estimate of a batched upload's path round trip is no shorter than the link's", async () => {
+  const { sse, upload } = uploadBesideDownload()
+  await run(10_000)
+  const { _boundRtt } = (upload.server as unknown as { _flow: { _bdp: { _boundRtt: number } } })._flow._bdp
+  expect(sse.batched).toBe(true)
+  expect(_boundRtt).toBeGreaterThanOrEqual(2 * LATENCY_MS)
 })
 
 // Firefox answers the streaming upload it can't send with the server's 400, a round trip after the page's first RECONCILE

@@ -12,7 +12,16 @@ import {
   WIRE_PROBE_PAIR_BYTES,
 } from './constants.js'
 import { Link } from './link.js'
-import { LENGTH_BYTES, TAG, assertProtocol, encode, fixedBytes, isSequencedTag, type PiecesAck } from './shared-ws.js'
+import {
+  LENGTH_BYTES,
+  TAG,
+  assertProtocol,
+  encode,
+  fixedBytes,
+  isSequencedTag,
+  passesData,
+  type PiecesAck,
+} from './shared-ws.js'
 import { assert } from '../utils/assert.js'
 import { Fifo } from '../utils/Fifo.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
@@ -83,7 +92,6 @@ class PieceSender {
   private namedFloor = 0
   /** With no rate measured, a frame this size or smaller goes unannounced. */
   private unannouncedUpTo = WIRE_PROBE_FIRST_BYTES
-  private pingInterval = 0
   /** A frame this size or smaller goes whole, a larger one in pieces this size (see `setWholeUpTo`). */
   private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
   /** The most bytes a message of whole frames carries: what a frame of them could, whole and unannounced. */
@@ -99,7 +107,7 @@ class PieceSender {
   private lastVaries = false
   /** It gathered frames that weren't carried. */
   private gatheredOwn = false
-  /** It gathered a frame that goes at once: one that isn't data. */
+  /** It gathered a frame that isn't data. */
   private gatheredAtOnce = false
   private gatheredData = false
   private flushQueued = false
@@ -109,10 +117,14 @@ class PieceSender {
     private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
     /** The bytes its socket holds unsent. */
     private readonly queued: () => number,
+    /** Its wire's ping interval, which sizes the frames it sends whole. */
+    private pingInterval: number,
     /** Its wire's: the rates it measures go there. */
     private readonly link = new Link(),
     private readonly room = UNBOUNDED,
-  ) {}
+  ) {
+    this.setWholeUpTo()
+  }
 
   /** The bytes of the messages for the socket, and of the frames sent, those it holds. */
   get sentBytes(): number {
@@ -134,7 +146,6 @@ class PieceSender {
     this.carried.push(frame)
   }
 
-  /** Its wire's ping interval, which sizes the frames it sends whole. */
   setPingInterval(ms: number): void {
     this.pingInterval = ms
     this.setWholeUpTo()
@@ -169,10 +180,9 @@ class PieceSender {
     )
   }
 
-  /** Whether `frame`, sent while the rest of a data frame waits for room, goes ahead of it: a frame that isn't data and
-   *  goes whole, as a flow-control frame does. */
+  /** While the rest of a data frame waits for room, a frame that `passesData` and goes whole goes first. */
   private passesRest(frame: Uint8Array<ArrayBuffer>): boolean {
-    return !isSequencedTag(frame[0]!) && frame.byteLength <= this.wholeUpTo
+    return passesData(frame[0]!) && frame.byteLength <= this.wholeUpTo
   }
 
   /** Hands the socket `frame`, whole or in pieces. */
@@ -237,8 +247,7 @@ class PieceSender {
     this.flush()
   }
 
-  /** Before a message that gathers nothing: the frames sent before it don't wait for its bytes, but those carried, which
-   *  ride on it. */
+  /** Before a message that gathers nothing: frames sent before it go ahead, and those only carried ride on it. */
   private handGathered(): void {
     if (this.gatheredOwn) this.flush()
   }
@@ -268,8 +277,7 @@ class PieceSender {
     const room = Math.max(0, Math.floor(this.room.dataRoom()))
     const end = isSequencedTag(frame[0]!) && this.room.cuts ? Math.min(bytes, offset + room) : bytes
     if (end === offset) return this.hold(frame, offset)
-    // The first of a frame over `wholeUpTo` is empty: its receiver hears of the frame at once, and acknowledges its first
-    // two pieces at once. One cut only for room is no measure.
+    // An empty first piece has the first two acknowledged at once; a frame cut only for room is no measure.
     if (offset === 0 && bytes > this.wholeUpTo) this.sendEmptyPiece(bytes)
     const size = Math.max(1, Math.floor(this.wholeUpTo))
     const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
@@ -385,8 +393,7 @@ class PieceSender {
   }
 
   private track(crossingBytes: number, at: number, probe: boolean): void {
-    // What its socket holds unsent crosses before it, and what it gathered ahead of it; a browser may count the
-    // message it is sending in full, so less the largest message.
+    // What its socket holds and what it gathered cross first, less the largest message, which a browser may count.
     this.unacknowledged.push({
       crossing: Math.max(0, this.queued() + this.gatheredBytes - this.largest) + crossingBytes,
       at,
@@ -448,8 +455,7 @@ class PieceSender {
     }
     while (this.unacknowledged.length > 0 && this.unacknowledged.peek()!.end <= this.acknowledgedBytes) {
       const sent = this.unacknowledged.shift()!
-      // Within one tick of a coarsened clock a sample says nothing of the rate, but a probe's, which is small: it
-      // crossed within a tick.
+      // A sample within one tick of a coarse clock says nothing, but a probe's, which is small, crossed within one.
       if (sent.probe) this.rise(sent.crossing / Math.max(arrived - sent.at, WIRE_PROBE_CLOCK_MS), arrived)
       else if (arrived > sent.at) this.rise(sent.crossing / (arrived - sent.at), arrived)
     }

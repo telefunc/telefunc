@@ -44,15 +44,16 @@ class SendBudget implements SendRoom {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   private paceDue = 0
 
-  /** `transmit` and `queued` as `PieceSender`'s. */
+  /** `transmit`, `queued` and `pingInterval` as `PieceSender`'s. */
   constructor(
     transmit: (message: Uint8Array<ArrayBuffer>) => void,
     queued: () => number,
+    pingInterval: number,
     private readonly uplink: Uplink,
     /** Called when the timer finds the uplink drained some of what it held. */
     private readonly onRoom: () => void,
   ) {
-    this.sender = new PieceSender(transmit, queued, uplink.link, this)
+    this.sender = new PieceSender(transmit, queued, pingInterval, uplink.link, this)
   }
 
   /** Sends `frame` through the sender. */
@@ -120,16 +121,14 @@ class SendBudget implements SendRoom {
   private roomPast(sent: number): number {
     const unacknowledged = sent - this.sender.acknowledgedBytes
     const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
-    // What the newest heartbeat says the server took arrived, and up to `slack` more unacknowledged. More arrives while
-    // an acknowledgement comes back, or would wait behind what the server sends now.
+    // Unarrived: what no ack or newest heartbeat says the server took, less `slack` and what crosses while late.
     const late = Math.max(this.lateMs, this.uplink.peerQueueWait())
     const untaken = sent - Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
     const unarrived = untaken - this.uplink.uplinkRate() * late - this.slack
     return this.allowance - Math.max(waiting, unarrived)
   }
 
-  /** While the room is used up and the uplink holds data, the uplink sets the pace, and data may wait for room: looks
-   *  again once the uplink carried what its server acknowledges at once, or all it holds. */
+  /** With no room and data in the uplink, looks again once it carried what the server acks at once, or all it holds. */
   private pace(): void {
     const { drainRate } = this.uplink
     if (drainRate === 0 || this.sendRoom > 0 || this.paceTimer !== null) return

@@ -224,10 +224,13 @@ test.each([
   { mib: 31, posts: 0, next: 'waits for its flush throttle' },
   { mib: 33, posts: 1, next: 'goes at once' },
 ])('with no POST out, a batch holding $mib MiB $next', async ({ mib, posts }) => {
+  // The clock stands still, so building the batch on a slow machine doesn't outlast the flush throttle.
+  vi.useFakeTimers({ toFake: ['Date'] })
   const { connection, transport, out } = connectionCountingPosts('http://eager-idle.test')
   transport.lastPostStartedAt = Date.now()
   sendMiB(transport, mib)
   await new Promise((resolve) => setTimeout(resolve, 0))
+  vi.useRealTimers()
   expect(out.posts).toBe(posts)
   connection.dispose()
 })
@@ -236,10 +239,12 @@ test.each([
   { kind: 'flow-control', posts: 0, next: 'waits for its flush throttle' },
   { kind: 'urgent-flow-control', posts: 1, next: 'goes at once' },
 ])('with no POST out, a $kind frame $next', async ({ kind, posts }) => {
+  vi.useFakeTimers({ toFake: ['Date'] })
   const { connection, transport, out } = connectionCountingPosts('http://urgent-window.test')
   transport.lastPostStartedAt = Date.now()
   transport.sendFrame({ kind, frame: encode.window(0, 65_536, 0) })
   await new Promise((resolve) => setTimeout(resolve, 0))
+  vi.useRealTimers()
   expect(out.posts).toBe(posts)
   connection.dispose()
 })

@@ -35,8 +35,8 @@ test("with no rate measured, a task's frames go as they are sent behind an annou
   const sender = new PieceSender(
     (message) => void transmitted.push(message),
     () => 0,
+    5_000,
   )
-  sender.setPingInterval(5_000)
   sender.send(data(60_000))
   // 8 KiB may follow any piece; the last two of a frame are cut so the last is the larger.
   expect(lengths(transmitted)).toEqual([
@@ -70,8 +70,8 @@ test("a probe pair's receiver spacing measures the rate later frames are cut by,
   const sender = new PieceSender(
     (message) => void transmitted.push(message),
     () => 0,
+    5_000,
   )
-  sender.setPingInterval(5_000)
   sender.send(data(100_000))
   await flush()
   clock.now = 200
@@ -95,8 +95,8 @@ test('a rate that lapsed still cuts a frame at once, until the next measure repl
   const sender = new PieceSender(
     (message) => void transmitted.push(message),
     () => 0,
+    5_000,
   )
-  sender.setPingInterval(5_000)
   sender.send(data(20_000))
   await flush()
   clock.now = 200
@@ -124,8 +124,8 @@ test('an acknowledgement within one tick of a coarsened clock measures a probe a
   const sender = new PieceSender(
     (message) => void transmitted.push(message),
     () => 0,
+    5_000,
   )
-  sender.setPingInterval(5_000)
   sender.send(data(20_000))
   await flush()
   expect(sender.acknowledged({ bytes: PAIR_FIRST, heldMs: 0, spanUs: 0 })).toBe(true)
@@ -151,9 +151,9 @@ test('a rate counts what the socket holds ahead of a frame but the largest messa
   const sender = new PieceSender(
     () => {},
     () => queued,
+    5_000,
     link,
   )
-  sender.setPingInterval(5_000)
   sender.send(data(80_000))
   clock.now = 10_000
   expect(sender.acknowledged({ bytes: sender.transmittedBytes, heldMs: 0, spanUs: 0 })).toBe(true)
@@ -176,9 +176,9 @@ test('a rate leaves out how long its receiver held what arrived before it acknow
   const sender = new PieceSender(
     () => {},
     () => 0,
+    5_000,
     link,
   )
-  sender.setPingInterval(5_000)
   sender.send(data(20_000))
   await flush()
   clock.now = 1_000
@@ -190,8 +190,8 @@ test('an acknowledgement counts the bytes handed to the socket, announcements an
   const sender = new PieceSender(
     () => {},
     () => 0,
+    5_000,
   )
-  sender.setPingInterval(5_000)
   sender.send(new Uint8Array(4_000))
   sender.send(new Uint8Array(100))
   expect(sender.acknowledged({ bytes: 4_100, heldMs: 0, spanUs: 0 })).toBe(true)
@@ -215,10 +215,10 @@ test('a frame held for room goes, once room comes, in one message behind what wa
   const sender = new PieceSender(
     (message) => void transmitted.push(message),
     () => 0,
+    5_000,
     link,
     { cuts: true, dataRoom: () => dataRoom, handed: () => {}, sentFrame: () => {} },
   )
-  sender.setPingInterval(5_000)
   sender.send(data(1_000))
   expect(transmitted).toEqual([])
   const window = encode.window(1, 0, 0)
@@ -237,8 +237,8 @@ test('an acknowledgement is read modulo 2^32', () => {
   const sender = new PieceSender(
     () => {},
     () => 0,
+    5_000,
   )
-  sender.setPingInterval(5_000)
   sender.send(new Uint8Array(5_000))
   expect(sender.acknowledged({ bytes: 4_096, heldMs: 0, spanUs: 0 })).toBe(true)
   expect(sender.acknowledged({ bytes: 5_000, heldMs: 0, spanUs: 0 })).toBe(true)

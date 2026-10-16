@@ -47,8 +47,7 @@ class Heartbeat {
     this.expectedBy = expectedBy
   }
 
-  /** How long the wire has delivered nothing, since the heartbeat started or got a PONG if later, less the time it may
-   *  take past the deadline to deliver what it still carries. */
+  /** How long the wire delivered nothing, less what it may still take past the deadline to deliver what it carries. */
   quietFor(): number {
     return performance.now() - Math.max(this.lastReceivedAt, this.expectedBy() - this.pongTimeoutMs)
   }
@@ -58,8 +57,7 @@ class Heartbeat {
     this.pongTimer = setTimeout(this.onPongDeadline, ms)
   }
 
-  /** A PONG arrives behind what the server queued before it, as much as a window on a slow link: the wire is dead once
-   *  it has delivered nothing for the deadline. */
+  /** A PONG waits behind what the server queued: the wire is dead once it delivered nothing for the deadline. */
   private readonly onPongDeadline = (): void => {
     const quiet = this.quietFor()
     if (quiet < this.pongTimeoutMs) this.armPongDeadline(this.pongTimeoutMs - quiet)

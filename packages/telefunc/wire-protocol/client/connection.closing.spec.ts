@@ -25,12 +25,9 @@ import { config as serverConfig } from '../../node/server/serverConfig.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { createRequestContext } from '../../node/server/context/requestContext.js'
 import { parseResponse } from './response/parse.js'
-import { Net, sseFetch, webSocketTo } from '../test/page-server.js'
+import { page, register, type Net, type Wire } from '../test/page-server.js'
 import { flowOf } from '../test/channel-specs.js'
 
-/** `sse-late-upload`: SSE whose upload request reaches the server 500 ms after the request that opens the wire, as one
- *  that opens a connection of its own may. */
-type Wire = 'sse' | 'sse-batch' | 'ws' | 'sse-late-upload'
 const WIRES: Wire[] = ['ws', 'sse', 'sse-batch']
 
 // Before the first reconcile, so every RECONCILED offers a page the WebSocket.
@@ -52,36 +49,6 @@ afterEach(() => {
   serverConfig.channel = {}
   ;(getChannelMux() as unknown as { resolvedOptions: unknown }).resolvedOptions = null
 })
-
-/** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket. */
-function page(wire: Wire, { upgrade = false } = {}) {
-  const net = new Net()
-  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(net))
-  if (wire !== 'ws') config.fetch = sseFetch(net, wire === 'sse-batch')
-  if (wire === 'sse-late-upload') net.uploadLag = 500
-  const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
-  const connectionKey = crypto.randomUUID()
-  return {
-    net,
-    /** A channel the page opens. */
-    channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string) {
-      return new ClientChannel<ClientToServer, ServerToClient>({
-        channelId,
-        ack: true,
-        transports: wire === 'ws' ? ['ws'] : upgrade ? ['sse', 'ws'] : ['sse'],
-        telefuncUrl,
-        connectionKey,
-      })
-    },
-  }
-}
-
-/** What the server registers when a call's request arrives. */
-function register<ClientToServer = unknown, ServerToClient = unknown>() {
-  const channel = new ServerChannel<ClientToServer, ServerToClient>({ ack: true })
-  getChannelMux().registerChannel(channel)
-  return channel
-}
 
 /** What a promise settled with: `'pending'` until it does. */
 function settled<T>(promise: Promise<T>) {
@@ -1391,6 +1358,29 @@ test("over sse, an upgrade whose barrier finds more on the old wire than the ser
   expect(pageClosed.err).toBe('open')
   expect(serverClosed.err).toBe('open')
 })
+
+test.each(['sse', 'sse-batch'] as const)(
+  "over %s on a 200 KB/s downlink, the messages the server sends as the page writes its barrier reach the page before the old wire's FIN, in order, once",
+  async (wire) => {
+    const { net, channel } = page(wire, { upgrade: true })
+    net.rate.down = 200_000
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message.trim()))
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    // More than the link carries before the barrier commits, so some still wait on the old wire as its FIN goes.
+    net.whenPageSends(TAG.BARRIER, () => {
+      for (let n = 0; n < 40; n++) void server.send(String(n).padEnd(4_000), { ack: false })
+    })
+    await advance(20_000)
+    expect((pageChannel as any)._connection.transport.type).toBe('ws')
+    expect(got).toEqual(Array.from({ length: 40 }, (_, n) => String(n)))
+    expect(pageClosed.err).toBe('open')
+    expect(serverClosed.err).toBe('open')
+  },
+)
 
 test('over sse, a stream that awaits its sends keeps whole across the upgrade to a WebSocket, and resumes without loss when that drops with its window in flight', async () => {
   const { net, channel } = page('sse', { upgrade: true })

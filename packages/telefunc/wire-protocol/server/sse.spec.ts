@@ -1,5 +1,5 @@
 import { expect, test, vi } from 'vitest'
-import { getTelefuncSseChannelHooks } from './sse.js'
+import { getTelefuncSseChannelHooks, type SseConnection } from './sse.js'
 import { getChannelMux } from './mux.js'
 import { ServerChannel } from './channel.js'
 import { encodeSseBatch, encodeSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
@@ -10,8 +10,6 @@ import { Readable } from 'node:stream'
 import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import { CREDIT_MSG_WINDOW_MAX, CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 import { ChannelOverflowError } from '../channel-errors.js'
-import type { PushReadable } from '../push-readable.js'
-import type { PushReadableStream } from '../push-readable-stream.js'
 import { loadStreamNodeModuleOnce } from '../../utils/loadStreamNodeModule.js'
 
 function openPost(metadata: SseRequestMetadata) {
@@ -158,6 +156,35 @@ test('a POST for a wire the server has closed is refused at once, so the page re
   }
 })
 
+test("the data waiting for a page's SSE stream to ask, when the server ends the wire on an oversize frame, reaches the page before its stream ends", async () => {
+  const sse = getTelefuncSseChannelHooks()
+  const channel = new ServerChannel<unknown, string>()
+  let opened = false
+  channel.onOpen(() => void (opened = true))
+  getChannelMux().registerChannel(channel)
+  const connId = crypto.randomUUID()
+  const downstream = openPost({ connId, streamResponse: true })
+  const response = await sse.handleRequest(downstream.request)
+  downstream.push(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
+  downstream.end()
+  await vi.waitFor(() => expect(opened).toBe(true))
+  // Nothing reads the event stream yet, so it asks for none of these.
+  const sent = ['a', 'b', 'c']
+  for (const data of sent) void channel.send(data).catch(() => {})
+  const { events } = getChannelMux().getConnectionByConnId<SseConnection>(connId)!
+  await vi.waitFor(() => expect(events.heldBytes).toBeGreaterThan(events.streamBytes))
+  const batch = openPost({ connId })
+  batch.pushBytes(new Uint8Array([0xff, 0xff, 0xff, 0xff]))
+  batch.end()
+  expect((await sse.handleRequest(batch.request))!.statusCode).toBe(400)
+  expect(getChannelMux().getConnectionByConnId(connId)).toBeUndefined()
+
+  const frames = collectFrames(response!.body as ReadableStream<Uint8Array>)
+  await vi.waitFor(() =>
+    expect(frames.flatMap((frame) => (frame.tag === TAG.TEXT ? [JSON.parse(frame.text) as string] : []))).toEqual(sent),
+  )
+})
+
 /** An SSE wire whose page has one channel attached, which counts what reaches its listener. */
 async function reconciledSseWire() {
   const sse = getTelefuncSseChannelHooks()
@@ -228,12 +255,13 @@ test.each([
     let opened = false
     channel.onOpen(() => void (opened = true))
     getChannelMux().registerChannel(channel)
-    const downstream = openPost({ connId: crypto.randomUUID(), streamResponse: true })
-    const response = node
-      ? await sse.handleRequest(downstream.request, Readable.fromWeb(downstream.request.body! as never))
-      : await sse.handleRequest(downstream.request)
-    // Nothing reads the event stream.
-    const body = response!.body as PushReadable | PushReadableStream
+    const connId = crypto.randomUUID()
+    const downstream = openPost({ connId, streamResponse: true })
+    await (node
+      ? sse.handleRequest(downstream.request, Readable.fromWeb(downstream.request.body! as never))
+      : sse.handleRequest(downstream.request))
+    // Nothing reads the event stream. What it holds, and the data waiting for it to ask.
+    const held = () => getChannelMux().getConnectionByConnId<SseConnection>(connId)!.events.heldBytes
     downstream.push(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
     downstream.end()
     await vi.waitFor(() => expect(opened).toBe(true))
@@ -247,7 +275,7 @@ test.each([
     // An event carries its frame in base64.
     // One message past them, and each one's header and event framing.
     const bound = ((CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 128 * 1024) * 4) / 3
-    expect(body.bufferedAmount).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(body.bufferedAmount).toBeLessThanOrEqual(bound)
+    expect(held()).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(held()).toBeLessThanOrEqual(bound)
   },
 )

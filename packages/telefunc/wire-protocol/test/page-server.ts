@@ -1,7 +1,13 @@
-export { Net, Rate, sseFetch, until, webSocketTo }
-export type { Link, Traffic }
+export { Net, page, register }
+export type { Traffic, Wire }
 
 import type { Peer } from 'crossws'
+import { vi } from 'vitest'
+
+import { ClientChannel } from '../client/channel.js'
+import { config } from '../../client/clientConfig.js'
+import { ServerChannel } from '../server/channel.js'
+import { getChannelMux } from '../server/mux.js'
 
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { getTelefuncChannelHooks } from '../server/ws.js'
@@ -24,6 +30,9 @@ class Rate {
     return (Math.max(0, this.busyUntil - Date.now()) * this.rate) / 1_000
   }
 }
+
+/** What one read of the server's event stream hands the page at most, as a socket read does. */
+const EVENT_READ_BYTES = 16 * 1024
 
 const until = (at: number) => new Promise<void>((resolve) => setTimeout(resolve, at - Date.now()))
 
@@ -145,6 +154,40 @@ class Net {
     hooks.delete(frame[0]!)
     then(frame)
   }
+}
+
+/** `sse-late-upload`: SSE whose upload request reaches the server 500 ms after the request that opens the wire, as one
+ *  that opens a connection of its own may. */
+type Wire = 'sse' | 'sse-batch' | 'ws' | 'sse-late-upload'
+
+/** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket. */
+function page(wire: Wire, { upgrade = false } = {}) {
+  const net = new Net()
+  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(net))
+  if (wire !== 'ws') config.fetch = sseFetch(net, wire === 'sse-batch')
+  if (wire === 'sse-late-upload') net.uploadLag = 500
+  const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
+  const connectionKey = crypto.randomUUID()
+  return {
+    net,
+    /** A channel the page opens, such as a call's callback. */
+    channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string = crypto.randomUUID()) {
+      return new ClientChannel<ClientToServer, ServerToClient>({
+        channelId,
+        ack: true,
+        transports: wire === 'ws' ? ['ws'] : upgrade ? ['sse', 'ws'] : ['sse'],
+        telefuncUrl,
+        connectionKey,
+      })
+    },
+  }
+}
+
+/** What the server registers when a call's request arrives. */
+function register<ClientToServer = unknown, ServerToClient = unknown>(id?: string) {
+  const channel = new ServerChannel<ClientToServer, ServerToClient>({ id, ack: true })
+  getChannelMux().registerChannel(channel)
+  return channel
 }
 
 /** A `fetch` whose far end is the server's SSE hooks, over `net`. `refuseUpload`: a browser that can't stream a request
@@ -309,12 +352,17 @@ function downstream(body: ReadableStream<Uint8Array>, link: Link, net: Net): Rea
           text = text.slice(end + 2)
           const frame = event.startsWith('data: ') ? base64urlToUint8Array(event.slice('data: '.length)) : null
           if (frame && !link.dead) net.serverSends(frame)
-          const at = net.arrival(link, event.length + 2, frame?.[0])
-          if (at > Date.now()) await until(at)
-          if (link.dead || dropped) continue
-          if (frame) net.pageGets(frame)
-          controller.enqueue(encoder.encode(`${event}\n\n`))
-          delivered = true
+          const bytes = encoder.encode(`${event}\n\n`)
+          for (let offset = 0; offset < bytes.length; offset += EVENT_READ_BYTES) {
+            const last = offset + EVENT_READ_BYTES >= bytes.length
+            const chunk = bytes.subarray(offset, offset + EVENT_READ_BYTES)
+            const at = net.arrival(link, chunk.length, last ? frame?.[0] : undefined)
+            if (at > Date.now()) await until(at)
+            if (link.dead || dropped) break
+            if (last && frame) net.pageGets(frame)
+            controller.enqueue(chunk)
+            delivered = true
+          }
         }
         if (delivered) return
       }

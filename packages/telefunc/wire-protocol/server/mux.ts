@@ -37,6 +37,7 @@ import {
   messageFrames,
   isConnCtrlTag,
   isSequencedTag,
+  passesData,
   peekTag,
   seqThrough,
   withTook,
@@ -78,6 +79,8 @@ type ServerTransport<TConnection> = {
   /** Bytes of the frames sent that still wait in the connection, never fewer than there are, or `undefined` where the
    *  runtime doesn't report them. */
   bufferedAmount(connection: TConnection): number | undefined
+  /** The bytes of those a frame that goes at once waits behind, where it passes some: else `bufferedAmount`'s. */
+  queuedAhead?(connection: TConnection): number | undefined
   terminateConnection(connection: TConnection): void
 }
 
@@ -268,15 +271,18 @@ class ChannelMux {
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
-    const wait = new SocketWait(() => this.bufferedAmount(connection))
+    const wait = new SocketWait(
+      () => this.bufferedAmount(connection),
+      () => this.queuedAhead(connection),
+    )
     const recvBacklog = { bytes: 0, frames: 0 }
     const room = transport.wholeMessages
       ? new PathRoom(
           (message) => transport.sendNow(connection, message),
           () => transport.bufferedAmount(connection) ?? 0,
+          this.options.pingInterval,
         )
       : null
-    room?.sender.setPingInterval(this.options.pingInterval)
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
@@ -643,9 +649,7 @@ class ChannelMux {
     this.sessions.get(sessionId, frame.index)?.channel._dispatchFrame(frame)
   }
 
-  /** An ordinary reconcile claims its session, abandoning any probe staged on it — unless a barrier
-   *  is mid-commit on that session, in which case the claim is refused instead. One on the wire that
-   *  holds the session is that wire's own, and leaves the page's upgrade attempt be. */
+  /** Abandons the probes staged on the session it names and its wire's, refused mid-commit, unless it names its own. */
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): void {
     const own = entry.transport.getSessionId(connection)
     if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
@@ -797,10 +801,7 @@ class ChannelMux {
     // Its wire no longer has the session it names, which is gone with the handles it had.
     if (ctrl.sessionId) this.sessionWires.delete(ctrl.sessionId)
 
-    // The connection may have closed since this frame arrived, so its RECONCILED never goes out.
-    // Remove the session outright, one the client never received or its own, but preserve the
-    // close kind: a transient close leaves the channels their `_onPeerDisconnect` grace so the
-    // client's retry can re-attach them.
+    // Closed since this frame arrived: the session goes, but a transient close keeps its channels' reattach grace.
     if (state.closed) {
       state.attaching.clear()
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
@@ -1049,7 +1050,7 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
-    state.wait.handed(frame.byteLength, !isSequencedTag(frame[0]!))
+    state.wait.handed(frame.byteLength, passesData(frame[0]!))
     if (state.pieces) state.pieces.room.send(frame)
     else entry.transport.sendNow(connection, frame)
   }
@@ -1082,6 +1083,12 @@ class ChannelMux {
     if (!entry) return 0
     const socket = entry.transport.bufferedAmount(connection)
     return socket === undefined ? undefined : socket + (entry.state.pieces?.room.sender.unhandedBytes ?? 0)
+  }
+
+  /** What a frame that goes at once counts as ahead of it: the transport's `queuedAhead` where it has one. */
+  private queuedAhead(connection: Wire): number | undefined {
+    const transport = this.connectionEntries.get(connection)?.transport
+    return transport?.queuedAhead ? transport.queuedAhead(connection) : this.bufferedAmount(connection)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {
