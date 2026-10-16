@@ -30,7 +30,6 @@ import {
   disposeRoomBackend,
   driver,
   installRoomBackend,
-  longestGapWhile,
   loseLaneFrames,
   register,
   serve,
@@ -40,6 +39,7 @@ import {
   tellAgain,
   trackNames,
 } from '../../test/room.js'
+import { longestGapWhile } from '../../test/event-loop.js'
 
 beforeEach(() => installRoomBackend())
 afterEach(disposeRoomBackend)

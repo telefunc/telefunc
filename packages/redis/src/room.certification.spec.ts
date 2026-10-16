@@ -7,6 +7,7 @@ import { generationKeysKey } from './keys.js'
 import { encodeLaneKey } from 'telefunc/__internal'
 import { disposeBackend, getRoomBackend } from '../../telefunc/dist/wire-protocol/backend/install.js'
 import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
+import { longestGapWhile } from '../../telefunc/wire-protocol/test/event-loop.js'
 
 // Room on a real Redis: REDIS_URL names a standalone server, REDIS_CLUSTER_NODES a Cluster's nodes; each one set runs.
 type Target = { name: string; env: Record<string, string>; connect: () => Redis | Cluster }
@@ -581,17 +582,11 @@ await read()`,
     const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
     const merge = async (value: number) => {
       await Promise.all(nodes.map((node) => node.slowlog('RESET')))
-      let last = performance.now()
-      let longest = 0
-      const timer = setInterval(() => {
-        const now = performance.now()
-        longest = Math.max(longest, now - last)
-        last = now
-      }, 1)
-      await Room.setAttributes(room.id, { k0: value })
-      await vi.waitFor(() => expect(observer.meta.k0).toBe(value))
-      clearInterval(timer)
-      return { gap: Math.max(longest, performance.now() - last), slow: await commandsOver20Ms(nodes, prefix) }
+      const { gap } = await longestGapWhile(async () => {
+        await Room.setAttributes(room.id, { k0: value })
+        await vi.waitFor(() => expect(observer.meta.k0).toBe(value))
+      })
+      return { gap, slow: await commandsOver20Ms(nodes, prefix) }
     }
     await merge(-1)
     const merges = [await merge(1), await merge(2)]

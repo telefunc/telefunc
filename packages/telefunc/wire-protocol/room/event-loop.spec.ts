@@ -18,7 +18,8 @@ import { disposeBackend, getRoomBackend, installBackend } from '../backend/insta
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from './server/constants.js'
-import { longestGapWhile, subsOf, syncOf } from '../test/room.js'
+import { subsOf, syncOf } from '../test/room.js'
+import { longestGapWhile } from '../test/event-loop.js'
 
 // Each spec here times a stall at 100,000 members, so it runs in a worker of its own: the other room specs leave
 // rooms reachable (vitest keeps every spy, and a stub no client connects to waits out its TTL), and collecting them

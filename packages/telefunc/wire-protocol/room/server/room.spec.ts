@@ -67,13 +67,11 @@ import {
   joinThrough,
   lapseSessionOf,
   loseLaneFrames,
-  mark,
   memberEvents,
   memoryState,
   mockLaneSubscription,
   NO_TRACK,
   notices,
-  ran,
   register,
   rejectedSubscription,
   rejectLaneSubscriptions,
@@ -91,12 +89,12 @@ import {
   syncOf,
   tellAgain,
   terminalSubscription,
-  timeOutsideGc,
   trackNames,
   wantsHeld,
   wideBinaryScenario,
   yieldAfterEachReadAndCountWrites,
 } from '../../test/room.js'
+import { mark, ran, timeOutsideGc } from '../../test/event-loop.js'
 
 beforeEach(() => installRoomBackend())
 afterEach(disposeRoomBackend)
