@@ -1145,8 +1145,9 @@ class ClientConnection implements MuxConnection {
     this.installHeartbeat(this.transport, ctrl.pingInterval, false)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
-    for (const channel of outcome.channelsToOpen)
+    for (const channel of outcome.channelsToOpen) {
       channel._onTransportOpen(this.transport.batched, this.transport.uplink)
+    }
     this.tryCompleteUpgrade()
     if (outcome.reconcileComplete) {
       this.serverTransports = ctrl.transports
@@ -1344,8 +1345,9 @@ class ClientConnection implements MuxConnection {
       return
     }
     // A closed channel the server has all of needs nothing from another wire.
-    for (const [ix, entry] of this.channels)
+    for (const [ix, entry] of this.channels) {
       if (entry.state.tag === 'closed' && entry.state.delivered) this.releaseChannel(ix, entry.channel)
+    }
     if (this.channels.size === 0) {
       this.dispose()
       return
@@ -1369,8 +1371,9 @@ class ClientConnection implements MuxConnection {
       this.settleQueue().length > 0 ||
       this.heldForRoom.length > 0 ||
       this.channelIndex.size > 0
-    )
+    ) {
       return
+    }
     const ttl = setTimeout(() => {
       void this.transport.drained().then(() => {
         if (this.ttl === ttl && this.channelIndex.size === 0) this.dispose()
@@ -1473,11 +1476,12 @@ class ClientConnection implements MuxConnection {
       open.push(payloadEntry)
     }
     // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
-    if (subscribing.size > 0)
+    if (subscribing.size > 0) {
       this.sendBuffer = this.settleQueue().filter(
         ({ channelIx, frame }) =>
           !subscribing.has(channelIx) || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
       )
+    }
     return open
   }
 
@@ -1495,9 +1499,11 @@ class ClientConnection implements MuxConnection {
     // in-transit replay frame to jump ahead of — so eager-batch, it saves a round-trip.
     if (isInitialBatch && (this.sessionId !== null || this.sentBefore())) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
-    for (const { channelIx, seq } of this.settleQueue())
-      if (seq !== undefined && this.isSendable(channelIx) && !this.inFlight.carriedFrom.has(channelIx))
+    for (const { channelIx, seq } of this.settleQueue()) {
+      if (seq !== undefined && this.isSendable(channelIx) && !this.inFlight.carriedFrom.has(channelIx)) {
         this.inFlight.carriedFrom.set(channelIx, seq)
+      }
+    }
     return this.drainBufferedFrames(this.isSendable)
   }
 
@@ -1587,8 +1593,9 @@ class ClientConnection implements MuxConnection {
         continue
       }
       if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
-      for (const frame of this.replayTo(ix, entry, serverMap.get(ix)!, (carriedFrom.get(ix) ?? Infinity) - 1))
+      for (const frame of this.replayTo(ix, entry, serverMap.get(ix)!, (carriedFrom.get(ix) ?? Infinity) - 1)) {
         releaseFrames.push(frame)
+      }
       if (entry.state.tag !== 'closed') channelsToOpen.push(entry.channel)
     }
 
@@ -1633,8 +1640,9 @@ class ClientConnection implements MuxConnection {
       // As `applyReconciled` does: its replay, then what it queued.
       for (const frame of this.replayTo(ix, entry, lastSeq)) this.transport.sendFrame(frame)
       for (const frame of this.drainBufferedFrames((i) => i === ix)) this.transport.sendFrame(frame)
-      if (opened && entry.state.tag === 'open')
+      if (opened && entry.state.tag === 'open') {
         entry.channel._onTransportOpen(this.transport.batched, this.transport.uplink)
+      }
     }
     this.startTtlIfIdle()
     this.maybeStartUpgrade()
@@ -1757,9 +1765,10 @@ class ClientConnection implements MuxConnection {
     this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => !dropped.has(channelIx))
     if (this.heldForRoom.length > 0) {
       const kept = new Fifo<SequencedFrame>()
-      for (const entry of this.heldForRoom)
+      for (const entry of this.heldForRoom) {
         if (dropped.has(entry.channelIx)) this.heldForRoomBytes -= entry.frame.byteLength
         else kept.push(entry)
+      }
       this.heldForRoom = kept
     }
     this.droppedQueues = new Set()

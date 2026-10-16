@@ -171,8 +171,9 @@ class BdpEstimator {
     // what the channel did on average. A queue the ack waits behind delivers at the link's rate up to it, at least the
     // channel's rate, another channel's frames too. So the round trip, less what the ping waited behind on this side's
     // wire, is the path's, however much less one measured before.
-    if (starved && received * 3 >= this._byteWindow * 2 && deliveredBefore(rtt / 8) * 16 < received)
+    if (starved && received * 3 >= this._byteWindow * 2 && deliveredBefore(rtt / 8) * 16 < received) {
       this._boundRtt = roundRtt
+    }
     // Where an attach measured the path's round trip, here or at the sender, that tells a queue from the path, wherever
     // the queue is, as does a round the window held back, which took longer if the path's rose since. Else only the sender
     // can, where its runtime reports what its wire holds.

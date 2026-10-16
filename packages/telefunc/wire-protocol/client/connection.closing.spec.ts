@@ -1105,7 +1105,7 @@ describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops 
   for (const [from, to] of [
     ['server', 'page'],
     ['page', 'server'],
-  ] as const)
+  ] as const) {
     test(`the ${from}'s replay lets go of what the ${to} acknowledges, holding the ${to}'s window and a message at most`, async () => {
       const { channel } = page(wire)
       const server = register<string, string>()
@@ -1137,6 +1137,7 @@ describe.each(WIRES)('over %s, a stream that awaits its sends, whose wire drops 
       expect(shrank).toBeGreaterThan(0)
       expect(most).toBeLessThanOrEqual(flowOf(receiver).byteWindow + 16 * 1_024)
     })
+  }
 })
 
 /** A 64 KiB binary message that names its place in the stream. */
@@ -1198,8 +1199,9 @@ describe.each([...WIRES, 'sse-late-upload'] as const)(
       }
       const pageGets = net.pageGets.bind(net)
       net.pageGets = (frame) => {
-        if (frame[0] === TAG.RECONCILED)
+        if (frame[0] === TAG.RECONCILED) {
           events.push(`RECONCILED ${Date.now() - t0 < 1_000 ? 'within' : 'past'} a second`)
+        }
         pageGets(frame)
       }
       const server = register()
@@ -1507,7 +1509,7 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
   for (const [from, to, side] of [
     ['server', 'page', 'server'],
     ['page', 'server', 'client'],
-  ] as const)
+  ] as const) {
     test(`a reconnect that needs messages the ${from}'s replay dropped ends the channel with NetworkError on both ends, and the ${to} gets none after them`, async () => {
       serverConfig.channel = { pingInterval: 1_000, [`${side}ReplayBuffer`]: 1_024 }
       const { net, channel } = page(wire)
@@ -1529,6 +1531,7 @@ describe.each(WIRES)('over %s, past the replay', (wire) => {
       expectLost(pageClosed.err, side)
       expectLost(serverClosed.err, side)
     })
+  }
 
   test('a reconnect whose gap the replays fill resumes without loss, past a message larger than them that arrived before', async () => {
     serverConfig.channel = { pingInterval: 1_000, serverReplayBuffer: 1_024, clientReplayBuffer: 1_024 }

@@ -170,10 +170,11 @@ describe('an upload POST whose open-ack never comes', () => {
     })
     const uploaded: Uint8Array[] = []
     const fetchImpl = ((url: string, init: RequestInit) => {
-      if (!(init.body instanceof Blob))
+      if (!(init.body instanceof Blob)) {
         void (async () => {
           for await (const chunk of init.body as ReadableStream<Uint8Array>) uploaded.push(chunk)
         })()
+      }
       return server.fetch(url, init)
     }) as typeof fetch
     const channel = muxChannelStub(serverChannel.id)
@@ -335,8 +336,9 @@ test("a batch POST still in flight for a dead wire can't unsubscribe the listene
             controller.close()
           }
           void (async () => {
-            for (let read = await reader.read(); !read.done && !cut; read = await reader.read())
+            for (let read = await reader.read(); !read.done && !cut; read = await reader.read()) {
               controller.enqueue(read.value)
+            }
           })()
         },
       })
@@ -388,8 +390,9 @@ test("a batch POST still in flight for a dead wire can't unsubscribe the listene
 test("a reconnect's wire gets its own connection id, so a POST still in flight for the dead wire isn't adopted by it", async () => {
   const connIds: string[] = []
   const fetchImpl = (async (_url: string, init: RequestInit) => {
-    if (init.body instanceof Blob)
+    if (init.body instanceof Blob) {
       connIds.push(((await parseBlobBody(init.body)).metadata as { connId: string }).connId)
+    }
     return await new Promise<Response>(() => {})
   }) as unknown as typeof fetch
   const connection = ClientConnection.getOrCreate('http://conn-id.test/_telefunc', muxChannelStub(), {

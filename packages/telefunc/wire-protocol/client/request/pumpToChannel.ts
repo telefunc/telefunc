@@ -73,8 +73,9 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, op
       // reader.cancel(err), not through this catch.
       // Anything else is the source failing: the server's stream errors rather than end as if complete. No detail of the
       // page's error crosses to the server.
-      if (!(err instanceof ChannelClosedError) && !channel.isClosed)
+      if (!(err instanceof ChannelClosedError) && !channel.isClosed) {
         channel._sendBinary(concat(TAG_ERROR, textEncoder.encode('{}')))
+      }
     } finally {
       doCancel()
       // A server that is away gets the upload's end once back, as an open channel waits for it.

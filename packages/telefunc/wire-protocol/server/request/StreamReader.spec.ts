@@ -7,8 +7,9 @@ test('reads length-prefixed chunks, however the request body splits them', async
     const reader = new StreamReader(
       new ReadableStream({
         start(controller) {
-          for (let offset = 0; offset < body.length; offset += size)
+          for (let offset = 0; offset < body.length; offset += size) {
             controller.enqueue(body.slice(offset, offset + size))
+          }
           controller.close()
         },
       }),

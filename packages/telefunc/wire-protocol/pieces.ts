@@ -168,8 +168,12 @@ class PieceSender {
   /** Hands the socket `frame`, whole or in pieces. */
   private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
-    if (bytes > this.wholeUpTo || (this.link.fastest > 0 && isSequencedTag(frame[0]!) && bytes > this.room.dataRoom()))
+    if (
+      bytes > this.wholeUpTo ||
+      (this.link.fastest > 0 && isSequencedTag(frame[0]!) && bytes > this.room.dataRoom())
+    ) {
       return this.cut(frame, 0)
+    }
     this.gather(frame, isSequencedTag(frame[0]!))
   }
 
@@ -184,8 +188,9 @@ class PieceSender {
       this.gatheredSent &&
       ((data && (this.gatheredAtOnce || this.room !== UNBOUNDED)) ||
         this.gatheredBytes + length + bytes > this.gatherUpTo)
-    )
+    ) {
       this.flush()
+    }
     this.count(frame, data)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.add(frame)
@@ -265,8 +270,9 @@ class PieceSender {
     const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
     this.transmitted(handed, isSequencedTag(frame[0]!))
     if (acknowledges(bytes)) this.track(handed, now, false)
-    for (let at = offset; at < end; at += size)
+    for (let at = offset; at < end; at += size) {
       this.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
+    }
     if (end < bytes) this.hold(frame, end)
   }
 
@@ -427,15 +433,17 @@ class PieceSender {
       this.rise(newly / Math.max(spanUs / 1000, WIRE_PROBE_CLOCK_MS), performance.now())
     }
     this.acknowledgedBytes += newly
-    while (this.announcedEnds.length > 0 && this.announcedEnds.peek()!.end <= this.acknowledgedBytes)
+    while (this.announcedEnds.length > 0 && this.announcedEnds.peek()!.end <= this.acknowledgedBytes) {
       this.announcedEnds.shift()
+    }
     this.acknowledgedAt = performance.now()
     const arrived = this.acknowledgedAt - heldMs
     const oldest = this.announcements.peek()
     if (oldest !== undefined && oldest.end <= this.acknowledgedBytes) {
       let end = oldest.end
-      while (this.announcements.length > 0 && this.announcements.peek()!.end <= this.acknowledgedBytes)
+      while (this.announcements.length > 0 && this.announcements.peek()!.end <= this.acknowledgedBytes) {
         end = this.announcements.shift()!.end
+      }
       // What it acknowledged went no earlier than the oldest and arrived by the newest: at most the link's rate.
       this.raiseFloor((end - oldest.start) / Math.max(arrived - oldest.at, WIRE_PROBE_CLOCK_MS))
     }

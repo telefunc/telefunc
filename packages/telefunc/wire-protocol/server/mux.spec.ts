@@ -434,8 +434,9 @@ test('what a wire holds for a channel it awaits counts against its recv backlog'
     wire,
     encode.reconcile({ open: [{ id: 'never-registered', ix: 0, lastSeq: 0, initial: true }] }),
   )
-  for (let seq = 1; seq <= WIRE_RECV_BACKLOG_BASE_FRAMES + 1 && !terminated.has(wire); seq++)
+  for (let seq = 1; seq <= WIRE_RECV_BACKLOG_BASE_FRAMES + 1 && !terminated.has(wire); seq++) {
     await mux.onConnectionRawMessage(wire, encode.text(0, '0', seq))
+  }
   expect(terminated.has(wire)).toBe(true)
 })
 
@@ -639,8 +640,9 @@ test('a reconnect replays what each channel sent within the largest window past 
   await turn()
   const refused: unknown[] = []
   // 40 MiB each, nobody awaiting: within the 64 MiB a channel may be sent past its page's room.
-  for (const channel of channels)
+  for (const channel of channels) {
     for (let i = 0; i < 80; i++) channel.sendBinary(new Uint8Array(512 * 1024)).catch((err) => refused.push(err))
+  }
   await turn()
   expect(refused).toEqual([])
   // The wire drops before the page got any of it, and the page reconnects.

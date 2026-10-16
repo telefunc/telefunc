@@ -388,14 +388,16 @@ describe('seqs past 32 bits', () => {
       const pong = decode(encode.pong([{ ix: 3, lastSeq }])) as { ended: { lastSeq: number }[] }
       const carried = [window.lastSeq, attached.lastSeq, ping.ended[0]!.lastSeq, pong.ended[0]!.lastSeq]
       // All that was sent, or all but what a wire or a replay holds.
-      for (const sent of [lastSeq, lastSeq + 1_000_000])
+      for (const sent of [lastSeq, lastSeq + 1_000_000]) {
         expect(carried.map((bits) => seqThrough(bits, sent))).toEqual([lastSeq, lastSeq, lastSeq, lastSeq])
+      }
     }
   })
 
   test('an ACK_RES carries the seq it answers whole, past 2^32', () => {
-    for (const ackedSeq of [0, 1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER])
+    for (const ackedSeq of [0, 1, ...boundaries.flatMap(around), Number.MAX_SAFE_INTEGER]) {
       expect(decode(encode.ackRes(3, 1, ackedSeq, '"x"'))).toMatchObject({ ackedSeq })
+    }
   })
 
   test("a binary publish carries its key's seq as a text publish does, past 2^32", () => {
@@ -410,11 +412,12 @@ describe('seqs past 32 bits', () => {
   })
 
   test('a seq never reads below 0, whatever its bits', () => {
-    for (const bits of [0, 1, 2 ** 31 - 1, 2 ** 31, 2 ** 31 + 1, 2 ** 32 - 1])
+    for (const bits of [0, 1, 2 ** 31 - 1, 2 ** 31, 2 ** 31 + 1, 2 ** 32 - 1]) {
       for (const at of [0, 1, 7]) {
         expect(seqNear(bits, at + 1)).toBeGreaterThanOrEqual(0)
         expect(seqThrough(bits, at)).toBeGreaterThanOrEqual(0)
       }
+    }
   })
 
   test('a RECONCILE carries a lastSeq past 2^32 whole', () => {
