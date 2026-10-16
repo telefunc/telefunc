@@ -696,10 +696,11 @@ describe('Broadcast client publish acks', () => {
     const frames: Uint8Array[] = []
     broadcast._attachPeer(peer((frame) => frames.push(frame)))
     if (outcome === 'overflow') broadcast.subscribe(() => {})
-    if (outcome === 'bug')
+    if (outcome === 'bug') {
       publish.mockImplementation(() => {
         throw new Error('driver bug')
       })
+    }
     await broadcast._onPeerPublishAckReqMessage(
       JSON.stringify(outcome === 'overflow' ? 'x'.repeat(600 * 1024) : 'x'),
       1,

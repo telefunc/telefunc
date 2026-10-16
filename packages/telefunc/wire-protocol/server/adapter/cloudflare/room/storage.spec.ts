@@ -40,8 +40,9 @@ test("a directory page reads a prefix's rooms as a primary-key range, up to the 
 
 test('a directory lists its rooms in code point order', () => {
   const { sql } = sqlStorage()
-  for (const roomId of ['order:a', 'order:\u{1f600}', 'order:é', 'order:\uff01', 'order:B', 'order:f'])
+  for (const roomId of ['order:a', 'order:\u{1f600}', 'order:é', 'order:\uff01', 'order:B', 'order:f']) {
     directoryPut(sql, roomId, 'tag', Infinity)
+  }
   expect(directoryList(sql, 'order:').entries.map((entry) => entry.roomId)).toEqual([
     'order:B',
     'order:a',
@@ -209,8 +210,9 @@ test("a binary commit's delivery targets are its lane's, its member's every-trac
     ['binary:m:mic', 'mic'],
     ['binary-all:other', 'other'],
     ['binary-track:mic', 'other-track'],
-  ])
-    upsertRoute(sql, { roomId: 'room', inc: 'inc', laneKey: laneKey!, sessionDoId: sessionDoId!, leaseId: 'lease' }, 0)
+  ] as const) {
+    upsertRoute(sql, { roomId: 'room', inc: 'inc', laneKey, sessionDoId, leaseId: 'lease' }, 0)
+  }
   const targets = snapshotRoutes(sql, 'inc', ['binary:m:camera', 'binary-all:m', 'binary-track:camera'], 1)
   expect(targets.map((route) => route.sessionDoId).sort()).toEqual(['camera', 'every-member', 'every-track'])
   expect(plans).toEqual([expect.stringMatching(/^SEARCH route USING INDEX \w+ \(inc=\? AND lane_key=\?\)$/)])
@@ -225,8 +227,9 @@ test("one member's retained binary lanes are a primary-key range of its lane key
     binary('m:1', 'camera'),
     binary('n', ''),
     { kind: 'semantic' } as const,
-  ])
+  ]) {
     installRetained(sql, 'inc', lane, new Uint8Array([1]), { seq: 1, timestamp: 1 })
+  }
   plans.length = 0
   expect(listRetained(sql, 'inc', { member: 'm' })).toEqual([binary('m', ''), binary('m', 'camera')])
   expect(plans).toEqual([
@@ -247,8 +250,9 @@ test("one track's retained binary lanes across members are an rt_manifest_track 
     binary('a', 'camera:1'),
     binary('a', ''),
     { kind: 'semantic' } as const,
-  ])
+  ]) {
     installRetained(sql, 'inc', lane, new Uint8Array([1]), { seq: 1, timestamp: 1 })
+  }
   plans.length = 0
   expect(listRetained(sql, 'inc', { track: 'camera' })).toEqual([binary('a', 'camera'), binary('b', 'camera')])
   expect(plans).toEqual([

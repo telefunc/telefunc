@@ -442,8 +442,9 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    for (const bucket of ['weur', 'apac', 'eeur'] as const)
+    for (const bucket of ['weur', 'apac', 'eeur'] as const) {
       authorityState.setPresence({ key: 'room:test', kind: 'text', member: `telefunc-shard-${bucket}-0`, bucket })
+    }
     await broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
@@ -474,8 +475,9 @@ describe('cloudflare broadcast routing', () => {
     for (const [member, bucket] of [
       ['telefunc-shard-weur-0', 'weur'],
       ['telefunc-shard-apac-0', 'apac'],
-    ] as const)
+    ] as const) {
       authorityState.setPresence({ key: 'room:redeployed', kind: 'text', member, bucket })
+    }
     const receipt = await broadcast.publishToSubscribers(authorityState, new OrderedStubs(), {
       key: 'room:redeployed',
       kind: 'text',
@@ -664,8 +666,9 @@ describe('cloudflare broadcast routing', () => {
         },
       }),
     )
-    for (const bucket of ['weur', 'apac'] as const)
+    for (const bucket of ['weur', 'apac'] as const) {
       authorityState.setPresence({ key: 'room:test', kind: 'text', member: `telefunc-shard-${bucket}-0`, bucket })
+    }
     const firstPublish = broadcast.publishToSubscribers(authorityState, calls, {
       key: 'room:test',
       kind: 'text',
