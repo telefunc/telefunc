@@ -365,14 +365,12 @@ class CloudflareBroadcast {
    *  the caller gets a native promise: a stub's RpcPromise is callable, which `isPromise` doesn't take for a
    *  promise. */
   async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    const member = currentCloudflareSession()?.broadcast
-    const locationBucket = member?.bucket ?? null
     const request = { key: route.key, kind: route.kind, payload }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
     const name = this.#authorityName(route.key)
-    return member === undefined
-      ? send(this.#stubByName(name, locationBucket))
-      : this.#callByName(member.calls, name, locationBucket, send)
+    const member = currentCloudflareSession()?.broadcast
+    if (member === undefined) return send(this.#stubByName(name, null))
+    return this.#callByName(member.calls, name, member.bucket, send)
   }
 
   sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest): Promise<void> {
