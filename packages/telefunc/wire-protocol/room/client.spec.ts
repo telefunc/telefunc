@@ -67,7 +67,7 @@ describe('client Room lifecycle', () => {
     await Promise.all([first, second])
     expect(participant.meta).toEqual({ v: 'B' })
   })
-  it('holds DMs before a client-held participant’s first listen() within the bufferLimit its server sent', () => {
+  it("holds DMs before a client-held participant's first listen() within the bufferLimit its server sent", () => {
     const dm = (data: number) => ({ __r: 'dm', from: '', fromMeta: null, data })
     const roomy = standaloneParticipant({})
     for (let n = 0; n < 200; n++) roomy.notify(dm(n))

@@ -191,7 +191,7 @@ describe('Room public behavior', () => {
     await expect(room.join()).rejects.toThrow('join announcement failed')
     await expect(Room.getParticipants(room.id)).resolves.toEqual([])
   })
-  it('admits a thousand simultaneous joins, each read racing the others’ writes, with no conflict, and counts each as a hold', async () => {
+  it("admits a thousand simultaneous joins, each read racing the others' writes, with no conflict, and counts each as a hold", async () => {
     const room = (await Room.create('join-burst')) as ServerRoom
     const readCells = driver.readCells.bind(driver)
     // Every read yields, so the other joins' writes land between a join's read and its write.

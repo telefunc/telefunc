@@ -373,7 +373,7 @@ describe('cloudflare broadcast routing', () => {
     expect(() => assertLocationFallbackIsScaled(undefined, 'weur')).not.toThrow()
   })
 
-  it('records presence at the key’s authority on subscribe and reads it during publish fanout', async () => {
+  it("records presence at the key's authority on subscribe and reads it during publish fanout", async () => {
     const authority = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const broadcast = createBroadcast(
@@ -393,7 +393,7 @@ describe('cloudflare broadcast routing', () => {
     await subscription.unsubscribe()
   })
 
-  it('a publish waits only for its own session’s subscription, and leaves from its own session', async () => {
+  it("a publish waits only for its own session's subscription, and leaves from its own session", async () => {
     const recorded = Promise.withResolvers<void>()
     const publishBuckets: string[] = []
     const broadcast = createBroadcast(
@@ -571,7 +571,7 @@ describe('cloudflare broadcast routing', () => {
     await subscription.unsubscribe()
   })
 
-  it('delivers a key’s publishes to each member in seq order while calls through different stubs race', async () => {
+  it("delivers a key's publishes to each member in seq order while calls through different stubs race", async () => {
     const authority = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
     const coordinatorCalls: BroadcastCalls = new OrderedStubs()
@@ -594,7 +594,7 @@ describe('cloudflare broadcast routing', () => {
     await subscription.unsubscribe()
   })
 
-  it('delivers a session’s publishes to the key’s authority in call order while calls through different stubs race', async () => {
+  it("delivers a session's publishes to the key's authority in call order while calls through different stubs race", async () => {
     const arrived: string[] = []
     // The first stub opened is the slowest, so a publish sent through a fresh stub overtakes the one before it.
     const broadcast = createBroadcast(
@@ -648,7 +648,7 @@ describe('cloudflare broadcast routing', () => {
     expect(published).toEqual([[1], [1], [3]])
   })
 
-  it('publishes from outside a session, as from a cron trigger, to the key’s authority', async () => {
+  it("publishes from outside a session, as from a cron trigger, to the key's authority", async () => {
     const coordinatorPublishes: Array<{ name: string; key: string; text: string }> = []
     const broadcast: CloudflareBroadcast = createBroadcast(
       createBasicBinding({

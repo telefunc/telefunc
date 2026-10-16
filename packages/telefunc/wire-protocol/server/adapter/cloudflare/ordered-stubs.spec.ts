@@ -29,7 +29,7 @@ describe('OrderedStubs', () => {
     expect(opened.map((stub) => stub.calls)).toEqual([['a', 'b'], ['x'], ['c']])
   })
 
-  it('replaces a stub that rejected, holding the replacement until the failed stub’s calls settle', async () => {
+  it("replaces a stub that rejected, holding the replacement until the failed stub's calls settle", async () => {
     const calls = new OrderedStubs<Stub>()
     const { opened, open } = stubs()
     const pending = createDeferred()
