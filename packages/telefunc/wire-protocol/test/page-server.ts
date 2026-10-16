@@ -1,7 +1,13 @@
-export { Net, Rate, sseFetch, until, webSocketTo }
-export type { Link, Traffic }
+export { Net, page, register }
+export type { Traffic, Wire }
 
 import type { Peer } from 'crossws'
+import { vi } from 'vitest'
+
+import { ClientChannel } from '../client/channel.js'
+import { config } from '../../client/clientConfig.js'
+import { ServerChannel } from '../server/channel.js'
+import { getChannelMux } from '../server/mux.js'
 
 import { getTelefuncSseChannelHooks } from '../server/sse.js'
 import { getTelefuncChannelHooks } from '../server/ws.js'
@@ -145,6 +151,40 @@ class Net {
     hooks.delete(frame[0]!)
     then(frame)
   }
+}
+
+/** `sse-late-upload`: SSE whose upload request reaches the server 500 ms after the request that opens the wire, as one
+ *  that opens a connection of its own may. */
+type Wire = 'sse' | 'sse-batch' | 'ws' | 'sse-late-upload'
+
+/** A page on `wire`, and the server it talks to. `upgrade`: an SSE page that may move to a WebSocket. */
+function page(wire: Wire, { upgrade = false } = {}) {
+  const net = new Net()
+  if (wire === 'ws' || upgrade) vi.stubGlobal('WebSocket', webSocketTo(net))
+  if (wire !== 'ws') config.fetch = sseFetch(net, wire === 'sse-batch')
+  if (wire === 'sse-late-upload') net.uploadLag = 500
+  const telefuncUrl = `http://${crypto.randomUUID()}.test/_telefunc`
+  const connectionKey = crypto.randomUUID()
+  return {
+    net,
+    /** A channel the page opens, such as a call's callback. */
+    channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string = crypto.randomUUID()) {
+      return new ClientChannel<ClientToServer, ServerToClient>({
+        channelId,
+        ack: true,
+        transports: wire === 'ws' ? ['ws'] : upgrade ? ['sse', 'ws'] : ['sse'],
+        telefuncUrl,
+        connectionKey,
+      })
+    },
+  }
+}
+
+/** What the server registers when a call's request arrives. */
+function register<ClientToServer = unknown, ServerToClient = unknown>(id?: string) {
+  const channel = new ServerChannel<ClientToServer, ServerToClient>({ id, ack: true })
+  getChannelMux().registerChannel(channel)
+  return channel
 }
 
 /** A `fetch` whose far end is the server's SSE hooks, over `net`. `refuseUpload`: a browser that can't stream a request
