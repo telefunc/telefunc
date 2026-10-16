@@ -640,7 +640,7 @@ class ChannelMux {
     this.sessions.get(sessionId, frame.index)?.channel._dispatchFrame(frame)
   }
 
-  /** A reconcile abandons the probes staged on its sessions, refused mid-commit, and leaves its own wire's be. */
+  /** Abandons the probes staged on the session it names and on its wire's, refused mid-commit; naming its wire's own, none. */
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): void {
     const own = entry.transport.getSessionId(connection)
     if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
