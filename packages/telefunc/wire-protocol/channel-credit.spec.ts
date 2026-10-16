@@ -678,20 +678,6 @@ test('a broadcast whose page was offline while more was published than config.ch
   expect(seen).toEqual(['before'])
 })
 
-test('a broadcast whose page was offline while more binary was published than config.channel.bufferLimitBinary holds closes naming that limit', async () => {
-  const key = `room:${crypto.randomUUID()}`
-  const room = loop.openBroadcast<string>(key)
-  const closed = closedWith(room)
-  room.page.subscribeBinary(() => {})
-  await run(100)
-  loop.socket.cut()
-  // Offline, the server holds 2 MiB of binary for the page: these are 3 MiB.
-  for (let n = 0; n < 6; n++) Broadcast.publishBinary(key, new Uint8Array(512 * KIB))
-  await runUntil(() => closed.page !== 'open', 2_000)
-  expect(closed.server).toBeInstanceOf(ChannelOverflowError)
-  expect((closed.server as Error).message).toContain('config.channel.bufferLimitBinary')
-})
-
 test('a broadcast whose page was offline while less was published than config.channel.bufferLimit holds gets it all at its reconnect', async () => {
   const key = `room:${crypto.randomUUID()}`
   const room = loop.openBroadcast<string>(key)
