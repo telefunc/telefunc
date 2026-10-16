@@ -1,7 +1,5 @@
 export { OrderedStubs, reportLostDeliveries }
 
-// Ordered cross-DO calls, and how their losses are reported.
-
 import { createDeferred, type Deferred } from '../../../../utils/createDeferred.js'
 
 type Line<Stub> = {
