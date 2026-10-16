@@ -37,14 +37,10 @@ type BroadcastPublishRequest = {
   payload: BroadcastPayload
 }
 
+type BroadcastDeliverRequest = BroadcastPublishRequest & { info: OrderingInfo }
+
 /** The authority's sequenced publish, handed to one bucket coordinator for the member DOs it names by id. */
-type BroadcastForwardRequest = {
-  key: string
-  kind: BroadcastRoute['kind']
-  payload: BroadcastPayload
-  info: OrderingInfo
-  members: string[]
-}
+type BroadcastForwardRequest = BroadcastDeliverRequest & { members: string[] }
 
 /** A member DO's presence on a route, at the key's authority, by DO id; `bucket: null` withdraws it. */
 type BroadcastPresenceRequest = {
@@ -52,13 +48,6 @@ type BroadcastPresenceRequest = {
   kind: BroadcastRoute['kind']
   member: string
   bucket: LocationBucket | null
-}
-
-type BroadcastDeliverRequest = {
-  key: string
-  kind: BroadcastRoute['kind']
-  payload: BroadcastPayload
-  info: OrderingInfo
 }
 
 type TelefuncBroadcastStub = {
