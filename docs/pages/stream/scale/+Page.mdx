@@ -84,6 +84,8 @@ type BroadcastTransport = {
 
 `send()` / `sendBinary()` must return the assigned `{ seq, timestamp }` so subscribers across nodes see a single global order per key. `listen()` / `listenBinary()` return an unsubscribe function and are called at most once per key.
 
+A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) sends a copy: the publisher may reuse its buffer once `publishBinary()` returns.
+
 > On Cloudflare Workers, Telefunc handles distributed broadcast automatically via Durable Objects — no transport needed. See <Link href="/stream/cloudflare" />.
 
 ## Cloudflare
