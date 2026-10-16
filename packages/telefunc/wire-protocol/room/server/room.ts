@@ -81,12 +81,15 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal Every authority check and member write carries this incarnation,
    *  rejecting stale handles after recreate. */
   readonly _incarnation: RoomIncarnation
-  /** @internal What this process shares of the incarnation. */ readonly _replica: RoomReplica
+  /** @internal What this process shares of the incarnation. */
+  readonly _replica: RoomReplica
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private _tail: TailHold | null = null
   private _guards: Partial<RoomGuardHooks> | null = null
-  /** @internal This handle's listeners over the replica's model. */ readonly _state: RoomState
-  /** @internal */ readonly _local: LocalHolder
+  /** @internal This handle's listeners over the replica's model. */
+  readonly _state: RoomState
+  /** @internal */
+  readonly _local: LocalHolder
   private readonly _stubs = new Set<RoomStubChannel>()
   /** The attached stub holding each member a client joined through. */
   private readonly _stubOf = new Map<string, RoomStubChannel>()
@@ -95,7 +98,8 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _localSuppressed = new Set<string>()
   /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
   private readonly _admissions = new Map<string, AdmissionState>()
-  /** @internal */ readonly _writes: RoomWrites
+  /** @internal */
+  readonly _writes: RoomWrites
 
   constructor(replica: RoomReplica) {
     super()
@@ -465,7 +469,8 @@ class ServerRoom extends RoomStateView implements Room {
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
 class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
-  /** @internal */ readonly _room: ServerRoom
+  /** @internal */
+  readonly _room: ServerRoom
   private _metaMirror: MetaMirror | null = null
 
   constructor(serverRoom: ServerRoom, participant: ConstructorParameters<typeof ParticipantBase>[0]) {
