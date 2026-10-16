@@ -315,7 +315,6 @@ function roomProbe(env: Env, suffix: string, name: string) {
   const roomId = `${name}-${suffix}`
   const inc = `${name}-inc-${suffix}`
   const authority = env.ROOM.get(env.ROOM.idFromName(roomId)) as unknown as Authority
-  const open = (operation = `${name} open`) => openHead(authority, inc, operation)
   const route = (sessionId: DurableObjectId, { role = 'lease', laneKey = 'semantic', inc: routeInc = inc } = {}) => ({
     roomId,
     inc: routeInc,
@@ -332,9 +331,15 @@ function roomProbe(env: Env, suffix: string, name: string) {
   return {
     inc,
     authority,
-    open,
     route,
     join,
+    async open(config = textEncoder.encode('{}')) {
+      const opened = await authority.compareExchangeHead(
+        { form: 'absent' },
+        { head: { currentInc: inc, state: 'open', config } },
+      )
+      return expectHead(opened, `${name} open`)
+    },
     /** An inbox commit, the one kind whose delivery its committer awaits. */
     async commit(payload: string | number, operation: string) {
       const frame = typeof payload === 'string' ? textEncoder.encode(payload) : new Uint8Array([payload])
@@ -537,7 +542,7 @@ async function joinOpensLane(env: Env, suffix: string) {
 
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')
-  await probe.open('large retained open')
+  await probe.open()
   // A byte pattern whose period divides no chunk's length, so a chunk stored from the wrong bytes reads back unlike it.
   const payload = Uint8Array.from({ length: 25 * 1024 * 1024 }, (_, index) => index % 251)
   const lane = { kind: 'binary' as const, member: 'member', track: 'track' }
@@ -551,13 +556,7 @@ async function largeRetainedReplay(env: Env, suffix: string) {
 async function nativeRpcRoundTrip(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'native-rpc')
   const config = new Uint8Array([0x11, 0x22, 0x33])
-  const opened = expectHead(
-    await probe.authority.compareExchangeHead(
-      { form: 'absent' },
-      { head: { currentInc: probe.inc, state: 'open', config } },
-    ),
-    'native RPC open',
-  )
+  const opened = await probe.open(config)
   const initialCells = await probe.authority.readCells(probe.inc, { keys: ['native'] })
   if ('staleInc' in initialCells) throw new Error('native RPC cell read was stale')
   const cellResult = await probe.authority.compareExchangeCells(probe.inc, {
@@ -591,16 +590,6 @@ async function refusedFirstWrite(env: Env, suffix: string) {
     refused: refused.includes('SQLITE_TOOBIG'),
     listed: (await authority.directoryList('')).entries.map(({ roomId }) => roomId),
   }
-}
-
-async function openHead(authority: Authority, inc: string, operation: string): Promise<RoomHead> {
-  return expectHead(
-    await authority.compareExchangeHead(
-      { form: 'absent' },
-      { head: { currentInc: inc, state: 'open', config: textEncoder.encode('{}') } },
-    ),
-    operation,
-  )
 }
 
 function expectHead(result: HeadCxResult, operation: string): RoomHead {
