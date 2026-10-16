@@ -28,8 +28,8 @@ type RoomDeclaration =
 const MEMBER_MUTATIONS = { 'req-set-meta': 'setMeta', 'req-set-attrs': 'setAttributes', 'req-dm': 'send' } as const
 type MemberMutation = Extract<ParticipantStubRequest, { __r: keyof typeof MEMBER_MUTATIONS }>
 
-/** A stub's client library sends only these shapes, so anything else comes from a broken or hostile peer and ends its
- *  connection. */
+/** A stub's client library sends only these shapes, so anything else comes from a broken or hostile peer
+ *  and ends its connection. */
 function malformed(what: string): never {
   throw new ProtocolViolationError(`malformed Room ${what}`)
 }

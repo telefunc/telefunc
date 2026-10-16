@@ -40,8 +40,8 @@ class ReplayGate {
   }
 }
 
-/** A later time is newer whatever the seq: a commit never sets its lane's time back, and a failover may rewind its
- *  seq. */
+/** A later time is newer whatever the seq: a commit never sets its lane's time back,
+ *  and a failover may rewind its seq. */
 function admitInto(high: Map<string, WirePublishInfo>, key: string, info: WirePublishInfo): boolean {
   const last = high.get(key)
   if (last !== undefined && info.timestamp < last.timestamp) return false

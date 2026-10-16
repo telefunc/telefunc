@@ -80,8 +80,8 @@ function nextOrderMark(previous: OrderingInfo | undefined, now: number): Orderin
   return { seq: (previous?.seq ?? 0) + 1, timestamp: Math.max(now, previous?.timestamp ?? 0) }
 }
 
-/** A counter cell after `count` at authority time `now`: `written` when it changed, null when absent and not
- *  created. */
+/** A counter cell after `count` at authority time `now`: `written` when it changed,
+ *  null when absent and not created. */
 function countCell(
   current: Uint8Array | undefined,
   { delta, create }: CellCount,

@@ -28,8 +28,8 @@ class RosterStream {
     private readonly _ensureRoster: () => Promise<void>,
   ) {}
 
-  /** Whether a client of the view was sent every member it holds, as it holds them: no roster reconciles into it
-   *  unsent. */
+  /** Whether a client of the view was sent every member it holds, as it holds them:
+   *  no roster reconciles into it unsent. */
   get settled(): boolean {
     return !this._reconciling
   }

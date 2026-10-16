@@ -29,8 +29,8 @@ export type { CommitChannels }
 
 import { everyMemberLaneKey, everyTrackLaneKey, type BroadcastRoute, type LaneId } from 'telefunc/__internal'
 
-/** A binary commit's lane, its member's every-track and its track's every-member channels; another commit's lane
- *  only. */
+/** A binary commit's lane, its member's every-track and its track's every-member channels;
+ *  another commit's lane only. */
 type CommitChannels = { lane: string; everyTrack: string | null; everyMember: string | null }
 
 const DEFAULT_PREFIX = 'tf:'

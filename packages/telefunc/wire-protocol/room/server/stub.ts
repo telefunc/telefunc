@@ -77,8 +77,8 @@ class ResponseRoomGrants {
 
 /** A Room stub answers each client request through its channel ack, under the Room error contract. */
 abstract class RoomRequestChannel extends ServerChannel {
-  /** A client may have missed state its buffer dropped, before it first connected or while offline: each attach sends
-   *  it. */
+  /** A client may have missed state its buffer dropped, before it first connected or while offline:
+   *  each attach sends it. */
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     super._attachPeer(peer, state)
     this._onAttached()
@@ -132,8 +132,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   private readonly _room: ServerRoom
   private readonly _publishShield: ShieldValidator | undefined
   private readonly _members = new Set<string>()
-  /** Members whose own messages this client doesn't get back: its selfDelivery: false joins and co-returned server
-   *  joins. */
+  /** Members whose own messages this client doesn't get back:
+   *  its selfDelivery: false joins and co-returned server joins. */
   private readonly _selfSuppressed: Set<string>
   /** Hidden members this response handed the client: their events are relayed to it alone. */
   private readonly _grantedHidden: Set<string>
@@ -240,8 +240,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     assertProtocol(scope?.tracks.has(track), 'Room binary wants over ROOM_TRACK_WANTS_MAX')
   }
 
-  /** A client learns its members from this view alone, so a want naming any other id names one that left or never
-   *  was. */
+  /** A client learns its members from this view alone, so a want naming any other id names one that
+   *  left or never was. */
   private _declareBinaryWant({ member, track, on }: BinaryWantChange): void {
     if (on && member !== ALL && !this._room._model.hasMember(member)) return
     const change: BinaryWantChange = { member, track, on }
@@ -428,8 +428,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   // Tail
 
-  /** Seeded from the room's pre-attach hold, with a fresh lease; expiry drops the hold and lets the room release
-   *  ingestion. */
+  /** Seeded from the room's pre-attach hold, with a fresh lease; expiry drops the hold and lets
+   *  the room release ingestion. */
   _beginTail(seed: TailEntry[], onExpire: () => void): void {
     this._tail = new TailHold(() => {
       this._tail = null

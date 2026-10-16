@@ -74,8 +74,8 @@ local function tf_live_head(key, now)
 end
 `
 
-// The same bytes as telefunc's ordering frame (wire-protocol/ordering-frame.ts): four u32 big-endian words, then the
-// payload.
+// The same bytes as telefunc's ordering frame (wire-protocol/ordering-frame.ts): four u32 big-endian words,
+// then the payload.
 const REDIS_ORDERING_FRAME_LUA = `
 local function tf_ordering_frame(seq, ts, payload)
   local seq_hi = math.floor(seq / 4294967296)
@@ -86,8 +86,8 @@ local function tf_ordering_frame(seq, ts, payload)
 end
 `
 
-// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of the ordering
-// frame.
+// Broadcast publish: next per-key seq, authority time that never goes back on the key,
+// one PUBLISH of the ordering frame.
 //   KEYS: [1]=order ('seq:ts') [2]=channel
 //   ARGV: [1]=payload
 const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
@@ -228,8 +228,8 @@ if not head or head.state ~= 'open' or head.inc ~= ARGV[1] then return false end
 return redis.call('HSCAN', KEYS[2], ARGV[2], 'COUNT', ${LANE_PAGE_SIZE})
 `
 
-// A page of a track's binary lanes that have a commit, read as LANE_START_LUA reads one lane, for its every-member
-// subscription.
+// A page of a track's binary lanes that have a commit, read as LANE_START_LUA reads one lane,
+// for its every-member subscription.
 //   KEYS: [1]=head [2]=the track's lane set
 //   ARGV: [1]=inc [2]=SSCAN cursor
 //   Reply: nil once the incarnation is not the open head, else {next cursor, {lane key, ...}}

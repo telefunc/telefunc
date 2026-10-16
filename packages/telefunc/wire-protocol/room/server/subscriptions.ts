@@ -84,8 +84,8 @@ class RoomSubscriptions {
   /** Each member's every-track lane, while some holder here receives all of its tracks, more than
    *  `ROOM_MEMBER_NAMED_LANES_MAX` named of it alone, or the tracks named of every member fetched by member. */
   private readonly _everyTrack = new Map<string, LaneSubscription>()
-  /** Each track's every-member lane, while some holder here names it of every member and the tracks are not fetched by
-   *  member. */
+  /** Each track's every-member lane, while some holder here names it of every member and the tracks are
+   *  not fetched by member. */
   private readonly _everyMember = new Map<string, LaneSubscription>()
   /** Whether the tracks named of every member are fetched on each member's every-track lane, as they outnumber
    *  `ROOM_MEMBER_NAMED_LANES_MAX` and the members, so a lane per track would cost more: from more tracks than members
@@ -109,8 +109,8 @@ class RoomSubscriptions {
   private readonly _excepted = new Set<string>()
   /** Per present member, how many tracks named of it alone some holder here receives. */
   private readonly _counts = new Map<string, number>()
-  /** The member a planning pass counts a slice at a time, and whether a change of its wants since made the count
-   *  stale. */
+  /** The member a planning pass counts a slice at a time, and whether a change of its wants since
+   *  made the count stale. */
   private _counting: { member: string; stale: boolean } | null = null
   /** The members whose named tracks exceeded `ROOM_MEMBER_NAMED_LANES_MAX` when last planned. */
   private readonly _overflowing = new Set<string>()
@@ -251,8 +251,8 @@ class RoomSubscriptions {
     return this._planning
   }
 
-  /** The lanes delivering the member's `track` (or `ALL`) are ready, so a retained read after this misses no live
-   *  frame. */
+  /** The lanes delivering the member's `track` (or `ALL`) are ready, so a retained read after this
+   *  misses no live frame. */
   async pairsReady(member: string, track: TrackKey | All): Promise<void> {
     await this._planning
     const lanes = [this._everyTrack.get(member)]
@@ -410,8 +410,8 @@ class RoomSubscriptions {
     }
   }
 
-  /** Runs `step` on each item within `slice`, each slice planned around; a step that yields can end a slice at each
-   *  yield. */
+  /** Runs `step` on each item within `slice`, each slice planned around; a step that yields
+   *  can end a slice at each yield. */
   private async _replanEach<T>(
     slice: Slice,
     items: Iterable<T>,
@@ -493,8 +493,8 @@ class RoomSubscriptions {
     )
   }
 
-  /** The member's queued pairs; a change that moved it across `ROOM_MEMBER_NAMED_LANES_MAX` replans all of its
-   *  lanes. */
+  /** The member's queued pairs; a change that moved it across `ROOM_MEMBER_NAMED_LANES_MAX` replans
+   *  all of its lanes. */
   private *_planMember(member: string, plan: BinaryPlan): Generator<void> {
     const count = this._counts.get(member)
     if (plan.all || plan.members.has(member) || (count === undefined && this._present(member))) {

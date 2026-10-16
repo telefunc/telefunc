@@ -105,8 +105,8 @@ class MemoryBackendState {
   revSeq = 0
 }
 
-/** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself can't starve the
- *  loop. */
+/** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself
+ *  can't starve the loop. */
 const DELIVERIES_PER_TURN = 1024
 
 const NO_TARGETS: readonly MemorySubscriptionAttempt[] = []
@@ -203,8 +203,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
   private readonly _state: MemoryBackendState
-  /** Deliveries in seq order from `_next`: the running one stays queued, so a publish made inside it is delivered
-   *  after. */
+  /** Deliveries in seq order from `_next`: the running one stays queued, so a publish made inside
+   *  it is delivered after. */
   private readonly _deliveries: Array<() => void> = []
   private _next = 0
   private _deliveredThisTurn = 0
@@ -373,8 +373,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       })
     })
     const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack) + sumReceiverCounts(everyMember)
-    // A commit past a turn's deliveries waits for the next turn, as a network write would, so commits can't outrun
-    // them.
+    // A commit past a turn's deliveries waits for the next turn, as a network write would,
+    // so commits can't outrun them.
     if (this._deliveries.length - this._next >= DELIVERIES_PER_TURN) await new Promise<void>(nextTurn)
     if (delivered === null) return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers }
     return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }

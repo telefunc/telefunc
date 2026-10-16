@@ -366,8 +366,8 @@ class RoomReplica {
     this.demand.take(this.report.instance, entry, on)
   }
 
-  /** @internal Renews this process's demand elsewhere with one page, and drops the reporters that lapsed, a slice at a
-   *  time. */
+  /** @internal Renews this process's demand elsewhere with one page, and drops the reporters that lapsed,
+   *  a slice at a time. */
   async _renewDemand(): Promise<void> {
     if (this.report.reporting) this._gossip.renew()
     const slice = new Slice()

@@ -37,8 +37,8 @@ type HoldWeight = { budget: string; bytes(): number; fits(bytes: number): boolea
 /** What a send waits for, read only while some subscription could be establishing; `sources` share a partition. */
 type SendHold<Source> = { key: string; sources: readonly [Source, ...Source[]]; weight?: HoldWeight }
 
-/** Checks a delivery against the driver contract, once for all its consumers; one it throws for is reported and
- *  dropped. */
+/** Checks a delivery against the driver contract, once for all its consumers; one it throws for
+ *  is reported and dropped. */
 type DeliveryCheck<Source> = (source: Source, payload: BackendPayload, info: { seq: number; timestamp: number }) => void
 
 type SubscriptionSlotConfig = {

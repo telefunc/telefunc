@@ -7,8 +7,8 @@ assertIsNotBrowser()
 
 type PendingDmAck = { from: string; to: string; settle: (reply: DmReply) => void }
 
-/** In-flight `send(…, { ack: true })`s by `ackId`, indexed by both ends too, so a leave settles only the ones it
- *  strands. */
+/** In-flight `send(…, { ack: true })`s by `ackId`, indexed by both ends too, so a leave settles only
+ *  the ones it strands. */
 class PendingDmAcks {
   private readonly _byId = new Map<string, PendingDmAck>()
   private readonly _byMember = new Map<string, Set<string>>()
