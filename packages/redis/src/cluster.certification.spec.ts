@@ -441,8 +441,10 @@ process.exit(0)`,
     let failNext = false
     let injectedFailure = false
     let opens = 0
+    const names: string[] = []
     interceptSubscribers((client) => {
       opens++
+      names.push(client.options.connectionName!)
       if (!failNext) return
       failNext = false
       const subscribe = client.subscribe.bind(client)
@@ -456,7 +458,6 @@ process.exit(0)`,
         return await subscribe(...channels)
       }) as typeof client.subscribe
     })
-    const baseline = new Set((await pubSubClients()).map(clientIdentity))
     const backend = ownBackend(cluster, prefix)
     const states: SubscriptionState[] = []
     const observed: string[] = []
@@ -465,9 +466,7 @@ process.exit(0)`,
     const subscription = subscribe(backend, roomId, inc, receiver)
     subscription.onStateChange((state) => states.push(state))
     await subscription.ready
-    const first = await waitForValue(async () =>
-      (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
-    )
+    const first = await waitForValue(() => pubSubClients(names[0]!))
     failNext = true
     await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
     await waitFor(() => states.includes('lost') && subscription.state() === 'ready')
@@ -485,7 +484,6 @@ process.exit(0)`,
       subscribers.push(client)
       return client
     })
-    const baseline = new Set((await pubSubClients()).map(clientIdentity))
     const backend = ownBackend(cluster, prefix)
     const states: SubscriptionState[] = []
     const observed: string[] = []
@@ -540,9 +538,7 @@ process.exit(0)`,
       Buffer.from(decodeOrderingFrame(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)).payload).toString(),
     ).toBe('old-epoch')
     expect(await settlesWithin(committed, 100)).toBe(false)
-    const first = await waitForValue(async () =>
-      (await pubSubClients()).filter((client) => !baseline.has(clientIdentity(client))),
-    )
+    const first = await waitForValue(() => pubSubClients(subscriber.options.connectionName!))
     await first.owner.client.call('CLIENT', 'KILL', 'ID', String(first.id))
     await waitFor(() => states.includes('lost') && subscription.state() === 'ready')
     setHolding(false)
@@ -554,14 +550,13 @@ process.exit(0)`,
   })
   it('omits unknowable receiver counts and shares empty-key text/binary ordering across nodes', async () => {
     const prefix = uniquePrefix('receivers')
+    const names: string[] = []
+    interceptSubscribers((client) => void names.push(client.options.connectionName!))
     const backend = ownBackend(cluster, prefix)
-    const knownClients = new Set((await pubSubClients()).map(clientIdentity))
     // The backend's one subscriber connection: rooms are placed on its master and on another.
     const probe = ownSubscription(backend.subscribe({ key: 'probe', kind: 'text' }, () => {}))
     await probe.ready
-    const subscriber = await waitForValue(async () =>
-      (await pubSubClients()).filter((client) => !knownClients.has(clientIdentity(client))),
-    )
+    const subscriber = await waitForValue(() => pubSubClients(names[0]!))
     const crossMaster = masters.find(({ id }) => id !== subscriber.owner.id)
     if (crossMaster === undefined) throw new Error('Certification requires at least two masters')
     const cases = [
@@ -677,13 +672,14 @@ process.exit(0)`,
     }
     throw new Error(`failed to find a room on master '${masterId}'`)
   }
-  async function pubSubClients(): Promise<Array<{ id: number; owner: Master }>> {
+  /** The pub/sub connections named `name`: this test's own, never another spec file's on the same Cluster. */
+  async function pubSubClients(name: string): Promise<Array<{ id: number; owner: Master }>> {
     const lists = await Promise.all(masters.map(({ client }) => client.call('CLIENT', 'LIST', 'TYPE', 'PUBSUB')))
     const clients: Array<{ id: number; owner: Master }> = []
     for (const [index, master] of masters.entries()) {
       const list = String(lists[index])
       for (const line of list.split('\n')) {
-        if (!line.includes('name=telefunc-subscriber-')) continue
+        if (!line.includes(` name=${name} `)) continue
         const id = line.match(/(?:^|\s)id=(\d+)(?:\s|$)/)?.[1]
         if (id !== undefined) clients.push({ id: Number(id), owner: master })
       }
@@ -807,7 +803,6 @@ function deliveryOf(commit: CommitAccepted): Promise<void> {
   return commit.delivery
 }
 const uniquePrefix = (label: string): string => `redis-cluster-ci:${process.pid}:${Date.now().toString(36)}:${label}:`
-const clientIdentity = (client: { id: number; owner: Master }): string => `${client.owner.id}:${client.id}`
 async function clusterInfo(client: Redis): Promise<Record<string, string>> {
   return Object.fromEntries(
     String(await client.cluster('INFO'))
