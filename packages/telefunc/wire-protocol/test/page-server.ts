@@ -31,6 +31,9 @@ class Rate {
   }
 }
 
+/** What one read of the server's event stream hands the page at most, as a socket read does. */
+const EVENT_READ_BYTES = 16 * 1024
+
 const until = (at: number) => new Promise<void>((resolve) => setTimeout(resolve, at - Date.now()))
 
 /** What crossed the wire: the page's requests (a WebSocket counts one), and each direction's frame tags in order. */
@@ -349,11 +352,17 @@ function downstream(body: ReadableStream<Uint8Array>, link: Link, net: Net): Rea
           text = text.slice(end + 2)
           const frame = event.startsWith('data: ') ? base64urlToUint8Array(event.slice('data: '.length)) : null
           if (frame && !link.dead) net.serverSends(frame)
-          const at = net.arrival(link, event.length + 2, frame?.[0])
-          if (at > Date.now()) await until(at)
-          if (link.dead || dropped) continue
-          if (frame) net.pageGets(frame)
-          controller.enqueue(encoder.encode(`${event}\n\n`))
+          // A socket read hands the page what arrived of an event, not all of it at once.
+          const bytes = encoder.encode(`${event}\n\n`)
+          for (let offset = 0; offset < bytes.length; offset += EVENT_READ_BYTES) {
+            const last = offset + EVENT_READ_BYTES >= bytes.length
+            const chunk = bytes.subarray(offset, offset + EVENT_READ_BYTES)
+            const at = net.arrival(link, chunk.length, last ? frame?.[0] : undefined)
+            if (at > Date.now()) await until(at)
+            if (link.dead || dropped) break
+            if (last && frame) net.pageGets(frame)
+            controller.enqueue(chunk)
+          }
           delivered = true
         }
         if (delivered) return

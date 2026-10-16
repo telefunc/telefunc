@@ -3,6 +3,7 @@ export type { SseChannelHttpResponse }
 
 import type { Readable } from 'node:stream'
 import { assert } from '../../utils/assert.js'
+import { Fifo } from '../../utils/Fifo.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
@@ -16,7 +17,7 @@ import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, ProtocolViolationError } from '../shared-ws.js'
+import { encode, isSequencedTag, ProtocolViolationError } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -31,6 +32,11 @@ type SseConnection = {
    *  `pipeline`); `PushReadableStream` (Web `ReadableStream`-backed) everywhere else. Both
    *  expose `push`, `close`, `isClosed`. */
   stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
+  /** The data events the stream hasn't asked for yet, which the frames that go at once pass, and their bytes; whether
+   *  the stream asks for more. */
+  waiting: Fifo<Uint8Array<ArrayBuffer>>
+  waitingBytes: number
+  takes: boolean
   closed: boolean
   sessionId: string | null
   /** Resolved by `runStreamResponse` once the stream-response POST's body is consumed. Data
@@ -66,8 +72,10 @@ class SseConnectionTransport {
     sendNow: (connection, frame) => this.sendNow(connection, frame),
     wholeMessages: false,
     // An event carries its frame in base64, 4 bytes for every 3 and framing on top: three quarters of what waits is
-    // never fewer bytes than the frames it carries.
-    bufferedAmount: (connection) => Math.floor((connection.stream.bufferedAmount * 3) / 4),
+    // never fewer bytes than the frames it carries. What waits: the stream's, and the data waiting for it to ask.
+    bufferedAmount: (connection) => Math.floor(((connection.stream.bufferedAmount + connection.waitingBytes) * 3) / 4),
+    // A frame that goes at once passes the data waiting for the stream to ask: it waits behind the stream's alone.
+    queuedAhead: (connection) => Math.floor((connection.stream.bufferedAmount * 3) / 4),
     terminateConnection: (connection) => this.terminateConnection(connection),
   }
 
@@ -119,9 +127,10 @@ class SseConnectionTransport {
       const conn = this.mux.getConnectionByConnId<SseConnection>(connId)
       if (conn) this.closeConnection(conn, { permanent: false })
     }
+    const onTake = () => this.handWaiting(connection)
     const stream = useNodeStream
-      ? createPushReadable(onCancel)
-      : createPushReadableStream<Uint8Array<ArrayBuffer>>(onCancel)
+      ? createPushReadable(onCancel, onTake)
+      : createPushReadableStream<Uint8Array<ArrayBuffer>>(onCancel, onTake)
 
     let resolveReady!: () => void
     const ready = new Promise<void>((resolve) => {
@@ -130,6 +139,9 @@ class SseConnectionTransport {
     const connection: SseConnection = {
       connId,
       stream,
+      waiting: new Fifo(),
+      waitingBytes: 0,
+      takes: true,
       closed: false,
       sessionId: null,
       ready,
@@ -138,7 +150,7 @@ class SseConnectionTransport {
     }
     this.mux.onConnectionOpen(connection, this.transport)
     this.resolvePendingConnections(connId, connection)
-    stream.push(sseOpenComment)
+    connection.takes = stream.push(sseOpenComment)
     void this.runStreamResponse(connection, reader)
 
     return {
@@ -305,9 +317,26 @@ class SseConnectionTransport {
     if (connection) this.closeConnection(connection, { permanent: true })
   }
 
+  /** Data waits for the stream to ask for it, so a frame that goes at once is behind no more than the stream holds. */
   private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void {
     if (connection.closed) return
-    connection.stream.push(textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`))
+    const event = textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
+    if (!isSequencedTag(frame[0]!) || (connection.takes && connection.waiting.length === 0)) {
+      connection.takes = connection.stream.push(event)
+      return
+    }
+    connection.waiting.push(event)
+    connection.waitingBytes += event.byteLength
+  }
+
+  /** Hands the stream the data that waits, as far as it asks. */
+  private handWaiting(connection: SseConnection): void {
+    connection.takes = true
+    while (connection.takes && connection.waiting.length > 0) {
+      const event = connection.waiting.shift()!
+      connection.waitingBytes -= event.byteLength
+      connection.takes = connection.stream.push(event)
+    }
   }
 
   /** Resolves false on timeout — caller drops the POST. */
@@ -328,6 +357,8 @@ class SseConnectionTransport {
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
     connection.resolveReady()
     this.mux.onConnectionClosed(connection, { permanent })
+    while (connection.waiting.length > 0) connection.stream.push(connection.waiting.shift()!)
+    connection.waitingBytes = 0
     connection.stream.close()
   }
 

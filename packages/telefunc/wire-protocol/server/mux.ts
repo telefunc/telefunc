@@ -76,6 +76,8 @@ type ServerTransport<TConnection> = {
   /** Bytes of the frames sent that still wait in the connection, never fewer than there are, or `undefined` where the
    *  runtime doesn't report them. */
   bufferedAmount(connection: TConnection): number | undefined
+  /** The bytes of those a frame that goes at once waits behind, where it passes some: else `bufferedAmount`'s. */
+  queuedAhead?(connection: TConnection): number | undefined
   terminateConnection(connection: TConnection): void
 }
 
@@ -260,7 +262,10 @@ class ChannelMux {
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
-    const wait = new SocketWait(() => this.bufferedAmount(connection))
+    const wait = new SocketWait(
+      () => this.bufferedAmount(connection),
+      () => this.queuedAhead(connection),
+    )
     const recvBacklog = { bytes: 0, frames: 0 }
     const room = transport.wholeMessages
       ? new PathRoom(
@@ -1064,9 +1069,25 @@ class ChannelMux {
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. A wire that's gone holds nothing. */
   private bufferedAmount(connection: Wire): number | undefined {
+    return this.withUnhanded(connection, (transport) => transport.bufferedAmount(connection))
+  }
+
+  /** What a frame that goes at once waits behind in its socket, and what its piece sender hasn't handed it. */
+  private queuedAhead(connection: Wire): number | undefined {
+    return this.withUnhanded(
+      connection,
+      (transport) => transport.queuedAhead?.(connection) ?? transport.bufferedAmount(connection),
+    )
+  }
+
+  /** `read`'s bytes of its socket, and what its piece sender hasn't handed it. A wire that's gone holds nothing. */
+  private withUnhanded(
+    connection: Wire,
+    read: (transport: ServerTransport<Wire>) => number | undefined,
+  ): number | undefined {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return 0
-    const socket = entry.transport.bufferedAmount(connection)
+    const socket = read(entry.transport)
     return socket === undefined ? undefined : socket + (entry.state.pieces?.room.sender.unhandedBytes ?? 0)
   }
 

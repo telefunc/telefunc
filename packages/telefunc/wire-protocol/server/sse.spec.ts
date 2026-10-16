@@ -228,12 +228,15 @@ test.each([
     let opened = false
     channel.onOpen(() => void (opened = true))
     getChannelMux().registerChannel(channel)
-    const downstream = openPost({ connId: crypto.randomUUID(), streamResponse: true })
+    const connId = crypto.randomUUID()
+    const downstream = openPost({ connId, streamResponse: true })
     const response = node
       ? await sse.handleRequest(downstream.request, Readable.fromWeb(downstream.request.body! as never))
       : await sse.handleRequest(downstream.request)
-    // Nothing reads the event stream.
+    // Nothing reads the event stream. What it holds, and the data waiting for it to ask.
     const body = response!.body as PushReadable | PushReadableStream
+    const held = () =>
+      body.bufferedAmount + getChannelMux().getConnectionByConnId<{ waitingBytes: number }>(connId)!.waitingBytes
     downstream.push(encode.reconcile({ open: [{ id: channel.id, ix: 0, lastSeq: 0, initial: true }] }))
     downstream.end()
     await vi.waitFor(() => expect(opened).toBe(true))
@@ -247,7 +250,7 @@ test.each([
     // An event carries its frame in base64.
     // One message past them, and each one's header and event framing.
     const bound = ((CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_MAX_BYTES + 128 * 1024) * 4) / 3
-    expect(body.bufferedAmount).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(body.bufferedAmount).toBeLessThanOrEqual(bound)
+    expect(held()).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
+    expect(held()).toBeLessThanOrEqual(bound)
   },
 )
