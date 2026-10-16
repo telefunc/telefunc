@@ -120,8 +120,8 @@ class RedisTransport implements BroadcastTransport {
   ): Promise<{ seq: number; timestamp: number }> {
     // ioredis 5.x checks `arg instanceof Buffer` to pick its binary path; a raw
     // `Uint8Array` falls into `String(arg)` and gets serialised as a comma-joined
-    // string of byte values, corrupting the bytes. A copy, as ioredis holds the
-    // command while it connects, and the caller may reuse its buffer meanwhile.
+    // string of byte values, corrupting the bytes. A copy, as ioredis may hold the
+    // command past the call (connecting, auto-pipelining, a NOSCRIPT retry).
     const buf = Buffer.from(payload)
     const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
     assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')
