@@ -66,7 +66,7 @@ class PathRoom implements SendRoom {
     this.inPathAt = now
     if (!data) return
     const end = this.sender.transmittedBytes
-    if (!this.releasing && this.queued() + this.sender.unhandedDataBytes === 0) this.appLimitedTo = end
+    if (!this.releasing && this.queued() === 0 && !this.sender.holdsData) this.appLimitedTo = end
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
 

@@ -99,14 +99,13 @@ class PieceSender {
   private readonly carried: (() => Uint8Array<ArrayBuffer> | null)[] = []
   /** The frames counted and not yet handed to the socket, which go in one message as this turn ends, and their bytes with
    *  the LENGTH ahead of each that one followed; whether its last frame needs a LENGTH once one follows it (see
-   *  `messageFrames`), it holds frames that weren't carried, and one of them that goes at once; the bytes of its data
-   *  frames. */
+   *  `messageFrames`), it holds frames that weren't carried, one of them that goes at once, and a data frame. */
   private readonly gathered: Uint8Array<ArrayBuffer>[] = []
   private gatheredBytes = 0
-  private gatheredDataBytes = 0
   private lastVaries = false
   private gatheredSent = false
   private gatheredAtOnce = false
+  private gatheredData = false
   private flushQueued = false
   private closed = false
 
@@ -129,9 +128,9 @@ class PieceSender {
     return this.heldBytes + this.gatheredBytes
   }
 
-  /** The bytes of the data frames sent that its socket doesn't have yet: what it holds waits behind a data frame. */
-  get unhandedDataBytes(): number {
-    return this.heldBytes + this.gatheredDataBytes
+  /** Whether it has data its socket doesn't have yet: what it holds waits behind the rest of a data frame. */
+  get holdsData(): boolean {
+    return this.rest !== null || this.gatheredData
   }
 
   /** The next message it hands the socket carries the frame `frame` returns as that message is sent, if any, ahead of
@@ -207,7 +206,7 @@ class PieceSender {
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.add(frame)
     this.gatheredSent = true
-    if (data) this.gatheredDataBytes += bytes
+    if (data) this.gatheredData = true
     else this.gatheredAtOnce = true
   }
 
@@ -257,8 +256,8 @@ class PieceSender {
     if (n === 0 || this.closed) return
     const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes)
     this.gathered.length = 0
-    this.gatheredBytes = this.gatheredDataBytes = 0
-    this.lastVaries = this.gatheredSent = this.gatheredAtOnce = false
+    this.gatheredBytes = 0
+    this.lastVaries = this.gatheredSent = this.gatheredAtOnce = this.gatheredData = false
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.transmit(message)
   }
