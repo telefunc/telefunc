@@ -899,6 +899,26 @@ describe('Broadcast static bus (publish/subscribe)', () => {
     }
   })
 
+  it("hands the driver the caller's own bytes for a publish sent at once while another key subscribes", async () => {
+    const attempt = new PendingAttempt()
+    const driver = await installOpeningBackend(() => attempt)
+    const frame = new Uint8Array([1])
+    const sent: BroadcastPayload[] = []
+    vi.spyOn(driver, 'publish').mockImplementation((_route, payload) => {
+      sent.push(payload)
+      return { seq: sent.length, timestamp: 1 }
+    })
+    const unsubscribe = Broadcast.subscribeBinary('broadcast:establishing', () => {})
+    try {
+      await Broadcast.publishBinary('broadcast:other', frame)
+      expect(sent).toHaveLength(1)
+      expect(sent[0]).toBe(frame)
+    } finally {
+      attempt.ready()
+      unsubscribe()
+    }
+  })
+
   it('opens channels under a zero config.channel.bufferLimit and holds no publish', async () => {
     const { controlled } = await installPendingSubscriptionBackend({ seq: 1, timestamp: 1 })
     config.channel = { bufferLimit: 0, bufferLimitBinary: 0 }
