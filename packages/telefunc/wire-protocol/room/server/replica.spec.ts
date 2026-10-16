@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MEMBER_CELL_PREFIX } from './cells.js'
 import { Room } from './statics.js'
 import { ServerRoom } from './room.js'
-import { captureHeartbeats, disposeRoomBackend, driver, forceRoomGc, installRoomBackend } from '../../test/room.js'
+import {
+  EVERY_TRACK,
+  captureHeartbeats,
+  declare,
+  disposeRoomBackend,
+  driver,
+  forceRoomGc,
+  installRoomBackend,
+  serve,
+} from '../../test/room.js'
 
 beforeEach(() => installRoomBackend())
 afterEach(disposeRoomBackend)
@@ -57,6 +66,18 @@ describe("a server's handles to one room", () => {
     })()
     await forceRoomGc()
     expect(handle.deref()).toBe(undefined)
+  })
+  it("let a client's stub go once it closes after wanting every track, while a member keeps their view", async () => {
+    const room = (await Room.create('released-stub')) as ServerRoom
+    await room.join()
+    const stub = (() => {
+      const { stub } = serve(room)
+      declare(stub, { __r: 'sub-binary', ...EVERY_TRACK })
+      stub.abort()
+      return new WeakRef(stub)
+    })()
+    await forceRoomGc()
+    expect(stub.deref()).toBe(undefined)
   })
   it('let their view go once no handle holds it, while a member keeps another view, and a Room.get() after that opens a new one', async () => {
     const id = 'shared-view-dropped'
