@@ -33,7 +33,7 @@ async function acquireClosingLease(backend: RoomBackend, roomId: string, current
   const closeLease = { id: crypto.randomUUID(), durationMs: ROOM_CLOSE_LEASE_MS }
   const result = await backend.compareExchangeHead(
     roomId,
-    current.state === 'open' ? { form: 'rev', rev: current.rev } : { form: 'takeover', rev: current.rev },
+    { form: current.state === 'open' ? 'rev' : 'takeover', rev: current.rev },
     {
       head: {
         currentInc: current.currentInc,

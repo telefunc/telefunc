@@ -208,7 +208,7 @@ class ServerRoom extends RoomStateView implements Room {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
       const lost = this._admissions.get(id) === 'abandoned' && !this._model.closed
-      const cause = lost ? ({ type: 'disconnected' } as const) : ({ type: 'left' } as const)
+      const cause: LeaveCause = { type: lost ? 'disconnected' : 'left' }
       await evictMember(this._incarnation, id, identity, cause).catch((error: unknown) => {
         reportRoomError(error)
         this._replica.evictLater(id, identity)
