@@ -714,13 +714,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal Its page takes nothing more of it: the page closed its end, or has all this channel sent it while it has
    *  nothing more to send. */
   _pageNeedsNothing(): boolean {
+    if (this._replayBuffer === null) return false
+    if (this._pageClosed) return true
     return (
-      this._replayBuffer !== null &&
-      (this._pageClosed ||
-        (this._pageLastSeq >= this._replayBuffer.seq &&
-          this._prePeerBuffer.size === 0 &&
-          this._pendingAckRes.length === 0 &&
-          !this._hasPendingEnd()))
+      this._pageLastSeq >= this._replayBuffer.seq &&
+      this._prePeerBuffer.size === 0 &&
+      this._pendingAckRes.length === 0 &&
+      !this._hasPendingEnd()
     )
   }
 
