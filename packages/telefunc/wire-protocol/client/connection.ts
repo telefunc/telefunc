@@ -703,20 +703,14 @@ class ClientConnection implements MuxConnection {
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
-    const replay = this.replayBuffers.get(ix)!
-    const answer = encode.ackRes(ix, replay.seq + 1, ackedSeq, result, status)
-    // The server ends the wire a larger frame arrives on: the send it answers is refused instead.
-    const frame =
-      answer.byteLength <= channel._maxFrameBytes
-        ? answer
-        : encode.ackRes(
-            ix,
-            replay.seq + 1,
-            ackedSeq,
-            `Channel ack answer too large: ${answer.byteLength} bytes encoded, the server accepts ${channel._maxFrameBytes} at most`,
-            ACK_STATUS.ERROR,
-          )
-    this.sendOrQueue(ix, replay.nextSeq(), frame, 'ack')
+    const seq = this.replayBuffers.get(ix)!.nextSeq()
+    let frame = encode.ackRes(ix, seq, ackedSeq, result, status)
+    // The server ends the wire a larger frame arrives on, so the send it answers gets an error instead.
+    if (frame.byteLength > channel._maxFrameBytes) {
+      const error = `Channel ack answer too large: ${frame.byteLength} bytes encoded, the server accepts ${channel._maxFrameBytes} at most`
+      frame = encode.ackRes(ix, seq, ackedSeq, error, ACK_STATUS.ERROR)
+    }
+    this.sendOrQueue(ix, seq, frame, 'ack')
     if (ackedSeq === this.lastSeqByChannel.get(ix)) channel._answered()
   }
 
