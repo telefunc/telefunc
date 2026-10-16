@@ -23,9 +23,10 @@ assertIsNotBrowser()
 /** What holds a room (its non-hidden members and pages' views), and how many joins it had. */
 type HoldCounts = { holds: number; joins: number }
 
-/** `closesAt` is set while nothing holds the room: its unheld timeout after the hold count last changed. `readAt` is
- *  the authority time of the read or exchange that gave the record; app servers' clocks may be off it. */
-type HoldRecord = HoldConfig & HoldCounts & { closesAt?: number; readAt: number }
+/** `closesIn` is set while nothing holds the room: the time from `readAt` until its unheld timeout after the hold count
+ *  last changed. `readAt` is the authority time of the read or exchange that gave the record; app servers' clocks may
+ *  be off it. */
+type HoldRecord = HoldConfig & HoldCounts & { closesIn?: number; readAt: number }
 
 type HoldChange = { before: HoldCounts; after: HoldRecord }
 
@@ -57,7 +58,7 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
   const { emptyTimeout, departureTimeout } = config
   const record: HoldRecord = { emptyTimeout, departureTimeout, holds: holds.value, joins: joins.value, readAt: at }
   const timeout = unheldTimeout(record)
-  if (record.holds <= 0 && timeout !== Infinity) record.closesAt = holds.changedAt + timeout
+  if (record.holds <= 0 && timeout !== Infinity) record.closesIn = holds.changedAt + timeout - at
   return record
 }
 
@@ -92,7 +93,7 @@ function unheldTimeout({ joins, emptyTimeout, departureTimeout }: HoldConfig & H
 function afterHoldChange(room: RoomIncarnation, change: HoldChange | null): void {
   if (change === null) return
   const { before, after } = change
-  if (after.closesAt !== undefined) return scheduleClose(room, after.closesAt - after.readAt)
+  if (after.closesIn !== undefined) return scheduleClose(room, after.closesIn)
   if (before.holds === 0 || before.joins > 0 !== after.joins > 0) {
     void extendLapse(room, after, before.holds === 0).catch(reportRoomError)
   }
@@ -110,7 +111,7 @@ async function createHold(room: RoomIncarnation): Promise<void> {
   if (result === 'stale-inc') throw roomClosedError(room.id)
   assert(result !== 'conflict')
   const record = holdRecord(hold, result.committed)
-  if (record.closesAt !== undefined) scheduleClose(room, record.closesAt - record.readAt)
+  if (record.closesIn !== undefined) scheduleClose(room, record.closesIn)
 }
 
 /** Each heartbeat, after it reaped lapsed sessions: keeps a held room's lapse ahead, or arms the close of
@@ -118,7 +119,7 @@ async function createHold(room: RoomIncarnation): Promise<void> {
 async function maintainHold(room: RoomIncarnation): Promise<void> {
   const record = await readHoldRecord(room)
   if (record === null) return
-  if (record.closesAt !== undefined) scheduleClose(room, record.closesAt - record.readAt)
+  if (record.closesIn !== undefined) scheduleClose(room, record.closesIn)
   else await extendLapse(room, record)
 }
 
@@ -133,13 +134,13 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
     const head = await backend.readHead(id)
     if (!isOpenIncarnation(head, inc)) return null
     const record = await readHoldRecord(room)
-    if (record?.closesAt === undefined) return head
+    if (record?.closesIn === undefined) return head
     const result = await backend.compareExchangeHead(
       id,
       { form: 'rev', rev: head.rev },
       {
         head: { currentInc: inc, state: 'open', config: head.config },
-        ttlMs: record.closesAt - record.readAt + ROOM_LAPSE_AFTER_CLOSE_MS,
+        ttlMs: record.closesIn + ROOM_LAPSE_AFTER_CLOSE_MS,
       },
     )
     return 'conflict' in result ? CX_CONFLICT : result.head
@@ -186,7 +187,7 @@ function scheduleClose(room: RoomIncarnation, closesIn: number): void {
 
 async function closeIfUnheld(room: RoomIncarnation): Promise<void> {
   const record = await readHoldRecord(room)
-  if (record?.closesAt === undefined) return // held again
-  if (record.closesAt > record.readAt) return scheduleClose(room, record.closesAt - record.readAt)
+  if (record?.closesIn === undefined) return // held again
+  if (record.closesIn > 0) return scheduleClose(room, record.closesIn)
   await closeIncarnation(room.id, room.inc)
 }
