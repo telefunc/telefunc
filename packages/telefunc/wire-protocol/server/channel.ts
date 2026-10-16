@@ -248,7 +248,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         : new Promise<void>((resolve, reject) => {
             this._prePeerBuffer.pushText(serialized, resolve, reject, gap)
           })
-      this._closeIfDroppedOffline()
+      this._closeIfDroppedOffline(false)
       return buffered
     }
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
@@ -293,7 +293,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         : new Promise<void>((resolve, reject) => {
             this._prePeerBuffer.pushBinary(data, resolve, reject, gap)
           })
-      this._closeIfDroppedOffline()
+      this._closeIfDroppedOffline(true)
       return buffered
     }
     // Ack-bearing path bypasses credit; see `_send` for rationale.
@@ -836,7 +836,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (peer === null) {
       if (typeof wire === 'string') this._prePeerBuffer.pushPublish(wire, gap)
       else this._prePeerBuffer.pushPublishBinary(wire, gap)
-      this._closeIfDroppedOffline()
+      this._closeIfDroppedOffline(typeof wire !== 'string')
       return
     }
     if (this._flow.isPastByteCredit && this._isPeerBehind()) {
@@ -857,12 +857,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** The buffer for an offline page dropped a publish, or a send where no sender can be refused, that its page doesn't
    *  get again as it attaches: rather than be sent a gap, it gets the end at its next attach. */
-  private _closeIfDroppedOffline(): void {
+  private _closeIfDroppedOffline(binary: boolean): void {
     if (!this._prePeerBuffer.droppedGap) return
+    const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
     this._endWithError(
       ERROR_REASON.OVERFLOW,
       new ChannelOverflowError(
-        'Channel closed: more was sent to its client while it was offline than config.channel.bufferLimit, or bufferLimitBinary for binary, lets the server hold',
+        `Channel closed: more was sent to its client while it was offline than config.channel.${limit} lets the server hold`,
       ),
     )
   }

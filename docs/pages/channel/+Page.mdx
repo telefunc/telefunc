@@ -421,11 +421,11 @@ Channels and broadcasts signal failure through four errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | The client fell too far behind the server's sends, or `bufferLimit` filled while it was offline | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
+| `ChannelOverflowError` | The client fell too far behind the server's sends, or `bufferLimit` (`bufferLimitBinary` for binary) filled while it was offline | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` whose client falls 80 MiB behind (less if you lowered the replay buffers), or misses more than `bufferLimit` while offline, closes with `ChannelOverflowError`. Call its telefunction again to rejoin.
+> A `BroadcastChannel` whose client falls 80 MiB behind (less if you lowered the replay buffers), or misses more than `bufferLimit` (`bufferLimitBinary` for binary) while offline, closes with `ChannelOverflowError`. Call its telefunction again to rejoin.
 
 See also:
 - <Link href="/stream#error-handling" />
