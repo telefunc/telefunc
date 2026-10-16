@@ -53,7 +53,7 @@ import { PathRoom } from './path-room.js'
 import { ServerPieceReceiver } from './server-piece-receiver.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from './socket-wait.js'
-import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
+import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './awaited-channels.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
