@@ -368,8 +368,7 @@ type DecodedFrame = ChannelFrame | ConnCtrlFrame
 
 function writeHeader(frame: Uint8Array, tag: number, index: number, seq: number): void {
   frame[0] = tag
-  frame[1] = index & 0xff
-  frame[2] = (index >> 8) & 0xff
+  writeU16(frame, 1, index)
   writeU32(frame, SEQ_OFFSET, seq)
 }
 
@@ -718,7 +717,7 @@ function peekTag(raw: Uint8Array): number | undefined {
 function decode(frame: Uint8Array): DecodedFrame {
   assertProtocol(frame.length >= HEADER, 'frame too short')
   const tag = frame[0] as number
-  const index = (frame[1] as number) | ((frame[2] as number) << 8)
+  const index = readU16(frame, 1)
   const seq = isSequencedTag(tag) ? readU32(frame, SEQ_OFFSET) : 0
   const payload = frame.subarray(HEADER)
 
