@@ -973,13 +973,13 @@ class RoomState {
     if (!listeners) return
     for (const list of [listeners.dataCbs, listeners.binary?.cbs, listeners.updateCbs, listeners.leaveCbs]) {
       if (!list) continue
-      for (const unlisten of [...(this._listenerCleanups.get(list) ?? [])]) unlisten()
+      for (const unlisten of this._listenerCleanups.get(list) ?? []) unlisten()
       this._listenerCleanups.delete(list)
     }
   }
 
   private _releaseAllListeners(): void {
-    for (const cleanups of [...this._listenerCleanups.values()]) for (const unlisten of [...cleanups]) unlisten()
+    for (const cleanups of this._listenerCleanups.values()) for (const unlisten of cleanups) unlisten()
   }
 
   private _bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {
