@@ -137,7 +137,7 @@ class ServerRoom extends RoomStateView implements Room {
   async join(options?: JoinOptions): Promise<LocalParticipant> {
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
     const admission = { id: crypto.randomUUID(), meta, identity, joinedAt: Date.now(), hidden }
-    const participant = new ServerLocalParticipant(this, admission.id, meta, selfDelivery, identity)
+    const participant = new ServerLocalParticipant(this, { id: admission.id, meta, selfDelivery, identity })
     await this._admit(admission, () => {
       this._localParticipants.set(admission.id, participant)
       this._replica.own(admission.id, this)
@@ -464,14 +464,8 @@ class ServerLocalParticipant extends ParticipantBase {
   /** @internal */ readonly _room: ServerRoom
   private _metaMirror: MetaMirror | null = null
 
-  constructor(
-    serverRoom: ServerRoom,
-    id: string,
-    meta: ParticipantMeta,
-    selfDelivery: boolean,
-    identity: string | null,
-  ) {
-    super({ id, meta, selfDelivery, identity }, serverRoom._model.metaRewinds)
+  constructor(serverRoom: ServerRoom, participant: ConstructorParameters<typeof ParticipantBase>[0]) {
+    super(participant, serverRoom._model.metaRewinds)
     this._room = serverRoom
   }
 
