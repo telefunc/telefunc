@@ -52,7 +52,7 @@ import {
   type RoomJoinedEvent,
   type RoomRosterEvent,
 } from '../protocol.js'
-import { type RoomDataEnvelope } from './protocol.js'
+import type { RoomDataEnvelope } from './protocol.js'
 import { toggle } from './sets.js'
 assertIsNotBrowser()
 

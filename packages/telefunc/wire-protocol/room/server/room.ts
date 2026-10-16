@@ -31,7 +31,7 @@ import {
   type AcceptedMeta,
   type RoomSnapshotMetadata,
 } from '../protocol.js'
-import { type RoomDataEnvelope, type RoomMemberRecord } from './protocol.js'
+import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import { type RoomModel, RoomState, RoomStateView } from '../state.js'
 import { ParticipantBase } from '../participant.js'
 import { MemberMessageTexts, RoomStubChannel } from './stub.js'

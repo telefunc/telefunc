@@ -20,7 +20,7 @@ import {
 } from './constants.js'
 import { DEFAULT_TRACK, decodeBinaryFrame, encodeBinaryFrame } from '../binary.js'
 import { ROOM_BUG_MESSAGE, RoomError, isRoomError, roomAckError, toRoomFailure } from '../errors.js'
-import { type InboxMessage } from '../protocol.js'
+import type { InboxMessage } from '../protocol.js'
 import { HOLDS_CELL_KEY, MEMBER_CELL_PREFIX, SESSION_CELL_PREFIX, memberCellKey } from './cells.js'
 import type { Sender } from '../types.js'
 import { ClientRoom } from '../client.js'

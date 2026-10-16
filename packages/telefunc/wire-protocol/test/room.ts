@@ -79,8 +79,8 @@ import { TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../room/server/constants.js'
 import { DEFAULT_TRACK } from '../room/binary.js'
-import { type RoomSnapshotMetadata } from '../room/protocol.js'
-import { type DemandEntry, type RoomDemandPage } from '../room/server/protocol.js'
+import type { RoomSnapshotMetadata } from '../room/protocol.js'
+import type { DemandEntry, RoomDemandPage } from '../room/server/protocol.js'
 import {
   HOLDS_CELL_KEY,
   JOINS_CELL_KEY,

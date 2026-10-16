@@ -30,7 +30,7 @@ import {
   type RoomCtrlEnvelope,
   type WireLeaveCause,
 } from '../protocol.js'
-import { type HoldConfig, type RoomDataEnvelope, type RoomMemberRecord } from './protocol.js'
+import type { HoldConfig, RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 import {
   dropCells,
