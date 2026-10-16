@@ -76,8 +76,7 @@ type ServerTransport<TConnection> = {
   sendNow(connection: TConnection, frame: Uint8Array<ArrayBuffer>): void
   /** Its peer gets no part of a message until all of it arrived, as on a WebSocket (see `pieces.ts`). */
   wholeMessages: boolean
-  /** Bytes of the frames sent that still wait in the connection, never fewer than there are, or `undefined` where the
-   *  runtime doesn't report them. */
+  /** Bytes of sent frames still in the connection, never undercounted; `undefined` if the runtime can't tell. */
   bufferedAmount(connection: TConnection): number | undefined
   /** The bytes of those a frame that goes at once waits behind, where it passes some: else `bufferedAmount`'s. */
   queuedAhead?(connection: TConnection): number | undefined
@@ -89,8 +88,7 @@ type ServerTransport<TConnection> = {
  *  `finalizeUpgrade` is null when this isn't an SSE→WS upgrade. */
 type ReconcileOutcome = {
   sessionId: string
-  /** Each one's `lastSeq` is read as the RECONCILED goes out, so it counts what the batch carried behind the RECONCILE
-   *  when the transport sends it after that batch. */
+  /** Each `lastSeq` is read as the RECONCILED goes out, so it counts what was dispatched before then. */
   attached: ChannelHandle[]
   finalizeUpgrade: (() => void) | null
   /** The wire this RECONCILED belongs on — a barrier reconciles the staged WS, not the sender. */
@@ -201,8 +199,7 @@ class ChannelMux {
   private readonly stagedUpgrades = new Map<Wire, StagedUpgrade>()
   private readonly stagedByPrevSession = new Map<string, Wire>()
   private stagedBytes = 0
-  /** Channels that ended while their page may still lack their last frames, each with the timer that lets it go once
-   *  its page stays away: none while the page is attached. */
+  /** Ended channels their page may still need, each with the timer releasing it, null while the page is attached. */
   private readonly endedChannels = new Map<ServerChannel, ReturnType<typeof setTimeout> | null>()
 
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
@@ -410,8 +407,7 @@ class ChannelMux {
     let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
     try {
       if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, connection, rawFrame, 'alone')
-      // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
-      // measures. Each is copied as the one before it goes, so copying stops two frames past the ingress budget.
+      // Every frame but the last arrives riding; a LENGTH is taken after the frame it measures.
       assertProtocol(entry.state.pieces, 'frames in one message on a wire that takes no pieces')
       const { receiver } = entry.state.pieces
       const frames = messageFrames(rawFrame)
@@ -501,8 +497,7 @@ class ChannelMux {
     return Promise.resolve(null)
   }
 
-  /** Bytes reached `connection`: a frame that takes longer than the ping deadline to arrive whole shows the
-   *  wire alive while it arrives. */
+  /** Bytes reached `connection`: a frame slower than the ping deadline to arrive shows the wire alive meanwhile. */
   onConnectionBytes(connection: Wire): void {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
@@ -510,8 +505,7 @@ class ChannelMux {
     this.answerArrival(entry, connection)
   }
 
-  /** A PING waits behind what the page sent before it, as an upload on a slow link: a wire whose bytes keep arriving
-   *  is answered all the same, once a ping interval, so the page knows they arrive. */
+  /** A wire whose bytes keep arriving gets a PONG each ping interval, as its PING may wait behind an upload. */
   private answerArrival(entry: ConnectionEntry, connection: Wire): void {
     if (performance.now() - entry.state.pongedAt >= this.options.pingInterval) this.pong(entry, connection, [])
   }
@@ -630,8 +624,7 @@ class ChannelMux {
     return answers
   }
 
-  /** At each of the page's heartbeats, the channels of the session on this wire acknowledge what arrived since their
-   *  last WINDOW, so the page's replay lets it go while a channel is quiet. */
+  /** At each page heartbeat, its session's channels acknowledge what arrived, so the page's replay lets it go. */
   private acknowledgeArrivals(entry: ConnectionEntry, connection: Wire): void {
     const sessionId = entry.transport.getSessionId(connection)
     if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return
@@ -794,8 +787,7 @@ class ChannelMux {
       ctrl.sessionId !== undefined && ctrl.sessionId === transport.getSessionId(connection)
         ? ctrl.sessionId
         : crypto.randomUUID()
-    // What the server sent the page is on a wire that delivers it, unless the page reconnected: the one that holds the
-    // session, or a barrier's old wire, which the page reads to its FIN first.
+    // Replayed only on a reconnect, as the session's own wire and a barrier's old one (read to its FIN) still deliver.
     const replay = !isBarrier && newSessionId !== ctrl.sessionId
     const attached = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection, replay)
     // Its wire no longer has the session it names, which is gone with the handles it had.
@@ -853,8 +845,7 @@ class ChannelMux {
     connection: Wire,
     replay: boolean,
   ): ChannelHandle | null {
-    // Answered ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip
-    // is the path's.
+    // Answered ahead of the channel's frames, and of its registration where awaited: its round trip is the path's.
     if (open.probe !== undefined) entry.state.probed.push({ ix: open.ix, probe: open.probe })
     const awaited = entry.state.awaited.get(open.ix)
     if (awaited) {
@@ -886,8 +877,7 @@ class ChannelMux {
     entry.state.awaited.add(awaited)
   }
 
-  /** Runs in `registerChannel`, so the waiters of several wires attach in the order they began waiting and the latest
-   *  keeps the channel. A reconcile is one synchronous turn, so this lands between two, never within one. */
+  /** Runs in `registerChannel`, between two reconciles: waiters attach in the order they began; the latest keeps it. */
   private attachAwaited(awaited: AwaitedChannel, channel: ServerChannel): void {
     const { entry, wire } = awaited
     const sessionId = entry.transport.getSessionId(wire)
@@ -901,8 +891,7 @@ class ChannelMux {
     }
     this.sessions.add(sessionId, handle)
     awaited.phase = 'attached'
-    // On the wire's recv chain, once the code that registered the channel has added its listeners; the wire holds
-    // what arrives meanwhile. The ATTACH_RESULT follows, so its lastSeq counts what the wire held.
+    // Once the registering code added its listeners; the ATTACH_RESULT follows, so its lastSeq counts what was held.
     const settle = async (): Promise<void> => {
       if (entry.state.awaited.get(awaited.open.ix) !== awaited) return
       if (this.dispatchHeld(awaited)) this.send(wire, encode.attachResult(awaited.open.ix, channel._lastClientSeq))
@@ -933,8 +922,7 @@ class ChannelMux {
     this.send(awaited.wire, encode.attachResult(awaited.open.ix, null))
   }
 
-  /** A channel the old wire awaits moves with the barrier listing it, so the WebSocket awaits it from then on. One
-   *  attached already gets what the old wire held for it first, and the barrier's reconcile moves it as it is. */
+  /** Awaited channels the barrier lists move to the WebSocket; an attached one first gets what the old wire held. */
   private moveAwaited(
     oldEntry: ConnectionEntry,
     wsEntry: ConnectionEntry,
@@ -1055,16 +1043,14 @@ class ChannelMux {
     else entry.transport.sendNow(connection, frame)
   }
 
-  /** Answers the probes of the RECONCILE it reads, ahead of a frame that would go ahead of its RECONCILED. An answer
-   *  measures, so it says no credit ran out, and names no round trip. */
+  /** Answers its RECONCILE's probes ahead of the next frame: each says no credit ran out and names no round trip. */
   private answerProbes(connection: Wire, state: ConnectionState): void {
     const probed = state.probed
     state.probed = []
     for (const { ix, probe } of probed) this.send(connection, encode.bdpPingAck(ix, probe, Infinity, Infinity))
   }
 
-  /** What its channels' flow control allows the wire to hold, less what it holds: `Infinity` where the runtime can't
-   *  tell. */
+  /** What its channels' flow control lets the wire hold, less what it holds; `Infinity` if the runtime can't tell. */
   private sendHeadroom(entry: ConnectionEntry, connection: Wire): number {
     const backlog = this.bufferedAmount(connection)
     if (backlog === undefined) return Infinity
@@ -1119,8 +1105,7 @@ class ChannelMux {
     state.pingTimer = unrefTimer(
       setTimeout(() => {
         state.pingTimer = null
-        // A PING arrives behind what the page queued before it, as an upload on a slow link: the wire is dead once it
-        // has delivered nothing for the deadline, and nothing of what the page announced for the time that takes.
+        // A PING waits behind what the page queued: dead past the deadline after its last bytes and its announced data.
         const deadAt = Math.max(
           state.lastReceivedAt + this.options.pingDeadline,
           state.pieces?.receiver.expectedBy(this.options.pingDeadline) ?? 0,

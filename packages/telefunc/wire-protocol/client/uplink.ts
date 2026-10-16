@@ -3,7 +3,6 @@ export { Uplink }
 import { WIRE_ACK_SHARE, WIRE_REFRESH_SHARE } from '../constants.js'
 import { DRAIN_SPAN_MS, Link, Waits, newestFastest, type SendWait } from '../link.js'
 import { TAG } from '../shared-ws.js'
-import { Fifo } from '../../utils/Fifo.js'
 
 /** A page's uplink: the rate the server takes data at, what the uplink holds, and the shares its control frames take. */
 class Uplink implements SendWait {
@@ -20,72 +19,10 @@ class Uplink implements SendWait {
   private queuedAt = 0
   /** How long the frames that go at once waited behind the uplink, and data did as the peer acknowledged it. */
   private readonly waits = new Waits()
-  /** The credit the channels on this wire granted the peer that reached it. */
-  private grantedBytes = 0
-  private readonly grants = new Fifo<{ bytes: number; at: number }>()
-  private creditArrivedBytes = 0
-  /** In bytes per ms: the fastest of the newest rates the peer's messages arrived at while they kept coming. */
-  private deliveryRate = 0
-  private readonly deliveryRates: number[] = []
-  private deliveredBytes = 0
-  private deliveredFrom = 0
-  private deliveredAt = Number.NEGATIVE_INFINITY
-  /** The span being measured started as the one before it ended, not after a pause. */
-  private deliveryGoesOn = false
   readonly link = new Link()
   /** The acknowledgements and the window refreshes of what this side receives, each within its share of the link. */
   readonly acks = new Share(this.link, WIRE_ACK_SHARE)
   readonly refreshes = new Share(this.link, WIRE_REFRESH_SHARE)
-
-  /** The channels on this wire granted the peer `bytes` more credit: it reaches it once what the uplink holds drained. */
-  granted(bytes: number): void {
-    const rate = this.uplinkRate()
-    this.grantsReached()
-    this.grants.push({ bytes, at: performance.now() + (rate > 0 ? this.inUplink() / rate : 0) })
-  }
-
-  /** `bytes` arrived against the credit the channels on this wire granted. */
-  creditArrived(bytes: number): void {
-    this.creditArrivedBytes += bytes
-  }
-
-  /** A message of `bytes` from the peer arrived at `at`; after a pause a new span starts. */
-  delivered(bytes: number, at: number): void {
-    if (at - this.deliveredAt > DRAIN_SPAN_MS) {
-      this.deliveredFrom = this.deliveredAt = at
-      this.deliveredBytes = 0
-      this.deliveryGoesOn = false
-      return
-    }
-    this.deliveredAt = at
-    this.deliveredBytes += bytes
-    const span = at - this.deliveredFrom
-    if (span < DRAIN_SPAN_MS) return
-    this.deliveryRate = newestFastest(this.deliveryRates, this.deliveredBytes / span)
-    this.deliveredBytes = 0
-    this.deliveredFrom = at
-    this.deliveryGoesOn = true
-  }
-
-  /** How long a frame the peer sends now waits behind what it sent before, while its messages keep coming. */
-  peerQueueWait(): number {
-    const now = performance.now()
-    if (this.deliveryRate === 0 || now - this.deliveredAt > DRAIN_SPAN_MS) return 0
-    // The span so far, or where it just started as the one before it ended, that one.
-    const elapsed = now - this.deliveredFrom
-    const lately = Math.max(
-      this.deliveredBytes / Math.max(1, elapsed),
-      this.deliveryGoesOn && elapsed < DRAIN_SPAN_MS ? this.deliveryRates.at(-1)! : 0,
-    )
-    if (lately < this.deliveryRate / 2) return 0
-    this.grantsReached()
-    return Math.max(0, this.grantedBytes - this.creditArrivedBytes) / this.deliveryRate
-  }
-
-  private grantsReached(): void {
-    const now = performance.now()
-    while (this.grants.length > 0 && this.grants.peek()!.at <= now) this.grantedBytes += this.grants.shift()!.bytes
-  }
 
   /** In bytes per ms, the slower of the drain rate and the rate the newest acknowledgement says data arrived at. */
   uplinkRate(): number {

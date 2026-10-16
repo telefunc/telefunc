@@ -10,7 +10,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-test("Bun's WebSocket handler queues every frame instead of dropping past its default 16 MiB limit", () => {
+test("Bun's WebSocket handler sets no backpressure limit", () => {
   vi.stubGlobal('Bun', {}) // crossws's Bun adapter checks it runs on Bun
   expect(new Telefunc().websocket).toMatchObject({ backpressureLimit: 0 })
 })

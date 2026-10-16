@@ -23,7 +23,6 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { hasProp } from '../../utils/hasProp.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
-import { assertUsage } from '../../utils/assert.js'
 import { isAbort } from '../../node/server/Abort.js'
 import type { ShieldValidators } from '../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
@@ -32,7 +31,8 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS, CHANNEL_CLOSE_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
@@ -313,8 +313,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return CREDIT_WINDOW_MAX_BYTES + this._pastCreditAllowance + this._bufferLimit + this._bufferLimitBinary
   }
 
-  /** What this channel sent once past its credit, and the ack requests the peer hasn't answered, as far as its wire
-   *  still holds them, or all of them where the runtime can't tell. Past `_pastCreditAllowance`, the peer is behind. */
+  /** Whether its sends past credit and unanswered ack requests, as far as its wire holds them, reach the allowance. */
   private _isPeerBehind(): boolean {
     const allowance = this._pastCreditAllowance
     const behind = this._flow.bytesSentPastCredit + this._pendingAckBytes
@@ -413,8 +412,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. An ended
-   *  channel sends only what it made while no peer was attached: its messages, its answers and its end. */
+  /** RECONCILE declarations apply before `onOpen`; an ended channel sends only what it made with no peer attached. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) {
       this._flushPrePeerBuffer(peer)
@@ -446,8 +444,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
    *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
   _dispatchFrame(frame: ChannelFrame): void {
-    // The page's closing frames are sequenced with its data, so a replay repeats none of them. The wire carries a seq's
-    // low 32 bits, read here as the whole from the next one this channel expects.
+    // The wire carries a seq's low 32 bits, widened here from the next one this channel expects.
     if (isSequencedFrame(frame)) {
       frame.seq = seqNear(frame.seq, this._lastClientSeq + 1)
       if (frame.seq) {
@@ -739,8 +736,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._onPageHas(lastSeq)
   }
 
-  /** @internal Its page takes nothing more of it: the page closed its end, or has all this channel sent it while it has
-   *  nothing more to send. */
+  /** @internal Its page takes nothing more of it: it closed its end, or has all this channel sent and nothing waits. */
   _pageNeedsNothing(): boolean {
     if (this._replayBuffer === null) return false
     if (this._pageClosed) return true
@@ -763,12 +759,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     end.abort = end.error = null
   }
 
-  /** What was sent while no peer was attached goes to `peer`. An ended channel's ack requests were rejected as it
-   *  ended, and take no answer. */
+  /** What was sent while no peer was attached goes to `peer`; an ack request rejected at the end takes no answer. */
   private _flushPrePeerBuffer(peer: IndexedPeer): void {
     this._prePeerBuffer.flush({
       sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
-      sendPublish: (msg) => this._flow.countSentBytes(peer.sendPublish(msg)),
+      sendPublish: (msg) => this._flow.countPublishSent(peer.sendPublish(msg)),
       sendBinary: (msg) => this._flow.countSent(peer.sendBinary(msg)),
       sendTextAck: (data, cb) =>
         peer.sendTextAckReq(data, (seq, bytes) => {
@@ -778,7 +773,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         peer.sendBinaryAckReq(data, (seq, bytes) => {
           if (cb) this._addPendingAck(seq, bytes, cb)
         }),
-      sendPublishBinary: (msg) => this._flow.countSentBytes(peer.sendPublishBinary(msg)),
+      sendPublishBinary: (msg) => this._flow.countPublishSent(peer.sendPublishBinary(msg)),
     })
   }
 
@@ -796,8 +791,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._clearPendingEnd()
   }
 
-  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach, in place
-   *  of what the channel held for it, past what it lost. */
+  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
   protected _endWithError(reason: ErrorReason, err: Error): void {
     if (this._didShutdown) return
     this._prePeerBuffer.clear(err)
@@ -817,21 +811,21 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._forwardPublish(wireData, true)
   }
 
-  /** A text (`string`) or binary publish to the page, buffered while it is away, where dropping it leaves a `gap`; a
-   *  page behind is let go. */
+  /** A text (`string`) or binary publish to the page, buffered while it is away (dropping it there leaves a `gap`). */
   private _forwardPublish(wire: string | Uint8Array, gap: boolean): void {
+    const binary = typeof wire !== 'string'
     const peer = this._peer
     if (peer === null) {
-      if (typeof wire === 'string') this._prePeerBuffer.pushPublish(wire, gap)
-      else this._prePeerBuffer.pushPublishBinary(wire, gap)
-      this._closeIfDroppedOffline(typeof wire !== 'string')
+      if (binary) this._prePeerBuffer.pushPublishBinary(wire, gap)
+      else this._prePeerBuffer.pushPublish(wire, gap)
+      this._closeIfDroppedOffline(binary)
       return
     }
     if (this._flow.isPastByteCredit && this._isPeerBehind()) {
       this._closeBehind()
       return
     }
-    this._flow.countSentBytes(typeof wire === 'string' ? peer.sendPublish(wire) : peer.sendPublishBinary(wire))
+    this._flow.countPublishSent(binary ? peer.sendPublishBinary(wire) : peer.sendPublish(wire))
   }
 
   /** A page that can't keep up, where no sender can be refused: once behind, it leaves, on both ends, rather than be
@@ -1094,15 +1088,6 @@ function rejectOverflow(): Promise<never> {
 
 function reportServerChannelError(err: unknown): void {
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
-}
-
-function normalizeCloseTimeout(timeout: number | undefined): number {
-  if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  assertUsage(
-    Number.isFinite(timeout) && timeout >= 0 && timeout <= TIMER_DELAY_MAX_MS,
-    `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
-  )
-  return timeout
 }
 
 /** Server-side channel. `ClientToServer` = messages the server receives; `ServerToClient` = messages the server sends. */

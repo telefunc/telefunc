@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection } from './connection.js'
 import { muxChannelStub } from '../test/mux-channel-stub.js'
-import { lengthPrefixed } from '../test/loopback.js'
+import { lengthPrefixed } from '../test/page-server.js'
 import { reconciled } from '../test/channel-specs.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import type { DecodedFrame, ReconciledPayload } from '../shared-ws.js'

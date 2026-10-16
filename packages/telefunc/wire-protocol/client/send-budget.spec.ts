@@ -10,6 +10,7 @@ import {
 import { PieceSender } from '../pieces.js'
 import { SendBudget } from './send-budget.js'
 import { Uplink } from './uplink.js'
+import { Downlink } from './downlink.js'
 import { TAG } from '../shared-ws.js'
 
 afterEach(() => void vi.restoreAllMocks())
@@ -39,6 +40,7 @@ function open() {
     () => 0,
     5_000,
     uplink,
+    new Downlink(uplink),
     () => {},
   )
   let sent = 0

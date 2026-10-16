@@ -19,9 +19,7 @@ interface PeerSender {
   deliveredBeforeFrame(ms: number): number
 }
 
-/** Wraps a `PeerSender`, encodes frames with a fixed channel index.
- *  Assigns sequence numbers. Frames are added to the replay buffer only once
- *  they are committed to a transport send path. */
+/** Encodes a channel's frames with its index; a sequenced one joins the replay buffer once its wire commits it. */
 class IndexedPeer {
   constructor(
     readonly sender: PeerSender,

@@ -5,8 +5,7 @@ import { PieceReceiver } from '../pieces.js'
 
 /** The server's: it acknowledges data soon, as the page's send budget waits on it, and in its answers. */
 class ServerPieceReceiver extends PieceReceiver {
-  /** Its side answers what arrived: the answer's message acknowledges the data it took, so the page's next request
-   *  doesn't wait for the acknowledgement's timer. */
+  /** Its side answers: the answer carries the acknowledgement, so the page's next request doesn't wait on its timer. */
   answering(): void {
     if (this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeWithNext()
   }
@@ -20,8 +19,7 @@ class ServerPieceReceiver extends PieceReceiver {
     this.acknowledgeTaken(data, announced)
   }
 
-  /** Acknowledges data within `WIRE_SEND_ACK_MS` once it took enough since the last acknowledgement, and soon an
-   *  announced message or more than `WIRE_PIECES_ACK_BYTES`. */
+  /** Acknowledges enough data in `WIRE_SEND_ACK_MS`, and soon past `WIRE_PIECES_ACK_BYTES` or an announced message. */
   private acknowledgeTaken(data: boolean, announced: boolean): void {
     if (data && this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeIn(WIRE_SEND_ACK_MS)
     if (announced || this.took - this.acknowledgedTook > WIRE_PIECES_ACK_BYTES) this.acknowledgeSoon()

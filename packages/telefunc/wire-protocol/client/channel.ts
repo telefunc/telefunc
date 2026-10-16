@@ -41,15 +41,15 @@ import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './session-registry.js'
 import {
-  TIMER_DELAY_MAX_MS,
-  CHANNEL_CLOSE_TIMEOUT_MS,
   FC_PAGE_YIELD_BYTES,
   CHANNEL_TRANSPORT,
   WIRE_MAX_RAW_FRAME_BYTES,
   type ChannelTransports,
 } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
+import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import type { Uplink } from './uplink.js'
+import type { Downlink } from './downlink.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
@@ -299,10 +299,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
-  _onTransportOpen(batched: boolean, uplink: Uplink): void {
+  _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
-    this._flow.attach(uplink)
+    this._flow.attach(uplink, downlink)
     this._fireOpen()
   }
 
@@ -742,22 +742,22 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
   _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
-    this._flow.onArrived()
+    this._flow.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._subscribers.text.list()) {
       if (invokeChannelListener(cb, [parsed, info], this._onListenerError)) return
     }
-    this._flow.onConsumedBytes(bytes)
+    this._flow.onPublishConsumed(bytes)
   }
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
-    this._flow.onArrived()
+    this._flow.onPublishArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._subscribers.binary.list()) {
       if (invokeChannelListener(cb, [data, info], this._onListenerError)) return
     }
-    this._flow.onConsumedBytes(bytes)
+    this._flow.onPublishConsumed(bytes)
   }
 }
 
@@ -771,14 +771,4 @@ function reportingUnexpected(publish: Promise<ChannelPublishAck>): Promise<Chann
     if (classifyTelefuncError(err, isExpectedChannelFailure).kind === 'bug') reportChannelError(err)
   })
   return publish
-}
-
-function normalizeCloseTimeout(timeout: number | undefined): number {
-  if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  if (!Number.isFinite(timeout) || timeout < 0 || timeout > TIMER_DELAY_MAX_MS) {
-    throw new Error(
-      `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
-    )
-  }
-  return timeout
 }

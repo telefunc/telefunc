@@ -1,5 +1,5 @@
 export { FlowControl, replayWindow }
-export type { AttachedWire, ByteWindowKind, FlowControlEmit }
+export type { AttachedDownlink, AttachedUplink, ByteWindowKind, FlowControlEmit }
 
 import { BdpEstimator } from './bdp-estimator.js'
 import type { Link, SendWait } from '../link.js'
@@ -27,12 +27,16 @@ interface FlowControlEmit {
 }
 
 /** The page's uplink, as a channel's credit reads it. */
-type AttachedWire = SendWait & {
+type AttachedUplink = SendWait & {
   readonly link: Link
   readonly refreshes: { wait(): number }
+  noteWait(wait: number): void
+}
+
+/** The page's downlink, as a channel's credit tells it what it granted and what arrived. */
+type AttachedDownlink = {
   granted(bytes: number): void
   creditArrived(bytes: number): void
-  noteWait(wait: number): void
 }
 
 /** The largest window a sender whose replay lanes hold `text` and `binary` bytes gets: what it holds in flight fits. */
@@ -44,7 +48,8 @@ function replayWindow(text: number, binary: number): number {
 class FlowControl {
   private _bdp = new BdpEstimator()
   /** The page's uplink of the last `attach`. */
-  private _uplink: AttachedWire | null = null
+  private _uplink: AttachedUplink | null = null
+  private _downlink: AttachedDownlink | null = null
   // Sender side: what this side has sent, and the peer's limits.
   private _sentBytes = 0
   private _sentMessages = 0
@@ -163,7 +168,7 @@ class FlowControl {
 
   /** Sender-side: count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    this.countSentBytes(bytes)
+    this._countSentBytes(bytes)
     this._sentMessages += 1
   }
 
@@ -197,7 +202,7 @@ class FlowControl {
   onReceived(bytes: number): void {
     this._arrived = true
     this._receivedBytes += bytes
-    this._uplink?.creditArrived(bytes)
+    this._downlink?.creditArrived(bytes)
     if (this._bdp.onReceive(bytes, this._wireWait())) this._emit.bdpPing(this._bdp.probe)
   }
 
@@ -293,14 +298,15 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Attach on `wire`. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
-  attach(wire: AttachedWire): void {
-    if (wire !== this._uplink) {
-      this._uplink = wire
-      wire.granted(this._grantedBytes - this._receivedBytes)
+  /** Attach on `uplink`'s wire. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
+  attach(uplink: AttachedUplink, downlink: AttachedDownlink): void {
+    if (uplink !== this._uplink) {
+      this._uplink = uplink
+      this._downlink = downlink
+      downlink.granted(this._grantedBytes - this._receivedBytes)
       this.reattach()
     }
-    this._bdp.attach(wire.link)
+    this._bdp.attach(uplink.link)
   }
 
   /** Attach on another wire than the last, or the first: the limits go out again, which repairs what the prior lost. */
@@ -322,20 +328,18 @@ class FlowControl {
     this._widened = true
   }
 
-  /** Sender-side: counts a frame in bytes only, a broadcast's publish, which nothing waits on. */
-  countSentBytes(bytes: number): void {
-    const hadCredit = !this.isPastByteCredit
-    this._sentBytes += bytes
-    if (hadCredit) this._sentWithCredit = this._sentBytes
+  /** Sender-side: counts a broadcast's publish, in bytes only, which nothing waits on. */
+  countPublishSent(bytes: number): void {
+    this._countSentBytes(bytes)
   }
 
-  /** Receiver-side: a frame counted in bytes only arrived, which starts no BDP probe. */
-  onArrived(): void {
+  /** Receiver-side: a publish arrived, which starts no BDP probe. */
+  onPublishArrived(): void {
     this._arrived = true
   }
 
-  /** Receiver-side: such a frame of `bytes` was consumed, which takes no message credit. */
-  onConsumedBytes(bytes: number): void {
+  /** Receiver-side: a publish of `bytes` was consumed, which takes no message credit. */
+  onPublishConsumed(bytes: number): void {
     this._consume(bytes, 0)
   }
 
@@ -351,6 +355,12 @@ class FlowControl {
     this._shutdown = true
     if (this._refreshTimer !== null) clearTimeout(this._refreshTimer)
     this._tryWakeCreditWaiters()
+  }
+
+  private _countSentBytes(bytes: number): void {
+    const hadCredit = !this.isPastByteCredit
+    this._sentBytes += bytes
+    if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
   private _consume(bytes: number, messages: number): void {
@@ -387,7 +397,7 @@ class FlowControl {
     this._advertisedBytes = this._consumedBytes
     const limit = this._consumedBytes + this.byteWindow
     if (limit > this._grantedBytes) {
-      this._uplink?.granted(limit - this._grantedBytes)
+      this._downlink?.granted(limit - this._grantedBytes)
       this._grantedBytes = limit
     }
     this._uncountedBytes = 0

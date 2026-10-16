@@ -11,8 +11,7 @@ declare module 'crossws' {
   }
 }
 
-/** `bufferedAmount` reads the socket's: Node's ws and Deno's WebSocket have it, and workerd's WebSocket has none, so a
- *  Durable Object's reads `undefined`. */
+/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. */
 function getTelefuncChannelHooks({
   terminate = (peer) => peer.terminate(),
   bufferedAmount = (peer) => peer.websocket.bufferedAmount,
@@ -34,8 +33,7 @@ function getTelefuncChannelHooks({
     },
     wholeMessages: true,
     bufferedAmount,
-    // Closed at once, as an SSE wire is: a Durable Object peer's terminate() is a close handshake a vanished client
-    // never answers, so its close hook would run late, if at all.
+    // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
     terminateConnection: (peer) => {
       const mux = getChannelMux()
       const permanent = mux.readPermanentTermination(peer)

@@ -7,8 +7,7 @@ import type { ConnectionEntry, Wire } from './mux.js'
 /** What a wire received and hasn't handled yet. */
 type RecvBacklog = { bytes: number; frames: number }
 
-/** An initial channel a RECONCILE on this wire named before the server registered it. The RECONCILED leaves it out,
- *  and an ATTACH_RESULT settles it. */
+/** An initial channel a RECONCILE named while unregistered: left out of the RECONCILED, settled by an ATTACH_RESULT. */
 type AwaitedChannel = {
   /** The latest RECONCILE entry naming it. */
   open: ReconcileOpenEntry
@@ -17,14 +16,12 @@ type AwaitedChannel = {
   wire: Wire
   /** What the page sent it meanwhile, dispatched after its attach. */
   held: { frame: ChannelFrame; bytes: number }[]
-  /** `attached` until what it holds is dispatched. `expired` once `connectTtl` passed, and kept until a RECONCILE no
-   *  longer names it, so one that crossed its ATTACH_RESULT doesn't await it again. */
+  /** `attached` until what it holds is dispatched; `expired` stays while a RECONCILE names it, never awaited again. */
   phase: 'waiting' | 'attached' | 'expired'
   stopWaiting: () => void
 }
 
-/** The channels a wire awaits, by index. What it holds for them counts in its recv backlog until it's dispatched or
- *  dropped. */
+/** The channels a wire awaits, by index; what it holds for them counts in its recv backlog. */
 class AwaitedChannels {
   private readonly byIx = new Map<number, AwaitedChannel>()
 
@@ -60,8 +57,7 @@ class AwaitedChannels {
     awaited.held = []
   }
 
-  /** Awaits no more, and drops what it held for, each channel but those `named`. One attached meanwhile, the RECONCILE
-   *  left out of the session, which ended it. */
+  /** Awaits no more, and drops what it held for, each channel but those `named`. */
   forgetUnnamed(named: Set<number>): void {
     for (const [ix, awaited] of this.byIx) {
       if (named.has(ix)) continue

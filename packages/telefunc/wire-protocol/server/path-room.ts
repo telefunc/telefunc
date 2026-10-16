@@ -12,23 +12,22 @@ class PathRoom implements SendRoom {
   readonly cuts = false
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
-  /** In bytes per ms: the fastest of the newest rates its data arrived at while data waited to go, 0 before any; the
-   *  bytes and ms of arrivals not yet in a rate. */
+  /** In bytes per ms: the fastest of the newest drain rates, 0 before any; `spanBytes` and `spanMs` gather the next. */
   private drainRate = 0
   private readonly drainRates: number[] = []
   private spanBytes = 0
   private spanMs = 0
-  /** In ms, the page's clock from the first data an acknowledgement covered, and the least time an acknowledgement took
-   *  back, up to the clocks' offset: the one that waited least behind what the page sends dates the data. */
+  /** In ms, the page's clock from the first data an acknowledgement covered. */
   private arrivedAt = 0
+  /** In ms, the least time an acknowledgement took back, up to the clocks' offset. */
   private leastBack = Number.POSITIVE_INFINITY
   /** The least time from data handed to the acknowledgement that covered it, `Infinity` before one. */
   private leastRtt = Number.POSITIVE_INFINITY
   /** The data handed and not covered by an acknowledgement: where it ends, of all the sender handed, and when. */
   private readonly sent = new Fifo<{ end: number; at: number }>()
-  /** Where the newest data handed with no data waiting ahead of it ends, of all the sender handed: arrivals up to it
-   *  came at the rate the app sent, not the link's. Whether the sender is sending what it held for room. */
+  /** Where the newest data handed with nothing waiting ahead ends: arrivals up to it came at the app's rate. */
   private appLimitedTo = 0
+  /** Whether the sender is sending what it held for room. */
   private releasing = false
   /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is gathered. */
   private handedSinceData = 0
@@ -59,8 +58,7 @@ class PathRoom implements SendRoom {
     return room - this.pathHolds(performance.now())
   }
 
-  /** `SendRoom`: the path holds what it handed; data the page dates is dated, each part apart, so the first of a burst
-   *  measures the path without it. */
+  /** `SendRoom`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
   handed(bytes: number, data: boolean): void {
     const now = performance.now()
     this.inPath = this.pathHolds(now) + bytes
