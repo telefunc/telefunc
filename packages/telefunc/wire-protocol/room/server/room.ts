@@ -472,6 +472,7 @@ class ServerLocalParticipant extends ParticipantBase {
   /** @internal */
   readonly _room: ServerRoom
   private _metaMirror: MetaMirror | null = null
+  protected readonly _bugMessage = ROOM_BUG_MESSAGE
 
   constructor(serverRoom: ServerRoom, participant: ConstructorParameters<typeof ParticipantBase>[0]) {
     super(participant, serverRoom._model.metaRewinds)
@@ -587,8 +588,6 @@ class ServerLocalParticipant extends ParticipantBase {
   protected _reportError(err: unknown): void {
     reportServerChannelError(err)
   }
-
-  protected readonly _bugMessage = ROOM_BUG_MESSAGE
 
   protected _inboxBufferLimit(): number {
     return getServerConfig().channel.bufferLimit
