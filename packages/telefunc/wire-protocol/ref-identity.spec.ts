@@ -533,9 +533,12 @@ describe('reference identity — full pipeline', () => {
       let sent = 0
       return new ReadableStream<Uint8Array<ArrayBuffer>>({
         pull(controller) {
-          if (sent++ === 32)
-            controller.close() // 2 MiB
-          else controller.enqueue(new Uint8Array(64 * 1024))
+          if (sent++ === 32) {
+            controller.close()
+          } // 2 MiB
+          else {
+            controller.enqueue(new Uint8Array(64 * 1024))
+          }
         },
       })
     }

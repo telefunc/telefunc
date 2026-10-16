@@ -166,11 +166,12 @@ describe('Room at 100,000 members', () => {
   }, 60_000)
   it('reads no page of a room meta of 100,000 keys in a heartbeat tick while the view holds every write', async () => {
     const room = await create('meta-steady-tick')
-    for (let from = 0; from < 100_000; from += 10_000)
+    for (let from = 0; from < 100_000; from += 10_000) {
       await Room.setAttributes(
         room.id,
         Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
       )
+    }
     const observer = await view(room.id)
     observer.onUpdate(() => {})
     await syncOf(observer)._heartbeatTick()
@@ -203,8 +204,9 @@ describe('Room at 100,000 members', () => {
       const held = Array.from({ length: 100 }, () => {
         const stub = register(observer)
         const { peer } = attachPeer(stub)
-        for (let i = 0; i < ROOM_TRACK_WANTS_MAX; i++)
+        for (let i = 0; i < ROOM_TRACK_WANTS_MAX; i++) {
           stub._onPeerMessage(stringify({ __r: 'sub-binary', member: publisher.id, track: `t${i}`, on: true }), 0)
+        }
         return { stub, peer }
       })
       await subsOf(observer).binaryReady()
@@ -383,8 +385,9 @@ describe('Room at 100,000 members', () => {
     for (let c = 0; c < 1_000; c++) {
       const stub = register(observer)
       attachPeer(stub)
-      for (let i = 0; i < 100; i++)
+      for (let i = 0; i < 100; i++) {
         stub._onPeerMessage(stringify({ __r: 'sub-binary', member: publisher.id, track: `c${c}t${i}`, on: true }), 0)
+      }
     }
     await subsOf(observer).binaryReady()
     await settled()
@@ -394,11 +397,12 @@ describe('Room at 100,000 members', () => {
   }, 60_000)
   it('merges one key into a room meta of 100,000 keys with both event loops turning, a view and a client applying it', async () => {
     const room = await create('meta-merge-turns')
-    for (let from = 0; from < 100_000; from += 10_000)
+    for (let from = 0; from < 100_000; from += 10_000) {
       await Room.setAttributes(
         room.id,
         Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
       )
+    }
     const observer = await view(room.id)
     const peer = attachPeer(register(observer))
     // The attach is done once its roster went out.
@@ -410,8 +414,9 @@ describe('Room at 100,000 members', () => {
     const { client, emit } = fakeClient(room.id)
     let fed = 0
     const feed = () => {
-      for (const frame of peer.decoded().slice(fed))
+      for (const frame of peer.decoded().slice(fed)) {
         if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
+      }
       fed = peer.decoded().length
     }
     feed()
@@ -447,8 +452,9 @@ describe('Room at 100,000 members', () => {
     client.onJoin(() => {})
     let fed = 0
     const feed = () => {
-      for (const frame of peer.decoded().slice(fed))
+      for (const frame of peer.decoded().slice(fed)) {
         if (frame.tag === TAG.PUBLISH) emit(parse(frame.text), frame.info.seq)
+      }
       fed = peer.decoded().length
     }
     await vi.waitFor(() => {

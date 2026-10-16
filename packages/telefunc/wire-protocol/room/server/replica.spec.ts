@@ -7,7 +7,7 @@ import { captureHeartbeats, disposeRoomBackend, driver, forceRoomGc, installRoom
 beforeEach(() => installRoomBackend())
 afterEach(disposeRoomBackend)
 describe("a server's handles to one room", () => {
-  for (const handles of [1, 10, 100, 1_000])
+  for (const handles of [1, 10, 100, 1_000]) {
     it(`read no member list and write once per heartbeat, at ${handles} handles on 10,000 members`, async () => {
       const heartbeats = captureHeartbeats()
       const room = await Room.create(`shared-view-${handles}`)
@@ -33,6 +33,7 @@ describe("a server's handles to one room", () => {
       const written = writes.mock.calls.flatMap(([, , { mutations }]) => mutations.map(({ key }) => key))
       expect({ memberReads, written }).toEqual({ memberReads: 0, written: [expect.stringMatching(/^session:/)] })
     }, 120_000)
+  }
   it('let their view go once no handle holds it, while a member keeps another view, and a Room.get() after that opens a new one', async () => {
     const id = 'shared-view-dropped'
     const dropped = await (async () => {

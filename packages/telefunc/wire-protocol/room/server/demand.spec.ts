@@ -149,9 +149,11 @@ describe('room demand lifecycle', () => {
     const commitLane = backend.commitLane.bind(backend)
     let excepted = 0
     vi.spyOn(backend, 'commitLane').mockImplementation((...args) => {
-      if (args[2].kind === 'demand')
-        for (const want of decodeDemandPage(decodeRoomText(args[3])).wants)
+      if (args[2].kind === 'demand') {
+        for (const want of decodeDemandPage(decodeRoomText(args[3])).wants) {
           if ('except' in want) excepted += Array.isArray(want.except) ? want.except.length : 1
+        }
+      }
       return commitLane(...args)
     })
     // Each joins unheard by the handle's own listener.

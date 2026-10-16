@@ -411,8 +411,9 @@ describe('Room public behavior', () => {
     expect((await Room.list()).map(({ id }) => id)).toEqual(['list-open'])
   })
   it('lists rooms in code point order, as the Redis and Cloudflare backends do', async () => {
-    for (const id of ['order:a', 'order:\u{1f600}', 'order:é', 'order:\uff01', 'order:B', 'order:f'])
+    for (const id of ['order:a', 'order:\u{1f600}', 'order:é', 'order:\uff01', 'order:B', 'order:f']) {
       await Room.create(id)
+    }
     expect((await Room.list({ prefix: 'order:' })).map(({ id }) => id)).toEqual([
       'order:B',
       'order:a',
@@ -3428,8 +3429,9 @@ describe('Room public behavior', () => {
     const authority = (await Room.create('retained-track-want')) as ServerRoom
     const members = await Promise.all(Array.from({ length: 100 }, () => authority.join()))
     const retaining = members.slice(0, 3)
-    for (const [i, member] of retaining.entries())
+    for (const [i, member] of retaining.entries()) {
       await member.publishBinary(new Uint8Array([i]), { track: 'screen', retain: true })
+    }
     await members[3]!.publishBinary(new Uint8Array([9]), { track: 'camera', retain: true })
     const observer = await Room.get(authority.id)
     const listRetained = vi.spyOn(driver, 'listRetained')
@@ -3499,8 +3501,9 @@ describe('Room public behavior', () => {
     streamer.onDemand((track, on) => void (on || withdrawn.push(track)))
     const streamed: number[] = []
     const tracks = Array.from({ length: 17 }, (_, i) => `t${i}`)
-    for (const track of tracks)
+    for (const track of tracks) {
       room.subscribeBinary((data, info) => void (info.track === 't0' && streamed.push(data[0]!)), { track })
+    }
     const everyTrack = () => members.map(({ id }) => everyTrackLaneKey(id)).sort()
     await vi.waitFor(() => expect(binaryLanes(room)).toEqual(everyTrack()))
     let published = 0
@@ -3524,8 +3527,9 @@ describe('Room public behavior', () => {
     const other = await anotherServer()
     const viewer = (await other.Room.get(room.id)) as ServerRoom
     const frames: string[] = []
-    for (const track of trackNames(17))
+    for (const track of trackNames(17)) {
       viewer.subscribeBinary((data, info) => frames.push(`${info.track}:${data[0]}`), { track })
+    }
     const everyTrack = (ids: string[]) => ids.map(everyTrackLaneKey).sort()
     await vi.waitFor(() => expect(binaryLanes(viewer)).toEqual(everyTrack(members.map(({ id }) => id))))
     const release = delayDriverLane((lane) => lane.kind === 'binary-all', other)
@@ -3692,8 +3696,9 @@ describe('Room public behavior', () => {
     const observer = (await Room.get(authority.id)) as ServerRoom
     const stub = register(observer)
     const subscribeLane = vi.spyOn(getRoomBackend(), 'subscribeLane')
-    for (let i = 0; i < 100; i++)
+    for (let i = 0; i < 100; i++) {
       declare(stub, { __r: 'sub-binary', member: crypto.randomUUID(), track: 'screen', on: true })
+    }
     await observer.getParticipants()
     expect(subscribeLane.mock.calls.filter(([, , lane]) => lane.kind === 'binary')).toEqual([])
   })
@@ -3954,8 +3959,9 @@ describe('Room public behavior', () => {
       return { track, frames }
     })
     await subsOf(observer).binaryReady()
-    for (const round of [0, 1, 2])
+    for (const round of [0, 1, 2]) {
       for (const { track } of received) await publisher.publishBinary(new Uint8Array([round]), { track })
+    }
     await vi.waitFor(() => expect(received.every(({ frames }) => frames.length === 3)).toBe(true))
     expect(received.filter(({ frames }) => frames.join() !== '0,1,2')).toEqual([])
   })
@@ -3990,8 +3996,9 @@ describe('Room public behavior', () => {
     )
     await observer.getParticipants()
     await subsOf(observer).binaryReady()
-    for (const track of trackNames(1_000))
+    for (const track of trackNames(1_000)) {
       for (const member of [a, b]) await member.publishBinary(new Uint8Array([1]), { track })
+    }
     for (const member of [a, b]) await member.publishBinary(new Uint8Array([2]), { track: 't500' })
     await vi.waitFor(() => expect([...frames].sort()).toEqual(['a:t500:1', 'a:t500:2', 'b:t500:1', 'b:t500:2']))
   })
@@ -4136,8 +4143,9 @@ describe('Room public behavior', () => {
   it("replays a retained frame on one of a member's 1,000 tracks once to a late every-track subscriber, and drops it when the member leaves", async () => {
     const room = await Room.create('retained-of-thousand')
     const publisher = await room.join()
-    for (const track of trackNames(1_000))
+    for (const track of trackNames(1_000)) {
       await publisher.publishBinary(new Uint8Array([1]), { track, retain: track === 't700' })
+    }
     const retained = () => [...memoryState.rooms.get(room.id)!.gens.values()].flatMap((gen) => [...gen.retained.keys()])
     expect(retained()).toEqual([encodeLaneKey({ kind: 'binary', member: publisher.id, track: 't700' })])
     const observer = await Room.get(room.id)
@@ -4192,15 +4200,18 @@ describe('Room public behavior', () => {
         // A client names at most ROOM_TRACK_WANTS_MAX tracks of a room.
         const stubs = Array.from({ length: Math.ceil(count / ROOM_TRACK_WANTS_MAX) }, () => register(observer))
         const elapsed = await timeOutsideGc(async () => {
-          for (const [n, track] of trackNames(count).entries())
-            if (through === "clients' declarations")
+          for (const [n, track] of trackNames(count).entries()) {
+            if (through === "clients' declarations") {
               declare(stubs[Math.floor(n / ROOM_TRACK_WANTS_MAX)]!, {
                 __r: 'sub-binary',
                 member: publisher.id,
                 track,
                 on: true,
               })
-            else remote.subscribeBinary(() => {}, { track })
+            } else {
+              remote.subscribeBinary(() => {}, { track })
+            }
+          }
           await subsOf(observer).binaryReady()
         })
         // Its clients never connect: they end here, not when the close's wait for them ends, in a later spec.

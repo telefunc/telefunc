@@ -149,8 +149,9 @@ class SubscriptionManager<Source> {
       let waits = this._establishingWaits(sources, partition);
       waits.length > 0;
       waits = this._establishingWaits(sources, partition)
-    )
+    ) {
       await Promise.all(waits)
+    }
   }
 
   /** A slot is establishing until it is first ready, stopped or ended. */

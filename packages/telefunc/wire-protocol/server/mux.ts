@@ -859,8 +859,9 @@ class ChannelMux {
       const prev = this.sessions.removeSession(prevSessionId)
       if (prev) {
         const keptIxes = new Set(handles.map((h) => h.ix))
-        for (const [ix, prevHandle] of prev)
+        for (const [ix, prevHandle] of prev) {
           if (!keptIxes.has(ix)) this.detachHandle(prevHandle, DETACH_REASON.RECOVERY_FAILED)
+        }
       }
     }
     this.sessions.setSession(newSessionId, handles)

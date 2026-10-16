@@ -166,12 +166,13 @@ test("reads integer replies as ioredis returns them, numbers or, with a shared c
   for (const reply of [
     [7, 1_700_000_000_000, 2],
     ['7', '1700000000000', '2'],
-  ])
+  ]) {
     expect(REDIS_COMMANDS.publish.parse(reply, publishInput)).toEqual({
       seq: 7,
       timestamp: 1_700_000_000_000,
       receivers: 2,
     })
+  }
 })
 
 test('names Pub/Sub channels per database, as Pub/Sub spans every database', async () => {

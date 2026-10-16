@@ -180,8 +180,9 @@ test('an every-track lane drops a frame only when it is late on its own lane, as
     ['mic', 2],
     ['mic', 2],
     ['camera', 6],
-  ] as const)
+  ] as const) {
     sockets[0]!.deliver(channel, everyTrackFrame(`binary:m:${lane}`, seq, lane))
+  }
   expect(received).toEqual(['camera@5', 'mic@1', 'mic@2', 'camera@6'])
 })
 
@@ -203,8 +204,9 @@ test('an every-member lane drops a frame only when it is late on its own lane, a
     ['b', 2],
     ['b', 2],
     ['a', 6],
-  ] as const)
+  ] as const) {
     sockets[0]!.deliver(channel, everyTrackFrame(`binary:${member}:mic`, seq, member))
+  }
   expect(received).toEqual(['a@5', 'b@1', 'b@2', 'a@6'])
 })
 
@@ -226,8 +228,9 @@ test('a frame that arrives past a missing one waits for it, and both go out in o
     ['a', 4],
     ['b', 8],
     ['a', 2],
-  ] as const)
+  ] as const) {
     sockets[0]!.deliver(channel, everyTrackFrame(`binary:${member}:mic`, seq, member))
+  }
   expect(received).toEqual(['a@1', 'b@7', 'b@8', 'a@2', 'a@3', 'a@4'])
 })
 
@@ -281,8 +284,9 @@ test('a lane whose seq a failover rewound goes on from the rewound frame, and a 
     [6, 21, 'd'],
     [4, 9, 'late'],
     [7, 22, 'e'],
-  ] as const)
+  ] as const) {
     sockets[0]!.deliver(channel, orderingFrame(seq, payload, timestamp))
+  }
   expect(received).toEqual(['a@5', 'b@6', 'c@5', 'd@6', 'e@7'])
 })
 
@@ -314,8 +318,9 @@ test("a fan-in frame that arrives just ahead of its lane's first after subscribi
     ['mic', 2],
     ['camera', 5],
     ['mic', 1],
-  ] as const)
+  ] as const) {
     sockets[0]!.deliver(channel, everyTrackFrame(`binary:m:${lane}`, seq, lane))
+  }
   expect(received).toEqual(['camera@5', 'camera@6', 'mic@1', 'mic@2'])
 })
 
@@ -331,8 +336,9 @@ test('a frame that arrives while its lane is being read goes out once the read i
     [4, 'counted'],
     [6, 'b'],
     [5, 'a'],
-  ] as const)
+  ] as const) {
     sockets[0]!.deliver(channel, orderingFrame(seq, payload))
+  }
   read.resolve(new Map([['', { seq: 4, timestamp: 1 }]]))
   await untilReady(attempt)
   expect(received).toEqual(['a@5', 'b@6'])

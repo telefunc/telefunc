@@ -325,8 +325,9 @@ describe('memory backend behind the supervised consumer', () => {
       binary('m:1', 'camera'),
       binary('other', ''),
       semanticLane,
-    ])
+    ]) {
       await backend.commitLane('retained-of', 'inc-1', lane, encoder.encode('frame'), { retain: true })
+    }
     const scan = vi.spyOn(memoryState.rooms.get('retained-of')!.gens.get('inc-1')!.retained, 'values')
     const listed = () => backend.listRetained('retained-of', 'inc-1', { member: 'm' })
     expect(await listed()).toEqual([binary('m', 'camera'), binary('m', '')])
@@ -344,12 +345,14 @@ describe('memory backend behind the supervised consumer', () => {
       { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
     )
     const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
-    for (let i = 0; i < 1000; i++)
+    for (let i = 0; i < 1000; i++) {
       await backend.commitLane('retained-of-track', 'inc-1', binary(`m${i}`, 'mic'), encoder.encode('frame'), {
         retain: true,
       })
-    for (const lane of [binary('a', 'camera'), binary('b', 'camera'), binary('a', 'camera:1'), semanticLane])
+    }
+    for (const lane of [binary('a', 'camera'), binary('b', 'camera'), binary('a', 'camera:1'), semanticLane]) {
       await backend.commitLane('retained-of-track', 'inc-1', lane, encoder.encode('frame'), { retain: true })
+    }
     const retained = memoryState.rooms.get('retained-of-track')!.gens.get('inc-1')!.retained
     const scan = vi.spyOn(retained, 'values')
     const reads = vi.spyOn(retained, 'get')

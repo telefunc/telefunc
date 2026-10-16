@@ -70,8 +70,9 @@ describe('room protocol validation', () => {
     const stub = register(room)
     const subscribed = countBinarySubscriptions()
     const subs = subsOf(room)
-    for (const track of trackNames(ROOM_TRACK_WANTS_MAX))
+    for (const track of trackNames(ROOM_TRACK_WANTS_MAX)) {
       declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+    }
     await subs.binaryReady()
     expect(subs._binary.size + subs._everyMember.size).toBe(0)
     expect(binaryLanes(room)).toEqual(members.map(({ id }) => everyTrackLaneKey(id)).sort())
@@ -89,8 +90,9 @@ describe('room protocol validation', () => {
       })
       const { report, published } = spyGossip(room)
       const stub = register(room)
-      for (const track of trackNames(ROOM_TRACK_WANTS_MAX))
+      for (const track of trackNames(ROOM_TRACK_WANTS_MAX)) {
         declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+      }
       await vi.waitFor(() => expect(demanded.every((tracks) => tracks.size === ROOM_TRACK_WANTS_MAX)).toBe(true), {
         timeout: 10_000,
       })
@@ -167,10 +169,11 @@ describe('room protocol validation', () => {
     const room = (await Room.create('demand-told-whole')) as ServerRoom
     const members = await Promise.all(Array.from({ length: 20_000 }, () => room.join()))
     const told = new Map<string, boolean[]>()
-    for (const member of members)
+    for (const member of members) {
       member.onDemand((track, wanted) => {
         if (track === 'cam') told.set(member.id, [...(told.get(member.id) ?? []), wanted])
       })
+    }
     room.subscribeBinary(() => {})
     await subsOf(room).binaryReady()
     const stubs = Array.from({ length: Math.ceil(members.length / ROOM_TRACK_WANTS_MAX) }, () => register(room))
@@ -404,8 +407,9 @@ describe('room protocol validation', () => {
     expect(Object.hasOwn(mergeAttributes(merged, attrs), '__proto__')).toBe(false)
     const member = crypto.randomUUID()
     expect(decodeBinaryWantChange({ member, track: 'screen', on: true })).toEqual({ member, track: 'screen', on: true })
-    for (const id of ['__proto__', 'not-a-member-id'])
+    for (const id of ['__proto__', 'not-a-member-id']) {
       expect(() => decodeBinaryWantChange({ member: id, track: null, on: true })).toThrow(ProtocolViolationError)
+    }
   })
   it('rejects non-record metadata and malformed UTF-8 instead of normalizing them', () => {
     const memberId = crypto.randomUUID()

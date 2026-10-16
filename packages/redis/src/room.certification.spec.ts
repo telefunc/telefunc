@@ -304,8 +304,9 @@ await read()`,
       { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
     )
     const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
-    for (const lane of [binary('m', 'camera'), binary('m', ''), binary('other', ''), { kind: 'semantic' } as const])
+    for (const lane of [binary('m', 'camera'), binary('m', ''), binary('other', ''), { kind: 'semantic' } as const]) {
       await backend.commitLane('retained-of', 'inc', lane, bytes('frame'), { retain: true })
+    }
     const listed = async () => (await backend.listRetained('retained-of', 'inc', { member: 'm' })).map(encodeLaneKey)
     expect((await listed()).sort()).toEqual(['binary:m:', 'binary:m:camera'])
     await backend.deleteRetained('retained-of', 'inc', binary('m', 'camera'))
@@ -401,15 +402,17 @@ await read()`,
       { head: { currentInc: 'inc', state: 'open', config: bytes('config') } },
     )
     const binary = (member: string, track: string) => ({ kind: 'binary', member, track }) as const
-    for (let i = 0; i < 100; i++)
+    for (let i = 0; i < 100; i++) {
       await backend.commitLane('retained-of-track', 'inc', binary(`m${i}`, 'mic'), bytes('frame'), { retain: true })
+    }
     for (const lane of [
       binary('a', 'camera'),
       binary('b', 'camera'),
       binary('a', 'camera:1'),
       { kind: 'semantic' } as const,
-    ])
+    ]) {
       await backend.commitLane('retained-of-track', 'inc', lane, bytes('frame'), { retain: true })
+    }
     const { _publisher, _prefix } = backend as unknown as { _publisher: Redis | Cluster; _prefix: string }
     const reads = vi.spyOn(_publisher, 'smembers')
     const listed = async (track: string) =>
@@ -545,11 +548,12 @@ await read()`,
     installRedis(redis, { prefix })
     onTestFinished(() => disposeBackend())
     const room = await Room.create('meta-pages')
-    for (let from = 0; from < 100_000; from += 10_000)
+    for (let from = 0; from < 100_000; from += 10_000) {
       await Room.setAttributes(
         room.id,
         Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
       )
+    }
     const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
     await Promise.all(nodes.map((node) => node.slowlog('RESET')))
     expect(Object.keys((await Room.get(room.id)).meta)).toHaveLength(100_000)
@@ -565,11 +569,12 @@ await read()`,
     installRedis(redis, { prefix })
     onTestFinished(() => disposeBackend())
     const room = await Room.create('meta-merge')
-    for (let from = 0; from < 100_000; from += 10_000)
+    for (let from = 0; from < 100_000; from += 10_000) {
       await Room.setAttributes(
         room.id,
         Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])),
       )
+    }
     const observer = await Room.get(room.id)
     // Ended before the backend is, so nothing of this view reaches for a backend after it.
     onTestFinished(observer.onUpdate(() => {}))
@@ -622,8 +627,9 @@ await read()`,
     const room = await Room.create('member-meta-merge')
     const member = await room.join()
     onTestFinished(() => member.leave())
-    for (let from = 0; from < 100_000; from += 10_000)
+    for (let from = 0; from < 100_000; from += 10_000) {
       await member.setAttributes(Object.fromEntries(Array.from({ length: 10_000 }, (_, i) => [`k${from + i}`, i])))
+    }
     const observer = await Room.get(room.id)
     // Ended before the backend is, so nothing of this view reaches for a backend after it.
     onTestFinished(observer.onJoin(() => {}))
