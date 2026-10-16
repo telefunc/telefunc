@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { DEFAULT_TRACK } from './binary.js'
-import { RoomState } from './state.js'
 import { disposeRoomBackend, installRoomBackend, newState } from '../test/room.js'
 
 beforeEach(() => installRoomBackend())

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { ProtocolViolationError, decode } from '../../shared-ws.js'
+import { ProtocolViolationError } from '../../shared-ws.js'
 import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
 import {
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,

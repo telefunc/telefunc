@@ -15,14 +15,7 @@ import {
   type TrackKey,
 } from '../binary.js'
 import { participantLeftError, roomClosedError, ROOM_BUG_MESSAGE } from '../errors.js'
-import {
-  assertKnownOptions,
-  mergeAttributes,
-  normalizeJoinOptions,
-  ownMessage,
-  ownMetadata,
-  recipientId,
-} from '../model.js'
+import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetadata, recipientId } from '../model.js'
 import {
   inboxMessageFromWire,
   type SenderStamp,

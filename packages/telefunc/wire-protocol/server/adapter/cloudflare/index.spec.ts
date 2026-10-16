@@ -431,7 +431,7 @@ describe('cloudflare adapter entrypoint', () => {
     expect(upgradeResponse).toBeInstanceOf(Response)
     expect(mocks.crosswsAdapter.handleDurableUpgrade).toHaveBeenCalled()
 
-    const response = await instance.fetch(
+    await instance.fetch(
       new Request('https://telefunc.test/_telefunc', {
         headers: { 'x-telefunc-broadcast-bucket': 'weur' },
       }),

@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ChannelClosedError } from '../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
-import { stringify } from '@brillout/json-serializer/stringify'
 import { CHANNEL_TRANSPORT } from '../constants.js'
 import { ACK_STATUS, TAG } from '../shared-ws.js'
 import { createDeferred } from '../../utils/createDeferred.js'
@@ -16,7 +15,6 @@ import { roomRemoteReviver } from './response-client.js'
 import type { InternalClientReviverContext } from '../types.js'
 import {
   attachPeer,
-  declare,
   disposeRoomBackend,
   fakeClient,
   forceRoomGc,
@@ -25,7 +23,6 @@ import {
   joinThrough,
   pendingClientJoin,
   register,
-  relayed,
   retainOnlyCallbackRemote,
   retainOnlyDepartedParticipant,
   retainOnlyJoinedParticipant,

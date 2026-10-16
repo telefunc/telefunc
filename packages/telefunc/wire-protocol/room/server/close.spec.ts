@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { parse } from '@brillout/json-serializer/parse'
-import { decode } from '../../shared-ws.js'
 import {
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SESSION_TTL_MS,

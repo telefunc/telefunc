@@ -21,13 +21,11 @@ import { PendingDmAcks } from './dm-acks.js'
 import { reportRoomError } from './errors.js'
 import { GossipOutbox } from './gossip.js'
 import {
-  CONTROL_LANE,
   SEMANTIC_LANE,
   commitControl,
   decodeDemandPage,
   decodeLaneEnvelope,
   decodeRoomText,
-  encodeRoomRecord,
   openConfig,
   withinRoomHorizon,
 } from './lanes.js'

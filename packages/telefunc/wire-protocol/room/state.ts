@@ -19,11 +19,10 @@ import {
   type BinaryWantChange,
   type TrackKey,
 } from './binary.js'
-import { assertKnownOptions, ownLeaveCause, ownMetadata, removedCause, senderOf } from './model.js'
+import { assertKnownOptions, ownLeaveCause, removedCause, senderOf } from './model.js'
 import { RoomMetaState } from './meta-state.js'
 import { MemberMeta, type MetaRewinds } from './member-meta.js'
 import type {
-  AcceptedMeta,
   MemberMetaUpdate,
   MemberSnapshot,
   MemberWants,

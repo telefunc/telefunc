@@ -6,7 +6,6 @@ export {
   memoryState,
   installRoomBackend,
   disposeRoomBackend,
-  here,
   anotherServer,
   lapseSessionOf,
   attachPeer,

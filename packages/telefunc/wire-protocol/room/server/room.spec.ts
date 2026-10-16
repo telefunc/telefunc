@@ -3,7 +3,7 @@ import { ChannelOverflowError } from '../../channel-errors.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { CHANNEL_PING_INTERVAL_MS, CHANNEL_RECONNECT_TIMEOUT_MS } from '../../constants.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../../shared-ws.js'
+import { ACK_STATUS, ProtocolViolationError, TAG } from '../../shared-ws.js'
 import { ShieldValidationError, isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { Abort } from '../../../shared/Abort.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
@@ -58,10 +58,8 @@ import {
   disposeRoomBackend,
   driver,
   EVERY_TRACK,
-  expire,
   failoverPoint,
   fakeClient,
-  here,
   holdLaneDelivery,
   installRoomBackend,
   joinThrough,
@@ -81,7 +79,6 @@ import {
   semanticFrames,
   semanticLane,
   serve,
-  snapshot,
   spyGossip,
   standaloneParticipant,
   stubIndexOf,
