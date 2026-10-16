@@ -212,7 +212,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     return this._ackRoomResult(seq, this._publishBinary(decodeStubBinaryFrame(framed), framed))
   }
 
-  // Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`.
+  /** Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`. */
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
     if (kind === 'binary' || on === this._wantsText) return
     const before = on ? { all: this._wantsText, members: new Map<string, boolean>() } : null

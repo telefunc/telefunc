@@ -519,7 +519,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     return getOrCreate(room.gens, inc, newGeneration)
   }
 
-  // Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch.
+  /** Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch. */
   private _liveHead(room: RoomRecord | undefined): StoredHead | null {
     const head = room?.head ?? null
     return head === null || isExpired(head, this._state.now()) ? null : head
