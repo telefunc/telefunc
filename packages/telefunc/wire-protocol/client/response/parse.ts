@@ -166,8 +166,9 @@ async function reviveResponse(
   if (body.includes(SERIALIZER_PREFIX_ROOM_STEM)) {
     roomTypes = (await import('../../room/response-client.js')).roomTypes
     // Aborted during the load, before any revived value listens for it.
-    if (callContext.abortController.signal.aborted)
+    if (callContext.abortController.signal.aborted) {
       throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
+    }
   }
   const reviver = createStreamingReviver(
     context,

@@ -107,8 +107,9 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     const now = Date.now()
     const key = encodeLaneKey(lane)
     const outcome = this.#transaction((sql): StaleCommit | { mark: OrderingInfo; routes: RouteInstallation[] } => {
-      if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now))
+      if (!commitPreconditionHolds(readLiveHead(sql, now), inc, lane.kind, opts?.closingLease, now)) {
         return { stale: 'incarnation' }
+      }
       if (opts?.requiredCellKeys !== undefined) {
         const required = readCells(sql, inc, { keys: opts.requiredCellKeys }, now)
         assert(!('staleInc' in required)) // the precondition just found this incarnation open
@@ -158,8 +159,9 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   async registerRoute(route: RouteInstallation): Promise<RegisterWire> {
     const now = Date.now()
     const result = this.#transaction((sql): RegisterWire => {
-      if (!isOpenIncarnation(readLiveHead(sql, now), route.inc))
+      if (!isOpenIncarnation(readLiveHead(sql, now), route.inc)) {
         return { rejected: true, reason: `room has no open incarnation '${route.inc}'` }
+      }
       upsertRoute(sql, route, now)
       return { ok: true }
     })

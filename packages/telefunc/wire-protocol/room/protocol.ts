@@ -207,8 +207,9 @@ function leaveCauseFromWire(event: WireLeaveCause): LeaveCause {
   return ownLeaveCause({ type: event.cause ?? 'left' })
 }
 function leaveCauseToWire(cause: LeaveCause): WireLeaveCause {
-  if (cause.type === 'removed')
+  if (cause.type === 'removed') {
     return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }
+  }
   return cause.type === 'left' ? {} : { cause: cause.type }
 }
 

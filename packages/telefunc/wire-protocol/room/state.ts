@@ -544,8 +544,9 @@ class RoomModel {
     }
     const pending = this._pendingMember(from)
     if (entry) {
-      if (pending !== undefined && pending.metaSeq > entry.meta.seq)
+      if (pending !== undefined && pending.metaSeq > entry.meta.seq) {
         this.applyParticipantMeta(from, { seq: pending.metaSeq, meta: pending.meta })
+      }
       return { entry }
     }
     assert(pending !== undefined)
