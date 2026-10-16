@@ -18,7 +18,7 @@ import { disposeBackend, getRoomBackend, installBackend } from '../backend/insta
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from './server/constants.js'
-import { mark, ran, subsOf, syncOf } from '../test/room.js'
+import { longestGapWhile, subsOf, syncOf } from '../test/room.js'
 
 // Each spec here times a stall at 100,000 members, so it runs in a worker of its own: the other room specs leave
 // rooms reachable (vitest keeps every spy, and a stub no client connects to waits out its TTL), and collecting them
@@ -565,22 +565,6 @@ function allocatedBytes(): number {
 function collectGarbage(): void {
   setFlagsFromString('--expose-gc')
   ;(runInNewContext('gc') as () => void)()
-}
-/** The longest event-loop gap while `run` runs, counting the time the process ran in it, and what `run` returned. */
-async function longestGapWhile<T>(run: () => Promise<T>): Promise<{ gap: number; value: T }> {
-  let last = mark()
-  let gap = 0
-  const timer = setInterval(() => {
-    const now = mark()
-    gap = Math.max(gap, ran(last, now))
-    last = now
-  }, 1)
-  try {
-    const value = await run()
-    return { gap: Math.max(gap, ran(last, mark())), value }
-  } finally {
-    clearInterval(timer)
-  }
 }
 const opened = { rooms: [] as ServerRoom[], stubs: [] as RoomStubChannel[] }
 let state: MemoryBackendState

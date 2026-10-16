@@ -30,9 +30,8 @@ import {
   disposeRoomBackend,
   driver,
   installRoomBackend,
+  longestGapWhile,
   loseLaneFrames,
-  mark,
-  ran,
   register,
   serve,
   spyGossip,
@@ -136,20 +135,14 @@ describe('room protocol validation', () => {
       let demanded = 0
       for (const member of members) member.onDemand((_, wanted) => (demanded += wanted ? 1 : -1))
       const stub = register(room)
-      let last = mark()
-      let longest = 0
-      const timer = setInterval(() => {
-        const now = mark()
-        longest = Math.max(longest, ran(last, now))
-        last = now
-      }, 1)
-      for (const track of trackNames(64)) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
-      await vi.waitFor(() => expect(demanded).toBe(64 * members.length), { timeout: 15_000 })
-      stub.abort()
-      await vi.waitFor(() => expect(demanded).toBe(0), { timeout: 15_000 })
-      clearInterval(timer)
+      const { gap } = await longestGapWhile(async () => {
+        for (const track of trackNames(64)) declare(stub, { __r: 'sub-binary', member: null, track, on: true })
+        await vi.waitFor(() => expect(demanded).toBe(64 * members.length), { timeout: 15_000 })
+        stub.abort()
+        await vi.waitFor(() => expect(demanded).toBe(0), { timeout: 15_000 })
+      })
       await Room.close(room.id)
-      return longest
+      return gap
     }
     // The shorter of two runs, so a scheduling hiccup in one run is not read as a stall.
     expect(Math.min(await longestGap(), await longestGap())).toBeLessThanOrEqual(100)
