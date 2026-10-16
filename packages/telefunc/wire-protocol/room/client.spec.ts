@@ -554,6 +554,25 @@ describe('client Room lifecycle', () => {
       { __r: 'sub-text', announce: false, members: { [members[1]!.id]: false } },
     ])
   })
+  it("withdraws the wants a member's listeners declared once that member leaves", () => {
+    const sent: unknown[] = []
+    const { client, emit } = fakeClient('wants-left-member', {
+      send: async (message) => {
+        sent.push(message)
+        return undefined
+      },
+    })
+    const id = crypto.randomUUID()
+    emit({ __r: 'roster', members: [{ id, meta: {}, joinedAt: 1, metaSeq: 0, identity: null }], part: 0 })
+    client._getRemote(id)!.subscribe(() => {})
+    client._getRemote(id)!.subscribeBinary(() => {})
+    sent.length = 0
+    emit({ __r: 'leave', id })
+    expect(sent).toEqual([
+      { __r: 'sub-text', announce: false, members: { [id]: false } },
+      { __r: 'sub-binary', member: id, track: null, on: false },
+    ])
+  })
   it('declares wants only when they change, so listener churn sends nothing', () => {
     const sent: unknown[] = []
     const wireDeclarations: boolean[] = []
