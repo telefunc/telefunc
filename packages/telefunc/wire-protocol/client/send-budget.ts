@@ -10,6 +10,7 @@ import {
 } from '../constants.js'
 import { PieceSender, type SendRoom } from '../pieces.js'
 import type { Uplink } from './uplink.js'
+import type { Downlink } from './downlink.js'
 import { isSequencedTag, type PiecesAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
@@ -50,6 +51,7 @@ class SendBudget implements SendRoom {
     queued: () => number,
     pingInterval: number,
     private readonly uplink: Uplink,
+    private readonly downlink: Downlink,
     /** Called when the timer finds the uplink drained some of what it held. */
     private readonly onRoom: () => void,
   ) {
@@ -122,7 +124,7 @@ class SendBudget implements SendRoom {
     const unacknowledged = sent - this.sender.acknowledgedBytes
     const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
     // Unarrived: what no ack or newest heartbeat says the server took, less `slack` and what crosses while late.
-    const late = Math.max(this.lateMs, this.uplink.peerQueueWait())
+    const late = Math.max(this.lateMs, this.downlink.peerQueueWait())
     const untaken = sent - Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
     const unarrived = untaken - this.uplink.uplinkRate() * late - this.slack
     return this.allowance - Math.max(waiting, unarrived)

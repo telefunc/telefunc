@@ -12,6 +12,7 @@ import {
 import { decode, encode } from '../shared-ws.js'
 import { Deliveries } from '../deliveries.js'
 import { Uplink } from '../client/uplink.js'
+import { Downlink } from '../client/downlink.js'
 
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
@@ -635,7 +636,7 @@ async function runPath({
   const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
   const sender = fitted(new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes))
   const senderUplink = new Uplink()
-  sender.attach(senderUplink)
+  sender.attach(senderUplink, new Downlink(senderUplink))
   const answer = (probe: number, backlog: number, pathRtt: number) =>
     wire.push(decode(encode.bdpPingAck(0, probe, backlog, pathRtt)) as Ack)
   const receiver = fitted(
@@ -651,7 +652,7 @@ async function runPath({
   let attached = false
   const receiverUplink = new Uplink()
   const attachProbe = attach ? receiver.probeAttach(receiverUplink.link)! : undefined
-  if (attach) receiver.attach(receiverUplink)
+  if (attach) receiver.attach(receiverUplink, new Downlink(receiverUplink))
   const senderProbe = senderAttach ? sender.probeAttach(senderUplink.link)! : undefined
   upstream(() => {
     if (attachProbe !== undefined) answer(attachProbe, Infinity, Infinity)

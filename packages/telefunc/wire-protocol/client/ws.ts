@@ -6,6 +6,7 @@ import { PieceSender } from '../pieces.js'
 import { PagePieceReceiver } from './page-piece-receiver.js'
 import { SendBudget } from './send-budget.js'
 import { Uplink } from './uplink.js'
+import { Downlink } from './downlink.js'
 import {
   LENGTH_BYTES,
   TAG,
@@ -23,7 +24,7 @@ import type { ClientConnection, OutboundFrame, ProbeWire, UpgradeTarget } from '
 import type { Heartbeat } from './heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */
-type WsEnds = { uplink: Uplink; budget: SendBudget; pieces: PagePieceReceiver }
+type WsEnds = { uplink: Uplink; downlink: Downlink; budget: SendBudget; pieces: PagePieceReceiver }
 
 class WsTransport implements UpgradeTarget {
   readonly type = CHANNEL_TRANSPORT.WS
@@ -210,11 +211,13 @@ class WsTransport implements UpgradeTarget {
   /** Every frame `ws` carries goes through its budget's sender, which counts the bytes its receiver acknowledges. */
   private wsEnds(ws: WebSocket): WsEnds {
     const uplink = new Uplink()
+    const downlink = new Downlink(uplink)
     const budget = new SendBudget(
       (message) => ws.send(message),
       () => ws.bufferedAmount,
       this.pingInterval,
       uplink,
+      downlink,
       () => {
         if (this.ws !== ws) return
         sender.sendHeld()
@@ -224,6 +227,7 @@ class WsTransport implements UpgradeTarget {
     const { sender } = budget
     return {
       uplink,
+      downlink,
       budget,
       pieces: new PagePieceReceiver(
         (frame) => sender.send(frame),
@@ -234,7 +238,7 @@ class WsTransport implements UpgradeTarget {
   }
 
   private setupHandlers(ws: WebSocket, ends: WsEnds): void {
-    const { uplink, budget, pieces } = ends
+    const { downlink, budget, pieces } = ends
     const { sender } = budget
     this.ends = ends
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
@@ -252,7 +256,7 @@ class WsTransport implements UpgradeTarget {
       const now = performance.now()
       const raw = new Uint8Array(data as ArrayBuffer)
       this.heartbeat?.noteReceived(raw.byteLength, now)
-      uplink.delivered(raw.byteLength, now)
+      downlink.delivered(raw.byteLength, now)
       budget.received()
       if (!receiveMessage(pieces, raw, now, take)) ws.close()
     }
@@ -293,6 +297,11 @@ class WsTransport implements UpgradeTarget {
   get uplink(): Uplink {
     assert(this.ends)
     return this.ends.uplink
+  }
+
+  get downlink(): Downlink {
+    assert(this.ends)
+    return this.ends.downlink
   }
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */

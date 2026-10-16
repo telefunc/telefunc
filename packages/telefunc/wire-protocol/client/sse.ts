@@ -18,6 +18,7 @@ import {
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
 import { Uplink } from './uplink.js'
+import { Downlink } from './downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../shared-ws.js'
 import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
@@ -55,6 +56,7 @@ class SseTransport implements UpgradeSource {
   /** Each wire's own, so a POST still in flight for a wire that died isn't dispatched on the next one. */
   private connId = randomUuid()
   uplink = new Uplink()
+  downlink = new Downlink(this.uplink)
   get batched(): boolean {
     return this.streamRequest.tag !== 'active'
   }
@@ -208,6 +210,7 @@ class SseTransport implements UpgradeSource {
   private async openStream(): Promise<void> {
     this.connId = randomUuid()
     this.uplink = new Uplink()
+    this.downlink = new Downlink(this.uplink)
     const abortController = new AbortController()
     this.transportAbort = abortController
     const stage = this.stageInitialBatch()

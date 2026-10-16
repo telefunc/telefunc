@@ -46,6 +46,7 @@ import {
 import { FlowControl } from '../flow-control/flow-control.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import type { Uplink } from './uplink.js'
+import type { Downlink } from './downlink.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channel-errors.js'
 import { isPromise } from '../../utils/isPromise.js'
@@ -294,10 +295,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
-  _onTransportOpen(batched: boolean, uplink: Uplink): void {
+  _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
-    this._flow.attach(uplink)
+    this._flow.attach(uplink, downlink)
     this._fireOpen()
   }
 

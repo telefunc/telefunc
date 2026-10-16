@@ -65,6 +65,7 @@ import { Fifo } from '../../utils/Fifo.js'
 import { settledOrAborted } from '../../utils/settledOrAborted.js'
 import { Heartbeat } from './heartbeat.js'
 import type { Uplink } from './uplink.js'
+import type { Downlink } from './downlink.js'
 import { WsTransport } from './ws.js'
 import { SseTransport } from './sse.js'
 
@@ -113,7 +114,7 @@ interface MuxChannel {
   /** The largest frame its server takes. */
   readonly _maxFrameBytes: number
   /** It opened on `uplink`'s wire: the one of the channel's last attach means that same wire, which lost nothing. */
-  _onTransportOpen(batched: boolean, uplink: Uplink): void
+  _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
   /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
   _onTransportBatched(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
@@ -206,8 +207,9 @@ type ClientChannelTransport = {
   /** True iff client→server frames are per-POST batched instead of pushed onto
    *  one streaming body — signals the channel to use a larger initial window. */
   readonly batched: boolean
-  /** The uplink of the wire it carries, or opens next. */
+  /** The uplink and the downlink of the wire it carries, or opens next. */
   readonly uplink: Uplink
+  readonly downlink: Downlink
   start(): void
   hasWire(): boolean
   isConnecting(): boolean
@@ -1123,7 +1125,7 @@ class ClientConnection implements MuxConnection {
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen) {
-      channel._onTransportOpen(this.transport.batched, this.transport.uplink)
+      channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
     }
     this.tryCompleteUpgrade()
     if (outcome.reconcileComplete) {
@@ -1613,7 +1615,7 @@ class ClientConnection implements MuxConnection {
       for (const frame of this.replayTo(ix, entry, lastSeq)) this.transport.sendFrame(frame)
       for (const frame of this.drainBufferedFrames((i) => i === ix)) this.transport.sendFrame(frame)
       if (opened && entry.state.tag === 'open') {
-        entry.channel._onTransportOpen(this.transport.batched, this.transport.uplink)
+        entry.channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
       }
     }
     this.startTtlIfIdle()
