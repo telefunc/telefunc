@@ -1,4 +1,3 @@
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { expect, test } from 'vitest'
 import type { CellsCx } from '../../../../backend/room/contract.js'
 import {
@@ -18,29 +17,12 @@ import {
 import { snapshotRoutes, upsertRoute } from './routes.js'
 import { deleteRetained, installRetained, listRetained } from './retained.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { sqliteStorage } from '../../../../test/cloudflare-sql.js'
 
-/** Cloudflare's SQL storage over node:sqlite, recording the plan of each read. */
 function sqlStorage() {
-  const db = new DatabaseSync(':memory:')
-  const plans: string[] = []
-  const sql = {
-    exec(query: string, ...bindings: SQLInputValue[]) {
-      if (bindings.length === 0 && !query.startsWith('SELECT')) {
-        db.exec(query)
-        return { toArray: () => [] }
-      }
-      if (!query.startsWith('SELECT')) {
-        db.prepare(query).run(...bindings)
-        return { toArray: () => [] }
-      }
-      const plan = db.prepare(`EXPLAIN QUERY PLAN ${query}`).all(...bindings) as Array<{ detail: string }>
-      plans.push(...plan.map((step) => step.detail))
-      const rows = db.prepare(query).all(...bindings)
-      return { toArray: () => rows }
-    },
-  } as unknown as SqlStorage
-  initSchema(sql)
-  return { sql, plans }
+  const { storage, plans } = sqliteStorage()
+  initSchema(storage.sql)
+  return { sql: storage.sql, plans }
 }
 
 test("a directory page reads a prefix's rooms as a primary-key range, up to the next code point", () => {

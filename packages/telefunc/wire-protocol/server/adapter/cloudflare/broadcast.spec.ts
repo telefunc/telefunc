@@ -1,4 +1,3 @@
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   DEFAULT_BROADCAST_BUCKETS,
@@ -23,6 +22,7 @@ import { CloudflareBackend } from './backend.js'
 import { CloudflareRoomSessionManager } from './room/subscription.js'
 import { ChannelMux } from '../../mux.js'
 import type { BackendPayload, SubscriptionAttempt, SubscriptionState } from '../../../backend/subscription.js'
+import { sqliteStorage } from '../../../test/cloudflare-sql.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
 function untilReady(attempt: SubscriptionAttempt): Promise<void> {
@@ -64,39 +64,8 @@ function createCloudflareRequest({ colo, continent }: { colo?: string; continent
   return request
 }
 
-/** Cloudflare's SQLite storage API over node:sqlite, as far as the adapter uses it. */
-function createSqlState(): DurableObjectState {
-  const db = new DatabaseSync(':memory:')
-  const cursor = (rows: unknown[]) => ({ toArray: () => rows })
-  const sql = {
-    exec(query: string, ...bindings: SQLInputValue[]) {
-      if (bindings.length === 0 && !/^\s*SELECT/i.test(query)) {
-        db.exec(query)
-        return cursor([])
-      }
-      const statement = db.prepare(query)
-      return cursor(/^\s*SELECT/i.test(query) ? statement.all(...bindings) : (statement.run(...bindings), []))
-    },
-  }
-  const storage = {
-    sql,
-    transactionSync<T>(fn: () => T): T {
-      db.exec('BEGIN')
-      try {
-        const result = fn()
-        db.exec('COMMIT')
-        return result
-      } catch (error) {
-        db.exec('ROLLBACK')
-        throw error
-      }
-    },
-  }
-  return { storage } as unknown as DurableObjectState
-}
-
 function createAuthorityState() {
-  return new CloudflareBroadcastAuthorityState(createSqlState())
+  return new CloudflareBroadcastAuthorityState({ storage: sqliteStorage().storage } as DurableObjectState)
 }
 
 type PresenceHooks = { beforeRecord?: () => Promise<void>; beforeWithdraw?: () => Promise<void> }
