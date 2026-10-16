@@ -488,7 +488,7 @@ end
 return reply
 `
 
-type Invocation = { keys: string[]; argv: Array<string | Buffer> }
+type Invocation = { keys: readonly string[]; argv: ReadonlyArray<string | Buffer> }
 
 /** One script: its KEYS and ARGV for a call, and its reply decoded. `numberOfKeys: null` sends the key count
  *  first; `binaryReply` reads bulk strings as Buffers. */
@@ -663,7 +663,7 @@ const REDIS_COMMANDS = {
     numberOfKeys: null,
     invoke: (prefix, { roomId, inc, lanes }: RoomInc & { lanes: readonly string[] }) => ({
       keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(laneKey).member)),
-      argv: [...lanes],
+      argv: lanes,
     }),
     parse: (reply) => (reply as string[]).map((mark) => (mark === '' ? null : parseOrderMark(mark))),
   }),
@@ -801,7 +801,7 @@ const REDIS_COMMANDS = {
         generationKeysKey(prefix, roomId, inc),
         ...lanes.map((laneKey) => trackLanesKey(prefix, roomId, inc, binaryLaneOf(laneKey).track)),
       ],
-      argv: [...lanes],
+      argv: lanes,
     }),
     parse: () => {},
   }),
