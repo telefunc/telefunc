@@ -32,7 +32,7 @@ config.channel = {
 
 > **What to tune**: the defaults suit typical stream use cases; tune these only if you run into one of the issues below:
 > - Slow/flaky clients dropping with `NetworkError` (`isChannel: true`) → raise `reconnectTimeout` (how long the server holds a channel open while a client is gone).
-> - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit`/`bufferLimitBinary`, or apply backpressure by `await`-ing your `send()`s.
+> - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit`/`bufferLimitBinary` (each held `send()` counts as its size plus 512 bytes), or apply backpressure by `await`-ing your `send()`s.
 > - `NetworkError` right after a reconnect, whose error message names a replay buffer → `await` your `send()`s, or raise that replay buffer.
 > - Want to cap memory → `await` your `send()`s, and lower the replay buffers. Lower replay buffers can make channels slower over long-distance connections.
 
