@@ -87,7 +87,7 @@ class WsTransport implements UpgradeTarget {
       onClose?.()
     }
     ws.onerror = () => {}
-    ws.onopen = () => sender.send(encode.ping(), this.pingInterval)
+    ws.onopen = () => sender.send(encode.ping())
 
     // First pong proves the wire is alive — consumer reassigns onPong/onClose after the await.
     const ready = await new Promise<boolean>((resolve) => {
@@ -109,10 +109,12 @@ class WsTransport implements UpgradeTarget {
     }
 
     this.probed = { ws, ends }
+    // A RECONCILED may have come while it waited for the PONG.
+    sender.setPingInterval(this.pingInterval)
     return {
       ping: () => {
         try {
-          sender.send(withTook(encode.ping(), pieces.took), this.pingInterval)
+          sender.send(withTook(encode.ping(), pieces.took))
         } catch {}
       },
       onPong: (cb) => {
@@ -123,7 +125,7 @@ class WsTransport implements UpgradeTarget {
       },
       send: (frame) => {
         try {
-          sender.send(frame, this.pingInterval)
+          sender.send(frame)
         } catch {
           // Socket died between the open event and this send — `onClose` aborts the attempt.
         }
@@ -220,11 +222,12 @@ class WsTransport implements UpgradeTarget {
       },
     )
     const { sender } = budget
+    sender.setPingInterval(this.pingInterval)
     return {
       uplink,
       budget,
       pieces: new PagePieceReceiver(
-        (frame) => sender.send(frame, this.pingInterval),
+        (frame) => sender.send(frame),
         (ack) => sender.carry(ack),
         uplink,
       ),
@@ -280,7 +283,7 @@ class WsTransport implements UpgradeTarget {
   sendFrame(frame: OutboundFrame): void {
     assert(this.ws && this.ends)
     if (frame.kind === 'acknowledgement') this.ends.budget.sender.carry(() => frame.frame)
-    else this.ends.budget.send(frame.frame, this.pingInterval)
+    else this.ends.budget.send(frame.frame)
   }
 
   sendRoom(): number {
@@ -321,6 +324,8 @@ class WsTransport implements UpgradeTarget {
   applyReconciledSettings(ctrl: ReconciledPayload): void {
     assert(this.ends) // a RECONCILED came on its wire
     this.pingInterval = ctrl.pingInterval
+    this.ends.budget.sender.setPingInterval(this.pingInterval)
+    this.probed?.ends.budget.sender.setPingInterval(this.pingInterval)
     // The server sends nothing on a wire before the page's first frame arrived: that frame crossed by now.
     this.ends.budget.sender.answered(performance.now())
   }
@@ -328,7 +333,7 @@ class WsTransport implements UpgradeTarget {
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.ends)
-    this.ends.budget.sender.send(withTook(frame, this.ends.pieces.took), this.pingInterval)
+    this.ends.budget.sender.send(withTook(frame, this.ends.pieces.took))
   }
 
   dispose(): void {

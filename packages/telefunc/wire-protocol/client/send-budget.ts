@@ -59,14 +59,14 @@ class SendBudget implements SendRoom {
   }
 
   /** Sends `frame` through the sender. */
-  send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
+  send(frame: Uint8Array<ArrayBuffer>): void {
     if (isSequencedTag(frame[0]!)) {
-      this.sender.send(frame, pingInterval)
+      this.sender.send(frame)
       return this.pace()
     }
     // What it waits behind: the uplink holds it too once handed.
     const wait = this.uplink.waitNow()
-    this.sender.send(frame, pingInterval)
+    this.sender.send(frame)
     this.uplink.noteWait(wait)
   }
 

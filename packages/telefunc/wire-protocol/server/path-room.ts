@@ -47,8 +47,8 @@ class PathRoom implements SendRoom {
   }
 
   /** Sends `frame` through the sender. */
-  send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
-    this.sender.send(frame, pingInterval)
+  send(frame: Uint8Array<ArrayBuffer>): void {
+    this.sender.send(frame)
     this.pace()
   }
 

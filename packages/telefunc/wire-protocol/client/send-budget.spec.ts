@@ -30,7 +30,8 @@ function open() {
     () => 0,
     uplink.link,
   )
-  prober.send(data(PROBE), 5_000)
+  prober.setPingInterval(5_000)
+  prober.send(data(PROBE))
   prober.acknowledged({ bytes: WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, heldMs: 0, spanUs: 0 })
   prober.acknowledged({ bytes: PROBE, heldMs: 0, spanUs: 0 })
   const budget = new SendBudget(
@@ -39,11 +40,12 @@ function open() {
     uplink,
     () => {},
   )
+  budget.sender.setPingInterval(5_000)
   let sent = 0
   /** Sends a data frame and has the server acknowledge it `spanMs` after the one before it. The allowance, with nothing
    *  unacknowledged. */
   const exchange = (bytes: number, spanMs: number) => {
-    budget.send(data(bytes), 5_000)
+    budget.send(data(bytes))
     budget.sender.flush() // as its turn ends
     sent += bytes
     clock.now += 10
@@ -57,10 +59,10 @@ function open() {
 test('data goes out until the allowance and what the server holds before it acknowledges are sent, and more as it acknowledges', () => {
   const { budget } = open()
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
-  budget.send(data(40_000), 5_000)
+  budget.send(data(40_000))
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES + WIRE_PIECES_ACK_BYTES - 40_000)
-  budget.send(data(40_000), 5_000)
-  budget.send(data(40_000), 5_000)
+  budget.send(data(40_000))
+  budget.send(data(40_000))
   expect(budget.room).toBeLessThan(0)
   expect(budget.acknowledged({ bytes: 80_000, heldMs: 0, spanUs: 0 })).toBe(true)
   expect(budget.room).toBeGreaterThan(0)
@@ -68,7 +70,7 @@ test('data goes out until the allowance and what the server holds before it ackn
 
 test('the frames that go at once count against the room, and are not dated', () => {
   const { budget } = open()
-  budget.send(flowControl(WIRE_PIECES_ACK_BYTES + 1_000), 5_000)
+  budget.send(flowControl(WIRE_PIECES_ACK_BYTES + 1_000))
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES - 1_000)
   expect(budget.acknowledged({ bytes: WIRE_PIECES_ACK_BYTES + 1_000, heldMs: 0, spanUs: 0 })).toBe(true)
   expect(budget.room).toBe(WIRE_SEND_AHEAD_MIN_BYTES)
@@ -114,7 +116,7 @@ test('a frame that goes at once waits behind none of the data the server acknowl
   const { budget, uplink, clock, exchange } = open()
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
-  budget.send(data(20_000), 5_000)
+  budget.send(data(20_000))
   expect(uplink.waitNow()).toBeGreaterThan(0)
   clock.now += 10
   expect(budget.acknowledged({ bytes: 40_000, heldMs: 0, spanUs: 10_000 })).toBe(true)
@@ -127,10 +129,10 @@ test('the longest wait since an instant is what a frame that went at once after 
   // 10 KB a frame, 100 ms apart: the server took 100 B/ms.
   for (let i = 0; i < 2; i++) exchange(10_000, 100)
   const start = clock.now
-  budget.send(data(20_000), 5_000)
+  budget.send(data(20_000))
   budget.sender.flush() // as its turn ends
   expect(budget.room).toBeGreaterThan(0)
-  budget.send(flowControl(100), 5_000)
+  budget.send(flowControl(100))
   // 20 KB at 100 B/ms: it waited 200 ms, and a frame sent now waits behind its 100 B too.
   expect(uplink.longestWaitSince(start)).toBe(201)
   clock.now += 150
@@ -146,12 +148,12 @@ test('an acknowledgement the server held leaves the room as one it sent at once'
   const roomAfter = (heldMs: number) => {
     const { budget, clock, exchange } = open()
     for (let i = 0; i < 20; i++) exchange(32_000, 10)
-    budget.send(data(32_000), 5_000)
+    budget.send(data(32_000))
     budget.sender.flush() // as its turn ends
     clock.now += 10 + heldMs
     expect(budget.acknowledged({ bytes: 21 * 32_000, heldMs, spanUs: 10_000 })).toBe(true)
     clock.now += 40 - heldMs
-    budget.send(data(32_000), 5_000)
+    budget.send(data(32_000))
     budget.sender.flush() // as its turn ends
     // The uplink carried it, so how late acknowledgements come back decides what may not have arrived.
     clock.now += 1_000

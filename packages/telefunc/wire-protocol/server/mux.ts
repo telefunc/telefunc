@@ -268,6 +268,7 @@ class ChannelMux {
           () => transport.bufferedAmount(connection) ?? 0,
         )
       : null
+    room?.sender.setPingInterval(this.options.pingInterval)
     this.connectionEntries.set(connection, {
       state: {
         pingTimer: null,
@@ -1040,7 +1041,7 @@ class ChannelMux {
     }
     state.sendHeadroom -= frame.byteLength
     state.wait.handed(frame.byteLength, !isSequencedTag(frame[0]!))
-    if (state.pieces) state.pieces.room.send(frame, this.options.pingInterval)
+    if (state.pieces) state.pieces.room.send(frame)
     else entry.transport.sendNow(connection, frame)
   }
 

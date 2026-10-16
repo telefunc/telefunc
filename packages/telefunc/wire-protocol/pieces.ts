@@ -139,17 +139,19 @@ class PieceSender {
     this.carried.push(frame)
   }
 
+  /** Its wire's ping interval, which sizes the frames it sends whole. */
+  setPingInterval(ms: number): void {
+    this.pingInterval = ms
+    this.setWholeUpTo()
+  }
+
   /** Sends `frame`, whole or in pieces. */
-  send(frame: Uint8Array<ArrayBuffer>, pingInterval: number): void {
+  send(frame: Uint8Array<ArrayBuffer>): void {
     if (this.sentBytes === 0) {
       this.firstBytes = frame.byteLength
       this.firstAt = performance.now()
     }
     this.takeCarried()
-    if (pingInterval !== this.pingInterval) {
-      this.pingInterval = pingInterval
-      this.setWholeUpTo()
-    }
     const tag = frame[0]!
     this.room.sentFrame(tag, frame.byteLength)
     // It passes what waits: the probe its peer waits on may be its own.
