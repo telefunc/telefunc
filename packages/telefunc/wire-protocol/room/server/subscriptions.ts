@@ -71,8 +71,8 @@ class RoomSubscriptions {
   private readonly _onLaneRecovered = () => void this._host.sync.reconcileAuthority().catch(reportRoomError)
   /** Whether some handle observes the room, which the control lane serves. */
   private _observing = false
-  private readonly _control = this._newLaneSubscription()
-  private readonly _semantic = this._newLaneSubscription()
+  private readonly _control = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered)
+  private readonly _semantic = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered)
   /** While this process owns a member: only an owner reads demand. */
   private readonly _demandLane = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered, (slot, pending) => {
     if (!pending && slot.wanted) this._host._askDemand()
@@ -626,7 +626,7 @@ class RoomSubscriptions {
   private _openEveryTrack(member: string): LaneSubscription {
     const host = this._host
     const establishing = this._establishingEveryTrack
-    const lane = this._newLaneSubscription(() => {
+    const lane = this._newBinaryLane(() => {
       this._queued.members.add(member)
       this._established(lane, establishing)
     })
@@ -644,7 +644,7 @@ class RoomSubscriptions {
     const host = this._host
     const establishing = this._establishingEveryMember
     // The named lanes and every-track lanes it serves stop once it delivers.
-    const lane = this._newLaneSubscription(() => {
+    const lane = this._newBinaryLane(() => {
       this._queued.tracks.add(track)
       for (const member of this._trackMembers.get(track) ?? []) this._queuePair(member, track)
       this._established(lane, establishing)
@@ -663,7 +663,7 @@ class RoomSubscriptions {
     const host = this._host
     // An every-track lane beside it may wait for it to deliver, so it replans the whole member; an every-member lane
     // that holders no longer name waits for it too.
-    const lane = this._newLaneSubscription(() => {
+    const lane = this._newBinaryLane(() => {
       if (this._everyTrack.has(member)) this._queued.members.add(member)
       else this._queuePair(member, track)
       if (this._everyMember.has(track)) this._queued.tracks.add(track)
@@ -714,7 +714,11 @@ class RoomSubscriptions {
   private _openInbox(member: string): void {
     const host = this._host
     if (host.model.closed || !host._ownsMember(member)) return
-    const slot = getOrCreate(this._inbox, member, () => this._newLaneSubscription())
+    const slot = getOrCreate(
+      this._inbox,
+      member,
+      () => new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered),
+    )
     slot.sync(true, () =>
       getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'inbox', member }, (payload, info) =>
         host._onDm(decodeRoomText(payload), info),
@@ -742,10 +746,8 @@ class RoomSubscriptions {
     host._forgetDemand()
   }
 
-  /** A binary lane passes `queue`: what it carries is demand once it delivers, so its readiness replans what `queue`
-   *  queues. */
-  private _newLaneSubscription(queue?: () => void): LaneSubscription {
-    if (queue === undefined) return new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered)
+  /** What a binary lane carries is demand once it delivers, so its readiness replans what `queue` queues. */
+  private _newBinaryLane(queue: () => void): LaneSubscription {
     return new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered, (slot, pending) => {
       this._onBinaryPending(slot, pending)
       if (pending || !slot.wanted) return
