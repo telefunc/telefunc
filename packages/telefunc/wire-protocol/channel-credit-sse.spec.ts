@@ -214,9 +214,8 @@ describe.each([
   })
 })
 
-// The server's event stream carries the download and the WINDOW frames that let the page upload, so a WINDOW that
-// waits behind the download the stream holds holds the upload back.
-test("on a link that takes a socket's send buffer of the server's event stream, a page's batched upload beside a download keeps the uplink's pace", async () => {
+/** A batched upload and a download of 64 KiB messages at 1,250 B/ms each way, the link taking 256 KiB of the stream. */
+function uploadBesideDownload() {
   const sse = (current = link({ batched: true, downHolds: 256 * KIB }))
   sse.up.bytesPerMs = sse.down.bytesPerMs = 1_250
   const upload = sse.open<string, never>()
@@ -225,6 +224,13 @@ test("on a link that takes a socket's send buffer of the server's event stream, 
   received(download.page)
   produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
   produce(download.server, { message: () => 'x'.repeat(64 * KIB) })
+  return { sse, upload, got }
+}
+
+// The server's event stream carries the download and the WINDOW frames that let the page upload, so a WINDOW that
+// waits behind the download the stream holds holds the upload back.
+test("on a link that takes a socket's send buffer of the server's event stream, a page's batched upload beside a download keeps the uplink's pace", async () => {
+  const { sse, got } = uploadBesideDownload()
   await run(10_000)
   const mark = got.bytes
   await run(20_000)
@@ -235,14 +241,7 @@ test("on a link that takes a socket's send buffer of the server's event stream, 
 // The server's ping for the upload's window passes the download waiting for the event stream to ask: a wait that counted
 // that download would take more than the whole round trip off it.
 test("while the server's event stream holds a download, its estimate of a batched upload's path round trip is no shorter than the link's", async () => {
-  const sse = (current = link({ batched: true, downHolds: 256 * KIB }))
-  sse.up.bytesPerMs = sse.down.bytesPerMs = 1_250
-  const upload = sse.open<string, never>()
-  const download = sse.open<never, string>()
-  received(upload.server)
-  received(download.page)
-  produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
-  produce(download.server, { message: () => 'x'.repeat(64 * KIB) })
+  const { sse, upload } = uploadBesideDownload()
   await run(10_000)
   const { _boundRtt } = (upload.server as unknown as { _flow: { _bdp: { _boundRtt: number } } })._flow._bdp
   expect(sse.batched).toBe(true)
