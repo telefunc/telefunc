@@ -9,17 +9,21 @@ import { toggle } from './sets.js'
 type TrackWants = { all: boolean; tracks: Set<TrackKey> }
 /** A member with no wants has no entry. */
 type BinaryWants = { everyMember: TrackWants; members: Map<string, TrackWants> }
+
 function emptyBinaryWants(): BinaryWants {
   return { everyMember: { all: false, tracks: new Set() }, members: new Map() }
 }
+
 function wantsTrack(wants: TrackWants, track: TrackKey): boolean {
   return wants.all || wants.tracks.has(track)
 }
+
 function binaryWantsCovers(wants: BinaryWants, memberId: string, track: TrackKey): boolean {
   if (wantsTrack(wants.everyMember, track)) return true
   const memberWants = wants.members.get(memberId)
   return memberWants !== undefined && wantsTrack(memberWants, track)
 }
+
 /** Whether `change` changed `wants`. */
 function applyBinaryWantChange(wants: BinaryWants, { member, track, on }: BinaryWantChange): boolean {
   let scope = member === ALL ? wants.everyMember : wants.members.get(member)

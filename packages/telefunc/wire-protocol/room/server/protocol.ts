@@ -48,6 +48,7 @@ type DemandEntry =
   | { member: string; byMember: true }
   | { track: string; except: readonly string[]; byMember?: true }
   | { track: string; member: string; except: true }
+
 /** Demand between instances, on the demand lane: entries one instance starts or stops receiving, in the order it told
  *  them, at most `ROOM_DEMAND_PAGE_ENTRIES`, its `page`th page. Its entries from `{ again: true }` to
  *  `{ again: false }` are all it receives. */
@@ -57,6 +58,7 @@ type RoomDemandPage = {
   page: number
   wants: Array<({ on: boolean } & DemandEntry) | { again: boolean }>
 }
+
 /** A member's message on the lane; its order rides the transport frame. Stamped, so a receiver behind on the roster
  *  still names the sender. */
 type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown } & SenderStamp
