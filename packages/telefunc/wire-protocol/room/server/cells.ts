@@ -59,8 +59,8 @@ function identityCellKey(identity: string, memberId: string): string {
 /** Counters: what holds the room, counted in the compare-exchange that adds or removes a hold, and its joins. */
 const HOLDS_CELL_KEY = 'holds'
 const JOINS_CELL_KEY = 'joins'
-/** One per server hosting a member or a page's view in the room: its lease (see `session.ts`). Session ids hold no
- *  `:`. */
+/** One per server hosting a member or a page's view in the room: its lease (see `session.ts`). Session
+ *  ids hold no `:`. */
 const SESSION_CELL_PREFIX = 'session:'
 function sessionCellKey(session: string): string {
   return SESSION_CELL_PREFIX + session
