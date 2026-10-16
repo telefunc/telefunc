@@ -103,7 +103,7 @@ class PieceSender {
   private readonly gathered: Uint8Array<ArrayBuffer>[] = []
   private gatheredBytes = 0
   private lastVaries = false
-  private gatheredSent = false
+  private gatheredOwn = false
   private gatheredAtOnce = false
   private gatheredData = false
   private flushQueued = false
@@ -197,7 +197,7 @@ class PieceSender {
     const bytes = frame.byteLength
     const length = this.lastVaries ? LENGTH_BYTES : 0
     if (
-      this.gatheredSent &&
+      this.gatheredOwn &&
       ((data && (this.gatheredAtOnce || this.room.cuts)) || this.gatheredBytes + length + bytes > this.gatherUpTo)
     ) {
       this.flush()
@@ -205,7 +205,7 @@ class PieceSender {
     this.count(frame, data)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.add(frame)
-    this.gatheredSent = true
+    this.gatheredOwn = true
     if (data) this.gatheredData = true
     else this.gatheredAtOnce = true
   }
@@ -213,10 +213,10 @@ class PieceSender {
   /** Counts `frame` as it joins what it gathers, after the LENGTH the frame before it needs now. */
   private count(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
     if (this.lastVaries) {
-      this.transmitted(LENGTH_BYTES, false)
+      this.countHanded(LENGTH_BYTES, false)
       this.gatheredBytes += LENGTH_BYTES
     }
-    this.transmitted(frame.byteLength, data)
+    this.countHanded(frame.byteLength, data)
   }
 
   private add(frame: Uint8Array<ArrayBuffer>): void {
@@ -232,7 +232,7 @@ class PieceSender {
    *  the next message behind it, or on its close. */
   private readonly flushTurn = (): void => {
     this.flushQueued = false
-    if (this.gatheredSent && this.open === null) this.flush()
+    if (this.gatheredOwn && this.open === null) this.flush()
   }
 
   /** Hands the socket `message`, the frames carried riding ahead of it (see `handGathered`). */
@@ -247,7 +247,7 @@ class PieceSender {
   /** Before a message that gathers nothing: the frames sent before it don't wait for its bytes, but those carried, which
    *  ride on it. */
   private handGathered(): void {
-    if (this.gatheredSent) this.flush()
+    if (this.gatheredOwn) this.flush()
   }
 
   /** Hands the socket what it gathered, in one message. */
@@ -257,7 +257,7 @@ class PieceSender {
     const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes)
     this.gathered.length = 0
     this.gatheredBytes = 0
-    this.lastVaries = this.gatheredSent = this.gatheredAtOnce = this.gatheredData = false
+    this.lastVaries = this.gatheredOwn = this.gatheredAtOnce = this.gatheredData = false
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.transmit(message)
   }
@@ -280,7 +280,7 @@ class PieceSender {
     if (offset === 0 && bytes > this.wholeUpTo) this.sendEmptyPiece(bytes)
     const size = Math.max(1, Math.floor(this.wholeUpTo))
     const handed = end - offset + Math.ceil((end - offset) / size) * PIECE_HEADER_BYTES
-    this.transmitted(handed, isSequencedTag(frame[0]!))
+    this.countHanded(handed, isSequencedTag(frame[0]!))
     if (acknowledges(bytes)) this.track(handed, now, false)
     for (let at = offset; at < end; at += size) {
       this.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
@@ -289,14 +289,14 @@ class PieceSender {
   }
 
   /** Counts `bytes` handed to the socket, of data or not, or gathered for the message its turn ends with. */
-  private transmitted(bytes: number, data: boolean): void {
+  private countHanded(bytes: number, data: boolean): void {
     this.transmittedBytes += bytes
     this.room.handed(bytes, data)
   }
 
   /** Hands the socket the empty piece a frame of `total` bytes starts with. */
   private sendEmptyPiece(total: number): void {
-    this.transmitted(PIECE_HEADER_BYTES, false)
+    this.countHanded(PIECE_HEADER_BYTES, false)
     this.hand(encode.piece(total, new Uint8Array(0)))
   }
 
@@ -315,7 +315,7 @@ class PieceSender {
       this.open = { start: this.transmittedBytes, at: now, bytes: 0 }
       const floorPerS = Math.min(0xffffffff, Math.floor(this.link.floor * 1000))
       this.namedFloor = floorPerS / 1000
-      this.transmitted(ANNOUNCE_BYTES, false)
+      this.countHanded(ANNOUNCE_BYTES, false)
       this.hand(encode.announce(0, floorPerS))
       queueMicrotask(this.closeAnnouncement)
     }
@@ -328,7 +328,7 @@ class PieceSender {
   private readonly closeAnnouncement = (): void => {
     const { start, at, bytes } = this.open!
     this.open = null
-    this.transmitted(ANNOUNCE_BYTES, false)
+    this.countHanded(ANNOUNCE_BYTES, false)
     this.hand(encode.announce(bytes, 0))
     this.announcements.push({ start, end: this.transmittedBytes, at })
   }
@@ -343,7 +343,7 @@ class PieceSender {
       [0, WIRE_PROBE_FIRST_BYTES],
       [WIRE_PROBE_FIRST_BYTES, WIRE_PROBE_PAIR_BYTES],
     ] as const) {
-      this.transmitted(PIECE_HEADER_BYTES + size, data)
+      this.countHanded(PIECE_HEADER_BYTES + size, data)
       this.track(PIECE_HEADER_BYTES + size, now, true)
       this.sendAnnouncedMessage(encode.piece(bytes, frame.subarray(at, at + size)), size, this.transmittedBytes, now)
     }
@@ -359,7 +359,7 @@ class PieceSender {
     const bytes = frame.byteLength
     const data = isSequencedTag(frame[0]!)
     if (offset === 0 && bytes <= announcedNext(this.lastAnnounced, this.namedFloor)) {
-      this.transmitted(bytes, data)
+      this.countHanded(bytes, data)
       if (acknowledges(bytes)) this.track(bytes, now, false)
       return this.sendAnnouncedMessage(frame, bytes, this.transmittedBytes, now)
     }
@@ -376,7 +376,7 @@ class PieceSender {
     }
     let end = this.transmittedBytes
     const handed = bytes - offset + n * PIECE_HEADER_BYTES
-    this.transmitted(handed, data)
+    this.countHanded(handed, data)
     if (acknowledges(bytes)) this.track(handed, now, false)
     let at = offset
     for (const size of sizes) {

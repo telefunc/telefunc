@@ -64,7 +64,7 @@ class WsTransport implements UpgradeTarget {
       return null
     }
     ws.binaryType = 'arraybuffer'
-    const ends = this.pieceEnds(ws)
+    const ends = this.wsEnds(ws)
     const { budget, pieces } = ends
     const { sender } = budget
 
@@ -173,7 +173,7 @@ class WsTransport implements UpgradeTarget {
       this.handleOpen(ws)
     }
 
-    this.setupHandlers(ws, this.pieceEnds(ws))
+    this.setupHandlers(ws, this.wsEnds(ws))
   }
 
   private handleOpen(ws: WebSocket): void {
@@ -207,7 +207,7 @@ class WsTransport implements UpgradeTarget {
   }
 
   /** Every frame `ws` carries goes through its budget's sender, which counts the bytes its receiver acknowledges. */
-  private pieceEnds(ws: WebSocket): WsEnds {
+  private wsEnds(ws: WebSocket): WsEnds {
     const uplink = new Uplink()
     const budget = new SendBudget(
       (message) => ws.send(message),
