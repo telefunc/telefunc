@@ -46,7 +46,6 @@ class BdpEstimator {
   /** The number of the ping in flight, or the last one. */
   private _ping = 0
   private _pingInFlight = false
-  private _pingSentAt = 0
   /** Attach probes not answered yet. Each measures its wire's round trip and settles no growth, so none holds up a ping:
    *  one lost with its wire, or with an upgrade that didn't happen, costs nothing. */
   private _attachProbes: { probe: number; sentAt: number; link: Link }[] = []
@@ -94,22 +93,11 @@ class BdpEstimator {
    *  collects samples for both axes — `onPingAck` then derives independent byte-sample / msg-sample saturation
    *  decisions. */
   onReceive(bytes: number, sendWait: SendWait | null = null): boolean {
-    let probe = false
-    // Skip probe only when *both* axes have already hit their cap — otherwise one of them
-    // might still want to grow.
-    if (!this._pingInFlight && !(this._byteWindow >= this._byteWindowMax && this._msgWindow >= CREDIT_MSG_WINDOW_MAX)) {
-      const now = performance.now()
-      if (now - this._lastPingAt >= this._probeIntervalMs) {
-        // Snapshot BEFORE crediting the triggering frame — it counts as the first
-        // in-flight byte. Otherwise a window-bound producer always samples 0.
-        this._sendPing()
-        this._pingWait = sendWait?.waitNow() ?? 0
-        this._pingFollowsGrowth = this._grewSincePing
-        this._grewSincePing = false
-        this._lastPingAt = now
-        probe = true
-      }
-    }
+    const now = performance.now()
+    const probe = this._pingDue(now)
+    // Snapshot BEFORE crediting the triggering frame — it counts as the first
+    // in-flight byte. Otherwise a window-bound producer always samples 0.
+    if (probe) this._sendPing(now, sendWait)
     this._bytesReceived += bytes
     this._msgsReceived += 1
     return probe
@@ -157,12 +145,12 @@ class BdpEstimator {
     if (!this._pingInFlight || probe !== this._ping) return NOT_SETTLED
     this._pingInFlight = false
     const now = performance.now()
-    const rtt = now - this._pingSentAt
+    const rtt = now - this._lastPingAt
     // An attach's probe may have waited behind other channels' frames, or on the channel's registration: a later ping
     // that took less shows the path takes no more.
     const link = this._link
     if (link !== null && link.pathRtt < Infinity) link.measured(rtt)
-    const roundWait = sendWait?.longestWaitSince(this._pingSentAt) ?? 0
+    const roundWait = sendWait?.longestWaitSince(this._lastPingAt) ?? 0
     const roundRtt = Math.max(1, rtt - this._pingWait)
     if (this._boundRtt < Infinity && roundRtt < this._boundRtt) this._boundRtt = roundRtt
     const received = this._bytesReceived - this._bytesAtPingSent
@@ -250,11 +238,22 @@ class BdpEstimator {
     this._msgsAtPingSent = this._msgsReceived
   }
 
-  private _sendPing(): void {
+  private _pingDue(now: number): boolean {
+    if (this._pingInFlight) return false
+    // Skip probe only when *both* axes have already hit their cap — otherwise one of them
+    // might still want to grow.
+    if (this._byteWindow >= this._byteWindowMax && this._msgWindow >= CREDIT_MSG_WINDOW_MAX) return false
+    return now - this._lastPingAt >= this._probeIntervalMs
+  }
+
+  private _sendPing(now: number, sendWait: SendWait | null): void {
     this._probes = (this._probes + 1) >>> 0
     this._ping = this._probes
     this._pingInFlight = true
-    this._pingSentAt = performance.now()
+    this._lastPingAt = now
+    this._pingWait = sendWait?.waitNow() ?? 0
+    this._pingFollowsGrowth = this._grewSincePing
+    this._grewSincePing = false
     this._bytesAtPingSent = this._bytesReceived
     this._msgsAtPingSent = this._msgsReceived
   }
