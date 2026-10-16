@@ -46,6 +46,15 @@ type SseInitialBatchStage = {
   movedBufferedFrames: OutboundFrame[]
 }
 
+/** A wire's streaming upload POST: its body, what aborts it alone, and its end. */
+type StreamUpload = {
+  body: PushReadableStream<Uint8Array<ArrayBuffer>>
+  abort: AbortController
+  ended: Promise<'fetch-ended'>
+}
+
+type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
+
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
 const SSE_FOLD_BYTES = 1024 * 1024
 
@@ -224,47 +233,18 @@ class SseTransport implements UpgradeSource {
       abortController.signal,
       { accept: 'text/event-stream' },
     )
-    // The POST ends with its body or when cut on the way; `fetchEndedP` handles its rejection if openStream exits.
-    let fetchEndedP: Promise<'fetch-ended'> | undefined
-    let uploadBody: PushReadableStream<Uint8Array<ArrayBuffer>> | undefined
-    const uploadAbort = new AbortController()
-    abortController.signal.addEventListener('abort', () => uploadAbort.abort(), { once: true })
-    if (this.streamRequest.tag !== 'failed') {
-      const body = createPushReadableStream<Uint8Array<ArrayBuffer>>()
-      uploadBody = body
-      // Metadata header first — the server classifies the POST by it; `streamRequest: true`
-      // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
-      body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
-      const fetch = this.postAndRead(body, uploadAbort.signal, { duplex: 'half' })
-      this.streamRequest = { tag: 'active', body, unconfirmed: [] }
-      fetchEndedP = (async (): Promise<'fetch-ended'> => {
-        try {
-          await fetch
-        } catch {}
-        return 'fetch-ended'
-      })()
-    }
+    const upload = this.streamRequest.tag === 'failed' ? null : this.openUpload(abortController)
     this.owner._onTransportReconcileSent(this)
-
-    const failOpen = (rejectedByServer: boolean): void => {
-      this.rollbackInitialBatch(stage)
-      this.closeStreamRequest()
-      abortController.abort()
-      this.transportAbort = null
-      this.connecting = false
-      this.owner._onTransportClosed(this, { rejectedByServer })
-    }
 
     let response: Response
     try {
       response = await ssePromise
     } catch {
-      failOpen(false)
+      this.failOpen(stage, abortController, false)
       return
     }
-
     if (!response.ok || !response.body) {
-      failOpen(true)
+      this.failOpen(stage, abortController, true)
       return
     }
 
@@ -273,76 +253,113 @@ class SseTransport implements UpgradeSource {
       abortController,
       (bytes) => this.heartbeat?.noteReceived(bytes),
     )
-
     // Run the SSE loop concurrently with the handshake wait — frames (including the first
     // RECONCILED) can arrive while the open-ack is still in flight and must be dispatched.
     let resolveHandshakeOk!: () => void
     const handshakeOkP = new Promise<'ok'>((resolve) => {
       resolveHandshakeOk = () => resolve('ok')
     })
-    ;(async () => {
-      try {
-        while (true) {
-          const raw = await reader.readNextEntry()
-          if (!raw) break
-          if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
-            resolveHandshakeOk()
-            continue
-          }
-          const frame = decode(raw)
-          if (frame.tag === TAG.PONG) {
-            this.heartbeat?.resetPong()
-            this.owner._onTransportPong(frame.ended)
-            continue
-          }
-          this.owner._onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
-        }
-      } catch {
-        if (abortController.signal.aborted) return
-      } finally {
-        reader.cancel()
-        // The old SSE reader's death must NOT trample a successor openStream's streamRequest /
-        // transportAbort. Only mutate transport state if this controller is still the active one.
-        if (this.transportAbort === abortController) {
-          this.closeStreamRequest()
-          this.transportAbort = null
-          // Its batch POST still in flight settles now rather than hold the next wire's outbox.
-          abortController.abort()
-        }
-        // Abandoned controllers are owned by a successor transport — don't notify closed.
-        if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this)
-      }
-    })()
+    void this.readEvents(reader, abortController, resolveHandshakeOk)
 
     // Race upstream readiness: ack (ok), fetch ended (dead), or timeout. Non-ok → outbox+batch.
-    if (fetchEndedP) {
+    if (upload) {
       const timeoutP = new Promise<'timeout'>((resolve) =>
         setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
       )
-      const result = await Promise.race([handshakeOkP, timeoutP, fetchEndedP])
-      if (result === 'ok') {
-        if (this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
-        // Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends.
-        void fetchEndedP.then(() => {
-          if (this.streamRequest.tag === 'active' && this.streamRequest.body === uploadBody) abortController.abort()
-        })
-      } else {
-        // The server may not have read a body it never acknowledged: resend it, first; it drops a seq it already has.
-        const unsent = this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
-        // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
-        uploadAbort.abort()
-        this.streamRequest = { tag: 'failed' }
-        if (unsent) {
-          this.outbox = unsent.map((frame) => ({ frame, deadline: Date.now() })).concat(this.outbox)
-          for (const frame of unsent) this.outboxBytes += frame.byteLength
-        }
-        this.owner._onTransportBatched(this)
-      }
+      const result = await Promise.race([handshakeOkP, timeoutP, upload.ended])
+      if (result === 'ok') this.confirmUpload(upload, abortController)
+      else this.abandonUpload(upload)
     }
 
     this.connecting = false
     this.owner._onTransportOpen(this)
     if (this.outbox.length > 0) void this.flushOutbox()
+  }
+
+  /** The streaming upload POST, aborted with the wire's `abortController` or alone. */
+  private openUpload(abortController: AbortController): StreamUpload {
+    const abort = new AbortController()
+    abortController.signal.addEventListener('abort', () => abort.abort(), { once: true })
+    const body = createPushReadableStream<Uint8Array<ArrayBuffer>>()
+    // Metadata header first — the server classifies the POST by it; `streamRequest: true`
+    // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
+    body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
+    const fetch = this.postAndRead(body, abort.signal, { duplex: 'half' })
+    this.streamRequest = { tag: 'active', body, unconfirmed: [] }
+    // The POST ends with its body or when cut on the way; `ended` handles its rejection if openStream exits.
+    const ended = fetch.then(
+      () => 'fetch-ended' as const,
+      () => 'fetch-ended' as const,
+    )
+    return { body, abort, ended }
+  }
+
+  /** The server acknowledged the upload: what it was written is confirmed. */
+  private confirmUpload({ body, ended }: StreamUpload, abortController: AbortController): void {
+    if (this.streamRequest.tag === 'active') this.streamRequest.unconfirmed = null
+    // Ended while its body is still ours: nothing written to it reaches the server any more, so this wire ends.
+    void ended.then(() => {
+      if (this.streamRequest.tag === 'active' && this.streamRequest.body === body) abortController.abort()
+    })
+  }
+
+  /** The upload went unacknowledged: frames go in batch POSTs from now on. */
+  private abandonUpload({ abort }: StreamUpload): void {
+    // The server may not have read a body it never acknowledged: resend it, first; it drops a seq it already has.
+    const unsent = this.streamRequest.tag === 'active' ? this.streamRequest.unconfirmed : null
+    // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
+    abort.abort()
+    this.streamRequest = { tag: 'failed' }
+    if (unsent) {
+      this.outbox = unsent.map((frame) => ({ frame, deadline: Date.now() })).concat(this.outbox)
+      for (const frame of unsent) this.outboxBytes += frame.byteLength
+    }
+    this.owner._onTransportBatched(this)
+  }
+
+  /** The downstream didn't open: what the reconcile took goes back to the outbox, and the wire closes. */
+  private failOpen(stage: SseInitialBatchStage, abortController: AbortController, rejectedByServer: boolean): void {
+    this.rollbackInitialBatch(stage)
+    this.closeStreamRequest()
+    abortController.abort()
+    this.transportAbort = null
+    this.connecting = false
+    this.owner._onTransportClosed(this, { rejectedByServer })
+  }
+
+  /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
+  private async readEvents(reader: SseEventStreamReader, abortController: AbortController, onOpenAck: () => void) {
+    try {
+      while (true) {
+        const raw = await reader.readNextEntry()
+        if (!raw) break
+        if (raw[0] === TAG.STREAM_REQUEST_OPEN_ACK) {
+          onOpenAck()
+          continue
+        }
+        const frame = decode(raw)
+        if (frame.tag === TAG.PONG) {
+          this.heartbeat?.resetPong()
+          this.owner._onTransportPong(frame.ended)
+          continue
+        }
+        this.owner._onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
+      }
+    } catch {
+      if (abortController.signal.aborted) return
+    } finally {
+      reader.cancel()
+      // The old SSE reader's death must NOT trample a successor openStream's streamRequest /
+      // transportAbort. Only mutate transport state if this controller is still the active one.
+      if (this.transportAbort === abortController) {
+        this.closeStreamRequest()
+        this.transportAbort = null
+        // Its batch POST still in flight settles now rather than hold the next wire's outbox.
+        abortController.abort()
+      }
+      // Abandoned controllers are owned by a successor transport — don't notify closed.
+      if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this)
+    }
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
