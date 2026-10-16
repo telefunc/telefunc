@@ -3,8 +3,8 @@ export { testAbort }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, navigate, getResult } from '../../e2e-utils'
 
-/** Max elapsed time (ms) from t0 to server-side cleanup completion. */
-const ABORT_DEADLINE_MS = 2000
+/** Max time (ms) from the telefunction's start to its onClose: before its next 1 s token. */
+const ABORT_DEADLINE_MS = 1000
 
 function testAbort() {
   // ── Generator abort mechanisms ──────────────────────────────────────
@@ -13,7 +13,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-generator-abort-fn')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -25,7 +24,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(Number(state.slowAIClosedAfterMs)).to.be.below(ABORT_DEADLINE_MS)
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -34,7 +33,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-generator-return')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -46,7 +44,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(Number(state.slowAIClosedAfterMs)).to.be.below(ABORT_DEADLINE_MS)
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -55,7 +53,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-generator-withContext')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -67,7 +64,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowAI).toBe('cleaned-up')
-      expect(Number(state.slowAIClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(Number(state.slowAIClosedAfterMs)).to.be.below(ABORT_DEADLINE_MS)
       expect(state.slowAIFinallyRan).toBe('true')
     })
   })
@@ -78,7 +75,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-stream-reader-cancel')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -90,7 +86,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowStream).toBe('cleaned-up')
-      expect(Number(state.slowStreamClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(Number(state.slowStreamClosedAfterMs)).to.be.below(ABORT_DEADLINE_MS)
       expect(state.slowStreamCancelled).toBe('true')
     })
   })
@@ -99,7 +95,6 @@ function testAbort() {
     await navigate(`${getServerUrl()}/abort`)
     await resetCleanupState()
 
-    const t0 = Date.now()
     await page.click('#test-stream-withContext')
     await autoRetry(async () => {
       const result = await getResult('#abort-result')
@@ -111,7 +106,7 @@ function testAbort() {
     await autoRetry(async () => {
       const state = await getCleanupState()
       expect(state.slowStream).toBe('cleaned-up')
-      expect(Number(state.slowStreamClosedAt) - t0).to.be.below(ABORT_DEADLINE_MS)
+      expect(Number(state.slowStreamClosedAfterMs)).to.be.below(ABORT_DEADLINE_MS)
       expect(state.slowStreamCancelled).toBe('true')
     })
   })
