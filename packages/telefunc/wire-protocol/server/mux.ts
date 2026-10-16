@@ -398,11 +398,11 @@ class ChannelMux {
   private dispatchInbound(connection: Wire, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return Promise.resolve(null)
-    if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, connection, rawFrame, 'alone')
-    // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
-    // measures. Each is copied as the one before it goes, so copying stops two frames past the ingress budget.
     let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
     try {
+      if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, connection, rawFrame, 'alone')
+      // Each is handled as it would be alone, those before the last riding on it, a LENGTH taken after the frame it
+      // measures. Each is copied as the one before it goes, so copying stops two frames past the ingress budget.
       assertProtocol(entry.state.pieces, 'frames in one message on a wire that takes no pieces')
       const { receiver } = entry.state.pieces
       const frames = messageFrames(rawFrame)
@@ -438,7 +438,7 @@ class ChannelMux {
     }
     const tag = peekTag(rawFrame)
     if (tag === TAG.PIECE) return this.receivePiece(entry, connection, rawFrame)
-    if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, connection, rawFrame)
+    if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, rawFrame)
     const now = performance.now()
     if (arrival !== 'pieced') {
       state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now, arrival === 'riding')
@@ -467,46 +467,30 @@ class ChannelMux {
     state.lastReceivedAt = now
     state.deliveries.note(now, rawFrame.byteLength)
     this.answerArrival(entry, connection)
-    let frame: Uint8Array<ArrayBuffer> | null
-    try {
-      const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
-      assert(piece.tag === TAG.PIECE)
-      assertProtocol(state.pieces, 'PIECE on a wire that takes no pieces')
-      // As large as the runtime takes in one message: its pieces get past what it would refuse whole.
-      const cap = getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES
-      assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
-      const { receiver } = state.pieces
-      const heldBefore = receiver.held
-      frame = receiver.add(piece.total, piece.piece, now)
-      // What it holds of a frame counts in the recv backlog as the frame does once whole.
-      state.recvBacklog.bytes += receiver.held - heldBefore
-      state.recvBacklog.frames += Number(receiver.held > 0) - Number(heldBefore > 0)
-    } catch (err) {
-      if (!(err instanceof ProtocolViolationError)) throw err
-      this.terminateWire(connection)
-      return Promise.resolve(null)
-    }
+    const piece = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    assert(piece.tag === TAG.PIECE)
+    assertProtocol(state.pieces, 'PIECE on a wire that takes no pieces')
+    // As large as the runtime takes in one message: its pieces get past what it would refuse whole.
+    const cap = getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES
+    assertProtocol(piece.total <= cap, 'PIECE of a frame over the cap')
+    const { receiver } = state.pieces
+    const heldBefore = receiver.held
+    const frame = receiver.add(piece.total, piece.piece, now)
+    // What it holds of a frame counts in the recv backlog as the frame does once whole.
+    state.recvBacklog.bytes += receiver.held - heldBefore
+    state.recvBacklog.frames += Number(receiver.held > 0) - Number(heldBefore > 0)
     if (frame === null) return Promise.resolve(null)
     return this.dispatchFrame(entry, connection, frame, 'pieced')
   }
 
-  private receiveAnnounce(
-    entry: ConnectionEntry,
-    connection: Wire,
-    rawFrame: Uint8Array<ArrayBuffer>,
-  ): Promise<ReconcileOutcome | null> {
+  private receiveAnnounce(entry: ConnectionEntry, rawFrame: Uint8Array<ArrayBuffer>): Promise<ReconcileOutcome | null> {
     const now = performance.now()
     entry.state.lastReceivedAt = now
     entry.state.deliveries.note(now, rawFrame.byteLength)
-    try {
-      const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
-      assert(announce.tag === TAG.ANNOUNCE)
-      assertProtocol(entry.state.pieces, 'ANNOUNCE on a wire that takes no pieces')
-      entry.state.pieces.receiver.announce(announce.bytes, now, announce.floor)
-    } catch (err) {
-      if (!(err instanceof ProtocolViolationError)) throw err
-      this.terminateWire(connection)
-    }
+    const announce = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
+    assert(announce.tag === TAG.ANNOUNCE)
+    assertProtocol(entry.state.pieces, 'ANNOUNCE on a wire that takes no pieces')
+    entry.state.pieces.receiver.announce(announce.bytes, now, announce.floor)
     return Promise.resolve(null)
   }
 
