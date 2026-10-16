@@ -134,18 +134,10 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     const nodes = redis instanceof Cluster ? redis.nodes('master') : [redis]
     const tick = async () => {
       await Promise.all(nodes.map((node) => node.slowlog('RESET')))
-      let last = performance.now()
-      let longest = 0
-      const timer = setInterval(() => {
-        const now = performance.now()
-        longest = Math.max(longest, now - last)
-        last = now
-      }, 1)
-      await (
-        room as unknown as { _replica: { sync: { _heartbeatTick(): Promise<void> } } }
-      )._replica.sync._heartbeatTick()
-      clearInterval(timer)
-      return { gap: Math.max(longest, performance.now() - last), slow: await commandsOver20Ms(nodes, prefix) }
+      const { gap } = await longestGapWhile(() =>
+        (room as unknown as { _replica: { sync: { _heartbeatTick(): Promise<void> } } })._replica.sync._heartbeatTick(),
+      )
+      return { gap, slow: await commandsOver20Ms(nodes, prefix) }
     }
     const ticks = [await tick(), await tick()]
     expect(room.count).toBe(100_000)
@@ -637,17 +629,11 @@ await read()`,
     const merge = async (value: number) => {
       await Promise.all(nodes.map((node) => node.slowlog('RESET')))
       const before = changes
-      let last = performance.now()
-      let longest = 0
-      const timer = setInterval(() => {
-        const now = performance.now()
-        longest = Math.max(longest, now - last)
-        last = now
-      }, 1)
-      await member.setAttributes({ k0: value })
-      await vi.waitFor(() => expect(changes).toBe(before + 1))
-      clearInterval(timer)
-      return { gap: Math.max(longest, performance.now() - last), slow: await commandsOver20Ms(nodes, prefix) }
+      const { gap } = await longestGapWhile(async () => {
+        await member.setAttributes({ k0: value })
+        await vi.waitFor(() => expect(changes).toBe(before + 1))
+      })
+      return { gap, slow: await commandsOver20Ms(nodes, prefix) }
     }
     await merge(-1)
     const merges = [await merge(1), await merge(2)]
