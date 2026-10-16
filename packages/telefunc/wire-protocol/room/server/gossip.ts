@@ -7,6 +7,7 @@ import { ROOM_DEMAND_PAGE_ENTRIES, ROOM_GOSSIP_IN_FLIGHT_MAX } from './constants
 import type { RoomDemandPage } from './protocol.js'
 import { reportRoomError } from './errors.js'
 import { DEMAND_LANE, encodeDemandPage } from './lanes.js'
+import type { RoomIncarnation } from './lifecycle.js'
 import { Slice } from '../slice.js'
 assertIsNotBrowser()
 
@@ -28,8 +29,7 @@ class GossipOutbox {
   private _yielding = false
 
   constructor(
-    private readonly _roomId: string,
-    private readonly _inc: string,
+    private readonly _room: RoomIncarnation,
     private readonly _instance: string,
   ) {}
 
@@ -80,7 +80,7 @@ class GossipOutbox {
       this._inFlight++
       // A stale commit is a closed room's: its gossip has no reader.
       void getRoomBackend()
-        .commitLane(this._roomId, this._inc, DEMAND_LANE, encodeDemandPage(page))
+        .commitLane(this._room.id, this._room.inc, DEMAND_LANE, encodeDemandPage(page))
         .catch(reportRoomError)
         .finally(() => {
           this._inFlight--

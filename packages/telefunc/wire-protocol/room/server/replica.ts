@@ -145,7 +145,7 @@ class RoomReplica {
       onMemberMeta: (id, update) => this._owners.get(id)?._acceptMeta(id, update),
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
-    this._gossip = new GossipOutbox(incarnation.id, incarnation.inc, this.report.instance)
+    this._gossip = new GossipOutbox(incarnation, this.report.instance)
     this.demand = new RoomDemand({
       ownsMember: (id) => this._owners.has(id),
       ownedMembers: () => this._owners.keys(),
