@@ -172,7 +172,7 @@ Add the Durable Object and KV bindings to your `wrangler.jsonc`:
 ```jsonc
 {
   "compatibility_date": "2025-08-15", // or later: channels need MessageChannel
-  "compatibility_flags": ["enable_request_signal"], // lets context.signal see a client disconnect
+  "compatibility_flags": ["enable_request_signal"], // a Worker's request.signal aborts when its client disconnects
   "durable_objects": {
     "bindings": [
       { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
