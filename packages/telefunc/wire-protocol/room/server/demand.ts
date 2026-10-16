@@ -133,7 +133,7 @@ class DemandReport {
    *  one the deadline stopped resumes it, so their order holds. */
   tellUntil(deadline: number): boolean {
     const telling = (this._telling ??= this._tellChanges())
-    for (let step = telling.next(); !step.done; step = telling.next()) if (performance.now() >= deadline) return false
+    while (!telling.next().done) if (performance.now() >= deadline) return false
     this._telling = null
     return true
   }
@@ -520,7 +520,7 @@ class RoomDemand {
     const steps = this._evaluations()
     const run = (): void => {
       try {
-        for (let step = steps.next(); !step.done; step = steps.next()) {
+        while (!steps.next().done) {
           if (slice.over) {
             void slice.next().then(run)
             return
