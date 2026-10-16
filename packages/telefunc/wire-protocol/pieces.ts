@@ -96,25 +96,13 @@ class PieceSender {
   private wholeUpTo = 2 * WIRE_PROBE_PAIR_BYTES
   /** The most bytes a message of whole frames carries: what a frame of them could, whole and unannounced. */
   private gatherUpTo = WIRE_PROBE_FIRST_BYTES
-  /** The largest message sent: a browser may count a message in full while sending it. */
-  private largest = 0
   /** The frames the next message it sends carries (see `carry`). */
   private readonly carried: (() => Uint8Array<ArrayBuffer> | null)[] = []
-  /** The frames counted and not yet handed to the socket, which go in one message. */
-  private readonly gathered: Uint8Array<ArrayBuffer>[] = []
-  private gatheredBytes = 0
-  /** Its last frame needs a LENGTH once one follows it (see `messageFrames`). */
-  private lastVaries = false
-  /** It gathered frames that weren't carried. */
-  private gatheredOwn = false
-  /** It gathered a frame that isn't data. */
-  private gatheredAtOnce = false
-  private gatheredData = false
-  private flushQueued = false
-  private closed = false
+  /** The frames counted and not yet handed to the socket. */
+  private readonly turn: TurnMessage
 
   constructor(
-    private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
+    transmit: (message: Uint8Array<ArrayBuffer>) => void,
     /** The bytes its socket holds unsent. */
     private readonly queued: () => number,
     /** Its wire's ping interval, which sizes the frames it sends whole. */
@@ -123,6 +111,10 @@ class PieceSender {
     private readonly link = new Link(),
     private readonly room = UNBOUNDED,
   ) {
+    // As the turn ends, it hands what it gathered unless an announcement is open; what was only carried waits.
+    this.turn = new TurnMessage(transmit, () => {
+      if (this.open === null) this.turn.flush()
+    })
     this.setWholeUpTo()
   }
 
@@ -133,12 +125,12 @@ class PieceSender {
 
   /** The bytes of the frames sent that its socket doesn't have yet. */
   get unhandedBytes(): number {
-    return this.heldBytes + this.gatheredBytes
+    return this.heldBytes + this.turn.bytes
   }
 
   /** Whether it has data its socket doesn't have yet: what it holds waits behind the rest of a data frame. */
   get holdsData(): boolean {
-    return this.rest !== null || this.gatheredData
+    return this.rest !== null || this.turn.data
   }
 
   /** The next message it hands the socket carries ahead of it the frame `frame` returns then, if any. */
@@ -199,74 +191,41 @@ class PieceSender {
   /** Counts `frame` into its message. A cutting room times data from its handing: data follows only carried frames. */
   private gather(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
     const bytes = frame.byteLength
-    const length = this.lastVaries ? LENGTH_BYTES : 0
+    const turn = this.turn
     if (
-      this.gatheredOwn &&
-      ((data && (this.gatheredAtOnce || this.room.cuts)) || this.gatheredBytes + length + bytes > this.gatherUpTo)
+      turn.own &&
+      ((data && (turn.atOnce || this.room.cuts)) || turn.bytes + turn.lengthAhead + bytes > this.gatherUpTo)
     ) {
-      this.flush()
+      turn.flush()
     }
     this.count(frame, data)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
-    this.add(frame)
-    this.gatheredOwn = true
-    if (data) this.gatheredData = true
-    else this.gatheredAtOnce = true
+    turn.add(frame, data, true)
   }
 
   /** Counts `frame` as it joins what it gathers, after the LENGTH the frame before it needs now. */
   private count(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
-    if (this.lastVaries) {
-      this.countHanded(LENGTH_BYTES, false)
-      this.gatheredBytes += LENGTH_BYTES
+    const length = this.turn.lengthAhead
+    if (length > 0) {
+      this.countHanded(length, false)
+      this.turn.addLength()
     }
     this.countHanded(frame.byteLength, data)
   }
 
-  private add(frame: Uint8Array<ArrayBuffer>): void {
-    this.gathered.push(frame)
-    this.gatheredBytes += frame.byteLength
-    this.lastVaries = fixedBytes(frame[0]!) === 0
-    if (this.flushQueued) return
-    this.flushQueued = true
-    queueMicrotask(this.flushTurn)
-  }
-
-  /** As the turn ends, hands what it gathered unless an announcement is open; what was only carried waits. */
-  private readonly flushTurn = (): void => {
-    this.flushQueued = false
-    if (this.gatheredOwn && this.open === null) this.flush()
-  }
-
-  /** Hands the socket `message`, the frames carried riding ahead of it (see `handGathered`). */
-  private hand(message: Uint8Array<ArrayBuffer>): void {
-    // Only what was carried rides, of bytes its tag fixes: a LENGTH ahead of it would count after `message`.
-    assert(!this.lastVaries)
-    this.gathered.push(message)
-    this.gatheredBytes += message.byteLength
-    this.flush()
-  }
-
   /** Before a message that gathers nothing: frames sent before it go ahead, and those only carried ride on it. */
   private handGathered(): void {
-    if (this.gatheredOwn) this.flush()
+    if (this.turn.own) this.turn.flush()
   }
 
   /** Hands the socket what it gathered, in one message. */
   flush(): void {
-    const n = this.gathered.length
-    if (n === 0 || this.closed) return
-    const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes)
-    this.gathered.length = 0
-    this.gatheredBytes = 0
-    this.lastVaries = this.gatheredOwn = this.gatheredAtOnce = this.gatheredData = false
-    if (message.byteLength > this.largest) this.largest = message.byteLength
-    this.transmit(message)
+    this.turn.flush()
   }
 
   /** Its socket closed: it hands it nothing more, though this turn gathered frames for it. */
   close(): void {
-    this.closed = true
+    this.turn.close()
   }
 
   /** Hands the socket `frame` from `offset` in pieces, of data as far as its room goes, and holds the rest. */
@@ -284,7 +243,7 @@ class PieceSender {
     this.countHanded(handed, isSequencedTag(frame[0]!))
     if (acknowledges(bytes)) this.track(handed, now, false)
     for (let at = offset; at < end; at += size) {
-      this.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
+      this.turn.hand(encode.piece(bytes, frame.subarray(at, Math.min(end, at + size))))
     }
     if (end < bytes) this.hold(frame, end)
   }
@@ -298,7 +257,7 @@ class PieceSender {
   /** Hands the socket the empty piece a frame of `total` bytes starts with. */
   private sendEmptyPiece(total: number): void {
     this.countHanded(PIECE_HEADER_BYTES, false)
-    this.hand(encode.piece(total, new Uint8Array(0)))
+    this.turn.hand(encode.piece(total, new Uint8Array(0)))
   }
 
   /** Holds `frame` from `offset`, for room. */
@@ -317,7 +276,7 @@ class PieceSender {
       const floorPerS = Math.min(0xffffffff, Math.floor(this.link.floor * 1000))
       this.namedFloor = floorPerS / 1000
       this.countHanded(ANNOUNCE_BYTES, false)
-      this.hand(encode.announce(0, floorPerS))
+      this.turn.hand(encode.announce(0, floorPerS))
       queueMicrotask(this.closeAnnouncement)
     }
     this.open.bytes += bytes
@@ -330,7 +289,7 @@ class PieceSender {
     const { start, at, bytes } = this.open!
     this.open = null
     this.countHanded(ANNOUNCE_BYTES, false)
-    this.hand(encode.announce(bytes, 0))
+    this.turn.hand(encode.announce(bytes, 0))
     this.announcements.push({ start, end: this.transmittedBytes, at })
   }
 
@@ -389,13 +348,13 @@ class PieceSender {
   private sendAnnouncedMessage(message: Uint8Array<ArrayBuffer>, bytes: number, end: number, at: number): void {
     this.lastAnnounced = bytes
     this.announcedEnds.push({ end, at })
-    this.hand(message)
+    this.turn.hand(message)
   }
 
   private track(crossingBytes: number, at: number, probe: boolean): void {
     // What its socket holds and what it gathered cross first, less the largest message, which a browser may count.
     this.unacknowledged.push({
-      crossing: Math.max(0, this.queued() + this.gatheredBytes - this.largest) + crossingBytes,
+      crossing: Math.max(0, this.queued() + this.turn.bytes - this.turn.largest) + crossingBytes,
       at,
       end: this.transmittedBytes,
       probe,
@@ -511,8 +470,88 @@ class PieceSender {
       if (frame === null) continue
       this.room.sentFrame(frame[0]!, frame.byteLength)
       this.count(frame, false)
-      this.add(frame)
+      this.turn.add(frame, false, false)
     }
+  }
+}
+
+/** The frames one turn of a sender gathers, handed to its socket in one message (see `messageFrames`). */
+class TurnMessage {
+  /** The bytes of the frames it holds, with the LENGTH ahead of each that needs one. */
+  bytes = 0
+  /** It holds frames that weren't carried. */
+  own = false
+  /** It holds a frame sent that isn't data. */
+  atOnce = false
+  /** It holds data. */
+  data = false
+  /** The largest message handed: a browser may count a message in full while sending it. */
+  largest = 0
+  private readonly frames: Uint8Array<ArrayBuffer>[] = []
+  /** Its last frame needs a LENGTH once one follows it (see `messageFrames`). */
+  private lastVaries = false
+  private flushQueued = false
+  private closed = false
+
+  constructor(
+    private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
+    /** Runs as the turn that added a frame ends, while it holds frames that weren't carried. */
+    private readonly turnEnded: () => void,
+  ) {}
+
+  /** The bytes of the LENGTH the next frame takes ahead of it. */
+  get lengthAhead(): number {
+    return this.lastVaries ? LENGTH_BYTES : 0
+  }
+
+  /** Counts the LENGTH the next frame takes ahead of it. */
+  addLength(): void {
+    this.bytes += this.lengthAhead
+  }
+
+  /** Adds `frame`, of data or not, sent (`own`) or carried, after its LENGTH. */
+  add(frame: Uint8Array<ArrayBuffer>, data: boolean, own: boolean): void {
+    this.frames.push(frame)
+    this.bytes += frame.byteLength
+    this.lastVaries = fixedBytes(frame[0]!) === 0
+    if (own) {
+      this.own = true
+      if (data) this.data = true
+      else this.atOnce = true
+    }
+    if (this.flushQueued) return
+    this.flushQueued = true
+    queueMicrotask(this.endTurn)
+  }
+
+  /** Hands the socket `message`, with what it holds riding ahead of it. */
+  hand(message: Uint8Array<ArrayBuffer>): void {
+    // Only what was carried rides, of bytes its tag fixes: a LENGTH ahead of it would count after `message`.
+    assert(!this.lastVaries)
+    this.frames.push(message)
+    this.bytes += message.byteLength
+    this.flush()
+  }
+
+  /** Hands the socket what it holds, in one message. */
+  flush(): void {
+    const n = this.frames.length
+    if (n === 0 || this.closed) return
+    const message = n === 1 ? this.frames[0]! : encode.message(this.frames, this.bytes)
+    this.frames.length = 0
+    this.bytes = 0
+    this.lastVaries = this.own = this.atOnce = this.data = false
+    if (message.byteLength > this.largest) this.largest = message.byteLength
+    this.transmit(message)
+  }
+
+  close(): void {
+    this.closed = true
+  }
+
+  private readonly endTurn = (): void => {
+    this.flushQueued = false
+    if (this.own) this.turnEnded()
   }
 }
 
