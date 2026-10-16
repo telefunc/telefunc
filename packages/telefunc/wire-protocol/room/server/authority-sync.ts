@@ -34,6 +34,9 @@ type SyncHost = {
   _closeFromAuthority(): void
 }
 
+/** The repairs a gap asks for, each due `ROOM_META_REPAIR_MS` after it. */
+type Repair = 'control' | 'meta' | 'memberMeta'
+
 /** Keeps a replica's view in step with the authority: its roster and meta reads, the repairs a gap asks for, and the
  *  heartbeat, which renews the session and the demand, reaps lapsed sessions, and reads the roster again once the
  *  control lane is past what this view covers. */
@@ -41,7 +44,7 @@ class AuthoritySync {
   private _pendingRefresh: Promise<void> | null = null
   private _heartbeatTimer: ReturnType<typeof setInterval> | null = null
   /** The repairs due `ROOM_META_REPAIR_MS` after the first gap that asked for each. */
-  private readonly _repairsDue = new Set<'control' | 'meta' | 'memberMeta'>()
+  private readonly _repairsDue = new Set<Repair>()
   private _heartbeatBusy = false
   /** Every control seq at or below it reached this view, as a frame or through a roster read started after it. */
   private _covered = 0
@@ -130,7 +133,7 @@ class AuthoritySync {
     if (this._runStart <= this._covered + 1) this._covered = Math.max(this._covered, this._received)
   }
 
-  private _repairSoon(repair: 'control' | 'meta' | 'memberMeta', run: () => void): void {
+  private _repairSoon(repair: Repair, run: () => void): void {
     if (this._repairsDue.has(repair)) return
     this._repairsDue.add(repair)
     unrefTimer(
