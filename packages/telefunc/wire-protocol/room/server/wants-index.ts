@@ -131,11 +131,6 @@ class WantsIndex {
     }
   }
 
-  /** The members some holder names `track` of alone. */
-  membersNaming(track: string): Iterable<string> {
-    return this._trackMembers.get(track) ?? []
-  }
-
   /** Whether some holder names `track` of every member. */
   namesEveryMember(track: string): boolean {
     return this._everyMember.has(track)
@@ -215,7 +210,7 @@ class WantsIndex {
     this._onEveryMemberCover(key)
     if (other !== undefined) return new Set(other._suppressedMembers())
     // Only the members it is named of alone change lanes; the holder's own may stop or start being received.
-    const affected = new Set(this.membersNaming(key))
+    const affected = new Set(this._trackMembers.get(key))
     for (const member of holder._suppressedMembers()) affected.add(member)
     return affected
   }
