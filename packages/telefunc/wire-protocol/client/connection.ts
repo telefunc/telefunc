@@ -1079,7 +1079,7 @@ class ClientConnection implements MuxConnection {
     const { from, buffer, deferredOmitted } = this.exitUpgradeCommitting()
     this.retireOldWire(from)
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
-    this.releaseDeferredOmitted(deferredOmitted)
+    this.closeUnacknowledged(deferredOmitted)
     for (const entry of buffer.new) this.dispatchFrame(entry.frame)
     this.flushPendingRegisterReconcile()
     this.startTtlIfIdle()
@@ -1175,7 +1175,7 @@ class ClientConnection implements MuxConnection {
     const abandoned = this.teardownUpgrade()
     if (abandoned) {
       for (const entry of abandoned.buffer.old) this.dispatchFrame(entry.frame)
-      this.releaseDeferredOmitted(abandoned.deferredOmitted)
+      this.closeUnacknowledged(abandoned.deferredOmitted)
     }
     this.upgradeDisabled = true
     this.transport.abandonActiveTransport()
@@ -1583,9 +1583,7 @@ class ClientConnection implements MuxConnection {
           deferredOmitted.push(ix)
           continue
         }
-        const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
-        this.releaseChannel(ix, entry.channel)
-        entry.channel._onTransportClose(err)
+        this.closeUnacknowledged([ix])
         continue
       }
       if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
@@ -1609,7 +1607,7 @@ class ClientConnection implements MuxConnection {
     return { frames: releaseFrames, channelsToOpen, reconcileComplete: !hasNewChannels }
   }
 
-  private releaseDeferredOmitted(ixes: number[]): void {
+  private closeUnacknowledged(ixes: number[]): void {
     for (const ix of ixes) {
       const entry = this.channels.get(ix)
       if (!entry) continue
@@ -1628,7 +1626,7 @@ class ClientConnection implements MuxConnection {
     if (!this.awaitedIxes.delete(ix)) return
     const entry = this.channels.get(ix)!
     if (lastSeq === null) {
-      this.releaseDeferredOmitted([ix])
+      this.closeUnacknowledged([ix])
     } else {
       const opened = entry.state.tag === 'pending'
       if (opened) this.enterChannelOpen(ix)
