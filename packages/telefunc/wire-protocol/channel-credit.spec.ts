@@ -1025,6 +1025,40 @@ test.each([
   },
 )
 
+// Node's `ws` reads `bufferedAmount` 0 while the kernel takes what it sends.
+test.each([
+  ['a socket that reports every byte it holds', false],
+  ['a socket that reports nothing under 128 KiB', true],
+])(
+  "on %s, a server that answered a page's acked request every 200 ms, then sends ~4 KB messages as fast as credit allows, carries them at the link's rate, not at the page's pace",
+  async (_, nodeLike) => {
+    if (nodeLike)
+      loop.transport.bufferedAmount = (socket) => (socket.toPage.bytes > 128 * KIB ? socket.toPage.bytes : 0)
+    const rpc = loop.open<string, never>()
+    const { server, page } = loop.open<never, unknown>()
+    let got = 0
+    page.listen(() => void got++)
+    rpc.server.listen(() => 'y'.repeat(64 * KIB) as never)
+    await run(100)
+    loop.socket.toPage.bytesPerMs = loop.socket.toServer.bytesPerMs = 10_000
+    for (let i = 0; i < 15; i++) {
+      void rpc.page.send('q'.repeat(4_000), { ack: true })
+      await run(200)
+    }
+    await run(500)
+    const mark = got
+    let stop = false
+    void (async () => {
+      while (!stop && !server.isClosed) await server.send({ text: 'x'.repeat(4_000) })
+    })().catch(() => {})
+    await run(3_000)
+    stop = true
+    // 10 MB/s carries ~2,400 of them a second.
+    expect((got - mark) / 3).toBeGreaterThan(2_000)
+    expect(loop.sockets).toHaveLength(1)
+  },
+)
+
 // What the other channels' messages leave in the server's socket, and deliver just before the ping's ack, is no queue.
 test.each([
   ['another channel on it gets a small message every 50 ms', [50]],

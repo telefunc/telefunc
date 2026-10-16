@@ -28,7 +28,7 @@ class PathRoom implements SendRoom {
   private leastRtt = Number.POSITIVE_INFINITY
   /** The data handed and not covered by an acknowledgement: where it ends, of all the sender handed, and when. */
   private readonly sent = new Fifo<{ end: number; at: number }>()
-  /** Where the newest data handed with nothing waiting ahead of it ends, of all the sender handed: arrivals up to it
+  /** Where the newest data handed with no data waiting ahead of it ends, of all the sender handed: arrivals up to it
    *  came at the rate the app sent, not the link's. Whether the sender is sending what it held for room. */
   private appLimitedTo = 0
   private releasing = false
@@ -60,7 +60,7 @@ class PathRoom implements SendRoom {
   handed(bytes: number, data: boolean): void {
     if (!data) return
     const end = this.sender.transmittedBytes
-    if (!this.releasing && this.queued() + this.sender.unhandedBytes === 0) this.appLimitedTo = end
+    if (!this.releasing && this.queued() + this.sender.unhandedDataBytes === 0) this.appLimitedTo = end
     if (acknowledges(bytes)) this.sent.push({ end, at: performance.now() })
   }
 

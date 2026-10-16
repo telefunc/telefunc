@@ -99,9 +99,11 @@ class PieceSender {
   private readonly carried: (() => Uint8Array<ArrayBuffer> | null)[] = []
   /** The frames counted and not yet handed to the socket, which go in one message as this turn ends, and their bytes with
    *  the LENGTH ahead of each that one followed; whether its last frame needs a LENGTH once one follows it (see
-   *  `messageFrames`), it holds frames that weren't carried, and one of them that goes at once. */
+   *  `messageFrames`), it holds frames that weren't carried, and one of them that goes at once; the bytes of its data
+   *  frames. */
   private readonly gathered: Uint8Array<ArrayBuffer>[] = []
   private gatheredBytes = 0
+  private gatheredDataBytes = 0
   private lastVaries = false
   private gatheredSent = false
   private gatheredAtOnce = false
@@ -125,6 +127,11 @@ class PieceSender {
   /** The bytes of the frames sent that its socket doesn't have yet. */
   get unhandedBytes(): number {
     return this.heldBytes + this.gatheredBytes
+  }
+
+  /** The bytes of the data frames sent that its socket doesn't have yet: what it holds waits behind a data frame. */
+  get unhandedDataBytes(): number {
+    return this.heldBytes + this.gatheredDataBytes
   }
 
   /** The next message it hands the socket carries the frame `frame` returns as that message is sent, if any, ahead of
@@ -200,7 +207,8 @@ class PieceSender {
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
     this.add(frame)
     this.gatheredSent = true
-    if (!data) this.gatheredAtOnce = true
+    if (data) this.gatheredDataBytes += bytes
+    else this.gatheredAtOnce = true
   }
 
   /** Counts `frame` as it joins what it gathers, after the LENGTH the frame before it needs now. */
@@ -249,7 +257,7 @@ class PieceSender {
     if (n === 0 || this.closed) return
     const message = n === 1 ? this.gathered[0]! : encode.message(this.gathered, this.gatheredBytes)
     this.gathered.length = 0
-    this.gatheredBytes = 0
+    this.gatheredBytes = this.gatheredDataBytes = 0
     this.lastVaries = this.gatheredSent = this.gatheredAtOnce = false
     if (message.byteLength > this.largest) this.largest = message.byteLength
     this.transmit(message)
