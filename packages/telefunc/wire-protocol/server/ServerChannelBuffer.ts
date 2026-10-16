@@ -78,7 +78,13 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void): void {
-    this.#binary.push(TAG.BINARY_ACK_REQ, new Uint8Array(data), data.byteLength, { resolve, reject }, this.#insertionSeq++)
+    this.#binary.push(
+      TAG.BINARY_ACK_REQ,
+      new Uint8Array(data),
+      data.byteLength,
+      { resolve, reject },
+      this.#insertionSeq++,
+    )
   }
 
   pushPublishBinary(data: Uint8Array): void {
