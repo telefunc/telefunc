@@ -224,7 +224,8 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal The member is gone; `cause` says how. */
   _onLeft(cause: LeaveCause): void {
     if (this._leftCause) return
-    const ownedCause = (this._leftCause = ownLeaveCause(cause))
+    const ownedCause = ownLeaveCause(cause)
+    this._leftCause = ownedCause
     // Held ack DMs will never be handled now, so fail their senders instead of hanging them.
     const held = this._pendingInbox
     this._pendingInbox = null
