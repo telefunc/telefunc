@@ -710,17 +710,17 @@ abstract class PieceReceiver {
   }
 
   private acknowledge(): void {
-    this.send(this.acknowledgement())
+    this.send(this.takeAcknowledgement())
   }
 
   /** Acknowledges in the message its side sends next. */
   protected acknowledgeWithNext(): void {
     if (this.carrying) return
     this.carrying = true
-    this.carry(() => (this.carrying ? this.acknowledgement() : null))
+    this.carry(() => (this.carrying ? this.takeAcknowledgement() : null))
   }
 
-  private acknowledgement(): Uint8Array<ArrayBuffer> {
+  private takeAcknowledgement(): Uint8Array<ArrayBuffer> {
     if (this.ackTimer !== null) clearTimeout(this.ackTimer)
     this.ackTimer = null
     this.ackAlone = this.carrying = false
