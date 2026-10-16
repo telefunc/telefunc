@@ -822,12 +822,12 @@ class ChannelMux {
     prevSessionId: string | undefined,
     newSessionId: string,
     open: ReconcilePayload['open'],
-    conn: ConnectionEntry,
+    entry: ConnectionEntry,
     connection: Wire,
     replay: boolean,
   ): ChannelHandle[] {
     const handles = open
-      .map((entry) => this.attach(entry, conn, connection, replay))
+      .map((each) => this.attach(each, entry, connection, replay))
       .filter((h): h is ChannelHandle => h !== null)
 
     // Channels in the previous session that the client did NOT re-include are recovery-failed.
@@ -847,53 +847,53 @@ class ChannelMux {
    *  one it awaits stays out until attached; its ATTACH_RESULT settles it. Later reconciles fail fast if the channel
    *  is gone. */
   private attach(
-    entry: ReconcileOpenEntry,
-    conn: ConnectionEntry,
+    open: ReconcileOpenEntry,
+    entry: ConnectionEntry,
     connection: Wire,
     replay: boolean,
   ): ChannelHandle | null {
     // Answered ahead of every frame of the channel, and of its registration where the wire awaits it: its round trip
     // is the path's.
-    if (entry.probe !== undefined) conn.state.probed.push({ ix: entry.ix, probe: entry.probe })
-    const awaited = conn.state.awaited.get(entry.ix)
+    if (open.probe !== undefined) entry.state.probed.push({ ix: open.ix, probe: open.probe })
+    const awaited = entry.state.awaited.get(open.ix)
     if (awaited) {
-      awaited.entry = entry
+      awaited.open = open
       if (awaited.phase !== 'attached') return null
     }
-    const existing = this.channels.get(entry.id)
+    const existing = this.channels.get(open.id)
     if (existing) {
-      conn.state.attaching.add(existing)
-      return this.attachChannel(existing, entry, conn.sender, replay)
+      entry.state.attaching.add(existing)
+      return this.attachChannel(existing, open, entry.sender, replay)
     }
-    if (entry.initial && !awaited) this.awaitChannel(entry, conn, connection)
+    if (open.initial && !awaited) this.awaitChannel(open, entry, connection)
     return null
   }
 
-  private awaitChannel(entry: ReconcileOpenEntry, conn: ConnectionEntry, connection: Wire): void {
+  private awaitChannel(open: ReconcileOpenEntry, entry: ConnectionEntry, connection: Wire): void {
     const onResult = (channel: ServerChannel | null): void => {
       if (channel) this.attachAwaited(awaited, channel)
       else this.expireAwaited(awaited)
     }
     const awaited: AwaitedChannel = {
+      open,
       entry,
-      conn,
       wire: connection,
       held: [],
       phase: 'waiting',
-      stopWaiting: this.waitForChannelRegistration(entry.id, this.options.connectTtl, onResult),
+      stopWaiting: this.waitForChannelRegistration(open.id, this.options.connectTtl, onResult),
     }
-    conn.state.awaited.add(awaited)
+    entry.state.awaited.add(awaited)
   }
 
   /** Runs in `registerChannel`, so the waiters of several wires attach in the order they began waiting and the latest
    *  keeps the channel. A reconcile is one synchronous turn, so this lands between two, never within one. */
   private attachAwaited(awaited: AwaitedChannel, channel: ServerChannel): void {
-    const { conn, wire } = awaited
-    const sessionId = conn.transport.getSessionId(wire)
+    const { entry, wire } = awaited
+    const sessionId = entry.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
-    conn.state.attaching.add(channel)
-    const handle = this.attachChannel(channel, awaited.entry, conn.sender, false)
-    conn.state.attaching.delete(channel)
+    entry.state.attaching.add(channel)
+    const handle = this.attachChannel(channel, awaited.open, entry.sender, false)
+    entry.state.attaching.delete(channel)
     if (!handle) {
       this.expireAwaited(awaited)
       return
@@ -903,17 +903,17 @@ class ChannelMux {
     // On the wire's recv chain, once the code that registered the channel has added its listeners; the wire holds
     // what arrives meanwhile. The ATTACH_RESULT follows, so its lastSeq counts what the wire held.
     const settle = async (): Promise<void> => {
-      if (conn.state.awaited.get(awaited.entry.ix) !== awaited) return
-      if (this.dispatchHeld(awaited)) this.send(wire, encode.attachResult(awaited.entry.ix, channel._lastClientSeq))
+      if (entry.state.awaited.get(awaited.open.ix) !== awaited) return
+      if (this.dispatchHeld(awaited)) this.send(wire, encode.attachResult(awaited.open.ix, channel._lastClientSeq))
     }
-    void this.chainRecv(conn, settle).catch(handleTelefunctionBug)
+    void this.chainRecv(entry, settle).catch(handleTelefunctionBug)
   }
 
   /** Returns false if what it held broke the protocol, which ends its wire. */
   private dispatchHeld(awaited: AwaitedChannel): boolean {
-    const { conn, wire } = awaited
-    const held = conn.state.awaited.take(awaited)
-    const sessionId = conn.transport.getSessionId(wire)
+    const { entry, wire } = awaited
+    const held = entry.state.awaited.take(awaited)
+    const sessionId = entry.transport.getSessionId(wire)
     assert(sessionId)
     try {
       for (const { frame } of held) this.dispatchChannelFrame(sessionId, frame)
@@ -928,8 +928,8 @@ class ChannelMux {
   /** Not registered within `connectTtl`, or shut down as it registered. */
   private expireAwaited(awaited: AwaitedChannel): void {
     awaited.phase = 'expired'
-    awaited.conn.state.awaited.drop(awaited)
-    this.send(awaited.wire, encode.attachResult(awaited.entry.ix, null))
+    awaited.entry.state.awaited.drop(awaited)
+    this.send(awaited.wire, encode.attachResult(awaited.open.ix, null))
   }
 
   /** A channel the old wire awaits moves with the barrier listing it, so the WebSocket awaits it from then on. One
@@ -940,8 +940,8 @@ class ChannelMux {
     wsConnection: Wire,
     open: ReconcileOpenEntry[],
   ): void {
-    for (const entry of open) {
-      const awaited = oldEntry.state.awaited.get(entry.ix)
+    for (const { ix } of open) {
+      const awaited = oldEntry.state.awaited.get(ix)
       if (!awaited) continue
       if (awaited.phase === 'attached') this.dispatchHeld(awaited)
       else oldEntry.state.awaited.move(awaited, wsEntry, wsConnection)
@@ -953,23 +953,23 @@ class ChannelMux {
    *  down and kept nothing for its page. */
   private attachChannel(
     channel: ServerChannel,
-    entry: ReconcileOpenEntry,
+    open: ReconcileOpenEntry,
     sender: PeerSender,
     replay: boolean,
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
-    channel._onPageHas(entry.lastSeq)
-    const peer = new IndexedPeer(sender, entry.ix, buffer)
-    const missed = replay ? buffer.getAfter(entry.lastSeq) : []
+    channel._onPageHas(open.lastSeq)
+    const peer = new IndexedPeer(sender, open.ix, buffer)
+    const missed = replay ? buffer.getAfter(open.lastSeq) : []
     if (missed === null) {
       channel._onReplayLost(peer)
     } else {
       for (const frame of missed) sender.send(frame)
-      channel._attachPeer(peer, entry)
+      channel._attachPeer(peer, open)
     }
     if (this.endedChannels.has(channel)) this.keepEnded(channel, true)
-    return { channel, ix: entry.ix, peer }
+    return { channel, ix: open.ix, peer }
   }
 
   /** Returns what ends the wait without a result. */

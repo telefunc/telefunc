@@ -11,9 +11,9 @@ type RecvBacklog = { bytes: number; frames: number }
  *  and an ATTACH_RESULT settles it. */
 type AwaitedChannel = {
   /** The latest RECONCILE entry naming it. */
-  entry: ReconcileOpenEntry
+  open: ReconcileOpenEntry
   /** The wire awaiting it: the one whose RECONCILE named it, until a barrier moves it to the WebSocket. */
-  conn: ConnectionEntry
+  entry: ConnectionEntry
   wire: Wire
   /** What the page sent it meanwhile, dispatched after its attach. */
   held: { frame: ChannelFrame; bytes: number }[]
@@ -35,7 +35,7 @@ class AwaitedChannels {
   }
 
   add(awaited: AwaitedChannel): void {
-    this.byIx.set(awaited.entry.ix, awaited)
+    this.byIx.set(awaited.open.ix, awaited)
   }
 
   hold(awaited: AwaitedChannel, frame: ChannelFrame, bytes: number): void {
@@ -46,7 +46,7 @@ class AwaitedChannels {
 
   /** Awaits it no more, and hands back what it held, to dispatch. */
   take(awaited: AwaitedChannel): AwaitedChannel['held'] {
-    this.byIx.delete(awaited.entry.ix)
+    this.byIx.delete(awaited.open.ix)
     const { held } = awaited
     this.drop(awaited)
     return held
@@ -71,13 +71,13 @@ class AwaitedChannels {
     }
   }
 
-  /** The wire `wire`, whose entry is `conn`, awaits it from now on, with what it held. */
-  move(awaited: AwaitedChannel, conn: ConnectionEntry, wire: Wire): void {
+  /** The wire `wire` awaits it from now on, with what it held. */
+  move(awaited: AwaitedChannel, entry: ConnectionEntry, wire: Wire): void {
     const held = this.take(awaited)
-    awaited.conn = conn
+    awaited.entry = entry
     awaited.wire = wire
-    for (const { frame, bytes } of held) conn.state.awaited.hold(awaited, frame, bytes)
-    conn.state.awaited.add(awaited)
+    for (const { frame, bytes } of held) entry.state.awaited.hold(awaited, frame, bytes)
+    entry.state.awaited.add(awaited)
   }
 
   stop(): void {
