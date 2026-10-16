@@ -4469,6 +4469,52 @@ describe('Room public behavior', () => {
     remote.onUpdate(() => {})
     expect(observer._state.listenerCount).toBe(0)
   })
+  it('releases every listener on a participant when it leaves, several sharing one list', async () => {
+    const authority = await Room.create('left-entry-release')
+    const member = await authority.join()
+    const observer = (await Room.get(authority.id)) as ServerRoom
+    const off = observer.onChange(() => {})
+    const remote = (await observer.getParticipant(member.id))!
+    const received: string[] = []
+    remote.subscribe((data) => void received.push(`a:${data}`))
+    remote.subscribe((data) => void received.push(`b:${data}`))
+    remote.subscribe((data) => void received.push(`c:${data}`))
+    remote.subscribeBinary(() => {})
+    remote.subscribeBinary(() => {}, { track: 'cam' })
+    remote.onUpdate(() => {})
+    remote.onUpdate(() => {})
+    remote.onLeave(() => {})
+    remote.onLeave(() => {})
+    expect(observer._state.listenerCount).toBe(10)
+    await member.publish('before')
+    await vi.waitFor(() => expect(received.sort()).toEqual(['a:before', 'b:before', 'c:before']))
+    await member.leave()
+    await vi.waitFor(() => expect(observer.count).toBe(0))
+    expect(observer._state.listenerCount).toBe(1)
+    off()
+    expect(observer._state.listenerCount).toBe(0)
+  })
+  it('releases every listener of a room when it closes, several sharing one list', async () => {
+    const room = (await Room.create('closed-room-release')) as ServerRoom
+    const member = await room.join()
+    const received: string[] = []
+    room.subscribe((data) => void received.push(`a:${data}`))
+    room.subscribe((data) => void received.push(`b:${data}`))
+    room.subscribeBinary(() => {})
+    room.subscribeBinary(() => {})
+    room.onJoin(() => {})
+    room.onJoin(() => {})
+    room.onChange(() => {})
+    const remote = (await room.getParticipant(member.id))!
+    remote.subscribe(() => {})
+    remote.subscribe(() => {})
+    expect(room._state.listenerCount).toBe(9)
+    await member.publish('before')
+    await vi.waitFor(() => expect(received.sort()).toEqual(['a:before', 'b:before']))
+    await Room.close(room.id)
+    await vi.waitFor(() => expect(room.isClosed).toBe(true))
+    expect(room._state.listenerCount).toBe(0)
+  })
   it("commits a participant's publishes in call order, however long its guard takes for each", async () => {
     const room = await Room.create('publish-call-order')
     const slow = createDeferred()
