@@ -1,4 +1,5 @@
 import { chargedBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
+import { assert } from '../utils/assert.js'
 
 /** Sent sequenced frames till their peer acks them, in lanes by tag; a data lane evicts its oldest past its budget. */
 export class ReplayBuffer {
@@ -92,7 +93,7 @@ export class ReplayBuffer {
   // ── Private ──
 
   private pushed(seq: number): void {
-    if (seq > this._seq) this._seq = seq
+    assert(seq <= this._seq)
     if (seq > this.pushedSeq) this.pushedSeq = seq
   }
 }
