@@ -43,6 +43,7 @@ class DemandReport {
   private _changed = new Receives()
   /** A telling a deadline stopped, resumed by the next one. */
   private _telling: Iterator<void> | null = null
+
   private readonly _told = {
     pairs: new Map<string, Set<string>>(),
     members: new Set<string>(),
@@ -571,6 +572,7 @@ class RoomDemand {
 function trackEntry(track: string, { except, byMember }: { except: Set<string>; byMember: boolean }): DemandEntry {
   return byMember ? { track, except: [...except], byMember } : { track, except: [...except] }
 }
+
 /** Takes, renews or drops `instance`'s lease on `key`, and whether `key` went from held to not or back. */
 function lease<K>(leases: Map<K, Leases>, key: K, instance: string, on: boolean, telling: number): boolean {
   const held = leases.get(key)
@@ -583,11 +585,13 @@ function lease<K>(leases: Map<K, Leases>, key: K, instance: string, on: boolean,
   leases.delete(key)
   return true
 }
+
 /** Drops the leases `dropped` names, and whether none is left. */
 function lapse(leases: Leases, dropped: (instance: string, telling: number) => boolean): boolean {
   for (const [instance, telling] of leases) if (dropped(instance, telling)) leases.delete(instance)
   return leases.size === 0
 }
+
 function sameMembers(a: ReadonlySet<string>, b: readonly string[]): boolean {
   return a.size === b.length && b.every((member) => a.has(member))
 }

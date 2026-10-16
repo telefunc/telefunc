@@ -90,18 +90,22 @@ type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
  *  its authority time; a spec gives it a clock of its own to set the app servers' apart from it. */
 class MemoryBackendState {
   readonly now: () => number
+
   constructor({ now = () => Date.now() }: { now?: () => number } = {}) {
     this.now = now
   }
+
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, DirectoryEntry>()
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   readonly directoryChecks: DirectoryCheck[] = []
   readonly broadcastOrder = new Map<string, OrderingInfo>()
+
   readonly broadcastSubs: Record<BroadcastKind, Subscriptions> = {
     text: new Map(),
     binary: new Map(),
   }
+
   revSeq = 0
 }
 
@@ -112,8 +116,10 @@ const DELIVERIES_PER_TURN = 1024
 const NO_TARGETS: readonly MemorySubscriptionAttempt[] = []
 const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
 const copyLane = (lane: LaneId): LaneId => ({ ...lane })
+
 const sumReceiverCounts = (targets: readonly MemorySubscriptionAttempt[]): number =>
   targets.reduce((total, target) => total + target.receiverCount(), 0)
+
 const isExpired = (entry: Expiring, now: number): boolean => entry.expiresAt !== null && entry.expiresAt <= now
 
 function newGeneration(): Generation {
@@ -210,6 +216,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   private _deliveredThisTurn = 0
   /** Lane commits whose delivery is not queued yet. */
   private _committing = 0
+
   constructor(options: MemoryBackendOptions = {}) {
     this._state = options.state ?? new MemoryBackendState()
     this.subscriptions = {

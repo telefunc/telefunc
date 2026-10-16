@@ -19,6 +19,7 @@ type StateListener = (state: SubscriptionState) => void
 
 // Every consumer of a shared subscription gets its end as one failure object, reported once.
 const reportedEnds = new WeakSet<object>()
+
 function reportSubscriptionEnd(error: unknown, report: (error: unknown) => void): void {
   if (typeof error === 'object' && error !== null) {
     if (reportedEnds.has(error)) return
@@ -168,11 +169,13 @@ class SubscriptionSlot {
   private _attempt: SubscriptionAttempt | null = null
   private _unobserve: (() => void) | null = null
   private _readiness: Deferred<void> = createReadiness()
+
   /** The first readiness, settled by the first ready, a stop or an end; a later loss opens a new one. */
   readonly established: Promise<void> = this._readiness.promise.then(
     () => {},
     () => {},
   )
+
   private _wasReady = false
   private _state: SubscriptionState = 'establishing'
   private _stopPromise: Promise<void> | null = null

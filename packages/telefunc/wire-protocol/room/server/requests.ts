@@ -21,9 +21,11 @@ type RoomRequest = Extract<
   RoomStubRequest,
   { __r: 'req-join' | 'req-leave' | 'req-set-meta' | 'req-set-attrs' | 'req-dm' }
 >
+
 type RoomDeclaration =
   | Exclude<RoomStubRequest, RoomRequest | { __r: 'sub-binary' }>
   | ({ __r: 'sub-binary' } & BinaryWantChange)
+
 /** A member's meta, attributes and DM requests, by the API call each serves. */
 const MEMBER_MUTATIONS = { 'req-set-meta': 'setMeta', 'req-set-attrs': 'setAttributes', 'req-dm': 'send' } as const
 type MemberMutation = Extract<ParticipantStubRequest, { __r: keyof typeof MEMBER_MUTATIONS }>
@@ -33,26 +35,32 @@ type MemberMutation = Extract<ParticipantStubRequest, { __r: keyof typeof MEMBER
 function malformed(what: string): never {
   throw new ProtocolViolationError(`malformed Room ${what}`)
 }
+
 function record(value: unknown, what: string): Record<string, unknown> {
   if (!isRecord(value)) malformed(what)
   return value
 }
+
 function text(value: unknown, what: string): string {
   if (typeof value !== 'string') malformed(what)
   return value
 }
+
 function memberId(value: unknown, what: string): string {
   if (!isMemberId(value)) malformed(what)
   return value
 }
+
 function flag(value: unknown, what: string): boolean {
   if (typeof value !== 'boolean') malformed(what)
   return value
 }
+
 function integer(value: unknown, what: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value)) malformed(what)
   return value
 }
+
 function optionalTrue(value: unknown, what: string): boolean {
   if (value !== undefined && value !== true) malformed(what)
   return value === true
@@ -116,6 +124,7 @@ function decodeBinaryWantChange({ member, track, on }: Record<string, unknown>):
   if (track !== null && !isRoomTrack(track)) malformed('binary wants')
   return { member: member ?? ALL, track: track ?? ALL, on: flag(on, 'binary wants') }
 }
+
 /** A declared change per member id, into a record no key can reach the prototype of. */
 function decodeMemberChanges<T>(changes: unknown, what: string, decode: (change: unknown) => T): Record<string, T> {
   if (!isRecord(changes)) malformed(what)

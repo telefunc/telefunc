@@ -83,6 +83,7 @@ abstract class RoomRequestChannel extends ServerChannel {
     super._attachPeer(peer, state)
     this._onAttached()
   }
+
   protected abstract _onAttached(): void
 
   protected _ackRoomResult(seq: number, work: Promise<unknown>): Promise<void> {
@@ -107,14 +108,17 @@ function unorderedEventText(event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoin
 class MemberMessageTexts {
   private _stamped: string | null = null
   private _unstamped: string | null = null
+
   constructor(
     private readonly _serialized: string,
     private readonly _info: WirePublishInfo,
     private readonly _unstampedEvent: () => object,
   ) {}
+
   stamped(): string {
     return (this._stamped ??= encodePublishText(this._serialized, this._info))
   }
+
   unstamped(): string {
     return (this._unstamped ??= encodePublishText(stringify(this._unstampedEvent()), this._info))
   }

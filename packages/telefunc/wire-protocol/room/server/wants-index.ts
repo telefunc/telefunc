@@ -16,6 +16,7 @@ type Indexed = {
   textMembers: Set<string>
   binary: Map<string | All, Set<TrackKey | All>>
 }
+
 /** The holders covering each track of a scope; the `ALL` key covers every track. */
 type TrackCover = Map<TrackKey | All, Set<LaneHolder>>
 /** The members whose binary pairs a change may have changed. */

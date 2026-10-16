@@ -73,10 +73,12 @@ class RoomSubscriptions {
   private _observing = false
   private readonly _control = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered)
   private readonly _semantic = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered)
+
   /** While this process owns a member: only an owner reads demand. */
   private readonly _demandLane = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered, (slot, pending) => {
     if (!pending && slot.wanted) this._host._askDemand()
   })
+
   /** Named lanes, keyed by (member, track); `_binaryTracks` lists each member's, `_trackMembers` each track's. */
   private readonly _binary = new Map<string, LaneSubscription>()
   private readonly _binaryTracks = new Map<string, Set<string>>()
@@ -93,18 +95,21 @@ class RoomSubscriptions {
   private _byMember = false
   /** The tracks named of every member that are told as demand while every-track lanes deliver them. */
   private readonly _byMemberTracks = new Set<string>()
+
   /** The every-track lanes not delivering yet, and the tracks whose every-member lanes wait for none to be. */
   private readonly _establishingEveryTrack: Establishing = {
     lanes: new Set(),
     waiting: new Set(),
     replan: (track) => this._queued.tracks.add(track),
   }
+
   /** The every-member lanes not delivering yet, and the members whose every-track lanes wait for none to be. */
   private readonly _establishingEveryMember: Establishing = {
     lanes: new Set(),
     waiting: new Set(),
     replan: (member) => this._queued.members.add(member),
   }
+
   /** The members some track named of every member is told without. */
   private readonly _excepted = new Set<string>()
   /** Per present member, how many tracks named of it alone some holder here receives. */
@@ -805,6 +810,7 @@ class RoomSubscriptions {
 function* chain<T>(...sources: Iterable<T>[]): Generator<T> {
   for (const source of sources) yield* source
 }
+
 /** Each item's step, then what it yields one at a time; an item whose step yields nothing is still one step. */
 function* stepsOf<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | void): Generator<void> {
   for (const item of items) {
@@ -813,6 +819,7 @@ function* stepsOf<T>(items: Iterable<T>, step: (item: T) => Iterable<void> | voi
     yield
   }
 }
+
 /** `step` on each item it is called with the first time; an item seen before is still one call, so one step. */
 function once<T, R>(step: (item: T) => R): (item: T) => R | void {
   const seen = new Set<T>()
@@ -822,6 +829,7 @@ function once<T, R>(step: (item: T) => R): (item: T) => R | void {
     return step(item)
   }
 }
+
 /** Each item, removed as it is taken; one added meanwhile comes too. */
 function* drain<T>(items: Set<T>): Generator<T> {
   for (const item of items) {
@@ -829,6 +837,7 @@ function* drain<T>(items: Set<T>): Generator<T> {
     yield item
   }
 }
+
 function newBinaryPlan(): BinaryPlan {
   return { all: false, members: new Set(), tracks: new Set(), pairs: new Map() }
 }

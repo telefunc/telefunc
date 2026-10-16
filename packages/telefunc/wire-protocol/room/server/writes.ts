@@ -41,6 +41,7 @@ type WritesHost = {
   readonly _state: Pick<RoomState, 'getRemote'>
   readonly _replica: RoomReplica
 }
+
 /** What the writes read of the handle's own: its guards and its local participants. */
 type WritesOf = {
   guards(): Partial<RoomGuardHooks> | null
@@ -169,6 +170,7 @@ class RoomWrites {
   async sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
     return ack ? await this._sendDmAck(from, to, data) : await this._publishDm(from, to, data)
   }
+
   private async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const acks = this._host._replica.acks
     const ackId = crypto.randomUUID()

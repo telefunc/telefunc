@@ -505,6 +505,7 @@ const command = <Input, Output>(spec: RedisCommand<Input, Output>): RedisCommand
 
 type RoomInc = { roomId: string; inc: string }
 type DirectoryPutInput = { roomId: string; incTag: string; checkAt: number; minDelayMs: number }
+
 type CommitInput = RoomInc & {
   lane: LaneId
   laneKey: string
@@ -516,6 +517,7 @@ type CommitInput = RoomInc & {
   /** Each channel's fence token, `''` where no local attempt awaits the commit. */
   fenceTokens: { lane: string; everyTrack: string; everyMember: string }
 }
+
 type CommitReply =
   | { stale: 'incarnation' }
   | { stale: 'cell'; index: number }
