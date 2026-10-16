@@ -7,7 +7,7 @@ import type { PiecesAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
-/** The path holds `WIRE_SEND_AHEAD_ROUND_TRIPS` least round trips at the drain rate; the rest waits in its sender. */
+/** The path to the page holds what `dataRoom` allows; the rest waits whole in its sender. */
 class PathRoom implements SendRoom {
   readonly cuts = false
   /** Every frame the WebSocket carries goes through it. */
@@ -30,8 +30,7 @@ class PathRoom implements SendRoom {
    *  came at the rate the app sent, not the link's. Whether the sender is sending what it held for room. */
   private appLimitedTo = 0
   private releasing = false
-  /** The bytes handed since the newest data. The socket sends in order, so while it holds no more, it holds none of that
-   *  data, unless some of these bytes are still gathered. */
+  /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is gathered. */
   private handedSinceData = 0
   /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it, as `Uplink.inUplink`. */
   private inPath = 0

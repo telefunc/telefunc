@@ -635,9 +635,7 @@ class ChannelMux {
     this.sessions.get(sessionId, frame.index)?.channel._dispatchFrame(frame)
   }
 
-  /** An ordinary reconcile claims its session, abandoning any probe staged on it — unless a barrier
-   *  is mid-commit on that session, in which case the claim is refused instead. One on the wire that
-   *  holds the session is that wire's own, and leaves the page's upgrade attempt be. */
+  /** A reconcile abandons the probes staged on its sessions, refused mid-commit, and leaves its own wire's be. */
   private claimSessionForReconcile(ctrl: ReconcilePayload, entry: ConnectionEntry, connection: Wire): void {
     const own = entry.transport.getSessionId(connection)
     if (ctrl.sessionId !== undefined && ctrl.sessionId === own) return
@@ -789,10 +787,7 @@ class ChannelMux {
     // Its wire no longer has the session it names, which is gone with the handles it had.
     if (ctrl.sessionId) this.sessionWires.delete(ctrl.sessionId)
 
-    // The connection may have closed since this frame arrived, so its RECONCILED never goes out.
-    // Remove the session outright, one the client never received or its own, but preserve the
-    // close kind: a transient close leaves the channels their `_onPeerDisconnect` grace so the
-    // client's retry can re-attach them.
+    // Closed since this frame arrived: the session goes, but a transient close keeps its channels' reattach grace.
     if (state.closed) {
       state.attaching.clear()
       const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT

@@ -71,7 +71,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   /** In-memory publishes waiting for the ones before them, in publish order. */
   private readonly queued = new Fifo<() => void>()
   private delivering = false
-  /** Reset by a macrotask scheduled once half the burst has run: one every turn costs a publish a turn 10% more. */
+  /** Reset by a macrotask scheduled once half the burst has run: one every turn made each publish 10% slower. */
   private deliveredInBurst = 0
 
   constructor(transport?: BroadcastTransport) {
