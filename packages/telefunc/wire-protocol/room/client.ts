@@ -302,14 +302,13 @@ class ClientRoom extends RoomStateView implements Room {
         // Relayed from this member's private inbox: only its own stub ever receives it.
         const local = this._localParticipants.get(event.to)
         if (!local) return
+        const msg = inboxMessageFromWire(event)
         // A room-authored DM has no sender to resolve.
-        if (event.from === '') {
-          this._deliverDm(local, inboxMessageFromWire(event))
-          return
+        if (event.from !== '') {
+          const sender = this._state.resolveSender(event as RoomDmEnvelope & Partial<SenderStamp>)
+          msg.fromMeta = sender.meta
+          msg.fromIdentity = sender.identity
         }
-        const { meta, identity } = this._state.resolveSender(event as RoomDmEnvelope & Partial<SenderStamp>)
-        const msg: InboxMessage = { from: event.from, fromMeta: meta, fromIdentity: identity, data: event.data }
-        if (event.ackId) msg.ackId = event.ackId
         this._deliverDm(local, msg)
         return
       }
