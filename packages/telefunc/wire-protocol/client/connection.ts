@@ -152,7 +152,6 @@ interface MuxConnection {
   sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
   sendBdpPing(channel: MuxChannel, probe: number): void
-  /** `pathRtt`: the path's round trip as the channel measured it, `Infinity` where it measured none. */
   sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
   /** Bytes the wire holds that haven't gone out. */
   bufferedAmount(): number
