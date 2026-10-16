@@ -41,6 +41,7 @@ import {
   compareExchangeHead,
   directoryDelete,
   directoryDue,
+  directoryGet,
   directoryList,
   directoryPut,
   dropGenerationRows,
@@ -199,6 +200,10 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
     this.#transaction((sql) => directoryDelete(sql, roomId, incTag))
+  }
+
+  async directoryGet(roomId: string): Promise<string | undefined> {
+    return directoryGet(this.#sql(), roomId)
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {

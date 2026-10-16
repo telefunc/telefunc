@@ -168,6 +168,8 @@ type RoomDriver = {
    *  authority's now; an entry due at Infinity is never due. */
   directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void>
   directoryDelete(roomId: string, incTag: string): Promise<void>
+  /** The tag `roomId` is listed under, if it is listed. */
+  directoryGet(roomId: string): Promise<string | undefined>
   directoryList(prefix: string, cursor?: string): Promise<DirectoryPage>
   /** Up to a page of the entries due at the authority's now, earliest first; an entry stays due until it is put again
    *  or deleted. */

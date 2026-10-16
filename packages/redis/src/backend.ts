@@ -243,6 +243,10 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     return this._run(REDIS_COMMANDS.directoryDelete, { roomId, incTag })
   }
 
+  async directoryGet(roomId: string): Promise<string | undefined> {
+    return (await this._publisher.hget(directoryTagsKey(this._prefix), roomId)) ?? undefined
+  }
+
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     const index = directoryIndexKey(this._prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`

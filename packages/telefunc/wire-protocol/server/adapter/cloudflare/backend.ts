@@ -150,6 +150,10 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     return this.#directory().directoryDelete(roomId, incTag)
   }
 
+  async directoryGet(roomId: string): Promise<string | undefined> {
+    return this.#directory().directoryGet(roomId)
+  }
+
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     return this.#directory().directoryList(prefix, cursor)
   }

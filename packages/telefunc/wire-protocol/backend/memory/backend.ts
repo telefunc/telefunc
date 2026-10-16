@@ -481,6 +481,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     if (this._state.directory.get(roomId)?.incTag === incTag) this._state.directory.delete(roomId)
   }
 
+  async directoryGet(roomId: string): Promise<string | undefined> {
+    return this._state.directory.get(roomId)?.incTag
+  }
+
   async directoryList(prefix: string): Promise<DirectoryPage> {
     const entries = [...this._state.directory]
       .filter(([roomId]) => roomId.startsWith(prefix))

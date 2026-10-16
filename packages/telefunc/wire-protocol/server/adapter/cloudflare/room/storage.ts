@@ -3,6 +3,7 @@ export {
   initSchema,
   directoryPut,
   directoryDelete,
+  directoryGet,
   directoryList,
   directoryDue,
   readLiveHead,
@@ -97,6 +98,10 @@ function directoryPut(sql: SqlStorage, roomId: string, incTag: string, checkAt: 
 /** Deletes iff the stored tag matches (a stale tag is a no-op). */
 function directoryDelete(sql: SqlStorage, roomId: string, incTag: string): void {
   sql.exec('DELETE FROM directory WHERE room_id = ? AND inc_tag = ?', roomId, incTag)
+}
+
+function directoryGet(sql: SqlStorage, roomId: string): string | undefined {
+  return sql.exec<{ inc_tag: string }>('SELECT inc_tag FROM directory WHERE room_id = ?', roomId).toArray()[0]?.inc_tag
 }
 
 function directoryList(sql: SqlStorage, prefix: string, cursor?: string): DirectoryPage {

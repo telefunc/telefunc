@@ -152,9 +152,9 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     }
     const created: RoomConfigRecord = { meta, inc: incarnation.inc, hold: incarnation.hold }
     // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
-    const lapsed = current === null ? (await backend.directoryList(id)).entries.find((e) => e.roomId === id) : undefined
+    const lapsedInc = current === null ? await backend.directoryGet(id) : undefined
     // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
-    if (lapsed === undefined) await listRoom(backend, incarnation, undefined)
+    if (lapsedInc === undefined) await listRoom(backend, incarnation, undefined)
     const result = await backend.compareExchangeHead(
       id,
       current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
@@ -169,7 +169,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     // The head lapses only once the counters that keep it ahead are written.
     await createHold(incarnation)
     const lapsing = await lapseNewRoom(incarnation)
-    if (lapsed !== undefined) await backend.dropGeneration(id, lapsed.incTag)
+    if (lapsedInc !== undefined) await backend.dropGeneration(id, lapsedInc)
     await listRoom(backend, incarnation, lapsing?.expiresAt)
     sweepLapsedRoomsSoon()
     return {

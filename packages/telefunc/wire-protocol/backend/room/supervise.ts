@@ -80,6 +80,7 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     dropGeneration: (roomId, inc) => driver.dropGeneration(roomId, inc),
     directoryPut: (roomId, incTag, checkAt, minDelayMs) => driver.directoryPut(roomId, incTag, checkAt, minDelayMs),
     directoryDelete: (roomId, incTag) => driver.directoryDelete(roomId, incTag),
+    directoryGet: (roomId) => driver.directoryGet(roomId),
     directoryList: (prefix, cursor) => driver.directoryList(prefix, cursor),
     directoryDue: () => driver.directoryDue(),
     dispose: () => subscriptions.dispose(),

@@ -4184,6 +4184,18 @@ describe('Room public behavior', () => {
     },
     60_000,
   )
+  it('creates rooms one by one in time linear in their count, to 40,000', async () => {
+    let created = 0
+    const createUpTo = async (count: number) => {
+      while (created < count) await Room.create(`created-one-by-one-${created++}`)
+    }
+    await createUpTo(9_000)
+    const at10k = await timeOutsideGc(() => createUpTo(10_000))
+    await createUpTo(39_000)
+    const at40k = await timeOutsideGc(() => createUpTo(40_000))
+    // A create that reads every room listed so far doesn't reach 40,000 rooms within the timeout.
+    expect(at40k / at10k).toBeLessThanOrEqual(2)
+  }, 60_000)
   it.each(['listeners on this instance', "clients' declarations"])(
     'names tracks of one member one by one, through %s, in time linear in their count from 50,000 to 200,000',
     async (through) => {
