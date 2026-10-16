@@ -443,9 +443,9 @@ async function routeRenewal(env: Env, suffix: string) {
 // Two session DOs in one isolate, as local workerd runs them: both subscribe, one publishes.
 async function broadcastAcrossSessions(env: Env, suffix: string) {
   const key = `broadcast-${suffix}`
-  const session = (name: string) =>
+  const broadcastSession = (name: string) =>
     env.TELEFUNC.get(env.TELEFUNC.idFromName(`broadcast-session-${name}-${suffix}`)) as unknown as BroadcastSession
-  const [a, b] = [session('a'), session('b')]
+  const [a, b] = [broadcastSession('a'), broadcastSession('b')]
   await a.broadcastSubscribe(key)
   await b.broadcastSubscribe(key)
   await a.broadcastPublish(key, ['one', 'two', 'three'])
@@ -455,9 +455,9 @@ async function broadcastAcrossSessions(env: Env, suffix: string) {
 // Two session DOs in one isolate each take a call with a callback; a's page leaves, then b's. Reports, per session DO,
 // how often the intervals its calls made fired while it held no callback, and after both pages left.
 async function callbackTimers(env: Env, suffix: string) {
-  const session = (name: string) =>
+  const callbackSession = (name: string) =>
     env.TELEFUNC.get(env.TELEFUNC.idFromName(`callback-${name}-${suffix}`)) as unknown as CallbackSession
-  const [a, b] = [session('a'), session('b')]
+  const [a, b] = [callbackSession('a'), callbackSession('b')]
   const made = intervals.length
   const firedBy = (name: string) =>
     intervals
