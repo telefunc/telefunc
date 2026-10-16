@@ -1,4 +1,4 @@
-export { flowOf, produce, reconciled, run, runUntil }
+export { flowOf, produce, reconciled, run }
 
 import { vi } from 'vitest'
 
@@ -17,11 +17,6 @@ import {
 import type { ReconciledPayload } from '../shared-ws.js'
 
 const run = (ms: number) => vi.advanceTimersByTimeAsync(ms)
-
-/** Runs until `done`, `maxMs` at most, in steps of `stepMs`. */
-async function runUntil(done: () => boolean, maxMs: number, stepMs: number): Promise<void> {
-  for (let elapsed = 0; elapsed < maxMs && !done(); elapsed += stepMs) await run(stepMs)
-}
 
 /** `for (;;) await channel.send(next)`, the channel page's backpressure loop, counting what it has sent. */
 function produce<T = number>(

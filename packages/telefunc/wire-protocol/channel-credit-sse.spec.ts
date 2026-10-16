@@ -15,12 +15,17 @@ import { getTelefuncSseChannelHooks } from './server/sse.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH } from './constants.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
 import { Pipe } from './test/loopback.js'
-import { flowOf, produce, run, runUntil } from './test/channel-specs.js'
+import { flowOf, produce, run } from './test/channel-specs.js'
 
 const LATENCY_MS = 25
 /** What one read of a request body hands the server, or of the event stream the page, as a socket read does. */
 const CHUNK_BYTES = 16 * 1024
 const KIB = 1024
+
+/** Runs until `done`, `maxMs` at most, in steps of 50 ms. */
+async function runUntil(done: () => boolean, maxMs: number): Promise<void> {
+  for (let elapsed = 0; elapsed < maxMs && !done(); elapsed += 50) await run(50)
+}
 
 /** The page's end of the link, and the server's SSE handler at the other. `batched`: the page's streaming upload is
  *  refused, as a browser that can't stream a request body gets, `refusedAfter` ms after it went out, and the page sends
@@ -193,7 +198,7 @@ describe.each([
     const upload = sse.open<string, never>()
     received(upload.server)
     produce(upload.page, { message: () => 'x'.repeat(64 * KIB) })
-    await runUntil(() => flowOf(upload.server).byteWindow > CREDIT_WINDOW_INITIAL_BYTES, 1_500, 50)
+    await runUntil(() => flowOf(upload.server).byteWindow > CREDIT_WINDOW_INITIAL_BYTES, 1_500)
     expect(sse.batched).toBe(batched)
     expect(flowOf(upload.server).byteWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
   })
@@ -203,7 +208,7 @@ describe.each([
     const download = sse.open<never, string>()
     received(download.page)
     produce(download.server, { message: () => 'x'.repeat(64 * KIB) })
-    await runUntil(() => flowOf(download.page).byteWindow > pageWindow, 1_500, 50)
+    await runUntil(() => flowOf(download.page).byteWindow > pageWindow, 1_500)
     expect(sse.batched).toBe(batched)
     expect(flowOf(download.page).byteWindow).toBeGreaterThan(pageWindow)
   })
