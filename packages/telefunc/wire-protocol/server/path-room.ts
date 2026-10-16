@@ -30,6 +30,8 @@ class PathRoom implements SendRoom {
    *  came at the rate the app sent, not the link's. Whether the sender is sending what it held for room. */
   private appLimitedTo = 0
   private releasing = false
+  /** The bytes handed since the newest data: while the socket holds no more, it holds none of that data. */
+  private handedSinceData = 0
   /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it, as `Uplink.inUplink`. */
   private inPath = 0
   private inPathAt = 0
@@ -62,9 +64,13 @@ class PathRoom implements SendRoom {
     const now = performance.now()
     this.inPath = this.pathHolds(now) + bytes
     this.inPathAt = now
-    if (!data) return
+    if (!data) {
+      this.handedSinceData += bytes
+      return
+    }
     const end = this.sender.transmittedBytes
-    if (!this.releasing && this.queued() === 0 && !this.sender.holdsData) this.appLimitedTo = end
+    if (!this.releasing && this.queued() <= this.handedSinceData && !this.sender.holdsData) this.appLimitedTo = end
+    this.handedSinceData = 0
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
 

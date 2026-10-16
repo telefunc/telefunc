@@ -1053,6 +1053,50 @@ test.each([
   },
 )
 
+// Deno's WebSocket counts what it was sent until its write completes on the event loop, after the task.
+test.each([
+  ['with its value', 'ask'],
+  ['with a 64 KiB push on another channel', 'echo'],
+])(
+  "on a socket that reports what it was sent until the task ends, a server that answered a page's 20 KB request every 200 ms %s, then sends ~4 KB messages as fast as credit allows, carries them at the link's rate, not at the page's pace",
+  async (_, answer) => {
+    let sentThisTask = 0
+    const { sendNow } = loop.transport
+    loop.transport.sendNow = (socket, frame) => {
+      if (sentThisTask === 0) setTimeout(() => void (sentThisTask = 0), 0)
+      sentThisTask += frame.byteLength
+      sendNow(socket, frame)
+    }
+    loop.transport.bufferedAmount = () => sentThisTask
+    const rpc = loop.open<string, never>()
+    const { server, page } = loop.open<never, unknown>()
+    let got = 0
+    page.listen(() => void got++)
+    page.listenBinary(() => {})
+    rpc.server.listen(() =>
+      answer === 'ask' ? ('y'.repeat(64 * KIB) as never) : void server.sendBinary(new Uint8Array(64 * KIB)),
+    )
+    await run(100)
+    loop.socket.toPage.bytesPerMs = loop.socket.toServer.bytesPerMs = 10_000
+    for (let i = 0; i < 15; i++) {
+      if (answer === 'ask') void rpc.page.send('q'.repeat(20_000), { ack: true })
+      else void rpc.page.send('q'.repeat(20_000))
+      await run(200)
+    }
+    await run(500)
+    const mark = got
+    let stop = false
+    void (async () => {
+      while (!stop && !server.isClosed) await server.send({ text: 'x'.repeat(4_000) })
+    })().catch(() => {})
+    await run(3_000)
+    stop = true
+    // 10 MB/s carries ~2,400 of them a second.
+    expect((got - mark) / 3).toBeGreaterThan(2_000)
+    expect(loop.sockets).toHaveLength(1)
+  },
+)
+
 // What the other channels' messages leave in the server's socket, and deliver just before the ping's ack, is no queue.
 test.each([
   ['another channel on it gets a small message every 50 ms', [50]],
