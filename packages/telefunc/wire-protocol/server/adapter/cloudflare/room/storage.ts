@@ -50,7 +50,7 @@ import { binaryLaneKeyPrefix, encodeLaneKey } from '../../../../backend/room/lan
 
 type HeadCxOutcome = { head: StoredHead } | { conflict: true; current: StoredHead | null }
 
-// Row shapes as SQLite hands them back (BLOB columns arrive as ArrayBuffer).
+/** Row shapes as SQLite hands them back (BLOB columns arrive as ArrayBuffer). */
 type HeadRow = {
   rev: string
   inc: string | null
