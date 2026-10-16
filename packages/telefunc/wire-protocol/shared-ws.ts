@@ -405,7 +405,7 @@ function readU64(buf: Uint8Array, offset: number): number {
 
 // ===== Seqs off the wire =====
 
-/** The seq with low bits `bits` nearest `expected`, as QUIC reads a packet number (RFC 9000, A.3). */
+/** The seq with low bits `bits` nearest `expected` (RFC 9000, A.3): no wire or replay holds 2^31 frames. */
 function seqNear(bits: number, expected: number): number {
   const seq = expected - (expected >>> 0) + bits
   if (seq <= expected - SEQ_SPAN / 2) return seq + SEQ_SPAN

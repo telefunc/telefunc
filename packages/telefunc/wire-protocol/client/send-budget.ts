@@ -121,14 +121,14 @@ class SendBudget implements SendRoom {
   private roomPast(sent: number): number {
     const unacknowledged = sent - this.sender.acknowledgedBytes
     const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
-    // Unarrived: what the newest heartbeat says the server didn't take, less `slack` and what crosses while late.
+    // Unarrived: what no ack or newest heartbeat says the server took, less `slack` and what crosses while late.
     const late = Math.max(this.lateMs, this.uplink.peerQueueWait())
     const untaken = sent - Math.max(this.sender.acknowledgedBytes, this.sender.heartbeatBytes)
     const unarrived = untaken - this.uplink.uplinkRate() * late - this.slack
     return this.allowance - Math.max(waiting, unarrived)
   }
 
-  /** With the room used and the uplink holding data, looks again once it carried what the server acks at once. */
+  /** With no room and data in the uplink, looks again once it carried what the server acks at once, or all it holds. */
   private pace(): void {
     const { drainRate } = this.uplink
     if (drainRate === 0 || this.sendRoom > 0 || this.paceTimer !== null) return

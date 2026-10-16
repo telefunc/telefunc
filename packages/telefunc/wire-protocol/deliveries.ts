@@ -22,7 +22,7 @@ class Deliveries {
     this.count++
   }
 
-  /** The bytes delivered in the `ms` before delivery `n`; past those kept, their rate times `ms`, or `Infinity`. */
+  /** Bytes in the `ms` before delivery `n`; past those kept, their rate times `ms`, `Infinity` where they have none. */
   before(n: number, ms: number): number {
     if (n === 0) return 0
     const oldest = Math.max(0, this.count - KEPT)

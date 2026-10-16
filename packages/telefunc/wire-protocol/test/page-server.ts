@@ -352,7 +352,6 @@ function downstream(body: ReadableStream<Uint8Array>, link: Link, net: Net): Rea
           text = text.slice(end + 2)
           const frame = event.startsWith('data: ') ? base64urlToUint8Array(event.slice('data: '.length)) : null
           if (frame && !link.dead) net.serverSends(frame)
-          // A socket read hands the page what arrived of an event, not all of it at once.
           const bytes = encoder.encode(`${event}\n\n`)
           for (let offset = 0; offset < bytes.length; offset += EVENT_READ_BYTES) {
             const last = offset + EVENT_READ_BYTES >= bytes.length

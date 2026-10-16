@@ -81,7 +81,7 @@ function link({
             toPage.error(new DOMException('The operation was aborted.', 'AbortError'))
             void events.cancel()
           })
-          // Taken as the server writes it, so its stream reads empty while the link carries it.
+          // Taken as written till the link holds `downHolds`, so the stream reads empty while the link carries it.
           void (async () => {
             for (;;) {
               while (down.bytes >= downHolds) await new Promise((resolve) => setTimeout(resolve, 1))

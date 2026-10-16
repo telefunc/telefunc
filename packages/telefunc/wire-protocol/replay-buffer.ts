@@ -45,7 +45,7 @@ export class ReplayBuffer {
     return ++this._seq
   }
 
-  /** Stores an encoded sequenced frame in its lane; false where it is larger than the lane's budget. */
+  /** Stores a frame, its seq no less than the last pushed, in its lane; false where it outgrows the lane's budget. */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): boolean {
     this.pushed(seq)
     return this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)

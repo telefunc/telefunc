@@ -347,7 +347,7 @@ class SseTransport implements UpgradeSource {
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
-    // Sequenced frames replay after RECONCILED: sent now, they could overtake a POST in flight, and be dropped.
+    // Sequenced frames replay after RECONCILED: sent now, they'd pass a POST in flight, making its frames duplicates.
     const movedOutbox = this.outbox.filter(isWindowRefresh)
     this.outbox = []
     this.outboxBytes = 0
@@ -416,7 +416,7 @@ class SseTransport implements UpgradeSource {
     }
   }
 
-  /** Sizes the next POSTs to take `SSE_POST_TARGET_MS`: past it they shrink to this one's, under it grow once full. */
+  /** Sizes next POSTs to what this one's rate carries in `SSE_POST_TARGET_MS`, unless it was quicker and not full. */
   private sizePosts(bytes: number, ms: number): void {
     if (ms < SSE_POST_TARGET_MS && bytes < this.postBytes) return
     this.postBytes = Math.min(

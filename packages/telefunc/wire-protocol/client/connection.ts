@@ -301,7 +301,14 @@ function isJoinLimb(frame: DecodedFrame): boolean {
 type ChannelState =
   | { tag: 'pending'; initial: boolean }
   | { tag: 'open' }
-  | { tag: 'closed'; initial: boolean; delivered: boolean; reported: boolean }
+  | {
+      tag: 'closed'
+      initial: boolean
+      /** The server has all the page sent on it, or ended it. */
+      delivered: boolean
+      /** A PING named it. */
+      reported: boolean
+    }
 
 type ClosedState = Extract<ChannelState, { tag: 'closed' }>
 
@@ -655,7 +662,7 @@ class ClientConnection implements MuxConnection {
     return frame
   }
 
-  /** Sends, or queues while sends are held or data lacks room (see `SendBudget`); a frame that goes at once passes. */
+  /** Sends, or queues while sends are held or lack `SendBudget` room; a frame sent at once passes the settle queue. */
   private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(ix)) {
       this.settleQueue().push({ frame, channelIx: ix, seq })
@@ -927,7 +934,7 @@ class ClientConnection implements MuxConnection {
     transport.sendPing(this.buildPing())
   }
 
-  /** Names each closed channel the server attached; one a PING named before, with nothing left to send, is let go. */
+  /** Names each closed channel the server attached; one a PING named, with nothing to replay or send, is let go. */
   private buildPing(): Uint8Array<ArrayBuffer> {
     const ended: PingEntry[] = []
     let queued: Set<number> | undefined
@@ -985,7 +992,7 @@ class ClientConnection implements MuxConnection {
     this.handlePongTimeout(transport)
   }
 
-  /** Before a wire's first RECONCILED its RECONCILE deadline bounds it: what the server sends ahead may take longer. */
+  /** Till its first RECONCILED a wire's RECONCILE deadline bounds it: what precedes may outlast the pong deadline. */
   private handlePongTimeout(transport: ClientChannelTransport): void {
     if (this.reconciling && this.reconciledWire !== this.wire) return
     this.dropWire(transport)
@@ -1602,7 +1609,7 @@ class ClientConnection implements MuxConnection {
     this.maybeStartUpgrade()
   }
 
-  /** What the server lacks through `throughSeq`: the replay, or the ERROR that ends the channel if it lost some. */
+  /** What the server lacks through `throughSeq`: the replay, or an ERROR ending the channel if the replay lost some. */
   private replayTo(ix: number, entry: ChannelEntry, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
     this.serverHasThrough(ix, lastSeq)
     const missed = this.replayBuffers.get(ix)!.getAfter(lastSeq, throughSeq)
@@ -1647,7 +1654,7 @@ class ClientConnection implements MuxConnection {
     return seq
   }
 
-  /** Takes out what the `releasable` channels queued; past the room, their sequenced frames wait behind the rest. */
+  /** Takes out what `releasable` channels queued; past the room, their sequenced frames go behind `heldForRoom`'s. */
   private drainBufferedFrames(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.settleQueue()

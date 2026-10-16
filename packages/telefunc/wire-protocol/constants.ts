@@ -152,7 +152,7 @@ export const SSE_POST_IDLE_FLUSH_DELAY_MS = 50
 /** Idle window used to decide whether the next upstream SSE batch is post-idle. */
 export const SSE_FLUSH_THROTTLE_MS = 300
 
-/** A POST out longer than this plus its bytes at `SSE_POST_MIN_BYTES_PER_S` is lost: a proxy may hold bodies back. */
+/** A POST out past this plus its bytes at `SSE_POST_MIN_BYTES_PER_S` is lost; generous, as a proxy may hold bodies. */
 export const SSE_POST_FLOOR_MS = 30_000
 export const SSE_POST_MIN_BYTES_PER_S = 16 * 1024
 
