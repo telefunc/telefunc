@@ -6,6 +6,7 @@ import type { HeadCxResult, RoomHead } from '../../packages/telefunc/wire-protoc
 import type { RoomSessionDeliveryRequest } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/subscription.js'
 import {
   RoomAuthority,
+  type AcceptedCommitWire,
   type CommitWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
 import { TELEFUNC_BROADCAST_BUCKET_HEADER } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/routing.js'
@@ -336,7 +337,7 @@ function roomProbe(env: Env, suffix: string, name: string) {
       return accepted(await authority.commitLane(inc, INBOX_LANE, frame), operation)
     },
     scheduledAlarm: () => authority.scheduledAlarm(),
-    settle: (commit: Extract<CommitWire, { accepted: true }>) => authority.awaitDelivery(commit.deliveryToken!),
+    settle: (commit: AcceptedCommitWire) => authority.awaitDelivery(commit.deliveryToken!),
   }
 }
 
@@ -609,7 +610,7 @@ function expectHead(result: HeadCxResult, operation: string): RoomHead {
   return result.head
 }
 
-function accepted(result: CommitWire, operation: string): Extract<CommitWire, { accepted: true }> {
+function accepted(result: CommitWire, operation: string): AcceptedCommitWire {
   if ('stale' in result) throw new Error(`${operation} commit was stale`)
   return result
 }

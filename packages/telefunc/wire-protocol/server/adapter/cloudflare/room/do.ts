@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { RoomAuthority }
-export type { CloudflareRoomAuthorityStub, CommitWire, RegisterWire }
+export type { AcceptedCommitWire, CloudflareRoomAuthorityStub, CommitWire, RegisterWire }
 
 // A room's authority owns its time, state and fanout.
 
@@ -56,9 +56,8 @@ import {
   type CellPage,
 } from './storage.js'
 
-type CommitWire =
-  | { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken?: string }
-  | StaleCommit
+type AcceptedCommitWire = { accepted: true; seq: number; timestamp: number; receivers: number; deliveryToken?: string }
+type CommitWire = AcceptedCommitWire | StaleCommit
 
 type RegisterWire = { ok: true } | { rejected: true; reason: string }
 /** The room authority's own methods, which its Durable Object serves over RPC. */
@@ -127,7 +126,7 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
     if ('stale' in outcome) return outcome
     const { mark, routes } = outcome
     const delivery = this.#fanout.send(routes, payload, mark)
-    const receipt: Extract<CommitWire, { accepted: true }> = {
+    const receipt: AcceptedCommitWire = {
       accepted: true,
       seq: mark.seq,
       timestamp: mark.timestamp,
