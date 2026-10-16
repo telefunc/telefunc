@@ -32,6 +32,9 @@ class PathRoom implements SendRoom {
    *  came at the rate the app sent, not the link's. Whether the sender is sending what it held for room. */
   private appLimitedTo = 0
   private releasing = false
+  /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it, as `Uplink.inUplink`. */
+  private inPath = 0
+  private inPathAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
 
   /** `transmit` and `queued` as `PieceSender`'s. */
@@ -48,20 +51,23 @@ class PathRoom implements SendRoom {
     this.pace()
   }
 
-  /** `SendRoom`: what the path takes past what it holds, as the rate drains it from the newest arrival. */
+  /** `SendRoom`: what the path takes past what it holds. */
   dataRoom(): number {
     if (this.rate === 0 || this.leastRtt === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY
-    const held = this.sender.transmittedBytes - this.sender.acknowledgedBytes
-    const drained = this.rate * Math.max(0, performance.now() - this.arrived)
-    return Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * this.rate * this.leastRtt) - held + drained
+    const room = Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * this.rate * this.leastRtt)
+    return room - this.pathHolds(performance.now())
   }
 
-  /** `SendRoom`: data the page dates is dated, each part apart, so the first of a burst measures the path without it. */
+  /** `SendRoom`: the path holds what it handed; data the page dates is dated, each part apart, so the first of a burst
+   *  measures the path without it. */
   handed(bytes: number, data: boolean): void {
+    const now = performance.now()
+    this.inPath = this.pathHolds(now) + bytes
+    this.inPathAt = now
     if (!data) return
     const end = this.sender.transmittedBytes
     if (!this.releasing && this.queued() + this.sender.unhandedDataBytes === 0) this.appLimitedTo = end
-    if (acknowledges(bytes)) this.sent.push({ end, at: performance.now() })
+    if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
 
   sentFrame(): void {}
@@ -70,14 +76,20 @@ class PathRoom implements SendRoom {
   acknowledged(ack: PiecesAck): boolean {
     const before = this.sender.acknowledgedBytes
     if (!this.sender.acknowledged(ack)) return false
+    const now = performance.now()
     const spanMs = ack.spanUs / 1000
     this.arrivedAt += spanMs
-    this.leastOffset = Math.min(this.leastOffset, performance.now() - ack.heldMs - this.arrivedAt)
+    this.leastOffset = Math.min(this.leastOffset, now - ack.heldMs - this.arrivedAt)
+    // When the newest data the acknowledgement covers arrived, on this clock.
+    const arrived = this.arrivedAt + this.leastOffset
     const acknowledged = this.sender.acknowledgedBytes
     let newest: { end: number; at: number } | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
-    if (newest !== undefined) this.leastRtt = Math.min(this.leastRtt, this.arrived - newest.at)
+    if (newest !== undefined) this.leastRtt = Math.min(this.leastRtt, arrived - newest.at)
     this.measureRate(acknowledged - before, spanMs, before < this.appLimitedTo)
+    // The path holds what the page hasn't acknowledged, less what the rate drained since that data arrived.
+    this.inPath = Math.max(0, this.sender.transmittedBytes - acknowledged - this.rate * Math.max(0, now - arrived))
+    this.inPathAt = now
     this.sendHeld()
     return true
   }
@@ -104,9 +116,9 @@ class PathRoom implements SendRoom {
     this.pace()
   }
 
-  /** When the newest data an acknowledgement covered arrived, on this clock. */
-  private get arrived(): number {
-    return this.arrivedAt + this.leastOffset
+  /** What the path holds at `now`, as the rate drained it since `inPathAt`. */
+  private pathHolds(now: number): number {
+    return Math.max(0, this.inPath - this.rate * (now - this.inPathAt))
   }
 
   /** Its socket closed. */

@@ -2183,6 +2183,47 @@ test("a PIECES_ACK and a window refresh the server sends while a download fills 
   expect(got.downloaded - marks.downloaded).toBeGreaterThan(0.9 * 4_000 * 1_250)
 })
 
+test("after its download paused for 3 s while the page uploads, a server's PIECES_ACKs reach the page within a few round trips once the download goes on, not behind all its window let it send", async () => {
+  const upload = loop.open<Uint8Array, Uint8Array>()
+  const download = loop.open<Uint8Array, Uint8Array>()
+  upload.server.listenBinary(() => {})
+  download.page.listenBinary(() => {})
+  await run(100)
+  const socket = loop.socket
+  socket.toServer.bytesPerMs = socket.toPage.bytesPerMs = 1_250 // 1.25 MB/s each way
+  const arrived: number[] = []
+  const onmessage = socket.onmessage!
+  socket.onmessage = (event) => {
+    const message = new Uint8Array(event.data)
+    for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) {
+      if (frame[0] === TAG.PIECES_ACK) arrived.push(Date.now())
+    }
+    onmessage(event)
+  }
+  const chunk = new Uint8Array(64 * 1024)
+  let resume: (() => void) | null = null
+  void (async () => {
+    while (!upload.page.isClosed) await upload.page.sendBinary(chunk)
+  })().catch(() => {})
+  void (async () => {
+    while (!download.server.isClosed) {
+      if (resume !== null) await new Promise<void>((go) => (resume = go))
+      await download.server.sendBinary(chunk)
+    }
+  })().catch(() => {})
+  await run(3_000)
+  resume = () => {}
+  await run(3_000)
+  const mark = Date.now()
+  resume()
+  resume = null
+  await run(2_000)
+  const departures = loop.sent.server.flatMap(([tag], i) => (tag === TAG.PIECES_ACK ? [loop.sentAt.server[i]!] : []))
+  const waits = arrived.flatMap((at, i) => (departures[i]! >= mark ? [at - departures[i]!] : []))
+  expect(waits.length).toBeGreaterThan(0)
+  expect(Math.max(...waits)).toBeLessThan(600)
+})
+
 test('a channel the page closes right after sends its slow uplink held back delivers them all, in order, before it closes', async () => {
   const { server, page } = loop.open<Uint8Array, never>()
   const got: number[] = []
