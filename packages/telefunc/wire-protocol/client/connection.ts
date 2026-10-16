@@ -102,7 +102,7 @@ type ProbeSession = {
  *  leaves the wire usable. */
 type BarrierEmission = 'emitted' | 'not-emitted'
 
-type OutboundFrameKind = 'reconcile' | 'control' | ByteWindowKind | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'released' | 'control' | ByteWindowKind | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind
@@ -708,7 +708,7 @@ class ClientConnection implements MuxConnection {
       this.heldForRoomBytes -= frame.byteLength
       room -= frame.byteLength
       this.replayBuffers.get(channelIx)!.push(seq, frame)
-      this.transport.sendFrame({ kind: 'reconcile', frame })
+      this.transport.sendFrame({ kind: 'released', frame })
     }
     this.startTtlIfIdle()
   }
@@ -1647,7 +1647,7 @@ class ClientConnection implements MuxConnection {
   private replayTo(ix: number, entry: ChannelEntry, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
     this.serverHasThrough(ix, lastSeq)
     const missed = this.replayBuffers.get(ix)!.getAfter(lastSeq, throughSeq)
-    if (missed !== null) return missed.map((frame) => ({ kind: 'reconcile', frame }))
+    if (missed !== null) return missed.map((frame) => ({ kind: 'released', frame }))
     // One the server ended needs nothing more.
     if (entry.state.tag === 'closed' && entry.state.delivered) return []
     return [this.loseChannel(ix, entry)]
@@ -1715,7 +1715,7 @@ class ClientConnection implements MuxConnection {
         room -= frame.byteLength
         this.replayBuffers.get(channelIx)?.push(seq, frame)
       }
-      frames.push({ kind: 'reconcile', frame })
+      frames.push({ kind: 'released', frame })
     }
     sendBuffer.length = writeIx
     return frames

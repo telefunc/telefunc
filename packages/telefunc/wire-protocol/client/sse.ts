@@ -527,6 +527,7 @@ class SseTransport implements UpgradeSource {
   private getFrameDeadline(kind: OutboundFrameKind, now = Date.now()): number {
     switch (kind) {
       case 'reconcile':
+      case 'released':
         return now + SSE_RECONCILE_DEADLINE_MS
       case 'control':
       case 'urgent-flow-control':
