@@ -21,12 +21,12 @@ describe('room demand lifecycle', () => {
   it("aggregates remote demand only for the members this instance owns, and forgets a departed member's", () => {
     const owned = new Set(['member'])
     const delivered: Array<[string, string, boolean]> = []
-    const demand = new RoomDemand(
-      (id) => owned.has(id),
-      () => owned,
-      (member, track, wanted) => delivered.push([member, track, wanted]),
-      () => {},
-    )
+    const demand = new RoomDemand({
+      ownsMember: (id) => owned.has(id),
+      ownedMembers: () => owned,
+      deliver: (member, track, wanted) => delivered.push([member, track, wanted]),
+      ask: () => {},
+    })
     applyPage(demand, 'remote-a', [{ on: true, member: 'elsewhere', track: 'screen' }])
     expect(leasesHeld(demand)).toBe(0)
     applyPage(demand, 'remote-a', [{ on: true, member: 'member', track: 'screen' }])
@@ -58,12 +58,12 @@ describe('room demand lifecycle', () => {
   it("drops a reporter's demand once its lease lapses unrenewed, as when its instance crashed", () => {
     vi.useFakeTimers()
     const delivered: Array<[string, string, boolean]> = []
-    const demand = new RoomDemand(
-      () => true,
-      () => ['member'],
-      (member, track, wanted) => delivered.push([member, track, wanted]),
-      () => {},
-    )
+    const demand = new RoomDemand({
+      ownsMember: () => true,
+      ownedMembers: () => ['member'],
+      deliver: (member, track, wanted) => delivered.push([member, track, wanted]),
+      ask: () => {},
+    })
     applyPage(demand, 'crashed', [{ on: true, member: 'member', track: 'screen' }])
     vi.advanceTimersByTime(ROOM_DEMAND_TTL_MS - 1)
     expire(demand)
@@ -80,12 +80,12 @@ describe('room demand lifecycle', () => {
     vi.useFakeTimers()
     const owned = ['a', 'b', 'c']
     const delivered: Array<[string, string, boolean]> = []
-    const demand = new RoomDemand(
-      (id) => owned.includes(id),
-      () => owned,
-      (member, track, wanted) => delivered.push([member, track, wanted]),
-      () => {},
-    )
+    const demand = new RoomDemand({
+      ownsMember: (id) => owned.includes(id),
+      ownedMembers: () => owned,
+      deliver: (member, track, wanted) => delivered.push([member, track, wanted]),
+      ask: () => {},
+    })
     applyPage(demand, 'crashed', [{ on: true, track: 'screen', except: ['c'] }])
     expect(delivered).toEqual([
       ['a', 'screen', true],
@@ -118,12 +118,12 @@ describe('room demand lifecycle', () => {
     const owned = Array.from({ length: 1_000 }, (_, i) => `m${i}`)
     let evaluated = 0
     const delivered: Array<[string, string, boolean]> = []
-    const demand = new RoomDemand(
-      () => (evaluated++, true),
-      () => owned,
-      (member, track, wanted) => delivered.push([member, track, wanted]),
-      () => {},
-    )
+    const demand = new RoomDemand({
+      ownsMember: () => (evaluated++, true),
+      ownedMembers: () => owned,
+      deliver: (member, track, wanted) => delivered.push([member, track, wanted]),
+      ask: () => {},
+    })
     const tracks = trackNames(100)
     const tell = (instance: string, on: boolean, except: string[] = []) =>
       applyPage(

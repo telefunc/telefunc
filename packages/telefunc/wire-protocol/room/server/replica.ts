@@ -146,12 +146,12 @@ class RoomReplica {
       onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
     })
     this._gossip = new GossipOutbox(incarnation.id, incarnation.inc, this.report.instance)
-    this.demand = new RoomDemand(
-      (id) => this._owners.has(id),
-      () => this._owners.keys(),
-      (member, track, wanted) => this._owners.get(member)?._deliverDemand(member, track, wanted),
-      (instance) => this._askDemand(instance),
-    )
+    this.demand = new RoomDemand({
+      ownsMember: (id) => this._owners.has(id),
+      ownedMembers: () => this._owners.keys(),
+      deliver: (member, track, wanted) => this._owners.get(member)?._deliverDemand(member, track, wanted),
+      ask: (instance) => this._askDemand(instance),
+    })
     this.plan = new RoomSubscriptions(this, this.report)
     this.sync = new AuthoritySync(this, this.plan)
     this.roster = new RosterStream(this.model, this.stubs, () => this.sync.ensureRoster())

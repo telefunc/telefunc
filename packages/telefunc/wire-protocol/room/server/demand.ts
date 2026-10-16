@@ -18,6 +18,16 @@ type TrackLeases = Map<string, TrackLease>
  *  this process asked it to since. */
 type Reporter = { expiresAt: number; page: number; telling: number; asked: boolean }
 
+/** The replica whose owned members the demand is for. */
+type DemandHost = {
+  ownsMember(id: string): boolean
+  /** Live. */
+  ownedMembers(): Iterable<string>
+  deliver(member: string, track: string, wanted: boolean): void
+  /** Asks the reporter to tell everything again. */
+  ask(instance: string): void
+}
+
 /** What some holder of a replica receives. */
 class Receives {
   readonly pairs = new Map<string, Set<string>>()
@@ -279,14 +289,7 @@ class RoomDemand {
   private readonly _due = new Map<string, Set<string> | All>()
   private _settling = false
 
-  constructor(
-    private readonly _ownsMember: (id: string) => boolean,
-    /** Live. */
-    private readonly _ownedMembers: () => Iterable<string>,
-    private readonly _deliver: (member: string, track: string, wanted: boolean) => void,
-    /** Asks the reporter to tell everything again. */
-    private readonly _ask: (instance: string) => void,
-  ) {}
+  constructor(private readonly _host: DemandHost) {}
 
   /** Another process's page, which renews its lease. A page count that skips one makes this process ask it to tell
    *  everything again, once until it does or its next page is only a renewal; what it tells again replaces what it
@@ -315,7 +318,7 @@ class RoomDemand {
     const asksAgain = reporter.asked ? page.wants.length === 0 : !continues
     if (tellsAgain || !asksAgain) return
     reporter.asked = true
-    this._ask(instance)
+    this._host.ask(instance)
   }
 
   /** Drops what the other processes told, read from a demand lane this one no longer subscribes. It owns no member
@@ -334,7 +337,7 @@ class RoomDemand {
     const telling = this._reporters.get(instance)?.telling ?? 0
     if ('except' in entry) {
       this._takeTrack(instance, entry, on, telling)
-    } else if (!this._ownsMember(entry.member)) {
+    } else if (!this._host.ownsMember(entry.member)) {
       return
     } else if ('byMember' in entry) {
       const { member } = entry
@@ -538,7 +541,7 @@ class RoomDemand {
   private *_evaluations(): Generator<void> {
     for (const [track, members] of this._due) {
       this._due.delete(track)
-      for (const member of members === ALL ? this._ownedMembers() : members) {
+      for (const member of members === ALL ? this._host.ownedMembers() : members) {
         this._evaluate(member, track)
         yield
       }
@@ -546,11 +549,11 @@ class RoomDemand {
   }
 
   private _evaluate(member: string, track: string): void {
-    if (!this._ownsMember(member)) return
+    if (!this._host.ownsMember(member)) return
     const wanted = this._wanted(member, track)
     if (wanted === hasEntry(this._told, track, member)) return
     toggleEntry(this._told, track, member, wanted)
-    this._deliver(member, track, wanted)
+    this._host.deliver(member, track, wanted)
   }
 
   /** Whether some reporter receives the owned member's track. */
