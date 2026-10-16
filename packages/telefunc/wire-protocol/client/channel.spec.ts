@@ -69,8 +69,9 @@ test("a channel listener that stops listening itself doesn't make the next one m
   for (const [seq, text] of [
     [1, 'one'],
     [2, 'two'],
-  ] as const)
+  ] as const) {
     channel._dispatchFrame({ tag: TAG.TEXT, index: 0, seq, text: JSON.stringify(text), bytes: 5 })
+  }
   expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
 })
 
@@ -144,7 +145,7 @@ test("a subscriber that unsubscribes itself doesn't make the next one miss the m
   for (const [seq, text] of [
     [1, 'one'],
     [2, 'two'],
-  ] as const)
+  ] as const) {
     broadcast._dispatchFrame({
       tag: TAG.PUBLISH,
       index: 0,
@@ -153,6 +154,7 @@ test("a subscriber that unsubscribes itself doesn't make the next one miss the m
       info: { seq, timestamp: 1 },
       bytes: 0,
     })
+  }
   expect(seen).toEqual(['once:one', 'other:one', 'other:two'])
 })
 

@@ -657,8 +657,9 @@ async function runPath({
     if (attachProbe !== undefined) answer(attachProbe, Infinity, Infinity)
     attached = true
   })
-  if (senderProbe !== undefined)
+  if (senderProbe !== undefined) {
     toSender.push({ at: 2 * delayMs, deliver: () => sender.onPingAck(senderProbe, Infinity, Infinity, upToAck) })
+  }
   let blocked = false
   let budget = 0
   let delivered = 0

@@ -52,8 +52,9 @@ function setup() {
   const carriesMessage = async (body: Blob) => {
     const bytes = new Uint8Array(await body.arrayBuffer())
     const view = new DataView(bytes.buffer)
-    for (let at = 4 + view.getUint32(0); at + 4 <= bytes.length; at += 4 + view.getUint32(at))
+    for (let at = 4 + view.getUint32(0); at + 4 <= bytes.length; at += 4 + view.getUint32(at)) {
       if (bytes[at + 4] === TAG.TEXT) return true
+    }
     return false
   }
   const state = { wires: 0, held: [] as number[], hold: null as Hold | null, answering: 0 }
@@ -80,8 +81,9 @@ function setup() {
           })
           void (async () => {
             try {
-              for (let read = await reader.read(); !read.done; read = await reader.read())
+              for (let read = await reader.read(); !read.done; read = await reader.read()) {
                 controller.enqueue(read.value)
+              }
             } catch {}
           })()
         },

@@ -578,14 +578,16 @@ test('on SSE batch POSTs, what the page holds for room as an upgrade attempt end
   // More than a POST takes, none awaited.
   const count = 64
   for (let n = 0; n < count; n++) void open.send(String(n).padEnd(64 * 1024), { ack: false })
-  for (let waited = 0; waited < 2_000 && connection.state.upgrade.tag !== 'committing'; waited++)
+  for (let waited = 0; waited < 2_000 && connection.state.upgrade.tag !== 'committing'; waited++) {
     await vi.advanceTimersByTimeAsync(1)
+  }
   expect(connection.state.upgrade.tag).toBe('committing')
   expect(connection.heldForRoom.length).toBeGreaterThan(0)
   const { attempt } = connection.state.upgrade
   cut() // the probe WebSocket
-  for (let waited = 0; waited < 3_000 && connection.state.upgrade.attempt === attempt; waited++)
+  for (let waited = 0; waited < 3_000 && connection.state.upgrade.attempt === attempt; waited++) {
     await vi.advanceTimersByTimeAsync(1)
+  }
   expect(connection.state.upgrade.attempt).not.toBe(attempt)
   // The next attempt's READY takes a second.
   await vi.advanceTimersByTimeAsync(500)

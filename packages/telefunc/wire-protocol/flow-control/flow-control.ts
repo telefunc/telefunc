@@ -334,8 +334,9 @@ class FlowControl {
     this._bdp.reset()
     if (!this._wired) {
       this._wired = true
-      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes)
+      if (this._arrived || this._consumedBytes + this.byteWindow > this._grantedBytes) {
         this._advertiseBytes('flow-control')
+      }
       return
     }
     this._advertiseBytes('flow-control')

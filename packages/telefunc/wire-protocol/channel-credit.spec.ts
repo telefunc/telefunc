@@ -129,8 +129,9 @@ class Loopback {
     }
   }
   receive(socket: LoopbackSocket, message: Uint8Array<ArrayBuffer>): void {
-    for (const frame of isOneFrame(message) ? [message] : messageFrames(message))
+    for (const frame of isOneFrame(message) ? [message] : messageFrames(message)) {
       this.arrived.push([frame[0]!, Date.now()])
+    }
     this.mux.onConnectionRawMessage(socket, message).catch((err) => this.errors.push(err))
   }
   /** The wire the page uses now. */
@@ -863,10 +864,11 @@ test('on a slow link, producers that await their sends are handed the credit one
   loop.socket.toPage.bytesPerMs = 4_000 // 4 MB/s
   let size = KIB
   let error: unknown
-  for (let p = 0; p < 8; p++)
+  for (let p = 0; p < 8; p++) {
     void (async () => {
       while (!feed.server.isClosed) await feed.server.send('x'.repeat(size))
     })().catch((err: unknown) => (error ??= err))
+  }
   // They start small: producers that start together each have a frame out as the credit first runs out, and those count.
   await run(100)
   // Every producer waits on credit by now. From here on each frame is 128 KiB.
@@ -1024,10 +1026,11 @@ test.each([
     const waits: number[] = []
     c.page.listen((sentAt) => void waits.push(Date.now() - sentAt))
     await run(2_000)
-    for (const { server } of [a, b])
+    for (const { server } of [a, b]) {
       void (async () => {
         while (!server.isClosed) await server.sendBinary(new Uint8Array(64 * KIB))
       })().catch(() => {})
+    }
     const ticker = setInterval(() => void c.server.send(Date.now()).catch(() => {}), 250)
     await run(30_000)
     const before = got
@@ -1157,8 +1160,9 @@ test.each([10, 50, 200].flatMap((rtt) => [8 * KIB, 32 * KIB, 512 * KIB].map((siz
     void server.sendBinary(new Uint8Array(size))
     await runUntil(() => arrived.page !== undefined && arrived.server !== undefined, 1_000)
     // Its pieces take a read each, where the in-process socket reads up to `READ_BYTES` of whole messages a tick.
-    for (const at of [arrived.page!, arrived.server!])
+    for (const at of [arrived.page!, arrived.server!]) {
       expect(at - sentAt).toBeLessThanOrEqual(rtt / 2 + size / READ_BYTES)
+    }
   },
 )
 
@@ -2072,11 +2076,13 @@ test.each([
     loop.socket.toServer.bytesPerMs = 600
     const count = producer ? 60 : 28
     let sent = 0
-    if (producer)
+    if (producer) {
       void (async () => {
         while (sent < count) await page.sendBinary(counted(sent++))
       })().catch(() => {})
-    else for (; sent < count; sent++) void page.sendBinary(counted(sent))
+    } else {
+      for (; sent < count; sent++) void page.sendBinary(counted(sent))
+    }
     await run(producer ? 1_000 : 300)
     const late = loop.open<never, number>({ registered: false })
     await run(producer ? 1_500 : 1_000)
@@ -2105,11 +2111,12 @@ function countQueueReads(page: unknown) {
   const fifo = Fifo.prototype as unknown as Record<PropertyKey, (...args: unknown[]) => unknown>
   const methods = { shift: fifo.shift!, peek: fifo.peek!, peekLast: fifo.peekLast! }
   const iterate = fifo[Symbol.iterator]!
-  for (const name of ['shift', 'peek', 'peekLast'] as const)
+  for (const name of ['shift', 'peek', 'peekLast'] as const) {
     fifo[name] = function (this: unknown) {
       reads.count++
       return methods[name].call(this)
     }
+  }
   fifo[Symbol.iterator] = function* (this: unknown) {
     for (const item of iterate.call(this) as Iterable<unknown>) {
       reads.count++
@@ -2273,10 +2280,11 @@ test('when both ends send 64-byte messages as fast as credit allows, the upload 
   server.listen(() => void up++)
   page.listen(() => void down++)
   await run(100)
-  for (const end of [server, page])
+  for (const end of [server, page]) {
     void (async () => {
       while (!end.isClosed) await end.send('x'.repeat(64))
     })().catch(() => {})
+  }
   await run(600)
   const window = (end: unknown) => (end as { _flow: { byteWindow: number } })._flow.byteWindow
   expect(up).toBeGreaterThanOrEqual(0.99 * down)

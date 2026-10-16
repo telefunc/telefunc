@@ -396,8 +396,10 @@ function receiveMessage(
   } catch {
     return false
   }
-  if (riding !== undefined)
-    for (let i = 0; i < riding.frames.length; i++)
+  if (riding !== undefined) {
+    for (let i = 0; i < riding.frames.length; i++) {
       if (!take(riding.decoded[i]!, riding.frames[i]!.byteLength, at)) return false
+    }
+  }
   return frame === null || take(frame, raw.byteLength, at)
 }

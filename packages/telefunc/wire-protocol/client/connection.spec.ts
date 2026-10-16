@@ -209,8 +209,9 @@ function connectionCountingPosts(url: string) {
 }
 
 const sendMiB = (transport: any, mib: number) => {
-  for (let i = 0; i < mib; i++)
+  for (let i = 0; i < mib; i++) {
     transport.sendFrame({ kind: 'data', frame: encode.text(0, '"' + 'x'.repeat(2 ** 20) + '"', i + 1) })
+  }
 }
 
 test("the SSE transport's buffered amount counts the data frames waiting for a batch POST, not the control frames", () => {
@@ -346,8 +347,9 @@ test('a batch POST that fails after the next wire started puts back only its win
 test("a wire's end aborts its batch POST still in flight, which would otherwise hold the next wire's outbox", async () => {
   let endWire: (() => void) | undefined
   const fetchImpl = (async (_url: string, init: RequestInit) => {
-    if ((init.headers as Record<string, string>).Accept !== 'text/event-stream')
+    if ((init.headers as Record<string, string>).Accept !== 'text/event-stream') {
       return await new Promise<Response>(() => {})
+    }
     return new Response(
       new ReadableStream<Uint8Array>({ start: (controller) => void (endWire = () => controller.close()) }),
     )
@@ -381,8 +383,9 @@ test('a closed channel whose abort waits for the wire keeps its place rather tha
   const options = stalledOptions()
   const closing = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://cap-closing.test', closing, options) as any
-  for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++)
+  for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++) {
     ClientConnection.getOrCreate('http://cap-closing.test', muxChannelStub(), options)
+  }
   connection.sendAbort(closing, 'null') // its abort waits for the wire
   connection.unregister(closing)
   expect(() => ClientConnection.getOrCreate('http://cap-closing.test', muxChannelStub(), options)).toThrow(
@@ -396,8 +399,9 @@ test('a closed channel the server has all of counts against neither the channel 
   const options = stalledOptions()
   const closing = muxChannelStub()
   const connection = ClientConnection.getOrCreate('http://cap-closed.test', closing, options) as any
-  for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++)
+  for (let open = 1; open < MAX_CHANNELS_PER_CONNECTION; open++) {
     ClientConnection.getOrCreate('http://cap-closed.test', muxChannelStub(), options)
+  }
   connection.sendAbort(closing, 'null')
   connection.unregister(closing)
   connection.channels.get(0).state.delivered = true // a PING found its abort acknowledged
