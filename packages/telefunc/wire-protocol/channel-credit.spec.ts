@@ -996,6 +996,35 @@ test("a download whose path's round trip rises on its wire grows its window to c
   expect(loop.sockets).toHaveLength(1)
 })
 
+test.each([
+  ['~4 KB messages', (channel: ServerChannel<never, unknown>) => channel.send({ text: 'x'.repeat(4_000) })],
+  ['8 KiB binary messages', (channel: ServerChannel<never, unknown>) => channel.sendBinary(new Uint8Array(8 * KIB))],
+])(
+  "a server that sent a 64 KiB frame every 200 ms on a 10 MB/s link, then sends %s as fast as credit allows, carries them at the link's rate, not at the rate it sent before",
+  async (_, send) => {
+    const { server, page } = loop.open<never, unknown>()
+    let got = 0
+    page.listenBinary((data) => void (got += data.byteLength))
+    page.listen(() => void (got += 4_000))
+    await run(100)
+    loop.socket.toPage.bytesPerMs = loop.socket.toServer.bytesPerMs = 10_000
+    for (let i = 0; i < 15; i++) {
+      void server.sendBinary(new Uint8Array(64 * KIB))
+      await run(200)
+    }
+    await run(500)
+    const mark = got
+    let stop = false
+    void (async () => {
+      while (!stop && !server.isClosed) await send(server)
+    })().catch(() => {})
+    await run(3_000)
+    stop = true
+    expect((got - mark) / 3_000).toBeGreaterThan(0.9 * 10_000)
+    expect(loop.sockets).toHaveLength(1)
+  },
+)
+
 // What the other channels' messages leave in the server's socket, and deliver just before the ping's ack, is no queue.
 test.each([
   ['another channel on it gets a small message every 50 ms', [50]],

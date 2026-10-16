@@ -14,8 +14,8 @@ class PathRoom implements SendRoom {
   readonly whole = true
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
-  /** In bytes per ms: the fastest of the newest rates its data arrived at, 0 before any; the bytes and ms of arrivals not
-   *  yet in a rate. */
+  /** In bytes per ms: the fastest of the newest rates its data arrived at while data waited to go, 0 before any; the
+   *  bytes and ms of arrivals not yet in a rate. */
   private rate = 0
   private readonly rates: number[] = []
   private spanBytes = 0
@@ -28,10 +28,17 @@ class PathRoom implements SendRoom {
   private leastRtt = Number.POSITIVE_INFINITY
   /** The data handed and not covered by an acknowledgement: where it ends, of all the sender handed, and when. */
   private readonly sent = new Fifo<{ end: number; at: number }>()
+  /** Where the newest data handed with nothing waiting ahead of it ends, of all the sender handed: arrivals up to it
+   *  came at the rate the app sent, not the link's. Whether the sender is sending what it held for room. */
+  private appLimitedTo = 0
+  private releasing = false
   private paceTimer: ReturnType<typeof setTimeout> | null = null
 
   /** `transmit` and `queued` as `PieceSender`'s. */
-  constructor(transmit: (message: Uint8Array<ArrayBuffer>) => void, queued: () => number) {
+  constructor(
+    transmit: (message: Uint8Array<ArrayBuffer>) => void,
+    private readonly queued: () => number,
+  ) {
     this.sender = new PieceSender(transmit, queued, undefined, this)
   }
 
@@ -51,7 +58,10 @@ class PathRoom implements SendRoom {
 
   /** `SendRoom`: data the page dates is dated, each part apart, so the first of a burst measures the path without it. */
   handed(bytes: number, data: boolean): void {
-    if (data && acknowledges(bytes)) this.sent.push({ end: this.sender.transmittedBytes, at: performance.now() })
+    if (!data) return
+    const end = this.sender.transmittedBytes
+    if (!this.releasing && this.queued() + this.sender.unhandedBytes === 0) this.appLimitedTo = end
+    if (acknowledges(bytes)) this.sent.push({ end, at: performance.now() })
   }
 
   sentFrame(): void {}
@@ -67,15 +77,31 @@ class PathRoom implements SendRoom {
     let newest: { end: number; at: number } | undefined
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     if (newest !== undefined) this.leastRtt = Math.min(this.leastRtt, this.arrived - newest.at)
-    this.spanBytes += acknowledged - before
-    this.spanMs += spanMs
-    if (this.spanMs >= DRAIN_SPAN_MS) {
-      this.rate = newestFastest(this.rates, this.spanBytes / this.spanMs)
-      this.spanBytes = this.spanMs = 0
-    }
-    this.sender.sendHeld()
-    this.pace()
+    this.measureRate(acknowledged - before, spanMs, before < this.appLimitedTo)
+    this.sendHeld()
     return true
+  }
+
+  /** Takes `bytes` that arrived over `spanMs`, the newest, and takes a rate once they span `DRAIN_SPAN_MS`. Arrivals of data
+   *  handed while nothing waited, `appLimited`, came at the app's rate: they neither set the rate nor lower it. */
+  private measureRate(bytes: number, spanMs: number, appLimited: boolean): void {
+    if (appLimited) {
+      this.spanBytes = this.spanMs = 0
+      return
+    }
+    this.spanBytes += bytes
+    this.spanMs += spanMs
+    if (this.spanMs < DRAIN_SPAN_MS) return
+    this.rate = newestFastest(this.rates, this.spanBytes / this.spanMs)
+    this.spanBytes = this.spanMs = 0
+  }
+
+  /** Sends what waits for room, as far as its room goes now. */
+  private sendHeld(): void {
+    this.releasing = true
+    this.sender.sendHeld()
+    this.releasing = false
+    this.pace()
   }
 
   /** When the newest data an acknowledgement covered arrived, on this clock. */
@@ -99,7 +125,6 @@ class PathRoom implements SendRoom {
 
   private readonly lookAgain = (): void => {
     this.paceTimer = null
-    this.sender.sendHeld()
-    this.pace()
+    this.sendHeld()
   }
 }
