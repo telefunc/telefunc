@@ -1,6 +1,7 @@
 export type { BroadcastBackend, BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult }
 
 import type { BroadcastKind } from '../../shared-ws.js'
+import type { ChannelPublishAck } from '../../channel.js'
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
 
 /** A Broadcast route; text and binary of one key share one ordering domain. */
@@ -33,7 +34,7 @@ type BroadcastBackend = {
   publish<Kind extends BroadcastKind>(
     route: BroadcastRoute<Kind>,
     payload: BroadcastPayload<Kind>,
-  ): PublishResult | Promise<PublishResult>
+  ): ChannelPublishAck | Promise<ChannelPublishAck>
   subscribe<Kind extends BroadcastKind>(
     route: BroadcastRoute<Kind>,
     receiver: BackendReceiver<BroadcastPayload<Kind>>,

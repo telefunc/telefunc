@@ -15,7 +15,7 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 import { invokeChannelListener, makePublishInfo } from '../channel.js'
 import { ServerChannel, reportServerChannelError } from './channel.js'
-import type { BroadcastPayload, BroadcastRoute, PublishResult } from '../backend/broadcast/contract.js'
+import type { BroadcastPayload, BroadcastRoute } from '../backend/broadcast/contract.js'
 import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
 import { reportSubscriptionEnd } from '../backend/subscription-manager.js'
@@ -179,7 +179,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     kind: Kind,
     payload: BroadcastPayload<Kind>,
   ): ChannelPublishAck | Promise<ChannelPublishAck> {
-    return publishRoute({ key: this.key, kind }, payload)
+    return getBroadcastBackend().publish({ key: this.key, kind }, payload)
   }
 
   private async _dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
@@ -247,14 +247,14 @@ const BroadcastChannel = ServerBroadcast as {
 const Broadcast = {
   publish<U = unknown>(key: string, data: ChannelData<U>): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return markHandled(publishRoute({ key, kind: 'text' }, stringify(data)))
+    return markHandled(getBroadcastBackend().publish({ key, kind: 'text' }, stringify(data)))
   },
   subscribe<U = unknown>(key: string, callback: BroadcastListener<U>): BroadcastUnsubscribe {
     return subscribeRoute({ key, kind: 'text' }, (payload) => parse(payload) as ChannelData<U>, callback)
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
     assertBroadcastKey(key)
-    return markHandled(publishRoute({ key, kind: 'binary' }, data))
+    return markHandled(getBroadcastBackend().publish({ key, kind: 'binary' }, data))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     return subscribeRoute({ key, kind: 'binary' }, (payload) => payload, callback)
@@ -326,19 +326,6 @@ class RouteSubscription<Kind extends BroadcastKind> {
       else if (state === 'closed') ended()
     })
   }
-}
-
-function publishRoute<Kind extends BroadcastKind>(
-  route: BroadcastRoute<Kind>,
-  payload: BroadcastPayload<Kind>,
-): ChannelPublishAck | Promise<ChannelPublishAck> {
-  const result = getBroadcastBackend().publish(route, payload)
-  return isPromise(result) ? result.then((receipt) => toAck(route.key, receipt)) : toAck(route.key, result)
-}
-
-/** The backend's receipt as the public ack, carrying its key like a subscriber's `info`. */
-function toAck(key: string, { seq, timestamp, receivers }: PublishResult): ChannelPublishAck {
-  return receivers === undefined ? { key, seq, timestamp } : { key, seq, timestamp, receivers }
 }
 
 function assertBroadcastKey(key: unknown): void {

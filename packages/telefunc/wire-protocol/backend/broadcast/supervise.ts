@@ -5,15 +5,18 @@ import { heldSendWeight } from '../held-send-weight.js'
 import type { BroadcastBackend, BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from './contract.js'
 import type { BackendPayload, BackendReceiver } from '../subscription.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
+import type { ChannelPublishAck } from '../../channel.js'
 import { broadcastRouteKey } from './route-key.js'
 import { assertDriverPosition } from '../driver-position.js'
 import { assert } from '../../../utils/assert.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 
-function checked(result: PublishResult): PublishResult {
+/** The driver's receipt as the public ack, carrying its key like a subscriber's `info`. */
+function toAck(key: string, result: PublishResult): ChannelPublishAck {
   assertDriverPosition(result)
-  return result
+  const { seq, timestamp, receivers } = result
+  return receivers === undefined ? { key, seq, timestamp } : { key, seq, timestamp, receivers }
 }
 
 /** A text route carries a string, a binary route bytes. */
@@ -29,12 +32,18 @@ function checkDelivery(route: BroadcastRoute, payload: BackendPayload, info: Ord
 function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
   const subscriptions = new SubscriptionManager(driver.subscriptions, broadcastRouteKey, checkDelivery)
 
-  const publishNow = (route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> => {
+  const publishNow = (
+    route: BroadcastRoute,
+    payload: BroadcastPayload,
+  ): ChannelPublishAck | Promise<ChannelPublishAck> => {
     const result = driver.publish(route, payload)
-    return isPromise(result) ? result.then(checked) : checked(result)
+    return isPromise(result) ? result.then((receipt) => toAck(route.key, receipt)) : toAck(route.key, result)
   }
 
-  const publish = (route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> => {
+  const publish = (
+    route: BroadcastRoute,
+    payload: BroadcastPayload,
+  ): ChannelPublishAck | Promise<ChannelPublishAck> => {
     const { key, kind } = route
     let owned = payload
     return subscriptions.afterEstablished(

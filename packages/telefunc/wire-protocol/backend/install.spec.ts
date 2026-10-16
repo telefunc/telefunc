@@ -147,7 +147,7 @@ describe('backend installation lifecycle', () => {
     }
     const receipt = await instances[0]!.publish(route, 'hi')
     expect(seen.sort()).toEqual(['0:hi', '1:hi'])
-    expect(receipt).toEqual({ seq: 1, timestamp: expect.any(Number) })
+    expect(receipt).toEqual({ key: 'cross-instance', seq: 1, timestamp: expect.any(Number) })
     await Promise.all(instances.map((instance) => instance.dispose()))
   })
 
