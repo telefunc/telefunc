@@ -38,14 +38,13 @@ import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './session-registry.js'
 import {
-  TIMER_DELAY_MAX_MS,
-  CHANNEL_CLOSE_TIMEOUT_MS,
   FC_PAGE_YIELD_BYTES,
   CHANNEL_TRANSPORT,
   WIRE_MAX_RAW_FRAME_BYTES,
   type ChannelTransports,
 } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
+import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import type { Uplink } from './uplink.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError } from '../channel-errors.js'
@@ -757,14 +756,4 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
 function reportChannelError(err: unknown): void {
   console.error('[telefunc:channel-error]', err instanceof Error ? err : new Error(String(err)))
-}
-
-function normalizeCloseTimeout(timeout: number | undefined): number {
-  if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  if (!Number.isFinite(timeout) || timeout < 0 || timeout > TIMER_DELAY_MAX_MS) {
-    throw new Error(
-      `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
-    )
-  }
-  return timeout
 }

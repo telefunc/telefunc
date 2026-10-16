@@ -23,7 +23,6 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { hasProp } from '../../utils/hasProp.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
-import { assertUsage } from '../../utils/assert.js'
 import { isAbort } from '../../node/server/Abort.js'
 import type { ShieldValidators } from '../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
@@ -32,7 +31,8 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
 import { NetworkError } from '../../shared/NetworkError.js'
 import { isPromise } from '../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS, CHANNEL_CLOSE_TIMEOUT_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { FlowControl, replayWindow } from '../flow-control/flow-control.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
@@ -997,15 +997,6 @@ function rejectOverflow(): Promise<never> {
 
 function reportServerChannelError(err: unknown): void {
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
-}
-
-function normalizeCloseTimeout(timeout: number | undefined): number {
-  if (timeout === undefined) return CHANNEL_CLOSE_TIMEOUT_MS
-  assertUsage(
-    Number.isFinite(timeout) && timeout >= 0 && timeout <= TIMER_DELAY_MAX_MS,
-    `Channel close timeout must be a non-negative number of milliseconds, at most ${TIMER_DELAY_MAX_MS}`,
-  )
-  return timeout
 }
 
 /** Server-side channel. `ClientToServer` = messages the server receives; `ServerToClient` = messages the server sends. */
