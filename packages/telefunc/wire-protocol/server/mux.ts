@@ -613,14 +613,19 @@ class ChannelMux {
     assertProtocol(ended.length <= MAX_CHANNELS_PER_CONNECTION, 'PING over entry cap')
     const sessionId = entry.transport.getSessionId(connection)
     if (sessionId === undefined || this.sessionWires.get(sessionId) !== connection) return []
-    return ended.map(({ ix, lastSeq }) => {
+    const answers: PongEntry[] = []
+    for (const { ix, lastSeq } of ended) {
       const channel = this.sessions.get(sessionId, ix)?.channel
-      if (channel === undefined) return { ix, lastSeq: null }
+      if (channel === undefined) {
+        answers.push({ ix, lastSeq: null })
+        continue
+      }
       channel._onPageClosed(seqThrough(lastSeq, channel._replayBuffer?.seq ?? 0))
-      if (!this.endedChannels.has(channel)) return { ix, lastSeq: channel._lastClientSeq }
-      this.releaseEnded(channel)
-      return { ix, lastSeq: null }
-    })
+      const released = this.endedChannels.has(channel)
+      if (released) this.releaseEnded(channel)
+      answers.push({ ix, lastSeq: released ? null : channel._lastClientSeq })
+    }
+    return answers
   }
 
   /** At each of the page's heartbeats, the channels of the session on this wire acknowledge what arrived since their
