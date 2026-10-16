@@ -218,6 +218,14 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
 
 type CellRow = { key: string; bytes: ArrayBuffer; version: number }
 
+function cellsOf(rows: CellRow[], now: number): Exclude<CellPage, { staleInc: true }> {
+  return {
+    cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
+    versions: new Map(rows.map((row) => [row.key, String(row.version)])),
+    now,
+  }
+}
+
 function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
   if ('keys' in sel) {
     return sel.keys.flatMap((key) =>
@@ -234,12 +242,7 @@ function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRo
 function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number): CellsRead {
   const head = readLiveHead(sql, now)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
-  const rows = selectCellRows(sql, inc, sel)
-  return {
-    cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
-    versions: new Map(rows.map((row) => [row.key, String(row.version)])),
-    now,
-  }
+  return cellsOf(selectCellRows(sql, inc, sel), now)
 }
 
 /** A prefix read's page, with the cursor its next page reads after while cells may remain. */
@@ -259,11 +262,7 @@ function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: stri
       CELL_PAGE_SIZE,
     )
     .toArray()
-  const page: Exclude<CellPage, { staleInc: true }> = {
-    cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
-    versions: new Map(rows.map((row) => [row.key, String(row.version)])),
-    now,
-  }
+  const page = cellsOf(rows, now)
   if (rows.length === CELL_PAGE_SIZE) page.cursor = rows[rows.length - 1]!.key
   return page
 }
