@@ -103,7 +103,7 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
       return {
         __r: 'sub-text',
         announce: flag(decl.announce, 'text wants'),
-        members: decodeMemberChanges(decl.members, 'text wants', (wanted) => flag(wanted, 'text wants')),
+        members: decodeTextWants(decl.members),
       }
   }
   return malformed('declaration')
@@ -125,13 +125,13 @@ function decodeBinaryWantChange({ member, track, on }: Record<string, unknown>):
   return { member: member ?? ALL, track: track ?? ALL, on: flag(on, 'binary wants') }
 }
 
-/** A declared change per member id, into a record no key can reach the prototype of. */
-function decodeMemberChanges<T>(changes: unknown, what: string, decode: (change: unknown) => T): Record<string, T> {
-  if (!isRecord(changes)) malformed(what)
-  const members: Record<string, T> = Object.create(null)
-  for (const [memberId, change] of Object.entries(changes)) {
-    if (!isMemberId(memberId)) malformed(what)
-    members[memberId] = decode(change)
+/** A declared text want per member id, into a record no key can reach the prototype of. */
+function decodeTextWants(changes: unknown): Record<string, boolean> {
+  if (!isRecord(changes)) malformed('text wants')
+  const members: Record<string, boolean> = Object.create(null)
+  for (const [memberId, wanted] of Object.entries(changes)) {
+    if (!isMemberId(memberId)) malformed('text wants')
+    members[memberId] = flag(wanted, 'text wants')
   }
   return members
 }
