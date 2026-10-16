@@ -605,10 +605,11 @@ test.each([false, true])(
     const { server, page } = loop.open<never, never>()
     const got: number[][] = []
     page.listenBinary((data) => void got.push(Array.from(data)))
+    const send = (data: Uint8Array) => (ack ? server.sendBinary(data, { ack: true }) : server.sendBinary(data))
     const buffer = new Uint8Array([1, 1, 1])
-    void server.sendBinary(buffer, { ack }).catch(() => {})
+    void send(buffer).catch(() => {})
     buffer.set([2, 2, 2])
-    void server.sendBinary(buffer, { ack }).catch(() => {})
+    void send(buffer).catch(() => {})
     buffer.set([3, 3, 3])
     await run(300)
     expect(got).toEqual([
