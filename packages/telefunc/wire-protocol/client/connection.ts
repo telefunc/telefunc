@@ -702,8 +702,19 @@ class ClientConnection implements MuxConnection {
     const ix = this.channelIndex.get(channel)
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
-    const seq = replay.nextSeq()
-    this.sendOrQueue(ix, seq, encode.ackRes(ix, seq, ackedSeq, result, status), 'ack')
+    const answer = encode.ackRes(ix, replay.seq + 1, ackedSeq, result, status)
+    // The server ends the wire a larger frame arrives on: the send it answers is refused instead.
+    const frame =
+      answer.byteLength <= channel._maxFrameBytes
+        ? answer
+        : encode.ackRes(
+            ix,
+            replay.seq + 1,
+            ackedSeq,
+            `Channel ack answer too large: ${answer.byteLength} bytes encoded, the server accepts ${channel._maxFrameBytes} at most`,
+            ACK_STATUS.ERROR,
+          )
+    this.sendOrQueue(ix, replay.nextSeq(), frame, 'ack')
     if (ackedSeq === this.lastSeqByChannel.get(ix)) channel._answered()
   }
 
