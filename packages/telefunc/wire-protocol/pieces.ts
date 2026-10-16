@@ -566,8 +566,8 @@ abstract class PieceReceiver {
 
   /** A whole frame of `bytes` arrived at `at`, as an announced message if `announced`. */
   protected abstract tookFrame(bytes: number, data: boolean, announced: boolean, at: number): void
-  /** A piece arrived, as an announced message if `announced`, and made its frame `whole`, a data frame if `data`. */
-  protected abstract tookPiece(whole: boolean, announced: boolean, data: boolean): void
+  /** A piece arrived and made its frame `whole`, a data frame if `data`, as an announced message if `announced`. */
+  protected abstract tookPiece(whole: boolean, data: boolean, announced: boolean): void
   /** An ANNOUNCE that arrived at `at` closed an announcement. */
   protected abstract tookClose(at: number): void
   /** How long an acknowledgement waits from now. */
@@ -656,7 +656,7 @@ abstract class PieceReceiver {
     if (this.probing > 0) {
       this.probing--
       this.acknowledge()
-    } else this.tookPiece(whole, announced, this.data)
+    } else this.tookPiece(whole, this.data, announced)
     if (!whole) return null
     const frame = this.frame
     this.frame = new Uint8Array(0)

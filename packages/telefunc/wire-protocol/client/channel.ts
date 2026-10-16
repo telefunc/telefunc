@@ -266,7 +266,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A probe of the path on an attach to a wire whose round trip it hasn't measured, unless its flow-control
    *  frames wait for a batched POST, which the RECONCILE doesn't: the RECONCILE's round trip wouldn't be theirs. */
-  _reattachState(uplink: Uplink, batched: boolean): ReattachState {
+  _reattachState(batched: boolean, uplink: Uplink): ReattachState {
     const probe = batched ? undefined : this._flow.probeAttach(uplink.link)
     return probe === undefined ? {} : { probe }
   }

@@ -125,7 +125,7 @@ interface MuxChannel {
   _onTransportClose(err?: Error): void
   /** What this channel declares in its RECONCILE entry on every (re)attach, on `uplink`'s wire, whose flow-control
    *  frames wait for a batched POST when `batched`. */
-  _reattachState(uplink: Uplink, batched: boolean): ReattachState
+  _reattachState(batched: boolean, uplink: Uplink): ReattachState
   /** Its RECONCILE entry's `probe` was answered by the RECONCILED. */
   _onProbeAnswered(probe: number): void
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
@@ -1469,7 +1469,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState(uplink, batched)
+      const state = entry.channel._reattachState(batched, uplink)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)
