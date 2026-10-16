@@ -4,6 +4,7 @@ export type { RoomGuardHooks }
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
 import { getRoomBackend } from '../../backend/install.js'
+import type { RoomBackend } from '../../backend/room/contract.js'
 import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../errors.js'
 import {
   assertKnownOptions,
@@ -275,22 +276,28 @@ async function listRooms(options?: { prefix?: string }): Promise<RoomInfo[]> {
     const page = await backend.directoryList(options?.prefix ?? '', cursor)
     cursor = page.cursor
     for (const { roomId, incTag } of page.entries) {
-      const head = await backend.readHead(roomId)
-      await repairRoomIndex(backend, roomId, incTag, head)
-      const config = openConfig(head)
-      if (config === null) continue
-      // A room that began closing after its head read is no longer listed.
-      const count = await reapAndCountPresence({ id: roomId, ...config }).catch(async (error: unknown) => {
-        if (isRoomError(error) && openConfig(await backend.readHead(roomId), config.inc) === null) return null
-        throw error
-      })
-      if (count === null) continue
-      const stored = await readRoomMeta(roomId, config)
-      if (stored === null) continue
-      rooms.push({ id: roomId, meta: metaObjectOf(stored.entries), count, isEmpty: count === 0 })
+      const info = await listedRoom(backend, roomId, incTag)
+      if (info !== null) rooms.push(info)
     }
   } while (cursor !== undefined)
   return rooms
+}
+
+/** A directory entry as `Room.list()` lists it, after repairing its listing; null once the room isn't open. */
+async function listedRoom(backend: RoomBackend, roomId: string, incTag: string): Promise<RoomInfo | null> {
+  const head = await backend.readHead(roomId)
+  await repairRoomIndex(backend, roomId, incTag, head)
+  const config = openConfig(head)
+  if (config === null) return null
+  // A room that began closing after its head read is no longer listed.
+  const count = await reapAndCountPresence({ id: roomId, ...config }).catch(async (error: unknown) => {
+    if (isRoomError(error) && openConfig(await backend.readHead(roomId), config.inc) === null) return null
+    throw error
+  })
+  if (count === null) return null
+  const stored = await readRoomMeta(roomId, config)
+  if (stored === null) return null
+  return { id: roomId, meta: metaObjectOf(stored.entries), count, isEmpty: count === 0 }
 }
 
 async function setRoomMeta(id: string, meta: RoomMeta): Promise<void> {
