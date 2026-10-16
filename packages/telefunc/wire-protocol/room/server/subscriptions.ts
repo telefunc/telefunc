@@ -4,8 +4,10 @@ import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { getRoomBackend } from '../../backend/install.js'
+import type { RoomSubscriptionSource } from '../../backend/room/contract.js'
 import { inProcessBinaryLaneKey } from '../../backend/room/lane-key.js'
 import { reportSubscriptionEnd } from '../../backend/subscription-manager.js'
+import type { BackendReceiver, BackendSubscription } from '../../backend/subscription.js'
 import { reportServerChannelError } from '../../server/channel.js'
 import type { WirePublishInfo } from '../../shared-ws.js'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from './constants.js'
@@ -289,16 +291,14 @@ class RoomSubscriptions {
     const open = !model.closed
     const observing = open && host._observed()
     const becomesObserved = observing && !this._observing
-    this._control.sync(observing, () =>
-      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, CONTROL_LANE, (payload, info) =>
-        host._onControl(decodeRoomText(payload), info),
-      ),
+    this._control.sync(
+      observing,
+      this._subscriber(CONTROL_LANE, (payload, info) => host._onControl(decodeRoomText(payload), info)),
     )
     this._observing = observing
-    this._semantic.sync(open && (host._holdsTail() || this._wants.wantsText), () =>
-      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, SEMANTIC_LANE, (payload, info) =>
-        host._onTextData(decodeRoomText(payload), info),
-      ),
+    this._semantic.sync(
+      open && (host._holdsTail() || this._wants.wantsText),
+      this._subscriber(SEMANTIC_LANE, (payload, info) => host._onTextData(decodeRoomText(payload), info)),
     )
     const needsRoster = host._listened() || (open && this._wants.wantsBinary)
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
@@ -637,10 +637,9 @@ class RoomSubscriptions {
     })
     establishing.lanes.add(lane)
     this._everyTrack.set(member, lane)
-    lane.sync(true, () =>
-      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'binary-all', member }, (framed, info) =>
-        host._onBinary(framed, info),
-      ),
+    lane.sync(
+      true,
+      this._subscriber({ kind: 'binary-all', member }, (framed, info) => host._onBinary(framed, info)),
     )
     return lane
   }
@@ -656,10 +655,9 @@ class RoomSubscriptions {
     })
     establishing.lanes.add(lane)
     this._everyMember.set(track, lane)
-    lane.sync(true, () =>
-      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'binary-track', track }, (framed, info) =>
-        host._onBinary(framed, info),
-      ),
+    lane.sync(
+      true,
+      this._subscriber({ kind: 'binary-track', track }, (framed, info) => host._onBinary(framed, info)),
     )
     return lane
   }
@@ -676,13 +674,9 @@ class RoomSubscriptions {
     this._binary.set(inProcessBinaryLaneKey(member, track), lane)
     toggleEntry(this._binaryTracks, member, track, true)
     toggleEntry(this._trackMembers, track, member, true)
-    lane.sync(true, () =>
-      getRoomBackend().subscribeLane(
-        host.id,
-        host._incarnation.inc,
-        { kind: 'binary', member, track },
-        (framed, info) => host._onBinary(framed, info),
-      ),
+    lane.sync(
+      true,
+      this._subscriber({ kind: 'binary', member, track }, (framed, info) => host._onBinary(framed, info)),
     )
     return lane
   }
@@ -724,10 +718,9 @@ class RoomSubscriptions {
       member,
       () => new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered),
     )
-    slot.sync(true, () =>
-      getRoomBackend().subscribeLane(host.id, host._incarnation.inc, { kind: 'inbox', member }, (payload, info) =>
-        host._onDm(decodeRoomText(payload), info),
-      ),
+    slot.sync(
+      true,
+      this._subscriber({ kind: 'inbox', member }, (payload, info) => host._onDm(decodeRoomText(payload), info)),
     )
   }
 
@@ -740,15 +733,20 @@ class RoomSubscriptions {
     const host = this._host
     const lane = this._demandLane
     if (!host.model.closed && host._ownsAnyMember()) {
-      return lane.sync(true, () =>
-        getRoomBackend().subscribeLane(host.id, host._incarnation.inc, DEMAND_LANE, (payload) =>
-          host._onDemand(decodeRoomText(payload)),
-        ),
+      return lane.sync(
+        true,
+        this._subscriber(DEMAND_LANE, (payload) => host._onDemand(decodeRoomText(payload))),
       )
     }
     if (!lane.wanted) return
     lane.stop()
     host._forgetDemand()
+  }
+
+  /** What a lane's `sync` subscribes: `lane` of this incarnation, delivering to `receiver`. */
+  private _subscriber(lane: RoomSubscriptionSource['lane'], receiver: BackendReceiver): () => BackendSubscription {
+    const host = this._host
+    return () => getRoomBackend().subscribeLane(host.id, host._incarnation.inc, lane, receiver)
   }
 
   /** What a binary lane carries is demand once it delivers, so its readiness replans what `queue` queues. */
