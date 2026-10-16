@@ -1,13 +1,12 @@
 /// <reference types="@cloudflare/workers-types" />
 export { installRetained, readRetained, listRetained, deleteRetained }
 
-// Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap.
-
 import type { LaneId, RetainedFrame, RetainedOf } from '../../../../backend/room/contract.js'
 import { binaryLaneKeyPrefix, decodeLaneKey, encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import type { OrderingInfo } from '../../../../ordering-frame.js'
 import { keyRange } from './storage.js'
 
+/** Retained payloads are internally chunked to 1.5 MB rows below workerd's 2 MB cap. */
 const MAX_RETAINED_CHUNK_BYTES = 1_500_000
 
 type ManifestRow = { lane_key: string; size: number; seq: number; ts: number }
