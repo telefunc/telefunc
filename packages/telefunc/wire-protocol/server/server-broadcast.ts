@@ -54,8 +54,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._flow.onPeerByteWindow(this._flow.peerByteWindowMax)
   }
 
-  /** Its page grants the largest window from the start, which a burst fits in: past it and a quarter more, the page is
-   *  behind by more than what it read and hasn't reported, which it reports sooner than that. */
+  /** Its page grants the largest window at once: a quarter of it past credit is more than the page reads unreported. */
   protected override _pastCreditAllowance(): number {
     return this._flow.peerByteWindowMax / 4
   }
@@ -173,8 +172,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._flow.countSentBytes(binary ? peer.sendPublishBinary(wire) : peer.sendPublish(wire))
   }
 
-  /** A page that can't keep up with the broadcast has no send to reject: once behind, it leaves the group, on both
-   *  ends, rather than be sent a gap. */
+  /** A page behind the broadcast has no send to reject: it leaves the group on both ends rather than get a gap. */
   private _closeBehind(): void {
     this._endWithError(
       ERROR_REASON.OVERFLOW,

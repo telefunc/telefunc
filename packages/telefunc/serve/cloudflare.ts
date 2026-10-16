@@ -82,8 +82,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   const hooks = getTelefuncChannelHooks()
   const onMessage = hooks.message
-  // A page may use its session over its WebSocket alone: each message renews the pin, as a request does, from the
-  // upgrade request the socket was opened with.
+  // A page may use its session over its WebSocket alone, so each message renews its pin when due, as a request does.
   hooks.message = (peer, message) => {
     pinSession(peer.request)
     return onMessage(peer, message)
@@ -145,8 +144,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean)
     }
 
-    /** workerd calls no webSocketClose after a socket's error, and crossws has no handler for one: its wire
-     *  ends here. */
+    /** crossws has no handler for a socket's error, so its wire ends here. */
     webSocketError(ws: WebSocket) {
       return crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false)
     }
@@ -178,8 +176,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const presented = new URL(request.url).searchParams.get('session')
       const token = presented || crypto.randomUUID()
       const pinned = presented ? await readSessionPin(kv, presented) : null
-      // A presented token keeps the shard KV pinned for it; without a pin, its hash picks the same shard of its region
-      // again. The session Durable Object writes the pin.
+      // Without a pin, the token's hash picks its shard in the request's region.
       const { sessionInstanceName, locationBucket } =
         pinned ?? resolveSessionRoutingTarget(baseInstanceName, scale, request, locationFallback, token)
 

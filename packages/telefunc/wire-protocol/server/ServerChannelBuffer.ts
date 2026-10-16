@@ -5,8 +5,7 @@ import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { TAG } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
 
-/** What holding an entry retains beyond its payload, so many small messages are bounded by memory too: a send's
- *  callbacks and the promise its caller got (about 480 bytes measured), and a publish's slots (about 52). */
+/** Held beyond an entry's payload: a send's callbacks and promise (about 480 B), a publish's slots (about 52 B). */
 const HELD_SEND_OVERHEAD_BYTES = 512
 const HELD_PUBLISH_OVERHEAD_BYTES = 64
 

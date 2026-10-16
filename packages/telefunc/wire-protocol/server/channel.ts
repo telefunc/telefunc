@@ -292,14 +292,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return CREDIT_WINDOW_MAX_BYTES + this._pastCreditAllowance() + this._bufferLimit + this._bufferLimitBinary
   }
 
-  /** How far past its credit the peer can be sent while it reads: a burst up to the largest window a page grants,
-   *  however small the window this one granted. */
+  /** How far past its credit the peer may be sent while it reads: the largest window a page grants. */
   protected _pastCreditAllowance(): number {
     return CREDIT_WINDOW_MAX_BYTES
   }
 
-  /** What this channel sent once past its credit, and the ack requests the peer hasn't answered, as far as its wire
-   *  still holds them, or all of them where the runtime can't tell. Past `_pastCreditAllowance`, the peer is behind. */
+  /** Whether its sends past credit and unanswered ack requests, as far as its wire holds them, reach the allowance. */
   protected _isPeerBehind(): boolean {
     const allowance = this._pastCreditAllowance()
     const behind = this._flow.bytesSentPastCredit + this._pendingAckBytes
@@ -391,8 +389,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  /** The peer's RECONCILE declarations apply before `onOpen` fires, through the same hooks as its frames. An ended
-   *  channel sends only what it made while no peer was attached: its messages, its answers and its end. */
+  /** RECONCILE declarations apply before `onOpen`; an ended channel sends only what it made with no peer attached. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) {
       this._flushPrePeerBuffer(peer)
@@ -423,8 +420,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
    *  client→server seq dedup, and delegation to `_dispatchDataFrame`. */
   _dispatchFrame(frame: ChannelFrame): void {
-    // The page's closing frames are sequenced with its data, so a replay repeats none of them. The wire carries a seq's
-    // low 32 bits, read here as the whole from the next one this channel expects.
+    // The wire carries a seq's low 32 bits, widened here from the next one this channel expects.
     if (isSequencedFrame(frame)) {
       frame.seq = seqNear(frame.seq, this._lastClientSeq + 1)
       if (frame.seq) {
@@ -699,8 +695,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._onPageHas(lastSeq)
   }
 
-  /** @internal Its page takes nothing more of it: the page closed its end, or has all this channel sent it while it has
-   *  nothing more to send. */
+  /** @internal Its page takes nothing more of it: it closed its end, or has all this channel sent and nothing waits. */
   _pageNeedsNothing(): boolean {
     if (this._replayBuffer === null) return false
     if (this._pageClosed) return true
@@ -723,8 +718,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     end.abort = end.error = null
   }
 
-  /** What was sent while no peer was attached goes to `peer`. An ended channel's ack requests were rejected as it
-   *  ended, and take no answer. */
+  /** What was sent while no peer was attached goes to `peer`; an ack request rejected at the end takes no answer. */
   private _flushPrePeerBuffer(peer: IndexedPeer): void {
     this._prePeerBuffer.flush({
       sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
@@ -756,8 +750,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._clearPendingEnd()
   }
 
-  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach, in place
-   *  of what the channel held for it, past what it lost. */
+  /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
   protected _endWithError(reason: ErrorReason, err: Error): void {
     if (this._didShutdown) return
     this._prePeerBuffer.clear(err)

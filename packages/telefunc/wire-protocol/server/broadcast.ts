@@ -162,8 +162,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const seq = (this.keySeqs.get(key) ?? 0) + 1
     this.keySeqs.set(key, seq)
     const timestamp = Date.now()
-    // A publish made from a listener reaches every subscriber after the message it answers, as through a transport, and
-    // one past the burst after the event loop's turn.
+    // A publish from a listener reaches subscribers after the message it answers; one past the burst, after the turn.
     if (this.delivering || this.queued.length > 0 || this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST) {
       // The caller may reuse or transfer its buffer once the publish returns.
       const queuedData = data instanceof Uint8Array ? (new Uint8Array(data) as T) : data

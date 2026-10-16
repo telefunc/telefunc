@@ -104,8 +104,7 @@ class SseConnectionTransport {
    *  connection — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
-  /** When each wire closed, oldest first, for `connectTtl`: a page opens each wire under a new connId, so a POST for
-   *  one of these comes from a page that hasn't seen its wire end yet, and is refused rather than held. */
+  /** When each wire closed, for `connectTtl`: a page never reuses a connId, so a POST for one is refused. */
   private readonly closedAt = new Map<string, number>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseConnection> = {
@@ -116,8 +115,7 @@ class SseConnectionTransport {
     getConnId: (connection) => connection.connId,
     sendNow: (connection, frame) => this.sendNow(connection, frame),
     wholeMessages: false,
-    // An event carries its frame in base64, 4 bytes for every 3 and framing on top: three quarters of what waits is
-    // never fewer bytes than the frames it carries. What waits: the stream's, and the data waiting for it to ask.
+    // Events carry frames in base64 plus framing, so three quarters of what waits is at least the frames it carries.
     bufferedAmount: (connection) => Math.floor((connection.events.heldBytes * 3) / 4),
     // A frame that goes at once passes the data waiting for the stream to ask: it waits behind the stream's alone.
     queuedAhead: (connection) => Math.floor((connection.events.streamBytes * 3) / 4),
@@ -213,8 +211,7 @@ class SseConnectionTransport {
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
     // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
     this.sendNow(connection, encode.streamRequestOpenAck())
-    // No deadline: the client trusts this POST from the ack on. The gate opens on every path, when runStreamResponse
-    // ends or the connection closes.
+    // No deadline: the client trusts this POST from the ack on; runStreamResponse's end or the close opens the gate.
     await connection.ready
     if (connection.closed) return badRequest()
     try {
