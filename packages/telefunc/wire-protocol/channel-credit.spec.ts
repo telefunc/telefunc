@@ -172,11 +172,11 @@ class Loopback {
 
 const run = (ms: number) => vi.advanceTimersByTimeAsync(ms)
 
-/** The server's piece sender and receiver of a socket, which the specs read into. */
+/** The server's room (with its piece sender) and receiver of a socket, which the specs read into. */
 const piecesOf = (socket: LoopbackSocket) =>
   (
     loop.mux as unknown as {
-      connectionEntries: Map<unknown, { state: { pieces: { sender: unknown; receiver: unknown } } }>
+      connectionEntries: Map<unknown, { state: { pieces: { room: { sender: unknown }; receiver: unknown } } }>
     }
   ).connectionEntries.get(socket)?.state.pieces
 
@@ -185,7 +185,7 @@ const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
 
 /** What the server holds for the page on `socket`: what the wire carries, and what waits for a probe. */
 const serverHolds = (socket: LoopbackSocket) =>
-  socket.toPage.bytes + (piecesOf(socket)?.sender as { heldBytes: number }).heldBytes
+  socket.toPage.bytes + (piecesOf(socket)?.room.sender as { heldBytes: number }).heldBytes
 
 /** Runs until `done`, in steps of `LATENCY_MS`. A page's window doubles about every 50 ms of a saturated stream,
  *  so runs stay short. */
@@ -1673,7 +1673,7 @@ test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last
     // The server acknowledges at most every `WIRE_SEND_ACK_GAP_MS`, the page every `WIRE_PIECES_ACK_GAP_MS`.
     expect(acks.length).toBeLessThan(side === 'server' ? 20 : 5)
   }
-  const sender = piecesOf(loop.socket)?.sender as { unacknowledged: { length: number } }
+  const sender = piecesOf(loop.socket)?.room.sender as { unacknowledged: { length: number } }
   expect(sender.unacknowledged).toHaveLength(0)
   expect(loop.sockets).toHaveLength(1)
 })
@@ -1834,7 +1834,10 @@ test("on a 1 B/ms link, what each end counts as handed and its peer hasn't taken
   page.listenBinary(() => void at.page++)
   await runUntil(() => loop.sockets.length === 1 && loop.socket.readyState === 1, 1_000)
   const socket = loop.socket
-  const serverEnds = () => piecesOf(socket) as { sender: { transmittedBytes: number }; receiver: { took: number } }
+  const serverEnds = () => {
+    const pieces = piecesOf(socket)!
+    return { sender: pieces.room.sender as { transmittedBytes: number }, receiver: pieces.receiver as { took: number } }
+  }
   const off = { up: 0, down: 0 }
   const sampler = setInterval(() => {
     const ends = pageCounts(page)

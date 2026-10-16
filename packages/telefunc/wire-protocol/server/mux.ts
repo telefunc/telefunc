@@ -49,7 +49,6 @@ import type {
   ReconcilePayload,
 } from '../shared-ws.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import type { PieceSender } from '../pieces.js'
 import { PathRoom } from './path-room.js'
 import { ServerPieceReceiver } from './server-piece-receiver.js'
 import { Deliveries } from '../deliveries.js'
@@ -143,7 +142,7 @@ type ConnectionState = {
   frameDelivery: number
   /** When the last PONG went out. */
   pongedAt: number
-  pieces: { room: PathRoom; sender: PieceSender; receiver: ServerPieceReceiver } | null
+  pieces: { room: PathRoom; receiver: ServerPieceReceiver } | null
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -284,7 +283,6 @@ class ChannelMux {
         pongedAt: performance.now(),
         pieces: room && {
           room,
-          sender: room.sender,
           receiver: new ServerPieceReceiver(
             (frame) => this.send(connection, frame),
             (ack) => room.sender.carry(ack),
@@ -590,7 +588,7 @@ class ChannelMux {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.state.pieces
-      const fits = pieces ? pieces.sender.heartbeat(frame.took, performance.now()) : true
+      const fits = pieces ? pieces.room.sender.heartbeat(frame.took, performance.now()) : true
       assertProtocol(fits, 'PING took more than sent')
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
@@ -1105,7 +1103,7 @@ class ChannelMux {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return 0
     const socket = entry.transport.bufferedAmount(connection)
-    return socket === undefined ? undefined : socket + (entry.state.pieces?.sender.unhandedBytes ?? 0)
+    return socket === undefined ? undefined : socket + (entry.state.pieces?.room.sender.unhandedBytes ?? 0)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {
