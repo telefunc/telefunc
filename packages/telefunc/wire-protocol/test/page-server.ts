@@ -361,8 +361,8 @@ function downstream(body: ReadableStream<Uint8Array>, link: Link, net: Net): Rea
             if (link.dead || dropped) break
             if (last && frame) net.pageGets(frame)
             controller.enqueue(chunk)
+            delivered = true
           }
-          delivered = true
         }
         if (delivered) return
       }
