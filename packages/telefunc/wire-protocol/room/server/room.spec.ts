@@ -4221,9 +4221,9 @@ describe('Room public behavior', () => {
       await name(50_000)
       // An insert into a hash table holding every track named so far costs more as the table outgrows the CPU's caches,
       // which from 5,000 to 50,000 tracks reads as growth (14 to 26 here). From 50,000 to 200,000 a linear path measures
-      // about 4 to 6, the marking that grows with the live heap included; a path whose every change costs the tracks
-      // already named, about 16.
-      expect((await fastest(200_000)) / (await fastest(50_000))).toBeLessThanOrEqual(8)
+      // about 4 to 6 here and up to 8.3 on a faster CI runner, the marking that grows with the live heap included; a path
+      // whose every fourth change walks the tracks already named times out.
+      expect((await fastest(200_000)) / (await fastest(50_000))).toBeLessThanOrEqual(10)
     },
     60_000,
   )
