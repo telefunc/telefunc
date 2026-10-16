@@ -13,7 +13,7 @@ interface PeerSender {
   carry(frame: Uint8Array): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
   bufferedAmount(): number | undefined
-  /** How long the frames that go at once wait behind what the wire holds. */
+  /** The wait the wire reports for the frames that go at once (see `SocketWait`). */
   sendWait(): SendWait
   /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
   deliveredBeforeFrame(ms: number): number
