@@ -21,11 +21,13 @@ type RoomParticipantReplacerContract = TypeContract<ServerLocalParticipant, neve
 type RoomRemoteReplacerContract = TypeContract<RemoteParticipant, never, RemoteParticipantMetadata>
 
 const ROOM_GRANTS = Symbol('telefunc.RoomResponseGrants')
+
 /** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
 function responseRoomGrants(context: InternalServerReplacerContext, roomId: string): ResponseRoomGrants {
   const byRoom = context.responseState(ROOM_GRANTS, () => new Map<string, ResponseRoomGrants>())
   return getOrCreate(byRoom, roomId, () => new ResponseRoomGrants())
 }
+
 const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   detect(value): value is RoomReplacerContract['value'] {
@@ -50,6 +52,7 @@ const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerCon
     }
   },
 }
+
 /** Rides its room's stub, so it has no lifecycle of its own; the recursive serializer replaces or dedupes the room it
  *  names. */
 const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServerReplacerContext> = {
@@ -79,6 +82,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServe
     }
   },
 }
+
 const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, InternalServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   detect(value): value is RoomParticipantReplacerContract['value'] {

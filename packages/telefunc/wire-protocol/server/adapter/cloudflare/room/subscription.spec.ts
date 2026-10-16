@@ -6,6 +6,7 @@ import { CloudflareRoomSessionManager, type CloudflareRoomSubscriptionAttempt } 
 
 const source = { roomId: 'room', inc: 'inc', lane: { kind: 'semantic' } } as const
 const route = { roomId: 'room', inc: 'inc', laneKey: encodeLaneKey({ kind: 'semantic' }), sessionDoId: 'session' }
+
 const frame = (byte: number, leaseId: string) => ({
   route: { ...route, leaseId },
   payload: new Uint8Array([byte]),
@@ -38,6 +39,7 @@ function endOf(attempt: CloudflareRoomSubscriptionAttempt): Promise<Error | unde
 afterEach(() => {
   vi.useRealTimers()
 })
+
 test('a session delivers a frame for the lease its subscription holds, and drops one for another lease', async () => {
   const manager = new CloudflareRoomSessionManager('session')
   const received: number[] = []

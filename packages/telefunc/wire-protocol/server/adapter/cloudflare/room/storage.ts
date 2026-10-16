@@ -217,6 +217,7 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
 }
 
 type CellRow = { key: string; bytes: ArrayBuffer; version: number }
+
 function selectCellRows(sql: SqlStorage, inc: string, sel: CellSelector): CellRow[] {
   if ('keys' in sel) {
     return sel.keys.flatMap((key) =>

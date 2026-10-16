@@ -1,6 +1,7 @@
 export { testRoom }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
+
 type ChatResult = {
   events: string[]
   received: Array<{ text: string; from: string }>
@@ -12,6 +13,7 @@ type ChatResult = {
   snapshotStable: boolean
   changes: number
 }
+
 type ParticipantResult = {
   received: Array<{ text: string; from: string }>
   count: number
@@ -21,6 +23,7 @@ type ParticipantResult = {
   remoteIdentity: string | null
   dms: Array<{ data: string; fromAlly: boolean }>
 }
+
 type BinaryResult = {
   frames: Array<{
     size: number
@@ -33,6 +36,7 @@ type BinaryResult = {
   defaultOnly: number[]
   camReceivers: number
 }
+
 type GuardResult = {
   joinError: string | null
   publishError: string | null
@@ -40,6 +44,7 @@ type GuardResult = {
   received: string[]
   inbox: string[]
 }
+
 type AdminResult = {
   announcements: string[]
   system: Array<{ data: string; fromRoom: boolean }>
@@ -49,11 +54,13 @@ type AdminResult = {
   isClosed: boolean
   count: number
 }
+
 type MemberResult = {
   hasMember: boolean
   memberName: string | null
   sameObject: boolean
 }
+
 function testRoomScenario<Result>(id: string, name: string, validate: (result: Result) => void | Promise<void>) {
   test(name, async () => {
     await navigate(`${getServerUrl()}/room`)
@@ -61,6 +68,7 @@ function testRoomScenario<Result>(id: string, name: string, validate: (result: R
     await autoRetry(async () => validate(await getResult<Result>('#room-result')))
   })
 }
+
 function testRoom() {
   testRoomScenario<ChatResult>('chat', 'room: join, publish with sender identity, setMeta, leave', (result) => {
     expect(result.events).deep.equal(['join:Alice', 'leave:Alice'])

@@ -75,6 +75,7 @@ type CoalesceSlot = { sending: boolean; pending: { data: unknown; retain?: boole
 /** A join awaiting its ack: the member the server admitted, once `joined` names it, and the events naming that
  *  member. */
 type PendingJoin = { id: string | null; held: Array<{ envelope: unknown; rawInfo: ChannelPublishInfo }> }
+
 /** The rosters streaming in or applying, from the first part of the first until the last applies. */
 type RosterStream = {
   /** The roster streaming in: its members so far and the part due next. */
@@ -88,6 +89,7 @@ type RosterStream = {
   applying: number
   applied: Promise<void>
 }
+
 type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
 
 /** A server room through one Broadcast stub: its frames carry events and data, its acked messages requests. */
@@ -456,12 +458,14 @@ abstract class ClientParticipantBase extends ParticipantBase {
   get _demandedTracks(): TrackKey[] {
     return this._left ? [] : [...this._wantedTracks]
   }
+
   /** @internal The whole wanted set, as a reattached holder hears it: only the tracks that changed fire. */
   _applyDemandState(tracks: TrackKey[]): void {
     const next = new Set(tracks)
     for (const track of this._wantedTracks) if (!next.has(track)) this._onDemand(track, false)
     for (const track of next) if (!this._wantedTracks.has(track)) this._onDemand(track, true)
   }
+
   override _onDemand(track: TrackKey, wanted: boolean): void {
     if (wanted) this._wantedTracks.add(track)
     else this._wantedTracks.delete(track)

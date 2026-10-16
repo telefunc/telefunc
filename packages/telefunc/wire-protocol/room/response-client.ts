@@ -35,6 +35,7 @@ const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext
     }
   },
 }
+
 const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, InternalClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   revive(metadata, context) {
@@ -50,6 +51,7 @@ const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, Intern
     }
   },
 }
+
 /** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m`, and sharing its
  *  lifecycle. */
 const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, InternalClientReviverContext> = {

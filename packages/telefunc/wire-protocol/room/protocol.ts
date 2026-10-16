@@ -40,6 +40,7 @@ type MemberSnapshot = {
   identity?: string | null
   hidden?: boolean
 }
+
 /** Scalars only: the roster streams once the stub's peer attaches, so serializing a room is O(1) in members. */
 type RoomSnapshotMetadata = {
   channelId: string
@@ -54,8 +55,10 @@ type RoomSnapshotMetadata = {
   bufferLimit: number
   maxFrameBytes?: number
 }
+
 /** Serializer metadata of a `RemoteParticipant` crossing the wire: its room, revived first, and the member snapshot. */
 type RemoteParticipantMetadata = MemberSnapshot & { room: unknown; identity: string | null }
+
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
 type ParticipantStubMetadata = {
   channelId: string
@@ -67,6 +70,7 @@ type ParticipantStubMetadata = {
   bufferLimit: number
   maxFrameBytes?: number
 }
+
 /** Control-lane events. The origin applies its own event and later absorbs the echo: `join`/`leave`/`closed` are
  *  idempotent, `p-meta` and `update` order by `seq`, so every instance converges. */
 type RoomCtrlEnvelope =
@@ -81,10 +85,12 @@ type RoomCtrlEnvelope =
 
 /** A room meta key with its place: the `meta:seq` the write that added it read, and its index in that write. */
 type RoomMetaEntry = [key: string, value: unknown, placeSeq: number, placeIndex: number]
+
 /** The room meta at `seq`, whole, or as the write at `seq` changed it: a key it removed as `[key]`. */
 type RoomMetaUpdate =
   | { __r: 'update'; seq: number; meta: RoomMetaEntry[] }
   | { __r: 'update'; seq: number; changes: (RoomMetaEntry | [key: string])[] }
+
 /** A `LeaveCause` on the wire: no `cause` means the member left on its own. */
 type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
 /** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the
@@ -97,6 +103,7 @@ type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: bool
 /** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
 type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent | RoomAnnounceEnvelope
+
 /** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it;
  *  `more` on all but the last. A failed read says so, so roster getters don't wait forever. `rewound`: a failover
  *  rewound the room's meta seqs, so the next whole meta of the room and of each member applies, whatever its seq. */
@@ -104,13 +111,16 @@ type RoomRosterEvent =
   | { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true }
   | { __r: 'roster-error' }
   | { __r: 'rewound' }
+
 /** To the client whose `req-join` (`reqId`) admitted the member, before any event naming it. */
 type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }
+
 /** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a reattached client
  *  gets the member's whole wanted set, since its offline buffer may have dropped changes. */
 type RoomDemandEvent =
   | { __r: 'demand'; member: string; track: TrackKey; wanted: boolean }
   | { __r: 'demand-state'; member: string; tracks: TrackKey[] }
+
 /** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. A
  *  room-authored one has no sender (`from: ''`, `fromMeta: null`); a client that names the sender gets it unstamped. */
 type RoomDmEnvelope = {
@@ -123,6 +133,7 @@ type RoomDmEnvelope = {
   data: unknown
   ackId?: string
 }
+
 /** The recipient handler's return, or its failure. */
 type DmReply = { ok: true; result: unknown } | RoomFailure
 
@@ -180,7 +191,9 @@ type InboxMessage = {
   data: unknown
   ackId?: string
 }
+
 type WireDm = Omit<RoomDmEnvelope, '__r' | 'to'>
+
 function inboxMessageFromWire(dm: WireDm): InboxMessage {
   const msg: InboxMessage = {
     from: dm.from,
@@ -191,6 +204,7 @@ function inboxMessageFromWire(dm: WireDm): InboxMessage {
   if (dm.ackId) msg.ackId = dm.ackId
   return msg
 }
+
 function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm' }> {
   const notice: Extract<ParticipantStubNotice, { __r: 'dm' }> = {
     __r: 'dm',
@@ -202,10 +216,12 @@ function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm'
   if (msg.ackId) notice.ackId = msg.ackId
   return notice
 }
+
 function leaveCauseFromWire(event: WireLeaveCause): LeaveCause {
   if (event.cause === 'removed') return removedCause(event.reason)
   return ownLeaveCause({ type: event.cause ?? 'left' })
 }
+
 function leaveCauseToWire(cause: LeaveCause): WireLeaveCause {
   if (cause.type === 'removed') {
     return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }

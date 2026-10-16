@@ -132,6 +132,7 @@ type JoinOptions<P extends ParticipantMeta = ParticipantMeta> = {
   /** Exclude this full participant from presence. Server-only. */
   hidden?: boolean
 }
+
 type ClientJoinOptions<P extends ParticipantMeta = ParticipantMeta> = Omit<JoinOptions<P>, 'identity' | 'hidden'>
 
 /** One participant inside `room.snapshot()`. */

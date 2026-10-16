@@ -41,6 +41,7 @@ async function onGetOrCreateRoom(roomId: string) {
 }
 
 type ChatMsg = { kind: 'chat'; text: string }
+
 async function onCreateTypedRoom(roomId: string) {
   return await Room.create<{ topic: string }, { name: string }, ChatMsg>(roomId, { meta: { topic: 'typed' } })
 }
@@ -62,11 +63,13 @@ async function onOpenGuardedRoom(roomId: string) {
 }
 
 const auditLog = new Map<string, Array<Record<string, unknown>>>()
+
 function audit(roomId: string, entry: Record<string, unknown>) {
   const list = auditLog.get(roomId) ?? []
   list.push(entry)
   auditLog.set(roomId, list)
 }
+
 async function onOpenAuditedRoom(roomId: string) {
   const room = await Room.get(roomId)
   Room.guard(room, {
@@ -82,6 +85,7 @@ async function onOpenAuditedRoom(roomId: string) {
   })
   return room
 }
+
 async function onGetAudit(roomId: string) {
   return auditLog.get(roomId) ?? []
 }
@@ -106,6 +110,7 @@ async function onGetRoomWithMember(roomId: string, memberId: string) {
 /** Keep the watched Room referenced so its independent server subscription survives. */
 const watched = new Map<string, unknown[]>()
 const watchedRooms = new Map<string, unknown>()
+
 async function onWatchRoom(roomId: string) {
   const room = await Room.get(roomId)
   const list: unknown[] = []
@@ -113,6 +118,7 @@ async function onWatchRoom(roomId: string) {
   watchedRooms.set(roomId, room)
   room.subscribe((data) => list.push(data))
 }
+
 async function onGetWatched(roomId: string) {
   return watched.get(roomId) ?? []
 }

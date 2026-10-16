@@ -32,6 +32,7 @@ const CONTROL_HORIZON_MS = 2_000
 const intervals: { by: string; fired: number }[] = []
 let makingFor = ''
 const nativeSetInterval = globalThis.setInterval
+
 globalThis.setInterval = ((callback: () => void, ms?: number) => {
   const interval = { by: makingFor, fired: 0 }
   intervals.push(interval)
@@ -40,9 +41,11 @@ globalThis.setInterval = ((callback: () => void, ms?: number) => {
     callback()
   }, ms)
 }) as typeof setInterval
+
 export class TelefuncProbeDurableObject extends TelefuncDurableObject {
   readonly #frames: number[] = []
   readonly #held = new Map<string, unknown[]>()
+
   // Each subscriber records into its own DO's storage: I/O that only that DO may do, like a socket send.
   broadcastSubscribe(key: string): Promise<void> {
     return this.#inSession(async () => {
@@ -52,17 +55,20 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       })
     })
   }
+
   broadcastPublish(key: string, texts: string[]): Promise<void> {
     return this.#inSession(async () => {
       const channel = new ServerBroadcast<string>({ key })
       await Promise.all(texts.map((text) => channel.publish(text)))
     })
   }
+
   broadcastReceived(): Array<{ seq: number; text: string }> {
     return this.ctx.storage.sql
       .exec<{ seq: number; text: string }>('SELECT seq, text FROM probe_received ORDER BY rowid')
       .toArray()
   }
+
   // A call whose argument is a callback, as a page makes it: the telefunction holds the callback, and the response
   // went out.
   callWithCallback(name: string): Promise<string> {
@@ -98,6 +104,7 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       return callback.channelId
     })
   }
+
   // Its page leaves: the callback's channel closes.
   leave(channelId: string): Promise<void> {
     return this.#inSession(async () => {
@@ -105,12 +112,14 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       this.#held.delete(channelId)
     })
   }
+
   // A server creates a room nothing ever holds.
   createRoom(roomId: string, emptyTimeout: number): Promise<void> {
     return this.#inSession(async () => {
       await Room.create(roomId, { emptyTimeout })
     })
   }
+
   // A server writes a room's meta, and reads its keys after each step.
   metaKeyOrder(roomId: string): Promise<string[][]> {
     return this.#inSession(async () => {
@@ -129,6 +138,7 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       return seen
     })
   }
+
   // A recipient answers an acknowledged send whose reply's frame is lost, then sends the sender a later DM.
   lostDmAck(roomId: string): Promise<unknown> {
     return this.#inSession(async () => {
@@ -153,13 +163,16 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       return settled
     })
   }
+
   // The server is gone, with the timers it set.
   die(): void {
     this.ctx.abort()
   }
+
   scheduledAlarm(): Promise<number | null> {
     return this.ctx.storage.getAlarm()
   }
+
   // A server watches every member's frames of a room, past its roster read: a member who joins later reaches it only by
   // the join's delivery.
   watchFrames(roomId: string): Promise<void> {
@@ -169,9 +182,11 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       await room.getParticipants()
     })
   }
+
   framesSeen(): number[] {
     return this.#frames
   }
+
   // A server's member joins a room and keeps a frame there.
   joinAndKeepFrame(roomId: string): Promise<void> {
     return this.#inSession(async () => {
@@ -179,6 +194,7 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       await member.publishBinary(new Uint8Array([7]), { retain: true })
     })
   }
+
   async #inSession<T>(probe: () => Promise<T>): Promise<T> {
     const runId = crypto.randomUUID()
     const outcome = Promise.withResolvers<T>()
@@ -194,54 +210,67 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
     return outcome.promise
   }
 }
+
 // A session DO that records the Room frames it is handed, holding the one reading 'hold' until released; one told to
 // refuse fails every handoff.
 export class SessionDurableObject extends DurableObject {
   readonly #arrived: string[] = []
   readonly #held = Promise.withResolvers<void>()
   #refusing = false
+
   async telefuncRoomDeliver({ payload }: RoomSessionDeliveryRequest): Promise<void> {
     if (this.#refusing) throw new Error('this session refuses Room deliveries')
     const text = textDecoder.decode(payload)
     this.#arrived.push(text)
     if (text === 'hold') await this.#held.promise
   }
+
   refuse(): void {
     this.#refusing = true
   }
+
   release(): void {
     this.#held.resolve()
   }
+
   arrived(): string[] {
     return this.#arrived
   }
 }
+
 export class RoomProbeDurableObject extends RoomAuthority<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env, env.TelefuncDurableObject)
   }
+
   scheduledAlarm(): Promise<number | null> {
     return this.ctx.storage.getAlarm()
   }
+
   fireAlarm(): Promise<void> {
     return this.alarm()
   }
 }
+
 type RpcMethods<T> = {
   [K in keyof T]: T[K] extends (...args: infer Args) => infer Result
     ? (...args: Args) => Promise<Awaited<Result>>
     : never
 }
+
 type Authority = RpcMethods<RoomProbeDurableObject>
 type Session = RpcMethods<Pick<SessionDurableObject, 'refuse' | 'release' | 'arrived'>>
+
 type BroadcastSession = RpcMethods<
   Pick<TelefuncProbeDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
+
 type CallbackSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'callWithCallback' | 'leave'>>
 type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'metaKeyOrder' | 'lostDmAck' | 'die'>>
 type LaneServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'watchFrames' | 'framesSeen' | 'joinAndKeepFrame'>>
 type TelefuncAuthority = RpcMethods<Pick<RoomProbeDurableObject, 'readHead' | 'scheduledAlarm'>>
 type Env = Cloudflare.Env
+
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/lost-target': lostTarget,
   '/pipelined-delivery': pipelinedDelivery,
@@ -258,6 +287,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/lost-dm-ack': lostDmAck,
   '/join-opens-lane': joinOpensLane,
 }
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const probe = probes[new URL(request.url).pathname]
@@ -269,12 +299,15 @@ export default {
     }
   },
 }
+
 function sessionOf(env: Env, suffix: string): DurableObjectId {
   return env.TelefuncDurableObject.idFromName(`session-${suffix}`)
 }
+
 function session(env: Env, suffix: string): Session {
   return env.TelefuncDurableObject.get(sessionOf(env, suffix)) as unknown as Session
 }
+
 function roomProbe(env: Env, suffix: string, name: string) {
   const roomId = `${name}-${suffix}`
   const inc = `${name}-inc-${suffix}`
@@ -306,6 +339,7 @@ function roomProbe(env: Env, suffix: string, name: string) {
     settle: (commit: Extract<CommitWire, { accepted: true }>) => authority.awaitDelivery(commit.deliveryToken!),
   }
 }
+
 async function lostTarget(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'lost-target')
   await probe.open()
@@ -314,6 +348,7 @@ async function lostTarget(env: Env, suffix: string) {
   const commit = await probe.commit(1, 'lost target')
   return { receivers: commit.receivers, settlement: await rejectionOf(probe.settle(commit), 'lost-target settlement') }
 }
+
 // The first frame is held at the session, so a later frame arrives only if it left without waiting for it.
 async function pipelinedDelivery(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'pipelined')
@@ -331,6 +366,7 @@ async function pipelinedDelivery(env: Env, suffix: string) {
     settlements: await Promise.all(commits.map((commit) => rejectionOf(probe.settle(commit), 'pipelined settlement'))),
   }
 }
+
 // One session holds the camera lane of `m`, another its every-track lane, a third the camera's every-member lane.
 async function everyTrackRoutes(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'every-track')
@@ -364,6 +400,7 @@ async function everyTrackRoutes(env: Env, suffix: string) {
     camera: await arrived('camera', 2),
   }
 }
+
 async function alarmScheduling(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)
   const probe = roomProbe(env, suffix, 'alarm')
@@ -405,6 +442,7 @@ async function alarmScheduling(env: Env, suffix: string) {
   await probe.authority.fireAlarm()
   return { idle, afterRoute, afterUnsubscribe, afterReopen, retryKept, afterAlarm: await probe.scheduledAlarm() }
 }
+
 async function routeRenewal(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)
   const probe = roomProbe(env, suffix, 'renewal')
@@ -416,6 +454,7 @@ async function routeRenewal(env: Env, suffix: string) {
     otherLease: await probe.authority.renewRoute({ ...route, leaseId: 'another-lease' }),
   }
 }
+
 // Two session DOs in one isolate, as local workerd runs them: both subscribe, one publishes.
 async function broadcastAcrossSessions(env: Env, suffix: string) {
   const key = `broadcast-${suffix}`
@@ -427,6 +466,7 @@ async function broadcastAcrossSessions(env: Env, suffix: string) {
   await a.broadcastPublish(key, ['one', 'two', 'three'])
   return { a: await a.broadcastReceived(), b: await b.broadcastReceived() }
 }
+
 // Two session DOs in one isolate each take a call with a callback; a's page leaves, then b's. Reports, per session DO,
 // how often the intervals its calls made fired while it held no callback, and after both pages left.
 async function callbackTimers(env: Env, suffix: string) {
@@ -454,6 +494,7 @@ async function callbackTimers(env: Env, suffix: string) {
     afterBothLeft: { a: firedBy('a') - bothLeft.a, b: firedBy('b') - bothLeft.b },
   }
 }
+
 // Two servers each create a room nothing holds, closing 1 s on; one is gone at once. The live one closes its room as
 // Room.close() does; the other's room lapses at its authority's alarm, with nothing left for the alarm after.
 async function autoClose(env: Env, suffix: string) {
@@ -482,14 +523,17 @@ async function autoClose(env: Env, suffix: string) {
     alarmAfterLapse: await gone.authority.scheduledAlarm(),
   }
 }
+
 async function metaKeyOrder(env: Env, suffix: string) {
   const server = env.TELEFUNC.get(env.TELEFUNC.idFromName(`meta-order-server-${suffix}`)) as unknown as RoomServer
   return await server.metaKeyOrder(`meta-order-${suffix}`)
 }
+
 async function lostDmAck(env: Env, suffix: string) {
   const server = env.TELEFUNC.get(env.TELEFUNC.idFromName(`lost-dm-ack-server-${suffix}`)) as unknown as RoomServer
   return await server.lostDmAck(`lost-dm-ack-${suffix}`)
 }
+
 // A server in one session watches every member's frames; a member joins from another session and keeps a frame. The
 // join's delivery to the watching session opens that member's lane.
 async function joinOpensLane(env: Env, suffix: string) {
@@ -504,6 +548,7 @@ async function joinOpensLane(env: Env, suffix: string) {
     (frames) => frames.length > 0,
   )
 }
+
 async function largeRetainedReplay(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'large-retained')
   await probe.open('large retained open')
@@ -516,6 +561,7 @@ async function largeRetainedReplay(env: Env, suffix: string) {
   if (!(replayed instanceof Uint8Array)) throw new Error('large retained replay did not return native bytes')
   return { bytes: replayed.byteLength, firstMismatch: replayed.findIndex((byte, index) => byte !== index % 251) }
 }
+
 async function nativeRpcRoundTrip(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'native-rpc')
   const config = new Uint8Array([0x11, 0x22, 0x33])
@@ -546,6 +592,7 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
     }),
   }
 }
+
 async function openHead(authority: Authority, inc: string, operation: string): Promise<RoomHead> {
   return expectHead(
     await authority.compareExchangeHead(
@@ -555,15 +602,18 @@ async function openHead(authority: Authority, inc: string, operation: string): P
     operation,
   )
 }
+
 function expectHead(result: HeadCxResult, operation: string): RoomHead {
   if ('conflict' in result) throw new Error(`${operation} conflicted`)
   if (!('head' in result)) throw new Error(`${operation} returned no head`)
   return result.head
 }
+
 function accepted(result: CommitWire, operation: string): Extract<CommitWire, { accepted: true }> {
   if ('stale' in result) throw new Error(`${operation} commit was stale`)
   return result
 }
+
 async function poll<T>(read: () => Promise<T>, done: (value: T) => boolean): Promise<T> {
   const deadline = Date.now() + CONTROL_HORIZON_MS
   for (;;) {
@@ -572,6 +622,7 @@ async function poll<T>(read: () => Promise<T>, done: (value: T) => boolean): Pro
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
 }
+
 async function rejectionOf(promise: Promise<unknown>, label: string): Promise<string> {
   try {
     await raceTimeout(promise, CONTROL_HORIZON_MS, () => {

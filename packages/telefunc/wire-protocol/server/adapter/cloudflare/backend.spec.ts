@@ -10,6 +10,7 @@ import { ChannelMux } from '../../mux.js'
 const noBroadcast = () => {
   throw new Error('this spec uses no Broadcast')
 }
+
 const broadcast = new CloudflareBroadcast({
   baseInstanceName: 'telefunc',
   locationFallback: 'weur',

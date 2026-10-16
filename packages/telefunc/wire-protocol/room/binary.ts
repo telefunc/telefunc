@@ -13,9 +13,11 @@ const MEMBER_ID_BYTE_LENGTH = 16
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const BYTE_TO_HEX: string[] = []
 for (let byte = 0; byte < 256; byte++) BYTE_TO_HEX.push(byte.toString(16).padStart(2, '0'))
+
 function isMemberId(value: unknown): value is string {
   return typeof value === 'string' && UUID_REGEX.test(value)
 }
+
 /** Canonical UUID string → 16 bytes. */
 function uuidToBytes(uuid: string): Uint8Array {
   assert(isMemberId(uuid), 'room member IDs are UUIDs')
@@ -24,6 +26,7 @@ function uuidToBytes(uuid: string): Uint8Array {
   for (let i = 0; i < MEMBER_ID_BYTE_LENGTH; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
   return bytes
 }
+
 /** First 16 bytes → canonical lowercase UUID string. */
 function bytesToUuid(bytes: Uint8Array): string {
   let uuid = ''
@@ -33,6 +36,7 @@ function bytesToUuid(bytes: Uint8Array): string {
   }
   return uuid
 }
+
 /** Binary frame flags (one byte after the member ID). */
 const FRAME_FLAG_META = 0b0000_0001
 const FRAME_FLAG_TRACK = 0b0000_0010
@@ -44,6 +48,7 @@ const TRACK_LENGTH_FIELD_MAX = 0xff
 const META_LENGTH_FIELD_MAX = 0xffff
 const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
 const frameTextDecoder = /* @__PURE__ */ new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+
 function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
   assertKnownOptions(opts, ['track', 'meta', 'retain'], 'publishBinary()')
   assertUsage(
@@ -94,7 +99,9 @@ function encodeBinaryFrame(memberId: string, payload: Uint8Array, opts?: BinaryP
   framed.set(payload, headerLength)
   return framed
 }
+
 type FrameCursor = { offset: number }
+
 function decodeFrameText(bytes: Uint8Array): string | undefined {
   try {
     return frameTextDecoder.decode(bytes)
@@ -102,6 +109,7 @@ function decodeFrameText(bytes: Uint8Array): string | undefined {
     return undefined
   }
 }
+
 function readTrackSection(data: Uint8Array, cursor: FrameCursor): string | undefined {
   const length = data[cursor.offset++]
   if (length === undefined || length === 0 || data.byteLength < cursor.offset + length) return undefined
@@ -110,6 +118,7 @@ function readTrackSection(data: Uint8Array, cursor: FrameCursor): string | undef
   cursor.offset += length
   return track
 }
+
 function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, unknown> | undefined {
   if (data.byteLength < cursor.offset + 2) return undefined
   const length = (data[cursor.offset]! << 8) | data[cursor.offset + 1]!
@@ -127,6 +136,7 @@ function readMetaSection(data: Uint8Array, cursor: FrameCursor): Record<string, 
   cursor.offset += length
   return meta
 }
+
 type BinaryFrame = {
   from: string
   payload: Uint8Array
@@ -134,6 +144,7 @@ type BinaryFrame = {
   meta: Record<string, unknown> | null
   retain: boolean
 }
+
 function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
   if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
   const flags = data[MEMBER_ID_BYTE_LENGTH]!
@@ -151,6 +162,7 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
     retain: !!(flags & FRAME_FLAG_RETAIN),
   }
 }
+
 // Tracks
 /** A track inside Room: a name, or `DEFAULT_TRACK`, which the public API calls `null`. */
 type TrackKey = string
@@ -159,16 +171,20 @@ const DEFAULT_TRACK: TrackKey = ''
 /** Every track, or every member, as a want's target. */
 const ALL: unique symbol = Symbol('ALL')
 type All = typeof ALL
+
 function publicTrack(track: TrackKey): string | null {
   return track === DEFAULT_TRACK ? null : track
 }
+
 /** One change of a holder's binary wants: `track` (or `ALL`) of `member` (or `ALL`), on or off. */
 type BinaryWantChange = { member: string | All; track: TrackKey | All; on: boolean }
+
 /** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that
  *  doesn't fit. */
 function isRoomTrack(track: unknown): track is string {
   return typeof track === 'string' && track.isWellFormed() && utf8ByteLength(track) <= TRACK_LENGTH_FIELD_MAX
 }
+
 function isNamedTrack(track: unknown): track is string {
   return isRoomTrack(track) && track.length > 0
 }

@@ -22,30 +22,39 @@ import type { DmReply, RoomFailure } from './protocol.js'
 // Error contract: Abort carries its value, RoomError carries a safe message, and bugs are reported
 // on the throwing side and hidden from the caller.
 const roomErrorBrand = Symbol.for('telefunc.RoomError')
+
 /** An expected caller-facing rejection; the global brand survives duplicate module graphs. */
 class RoomError extends Error {
   readonly [roomErrorBrand] = true as const
+
   constructor(message: string) {
     super(message)
     this.name = 'RoomError'
     Object.setPrototypeOf(this, new.target.prototype)
   }
 }
+
 function isRoomError(thing: unknown): thing is RoomError {
   return thing instanceof RoomError || (typeof thing === 'object' && thing !== null && roomErrorBrand in thing)
 }
+
 function roomClosedError(roomId: string): RoomError {
   return new RoomError(`Room is closed: ${roomId}`)
 }
+
 function participantGoneError(memberId: string): RoomError {
   return new RoomError(`Participant not found (left?): ${memberId}`)
 }
+
 const PARTICIPANT_LEFT = 'Participant left the room'
+
 function participantLeftError(): RoomError {
   return new RoomError(PARTICIPANT_LEFT)
 }
+
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
 const CLIENT_ROOM_BUG_MESSAGE = "Internal client room error — see the recipient's client logs"
+
 /** `roomAckError`'s classification rendered for an ack DM's reply, which travels on an inbox lane, not as a channel
  *  ack. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage: string): RoomFailure {
@@ -55,6 +64,7 @@ function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage:
   report(err)
   return { ok: false, err: bugMessage }
 }
+
 function roomAckError(err: unknown, report: (err: unknown) => void): { text: string; status: AckResultStatus } {
   const classified = classifyTelefuncError(err, isRoomError)
   if (classified.kind === 'abort') return { text: stringify(classified.error.abortValue), status: ACK_STATUS.ABORT }
@@ -63,6 +73,7 @@ function roomAckError(err: unknown, report: (err: unknown) => void): { text: str
   report(err)
   return { text: ROOM_BUG_MESSAGE, status: ACK_STATUS.ERROR }
 }
+
 function roomFailureError(res: RoomFailure): Error {
   if ('abort' in res) return createAbortError(res.abortValue)
   return new RoomError(res.err)
