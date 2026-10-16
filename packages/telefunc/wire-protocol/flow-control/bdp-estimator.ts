@@ -12,17 +12,10 @@ import {
 import type { Link, SendWait } from '../link.js'
 import type { BdpPingAck } from '../shared-ws.js'
 
-/** Per-axis verdict on a settled probe. `grow` = the sample saturated ≥ 2/3 of the current window, which is not at
- *  cap, and for the byte window, the sample leaves the sender's queue out: taken at the path's round trip where an
- *  attach measured it, the receiver's or the sender's, and where none did, the window starved the sender's wire.
- *  `sample-too-small` = the sample didn't. `wire-busy` = the sender's wire held an eighth of the window or more whenever
- *  its credit ran out.
- *  `window-grew` = the probe went out after a window grew, so what the sender says covers the smaller one. */
+/** Per-axis verdict on a settled probe; `grow` needs the sample to saturate ≥ 2/3 of a window not at cap. */
 type AxisDecision = 'grow' | 'sample-too-small' | 'wire-busy' | 'window-grew' | 'at-cap'
 
-/** `acknowledged` is true when a ping was in flight to settle (false for
- *  a stale ack arriving after a transport reset, and for an attach's probe). Per-axis decisions are
- *  independent — caller commits each axis's grow separately. */
+/** `acknowledged`: a ping was in flight to settle, not a stale ack or an attach's probe's; each axis grows apart. */
 type GrowDecision = { acknowledged: boolean; bytes: AxisDecision; msgs: AxisDecision }
 
 const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-small', msgs: 'sample-too-small' }
@@ -47,13 +40,11 @@ class BdpEstimator {
   /** The number of the ping in flight, or the last one. */
   private _ping = 0
   private _pingInFlight = false
-  /** Attach probes not answered yet. Each measures its wire's round trip and settles no growth, so none holds up a ping:
-   *  one lost with its wire, or with an upgrade that didn't happen, costs nothing. */
+  /** Attach probes not answered yet: each settles no growth, so none holds up a ping. */
   private _attachProbes: { probe: number; sentAt: number; link: Link }[] = []
   /** The wire it attached on last, whose round trip a sample counts at. */
   private _link: Link | null = null
-  /** The round trip a round the window held back took, which a queue can't have lengthened, since the wire was
-   *  replaced: lowered as the path's is. `Infinity` before. */
+  /** A round trip the window held back, which no queue lengthened, since the wire was replaced; `Infinity` before. */
   private _boundRtt = Infinity
   private _lastPingAt = Number.NEGATIVE_INFINITY
   /** How long the ping in flight waited behind this side's own data on its wire. */
@@ -62,8 +53,7 @@ class BdpEstimator {
   private _grownWindow = 0
   /** The byte window grew since the last ping went out. */
   private _grewSincePing = false
-  /** The ping in flight went out after the byte window grew. The sender answers on the credit it had since it answered the
-   *  one before, which the smaller window granted. */
+  /** The ping in flight went out after the byte window grew: its answer covers credit the smaller window granted. */
   private _pingFollowsGrowth = false
   /** Adaptive probe interval: snaps to `MIN` on grow, doubles up to `MAX` on
    *  non-grow. Slows but never freezes — a real rate change rediscovers. */
@@ -89,10 +79,7 @@ class BdpEstimator {
     return this._ping
   }
 
-  /** Record one received frame (pre-app-processing). Returns true iff a `BDP_PING`, of the number `probe` reads, should
-   *  be emitted: caller fires `sendBdpPing()` synchronously, and it waits for what `sendWait` says. A single probe
-   *  collects samples for both axes — `onPingAck` then derives independent byte-sample / msg-sample saturation
-   *  decisions. */
+  /** Records one received frame; true iff the caller should send a `BDP_PING` of the number `probe` reads, at once. */
   onReceive(bytes: number, sendWait: SendWait | null = null): boolean {
     const now = performance.now()
     const probe = this._pingDue(now)
@@ -104,9 +91,7 @@ class BdpEstimator {
     return probe
   }
 
-  /** Start a probe that goes out with an attach on `link`, and return its number, which the RECONCILE entry carries, or
-   *  `undefined` where that wire's round trip is measured already. Its answer measures the wire's round trip, lowers it
-   *  if measured, and one for a wire gone since measures nothing anyone reads. */
+  /** Starts a probe that goes out with an attach on `link`; `undefined` where that wire's round trip is measured. */
   probeAttach(link: Link): number | undefined {
     if (link.pathRtt < Infinity) return undefined
     this._attachProbes = this._attachProbes.filter((attach) => attach.link === link || attach.link === this._link)
@@ -129,12 +114,7 @@ class BdpEstimator {
     this._link = link
   }
 
-  /** Settle the `BDP_PING` in flight against its `BDP_PING_ACK`, which says the least the sender's wire held whenever its
-   *  credit ran out, and the path's round trip as the sender measured it, `Infinity` where it measured none.
-   *  `deliveredBefore(ms)`: the bytes the wire delivered, from any channel, in the `ms` before the ack arrived.
-   *  `sendWait`: how long this side's frames waited in the round. Returns
-   *  per-axis grow suggestions. Caller decides whether to actually `growBytes()` / `growMsgs()` (e.g. after applying the
-   *  CPU-lag gate). */
+  /** Settles the ping in flight; `deliveredBefore(ms)`: what the wire delivered from any channel in the `ms` before. */
   onPingAck(
     { probe, backlog: senderBacklog, pathRtt: senderPathRtt }: BdpPingAck,
     deliveredBefore: (ms: number) => number,
@@ -145,8 +125,7 @@ class BdpEstimator {
     this._pingInFlight = false
     const now = performance.now()
     const rtt = now - this._lastPingAt
-    // An attach's probe may have waited behind other channels' frames, or on the channel's registration: a later ping
-    // that took less shows the path takes no more.
+    // An attach's probe may have waited behind other frames: a later ping that took less shows the path takes no more.
     const link = this._link
     if (link !== null && link.pathRtt < Infinity) link.measured(rtt)
     const roundWait = sendWait?.longestWaitSince(this._lastPingAt) ?? 0
@@ -154,16 +133,11 @@ class BdpEstimator {
     if (this._boundRtt < Infinity && roundRtt < this._boundRtt) this._boundRtt = roundRtt
     const received = this._bytesReceived - this._bytesAtPingSent
     const starved = senderBacklog * 8 < this._byteWindow
-    // The window held the sender back, and in the eighth of the round trip before the ack the wire delivered under half
-    // what the channel did on average. A queue the ack waits behind delivers at the link's rate up to it, at least the
-    // channel's rate, another channel's frames too. So the round trip, less what the ping waited behind on this side's
-    // wire, is the path's, however much less one measured before.
+    // Starved, the wire near idle before the ack: no queue held it, so the round trip less its wait is the path's.
     if (starved && received * 3 >= this._byteWindow * 2 && deliveredBefore(rtt / 8) * 16 < received) {
       this._boundRtt = roundRtt
     }
-    // Where an attach measured the path's round trip, here or at the sender, that tells a queue from the path, wherever
-    // the queue is, as does a round the window held back, which took longer if the path's rose since. Else only the sender
-    // can, where its runtime reports what its wire holds.
+    // A measured path round trip, or a round the window held back, tells a queue from the path; else only the sender.
     let pathRtt = Math.min(link?.pathRtt ?? Infinity, senderPathRtt)
     if (this._boundRtt < Infinity) pathRtt = pathRtt < Infinity ? Math.max(pathRtt, this._boundRtt) : this._boundRtt
     const measured = pathRtt < Infinity
@@ -190,8 +164,7 @@ class BdpEstimator {
     return { acknowledged: true, bytes, msgs }
   }
 
-  /** The byte axis's verdict on a sample of `byteSample` bytes: taken at the path's round trip if `measured`, and in a
-   *  round the window held the sender back if `starved`. */
+  /** The byte axis's verdict on `byteSample`, taken at the path's round trip if `measured`, starved if `starved`. */
   private _byteDecision(byteSample: number, measured: boolean, starved: boolean): AxisDecision {
     if (this._byteWindow >= this._byteWindowMax) return 'at-cap'
     if (byteSample * 3 < this._byteWindow * 2) return 'sample-too-small'

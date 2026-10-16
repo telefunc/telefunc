@@ -133,32 +133,17 @@ export const MAX_CHANNELS_PER_CONNECTION = 4_096
 export const WIRE_MAX_CONN_CTRL_FRAME_BYTES =
   MAX_CHANNELS_PER_CONNECTION * (UPGRADE_MAX_ID_BYTES + RECONCILE_ENTRY_ENVELOPE_BYTES) + 1_024
 
-/** Per-connection ceiling on accepted-but-unprocessed frames: a peer that outruns its recv chain
- *  is terminated rather than allowed to queue without bound. This base is the allowance for what
- *  credit doesn't govern: control frames, ack-bearing sends, sends nobody awaits. Each channel
- *  attached to the wire adds a window at `CREDIT_WINDOW_MAX_BYTES` and `CREDIT_MSG_WINDOW_MAX`,
- *  the most a peer that awaits its sends can have in flight on it: a cap that refuses a legal
- *  burst is worse than no cap. */
+/** A peer past its connection's allowance of unprocessed frames is terminated: this base, plus a window per channel. */
 export const WIRE_RECV_BACKLOG_BASE_BYTES = 64 * 1024 * 1024
 export const WIRE_RECV_BACKLOG_BASE_FRAMES = 50_000
 
-/** Per-connection ceiling on what the server's wire holds for its peer, where the runtime reports it. Each channel
- *  attached to the wire adds the most its flow control lets wait there for a page that reads (see
- *  `ServerChannel._sendAllowance`), and the largest frame sent on the wire, as a send puts one frame past a limit. This
- *  base is room for what flow control doesn't count, control frames and the answers to a page's ack requests, as much
- *  as the largest frame a page may send. A wire holding more serves a peer that grants credit it can't take, or doesn't
- *  read what it asked for, and is terminated as a transient loss. */
+/** A server wire holding more for its peer than this base, plus each channel's allowance, is terminated as a loss. */
 export const WIRE_SEND_BACKLOG_BASE_BYTES = WIRE_MAX_RAW_FRAME_BYTES
 
 /** Largest SSE request metadata header the server will read off a POST body. */
 export const SSE_METADATA_MAX_BYTES = 64 * 1024
 
-/** How long the client waits for RECONCILED after sending a RECONCILE before declaring the
- *  wire dead and reconnecting, and then only once the wire has delivered nothing that long, where
- *  its heartbeat tracks it. A downstream that stalls without erroring (bytes stop, no FIN)
- *  otherwise wedges the connection: the upstream keeps sending pings but `handlePongTimeout`
- *  is suppressed while the wire opens, so nothing notices the dead wire and every call buffered
- *  behind the un-acked RECONCILE hangs. */
+/** How long a RECONCILE waits for RECONCILED, and the wire for any frame where tracked, before the page reconnects. */
 export const RECONCILE_TIMEOUT_MS = 10_000
 
 // An attempt outliving the reconcile watchdog would let the watchdog drop the wire mid-commit.
@@ -229,10 +214,9 @@ export const WIRE_SEND_ACK_GAP_MS = 10
 export const WIRE_SEND_ACK_MS = 25
 /** What such an acknowledgement covers at least: its own bytes stay under 1% of it. */
 export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
-/** The most of the rate a page's uplink carries its acknowledgements of what it receives take, and its window
- *  refreshes: each waits its turn, so on a slow uplink beside a fast download they leave 99% to what it uploads. A
- *  refresh moves the download's credit, an acknowledgement only its sender's measures. */
+/** The most of a page uplink's rate its acknowledgements of what it receives take: past it, each waits its turn. */
 export const WIRE_ACK_SHARE = 0.0025
+/** The most its window refreshes take, which move the download's credit. */
 export const WIRE_REFRESH_SHARE = 0.0075
 /** A page hands a WebSocket data while its server hasn't acknowledged more than this many bytes of anything it sent, at
  *  least (see `client/send-budget.ts`). */
@@ -252,10 +236,7 @@ export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
 
-/** How long a channel waits for a peer to connect after the server→client
- *  HTTP response carrying `channel.client` has been serialized. It outlasts a page's noticing that its wire died without
- *  a word, twice the ping interval after the wire's last frame, then its first reconnect delay and a reconcile round
- *  trip. */
+/** How long a channel waits for its peer to connect: it outlasts a page's noticing its wire died, and a reconnect. */
 export const CHANNEL_CONNECT_TTL_MS = 15_000
 
 // Client-side channel reconnect defaults
@@ -316,10 +297,7 @@ export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
 
-/** Each lane of a channel's replay buffer, text and binary, on the server and on the page: twice
- *  `CREDIT_WINDOW_MAX_BYTES`, so a window grows to it less the most a frame adds to a message (see `replayWindow`). A
- *  replay holds what its peer hasn't acknowledged: for a stream that awaits its sends, its window and a message at
- *  most. */
+/** Each lane of a channel's replay buffer, on both ends: twice `CREDIT_WINDOW_MAX_BYTES` (see `replayWindow`). */
 export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES

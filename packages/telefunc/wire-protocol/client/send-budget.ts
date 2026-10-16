@@ -21,8 +21,7 @@ const LEAST_OVER_SLACK_BYTES = 1024
 /** Parts of data handed within this long of one another make one sample. */
 const SAMPLE_MERGE_MS = 1
 
-/** Data handed to the socket at once: where it ends, of all the sender handed, its bytes, what the uplink held ahead of
- *  it, and when. */
+/** Data handed to the socket at once; `ahead` is what the uplink held ahead of it. */
 type SentData = { end: number; bytes: number; ahead: number; at: number }
 
 /** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
@@ -38,9 +37,7 @@ class SendBudget implements SendRoom {
   private arrivedAt = 0
   /** The least one-way delay of data on the path, up to the offset between the clocks. */
   private leastDelay = Number.POSITIVE_INFINITY
-  /** The least time an acknowledgement took back, up to the same offset, and how much longer the newest took: behind
-   *  what the server sends, which a download fills, and no queue of the uplink's. Its wait falls no faster than time
-   *  passes. */
+  /** The least time an acknowledgement took back, up to the same offset: behind no queue of the uplink's. */
   private leastBack = Number.POSITIVE_INFINITY
   private lateMs = 0
   private lateAt = 0
@@ -149,8 +146,7 @@ class SendBudget implements SendRoom {
     this.pace()
   }
 
-  /** `SendRoom`: notes `bytes` the sender handed the socket: all are in the uplink, and data is dated. Parts of data
-   *  handed within `SAMPLE_MERGE_MS` of one another make one sample, dated by the first. */
+  /** `SendRoom`: notes `bytes` the sender handed the socket; data handed within `SAMPLE_MERGE_MS` makes one sample. */
   handed(bytes: number, data: boolean): void {
     const ahead = this.uplink.handed(bytes)
     if (!data) return
@@ -163,8 +159,7 @@ class SendBudget implements SendRoom {
     } else this.sent.push({ end, bytes, ahead, at })
   }
 
-  /** Moves the allowance by the delay of `newest`, the newest data an acknowledgement of `newly` bytes covered, `spanMs`
-   *  after the data the one before covered. */
+  /** Moves the allowance by the delay of `newest`, the newest data an acknowledgement of `newly` bytes covered. */
   private measure(newest: SentData, newly: number, spanMs: number): void {
     const delay = this.arrivedAt - newest.at
     const { drainRate } = this.uplink
@@ -185,8 +180,7 @@ class SendBudget implements SendRoom {
     this.movedAllowance = Math.min(CREDIT_WINDOW_MAX_BYTES, Math.max(least, allowance))
   }
 
-  /** The least allowance: what the server takes in `WIRE_QUEUE_DELAY_MS`, more than it takes before it acknowledges,
-   *  and `WIRE_SEND_AHEAD_MIN_BYTES` at most or before its rate is measured. */
+  /** The least allowance: what the server takes in `WIRE_QUEUE_DELAY_MS`, more than it takes before it acknowledges. */
   private get least(): number {
     const { drainRate } = this.uplink
     if (drainRate === 0) return WIRE_SEND_AHEAD_MIN_BYTES
@@ -196,8 +190,7 @@ class SendBudget implements SendRoom {
     )
   }
 
-  /** What the server may have taken before it acknowledges: `WIRE_PIECES_ACK_BYTES` at most, and where less,
-   *  `WIRE_SEND_ACK_MIN_BYTES` and what the uplink carries in `WIRE_SEND_ACK_MS` after them. */
+  /** What the server may have taken before it acknowledges: `WIRE_PIECES_ACK_BYTES` at most. */
   private get slack(): number {
     const { drainRate } = this.uplink
     if (drainRate === 0) return WIRE_PIECES_ACK_BYTES

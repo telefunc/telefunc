@@ -362,9 +362,7 @@ class WsTransport implements UpgradeTarget {
   }
 }
 
-/** Takes a WebSocket message `raw` that arrived at `at`, which its receiver acknowledges as `PagePieceReceiver` says,
- *  and hands `take` its frames, with `at`, none for a piece before its frame's last. Returns false where its wire closes: for bytes
- *  that close it, before `take` had any, or once `take` returned false. */
+/** Hands `take` the frames of a WebSocket message that arrived at `at`; false where its wire closes. */
 function receiveMessage(
   pieces: PagePieceReceiver,
   raw: Uint8Array<ArrayBuffer>,

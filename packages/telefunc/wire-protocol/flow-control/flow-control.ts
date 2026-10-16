@@ -16,13 +16,10 @@ import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type BdpPingAck } from '../shared-ws.
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
-/** `urgent-flow-control`: past half its window has been consumed since the last urgent limit, so the peer may be close to
- *  blocking: a transport that batches should send it at once. `acknowledgement`: it only acknowledges what arrived, so
- *  it may go in the next message its wire sends. */
+/** A batching wire sends `urgent-flow-control` at once; an `acknowledgement` may ride the next message it sends. */
 type ByteWindowKind = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
 
-/** Limits go out mod 2^32. A byte limit goes out with the last seq this side has of the channel, which acknowledges what
- *  arrived (see `constants.ts`). */
+/** Limits go out mod 2^32; a byte limit carries the last seq this side has, which acknowledges what arrived. */
 interface FlowControlEmit {
   byteWindowUpdate(limit: number, kind: ByteWindowKind): void
   msgWindowUpdate(limit: number, urgent: boolean): void
@@ -38,10 +35,7 @@ type AttachedWire = SendWait & {
   noteWait(wait: number): void
 }
 
-/** The largest window a receiver grants a sender whose replay buffer's lanes hold `text` and `binary` bytes: half the
- *  smaller, less the most a frame adds to a message, so what credit lets be in flight, and the frame of a message or
- *  ack answer up to half sent as the credit ran out, fit it. At least a byte, so credit lets a message through each
- *  round trip. */
+/** The largest window a sender whose replay lanes hold `text` and `binary` bytes gets: what it holds in flight fits. */
 function replayWindow(text: number, binary: number): number {
   return Math.max(1, Math.floor(Math.min(text, binary) / 2) - MESSAGE_FRAME_OVERHEAD_MAX_BYTES)
 }
@@ -103,15 +97,13 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  /** `backlog`: bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell.
-   *  `yieldBytes`: the sender yields a macrotask once it sent that many bytes since it last yielded or waited. A page
-   *  sets it: Chromium takes what a page queued on a WebSocket or an upload stream only between tasks, and woken by
-   *  credit, a page would send all of it in one. `sendWait`: how long the frames that go at once wait behind the
-   *  channel's wire's own data where no attach's uplink tells it, `null` where the runtime can't tell. */
   constructor(
     private readonly _emit: FlowControlEmit,
+    /** Bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell. */
     private readonly _backlog: () => number | undefined,
+    /** A page's: Chromium takes what a page queued on a socket only between tasks, so its sender yields past this. */
     private readonly _yieldBytes = Infinity,
+    /** How long frames that go at once wait behind the wire's own data where no attach tells it, `null` for unknown. */
     private readonly _sendWait: () => SendWait | null = () => null,
   ) {
     macrotaskYield.assertSupported()
@@ -131,15 +123,12 @@ class FlowControl {
     return this._peerByteWindowMax
   }
 
-  /** The round trip of the path of the last `attach`'s wire, as an attach's probe measured it, `Infinity` where none
-   *  did: what this side's answer to a `BDP_PING` says, for a receiver with no attach of its own to probe. */
+  /** The last `attach`'s wire's path round trip, `Infinity` where unmeasured: what an answer to a `BDP_PING` says. */
   pathRtt(): number {
     return this._uplink?.link.pathRtt ?? Infinity
   }
 
-  /** Keeps what credit lets be in flight within the replay buffers (see `replayWindow`): this side grants its peer
-   *  `window` at most, and its peer grants it `peerWindow` at most. The limit this side assumes its peer starts with,
-   *  while no `WINDOW` raised it, doesn't pass that. */
+  /** Keeps what credit lets be in flight within the replay buffers (see `replayWindow`). */
   fitReplays(window: number, peerWindow: number): void {
     this._fitted = true
     this._bdp.capByteWindow(window)
@@ -152,16 +141,12 @@ class FlowControl {
     return this._limitBytes - this._sentBytes <= 0
   }
 
-  /** Sender-side: bytes of the frames sent once past the byte limit that are still past it. The frame that crossed it,
-   *  sent with credit, is credit flow control's one-frame overshoot and isn't counted. */
+  /** Sender-side: bytes sent past the byte limit and still past it, but the one frame that crossed it with credit. */
   get bytesSentPastCredit(): number {
     return Math.max(0, this._sentBytes - Math.max(this._limitBytes, this._sentWithCredit))
   }
 
-  /** Sender-side: count one frame of `bytes` against credit. Returns `void` when
-   *  both credit axes have headroom, no other sender waits, AND our loop utilisation is below the gate, nor did the
-   *  sender send `yieldBytes` since it last yielded or waited. Otherwise a Promise that resolves at the
-   *  sender's turn with credit (credit-gated) or one macrotask later (util- or byte-gated — single yield, no re-check). */
+  /** Sender-side: counts a frame of `bytes` against credit; a Promise where the sender waits for credit or yields. */
   decrement(bytes: number): void | Promise<void> {
     this.countSent(bytes)
     this._released = false
@@ -201,10 +186,7 @@ class FlowControl {
     this._tryWakeCreditWaiters()
   }
 
-  /** Sender-side: answer a `BDP_PING`. Returns the least the wire held whenever, since the last one, its credit ran out,
-   *  as more came or as the ping did: 0 where the runtime can't tell, `Infinity` where it didn't run out. The receiver
-   *  takes a wire that held an eighth of its window or more each time for busy, where a larger window would only have
-   *  queued more. */
+  /** Sender-side: answers a `BDP_PING` with the least its wire held whenever its credit ran out since the last. */
   onPing(): number {
     this._noteBacklog()
     const backlog = this._leastBacklog
@@ -212,8 +194,7 @@ class FlowControl {
     return backlog
   }
 
-  /** Receiver-side: account one received frame off the wire. Emits a `BDP_PING` via the channel's emit callback iff the
-   *  estimator opens a probe. */
+  /** Receiver-side: account one received frame off the wire, emitting a `BDP_PING` iff the estimator opens a probe. */
   onReceived(bytes: number): void {
     this._arrived = true
     this._receivedBytes += bytes
@@ -226,8 +207,7 @@ class FlowControl {
     return this._uplink ?? this._sendWait()
   }
 
-  /** Receiver-side: the number of a probe for the RECONCILE entry of an attach on `link`, which the peer answers before
-   *  any of the channel's frames (see `BdpEstimator`), or `undefined` where that wire's round trip is measured already. */
+  /** Receiver-side: a probe number for an attach on `link`'s RECONCILE entry; `undefined` where `link` is measured. */
   probeAttach(link: Link): number | undefined {
     return this._bdp.probeAttach(link)
   }
@@ -237,40 +217,30 @@ class FlowControl {
     this._bdp.settleAttachProbe(probe)
   }
 
-  /** Receiver-side: account post-callback consumption of one frame. Emits
-   *  refresh `WINDOW` / `MSG_WINDOW` frames once a quarter of the estimator's
-   *  byte window, or of the message window, has been consumed since that limit last went out, and the wire's share of
-   *  the uplink allows one. */
+  /** Receiver-side: account post-callback consumption of one frame. */
   onConsumed(bytes: number): void {
     this._consume(bytes, 1)
   }
 
-  /** Receiver-side: a frame credit doesn't count, an ack request or its answer, arrived. A `WINDOW` acknowledges it, so
-   *  one goes out once a quarter window of these arrived since the last, and the sender's replay lets them go. */
+  /** Receiver-side: a frame credit doesn't count, an ack request or its answer, arrived; a `WINDOW` acknowledges it. */
   onReceivedUncounted(bytes: number): void {
     this._arrived = true
     this._uncountedBytes += bytes
     if (this._uncountedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes('acknowledgement')
   }
 
-  /** Receiver-side, at each heartbeat: a `WINDOW` for what arrived since the last, so the sender's replay lets it go
-   *  while the channel is quiet. */
+  /** Receiver-side, at each heartbeat: a `WINDOW` for what arrived since the last, which the sender's replay frees. */
   acknowledge(): void {
     if (this._arrived) this._advertiseBytes('acknowledgement')
   }
 
-  /** Receiver-side: this side answered the newest frame that arrived, which tells the sender it has every frame before
-   *  it too, so no `WINDOW` is owed for them. */
+  /** Receiver-side: this side answered the newest frame that arrived, so no `WINDOW` is owed for what arrived. */
   answered(): void {
     this._uncountedBytes = 0
     this._arrived = false
   }
 
-  /** Settle `BDP_PING_ACK`, which says the least the peer's wire held whenever its credit ran out, and the path's round
-   *  trip as the peer measured it. `deliveredBefore(ms)`: what the wire delivered in the `ms` before the ack arrived.
-   *  Each axis grows iff its own sample saturated ≥ 2/3 of its current window, the byte sample leaving out the peer's
-   *  queue (see `BdpEstimator`), AND our own self-utilisation is below threshold. On growth, the new limit goes out to
-   *  the peer immediately. */
+  /** Settles a `BDP_PING_ACK`; `deliveredBefore(ms)`: what the wire delivered in the `ms` before the ack arrived. */
   onPingAck(ack: BdpPingAck, deliveredBefore: (ms: number) => number): void {
     const suggest = this._bdp.onPingAck(ack, deliveredBefore, this._wireWait())
     if (!suggest.acknowledged) return
@@ -334,9 +304,7 @@ class FlowControl {
     this._bdp.attach(wire.link)
   }
 
-  /** Attach on another wire than the last, or the first. The probe in flight rode the prior wire, and the limits go out
-   *  again, which repairs what the prior wire lost of them. Credit carries over: it is cumulative. On the first wire the
-   *  peer starts with the initial limits, so only a byte limit past them, or one that acknowledges what arrived, goes. */
+  /** Attach on another wire than the last, or the first: the limits go out again, which repairs what the prior lost. */
   reattach(): void {
     this._bdp.reset()
     if (!this._wired) {
@@ -350,15 +318,12 @@ class FlowControl {
     this._advertiseMessages()
   }
 
-  /** Receiver-side: the largest byte window its peer's replay allows, advertised with the next limit, while limits still
-   *  go out once a quarter of the estimator's window was consumed: a broadcast's page, whose window sets how far behind
-   *  the server may have it, acknowledges what it read as often as a stream's does. */
+  /** Receiver-side: the largest byte window its peer's replay allows, advertised with the next limit. */
   widenByteWindow(): void {
     this._widened = true
   }
 
-  /** Sender-side: counts a frame in bytes only, a broadcast's publish, which nothing waits on: it takes no message
-   *  credit. */
+  /** Sender-side: counts a frame in bytes only, a broadcast's publish, which nothing waits on. */
   countSentBytes(bytes: number): void {
     const hadCredit = !this.isPastByteCredit
     this._sentBytes += bytes
