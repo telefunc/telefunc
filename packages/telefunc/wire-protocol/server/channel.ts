@@ -722,7 +722,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _flushPrePeerBuffer(peer: IndexedPeer): void {
     this._prePeerBuffer.flush({
       sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
-      sendPublish: (msg) => this._flow.countSentBytes(peer.sendPublish(msg)),
+      sendPublish: (msg) => this._flow.countPublishSent(peer.sendPublish(msg)),
       sendBinary: (msg) => this._flow.countSent(peer.sendBinary(msg)),
       sendTextAck: (data, cb) =>
         peer.sendTextAckReq(data, (seq, bytes) => {
@@ -732,7 +732,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         peer.sendBinaryAckReq(data, (seq, bytes) => {
           if (cb) this._addPendingAck(seq, bytes, cb)
         }),
-      sendPublishBinary: (msg) => this._flow.countSentBytes(peer.sendPublishBinary(msg)),
+      sendPublishBinary: (msg) => this._flow.countPublishSent(peer.sendPublishBinary(msg)),
     })
   }
 

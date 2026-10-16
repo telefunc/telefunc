@@ -252,7 +252,7 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
   it('marks a WINDOW urgent once more than half a window was consumed since the last urgent one', () => {
     const { flow, emit } = makeFlow()
     const quarter = Math.floor(CREDIT_WINDOW_INITIAL_BYTES / 4)
-    for (let i = 0; i < 6; i++) flow.onConsumedBytes(quarter)
+    for (let i = 0; i < 6; i++) flow.onPublishConsumed(quarter)
     expect(emit.windowKinds).toEqual([
       'flow-control',
       'flow-control',

@@ -163,7 +163,7 @@ class FlowControl {
 
   /** Sender-side: count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    this.countSentBytes(bytes)
+    this._countSentBytes(bytes)
     this._sentMessages += 1
   }
 
@@ -322,20 +322,18 @@ class FlowControl {
     this._widened = true
   }
 
-  /** Sender-side: counts a frame in bytes only, a broadcast's publish, which nothing waits on. */
-  countSentBytes(bytes: number): void {
-    const hadCredit = !this.isPastByteCredit
-    this._sentBytes += bytes
-    if (hadCredit) this._sentWithCredit = this._sentBytes
+  /** Sender-side: counts a broadcast's publish, in bytes only, which nothing waits on. */
+  countPublishSent(bytes: number): void {
+    this._countSentBytes(bytes)
   }
 
-  /** Receiver-side: a frame counted in bytes only arrived, which starts no BDP probe. */
-  onArrived(): void {
+  /** Receiver-side: a publish arrived, which starts no BDP probe. */
+  onPublishArrived(): void {
     this._arrived = true
   }
 
-  /** Receiver-side: such a frame of `bytes` was consumed, which takes no message credit. */
-  onConsumedBytes(bytes: number): void {
+  /** Receiver-side: a publish of `bytes` was consumed, which takes no message credit. */
+  onPublishConsumed(bytes: number): void {
     this._consume(bytes, 0)
   }
 
@@ -351,6 +349,12 @@ class FlowControl {
     this._shutdown = true
     if (this._refreshTimer !== null) clearTimeout(this._refreshTimer)
     this._tryWakeCreditWaiters()
+  }
+
+  private _countSentBytes(bytes: number): void {
+    const hadCredit = !this.isPastByteCredit
+    this._sentBytes += bytes
+    if (hadCredit) this._sentWithCredit = this._sentBytes
   }
 
   private _consume(bytes: number, messages: number): void {

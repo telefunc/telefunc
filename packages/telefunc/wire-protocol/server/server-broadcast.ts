@@ -169,7 +169,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       this._closeBehind()
       return
     }
-    this._flow.countSentBytes(binary ? peer.sendPublishBinary(wire) : peer.sendPublish(wire))
+    this._flow.countPublishSent(binary ? peer.sendPublishBinary(wire) : peer.sendPublish(wire))
   }
 
   /** A page behind the broadcast has no send to reject: it leaves the group on both ends rather than get a gap. */
