@@ -2979,7 +2979,13 @@ describe('Room public behavior', () => {
     ;(await room.getParticipant(other.id))!.subscribeBinary(() => {})
     const remote = (await room.getParticipant(me.id))!
     const update = vi.spyOn(WantsIndex.prototype, 'update')
-    const updateText = vi.spyOn(WantsIndex.prototype, 'updateText')
+    const textMembers: string[][] = []
+    const updateText = WantsIndex.prototype.updateText
+    vi.spyOn(WantsIndex.prototype, 'updateText').mockImplementation(function (this: WantsIndex, holder, gone, members) {
+      const ids = [...members!]
+      textMembers.push(ids)
+      return updateText.call(this, holder, gone, ids)
+    })
     const applyBinary = vi.spyOn(WantsIndex.prototype, 'applyBinary')
     const text = [remote.subscribe(() => {}), remote.subscribe(() => {})]
     const screen = [
@@ -2987,7 +2993,7 @@ describe('Room public behavior', () => {
       remote.subscribeBinary(() => {}, { track: 'screen' }),
     ]
     expect(update).not.toHaveBeenCalled()
-    expect(updateText.mock.calls.map(([, , members]) => [...members!])).toEqual([[me.id], [], [], []])
+    expect(textMembers).toEqual([[me.id], [], [], []])
     expect(applyBinary.mock.calls.map(([, change]) => change)).toEqual([{ member: me.id, track: 'screen', on: true }])
     const lanes = () => ({
       text: subsOf(room)._semantic.wanted,

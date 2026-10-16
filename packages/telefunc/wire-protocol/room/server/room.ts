@@ -429,7 +429,7 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal A holder's text wants changed (`before` is `null` when none did): replan, then replay the retained
    *  frame it now wants. */
   _onHolderTextChanged(holder: LaneHolder, before: TextWantsChange | null): void {
-    if (this._holdsLanes(holder)) this._replica.plan.textChanged(holder, [...(before?.members.keys() ?? [])])
+    if (this._holdsLanes(holder)) this._replica.plan.textChanged(holder, before?.members.keys() ?? [])
     if (before) void this._replica.replayText(holder, before).catch(reportRoomError)
   }
 
