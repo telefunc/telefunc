@@ -55,9 +55,9 @@ class ServerChannelBuffer<TAck = never> {
     return this.#text.size + this.#binary.size
   }
 
-  /** A publish was dropped to stay within the budget since the last flush: nothing waits on it to be told. */
-  get droppedPublish(): boolean {
-    return this.#text.droppedPublish || this.#binary.droppedPublish
+  /** An entry was dropped to stay within the budget since the buffer was last flushed or cleared. */
+  get dropped(): boolean {
+    return this.#text.dropped || this.#binary.dropped
   }
 
   pushText(data: string, resolve: () => void, reject: (err: Error) => void): void {
@@ -198,7 +198,7 @@ class BufferLane {
   #head = 0
   #totalBytes = 0
   readonly #maxBytes: number
-  droppedPublish = false
+  dropped = false
 
   constructor(maxBytes: number) {
     this.#maxBytes = maxBytes
@@ -246,9 +246,8 @@ class BufferLane {
     bytes += callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES
     if (bytes > this.#maxBytes) {
       const overflowErr = new ChannelOverflowError()
-      const dropsPublish = isPublishTag(tag) || this.#holdsPublish()
       this.clear(overflowErr)
-      if (dropsPublish) this.droppedPublish = true
+      this.dropped = true
       callback?.reject(overflowErr)
       return
     }
@@ -274,7 +273,7 @@ class BufferLane {
     this.#order.length = 0
     this.#head = 0
     this.#totalBytes = 0
-    this.droppedPublish = false
+    this.dropped = false
   }
 
   rejectAcks(err: Error): void {
@@ -287,18 +286,13 @@ class BufferLane {
 
   // ── Private ──
 
-  #holdsPublish(): boolean {
-    for (let i = this.#head; i < this.#tags.length; i++) if (isPublishTag(this.#tags[i]!)) return true
-    return false
-  }
-
   #evict(): void {
     let evictionErr: ChannelOverflowError | undefined
     // Evict oldest entries until within the cap.
     // Safe to run after push: the oversized guard ensures the new entry has
     // bytes ≤ maxBytes, so eviction drains old entries and always leaves it.
     while (this.#totalBytes > this.#maxBytes && this.#head < this.#data.length) {
-      if (isPublishTag(this.#tags[this.#head]!)) this.droppedPublish = true
+      this.dropped = true
       this.#callbacks[this.#head]?.reject((evictionErr ??= new ChannelOverflowError()))
       this.#totalBytes -= this.#sizes[this.#head]!
       this.#head++
@@ -313,10 +307,6 @@ class BufferLane {
       this.#head = 0
     }
   }
-}
-
-function isPublishTag(tag: number): boolean {
-  return tag === TAG.PUBLISH || tag === TAG.PUBLISH_BINARY
 }
 
 function isAckTag(tag: number): boolean {

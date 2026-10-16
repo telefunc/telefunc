@@ -178,7 +178,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
   private _closeIfDroppedOffline(binary: boolean): void {
-    if (!this._prePeerBuffer.droppedPublish) return
+    if (!this._prePeerBuffer.dropped) return
     const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
     this._endWithError(
       ERROR_REASON.OVERFLOW,
