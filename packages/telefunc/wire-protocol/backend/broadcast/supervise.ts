@@ -40,7 +40,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     return subscriptions.afterEstablished(
       () => publishNow(route, owned),
       () => {
-        // Read only for a publish that may be held past the call, which keeps the bytes as they are now.
+        // Called only for a publish that may wait past this call, so only that one copies the caller's bytes.
         if (typeof payload !== 'string') owned = new Uint8Array(payload)
         return {
           key,

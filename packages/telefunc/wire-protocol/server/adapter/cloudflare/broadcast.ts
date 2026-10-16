@@ -350,9 +350,13 @@ class CloudflareBroadcast {
   async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
     const name = this.#authorityName(route.key)
     const member = currentCloudflareSession()?.broadcast
-    // An RPC reads its arguments as it is made, so only one made after this returns keeps the bytes as they are now.
-    const owned = typeof payload === 'string' || member?.calls.waits(name) !== true ? payload : new Uint8Array(payload)
-    const request = { key: route.key, kind: route.kind, payload: owned }
+    // An RPC serializes its arguments as it is made, so only a call that waits copies the caller's bytes.
+    const waits = member?.calls.waits(name) === true
+    const request = {
+      key: route.key,
+      kind: route.kind,
+      payload: waits && typeof payload !== 'string' ? new Uint8Array(payload) : payload,
+    }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
     if (member === undefined) return send(this.#stubByName(name, null))
     return this.#callByName(member.calls, name, member.bucket, send)
