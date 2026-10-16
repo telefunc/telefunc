@@ -30,6 +30,7 @@ import { serializeTelefunctionResult } from '../../node/server/runTelefunc/seria
 import { createRequestContext } from '../../node/server/context/requestContext.js'
 import { parseResponse } from './response/parse.js'
 import { lengthPrefixed } from '../test/loopback.js'
+import { flowOf } from '../test/channel-specs.js'
 
 /** `sse-late-upload`: SSE whose upload request reaches the server 500 ms after the request that opens the wire, as one
  *  that opens a connection of its own may. */
@@ -207,8 +208,6 @@ function closedWith(channel: { onClose(callback: (err?: Error) => void): void })
   channel.onClose((err) => void (closed.err = err))
   return closed
 }
-
-const flowOf = (channel: unknown) => (channel as { _flow: { byteWindow: number } })._flow
 
 /** Expects the error a channel ends with when a reconnect needs messages `side`'s replay buffer dropped. */
 function expectLost(err: unknown, side: 'server' | 'client') {

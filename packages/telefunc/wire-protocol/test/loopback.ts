@@ -1,4 +1,4 @@
-export { Pipe, lengthPrefixed }
+export { Pipe, lengthPrefixed, postBody }
 
 import { decodeU32 } from '../frame.js'
 
@@ -83,4 +83,12 @@ function lengthPrefixed(bytes: Uint8Array): { prefixed: Uint8Array; frame: Uint8
     offset += 4 + length
   }
   return chunks
+}
+
+/** An SSE POST's Blob body: its metadata header, then its frames. */
+async function postBody(
+  blob: Blob,
+): Promise<{ metadata: { connId: string; streamResponse?: boolean }; frames: Uint8Array[] }> {
+  const [metadata, ...frames] = lengthPrefixed(new Uint8Array(await blob.arrayBuffer())).map(({ frame }) => frame)
+  return { metadata: JSON.parse(new TextDecoder().decode(metadata)), frames }
 }

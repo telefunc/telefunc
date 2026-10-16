@@ -24,6 +24,7 @@ import { SendBudget } from './client/send-budget.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { Pipe } from './test/loopback.js'
+import { flowOf, produce, run, runUntil } from './test/channel-specs.js'
 
 const LATENCY_MS = 5
 
@@ -170,8 +171,6 @@ class Loopback {
   }
 }
 
-const run = (ms: number) => vi.advanceTimersByTimeAsync(ms)
-
 /** The server's room (with its piece sender) and receiver of a socket, which the specs read into. */
 const piecesOf = (socket: LoopbackSocket) =>
   (
@@ -186,28 +185,6 @@ const PIECE_HEADER_BYTES = encode.piece(0, new Uint8Array(0)).byteLength
 /** What the server holds for the page on `socket`: what the wire carries, and what waits for a probe. */
 const serverHolds = (socket: LoopbackSocket) =>
   socket.toPage.bytes + (piecesOf(socket)?.room.sender as { heldBytes: number }).heldBytes
-
-/** Runs until `done`, in steps of `LATENCY_MS`. A page's window doubles about every 50 ms of a saturated stream,
- *  so runs stay short. */
-async function runUntil(done: () => boolean, maxMs: number): Promise<void> {
-  for (let elapsed = 0; elapsed < maxMs && !done(); elapsed += LATENCY_MS) await run(LATENCY_MS)
-}
-
-/** `for (;;) await channel.send(next)`, the channel page's backpressure loop, counting what it has sent. */
-function produce<T = number>(
-  channel: { send(data: T): Promise<void>; isClosed: boolean },
-  { message = (n) => n as T, onSent }: { message?: (n: number) => T; onSent?: (count: number) => void } = {},
-) {
-  const sent = { count: 0 }
-  void (async () => {
-    while (!channel.isClosed) {
-      const sending = channel.send(message(sent.count++))
-      onSent?.(sent.count)
-      await sending
-    }
-  })().catch(() => {})
-  return sent
-}
 
 /** Takes what arrives, in order: at once, or, when slow, one message every 10 ms. */
 function consume<T = number>(
@@ -238,8 +215,6 @@ function consume<T = number>(
     },
   }
 }
-
-const flowOf = (channel: unknown) => (channel as { _flow: { msgWindow: number; byteWindow: number } })._flow
 
 /** Where each end's `onClose` leaves what it got: `'open'` until it fires. */
 function closedWith(ends: { page: { onClose(cb: (err?: Error) => void): void }; server: typeof ends.page }) {
@@ -330,7 +305,7 @@ test('a stream keeps flowing past its grown window after the page opens another 
   const clock = loop.open<never, number>()
   const page = consume(clock.page)
   produce(clock.server)
-  await runUntil(() => flowOf(clock.page).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
+  await runUntil(() => flowOf(clock.page).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000, LATENCY_MS)
   let window = flowOf(clock.page).msgWindow
   expect(window).toBeGreaterThan(4 * CREDIT_MSG_WINDOW_INITIAL)
 
@@ -342,7 +317,7 @@ test('a stream keeps flowing past its grown window after the page opens another 
   window = flowOf(clock.page).msgWindow
   loop.socket.cut()
   before = page.received.length
-  await runUntil(() => page.received.length - before > 2 * window, 1_000)
+  await runUntil(() => page.received.length - before > 2 * window, 1_000, LATENCY_MS)
   expect(page.received.length - before).toBeGreaterThan(2 * window)
   expect(page.received).toEqual([...page.received.keys()])
 })
@@ -351,12 +326,12 @@ test('an upload keeps flowing past its grown window after a reconnect, the serve
   const upload = loop.open<number, never>()
   const server = consume(upload.server)
   produce(upload.page)
-  await runUntil(() => flowOf(upload.server).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000)
+  await runUntil(() => flowOf(upload.server).msgWindow > 4 * CREDIT_MSG_WINDOW_INITIAL, 1_000, LATENCY_MS)
   const window = flowOf(upload.server).msgWindow
   expect(window).toBeGreaterThan(4 * CREDIT_MSG_WINDOW_INITIAL)
   loop.socket.cut() // what it carries is lost, and replays
   const before = server.received.length
-  await runUntil(() => server.received.length - before > 2 * window, 1_000)
+  await runUntil(() => server.received.length - before > 2 * window, 1_000, LATENCY_MS)
   expect(server.received.length - before).toBeGreaterThan(2 * window)
   expect(server.received).toEqual([...server.received.keys()])
 })
@@ -431,7 +406,7 @@ test('a stream whose window grew to 16 MiB, cut off with its window on the wire,
   expect(loop.socket.toPage.bytes).toBeGreaterThan(window / 2)
   loop.socket.cut()
   const before = got.length
-  await runUntil(() => got.length > before + (2 * window) / (256 * KIB), 2_000)
+  await runUntil(() => got.length > before + (2 * window) / (256 * KIB), 2_000, LATENCY_MS)
   expect(got.length).toBeGreaterThan(before + (2 * window) / (256 * KIB))
   expect(got).toEqual([...got.keys()])
   expect(closed).toEqual({ page: 'open', server: 'open' })
@@ -453,7 +428,7 @@ test.each(['server', 'page'] as const)(
     ;(from === 'server' ? loop.socket.toPage : loop.socket.toServer).hold()
     await run(50)
     loop.socket.cut()
-    await runUntil(() => got === 1_000, 2_000)
+    await runUntil(() => got === 1_000, 2_000, LATENCY_MS)
     expect(got).toBe(1_000)
     expect(closed).toEqual({ page: 'open', server: 'open' })
   },
@@ -487,7 +462,7 @@ test.each((['server', 'page'] as const).flatMap((from) => (['text', 'binary'] as
     })().catch(() => {})
     await run(50)
     loop.socket.cut()
-    await runUntil(() => got.length === 2, 2_000)
+    await runUntil(() => got.length === 2, 2_000, LATENCY_MS)
     expect(got).toEqual([first, KIB])
     expect(closed).toEqual({ page: 'open', server: 'open' })
   },
@@ -520,7 +495,7 @@ test.each(['server', 'page'] as const)(
     answer('y'.repeat(KIB - 2))
     await run(50)
     loop.socket.cut()
-    await runUntil(() => got.length === 1, 2_000)
+    await runUntil(() => got.length === 1, 2_000, LATENCY_MS)
     expect(got).toEqual([first])
     expect(((await acked) as string).length + 2).toBe(KIB)
     expect(closed).toEqual({ page: 'open', server: 'open' })
@@ -538,7 +513,7 @@ test("sends nobody awaits, past the page's window and more than the server's rep
   for (let n = 0; n < 64; n++) feed.server.send(text(n)).catch(() => {})
   await run(50)
   loop.socket.cut()
-  await runUntil(() => closed.page !== 'open', 1_000)
+  await runUntil(() => closed.page !== 'open', 1_000, LATENCY_MS)
   expect(closed).toEqual({ page: lostOn('server'), server: lostOn('server') })
   expect(page.received).toEqual(page.received.map((_, n) => text(n)))
 })
@@ -554,7 +529,7 @@ test("sends nobody awaits, past the server's window and more than the page's rep
   for (let n = 0; n < 64; n++) upload.page.send(text(n)).catch(() => {})
   await run(50)
   loop.socket.cut()
-  await runUntil(() => closed.server !== 'open', 1_000)
+  await runUntil(() => closed.server !== 'open', 1_000, LATENCY_MS)
   expect(closed).toEqual({ page: lostOn('client'), server: lostOn('client') })
   expect(server.received).toEqual(server.received.map((_, n) => text(n)))
 })
@@ -593,7 +568,7 @@ test("a broadcast whose page is cut off further behind than the server's replay 
   for (let n = 0; n < 8; n++) Broadcast.publish(key, publication(n))
   await run(50)
   loop.socket.cut()
-  await runUntil(() => closed.page !== 'open', 1_000)
+  await runUntil(() => closed.page !== 'open', 1_000, LATENCY_MS)
   expect(closed.page).toBeInstanceOf(ChannelOverflowError)
   expect(closed.server).toBeInstanceOf(ChannelOverflowError)
   expect(seen).toEqual(['before', ...seen.slice(1).map((_, n) => publication(n))])
@@ -636,7 +611,7 @@ test('a broadcast whose page was offline while more was published than config.ch
   loop.socket.cut()
   // Offline, the server holds 512 KiB of text for the page: these are 1 MiB.
   for (let n = 0; n < 8; n++) Broadcast.publish(key, String(n).padEnd(128 * KIB))
-  await runUntil(() => closed.page !== 'open', 2_000)
+  await runUntil(() => closed.page !== 'open', 2_000, LATENCY_MS)
   expect(closed.server).toBeInstanceOf(ChannelOverflowError)
   expect(closed.page).toBeInstanceOf(ChannelOverflowError)
   expect(seen).toEqual(['before'])
@@ -651,7 +626,7 @@ test('a broadcast whose page was offline while more binary was published than co
   loop.socket.cut()
   // Offline, the server holds 2 MiB of binary for the page: these are 3 MiB.
   for (let n = 0; n < 6; n++) Broadcast.publishBinary(key, new Uint8Array(512 * KIB))
-  await runUntil(() => closed.page !== 'open', 2_000)
+  await runUntil(() => closed.page !== 'open', 2_000, LATENCY_MS)
   expect(closed.server).toBeInstanceOf(ChannelOverflowError)
   expect(closed.page).toBeInstanceOf(ChannelOverflowError)
 })
@@ -665,7 +640,7 @@ test('a broadcast whose page was offline while less was published than config.ch
   await run(100)
   loop.socket.cut()
   for (let n = 0; n < 3; n++) Broadcast.publish(key, String(n).padEnd(128 * KIB))
-  await runUntil(() => seen.length === 3, 2_000)
+  await runUntil(() => seen.length === 3, 2_000, LATENCY_MS)
   expect(seen).toEqual(Array.from({ length: 3 }, (_, n) => String(n).padEnd(128 * KIB)))
   expect(closed).toEqual({ page: 'open', server: 'open' })
 })
@@ -680,7 +655,7 @@ test("a burst of sends nobody awaits, past the page's window and within the larg
   const burst = (n: number) => String(n).padEnd(512 * KIB)
   let error: unknown
   for (let n = 0; n < 60; n++) feed.server.send(burst(n)).catch((err: unknown) => (error ??= err))
-  await runUntil(() => page.received.length === 60, 5_000)
+  await runUntil(() => page.received.length === 60, 5_000, LATENCY_MS)
   expect(error).toBeUndefined()
   expect(page.received).toEqual(Array.from({ length: 60 }, (_, n) => burst(n)))
 })
@@ -700,9 +675,9 @@ test("a page that stops reading on a fresh wire has the server hold a channel's 
 
   // Once the page reads again it gets every message but the refused one, and what is sent after it caught up.
   loop.socket.toPage.release()
-  await runUntil(() => page.received.length === sends - 1, 5_000)
+  await runUntil(() => page.received.length === sends - 1, 5_000, LATENCY_MS)
   await feed.server.send(message(sends))
-  await runUntil(() => page.received.length === sends, 1_000)
+  await runUntil(() => page.received.length === sends, 1_000, LATENCY_MS)
   expect(page.received).toEqual([...Array.from({ length: sends - 1 }, (_, n) => message(n)), message(sends)])
 })
 
@@ -780,7 +755,7 @@ test('on a slow link, a chat nobody awaits that the page keeps up with is neithe
   // By then, probes that counted the stream's own queue as in flight had doubled its window to 8 MiB.
   await run(4_000)
   clearInterval(chatting)
-  await runUntil(() => delays.length === sent, 10_000)
+  await runUntil(() => delays.length === sent, 10_000, LATENCY_MS)
   expect(chatError).toBeUndefined()
   expect(streamError).toBeUndefined()
   expect(delays).toHaveLength(sent)
@@ -804,7 +779,7 @@ test('a send nobody awaits goes out past the window of a page whose listener lag
   expect(error).toBeUndefined()
   // The page's limit is at most what it consumed and its window, so the server sent this far past it.
   expect(behind).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES)
-  await runUntil(() => page.received.length === 320, 5_000)
+  await runUntil(() => page.received.length === 320, 5_000, LATENCY_MS)
   expect(page.received).toEqual(Array.from({ length: 320 }, (_, n) => big(n)))
 })
 
@@ -830,7 +805,7 @@ test('a page that stops reading a broadcast on a fresh wire leaves it with Chann
 
   // Once the page reads again it gets every publish sent before the one that found it behind, then the close.
   loop.socket.toPage.release()
-  await runUntil(() => errors.page !== undefined, 2_000)
+  await runUntil(() => errors.page !== undefined, 2_000, LATENCY_MS)
   expect(errors.page).toBeInstanceOf(ChannelOverflowError)
   expect(seen).toEqual(Array.from({ length: published - 1 }, (_, n) => publication(n)))
 })
@@ -856,7 +831,7 @@ test('on a slow link, a page that keeps up with a broadcast stays in it while an
     held = Math.max(held, loop.socket.toPage.bytes)
     await run(10)
   }
-  await runUntil(() => seen.length === 300, 2_000)
+  await runUntil(() => seen.length === 300, 2_000, LATENCY_MS)
   expect(closed).toBe(null)
   expect(held).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
   expect(seen).toEqual(Array.from({ length: 300 }, (_, n) => message(n)))
@@ -874,7 +849,7 @@ test("a page's consumption of what a broadcast publishes moves the server's limi
     Broadcast.publish(key, 'x'.repeat(KIB * KIB))
     await run(1)
   }
-  await runUntil(() => seen.length === publications, 1_000)
+  await runUntil(() => seen.length === publications, 1_000, LATENCY_MS)
   await run(100)
   // Sent 17 MiB, of which the last limit leaves less than one not yet counted consumed.
   expect(creditOf(room.server)).toBeGreaterThan(CREDIT_WINDOW_MAX_BYTES - KIB * KIB)
@@ -890,7 +865,7 @@ test("a broadcast's page acknowledges what it read as a stream's page does, howe
     Broadcast.publish(key, 'x'.repeat(KIB * KIB))
     await run(20)
   }
-  await runUntil(() => seen.length === 12, 1_000)
+  await runUntil(() => seen.length === 12, 1_000, LATENCY_MS)
   await run(50)
   const replay = (room.server as unknown as { _replayBuffer: { byteLength: number } })._replayBuffer
   expect(replay.byteLength).toBeLessThan(CREDIT_WINDOW_INITIAL_BYTES / 4)
@@ -943,7 +918,7 @@ test('a wire that stops delivering in the middle of a stream is taken for dead o
   await run(7_000)
   loop.socket.toPage.hold()
   const stoppedAt = Date.now()
-  await runUntil(() => loop.sockets.length === 2, 30_000)
+  await runUntil(() => loop.sockets.length === 2, 30_000, LATENCY_MS)
   expect(loop.sockets).toHaveLength(2)
   // The pong deadline is two ping intervals; then the first reconnect waits its delay.
   expect(Date.now() - stoppedAt).toBeLessThanOrEqual(
@@ -1220,7 +1195,7 @@ test('a page whose downlink stops while its RECONCILE waits behind its upload ta
   vi.spyOn(loop.transport, 'terminateConnection').mockImplementation(() => {})
   loop.socket.toPage.hold()
   const stoppedAt = Date.now()
-  await runUntil(() => loop.sockets.length === 2, 30_000)
+  await runUntil(() => loop.sockets.length === 2, 30_000, LATENCY_MS)
   expect(loop.sockets).toHaveLength(2)
   expect(Date.now() - stoppedAt).toBeLessThanOrEqual(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100)
 })
@@ -1237,10 +1212,10 @@ test('on a link too slow for a megabyte in a ping deadline, a megabyte sent at c
   await run(1_000)
   void page.sendBinary(new Uint8Array(1_000_000))
   void server.sendBinary(new Uint8Array(1_000_000))
-  await runUntil(() => atServer.length === 1 && atPage.length === 1, 60_000)
+  await runUntil(() => atServer.length === 1 && atPage.length === 1, 60_000, LATENCY_MS)
   void page.sendBinary(new Uint8Array(1_000_000))
   void server.sendBinary(new Uint8Array(1_000_000))
-  await runUntil(() => atServer.length === 2 && atPage.length === 2, 60_000)
+  await runUntil(() => atServer.length === 2 && atPage.length === 2, 60_000, LATENCY_MS)
   expect(atServer).toEqual([1_000_000, 1_000_000])
   expect(atPage).toEqual([1_000_000, 1_000_000])
   expect(loop.sockets).toHaveLength(1)
@@ -1298,7 +1273,7 @@ test.each([10, 50, 200].flatMap((rtt) => [8 * KIB, 32 * KIB, 512 * KIB].map((siz
     const sentAt = Date.now()
     void page.sendBinary(new Uint8Array(size))
     void server.sendBinary(new Uint8Array(size))
-    await runUntil(() => arrived.page !== undefined && arrived.server !== undefined, 1_000)
+    await runUntil(() => arrived.page !== undefined && arrived.server !== undefined, 1_000, LATENCY_MS)
     // Its pieces take a read each, where the in-process socket reads up to `READ_BYTES` of whole messages a tick.
     for (const at of [arrived.page!, arrived.server!]) {
       expect(at - sentAt).toBeLessThanOrEqual(rtt / 2 + size / READ_BYTES)
@@ -1362,7 +1337,7 @@ test.each([
     const push = async () => {
       const [startedAt, until] = [Date.now(), got + count]
       for (let i = 0; i < count; i++) void server.send(payload)
-      await runUntil(() => got === until, 10_000)
+      await runUntil(() => got === until, 10_000, LATENCY_MS)
       return Date.now() - startedAt
     }
     const fresh = await push()
@@ -1395,7 +1370,7 @@ test.each(
     await run(diesAfter)
     ;(sender === 'server' ? loop.socket.toPage : loop.socket.toServer).hold()
     const diedAt = Date.now()
-    await runUntil(() => loop.sockets.length === 2, 60_000)
+    await runUntil(() => loop.sockets.length === 2, 60_000, LATENCY_MS)
     expect(loop.sockets).toHaveLength(2)
     expect(Date.now() - diedAt).toBeLessThanOrEqual(withinMs)
   },
@@ -1408,7 +1383,7 @@ test('a push of 4 KiB messages on a fresh wire whose floor carries them within a
   await run(100)
   const mark = loop.sent.server.length
   for (let i = 0; i < 2_000; i++) void server.send('x'.repeat(4 * KIB))
-  await runUntil(() => got === 2_000, 10_000)
+  await runUntil(() => got === 2_000, 10_000, LATENCY_MS)
   expect(loop.sent.server.slice(mark).filter(([tag]) => tag === TAG.PIECE || tag === TAG.ANNOUNCE)).toEqual([])
 })
 
@@ -1421,7 +1396,7 @@ test('a push of small messages nobody awaits reaches the page in one WebSocket m
     const mark = loop.sent.server.length
     const until = got + 60
     for (let i = 0; i < 60; i++) void server.send('x'.repeat(64))
-    await runUntil(() => got === until, 1_000)
+    await runUntil(() => got === until, 1_000, LATENCY_MS)
     return new Set(loop.sent.server.slice(mark).flatMap(([tag, , , message]) => (tag === TAG.TEXT ? [message] : [])))
       .size
   }
@@ -1432,7 +1407,7 @@ test("a channel's first attach sends no window either way: each side starts with
   const { page } = loop.open<string, string>()
   let opened = false
   page.onOpen(() => (opened = true))
-  await runUntil(() => opened, 1_000)
+  await runUntil(() => opened, 1_000, LATENCY_MS)
   await run(100)
   const windows = (sent: [number, number, number, number][]) =>
     sent.filter(([tag]) => tag === TAG.WINDOW || tag === TAG.MSG_WINDOW).map(([tag]) => tag)
@@ -1443,7 +1418,7 @@ test("a fresh wire's attach measures the path's round trip by the RECONCILED, wi
   const { page } = loop.open<string, string>()
   let opened = false
   page.onOpen(() => (opened = true))
-  await runUntil(() => opened, 1_000)
+  await runUntil(() => opened, 1_000, LATENCY_MS)
   expect(loop.sent.server.filter(([tag]) => tag === TAG.BDP_PING_ACK)).toEqual([])
   expect(
     (page as unknown as { _connection: { transport: { uplink: { link: { pathRtt: number } } } } })._connection.transport
@@ -1593,7 +1568,7 @@ test('on a 10 B/ms uplink, a page that idled an hour after an upload has its nex
   for (let minute = 0; minute < 60; minute++) await run(60_000)
   const before = got
   void page.send('x'.repeat(100))
-  await runUntil(() => got > before, 5_000)
+  await runUntil(() => got > before, 5_000, LATENCY_MS)
   expect(got).toBe(before + 1)
   expect(loop.sockets.length).toBe(1)
 })
@@ -1605,7 +1580,7 @@ test('a page taking a push of 128 KiB messages acknowledges them only in the mes
   const push = async (n: number) => {
     const until = got + n
     for (let i = 0; i < n; i++) void server.sendBinary(new Uint8Array(128 * KIB))
-    await runUntil(() => got === until, 5_000)
+    await runUntil(() => got === until, 5_000, LATENCY_MS)
   }
   await push(20)
   const before = loop.sent.page.length
@@ -1633,7 +1608,7 @@ test('a fresh wire carrying only small messages stops announcing them once one a
   await push()
   const first = announces()
   await push()
-  await runUntil(() => got === 4_000, 1_000)
+  await runUntil(() => got === 4_000, 1_000, LATENCY_MS)
   expect(got).toBe(4_000)
   expect(announces()).toEqual(first)
 })
@@ -1650,7 +1625,7 @@ test.each((['server', 'page'] as const).flatMap((sender) => [2, 1].map((kbit) =>
     if (sender === 'server') server.onOpen(() => void server.sendBinary(new Uint8Array(4_000)))
     else void page.sendBinary(new Uint8Array(4_000))
     // The handshake and the message, at the link's rate.
-    await runUntil(() => arrived, (1.2 * 4_600) / (kbit / 8))
+    await runUntil(() => arrived, (1.2 * 4_600) / (kbit / 8), LATENCY_MS)
     expect(arrived).toBe(true)
     expect(loop.sockets).toHaveLength(1)
   },
@@ -1665,13 +1640,13 @@ test('on a fresh wire with a 600 ms round trip, small messages sent once it open
   server.listenBinary(() => void got++)
   server.onOpen(() => void server.sendBinary(new Uint8Array(16)))
   void page.sendBinary(new Uint8Array(16))
-  await runUntil(() => got === 2, 2_000)
+  await runUntil(() => got === 2, 2_000, LATENCY_MS)
   for (let i = 0; i < 1_000; i++) {
     void page.sendBinary(new Uint8Array(64))
     void server.sendBinary(new Uint8Array(64))
     await run(1)
   }
-  await runUntil(() => got === 2_002, 1_000)
+  await runUntil(() => got === 2_002, 1_000, LATENCY_MS)
   expect(got).toBe(2_002)
   expect([loop.sent.page, loop.sent.server].map((sent) => sent.filter(([tag]) => tag === TAG.ANNOUNCE))).toEqual([
     [],
@@ -1703,7 +1678,7 @@ test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last
     void page.sendBinary(new Uint8Array(32_000))
     void server.sendBinary(new Uint8Array(32_000))
   }
-  await runUntil(() => at.server === 100 && at.page === 100, 5_000)
+  await runUntil(() => at.server === 100 && at.page === 100, 5_000, LATENCY_MS)
   await run(100)
   for (const side of ['page', 'server'] as const) {
     const acks = loop.sent[side].slice(marks[side]).filter(([tag]) => tag === TAG.PIECES_ACK)
@@ -1727,7 +1702,7 @@ test('a flood of small frames gets a PIECES_ACK from the server, which the page 
     void page.sendBinary(new Uint8Array(1_000))
     void server.sendBinary(new Uint8Array(1_000))
   }
-  await runUntil(() => at.server === 100 && at.page === 100, 5_000)
+  await runUntil(() => at.server === 100 && at.page === 100, 5_000, LATENCY_MS)
   await run(100)
   const acks = (side: 'page' | 'server') =>
     loop.sent[side].slice(marks[side]).filter(([tag]) => tag === TAG.PIECES_ACK).length
@@ -1743,7 +1718,7 @@ test('a page that aborts its channel right after a message on a fresh wire hands
   // Within the room the server gives its page, so the abort goes to the wire at once, behind the message's probe.
   void page.sendBinary(new Uint8Array(10_000)).catch(() => {})
   page.abort()
-  await runUntil(() => socket.readyState === 3, 1_000)
+  await runUntil(() => socket.readyState === 3, 1_000, LATENCY_MS)
   expect(socket.readyState).toBe(3)
   expect(loop.sent.page.map(([tag]) => tag)).toContain(TAG.ABORT)
 })
@@ -1756,7 +1731,7 @@ test('a page whose every channel on a full connection aborted, then refused one 
   for (const { page } of pairs) page.abort()
   // Their aborts are on the wire, not yet acknowledged: each still holds its place.
   expect(() => loop.open()).toThrow('Too many channels')
-  await runUntil(() => socket.readyState === 3, 10_000)
+  await runUntil(() => socket.readyState === 3, 10_000, LATENCY_MS)
   expect(socket.readyState).toBe(3)
 })
 
@@ -1767,7 +1742,7 @@ test('a page that aborted a thousand channels while its wire was down lets the n
   loop.socket.cut()
   for (const { page } of pairs) page.abort()
   // More aborts than the new wire has room for at once: the last of them wait for its room.
-  await runUntil(() => loop.sockets.length === 2 && loop.socket.readyState === 3, 60_000)
+  await runUntil(() => loop.sockets.length === 2 && loop.socket.readyState === 3, 60_000, LATENCY_MS)
   expect(loop.sockets).toHaveLength(2)
   expect(loop.socket.readyState).toBe(3)
 })
@@ -1779,7 +1754,7 @@ test('a burst of 60 frames of 512 KB a server sends as its channel opens on a fa
   server.onOpen(() => {
     for (let i = 0; i < 60; i++) void server.sendBinary(new Uint8Array(512_000))
   })
-  await runUntil(() => got === 60, 5_000)
+  await runUntil(() => got === 60, 5_000, LATENCY_MS)
   expect(got).toBe(60)
   // The first frame's empty piece, its pair, and its rest in six pieces that at most double; the second in two.
   expect(loop.sent.server.filter(([tag]) => tag === TAG.PIECE)).toHaveLength(11)
@@ -1797,7 +1772,7 @@ test('a server pushing 512 KB frames on a fast wire sends them whole once it mea
   void (async () => {
     for (let i = 0; i < 100; i++) await server.sendBinary(new Uint8Array(512_000))
   })()
-  await runUntil(() => got === 100, 10_000)
+  await runUntil(() => got === 100, 10_000, LATENCY_MS)
   const tags = loop.sent.server.slice(mark).map(([tag]) => tag)
   expect(tags.filter((tag) => tag === TAG.BINARY).length).toBeGreaterThan(90)
 })
@@ -1815,7 +1790,7 @@ test('on a fresh fast wire, frames of 32 KB and 128 KB go at once, in pieces tha
     void page.sendBinary(new Uint8Array(size))
     void server.sendBinary(new Uint8Array(size))
   }
-  await runUntil(() => atServer.length === 2 && atPage.length === 2, 1_000)
+  await runUntil(() => atServer.length === 2 && atPage.length === 2, 1_000, LATENCY_MS)
   // No round trip: they cross with the latency.
   expect(Date.now() - sentAt).toBeLessThanOrEqual(2 * LATENCY_MS)
   expect(atServer).toEqual([32_000, 128_000])
@@ -1839,14 +1814,14 @@ test("on a 100 B/ms uplink, the server answers the pieces of the page's 1 MB fra
   const { server, page } = loop.open<Uint8Array, never>()
   let got = 0
   server.listenBinary(() => void got++)
-  await runUntil(() => loop.sockets.length === 1 && loop.socket.readyState === 1, 1_000)
+  await runUntil(() => loop.sockets.length === 1 && loop.socket.readyState === 1, 1_000, LATENCY_MS)
   // A first frame measures the rate the next is cut by.
   void page.sendBinary(new Uint8Array(20_000))
-  await runUntil(() => got === 1, 60_000)
+  await runUntil(() => got === 1, 60_000, LATENCY_MS)
   const marks = { page: loop.sent.page.length, server: loop.sent.server.length }
   const start = Date.now()
   void page.sendBinary(new Uint8Array(1_000_000))
-  await runUntil(() => got === 2, 60_000)
+  await runUntil(() => got === 2, 60_000, LATENCY_MS)
   const pongs = loop.sent.server.slice(marks.server).filter(([tag]) => tag === TAG.PONG).length
   const pings = loop.sent.page.slice(marks.page).filter(([tag]) => tag === TAG.PING).length
   expect(pongs).toBeLessThanOrEqual(pings + Math.ceil((Date.now() - start) / 1_000))
@@ -1870,7 +1845,7 @@ test("on a 1 B/ms link, what each end counts as handed and its peer hasn't taken
   const at = { server: 0, page: 0 }
   server.listenBinary(() => void at.server++)
   page.listenBinary(() => void at.page++)
-  await runUntil(() => loop.sockets.length === 1 && loop.socket.readyState === 1, 1_000)
+  await runUntil(() => loop.sockets.length === 1 && loop.socket.readyState === 1, 1_000, LATENCY_MS)
   const socket = loop.socket
   const serverEnds = () => {
     const pieces = piecesOf(socket)!
@@ -1892,7 +1867,7 @@ test("on a 1 B/ms link, what each end counts as handed and its peer hasn't taken
     void page.sendBinary(new Uint8Array(3_000))
     void server.sendBinary(new Uint8Array(3_000))
   }
-  await runUntil(() => at.server === 3 && at.page === 3, 60_000)
+  await runUntil(() => at.server === 3 && at.page === 3, 60_000, LATENCY_MS)
   await run(1_000)
   clearInterval(sampler)
   expect(at).toEqual({ server: 3, page: 3 })
@@ -1917,14 +1892,14 @@ test.each((['page', 'server'] as const).flatMap((sender) => (['fast', 'slow'] as
     await run(100)
     if (next === 'slow') loop.linkBytesPerMs = 1
     lost.cut()
-    await runUntil(() => loop.sockets.length === 2, 5_000)
+    await runUntil(() => loop.sockets.length === 2, 5_000, LATENCY_MS)
     const sentAt = Date.now() + 1_000
     await run(1_000)
     void page.sendBinary(new Uint8Array(100_000))
     void server.sendBinary(new Uint8Array(100_000))
     // At 1 B/ms, the lost frame and the 100 KB behind it.
     const takes = 1.05 * (next === 'slow' ? 228_000 : 0) + 100
-    await runUntil(() => atServer.includes(100_000) && atPage.includes(100_000), takes)
+    await runUntil(() => atServer.includes(100_000) && atPage.includes(100_000), takes, LATENCY_MS)
     expect(Date.now() - sentAt).toBeLessThanOrEqual(takes)
     expect(sender === 'page' ? atServer : atPage).toEqual([128_000, 100_000])
     expect(sender === 'page' ? atPage : atServer).toEqual([100_000])
@@ -1941,11 +1916,11 @@ test('after a page gives up a wire whose pongs stopped, with a frame of its own 
   // Nothing the server sends reaches the page: its pongs stop, and so does the PIECES_ACK for its frame.
   loop.socket.toPage.hold()
   void page.sendBinary(new Uint8Array(128_000))
-  await runUntil(() => loop.sockets.length === 2, 10_000)
+  await runUntil(() => loop.sockets.length === 2, 10_000, LATENCY_MS)
   await run(1_000)
   const sentAt = Date.now()
   void page.sendBinary(new Uint8Array(100_000))
-  await runUntil(() => atServer.length === 2, 1_000)
+  await runUntil(() => atServer.length === 2, 1_000, LATENCY_MS)
   expect(atServer).toEqual([128_000, 100_000])
   expect(Date.now() - sentAt).toBeLessThanOrEqual(100)
   expect(loop.sockets).toHaveLength(2)
@@ -1962,11 +1937,11 @@ test("after a page drops a wire the server still holds open, with a frame of the
   // The page waits for what the server announced at the rate it arrives: the wire must die to be dropped.
   void server.sendBinary(new Uint8Array(128_000))
   loop.socket.toPage.hold()
-  await runUntil(() => loop.sockets.length === 2, 10_000)
+  await runUntil(() => loop.sockets.length === 2, 10_000, LATENCY_MS)
   await run(1_000)
   const sentAt = Date.now()
   void page.sendBinary(new Uint8Array(100_000))
-  await runUntil(() => atServer.length > 0 && atPage.length > 0, 1_000)
+  await runUntil(() => atServer.length > 0 && atPage.length > 0, 1_000, LATENCY_MS)
   expect(atServer).toEqual([100_000])
   expect(atPage).toEqual([128_000])
   expect(Date.now() - sentAt).toBeLessThanOrEqual(100)
@@ -1992,16 +1967,16 @@ test.each([
     void server.sendBinary(new Uint8Array(128_000))
     await run(100)
     loop.socket.cut()
-    await runUntil(() => loop.sockets.length === 2 && atPage.length === 1, 10_000)
+    await runUntil(() => loop.sockets.length === 2 && atPage.length === 1, 10_000, LATENCY_MS)
     loop.socket.toServer.bytesPerMs = 0.25
     let pinged = false
     loop.onSend('page', TAG.PING, () => void (pinged = true))
-    await runUntil(() => pinged, 10_000)
+    await runUntil(() => pinged, 10_000, LATENCY_MS)
     await run(offset)
     void page.sendBinary(new Uint8Array(1_000))
     await run(delay)
     void server.sendBinary(new Uint8Array(20_000))
-    await runUntil(() => atServer.length === 1 && atPage.length === 2, 30_000)
+    await runUntil(() => atServer.length === 1 && atPage.length === 2, 30_000, LATENCY_MS)
     await run(15_000)
     expect(atServer).toEqual([1_000])
     expect(loop.sockets).toHaveLength(2)
@@ -2099,7 +2074,7 @@ test('a page whose uplink stops with its upload queued on it takes the wire for 
   vi.spyOn(loop.transport, 'terminateConnection').mockImplementation(() => {})
   loop.socket.toServer.hold()
   const stoppedAt = Date.now()
-  await runUntil(() => loop.sockets.length === 2, 10_000)
+  await runUntil(() => loop.sockets.length === 2, 10_000, LATENCY_MS)
   expect(loop.sockets).toHaveLength(2)
   // The pong deadline is two ping intervals; then the first reconnect waits its delay.
   expect(Date.now() - stoppedAt).toBeLessThanOrEqual(2 * 1_000 + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 100)
@@ -2119,7 +2094,7 @@ test('on a slow link, a producer that awaits its sends is not refused a message 
     await feed.server.send('x'.repeat(CREDIT_WINDOW_INITIAL_BYTES))
     for (let n = 0; n < 8; n++) await feed.server.send(message(n))
   })().catch((err: unknown) => (error ??= err))
-  await runUntil(() => page.received.length > 0 && page.received.at(-1) === message(7), 10_000)
+  await runUntil(() => page.received.length > 0 && page.received.at(-1) === message(7), 10_000, LATENCY_MS)
   expect(left).toBeGreaterThan(0)
   expect(left).toBeLessThanOrEqual(64 * KIB)
   expect(error).toBeUndefined()
@@ -2138,7 +2113,7 @@ test('on a slow link, a producer that awaits its sends is not refused for the cr
     feed.server.send('x'.repeat(CREDIT_WINDOW_INITIAL_BYTES)),
     feed.server.send(message(1)),
   ])
-  await runUntil(() => page.received.at(-1) === message(1), 10_000)
+  await runUntil(() => page.received.at(-1) === message(1), 10_000, LATENCY_MS)
   expect((await settled).map((result) => result.status)).toEqual(['fulfilled', 'fulfilled'])
   expect(page.received.at(-1)).toBe(message(1))
 })
@@ -2275,7 +2250,7 @@ test('a channel the page closes right after sends its slow uplink held back deli
   const counted = (n: number) => Object.assign(new Uint8Array(64 * 1024), { 0: n & 0xff, 1: n >> 8, 2: 0, 3: 0 })
   for (let n = 0; n < 24; n++) void page.sendBinary(counted(n))
   void page.close()
-  await runUntil(() => closed.page !== 'open' && closed.server !== 'open', 30_000)
+  await runUntil(() => closed.page !== 'open' && closed.server !== 'open', 30_000, LATENCY_MS)
   expect(got.length).toBe(24)
   expect(got).toEqual([...got.keys()].map((n) => new DataView(counted(n).buffer).getUint32(0)))
   expect(closed).toEqual({ page: undefined, server: undefined })
@@ -2364,7 +2339,7 @@ test("a page's burst of sends its server acknowledges slower than they come read
       got = 0
       reads.count = 0
       for (let i = 0; i < n; i++) void page.sendBinary(message)
-      await runUntil(() => got === n, 600_000)
+      await runUntil(() => got === n, 600_000, LATENCY_MS)
       expect(got).toBe(n)
       expect(reads.count / n, `reads per message in a burst of ${n}`).toBeLessThan(8)
     }

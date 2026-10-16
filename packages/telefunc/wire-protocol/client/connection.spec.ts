@@ -1,14 +1,8 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import {
-  CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-  CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-  CHANNEL_IDLE_TIMEOUT_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
-  CHANNEL_RECONNECT_TIMEOUT_MS,
-  CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
-  CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
   RECONCILE_TIMEOUT_MS,
@@ -18,9 +12,10 @@ import {
 } from '../constants.js'
 import { ClientConnection } from './connection.js'
 import { muxChannelStub } from '../test/mux-channel-stub.js'
+import { reconciled } from '../test/channel-specs.js'
 import { encodeSseRequest } from '../sse-request.js'
 import { encodeLengthPrefixedFrames } from '../frame.js'
-import { TAG, decode, encode, type ReconciledPayload } from '../shared-ws.js'
+import { TAG, decode, encode } from '../shared-ws.js'
 
 /** A `fetch` whose SSE downstream body never emits a byte and never closes: a silently
  *  stalled stream (no error, no FIN), so the RECONCILED frame that clears `reconciling`
@@ -42,23 +37,6 @@ function stalledOptions() {
     fetchImpl: createStalledTransport().fetchImpl,
     connectionKey: crypto.randomUUID(),
   }
-}
-
-/** A RECONCILED from a server with the default channel config. */
-function reconciled(payload: Pick<ReconciledPayload, 'sessionId' | 'open'> & Partial<ReconciledPayload>) {
-  return {
-    reconnectTimeout: CHANNEL_RECONNECT_TIMEOUT_MS,
-    idleTimeout: CHANNEL_IDLE_TIMEOUT_MS,
-    pingInterval: CHANNEL_PING_INTERVAL_MS,
-    serverReplayBuffer: CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
-    serverReplayBufferBinary: CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
-    clientReplayBuffer: CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
-    clientReplayBufferBinary: CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
-    sseFlushThrottle: SSE_FLUSH_THROTTLE_MS,
-    ssePostIdleFlushDelay: SSE_POST_IDLE_FLUSH_DELAY_MS,
-    transports: [CHANNEL_TRANSPORT.SSE],
-    ...payload,
-  } satisfies ReconciledPayload
 }
 
 /** A connection that applied a RECONCILED whose every setting is zero. */
