@@ -62,12 +62,14 @@ import type { Room, RoomGuardHooks } from './statics.js'
 assertIsNotBrowser()
 
 const SERVER_ROOM_BRAND: unique symbol = Symbol.for('telefunc.ServerRoom')
+const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomParticipant')
 
 type Admission = { id: string; meta: ParticipantMeta; identity: string | null; joinedAt: number; hidden: boolean }
 /** An admission through this handle once its holder took the member: its inbox opening (`owned`), its record durable
  *  (`committed`), or given up because the member left, its holder detached or the room closed (`abandoned`). Before
  *  that it is a guard running; once its join applies, a member like any other. */
 type AdmissionState = 'owned' | 'committed' | 'abandoned'
+type MetaMirror = { accepted(update: AcceptedMeta): void; rewound(): void }
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
@@ -456,8 +458,7 @@ class ServerRoom extends RoomStateView implements Room {
     else holder?._relayEvent({ __r: 'demand', member, track, wanted })
   }
 }
-const SERVER_PARTICIPANT_BRAND: unique symbol = Symbol.for('telefunc.ServerRoomParticipant')
-type MetaMirror = { accepted(update: AcceptedMeta): void; rewound(): void }
+
 /** Server-side `LocalParticipant`, returned by `ServerRoom.join()`. */
 class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
