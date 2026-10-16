@@ -150,8 +150,8 @@ class AuthoritySync {
    *  `ROOM_META_REPAIR_MS` after the first wait rather than at the next heartbeat. */
   metaWaiting(): void {
     this._repairSoon('meta', () => {
-      const state = this._host.model
-      if (state.metaWaiting && !state.closed) void this._reconcileMeta().catch(reportRoomError)
+      const model = this._host.model
+      if (model.metaWaiting && !model.closed) void this._reconcileMeta().catch(reportRoomError)
     })
   }
 

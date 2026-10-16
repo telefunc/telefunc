@@ -86,11 +86,11 @@ class RosterStream {
       this._streamOf.set(stub, stream)
       stub._rosterSent = false
     }
-    const state = this._model
-    const version = state.version
+    const model = this._model
+    const version = model.version
     if (this._texts?.version !== version) this._texts = { version, parts: [] }
     const texts = this._texts.parts
-    const ids = state.memberIds()
+    const ids = model.memberIds()
     const slice = new Slice()
     for (let part = 0; ; part++) {
       const chunk: string[] = []
@@ -104,12 +104,12 @@ class RosterStream {
         chunk.push(next.value)
       }
       const receiving = stubs.filter((stub) => this._streamOf.get(stub) === stream && this._stubs.has(stub))
-      if (receiving.length === 0 || state.closed) return
+      if (receiving.length === 0 || model.closed) return
       // The first roster read adds its members without a change.
-      const unchanged = state.rosterKnown && state.version === version
+      const unchanged = model.rosterKnown && model.version === version
       const built = unchanged ? texts[part] : undefined
       // Any stub's listing is the visible one in a part with no hidden member.
-      const members = built?.hidden === false ? null : chunk.map((id) => state.memberSnapshot(id))
+      const members = built?.hidden === false ? null : chunk.map((id) => model.memberSnapshot(id))
       const visible = members?.filter(({ hidden }) => !hidden)
       let visibleText = built?.text
       const textOf = (listed: MemberSnapshot[]) => {
