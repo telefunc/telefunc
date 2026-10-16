@@ -395,7 +395,7 @@ class SseTransport implements UpgradeSource {
         )
         this.postOutBytes = body.size
         this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
-        const response = await this.post(body, wire.signal)
+        const response = await this.postAndRead(body, wire.signal)
         if (!response.ok) throw new Error('POST failed')
         this.sizePosts(body.size, Date.now() - now)
       } catch {
@@ -488,13 +488,20 @@ class SseTransport implements UpgradeSource {
     })
   }
 
+  /** Chrome reports a POST whose response is left unread as canceled. */
+  private async postAndRead(body: BodyInit, signal: AbortSignal, extra?: { duplex: 'half' }): Promise<Response> {
+    const response = await this.post(body, signal, extra)
+    await response.arrayBuffer()
+    return response
+  }
+
   /** For frames that cannot wait for the next flush. Failure is swallowed: its two senders are a
    *  heartbeat ping (its own deadline notices a dead wire) and the barrier (delivered either way). */
   private async sendStandalonePost(frames: Uint8Array<ArrayBuffer>[]): Promise<void> {
     if (!this.hasWire()) return
     assert(this.transportAbort)
     try {
-      await this.post(
+      await this.postAndRead(
         encodeSseRequest({ connId: this.connId }, encodeLengthPrefixedFrames(frames)),
         this.transportAbort.signal,
       )
@@ -607,7 +614,7 @@ class SseTransport implements UpgradeSource {
   /** `PushReadableStream` IS-A `ReadableStream` — fetch reads it directly, the producer's
    *  `push(chunk)` lands in the same stream's queue, no async-iterator adapter in between. */
   private openStreamRequest(body: PushReadableStream<Uint8Array<ArrayBuffer>>, signal: AbortSignal): Promise<unknown> {
-    return this.post(body, signal, { duplex: 'half' })
+    return this.postAndRead(body, signal, { duplex: 'half' })
   }
 
   private closeStreamRequest(): void {
