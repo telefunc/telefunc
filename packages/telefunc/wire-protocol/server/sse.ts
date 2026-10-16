@@ -44,9 +44,6 @@ const sseOpenComment = textEncoder.encode(': open\n\n')
 
 /** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. */
 class EventStream {
-  /** Node-native `PushReadable` when the adapter passes a Node `IncomingMessage` (piped via
-   *  `pipeline`); `PushReadableStream` (Web `ReadableStream`-backed) everywhere else. Both
-   *  expose `push`, `close`, `isClosed`. */
   readonly stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
   private readonly waiting = new Fifo<Uint8Array<ArrayBuffer>>()
   private waitingBytes = 0

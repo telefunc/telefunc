@@ -179,18 +179,10 @@ test("the data waiting for a page's SSE stream to ask, when the server ends the 
   expect((await sse.handleRequest(batch.request))!.statusCode).toBe(400)
   expect(getChannelMux().getConnectionByConnId(connId)).toBeUndefined()
 
-  const reader = (response!.body as ReadableStream<Uint8Array>).getReader()
-  const decoder = new TextDecoder()
-  let text = ''
-  for (let read = await reader.read(); !read.done; read = await reader.read()) {
-    text += decoder.decode(read.value, { stream: true })
-  }
-  const got = text
-    .split('\n\n')
-    .filter((event) => event.startsWith('data: '))
-    .map((event) => decode(base64urlToUint8Array(event.slice('data: '.length))))
-    .flatMap((frame) => (frame.tag === TAG.TEXT ? [JSON.parse(frame.text) as string] : []))
-  expect(got).toEqual(sent)
+  const frames = collectFrames(response!.body as ReadableStream<Uint8Array>)
+  await vi.waitFor(() =>
+    expect(frames.flatMap((frame) => (frame.tag === TAG.TEXT ? [JSON.parse(frame.text) as string] : []))).toEqual(sent),
+  )
 })
 
 /** An SSE wire whose page has one channel attached, which counts what reaches its listener. */
