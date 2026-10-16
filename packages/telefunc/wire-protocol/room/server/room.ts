@@ -211,17 +211,20 @@ class ServerRoom extends RoomStateView implements Room {
       throw error
     }
   }
+
   /** The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds. */
   private async _inboxReady(id: string): Promise<void> {
     const inbox = this._replica.plan.inboxOf(id)
     if (inbox !== undefined) await withinRoomHorizon(inbox.ready)
     this._assertAdmitted(id)
   }
+
   private _assertAdmitted(id: string): void {
     if (this._admissions.get(id) === 'abandoned') {
       throw this._model.closed ? roomClosedError(this.id) : participantLeftError()
     }
   }
+
   private _abandonAdmission(id: string, cause: LeaveCause): void {
     this._admissions.delete(id)
     this._model.applyLeave(id, cause)
@@ -321,6 +324,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._replica.plan.syncLanes() // bring up text ingestion before any stub exists
     await withinRoomHorizon(this._replica.plan.semanticReady)
   }
+
   private _teardownTail(): void {
     if (this._tail === null) return // already handed off to a stub
     this._tail.end()
@@ -328,6 +332,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._replica.track(this)
     this._replica.plan.syncLanes() // drop the text ingestion nothing is consuming
   }
+
   /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
    *  earlier one is in the snapshot. */
   _openStub(options: ConstructorParameters<typeof RoomStubChannel>[1]): {
@@ -349,6 +354,7 @@ class ServerRoom extends RoomStateView implements Room {
       },
     }
   }
+
   _attachStub(stub: RoomStubChannel): void {
     this._stubs.add(stub)
     this._replica.attachStub(stub)
@@ -361,6 +367,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._replica.track(this)
     this._replica.plan.holderChanged(stub)
   }
+
   _onStubAttached(stub: RoomStubChannel): void {
     if (!this._stubs.has(stub)) return
     this._replica.roster.sendTo(stub)
@@ -369,6 +376,7 @@ class ServerRoom extends RoomStateView implements Room {
       stub._relayEvent({ __r: 'demand-state', member, tracks: this._replica.demand.wanted(member) })
     }
   }
+
   private _detachStub(stub: RoomStubChannel): void {
     this._stubs.delete(stub)
     this._replica.detachStub(stub)
@@ -385,10 +393,12 @@ class ServerRoom extends RoomStateView implements Room {
       void this._removeDepartedMember(id).catch(reportRoomError)
     }
   }
+
   /** @internal A response serialized a participant whose own frames the stub's client doesn't get back. */
   _onStubSuppressed(stub: RoomStubChannel, member: string): void {
     if (this._stubs.has(stub)) this._replica.plan.memberChanged(member)
   }
+
   async _joinStubMember(stub: RoomStubChannel, req: Extract<RoomRequest, { __r: 'req-join' }>) {
     const admission = {
       id: crypto.randomUUID(),
@@ -438,6 +448,7 @@ class ServerRoom extends RoomStateView implements Room {
   private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {
     return this._localParticipants.get(id) ?? this._stubOf.get(id)
   }
+
   /** @internal */
   _deliverDemand(member: string, track: string, wanted: boolean): void {
     const holder = this._holderOf(member)
@@ -452,6 +463,7 @@ class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */ readonly _room: ServerRoom
   private _metaMirror: MetaMirror | null = null
+
   constructor(
     serverRoom: ServerRoom,
     id: string,
@@ -462,13 +474,16 @@ class ServerLocalParticipant extends ParticipantBase {
     super({ id, meta, selfDelivery, identity }, serverRoom._model.metaRewinds)
     this._room = serverRoom
   }
+
   static isServerLocalParticipant(value: unknown): value is ServerLocalParticipant {
     return value !== null && typeof value === 'object' && SERVER_PARTICIPANT_BRAND in value
   }
+
   /** @internal Read from the room's demand, which holds it once. */
   get _demandedTracks(): TrackKey[] {
     return this._left ? [] : this._room._replica.demand.wanted(this.id)
   }
+
   publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck> {
     assertKnownOptions(options, ['coalesce', 'retain'], 'publish()')
     assertUsage(
@@ -481,6 +496,7 @@ class ServerLocalParticipant extends ParticipantBase {
     )
     return markHandled(this._publishText(ownMessage(data), options?.retain))
   }
+
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
     const framed = encodeBinaryFrame(this.id, data, options)
     // Local holders get exactly what remote ones decode, not the caller's objects.
@@ -488,15 +504,18 @@ class ServerLocalParticipant extends ParticipantBase {
     assert(frame !== null)
     return markHandled(this._publishFrame(frame, framed))
   }
+
   private async _publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._writes.publishText(this.id, data, retain)
   }
+
   /** @internal */
   async _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._writes.publishBinaryFrame(frame, framed)
   }
+
   /** @internal Each meta update this participant applies, and each failover rewind of its seq, which a client holding
    *  it mirrors. */
   _onMeta(mirror: MetaMirror): () => void {
@@ -507,15 +526,18 @@ class ServerLocalParticipant extends ParticipantBase {
       if (this._metaMirror === mirror) this._metaMirror = null
     }
   }
+
   override _acceptMeta(update: AcceptedMeta): boolean {
     if (!super._acceptMeta(update)) return false
     this._metaMirror?.accepted(update)
     return true
   }
+
   /** @internal The client holding this participant went away without leaving. */
   _releaseHolder(): Promise<void> {
     return this._room._removeDepartedMember(this.id)
   }
+
   send(to: string | Sender, data: unknown, options?: { ack?: boolean }): Promise<any> {
     assertKnownOptions(options, ['ack'], 'send()')
     assertUsage(
@@ -524,30 +546,37 @@ class ServerLocalParticipant extends ParticipantBase {
     )
     return markHandled(this._sendDm(recipientId(to), ownMessage(data), options?.ack === true))
   }
+
   private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
     return await this._room._writes.sendDm(this.id, to, data, ack)
   }
+
   async setMeta(meta: ParticipantMeta): Promise<void> {
     await this._setMeta(meta)
   }
+
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     await this._setAttributes(attrs)
   }
+
   /** @internal The accepted write, which a client holder mirrors in revision order. */
   async _setMeta(meta: ParticipantMeta): Promise<AcceptedMeta> {
     this._assertActive()
     return await this._room._writes.setMemberMeta(this.id, meta)
   }
+
   /** @internal */
   async _setAttributes(attrs: ParticipantMeta): Promise<AcceptedMeta> {
     this._assertActive()
     return await this._room._writes.mergeMemberMeta(this.id, attrs)
   }
+
   async leave(): Promise<void> {
     if (this._left) return
     await this._room._removeMember(this.id, { type: 'left' })
   }
+
   protected override _resolveSender(id: string): Sender | null {
     return this._room._state.getRemote(id) // sync view read (delivery must not wait on I/O)
   }
@@ -555,7 +584,9 @@ class ServerLocalParticipant extends ParticipantBase {
   protected _reportError(err: unknown): void {
     reportServerChannelError(err)
   }
+
   protected readonly _bugMessage = ROOM_BUG_MESSAGE
+
   protected _inboxBufferLimit(): number {
     return getServerConfig().channel.bufferLimit
   }

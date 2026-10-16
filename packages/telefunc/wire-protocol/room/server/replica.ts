@@ -61,6 +61,7 @@ type PresenceEvent = Exclude<RoomCtrlEnvelope, { __r: 'demand-ask' }>
  *  holds no lane; it lives while a handle holds it. */
 class RoomReplica {
   private static readonly _byInc = new Map<string, WeakRef<RoomReplica>>()
+
   private static readonly _collected = new FinalizationRegistry<string>((inc) => {
     if (RoomReplica._byInc.get(inc)?.deref() === undefined) RoomReplica._byInc.delete(inc)
   })
@@ -303,26 +304,32 @@ class RoomReplica {
   _observed(): boolean {
     return this._observers.size > 0
   }
+
   /** @internal */
   _listened(): boolean {
     return this._listening.size > 0
   }
+
   /** @internal A pre-attach tail ingests all text. */
   _holdsTail(): boolean {
     return this._tails.size > 0
   }
+
   /** @internal */
   _ownsMember(id: string): boolean {
     return this._owners.has(id)
   }
+
   /** @internal */
   _ownsAnyMember(): boolean {
     return this._owners.size > 0
   }
+
   /** @internal Live. A pending admission owns its inbox. */
   _ownedMembers(): Iterable<string> {
     return this._owners.keys()
   }
+
   /** The heartbeat evicts the member again, as `disconnected`. */
   evictLater(id: string, identity: string | null): void {
     this._unevicted.set(id, identity)
@@ -352,11 +359,13 @@ class RoomReplica {
     )
     await keys
   }
+
   /** This process's demand entry, to the other processes and to its own owners. */
   private _tellDemand(entry: DemandEntry, on: boolean): void {
     this._gossip.push({ on, ...entry })
     this.demand.take(this.report.instance, entry, on)
   }
+
   /** @internal Renews this process's demand elsewhere with one page, and drops the reporters that lapsed, a slice at a
    *  time. */
   async _renewDemand(): Promise<void> {
@@ -364,6 +373,7 @@ class RoomReplica {
     const slice = new Slice()
     for (const _ of this.demand.expire()) if (slice.over) await slice.next()
   }
+
   /** Tells every entry of this process's demand again as all it receives, a slice at a time; once more after it when
    *  asked again meanwhile, as an asker may not have read what it told before the ask. */
   private async _tellDemandAgain(): Promise<void> {
@@ -385,11 +395,13 @@ class RoomReplica {
       this._tellingAgain = false
     }
   }
+
   /** @internal */
   _onDemand(serialized: string): void {
     const page = decodeDemandPage(serialized)
     if (page.instance !== this.report.instance) this.demand.applyPage(page)
   }
+
   /** @internal Asks `of`, or every other process, to tell its demand again. */
   _askDemand(of?: string): void {
     const ask: Extract<RoomCtrlEnvelope, { __r: 'demand-ask' }> = { __r: 'demand-ask', instance: this.report.instance }
@@ -397,28 +409,34 @@ class RoomReplica {
     // A stale commit is a closed room's, which has no demand.
     void commitControl(this.id, this._incarnation.inc, ask).catch(reportRoomError)
   }
+
   /** @internal */
   _forgetDemand(): void {
     this.demand.forgetLeased()
   }
+
   /** @internal */
   async _readOpenConfig(): Promise<RoomConfigRecord | null> {
     return openConfig(await getRoomBackend().readHead(this.id), this._incarnation.inc)
   }
+
   /** @internal A newer meta reaching this view through the authority never reached its clients as an event. */
   _applyAuthorityMeta({ entries, seq }: StoredRoomMeta): void {
     this.applyControl({ __r: 'update', seq, meta: entries })
   }
+
   /** @internal A failover rewound the room's control lane, and its meta cells with it, which share its slot. */
   _rewound(): void {
     this.model.forgetMetaSeqs()
     for (const mirror of this.metaMirrors) mirror.rewound()
     for (const stub of this.stubs) stub._relayEvent({ __r: 'rewound' })
   }
+
   /** @internal The authority says the room closed; the lane that would have carried `closed` failed. */
   _closeFromAuthority(): void {
     this.applyControl({ __r: 'closed' })
   }
+
   /** @internal */
   _onControl(serialized: string, info: WirePublishInfo): void {
     this.sync.controlDelivered(info.seq)
@@ -430,6 +448,7 @@ class RoomReplica {
     }
     this.applyControl(ctrl, () => encodePublishText(serialized, info))
   }
+
   /** @internal */
   _onTextData(serialized: string, info: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
@@ -449,6 +468,7 @@ class RoomReplica {
     }))
     for (const stub of this.stubs) stub._relayText(serialized, texts, envelope.from, info)
   }
+
   /** @internal */
   _onBinary(framed: Uint8Array, info: WirePublishInfo): void {
     const unframed = decodeBinaryFrame(framed)
@@ -458,6 +478,7 @@ class RoomReplica {
     const wireData = encodePublishBinary(framed, info)
     for (const stub of this.stubs) stub._relayBinary(wireData, unframed.from, unframed.track, info)
   }
+
   /** @internal A DM for a member a handle here owns, routed to that handle. */
   _onDm(serialized: string, info: WirePublishInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
