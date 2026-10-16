@@ -162,7 +162,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     if (!peer) {
       if (typeof wire === 'string') this._prePeerBuffer.pushPublish(wire)
       else this._prePeerBuffer.pushPublishBinary(wire)
-      this._closeIfDroppedOffline()
+      this._closeIfDroppedOffline(typeof wire !== 'string')
     } else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
     else this._flow.countSentBytes(typeof wire === 'string' ? peer.sendPublish(wire) : peer.sendPublishBinary(wire))
   }
@@ -177,12 +177,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
-  private _closeIfDroppedOffline(): void {
+  private _closeIfDroppedOffline(binary: boolean): void {
     if (!this._prePeerBuffer.droppedPublish) return
+    const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
     this._endWithError(
       ERROR_REASON.OVERFLOW,
       new ChannelOverflowError(
-        'Broadcast closed: more was published to its client while it was offline than config.channel.bufferLimit lets the server hold',
+        `Broadcast closed: more was published to its client while it was offline than config.channel.${limit} lets the server hold`,
       ),
     )
   }
