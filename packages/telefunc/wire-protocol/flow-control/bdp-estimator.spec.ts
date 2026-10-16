@@ -148,7 +148,7 @@ describe('BdpEstimator', () => {
     vi.advanceTimersByTime(rttMs)
     const window = bdp.byteWindow
     bdp.onReceive(window)
-    return bdp.onPingAck({ probe: bdp.probe, backlog: backlog, pathRtt: senderPathRtt }, () => window)
+    return bdp.onPingAck({ probe: bdp.probe, backlog, pathRtt: senderPathRtt }, () => window)
   }
 
   /** A ping that waited `pingWait` behind the receiver's own data, and whose ack comes `rttMs` after it, with a window's
@@ -165,7 +165,7 @@ describe('BdpEstimator', () => {
     expect(bdp.onReceive(1, sendWait)).toBe(true)
     bdp.onReceive(bdp.byteWindow)
     vi.advanceTimersByTime(rttMs)
-    return bdp.onPingAck({ probe: bdp.probe, backlog: backlog, pathRtt: Infinity }, deliveredBefore, sendWait)
+    return bdp.onPingAck({ probe: bdp.probe, backlog, pathRtt: Infinity }, deliveredBefore, sendWait)
   }
 
   /** An attach on `link`, whose probe is answered `rttMs` after it went out. */
@@ -517,7 +517,7 @@ describe('BdpEstimator', () => {
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
     bdp.onReceive(1)
     for (let i = 0; i < msgs; i++) bdp.onReceive(1)
-    const dec = bdp.onPingAck({ probe: bdp.probe, backlog: backlog, pathRtt: Infinity }, upToAck)
+    const dec = bdp.onPingAck({ probe: bdp.probe, backlog, pathRtt: Infinity }, upToAck)
     if (dec.msgs === 'grow') bdp.growMsgs()
     return dec.msgs
   }

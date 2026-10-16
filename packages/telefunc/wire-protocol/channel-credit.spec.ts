@@ -1053,9 +1053,10 @@ test.each([
     let got = 0
     page.listen(() => void got++)
     page.listenBinary(() => {})
-    rpc.server.listen(() =>
-      answer === 'ask' ? ('y'.repeat(64 * KIB) as never) : void server.sendBinary(new Uint8Array(64 * KIB)),
-    )
+    rpc.server.listen(() => {
+      if (answer === 'ask') return 'y'.repeat(64 * KIB) as never
+      void server.sendBinary(new Uint8Array(64 * KIB))
+    })
     await run(100)
     loop.socket.toPage.bytesPerMs = loop.socket.toServer.bytesPerMs = 10_000
     for (let i = 0; i < 15; i++) {
