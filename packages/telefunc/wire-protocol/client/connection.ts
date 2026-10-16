@@ -662,7 +662,7 @@ class ClientConnection implements MuxConnection {
     return frame
   }
 
-  /** Sends, or queues while sends are held or lack `SendBudget` room; a frame sent at once passes the settle queue. */
+  /** Sends, or queues while sends are held or the transport lacks room; one sent at once passes the settle queue. */
   private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
     if (!this.canSendImmediately(ix)) {
       this.settleQueue().push({ frame, channelIx: ix, seq })
