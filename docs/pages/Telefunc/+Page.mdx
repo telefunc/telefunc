@@ -173,7 +173,7 @@ Add the compatibility settings, and the Durable Object and KV bindings, to your 
 ```jsonc
 {
   "compatibility_date": "2025-08-15", // or later: channels need MessageChannel
-  // Required: nodejs_als (nodejs_compat works too). enable_request_signal lets context.signal see a client disconnect.
+  // Required: nodejs_als (nodejs_compat works too). With enable_request_signal, a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {
     "bindings": [
