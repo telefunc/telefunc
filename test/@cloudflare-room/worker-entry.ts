@@ -20,6 +20,8 @@ import { Room } from '../../packages/telefunc/wire-protocol/room/server/statics.
 import { raceTimeout } from '../../packages/telefunc/utils/raceTimeout.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 
+type Env = Cloudflare.Env
+
 const { TelefuncDurableObject } = new Telefunc({ bindingName: 'TELEFUNC' })
 // A probe's code runs as an app's code does: in a telefunction, which the session DO's fetch() runs in its session.
 const PROBE_FILE = '/probe.telefunc.ts'
@@ -271,7 +273,6 @@ type CallbackSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'callWithCall
 type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'metaKeyOrder' | 'lostDmAck' | 'die'>>
 type LaneServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'watchFrames' | 'framesSeen' | 'joinAndKeepFrame'>>
 type TelefuncAuthority = RpcMethods<Pick<RoomProbeDurableObject, 'readHead' | 'scheduledAlarm'>>
-type Env = Cloudflare.Env
 
 const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/lost-target': lostTarget,
@@ -322,9 +323,11 @@ function roomProbe(env: Env, suffix: string, name: string) {
     sessionDoId: sessionId.toString(),
     leaseId: `${name}-${role}-${suffix}`,
   })
-  const join = async (sessionId: DurableObjectId, options?: { role?: string; laneKey?: string }) => {
-    const registration = await authority.registerRoute(route(sessionId, options))
+  const join = async (sessionId: DurableObjectId, options?: Parameters<typeof route>[1]) => {
+    const joined = route(sessionId, options)
+    const registration = await authority.registerRoute(joined)
     if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
+    return joined
   }
   return {
     inc,
@@ -409,9 +412,9 @@ async function alarmScheduling(env: Env, suffix: string) {
   const probe = roomProbe(env, suffix, 'alarm')
   const idle = await probe.scheduledAlarm()
   const head = await probe.open()
-  await probe.join(sessionId)
+  const firstRoute = await probe.join(sessionId)
   const afterRoute = (await probe.scheduledAlarm()) === null ? 'idle' : 'armed'
-  await probe.authority.unsubscribeRoute(probe.route(sessionId))
+  await probe.authority.unsubscribeRoute(firstRoute)
   const afterUnsubscribe = await probe.scheduledAlarm()
   // A head naming another incarnation leaves the first one's generation orphaned.
   const next = { head: { currentInc: `${probe.inc}-next`, state: 'open' as const, config: head.config } }
@@ -420,9 +423,7 @@ async function alarmScheduling(env: Env, suffix: string) {
   const afterReopen = retry === null ? 'idle' : 'armed'
   // The orphan's sweep is due: a later route registration doesn't push its retry out.
   await new Promise((resolve) => setTimeout(resolve, 20))
-  const nextRoute = probe.route(sessionId, { role: 'next-lease', inc: `${probe.inc}-next` })
-  const registration = await probe.authority.registerRoute(nextRoute)
-  if (!('ok' in registration)) throw new Error(`route registration failed: ${registration.reason}`)
+  const nextRoute = await probe.join(sessionId, { role: 'next-lease', inc: `${probe.inc}-next` })
   const retryKept = (await probe.scheduledAlarm()) === retry
   await probe.authority.unsubscribeRoute(nextRoute)
   await probe.authority.fireAlarm()
@@ -433,9 +434,9 @@ async function routeRenewal(env: Env, suffix: string) {
   const sessionId = sessionOf(env, suffix)
   const probe = roomProbe(env, suffix, 'renewal')
   await probe.open()
-  await probe.join(sessionId)
+  const joined = await probe.join(sessionId)
   return {
-    live: await probe.authority.renewRoute(probe.route(sessionId)),
+    live: await probe.authority.renewRoute(joined),
     otherLease: await probe.authority.renewRoute(probe.route(sessionId, { role: 'another-lease' })),
   }
 }
@@ -578,7 +579,7 @@ async function nativeRpcRoundTrip(env: Env, suffix: string) {
   }
 }
 
-/** A fresh authority whose first SQL use is a write SQLite refuses keeps its tables for the next calls. */
+// A fresh authority whose first SQL use is a write SQLite refuses keeps its tables for the next calls.
 async function refusedFirstWrite(env: Env, suffix: string) {
   const authority = env.ROOM.get(env.ROOM.idFromName(`refused-first-write-${suffix}`)) as unknown as Authority
   const refused = await rejectionOf(
