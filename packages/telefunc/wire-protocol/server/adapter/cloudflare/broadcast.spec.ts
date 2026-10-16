@@ -166,9 +166,10 @@ function createBasicBinding(
 function createRacingBinding(
   latencies: number[],
   handlers: {
-    onForward: (request: any) => Promise<void>
-    onDeliver: (request: any) => Promise<void>
-    onPresence: (request: any) => Promise<void>
+    onPublish?: (request: any) => Promise<{ seq: number; timestamp: number }>
+    onForward?: (request: any) => Promise<void>
+    onDeliver?: (request: any) => Promise<void>
+    onPresence?: (request: any) => Promise<void>
   },
 ) {
   let used = 0
@@ -183,13 +184,14 @@ function createRacingBinding(
       let latency: number | undefined
       let arrival = Promise.resolve()
       const send =
-        (handler: (request: any) => Promise<void>) =>
-        (request: any): Promise<void> => {
+        <R>(handler?: (request: any) => Promise<R>) =>
+        (request: any): Promise<R> => {
           const delay = (latency ??= latencies[used++] ?? 0)
           arrival = arrival.then(() => new Promise((resolve) => setTimeout(resolve, delay)))
-          return arrival.then(() => handler(request))
+          return arrival.then(() => handler!(request))
         }
       return {
+        telefuncBroadcastPublish: send(handlers.onPublish),
         telefuncBroadcastForward: send(handlers.onForward),
         telefuncBroadcastDeliver: send(handlers.onDeliver),
         telefuncBroadcastPresence: handlers.onPresence,
@@ -590,6 +592,25 @@ describe('cloudflare broadcast routing', () => {
     await Promise.all([publish(), publish(), publish()])
     expect(received).toEqual([1, 2, 3])
     await subscription.unsubscribe()
+  })
+
+  it('delivers a session’s publishes to the key’s authority in call order while calls through different stubs race', async () => {
+    const arrived: string[] = []
+    // The first stub opened is the slowest, so a publish sent through a fresh stub overtakes the one before it.
+    const broadcast = createBroadcast(
+      createRacingBinding([20], {
+        onPublish: async (request) => {
+          arrived.push(JSON.parse(request.payload))
+          return { seq: arrived.length, timestamp: Date.now() }
+        },
+      }),
+    )
+    installCloudflareBroadcast(broadcast)
+    await inSession(createMember(broadcast), () => {
+      const channel = new ServerBroadcast<string>({ key: 'room:session-order' })
+      return Promise.all([channel.publish('first'), channel.publish('second')])
+    })
+    expect(arrived).toEqual(['first', 'second'])
   })
 
   it("publishes a caller's buffer as it was at the call, even on a line held behind a failed call", async () => {
