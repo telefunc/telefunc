@@ -59,7 +59,7 @@ class WantsIndex {
     for (const scopes of scopeLists) {
       for (const scope of scopes) yield this._updateScope(holder, indexed, scope, wants)
     }
-    if (gone) this._indexed.delete(holder)
+    this._forgetIfIdle(holder)
   }
 
   /** Indexes the holder's binary wants of one scope, and the members it affected. */
@@ -99,11 +99,14 @@ class WantsIndex {
         yield
       }
     }
+    this._forgetIfIdle(holder)
   }
 
   /** Indexes one change of the holder's binary wants; the affected members' pairs of its track may have changed. */
   applyBinary(holder: LaneHolder, { member, track, on }: BinaryWantChange): Affected {
-    return this._cover(holder, member, track, on)
+    const affected = this._cover(holder, member, track, on)
+    this._forgetIfIdle(holder)
+    return affected
   }
 
   /** Whether some holder names a binary want of the member, or wants every track of every member: a track named of
@@ -183,6 +186,13 @@ class WantsIndex {
       for (const holder of holders ?? []) if (holder !== except && holder._wantsBinary(member, track)) return true
     }
     return false
+  }
+
+  /** A holder that wants nothing is let go, as the index is all that holds a handle no longer listening. */
+  private _forgetIfIdle(holder: LaneHolder): void {
+    const indexed = this._indexed.get(holder)
+    if (indexed === undefined || indexed.textAll || indexed.announce) return
+    if (indexed.textMembers.size === 0 && indexed.binary.size === 0) this._indexed.delete(holder)
   }
 
   private _indexedOf(holder: LaneHolder): Indexed {

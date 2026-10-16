@@ -34,6 +34,30 @@ describe("a server's handles to one room", () => {
       expect({ memberReads, written }).toEqual({ memberReads: 0, written: [expect.stringMatching(/^session:/)] })
     }, 120_000)
   }
+  it.each<[string, (handle: ServerRoom) => Promise<void>]>([
+    ['an onJoin() listener removed', async (handle) => handle.onJoin(() => {})()],
+    ['a subscribe() removed', async (handle) => handle.subscribe(() => {})()],
+    ['a subscribeBinary() removed', async (handle) => handle.subscribeBinary(() => {})()],
+    ["a track's subscribeBinary() removed", async (handle) => handle.subscribeBinary(() => {}, { track: 'mic' })()],
+    [
+      "a member's subscribe() whose member left",
+      async (handle) => {
+        const other = await Room.join(handle.id)
+        ;(await handle.getParticipant(other.id))!.subscribe(() => {})
+        await other.leave()
+      },
+    ],
+  ])('let a handle go after %s, while a member keeps their view', async (listener, listen) => {
+    const room = await Room.create(`released-listener-${listener}`)
+    await room.join()
+    const handle = await (async () => {
+      const handle = (await Room.get(room.id)) as ServerRoom
+      await listen(handle)
+      return new WeakRef(handle)
+    })()
+    await forceRoomGc()
+    expect(handle.deref()).toBe(undefined)
+  })
   it('let their view go once no handle holds it, while a member keeps another view, and a Room.get() after that opens a new one', async () => {
     const id = 'shared-view-dropped'
     const dropped = await (async () => {
