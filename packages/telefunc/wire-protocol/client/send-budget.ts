@@ -85,7 +85,7 @@ class SendBudget implements SendRoom {
   }
 
   /** The bytes of data it takes now: none, once the room is used or data waits for it. */
-  get room(): number {
+  get sendRoom(): number {
     return this.roomPast(this.sender.sentBytes)
   }
 
@@ -135,7 +135,7 @@ class SendBudget implements SendRoom {
    *  again once the uplink carried what its server acknowledges at once, or all it holds. */
   private pace(): void {
     const { drainRate } = this.uplink
-    if (drainRate === 0 || this.room > 0 || this.paceTimer !== null) return
+    if (drainRate === 0 || this.sendRoom > 0 || this.paceTimer !== null) return
     const queued = this.uplink.inUplink()
     if (queued === 0) return
     const ms = Math.max(1, Math.min(queued, WIRE_PIECES_ACK_BYTES) / drainRate)
