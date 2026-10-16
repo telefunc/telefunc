@@ -218,6 +218,11 @@ function storeHead(sql: SqlStorage, next: HeadNext, now: number): StoredHead {
 
 type CellRow = { key: string; bytes: ArrayBuffer; version: number }
 
+/** A prefix read's page, with the cursor its next page reads after while cells may remain. */
+type CellPage =
+  | { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number; cursor?: string }
+  | { staleInc: true }
+
 function cellsOf(rows: CellRow[], now: number): Exclude<CellPage, { staleInc: true }> {
   return {
     cells: new Map(rows.map((row) => [row.key, new Uint8Array(row.bytes)])),
@@ -244,11 +249,6 @@ function readCells(sql: SqlStorage, inc: string, sel: CellSelector, now: number)
   if (head === null || head.currentInc !== inc) return { staleInc: true }
   return cellsOf(selectCellRows(sql, inc, sel), now)
 }
-
-/** A prefix read's page, with the cursor its next page reads after while cells may remain. */
-type CellPage =
-  | { cells: Map<string, Uint8Array>; versions: Map<string, string>; now: number; cursor?: string }
-  | { staleInc: true }
 
 function readCellPage(sql: SqlStorage, inc: string, prefix: string, cursor: string | undefined, now: number): CellPage {
   const head = readLiveHead(sql, now)
