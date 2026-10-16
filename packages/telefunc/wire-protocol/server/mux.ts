@@ -35,6 +35,7 @@ import {
   messageFrames,
   isConnCtrlTag,
   isSequencedTag,
+  passesData,
   peekTag,
   seqThrough,
   withTook,
@@ -1040,7 +1041,7 @@ class ChannelMux {
       }
     }
     state.sendHeadroom -= frame.byteLength
-    state.wait.handed(frame.byteLength, !isSequencedTag(frame[0]!))
+    state.wait.handed(frame.byteLength, passesData(frame[0]!))
     if (state.pieces) state.pieces.room.send(frame)
     else entry.transport.sendNow(connection, frame)
   }

@@ -17,7 +17,7 @@ import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, isSequencedTag, ProtocolViolationError } from '../shared-ws.js'
+import { encode, passesData, ProtocolViolationError } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -73,7 +73,7 @@ class EventStream {
   /** Data waits for the stream to ask for it, so a frame that goes at once is behind no more than the stream holds. */
   send(frame: Uint8Array<ArrayBuffer>): void {
     const event = textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
-    if (!isSequencedTag(frame[0]!) || (this.takes && this.waiting.length === 0)) {
+    if (passesData(frame[0]!) || (this.takes && this.waiting.length === 0)) {
       this.takes = this.stream.push(event)
       return
     }

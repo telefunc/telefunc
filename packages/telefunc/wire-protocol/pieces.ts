@@ -12,7 +12,16 @@ import {
   WIRE_PROBE_PAIR_BYTES,
 } from './constants.js'
 import { Link } from './link.js'
-import { LENGTH_BYTES, TAG, assertProtocol, encode, fixedBytes, isSequencedTag, type PiecesAck } from './shared-ws.js'
+import {
+  LENGTH_BYTES,
+  TAG,
+  assertProtocol,
+  encode,
+  fixedBytes,
+  isSequencedTag,
+  passesData,
+  type PiecesAck,
+} from './shared-ws.js'
 import { assert } from '../utils/assert.js'
 import { Fifo } from '../utils/Fifo.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
@@ -98,7 +107,7 @@ class PieceSender {
   private lastVaries = false
   /** It gathered frames that weren't carried. */
   private gatheredOwn = false
-  /** It gathered a frame that goes at once: one that isn't data. */
+  /** It gathered a frame that isn't data. */
   private gatheredAtOnce = false
   private gatheredData = false
   private flushQueued = false
@@ -171,9 +180,9 @@ class PieceSender {
     )
   }
 
-  /** While the rest of a data frame waits for room, a frame that isn't data and goes whole goes first. */
+  /** While the rest of a data frame waits for room, a frame that `passesData` and goes whole goes first. */
   private passesRest(frame: Uint8Array<ArrayBuffer>): boolean {
-    return !isSequencedTag(frame[0]!) && frame.byteLength <= this.wholeUpTo
+    return passesData(frame[0]!) && frame.byteLength <= this.wholeUpTo
   }
 
   /** Hands the socket `frame`, whole or in pieces. */

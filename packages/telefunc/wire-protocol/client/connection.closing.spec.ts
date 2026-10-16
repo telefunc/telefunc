@@ -1359,6 +1359,29 @@ test("over sse, an upgrade whose barrier finds more on the old wire than the ser
   expect(serverClosed.err).toBe('open')
 })
 
+test.each(['sse', 'sse-batch'] as const)(
+  "over %s on a 200 KB/s downlink, the messages the server sends as the page writes its barrier reach the page before the old wire's FIN, in order, once",
+  async (wire) => {
+    const { net, channel } = page(wire, { upgrade: true })
+    net.rate.down = 200_000
+    const server = register<never, string>()
+    const pageChannel = channel<never, string>(server.id)
+    const got: string[] = []
+    pageChannel.listen((message) => void got.push(message.trim()))
+    const pageClosed = closedWith(pageChannel)
+    const serverClosed = closedWith(server)
+    // More than the link carries before the barrier commits, so some still wait on the old wire as its FIN goes.
+    net.whenPageSends(TAG.BARRIER, () => {
+      for (let n = 0; n < 40; n++) void server.send(String(n).padEnd(4_000), { ack: false })
+    })
+    await advance(20_000)
+    expect((pageChannel as any)._connection.transport.type).toBe('ws')
+    expect(got).toEqual(Array.from({ length: 40 }, (_, n) => String(n)))
+    expect(pageClosed.err).toBe('open')
+    expect(serverClosed.err).toBe('open')
+  },
+)
+
 test('over sse, a stream that awaits its sends keeps whole across the upgrade to a WebSocket, and resumes without loss when that drops with its window in flight', async () => {
   const { net, channel } = page('sse', { upgrade: true })
   const server = register<never, string>()

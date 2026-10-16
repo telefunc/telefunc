@@ -17,6 +17,7 @@ export {
   isChannelCtrlTag,
   isSequencedFrame,
   isSequencedTag,
+  passesData,
   replayLaneOf,
   countsCredit,
   isConnCtrlTag,
@@ -183,6 +184,11 @@ function isSequencedFrame(frame: DecodedFrame): frame is SequencedFrame {
 
 function isSequencedTag(tag: number): boolean {
   return (tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag)
+}
+
+/** Whether a frame of `tag` passes the data waiting ahead of it: not data, nor FIN, which ends its wire's data. */
+function passesData(tag: number): boolean {
+  return !isSequencedTag(tag) && tag !== TAG.FIN
 }
 
 function isClosingTag(tag: number): boolean {
