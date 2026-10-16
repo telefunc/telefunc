@@ -11,7 +11,7 @@ import { unrefTimer } from '../../utils/unrefTimer.js'
  *  `WIRE_SEND_AHEAD_ROUND_TRIPS` of the least round trip, and `WIRE_SEND_AHEAD_MIN_BYTES` at least. The rest waits whole
  *  in its sender, where its acknowledgements and window refreshes pass it. */
 class PathRoom implements SendRoom {
-  readonly whole = true
+  readonly cuts = false
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
   /** In bytes per ms: the fastest of the newest rates its data arrived at while data waited to go, 0 before any; the

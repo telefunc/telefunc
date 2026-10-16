@@ -8,7 +8,7 @@ import {
   WIRE_SEND_ACK_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../constants.js'
-import { PieceSender } from '../pieces.js'
+import { PieceSender, type SendRoom } from '../pieces.js'
 import type { Uplink } from './uplink.js'
 import { isSequencedTag, type PiecesAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
@@ -26,7 +26,8 @@ const SAMPLE_MERGE_MS = 1
 type SentData = { end: number; bytes: number; ahead: number; at: number }
 
 /** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
-class SendBudget {
+class SendBudget implements SendRoom {
+  readonly cuts = true
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
   /** The allowance as measured delays moved it, null before the first: till then it is the least. */
@@ -54,12 +55,7 @@ class SendBudget {
     /** Called when the timer finds the uplink drained some of what it held. */
     private readonly onRoom: () => void,
   ) {
-    this.sender = new PieceSender(transmit, queued, uplink.link, {
-      whole: false,
-      dataRoom: () => this.roomPast(this.sender.transmittedBytes),
-      handed: (bytes, data) => this.handed(bytes, data),
-      sentFrame: (tag, bytes) => uplink.sentFrame(tag, bytes),
-    })
+    this.sender = new PieceSender(transmit, queued, uplink.link, this)
   }
 
   /** Sends `frame` through the sender. */
@@ -76,6 +72,16 @@ class SendBudget {
 
   private get allowance(): number {
     return this.movedAllowance ?? this.least
+  }
+
+  /** `SendRoom`: the room less what the sender handed. */
+  dataRoom(): number {
+    return this.roomPast(this.sender.transmittedBytes)
+  }
+
+  /** `SendRoom`: a PIECES_ACK or a window refresh takes its share of the uplink. */
+  sentFrame(tag: number, bytes: number): void {
+    this.uplink.sentFrame(tag, bytes)
   }
 
   /** The bytes of data it takes now: none, once the room is used or data waits for it. */
@@ -143,9 +149,9 @@ class SendBudget {
     this.pace()
   }
 
-  /** Notes `bytes` the sender handed the socket: all are in the uplink, and data is dated. Parts of data handed within
-   *  `SAMPLE_MERGE_MS` of one another make one sample, dated by the first. */
-  private handed(bytes: number, data: boolean): void {
+  /** `SendRoom`: notes `bytes` the sender handed the socket: all are in the uplink, and data is dated. Parts of data
+   *  handed within `SAMPLE_MERGE_MS` of one another make one sample, dated by the first. */
+  handed(bytes: number, data: boolean): void {
     const ahead = this.uplink.handed(bytes)
     if (!data) return
     const end = this.sender.transmittedBytes

@@ -34,8 +34,8 @@ const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
 
 /** How much data a sender hands its socket: a page's `SendBudget`, or a server's `PathRoom`. */
 type SendRoom = {
-  /** Whether its data goes whole while it has room, and waits whole once it has none; else data is cut to the room. */
-  readonly whole: boolean
+  /** Whether it cuts data to its room; else data goes whole while it has room, and waits whole once it has none. */
+  readonly cuts: boolean
   /** With a rate measured, the most bytes of data it hands the socket now. */
   dataRoom(): number
   /** It handed the socket `bytes`, of data or not, or gathered them for the message its turn ends with. */
@@ -45,7 +45,7 @@ type SendRoom = {
 }
 
 const UNBOUNDED: SendRoom = {
-  whole: true,
+  cuts: false,
   dataRoom: () => Number.POSITIVE_INFINITY,
   handed: () => {},
   sentFrame: () => {},
@@ -183,8 +183,8 @@ class PieceSender {
   private pass(frame: Uint8Array<ArrayBuffer>): void {
     const bytes = frame.byteLength
     const data = isSequencedTag(frame[0]!)
-    if (data && this.room.whole && this.room.dataRoom() <= 0) return this.hold(frame, 0)
-    if (bytes > this.wholeUpTo || (this.link.fastest > 0 && data && !this.room.whole && bytes > this.room.dataRoom())) {
+    if (data && !this.room.cuts && this.room.dataRoom() <= 0) return this.hold(frame, 0)
+    if (bytes > this.wholeUpTo || (this.link.fastest > 0 && data && this.room.cuts && bytes > this.room.dataRoom())) {
       return this.cut(frame, 0)
     }
     this.gather(frame, data)
@@ -199,7 +199,7 @@ class PieceSender {
     const length = this.lastVaries ? LENGTH_BYTES : 0
     if (
       this.gatheredSent &&
-      ((data && (this.gatheredAtOnce || !this.room.whole)) || this.gatheredBytes + length + bytes > this.gatherUpTo)
+      ((data && (this.gatheredAtOnce || this.room.cuts)) || this.gatheredBytes + length + bytes > this.gatherUpTo)
     ) {
       this.flush()
     }
@@ -274,7 +274,7 @@ class PieceSender {
     const bytes = frame.byteLength
     const now = performance.now()
     const room = Math.max(0, Math.floor(this.room.dataRoom()))
-    const end = isSequencedTag(frame[0]!) && !this.room.whole ? Math.min(bytes, offset + room) : bytes
+    const end = isSequencedTag(frame[0]!) && this.room.cuts ? Math.min(bytes, offset + room) : bytes
     if (end === offset) return this.hold(frame, offset)
     // The first of a frame over `wholeUpTo` is empty: its receiver hears of the frame at once, and acknowledges its first
     // two pieces at once. One cut only for room is no measure.
@@ -413,7 +413,7 @@ class PieceSender {
         : Math.max(
             2 * WIRE_PROBE_PAIR_BYTES,
             // Only a sender that cuts data to its room needs the rate before a frame the floor carries in time.
-            this.room.whole ? (this.link.floor * this.pingInterval) / WIRE_PIECE_RATE_MARGIN : 0,
+            this.room.cuts ? 0 : (this.link.floor * this.pingInterval) / WIRE_PIECE_RATE_MARGIN,
           )
     // What crosses within its ping deadline, twice the interval: on any link a PING crosses, or at the floor.
     this.unannouncedUpTo = Math.min(
@@ -503,9 +503,9 @@ class PieceSender {
     const { frame, offset } = this.rest
     this.rest = null
     this.heldBytes -= frame.byteLength - offset
-    // A room whose data goes whole held it whole: it goes as if sent now.
-    if (this.room.whole) this.pass(frame)
-    else this.cut(frame, offset)
+    // A room that doesn't cut data held it whole: it goes as if sent now.
+    if (this.room.cuts) this.cut(frame, offset)
+    else this.pass(frame)
     while (this.rest === null && this.held.length > 0) {
       const next = this.held.shift()!
       this.heldBytes -= next.byteLength
