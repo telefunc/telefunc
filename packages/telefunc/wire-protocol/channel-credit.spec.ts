@@ -660,6 +660,25 @@ test("a broadcast whose page is cut off further behind than the server's replay 
   expect(seen).toEqual(['before', ...seen.slice(1).map((_, n) => publication(n))])
 })
 
+test.each([false, true])(
+  'a server sendBinary() before its page attaches delivers the bytes it was given, though its caller reuses the buffer (ack: %s)',
+  async (ack) => {
+    const { server, page } = loop.open<never, never>()
+    const got: number[][] = []
+    page.listenBinary((data) => void got.push(Array.from(data)))
+    const buffer = new Uint8Array([1, 1, 1])
+    void server.sendBinary(buffer, { ack }).catch(() => {})
+    buffer.set([2, 2, 2])
+    void server.sendBinary(buffer, { ack }).catch(() => {})
+    buffer.set([3, 3, 3])
+    await run(300)
+    expect(got).toEqual([
+      [1, 1, 1],
+      [2, 2, 2],
+    ])
+  },
+)
+
 test('a broadcast whose page was offline while more was published than config.channel.bufferLimit holds closes on both ends with ChannelOverflowError at its reconnect', async () => {
   const key = `room:${crypto.randomUUID()}`
   const room = loop.openBroadcast<string>(key)

@@ -75,12 +75,13 @@ class ServerChannelBuffer<TAck = never> {
     this.#text.push(TAG.PUBLISH, data, utf8ByteLength(data), null, this.#insertionSeq++, gap)
   }
 
+  /** Holds a copy, as an attached send encodes the caller's bytes at once and the caller may then reuse them. */
   pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void, gap: boolean): void {
-    this.#binary.push(TAG.BINARY, data, data.byteLength, { resolve, reject }, this.#insertionSeq++, gap)
+    this.#binary.push(TAG.BINARY, data.slice(), data.byteLength, { resolve, reject }, this.#insertionSeq++, gap)
   }
 
   pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void, gap: boolean): void {
-    this.#binary.push(TAG.BINARY_ACK_REQ, data, data.byteLength, { resolve, reject }, this.#insertionSeq++, gap)
+    this.#binary.push(TAG.BINARY_ACK_REQ, data.slice(), data.byteLength, { resolve, reject }, this.#insertionSeq++, gap)
   }
 
   pushPublishBinary(data: Uint8Array, gap: boolean): void {
