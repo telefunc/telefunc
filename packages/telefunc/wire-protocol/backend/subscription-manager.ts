@@ -104,7 +104,8 @@ class SubscriptionManager<Source> {
   }
 
   /** Runs `send` once none of its caller's subscriptions on the hold's `sources` is establishing, waiting at most the
-   *  hold time; while the caller holds the hold's `key`, its later sends on it queue behind, in call order. */
+   *  hold time; while the caller holds the hold's `key`, its later sends on it queue behind, in call order.
+   *  `describeHold` runs only for a send that may wait. */
   afterEstablished<T>(send: () => T | Promise<T>, describeHold: () => SendHold<Source>): T | Promise<T> {
     if (this._establishing === 0 && this._holds.size === 0) return send()
     const { key, sources, weight } = describeHold()

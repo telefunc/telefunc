@@ -254,8 +254,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
   private _deliver(delivery: () => void): void {
+    const now = this._deliversNow()
     this._deliveries.push(delivery)
-    if (this._deliveries.length - this._next === 1) this._drain()
+    if (now) this._drain()
   }
 
   private _drain(): void {
