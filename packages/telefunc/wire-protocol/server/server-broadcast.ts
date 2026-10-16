@@ -158,13 +158,19 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   /** A text (`string`) or binary publish to the page, buffered while it is away; a page behind is let go. */
   private _forwardPublish(wire: string | Uint8Array): void {
+    const binary = typeof wire !== 'string'
     const peer = this._peer
     if (!peer) {
-      if (typeof wire === 'string') this._prePeerBuffer.pushPublish(wire)
-      else this._prePeerBuffer.pushPublishBinary(wire)
-      this._closeIfDroppedOffline(typeof wire !== 'string')
-    } else if (this._flow.isPastByteCredit && this._isPeerBehind()) this._closeBehind()
-    else this._flow.countSentBytes(typeof wire === 'string' ? peer.sendPublish(wire) : peer.sendPublishBinary(wire))
+      if (binary) this._prePeerBuffer.pushPublishBinary(wire)
+      else this._prePeerBuffer.pushPublish(wire)
+      this._closeIfDroppedOffline(binary)
+      return
+    }
+    if (this._flow.isPastByteCredit && this._isPeerBehind()) {
+      this._closeBehind()
+      return
+    }
+    this._flow.countSentBytes(binary ? peer.sendPublishBinary(wire) : peer.sendPublish(wire))
   }
 
   /** A page that can't keep up with the broadcast has no send to reject: once behind, it leaves the group, on both
