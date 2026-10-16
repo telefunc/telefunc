@@ -90,11 +90,6 @@ type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
  *  its authority time; a spec gives it a clock of its own to set the app servers' apart from it. */
 class MemoryBackendState {
   readonly now: () => number
-
-  constructor({ now = () => Date.now() }: { now?: () => number } = {}) {
-    this.now = now
-  }
-
   readonly rooms = new Map<string, RoomRecord>()
   readonly directory = new Map<string, DirectoryEntry>()
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
@@ -107,6 +102,10 @@ class MemoryBackendState {
   }
 
   revSeq = 0
+
+  constructor({ now = () => Date.now() }: { now?: () => number } = {}) {
+    this.now = now
+  }
 }
 
 /** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself
