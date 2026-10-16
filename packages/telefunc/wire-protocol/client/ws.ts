@@ -372,39 +372,36 @@ function receiveMessage(
   take: (frame: DecodedFrame, byteLength: number, at: number) => boolean,
 ): boolean {
   // The frames before a message's last ride on it: each taken as it would be alone, but not dated apart from the last.
-  let riding: { frames: Uint8Array<ArrayBuffer>[]; decoded: DecodedFrame[] } | undefined
-  let frame: DecodedFrame | null
+  let riding: { frame: DecodedFrame; bytes: number }[] | undefined
+  let last: DecodedFrame | null = null
+  let lastBytes = 0
   try {
-    if (!isOneFrame(raw)) {
-      const frames = Array.from(messageFrames(raw))
-      raw = frames.pop()!
-      riding = { frames, decoded: [] }
-      for (const each of frames) {
-        const decoded = decode(each)
-        pieces.arrived(each.byteLength, isSequencedTag(decoded.tag), at, true)
-        if (fixedBytes(decoded.tag) === 0) pieces.tookLength(LENGTH_BYTES)
-        riding.decoded.push(decoded)
-      }
-    }
-    frame = decode(raw)
-    if (frame.tag === TAG.ANNOUNCE) {
-      pieces.announce(frame.bytes, at, frame.floor)
-      frame = null
-    } else if (frame.tag === TAG.PIECE) {
+    const frames = isOneFrame(raw) ? null : Array.from(messageFrames(raw))
+    const own = frames === null ? raw : frames.pop()!
+    riding = frames?.map((each) => {
+      const frame = decode(each)
+      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
+      if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
+      return { frame, bytes: each.byteLength }
+    })
+    const frame = decode(own)
+    if (frame.tag === TAG.ANNOUNCE) pieces.announce(frame.bytes, at, frame.floor)
+    else if (frame.tag === TAG.PIECE) {
       const whole = pieces.add(frame.total, frame.piece, at)
-      frame = null
       if (whole !== null) {
-        raw = whole
-        frame = decode(raw)
+        last = decode(whole)
+        lastBytes = whole.byteLength
       }
-    } else pieces.arrived(raw.byteLength, isSequencedTag(frame.tag), at, false)
+    } else {
+      pieces.arrived(own.byteLength, isSequencedTag(frame.tag), at, false)
+      last = frame
+      lastBytes = own.byteLength
+    }
   } catch {
     return false
   }
   if (riding !== undefined) {
-    for (let i = 0; i < riding.frames.length; i++) {
-      if (!take(riding.decoded[i]!, riding.frames[i]!.byteLength, at)) return false
-    }
+    for (const { frame, bytes } of riding) if (!take(frame, bytes, at)) return false
   }
-  return frame === null || take(frame, raw.byteLength, at)
+  return last === null || take(last, lastBytes, at)
 }
