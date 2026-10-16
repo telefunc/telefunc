@@ -341,8 +341,7 @@ class SlotAttachment implements BackendSubscription {
 
   /** Consumer listeners are isolated from each other; one that throws is reported. */
   notify(state: SubscriptionState): void {
-    for (const listener of [...this._listeners]) {
-      if (!this._listeners.has(listener)) continue
+    for (const listener of this._listeners) {
       try {
         listener(state)
       } catch (error) {

@@ -333,7 +333,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
 
   async unsubscribe(): Promise<void> {
     this._dropHeld()
-    for (const token of [...this._fences.keys()]) this.settleFence(token)
+    for (const token of this._fences.keys()) this.settleFence(token)
     this.transition('closed', new Error(`Redis subscription '${this.laneChannel}' was closed`))
     this._onDetach()
   }

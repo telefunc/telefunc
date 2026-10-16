@@ -29,6 +29,6 @@ abstract class DriverAttempt implements SubscriptionAttempt {
     if (this._state === state || this.ended) return
     this._state = state
     const error = reason === undefined || reason instanceof Error ? reason : new Error(String(reason))
-    for (const listener of [...this._listeners]) listener(state, error)
+    for (const listener of this._listeners) listener(state, error)
   }
 }

@@ -37,10 +37,10 @@ class PendingDmAcks {
 
   /** Settles every wait the member sends or receives. */
   settleMember(member: string, reply: DmReply): void {
-    for (const ackId of [...(this._byMember.get(member) ?? [])]) this.settle(ackId, reply)
+    for (const ackId of this._byMember.get(member) ?? []) this.settle(ackId, reply)
   }
 
   settleAll(reply: DmReply): void {
-    for (const ackId of [...this._byId.keys()]) this.settle(ackId, reply)
+    for (const ackId of this._byId.keys()) this.settle(ackId, reply)
   }
 }
