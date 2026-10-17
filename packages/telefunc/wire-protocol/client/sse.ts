@@ -392,40 +392,36 @@ class SseTransport implements UpgradeSource {
     assert(this.transportAbort)
     this.flushScheduler.cancel()
     this.flushing = true
+    const now = Date.now()
+    const queued = this.outbox.splice(0, this.outbox.length)
+    this.outboxBytes = 0
+    const head = this.foldHeading(queued)
+    this.folded = null
+    this.lastPostStartedAt = now
+    const wire = this.transportAbort
     try {
-      const now = Date.now()
-      const queued = this.outbox.splice(0, this.outbox.length)
-      this.outboxBytes = 0
-      const head = this.foldHeading(queued)
-      this.folded = null
-      this.lastPostStartedAt = now
-      const wire = this.transportAbort
-
-      try {
-        const body = encodeSseBatch(
-          { connId: this.connId },
-          queued.slice(head?.count ?? 0).map((entry) => entry.frame),
-          head?.blob,
-        )
-        this.postOutBytes = body.size
-        this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
-        const response = await this.postAndRead(body, wire.signal)
-        if (!response.ok) throw new Error('POST failed')
-        this.sizePosts(body.size, Date.now() - now)
-      } catch {
-        // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
-        if (wire !== this.transportAbort) {
-          const refreshes = queued.filter(isWindowRefresh)
-          this.outbox = refreshes.concat(this.outbox)
-          this.outboxBytes += bytesOf(refreshes)
-          return
-        }
-        this.outbox = queued.concat(this.outbox)
-        this.outboxBytes += bytesOf(queued)
-        this.abandonActiveTransport()
-        this.owner._onTransportClosed(this)
+      const body = encodeSseBatch(
+        { connId: this.connId },
+        queued.slice(head?.count ?? 0).map((entry) => entry.frame),
+        head?.blob,
+      )
+      this.postOutBytes = body.size
+      this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
+      const response = await this.postAndRead(body, wire.signal)
+      if (!response.ok) throw new Error('POST failed')
+      this.sizePosts(body.size, Date.now() - now)
+    } catch {
+      // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
+      if (wire !== this.transportAbort) {
+        const refreshes = queued.filter(isWindowRefresh)
+        this.outbox = refreshes.concat(this.outbox)
+        this.outboxBytes += bytesOf(refreshes)
         return
       }
+      this.outbox = queued.concat(this.outbox)
+      this.outboxBytes += bytesOf(queued)
+      this.abandonActiveTransport()
+      this.owner._onTransportClosed(this)
     } finally {
       if (this.postWatch) clearTimeout(this.postWatch)
       this.postWatch = null
