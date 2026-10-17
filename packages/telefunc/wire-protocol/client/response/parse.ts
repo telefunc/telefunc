@@ -7,7 +7,13 @@ import { isObject } from '../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { createStreamingReviver } from './registry.js'
-import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
+import type {
+  StreamSource,
+  ClientReviverContext,
+  InternalClientReviverContext,
+  ReviverType,
+  TypeContract,
+} from '../../types.js'
 import { setAbortController } from '../../../client/abort.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
@@ -21,7 +27,7 @@ import { GcRegistry } from '../../gcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
-import { STREAMING_ERROR_TYPE } from '../../constants.js'
+import { SERIALIZER_PREFIX_ROOM_STEM, STREAMING_ERROR_TYPE } from '../../constants.js'
 import type { ChannelTransports } from '../../constants.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 
@@ -106,7 +112,12 @@ async function reviveResponse(
   const headers = callContext.headers ?? undefined
   const telefuncUrl = callContext.telefuncUrl
   const pendingValues: PendingValue<unknown>[] = []
-  const context: ClientReviverContext = {
+  const context: InternalClientReviverContext = {
+    shareLifecycle(child, owner) {
+      const close = closeHandlers.get(owner)
+      assert(close)
+      closeHandlers.set(child, close)
+    },
     createChannel(opts) {
       return new ClientChannel({
         channelId: opts.channelId,
@@ -150,10 +161,21 @@ async function reviveResponse(
 
   const allCloseHandlers = [...callContext.requestCloseHandlers]
 
+  // Keeps Room's client code out of the entry bundle: only a response whose text holds a Room prefix loads it.
+  let roomTypes: ReviverType<TypeContract, InternalClientReviverContext>[] = []
+  if (body.includes(SERIALIZER_PREFIX_ROOM_STEM)) {
+    roomTypes = (await import('../../room/response-client.js')).roomTypes
+    // Aborted during the load, before any revived value listens for it.
+    if (callContext.abortController.signal.aborted) {
+      throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
+    }
+  }
   const reviver = createStreamingReviver(
     context,
     function onRevived(revived) {
       const { value, abort, close, onEnd } = revived
+      // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
+      if (isObjectOrFunction(value) && closeHandlers.has(value)) return
       allCloseHandlers.push(close)
       callContext.abortController.signal.addEventListener(
         'abort',
@@ -179,6 +201,7 @@ async function reviveResponse(
       // This is what the user gets
       revived.value = wrapper
     },
+    roomTypes,
     extensionResponseTypes,
   )
 

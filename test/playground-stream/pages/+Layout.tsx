@@ -15,6 +15,7 @@ const nav = [
   { href: '/function', label: 'Function' },
   { href: '/stream-to-server', label: 'Stream→Server' },
   { href: '/publish', label: 'Publish' },
+  { href: '/room', label: 'Room' },
   { href: '/ref-identity', label: 'Ref Identity' },
   { href: '/video-chat', label: 'Video Chat' },
   { href: '/live-query', label: 'Live Query' },

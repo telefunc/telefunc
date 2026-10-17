@@ -38,6 +38,11 @@ function getCiJobs() {
       command: 'pnpm run test:types',
       setups: [ubuntu],
     },
+    {
+      name: 'Released API',
+      command: 'pnpm run test:released-api',
+      setups: [ubuntu],
+    },
 
     // @brillout/test-e2e
     {
@@ -57,6 +62,17 @@ function getCiJobs() {
     },
     {
       name: 'Cloudflare',
+      setups: setupModern,
+    },
+    {
+      name: 'Cloudflare Room',
+      command: 'pnpm exec vitest run --config vitest.cloudflare-room.config.ts',
+      setups: setupModern,
+    },
+    {
+      name: 'Redis',
+      // Starts its own standalone Redis and three-master Cluster
+      command: 'bash packages/redis/scripts/certification.sh',
       setups: setupModern,
     },
     {

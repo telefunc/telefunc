@@ -10,7 +10,8 @@ import { promiseReplacer } from './promise.js'
 import { broadcastReplacer } from './broadcast.js'
 import { channelReplacer } from './channel.js'
 import { functionReplacer } from './function.js'
-import type { ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
+import { roomReplacer, roomParticipantReplacer, roomRemoteReplacer } from '../../room/response-server.js'
+import type { InternalServerReplacerContext, ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../shared/Abort.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
@@ -27,6 +28,9 @@ const serverTypes = [
   fileReplacer,
   blobReplacer,
   promiseReplacer,
+  roomReplacer,
+  roomParticipantReplacer,
+  roomRemoteReplacer,
   broadcastReplacer,
   channelReplacer,
   functionReplacer,
@@ -42,7 +46,7 @@ const serverTypes = [
  *  re-emit the first occurrence's replacement verbatim (wire format unchanged), and the client's
  *  mirror cache (createStreamingReviver) revives equal wire strings to one object. */
 function createStreamingReplacer(
-  getContext: (value: unknown) => ServerReplacerContext,
+  getContext: (value: unknown) => InternalServerReplacerContext,
   onReplaced: (replaced: { close: () => Promise<void> | void; abort: (abortError: AbortError) => void }) => void,
   extensionTypes: ReplacerType<TypeContract, ServerReplacerContext>[],
 ) {

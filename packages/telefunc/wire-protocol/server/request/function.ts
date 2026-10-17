@@ -4,6 +4,7 @@ import type { FunctionContract, ReviverType, ServerReviverContext } from '../../
 import { SERIALIZER_PREFIX_FUNCTION } from '../../constants.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
+import { markHandled } from '../../../utils/markHandled.js'
 assertIsNotBrowser()
 
 const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
@@ -23,12 +24,7 @@ const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
       return res
     }
     return {
-      value: (...args: unknown[]) => {
-        const result = fn(...args)
-        // A call nothing awaits leaves no unhandled rejection; one awaited still sees the error.
-        result.catch(() => {})
-        return result
-      },
+      value: (...args: unknown[]) => markHandled(fn(...args)),
       async close() {
         await channel.close()
       },

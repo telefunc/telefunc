@@ -10,13 +10,15 @@ class Listeners<T> {
     return this.byRegistration.size
   }
 
-  /** Returns the function that removes this registration. */
-  add(listener: T): () => void {
+  /** Returns the registration's removal, which reports whether it was still registered. */
+  add(listener: T): () => boolean {
     const registration = {}
     this.byRegistration.set(registration, listener)
     this.snapshot = undefined
     return () => {
-      if (this.byRegistration.delete(registration)) this.snapshot = undefined
+      if (!this.byRegistration.delete(registration)) return false
+      this.snapshot = undefined
+      return true
     }
   }
 

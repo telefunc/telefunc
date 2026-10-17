@@ -1,4 +1,4 @@
-export { ChannelClosedError, ChannelOverflowError, replayLossError }
+export { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure, replayLossError }
 
 import { NetworkError } from '../shared/NetworkError.js'
 
@@ -17,6 +17,10 @@ class ChannelOverflowError extends Error {
     super(message)
     this.name = 'ChannelOverflowError'
   }
+}
+
+function isExpectedChannelFailure(err: unknown): err is ChannelClosedError | ChannelOverflowError | NetworkError {
+  return err instanceof ChannelClosedError || err instanceof ChannelOverflowError || err instanceof NetworkError
 }
 
 /** How a channel ends when a reconnect needs what `side`'s replay buffer dropped. */

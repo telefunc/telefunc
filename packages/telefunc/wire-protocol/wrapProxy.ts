@@ -1,4 +1,4 @@
-export { wrapProxy }
+export { wrapProxy, untether }
 
 import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
 
@@ -12,6 +12,7 @@ import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
  *  WeakMap semantics: as long as the derived object (key) is reachable, the
  *  wrapper (value) is held strongly, so FinalizationRegistry won't collect it. */
 const keepWrapperAlive = new WeakMap<object, unknown>()
+const untethered = new WeakSet<object>()
 
 /** Wrap a value in a transparent proxy so it can be GC'd independently.
  *
@@ -29,16 +30,21 @@ function wrapProxy<T extends object>(target: T): T {
     return wrapper as unknown as T
   }
 
+  const forwarders = new Map<PropertyKey, { property: Function; forward: (...args: unknown[]) => unknown }>()
   const wrapper: T = new Proxy({} as T, {
     get(_proxy, prop) {
       const property = Reflect.get(target, prop, target)
       if (typeof property !== 'function') return property
-      // Return a forwarding function that tethers any returned object to the wrapper.
-      return (...args: unknown[]) => {
+      // One forwarder per method, so identity holds like on the target; it tethers any returned object to the wrapper.
+      const cached = forwarders.get(prop)
+      if (cached?.property === property) return cached.forward
+      const forward = (...args: unknown[]) => {
         const result = property.apply(target, args)
         tether(result, wrapper)
         return result
       }
+      forwarders.set(prop, { property, forward })
+      return forward
     },
     set(_proxy, prop, value) {
       return Reflect.set(target, prop, value, target)
@@ -63,5 +69,15 @@ function wrapProxy<T extends object>(target: T): T {
 
 /** Pin `wrapper` to live as long as `derived` does (via WeakMap). */
 function tether(derived: unknown, wrapper: unknown): void {
-  if (isObjectOrFunction(derived)) keepWrapperAlive.set(derived, wrapper)
+  if (!isObjectOrFunction(derived)) return
+  if (untethered.has(derived)) return
+  keepWrapperAlive.set(derived, wrapper)
+  // A synchronous array return, such as `tee()`'s branches, hands out each element.
+  if (Array.isArray(derived)) for (const value of derived) tether(value, wrapper)
+}
+
+/** `derived` never pins a wrapper: a terminal child no longer owns its parent's lifetime. */
+function untether(derived: object): void {
+  untethered.add(derived)
+  keepWrapperAlive.delete(derived)
 }
