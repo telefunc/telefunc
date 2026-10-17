@@ -13,6 +13,7 @@ import {
   CHANNEL_TRANSPORT,
   SSE_FLUSH_THROTTLE_MS,
   SSE_POST_IDLE_FLUSH_DELAY_MS,
+  WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
 import type { ReconciledPayload } from '../shared-ws.js'
 
@@ -42,6 +43,7 @@ function reconciled(payload: Pick<ReconciledPayload, 'sessionId' | 'open'> & Par
     reconnectTimeout: CHANNEL_RECONNECT_TIMEOUT_MS,
     idleTimeout: CHANNEL_IDLE_TIMEOUT_MS,
     pingInterval: CHANNEL_PING_INTERVAL_MS,
+    maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
     serverReplayBuffer: CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
     serverReplayBufferBinary: CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES,
     clientReplayBuffer: CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,

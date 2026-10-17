@@ -37,6 +37,7 @@ const reconciled = (extra: Partial<ReconciledPayload> = {}): ReconciledPayload =
   reconnectTimeout: 1,
   idleTimeout: 2,
   pingInterval: 3,
+  maxFrameBytes: 10,
   serverReplayBuffer: 8,
   serverReplayBufferBinary: 9,
   clientReplayBuffer: 4,

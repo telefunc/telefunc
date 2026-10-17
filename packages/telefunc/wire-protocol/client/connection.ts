@@ -34,6 +34,7 @@ import {
   type ChannelTransport,
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
+  WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
 import { replayWindow, type ByteWindowKind } from '../flow-control/flow-control.js'
 import { ReplayBuffer } from '../replay-buffer.js'
@@ -409,6 +410,8 @@ class ClientConnection implements MuxConnection {
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
   /** The windows the replay buffers allow, the page's and the server's, as the last RECONCILED says them. */
   private replayWindows: { window: number; peerWindow: number } | null = null
+  /** The largest frame the server takes, as the last RECONCILED says it. */
+  private maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
@@ -653,10 +656,11 @@ class ClientConnection implements MuxConnection {
     if (ix === undefined) return
     const replay = this.replayBuffers.get(ix)!
     const frame = buildFrame(ix, replay.seq + 1)
+    const maxFrameBytes = this.maxFrameBytesOf(channel)
     // The server ends the wire a larger frame arrives on, and the one its replay arrives on next.
     assertUsage(
-      frame.byteLength <= channel._maxFrameBytes,
-      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${channel._maxFrameBytes} at most`,
+      frame.byteLength <= maxFrameBytes,
+      `Channel message too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`,
     )
     const seq = replay.nextSeq()
     onQueued?.(seq)
@@ -705,13 +709,19 @@ class ClientConnection implements MuxConnection {
     if (ix === undefined) return
     const seq = this.replayBuffers.get(ix)!.nextSeq()
     let frame = encode.ackRes(ix, seq, ackedSeq, result, status)
+    const maxFrameBytes = this.maxFrameBytesOf(channel)
     // The server ends the wire a larger frame arrives on, so the send it answers gets an error instead.
-    if (frame.byteLength > channel._maxFrameBytes) {
-      const error = `Channel ack answer too large: ${frame.byteLength} bytes encoded, the server accepts ${channel._maxFrameBytes} at most`
+    if (frame.byteLength > maxFrameBytes) {
+      const error = `Channel ack answer too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`
       frame = encode.ackRes(ix, seq, ackedSeq, error, ACK_STATUS.ERROR)
     }
     this.sendOrQueue(ix, seq, frame, 'ack')
     if (ackedSeq === this.lastSeqByChannel.get(ix)) channel._answered()
+  }
+
+  /** The largest frame of `channel`'s the server takes: the channel's own limit, or its connection's once smaller. */
+  private maxFrameBytesOf(channel: MuxChannel): number {
+    return Math.min(channel._maxFrameBytes, this.maxFrameBytes)
   }
 
   sendAbort(channel: MuxChannel, abortValue: string): void {
@@ -1540,9 +1550,11 @@ class ClientConnection implements MuxConnection {
     return { frames: releaseFrames, channelsToOpen, reconcileComplete: !hasNewChannels }
   }
 
-  /** The timeouts and replay sizes the server sets, each replay fitted to them. */
+  /** The timeouts, replay sizes and frame limit the server sets, each replay fitted to them. */
   private takeServerSettings(ctrl: ReconciledPayload): void {
     this.reconnectTimeoutMs = ctrl.reconnectTimeout
+    // A runtime's lower limit is its WebSocket's.
+    if (this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.WS)) this.maxFrameBytes = ctrl.maxFrameBytes
     // A per-call `idleTimeout` (withContext) is kept over the server's.
     if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
     this.clientReplayBufferBytes = ctrl.clientReplayBuffer

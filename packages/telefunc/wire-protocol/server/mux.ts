@@ -335,6 +335,7 @@ class ChannelMux {
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
+        maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
         serverReplayBuffer: this.options.serverReplayBuffer,
         serverReplayBufferBinary: this.options.serverReplayBufferBinary,
         clientReplayBuffer: this.options.clientReplayBuffer,

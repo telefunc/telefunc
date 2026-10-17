@@ -267,6 +267,8 @@ type ReconciledPayload = {
   reconnectTimeout: number
   idleTimeout: number
   pingInterval: number
+  /** The largest frame the server takes on a WebSocket. */
+  maxFrameBytes: number
   serverReplayBuffer: number
   serverReplayBufferBinary: number
   clientReplayBuffer: number
