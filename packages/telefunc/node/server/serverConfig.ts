@@ -391,7 +391,7 @@ function enableChannelTransports(transports: ChannelTransports): void {
   for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
 }
 
-/** @internal The runtime ends a WebSocket on a larger message: each channel tells its page, which refuses one. */
+/** @internal The runtime ends a WebSocket on a larger message: the page refuses one, told by each channel the server makes and by each RECONCILED. */
 function setAdapterMaxFrameBytes(bytes: number | undefined): void {
   globalObject.adapterMaxFrameBytes = bytes
 }
