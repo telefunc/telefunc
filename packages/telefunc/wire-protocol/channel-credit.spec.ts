@@ -23,7 +23,7 @@ import { TAG, encode, isOneFrame, messageFrames } from './shared-ws.js'
 import { SendBudget } from './client/send-budget.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
-import { Pipe } from './test/loopback.js'
+import { Pipe } from './test/pipe.js'
 import { flowOf, produce, run } from './test/channel-specs.js'
 
 const LATENCY_MS = 5
