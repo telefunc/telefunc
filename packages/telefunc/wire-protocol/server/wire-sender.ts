@@ -22,7 +22,7 @@ class WireSender {
     private readonly transport: ServerTransport<unknown>,
     private readonly pieces: WirePieces | null,
     /** How long the frames that go at once wait behind what the socket holds. */
-    readonly wait: SocketWait,
+    private readonly wait: SocketWait,
     /** The channels whose flow control the headroom counts. */
     private readonly channels: () => Iterable<ServerChannel>,
   ) {}

@@ -300,7 +300,7 @@ class ChannelMux {
           else this.send(connection, frame as Uint8Array<ArrayBuffer>)
         },
         bufferedAmount: () => this.bufferedAmount(connection),
-        sendWait: () => wireSender.wait,
+        sendWait: () => wait,
         deliveredBeforeFrame: (ms) => {
           const state = this.connectionEntries.get(connection)?.state
           return state ? state.deliveries.before(state.frameDelivery, ms) : 0
