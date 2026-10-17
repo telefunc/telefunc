@@ -123,45 +123,48 @@ class BdpEstimator {
     if (this.settleAttachProbe(probe)) return NOT_SETTLED
     if (!this._pingInFlight || probe !== this._ping) return NOT_SETTLED
     this._pingInFlight = false
-    const now = performance.now()
-    const rtt = now - this._lastPingAt
+    const rtt = performance.now() - this._lastPingAt
     // An attach's probe may have waited behind other frames: a later ping that took less shows the path takes no more.
     const link = this._link
     if (link !== null && link.pathRtt < Infinity) link.measured(rtt)
     const roundWait = sendWait?.longestWaitSince(this._lastPingAt) ?? 0
-    const roundRtt = Math.max(1, rtt - this._pingWait)
-    if (this._boundRtt < Infinity && roundRtt < this._boundRtt) this._boundRtt = roundRtt
     const received = this._bytesReceived - this._bytesAtPingSent
     const starved = senderBacklog * 8 < this._byteWindow
-    // Starved, the wire near idle before the ack: no queue held it, so the round trip less its wait is the path's.
-    if (starved && received * 3 >= this._byteWindow * 2 && deliveredBefore(rtt / 8) * 16 < received) {
-      this._boundRtt = roundRtt
-    }
-    // A measured path round trip, or a round the window held back, tells a queue from the path; else only the sender.
-    let pathRtt = Math.min(link?.pathRtt ?? Infinity, senderPathRtt)
-    if (this._boundRtt < Infinity) pathRtt = pathRtt < Infinity ? Math.max(pathRtt, this._boundRtt) : this._boundRtt
-    const measured = pathRtt < Infinity
+    this._boundRoundTrip(rtt, received, starved, deliveredBefore)
+    const pathRtt = this._pathRtt(senderPathRtt)
     const loopRtt = pathRtt + roundWait
-    const atPathRtt = loopRtt < rtt ? loopRtt / rtt : 1
-    const byteSample = received * atPathRtt
-    const msgSample = this._msgsReceived - this._msgsAtPingSent
-    const bytes = this._byteDecision(byteSample, measured, starved)
-    const msgWindow = (starved && this._msgWindowBeforeGrowth) || this._msgWindow
+    const byteSample = received * (loopRtt < rtt ? loopRtt / rtt : 1)
+    const bytes = this._byteDecision(byteSample, pathRtt < Infinity, starved)
+    const msgs = this._msgDecision(this._msgsReceived - this._msgsAtPingSent, starved)
     this._msgWindowBeforeGrowth = 0
-    const msgs: AxisDecision =
-      this._msgWindow >= CREDIT_MSG_WINDOW_MAX ? 'at-cap' : msgSample * 3 < msgWindow * 2 ? 'sample-too-small' : 'grow'
     this._grownWindow =
       bytes === 'grow' && roundWait > 0
         ? Math.min(2 * this._byteWindow, Math.max(this._byteWindow, Math.ceil(1.5 * byteSample)))
         : 0
-    // Cadence: snap to MIN on grow (more headroom may exist), exponential
-    // backoff on a verdict against growing (converged or temporarily quiet).
-    if (bytes === 'grow' || msgs === 'grow') {
-      this._probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
-    } else if (bytes !== 'window-grew') {
-      this._probeIntervalMs = Math.min(BDP_PING_MAX_INTERVAL_MS, this._probeIntervalMs * 2)
-    }
+    this._pace(bytes, msgs)
     return { acknowledged: true, bytes, msgs }
+  }
+
+  /** This round, less its wait behind this side's data, bounds the round trip where shorter, or where no queue held it. */
+  private _boundRoundTrip(
+    rtt: number,
+    received: number,
+    starved: boolean,
+    deliveredBefore: (ms: number) => number,
+  ): void {
+    const roundRtt = Math.max(1, rtt - this._pingWait)
+    if (this._boundRtt < Infinity && roundRtt < this._boundRtt) this._boundRtt = roundRtt
+    // Starved, the wire near idle before the ack: no queue held it, so the round trip less its wait is the path's.
+    if (starved && received * 3 >= this._byteWindow * 2 && deliveredBefore(rtt / 8) * 16 < received) {
+      this._boundRtt = roundRtt
+    }
+  }
+
+  /** A measured path round trip, or a round the window held back, tells a queue from the path; else only the sender. */
+  private _pathRtt(senderPathRtt: number): number {
+    const pathRtt = Math.min(this._link?.pathRtt ?? Infinity, senderPathRtt)
+    if (this._boundRtt === Infinity) return pathRtt
+    return pathRtt < Infinity ? Math.max(pathRtt, this._boundRtt) : this._boundRtt
   }
 
   /** The byte axis's verdict on `byteSample`, taken at the path's round trip if `measured`, starved if `starved`. */
@@ -171,6 +174,22 @@ class BdpEstimator {
     if (measured) return 'grow'
     if (this._pingFollowsGrowth) return 'window-grew'
     return starved ? 'grow' : 'wire-busy'
+  }
+
+  /** The message axis's verdict on `msgSample`; starved, against the window before its last growth. */
+  private _msgDecision(msgSample: number, starved: boolean): AxisDecision {
+    if (this._msgWindow >= CREDIT_MSG_WINDOW_MAX) return 'at-cap'
+    const msgWindow = (starved && this._msgWindowBeforeGrowth) || this._msgWindow
+    return msgSample * 3 < msgWindow * 2 ? 'sample-too-small' : 'grow'
+  }
+
+  /** Cadence: snap to MIN on grow (more headroom may exist), exponential backoff on a verdict against growing. */
+  private _pace(bytes: AxisDecision, msgs: AxisDecision): void {
+    if (bytes === 'grow' || msgs === 'grow') {
+      this._probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
+    } else if (bytes !== 'window-grew') {
+      this._probeIntervalMs = Math.min(BDP_PING_MAX_INTERVAL_MS, this._probeIntervalMs * 2)
+    }
   }
 
   /** Commit a byte-window growth: a doubling, or less as the last settled probe says. Idempotent at the cap. */
