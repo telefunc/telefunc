@@ -1457,16 +1457,7 @@ class ClientConnection implements MuxConnection {
 
   drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
     if (this.transport.reconcileMode !== 'batch-on-reconcile') return []
-    // The hazard is confined to a *reconnect's* initial batch: the previous wire may have died
-    // with an unacked frame still only in the replay buffer, which is re-sent after RECONCILED
-    // (`applyReconciled`'s `getAfter`). Eager-batching a newer frame into that initial batch
-    // would reach the server first, advance its `lastClientSeq` past the older one, and get the
-    // older one dup-dropped on replay — silent message loss. Defer to the post-RECONCILED
-    // release there (same ordering discipline as the WS 'release-after-reconciled' mode).
-    // A connect retried before its first RECONCILED is a reconnect too: its earlier batch's frames are only in the
-    // replay buffers. Every other reconcile is on a live wire: a first attempt has sent nothing yet, and a
-    // reconcile on an established wire (new-channel registration, chained reconcile) has no
-    // in-transit replay frame to jump ahead of — so eager-batch, it saves a round-trip.
+    // After a wire that may have lost frames, the replay goes first: a newer frame ahead gets an older one dropped.
     if (isInitialBatch && (this.sessionId !== null || this.sentBefore())) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     for (const { channelIx, seq } of this.settleQueue()) {
@@ -1505,21 +1496,7 @@ class ClientConnection implements MuxConnection {
 
   private applyReconciled(ctrl: ReconciledPayload, deferredOmitted: number[] | null): ReconcileOutcome {
     this.sessionId = ctrl.sessionId
-    this.reconnectTimeoutMs = ctrl.reconnectTimeout
-    // A per-call `idleTimeout` (withContext) is kept over the server's.
-    if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
-    this.clientReplayBufferBytes = ctrl.clientReplayBuffer
-    this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
-    this.replayWindows = {
-      window: replayWindow(ctrl.serverReplayBuffer, ctrl.serverReplayBufferBinary),
-      peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary),
-    }
-    // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
-    for (const replay of this.replayBuffers.values()) {
-      replay.setLimits(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes)
-    }
-    for (const { channel } of this.channels.values()) this.fitReplays(channel)
-
+    this.takeServerSettings(ctrl)
     const serverMap = new Map<number, number>()
     for (const channel of ctrl.open) serverMap.set(channel.ix, channel.lastSeq)
     const { ixes, probes, attachResults, carriedFrom } = this.inFlight
@@ -1543,27 +1520,9 @@ class ClientConnection implements MuxConnection {
         continue
       }
       if (this.awaitedIxes.has(ix)) continue
-      if (entry.state.tag === 'closed') {
-        const lastSeq = serverMap.get(ix)
-        // One the server no longer has needs nothing more from the page.
-        if (lastSeq === undefined) {
-          this.releaseChannel(ix, entry.channel)
-          continue
-        }
-        this.serverHas(ix, entry.state, lastSeq)
-      }
-      if (!serverMap.has(ix)) {
-        if (deferredOmitted) {
-          deferredOmitted.push(ix)
-          continue
-        }
-        this.closeUnacknowledged([ix])
-        continue
-      }
-      if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
-      for (const frame of this.replayTo(ix, entry, serverMap.get(ix)!, (carriedFrom.get(ix) ?? Infinity) - 1)) {
-        releaseFrames.push(frame)
-      }
+      const replay = this.reattach(ix, entry, serverMap.get(ix), (carriedFrom.get(ix) ?? Infinity) - 1, deferredOmitted)
+      if (replay === null) continue
+      for (const frame of replay) releaseFrames.push(frame)
       if (entry.state.tag !== 'closed') channelsToOpen.push(entry.channel)
     }
 
@@ -1579,6 +1538,49 @@ class ClientConnection implements MuxConnection {
     }
 
     return { frames: releaseFrames, channelsToOpen, reconcileComplete: !hasNewChannels }
+  }
+
+  /** The timeouts and replay sizes the server sets, each replay fitted to them. */
+  private takeServerSettings(ctrl: ReconciledPayload): void {
+    this.reconnectTimeoutMs = ctrl.reconnectTimeout
+    // A per-call `idleTimeout` (withContext) is kept over the server's.
+    if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
+    this.clientReplayBufferBytes = ctrl.clientReplayBuffer
+    this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
+    this.replayWindows = {
+      window: replayWindow(ctrl.serverReplayBuffer, ctrl.serverReplayBufferBinary),
+      peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary),
+    }
+    // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
+    for (const replay of this.replayBuffers.values()) {
+      replay.setLimits(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes)
+    }
+    for (const { channel } of this.channels.values()) this.fitReplays(channel)
+  }
+
+  /** What a channel the RECONCILE named replays to the server, its state brought to the server's; null if let go. */
+  private reattach(
+    ix: number,
+    entry: ChannelEntry,
+    lastSeq: number | undefined,
+    throughSeq: number,
+    deferredOmitted: number[] | null,
+  ): OutboundFrame[] | null {
+    if (entry.state.tag === 'closed') {
+      // One the server no longer has needs nothing more from the page.
+      if (lastSeq === undefined) {
+        this.releaseChannel(ix, entry.channel)
+        return null
+      }
+      this.serverHas(ix, entry.state, lastSeq)
+    }
+    if (lastSeq === undefined) {
+      if (deferredOmitted) deferredOmitted.push(ix)
+      else this.closeUnacknowledged([ix])
+      return null
+    }
+    if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
+    return this.replayTo(ix, entry, lastSeq, throughSeq)
   }
 
   private closeUnacknowledged(ixes: number[]): void {
