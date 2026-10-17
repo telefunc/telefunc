@@ -836,17 +836,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         return
       }
     }
-    let lastResult: unknown
-    for (const cb of this._listeners.list()) {
-      try {
-        lastResult = await cb(data)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
-        return
-      }
+    let answer: string
+    try {
+      let lastResult: unknown
+      for (const cb of this._listeners.list()) lastResult = await cb(data)
+      answer = stringify(lastResult)
+    } catch (err) {
+      if (this._handleCallbackError(err)) return
+      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      return
     }
-    this._sendAckRes(seq, stringify(lastResult))
+    this._sendAckRes(seq, answer)
   }
 
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
@@ -854,17 +854,17 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
-    let lastResult: unknown
-    for (const cb of this._binaryListeners.list()) {
-      try {
-        lastResult = await cb(data)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
-        return
-      }
+    let answer: string
+    try {
+      let lastResult: unknown
+      for (const cb of this._binaryListeners.list()) lastResult = await cb(data)
+      answer = stringify(lastResult)
+    } catch (err) {
+      if (this._handleCallbackError(err)) return
+      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      return
     }
-    this._sendAckRes(seq, stringify(lastResult))
+    this._sendAckRes(seq, answer)
   }
 
   protected _trackAck<T>(promise: Promise<T>): Promise<T> {
