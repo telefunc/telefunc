@@ -94,6 +94,65 @@ test("an ack answer larger than the server takes rejects the server's send, and 
   }
 })
 
+test("a channel the page opens takes the server's limit from its connection's RECONCILED: a larger ack answer rejects the server's send, a larger send() throws, and the channel stays open", async () => {
+  vi.useFakeTimers()
+  setAdapterMaxFrameBytes(1024 * 1024)
+  try {
+    const { net, channel } = page('ws')
+    const server = register()
+    const client = channel(server.id)
+    channels.push(client as ClientChannel<never, string>)
+    client.listen(() => 'x'.repeat(2 * 1024 * 1024))
+    await vi.advanceTimersByTimeAsync(100)
+    const answered = server.send('question', { ack: true }).then(
+      () => 'resolved',
+      (err: Error) => err.message,
+    )
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(await answered).toMatch(/bytes encoded, the server accepts 1048576 at most$/)
+    expect(() => client.send('x'.repeat(2 * 1024 * 1024))).toThrow('the server accepts 1048576 at most')
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect([client.isClosed, server.isClosed]).toEqual([false, false])
+    expect(net.traffic.requests).toBe(1)
+  } finally {
+    setAdapterMaxFrameBytes(undefined)
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  }
+})
+
+test.each(['text', 'binary'] as const)(
+  "an ack answer to a %s message that can't be serialized rejects the server's send as a listener's throw does, and the channel stays open",
+  async (kind) => {
+    vi.useFakeTimers()
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { channel } = page('sse')
+      const server = register()
+      const client = channel(server.id)
+      channels.push(client as ClientChannel<never, string>)
+      const cyclic: { self?: unknown } = {}
+      cyclic.self = cyclic
+      client.listen(() => cyclic)
+      client.listenBinary(() => cyclic)
+      await vi.advanceTimersByTimeAsync(100)
+      const sent =
+        kind === 'text' ? server.send('question', { ack: true }) : server.sendBinary(new Uint8Array(1), { ack: true })
+      const answered = sent.then(
+        () => 'resolved',
+        (err: Error) => err.message,
+      )
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await answered).toBe('Internal client channel error — see client logs')
+      expect(reported).toHaveBeenCalledOnce()
+      expect([client.isClosed, server.isClosed]).toEqual([false, false])
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  },
+)
+
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = stalledChannel()
   const seen: string[] = []

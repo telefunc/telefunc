@@ -566,17 +566,17 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     const parsed = parse(data) as ChannelData<ServerToClient>
-    let lastResult: unknown
-    for (const cb of this._listeners.list()) {
-      try {
-        lastResult = await cb(parsed)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
-        return
-      }
+    let answer: string
+    try {
+      let lastResult: unknown
+      for (const cb of this._listeners.list()) lastResult = await cb(parsed)
+      answer = stringify(lastResult)
+    } catch (err) {
+      if (this._handleCallbackError(err)) return
+      this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
+      return
     }
-    this._connection.sendAckRes(this, seq, stringify(lastResult))
+    this._connection.sendAckRes(this, seq, answer)
   }
 
   private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
@@ -584,17 +584,17 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
-    let lastResult: unknown
-    for (const cb of this._binaryListeners.list()) {
-      try {
-        lastResult = await cb(data)
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-        this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
-        return
-      }
+    let answer: string
+    try {
+      let lastResult: unknown
+      for (const cb of this._binaryListeners.list()) lastResult = await cb(data)
+      answer = stringify(lastResult)
+    } catch (err) {
+      if (this._handleCallbackError(err)) return
+      this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
+      return
     }
-    this._connection.sendAckRes(this, seq, stringify(lastResult))
+    this._connection.sendAckRes(this, seq, answer)
   }
 
   /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */

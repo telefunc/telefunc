@@ -31,6 +31,7 @@ function open() {
     () => 0,
     5_000,
     uplink.link,
+    { cuts: false, dataRoom: () => Number.POSITIVE_INFINITY, handed: () => {}, sentFrame: () => {} },
   )
   prober.send(data(PROBE))
   prober.acknowledged({ bytes: WIRE_PROBE_FIRST_BYTES + WIRE_PROBE_PAIR_BYTES, heldMs: 0, spanUs: 0 })

@@ -1,4 +1,4 @@
-export { encodeSseRequest, encodeSseBatch, encodeSseRequestMetadata, parseSseRequestMetadata }
+export { encodeSseRequest, encodeSseBatch, encodeSseRequestMetadata, encodeLengthPrefixedBlob, parseSseRequestMetadata }
 export type { SseRequestMetadata }
 
 import { encodeLengthPrefixedString, encodeU32 } from './frame.js'
@@ -32,8 +32,12 @@ function encodeSseRequest(metadata: SseRequestMetadata, batch?: Uint8Array<Array
 /** As `encodeSseRequest` with `frames` length-prefixed, but the Blob takes the frames as they are: a batch POST of a
  *  window's worth isn't copied into one buffer first. `head`: the first frames, length-prefixed already. */
 function encodeSseBatch(metadata: SseRequestMetadata, frames: Uint8Array<ArrayBuffer>[], head?: Blob): Blob {
-  const parts: (Blob | Uint8Array<ArrayBuffer>)[] = [encodeSseRequestMetadata(metadata)]
-  if (head) parts.push(head)
+  return new Blob([encodeSseRequestMetadata(metadata), encodeLengthPrefixedBlob(frames, head)])
+}
+
+/** `frames` length-prefixed after `head`, in a Blob that takes them as they are. */
+function encodeLengthPrefixedBlob(frames: Uint8Array<ArrayBuffer>[], head?: Blob): Blob {
+  const parts: (Blob | Uint8Array<ArrayBuffer>)[] = head ? [head] : []
   for (const frame of frames) parts.push(encodeU32(frame.byteLength), frame)
   return new Blob(parts)
 }

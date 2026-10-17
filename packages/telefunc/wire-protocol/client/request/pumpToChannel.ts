@@ -74,7 +74,7 @@ function pumpClientProducerToChannel(createProducer: () => StreamingProducer, op
       // Anything else is the source failing: the server's stream errors rather than end as if complete. No detail of the
       // page's error crosses to the server.
       if (!(err instanceof ChannelClosedError) && !channel.isClosed) {
-        channel._sendBinary(concat(TAG_ERROR, textEncoder.encode('{}')))
+        channel.sendBinary(concat(TAG_ERROR, textEncoder.encode('{}')))
       }
     } finally {
       doCancel()

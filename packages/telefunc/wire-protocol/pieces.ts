@@ -11,7 +11,7 @@ import {
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
 } from './constants.js'
-import { Link } from './link.js'
+import type { Link } from './link.js'
 import {
   LENGTH_BYTES,
   TAG,
@@ -50,13 +50,6 @@ type SendRoom = {
   handed(bytes: number, data: boolean): void
   /** It was sent a frame of `tag` and `bytes`, which it hands the socket now or once room allows. */
   sentFrame(tag: number, bytes: number): void
-}
-
-const UNBOUNDED: SendRoom = {
-  cuts: false,
-  dataRoom: () => Number.POSITIVE_INFINITY,
-  handed: () => {},
-  sentFrame: () => {},
 }
 
 /** One WebSocket's sender: a turn's frames go in one message, one that may take a ping interval to cross in pieces. */
@@ -108,8 +101,8 @@ class PieceSender {
     /** Its wire's ping interval, which sizes the frames it sends whole. */
     private pingInterval: number,
     /** Its wire's: the rates it measures go there. */
-    private readonly link = new Link(),
-    private readonly room = UNBOUNDED,
+    private readonly link: Link,
+    private readonly room: SendRoom,
   ) {
     // As the turn ends, it hands what it gathered unless an announcement is open; what was only carried waits.
     this.turn = new TurnMessage(transmit, () => {

@@ -14,7 +14,7 @@ import { getChannelMux } from './server/mux.js'
 import { getTelefuncSseChannelHooks } from './server/sse.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH } from './constants.js'
 import { config as serverConfig } from '../node/server/serverConfig.js'
-import { Pipe } from './test/loopback.js'
+import { Pipe } from './test/pipe.js'
 import { flowOf, produce, run } from './test/channel-specs.js'
 
 const LATENCY_MS = 25

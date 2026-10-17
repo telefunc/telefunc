@@ -1,5 +1,5 @@
 export { ChannelMux, getChannelMux, CHANNEL_MUX }
-export type { ConnectionEntry, ReconcileOutcome, ServerTransport, Wire }
+export type { ConnectionEntry, ReconcileOutcome, ServerTransport, Wire, WirePieces }
 
 import { assert } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
@@ -22,7 +22,6 @@ import {
   WIRE_MAX_RAW_FRAME_BYTES,
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
-  WIRE_SEND_BACKLOG_BASE_BYTES,
   type ChannelTransports,
 } from '../constants.js'
 import {
@@ -37,7 +36,6 @@ import {
   messageFrames,
   isConnCtrlTag,
   isSequencedTag,
-  passesData,
   peekTag,
   seqThrough,
   withTook,
@@ -56,6 +54,7 @@ import { PathRoom } from './path-room.js'
 import { ServerPieceReceiver } from './server-piece-receiver.js'
 import { Deliveries } from '../deliveries.js'
 import { SocketWait } from './socket-wait.js'
+import { WireSender } from './wire-sender.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './awaited-channels.js'
 import type { ServerChannel } from './channel.js'
 
@@ -135,6 +134,8 @@ type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
 
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 
+type WirePieces = { room: PathRoom; receiver: ServerPieceReceiver }
+
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
   /** When the wire last delivered a frame, or the ping deadline was last set. */
@@ -145,7 +146,7 @@ type ConnectionState = {
   frameDelivery: number
   /** When the last PONG went out. */
   pongedAt: number
-  pieces: { room: PathRoom; receiver: ServerPieceReceiver } | null
+  pieces: WirePieces | null
   terminatePermanently: boolean
   recvChain: Promise<unknown> | null
   /** Set by `onConnectionClosed` so an in-flight `reconcile` can see the close and its kind. */
@@ -153,18 +154,9 @@ type ConnectionState = {
   retiredByBarrier: boolean
   recvBacklog: RecvBacklog
   awaited: AwaitedChannels
-  /** What may be written before the backlog is read again against what its channels' flow control allows. */
-  sendHeadroom: number
-  /** The largest frame sent on the wire. */
-  largestSent: number
-  /** Its backlog passed that, and the wire is being terminated. */
-  pastSendBacklog: boolean
   /** Channels attaching in this turn, before its session holds them: what they send counts in the headroom too. */
   attaching: Set<ServerChannel>
-  /** How long the frames that go at once wait behind what the socket holds. */
-  wait: SocketWait
-  /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
-  probed: { ix: number; probe: number }[]
+  wireSender: WireSender
 }
 
 type ConnectionEntry = {
@@ -280,32 +272,32 @@ class ChannelMux {
           this.options.pingInterval,
         )
       : null
-    this.connectionEntries.set(connection, {
+    const pieces = room && {
+      room,
+      receiver: new ServerPieceReceiver(
+        (frame) => this.send(connection, frame),
+        (ack) => room.sender.carry(ack),
+      ),
+    }
+    const wireSender = new WireSender(connection, transport as ServerTransport<unknown>, pieces, wait, () =>
+      this.wireChannels(entry, connection),
+    )
+    const entry: ConnectionEntry = {
       state: {
         pingTimer: null,
         lastReceivedAt: 0,
         deliveries: new Deliveries(),
         frameDelivery: 0,
         pongedAt: performance.now(),
-        pieces: room && {
-          room,
-          receiver: new ServerPieceReceiver(
-            (frame) => this.send(connection, frame),
-            (ack) => room.sender.carry(ack),
-          ),
-        },
+        pieces,
         terminatePermanently: false,
         recvChain: null,
         closed: null,
         retiredByBarrier: false,
         recvBacklog,
         awaited: new AwaitedChannels(recvBacklog),
-        sendHeadroom: 0,
-        largestSent: 0,
-        pastSendBacklog: false,
         attaching: new Set(),
-        wait,
-        probed: [],
+        wireSender,
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
@@ -315,13 +307,14 @@ class ChannelMux {
           else this.send(connection, frame as Uint8Array<ArrayBuffer>)
         },
         bufferedAmount: () => this.bufferedAmount(connection),
-        sendWait: () => wait,
+        sendWait: () => wireSender.wait,
         deliveredBeforeFrame: (ms) => {
           const state = this.connectionEntries.get(connection)?.state
           return state ? state.deliveries.before(state.frameDelivery, ms) : 0
         },
       },
-    })
+    }
+    this.connectionEntries.set(connection, entry)
     const connId = transport.getConnId(connection)
     if (connId !== null) this.connectionsByConnId.set(connId, connection)
     this.resetPingTimer(connection)
@@ -340,8 +333,7 @@ class ChannelMux {
   }
 
   sendReconciled(outcome: ReconcileOutcome): void {
-    const state = this.connectionEntries.get(outcome.deliverTo)?.state
-    if (state) state.probed = []
+    this.connectionEntries.get(outcome.deliverTo)?.state.wireSender.dropProbes()
     this.send(
       outcome.deliverTo,
       encode.reconciled({
@@ -351,6 +343,7 @@ class ChannelMux {
         reconnectTimeout: this.options.reconnectTimeout,
         idleTimeout: this.options.idleTimeout,
         pingInterval: this.options.pingInterval,
+        maxFrameBytes: getAdapterMaxFrameBytes() ?? WIRE_MAX_RAW_FRAME_BYTES,
         serverReplayBuffer: this.options.serverReplayBuffer,
         serverReplayBufferBinary: this.options.serverReplayBufferBinary,
         clientReplayBuffer: this.options.clientReplayBuffer,
@@ -846,7 +839,7 @@ class ChannelMux {
     replay: boolean,
   ): ChannelHandle | null {
     // Answered ahead of the channel's frames, and of its registration where awaited: its round trip is the path's.
-    if (open.probe !== undefined) entry.state.probed.push({ ix: open.ix, probe: open.probe })
+    if (open.probe !== undefined) entry.state.wireSender.addProbe(open.ix, open.probe)
     const awaited = entry.state.awaited.get(open.ix)
     if (awaited) {
       awaited.open = open
@@ -1022,53 +1015,23 @@ class ChannelMux {
   /** Sole send path, sync so wire order is call order; a frame for a closed or over-backlog wire commits anyway. */
   private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
     onCommit?.()
-    const entry = this.connectionEntries.get(connection)
-    if (!entry) return
-    const { state } = entry
-    if (state.pastSendBacklog) return
-    if (state.probed.length > 0) this.answerProbes(connection, state)
-    if (frame[0] === TAG.ACK_RES) state.pieces?.receiver.answering()
-    if (frame.byteLength > state.largestSent) state.largestSent = frame.byteLength
-    if (frame.byteLength > state.sendHeadroom) {
-      state.sendHeadroom = this.sendHeadroom(entry, connection)
-      if (state.sendHeadroom < 0) {
-        state.pastSendBacklog = true
-        queueMicrotask(() => entry.transport.terminateConnection(connection))
-        return
-      }
-    }
-    state.sendHeadroom -= frame.byteLength
-    state.wait.handed(frame.byteLength, passesData(frame[0]!))
-    if (state.pieces) state.pieces.room.send(frame)
-    else entry.transport.sendNow(connection, frame)
+    this.connectionEntries.get(connection)?.state.wireSender.send(frame)
   }
 
-  /** Answers its RECONCILE's probes ahead of the next frame: each says no credit ran out and names no round trip. */
-  private answerProbes(connection: Wire, state: ConnectionState): void {
-    const probed = state.probed
-    state.probed = []
-    for (const { ix, probe } of probed) this.send(connection, encode.bdpPingAck(ix, probe, Infinity, Infinity))
-  }
-
-  /** What its channels' flow control lets the wire hold, less what it holds; `Infinity` if the runtime can't tell. */
-  private sendHeadroom(entry: ConnectionEntry, connection: Wire): number {
-    const backlog = this.bufferedAmount(connection)
-    if (backlog === undefined) return Infinity
+  /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
+  private wireChannels(entry: ConnectionEntry, connection: Wire): Set<ServerChannel> {
     const sessionId = entry.transport.getSessionId(connection)
     const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
     const channels = new Set(entry.state.attaching)
     for (const { channel } of session?.values() ?? []) channels.add(channel)
-    let allowed = WIRE_SEND_BACKLOG_BASE_BYTES
-    for (const channel of channels) allowed += channel._sendAllowance() + entry.state.largestSent
-    return allowed - backlog
+    return channels
   }
 
-  /** What its socket holds unsent, and what its piece sender hasn't handed it. A wire that's gone holds nothing. */
+  /** A wire that's gone holds nothing. */
   private bufferedAmount(connection: Wire): number | undefined {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return 0
-    const socket = entry.transport.bufferedAmount(connection)
-    return socket === undefined ? undefined : socket + (entry.state.pieces?.room.sender.unhandedBytes ?? 0)
+    return entry.state.wireSender.bufferedAmount()
   }
 
   /** What a frame that goes at once counts as ahead of it: the transport's `queuedAhead` where it has one. */
