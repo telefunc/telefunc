@@ -65,21 +65,15 @@ class Link {
 
 /** Waits by when they were seen, for `WAITS_KEPT_MS`; each drops the earlier ones no longer than it. */
 class Waits {
-  private at: number[] = []
-  private wait: number[] = []
+  private entries: { at: number; wait: number }[] = []
   private head = 0
 
   note(wait: number, at: number): void {
-    while (this.at.length > this.head && this.wait[this.wait.length - 1]! <= wait) {
-      this.at.pop()
-      this.wait.pop()
-    }
-    this.at.push(at)
-    this.wait.push(wait)
-    while (this.at[this.head]! < at - WAITS_KEPT_MS) this.head++
-    if (this.head > 16 && this.head >= this.at.length >>> 1) {
-      this.at = this.at.slice(this.head)
-      this.wait = this.wait.slice(this.head)
+    while (this.entries.length > this.head && this.entries[this.entries.length - 1]!.wait <= wait) this.entries.pop()
+    this.entries.push({ at, wait })
+    while (this.entries[this.head]!.at < at - WAITS_KEPT_MS) this.head++
+    if (this.head > 16 && this.head >= this.entries.length >>> 1) {
+      this.entries = this.entries.slice(this.head)
       this.head = 0
     }
   }
@@ -87,12 +81,12 @@ class Waits {
   /** The longest wait seen at or after `at`, 0 for none. */
   since(at: number): number {
     let lo = this.head
-    let hi = this.at.length
+    let hi = this.entries.length
     while (lo < hi) {
       const mid = (lo + hi) >>> 1
-      if (this.at[mid]! < at) lo = mid + 1
+      if (this.entries[mid]!.at < at) lo = mid + 1
       else hi = mid
     }
-    return lo < this.at.length ? this.wait[lo]! : 0
+    return lo < this.entries.length ? this.entries[lo]!.wait : 0
   }
 }
