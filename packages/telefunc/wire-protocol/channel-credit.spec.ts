@@ -636,6 +636,29 @@ test('a broadcast whose page was offline while more binary was published than co
   expect(closed.page).toBeInstanceOf(ChannelOverflowError)
 })
 
+test.each([
+  ['text', 'bufferLimit', (key: string) => Broadcast.publish(key, ''.padEnd(600 * KIB))],
+  ['binary', 'bufferLimitBinary', (key: string) => Broadcast.publishBinary(key, new Uint8Array(3 * KIB * KIB))],
+] as const)(
+  'a broadcast whose page was offline when one %s publish larger than config.channel.%s was published closes on both ends with ChannelOverflowError at its reconnect',
+  async (_kind, _limit, publish) => {
+    const key = `room:${crypto.randomUUID()}`
+    const room = loop.openBroadcast<string>(key)
+    const closed = closedWith(room)
+    const seen: unknown[] = []
+    room.page.subscribe((text) => void seen.push(text))
+    room.page.subscribeBinary((data) => void seen.push(data))
+    await run(100)
+    loop.socket.cut()
+    // Offline, the server holds 512 KiB of text and 2 MiB of binary for the page.
+    publish(key)
+    await runUntil(() => closed.page !== 'open', 2_000)
+    expect(closed.server).toBeInstanceOf(ChannelOverflowError)
+    expect(closed.page).toBeInstanceOf(ChannelOverflowError)
+    expect(seen).toEqual([])
+  },
+)
+
 test('a broadcast whose page was offline while less was published than config.channel.bufferLimit holds gets it all at its reconnect', async () => {
   const key = `room:${crypto.randomUUID()}`
   const room = loop.openBroadcast<string>(key)
