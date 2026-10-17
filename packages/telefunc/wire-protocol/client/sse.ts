@@ -21,7 +21,7 @@ import { Uplink } from './uplink.js'
 import { Downlink } from './downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
 import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../shared-ws.js'
-import { encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
+import { encodeLengthPrefixedBlob, encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 import { SSEEvents } from './SSEEvents.js'
 import { randomUuid } from '../../utils/randomUuid.js'
@@ -196,14 +196,9 @@ class SseTransport implements UpgradeSource {
     if (this.unfolded < SSE_FOLD_BYTES) return
     this.unfolded = 0
     const folded = this.foldHeading(this.outbox)
-    const from = folded?.count ?? 0
-    const parts: (Blob | Uint8Array<ArrayBuffer>)[] = folded ? [folded.blob] : []
-    for (let i = from; i < this.outbox.length; i++) {
-      const { frame } = this.outbox[i]!
-      parts.push(encodeU32(frame.byteLength), frame)
-    }
+    const rest = this.outbox.slice(folded?.count ?? 0).map((entry) => entry.frame)
     this.folded = {
-      blob: new Blob(parts),
+      blob: encodeLengthPrefixedBlob(rest, folded?.blob),
       count: this.outbox.length,
       first: this.outbox[0]!,
       last: this.outbox[this.outbox.length - 1]!,
