@@ -4,7 +4,6 @@ import {
   assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
-  getShardIndicesForBucket,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
 } from './routing.js'
@@ -172,30 +171,19 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
-    const shardIndices = getBucketCoordinatorShardIndices(2, 'weur')
-
-    expect(getDeterministicKeyBucketIndex('room/alpha', shardIndices.length)).toBe(
-      getDeterministicKeyBucketIndex('room/alpha', shardIndices.length),
-    )
+    // A hash of the key alone, so every isolate, and every version of a gradual deploy, picks the same coordinator.
+    expect(getDeterministicKeyBucketIndex('room/alpha', 2)).toBe(0)
+    expect(getDeterministicKeyBucketIndex('room/alpha', 3)).toBe(2)
   })
 
   it('assigns room keys only within the bucket-coordinator subset', () => {
-    const weurShards = getBucketCoordinatorShardIndices(2, 'weur')
-    const apacShards = getBucketCoordinatorShardIndices(2, 'apac')
-    const ocShards = getBucketCoordinatorShardIndices(2, 'oc')
-
-    expect(weurShards).toContain(weurShards[getDeterministicKeyBucketIndex('room/alpha', weurShards.length)]!)
-    expect(apacShards).toContain(apacShards[getDeterministicKeyBucketIndex('room/alpha', apacShards.length)]!)
-    expect(ocShards).toContain(ocShards[getDeterministicKeyBucketIndex('room/alpha', ocShards.length)]!)
-  })
-
-  it('partitions shards by bucket when the scale is uniform', () => {
-    expect(getShardIndicesForBucket(2, 'wnam')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'enam')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'weur')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'eeur')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'apac')).toEqual([0, 1])
-    expect(getShardIndicesForBucket(2, 'oc')).toEqual([0, 1])
+    for (const bucket of ['weur', 'apac', 'oc'] as const) {
+      const shards = getBucketCoordinatorShardIndices(6, bucket)
+      const picked = new Set(
+        Array.from({ length: 20 }, (_, n) => shards[getDeterministicKeyBucketIndex(`room/${n}`, shards.length)]),
+      )
+      expect([...picked].sort()).toEqual(shards)
+    }
   })
 
   it('partitions bucket coordinators at ceil(sessionScale / 2) per bucket', () => {
@@ -206,25 +194,38 @@ describe('cloudflare broadcast routing', () => {
     expect(getBucketCoordinatorShardIndices(4, 'enam')).toEqual([0, 1])
   })
 
-  it('uses scale maps to control the session and bucket-coordinator shard subsets together', () => {
-    expect(getShardIndicesForBucket({ weur: 2, enam: 1 }, 'enam')).toEqual([0])
-    expect(getShardIndicesForBucket({ weur: 2, enam: 1 }, 'weur')).toEqual([0, 1])
+  it('uses scale maps to control the bucket-coordinator shard subsets', () => {
     expect(getBucketCoordinatorShardIndices({ weur: 2, enam: 1 }, 'enam')).toEqual([0])
     expect(getBucketCoordinatorShardIndices({ weur: 2, enam: 1 }, 'weur')).toEqual([0])
     expect(getBucketCoordinatorShardIndices({ weur: 3, enam: 1 }, 'weur')).toEqual([0, 1])
   })
 
   it('uses only canonical bucket scale entries', () => {
-    expect(getShardIndicesForBucket({ weur: 2, apac: 1 }, 'weur')).toEqual([0, 1])
-    expect(getShardIndicesForBucket({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
     expect(getBucketCoordinatorShardIndices({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
+  })
+
+  it('routes one session token to one shard of its region, however often it is routed', () => {
+    const request = createCloudflareRequest({ colo: 'LHR' })
+    const shards = new Set(
+      Array.from(
+        { length: 20 },
+        () => resolveSessionRoutingTarget('telefunc', { weur: 4 }, request, 'weur', 'token-a').shardOrdinal,
+      ),
+    )
+    expect(shards.size).toBe(1)
   })
 
   it('resolves session targets from request location and scale', () => {
     const exactRequest = createCloudflareRequest({ colo: 'LHR' })
     const unknownRequest = createCloudflareRequest({ continent: 'EU' })
-    const exactTarget = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, exactRequest, 'weur')
-    const fallbackTarget = resolveSessionRoutingTarget('telefunc', { weur: 1, apac: 1 }, unknownRequest, 'weur')
+    const exactTarget = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, exactRequest, 'weur', 'token')
+    const fallbackTarget = resolveSessionRoutingTarget(
+      'telefunc',
+      { weur: 1, apac: 1 },
+      unknownRequest,
+      'weur',
+      'token',
+    )
 
     expect(exactTarget).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
@@ -240,7 +241,7 @@ describe('cloudflare broadcast routing', () => {
   it('routes a recognized region missing from the scale map to locationFallback instead of throwing', () => {
     // `ABQ` resolves to `wnam`, which is absent from this per-region scale map.
     const wnamRequest = createCloudflareRequest({ colo: 'ABQ' })
-    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur')
+    const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur', 'token')
 
     expect(target).toMatchObject({
       sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
@@ -332,7 +333,7 @@ describe('cloudflare broadcast routing', () => {
 
     transport.attachBinding(
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(id) {
           publishTargets.push(id.name)
           return Promise.resolve({ seq: 1, timestamp: Date.now() })
         },
@@ -355,6 +356,49 @@ describe('cloudflare broadcast routing', () => {
     await flushCoordinatorTurn()
 
     expect(publishTargets).toEqual(['telefunc:broadcast:authority:room:test'])
+
+    _resetBroadcastAdapterForTesting(previousTransport)
+  })
+
+  it('delivers the bytes a binary publish waiting for KV presence setup was given, though its caller reuses the buffer', async () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const kv = createMockKV()
+    const previousTransport = getBroadcastAdapter()
+    const published: number[][] = []
+    let releaseKVPut: (() => void) | null = null
+    const kvPutReady = new Promise<void>((resolve) => {
+      releaseKVPut = resolve
+    })
+
+    const originalPut = kv.put.bind(kv)
+    kv.put = (async (key: string, value: string, options?: any) => {
+      await kvPutReady
+      return originalPut(key, value, options)
+    }) as any
+
+    transport.attachBinding(
+      createBasicBinding({
+        onPublish(_id, request) {
+          published.push(Array.from(request.binaryData as Uint8Array))
+          return Promise.resolve({ seq: 1, timestamp: Date.now() })
+        },
+      }),
+      'TelefuncDurableObject',
+    )
+    transport.attachKV(kv)
+    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    _resetBroadcastAdapterForTesting(transport)
+
+    const room = new ServerBroadcast<{ text: string }>({ key: 'room:binary' })
+    room.subscribeBinary(() => {})
+    const bytes = new Uint8Array([1, 2, 3])
+    room.publishBinary(bytes)
+    bytes.set([7, 7, 7])
+
+    releaseKVPut!()
+    await flushCoordinatorTurn()
+
+    expect(published).toEqual([[1, 2, 3]])
 
     _resetBroadcastAdapterForTesting(previousTransport)
   })
@@ -386,13 +430,13 @@ describe('cloudflare broadcast routing', () => {
 
     transport.attachBinding(
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(_id, request) {
           return transport.publishToSubscribers(createAuthorityState(), {
             ...request,
             locationBucket: request.locationBucket,
           })
         },
-        onDeliver(id, request) {
+        onDeliver(_id, request) {
           transport.deliverToLocal(request)
           return Promise.resolve()
         },
@@ -438,13 +482,13 @@ describe('cloudflare broadcast routing', () => {
     transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
     transport.attachBinding(
       createBasicBinding({
-        onPublish(id, request) {
+        onPublish(_id, request) {
           return transport.publishToSubscribers(createAuthorityState(), {
             ...request,
             locationBucket: request.locationBucket,
           })
         },
-        onDeliver(id, request) {
+        onDeliver(_id, request) {
           transport.deliverToLocal(request)
           return Promise.resolve()
         },
@@ -485,7 +529,7 @@ describe('cloudflare broadcast routing', () => {
 
     transport.attachBinding(
       createBasicBinding({
-        onPublish(id, { locationBucket }) {
+        onPublish(_id, { locationBucket }) {
           forwardedBuckets.push(locationBucket)
           return Promise.resolve()
         },

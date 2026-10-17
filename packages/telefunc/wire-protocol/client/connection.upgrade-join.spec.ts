@@ -7,11 +7,14 @@
 // orderings. This spec drives the REAL ClientConnection against a scripted SSE server and a fake
 // WebSocket, so each interleaving is chosen rather than raced.
 
-import { afterEach, beforeEach, describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection } from './connection.js'
+import { muxChannelStub } from '../test/mux-channel-stub.js'
+import { lengthPrefixed } from '../test/page-server.js'
+import { reconciled } from '../test/channel-specs.js'
 import { decode, encode, TAG } from '../shared-ws.js'
-import type { DecodedFrame } from '../shared-ws.js'
+import type { DecodedFrame, ReconciledPayload } from '../shared-ws.js'
 import { decodeU32 } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
 
@@ -22,19 +25,6 @@ const settle = async () => {
 }
 
 const bytes = (frame: Uint8Array) => frame as Uint8Array<ArrayBuffer>
-
-/** The frames the connection let through to the channel, in dispatch order. */
-function createChannel(dispatched: DecodedFrame[]) {
-  return {
-    id: crypto.randomUUID(),
-    isClosed: false,
-    _onTransportOpen() {},
-    _dispatchFrame(frame: DecodedFrame) {
-      dispatched.push(frame)
-    },
-    _onTransportClose() {},
-  }
-}
 
 class FakeWebSocket {
   static last: FakeWebSocket | null = null
@@ -71,20 +61,19 @@ class FakeWebSocket {
   }
 }
 
-function reconciled(extra: { ix: number; sessionId: string; upgradeId?: string }) {
-  return encode.reconciled({
-    sessionId: extra.sessionId,
-    open: [{ ix: extra.ix, lastSeq: 0 }],
-    reconnectTimeout: 60_000,
-    idleTimeout: 60_000,
-    pingInterval: 100_000,
-    clientReplayBuffer: 1_000_000,
-    clientReplayBufferBinary: 2_000_000,
-    sseFlushThrottle: 300,
-    ssePostIdleFlushDelay: 50,
-    transports: ['sse', 'ws'],
-    ...(extra.upgradeId === undefined ? {} : { upgradeId: extra.upgradeId }),
-  })
+function reconciledOf({ ix, ...overrides }: { ix: number; sessionId: string } & Partial<ReconciledPayload>) {
+  return encode.reconciled(
+    reconciled({
+      open: [{ ix, lastSeq: 0 }],
+      pingInterval: 100_000,
+      serverReplayBuffer: 1_000_000,
+      serverReplayBufferBinary: 2_000_000,
+      clientReplayBuffer: 1_000_000,
+      clientReplayBufferBinary: 2_000_000,
+      transports: ['sse', 'ws'],
+      ...overrides,
+    }),
+  )
 }
 
 /** SSE downstream the client reads (server→client on the old wire). */
@@ -99,18 +88,6 @@ function makeDownstream() {
   }
 }
 
-function parseLengthPrefixed(buf: Uint8Array): Uint8Array[] {
-  const out: Uint8Array[] = []
-  let off = 0
-  while (off + 4 <= buf.length) {
-    const len = decodeU32(bytes(buf.subarray(off, off + 4)))
-    off += 4
-    out.push(buf.subarray(off, off + len))
-    off += len
-  }
-  return out
-}
-
 type Harness = {
   ix: number
   probe: FakeWebSocket
@@ -119,14 +96,13 @@ type Harness = {
   pushOld: (frame: Uint8Array) => void
   dispatched: DecodedFrame[]
   connection: ClientConnection
-  channel: ReturnType<typeof createChannel>
+  channel: ReturnType<typeof muxChannelStub>
 }
 
 /** Connect over SSE, reconcile, let the client probe WS, answer PREPARE with READY, and stop at
  *  the moment the barrier has been emitted — the start of the join, before either limb lands. */
 async function upgradeToBarrier(): Promise<Harness> {
-  const dispatched: DecodedFrame[] = []
-  const channel = createChannel(dispatched)
+  const channel = muxChannelStub()
   const sessionId = crypto.randomUUID()
   let ix = 0
   const downstream = makeDownstream()
@@ -143,7 +119,7 @@ async function upgradeToBarrier(): Promise<Harness> {
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     const body = init.body as unknown
     if (body instanceof Blob) {
-      const frames = parseLengthPrefixed(new Uint8Array(await body.arrayBuffer()))
+      const frames = lengthPrefixed(new Uint8Array(await body.arrayBuffer())).map(({ frame }) => frame)
       const metadata = JSON.parse(new TextDecoder().decode(frames[0]!))
       for (const raw of frames.slice(1)) {
         const frame = decode(bytes(raw))
@@ -152,7 +128,7 @@ async function upgradeToBarrier(): Promise<Harness> {
       }
       if (!metadata.streamResponse) return new Response('', { status: 200 })
       downstream.open()
-      downstream.push(reconciled({ ix, sessionId }))
+      downstream.push(reconciledOf({ ix, sessionId }))
       return new Response(downstream.stream as BodyInit, {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
@@ -192,7 +168,7 @@ async function upgradeToBarrier(): Promise<Harness> {
     })
   }) as unknown as typeof fetch
 
-  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
+  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
     transports: ['sse', 'ws'],
     fetchImpl,
     connectionKey: crypto.randomUUID(),
@@ -212,8 +188,90 @@ async function upgradeToBarrier(): Promise<Harness> {
   const barrier = await Promise.race([barrierSent, settle().then(() => null)])
   expect(barrier, 'the client should have emitted its barrier').not.toBeNull()
 
-  return { ix, probe: probe!, barrierSent, pushOld: downstream.push, dispatched, connection, channel }
+  return {
+    ix,
+    probe: probe!,
+    barrierSent,
+    pushOld: downstream.push,
+    dispatched: channel.dispatched,
+    connection,
+    channel,
+  }
 }
+
+/** Connect over SSE with every client→server frame in a batch POST (no upload stream), and stage an upgrade on the
+ *  probe up to its READY, which `ready()` delivers. After `holdNextPost()`, the next batch POST stays out until
+ *  `releasePost()`. */
+async function stageBatchUpgrade() {
+  const channel = muxChannelStub()
+  const downstream = makeDownstream()
+  const posted: DecodedFrame[] = []
+  let streams = 0
+  let releasePost: (() => void) | null = null
+  let holdNextPost = false
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    const body = init.body as unknown
+    if (!(body instanceof Blob)) throw new TypeError('upload streams are not supported')
+    const [metadata, ...frames] = lengthPrefixed(new Uint8Array(await body.arrayBuffer())).map(({ frame }) => frame)
+    const decoded = frames.map((raw) => decode(bytes(raw)))
+    if (JSON.parse(new TextDecoder().decode(metadata)).streamResponse) {
+      streams++
+      const reconcile = decoded.find((frame) => frame.tag === TAG.RECONCILE)!
+      const ix = reconcile.tag === TAG.RECONCILE ? reconcile.payload.open[0]!.ix : 0
+      downstream.open()
+      downstream.push(
+        reconciledOf({ ix, sessionId: crypto.randomUUID(), sseFlushThrottle: 0, ssePostIdleFlushDelay: 0 }),
+      )
+      return new Response(downstream.stream as BodyInit, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    }
+    posted.push(...decoded)
+    if (!holdNextPost) return new Response('', { status: 200 })
+    holdNextPost = false
+    return await new Promise<Response>((resolve) => {
+      releasePost = () => resolve(new Response('', { status: 200 }))
+    })
+  }) as unknown as typeof fetch
+
+  const connection = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
+    transports: ['sse', 'ws'],
+    fetchImpl,
+    connectionKey: crypto.randomUUID(),
+  })
+  await settle()
+  const probe = FakeWebSocket.last!
+  probe.answer((frame) => {
+    if (frame.tag === TAG.PING) probe.deliver(encode.pong())
+  })
+  probe.deliver(encode.pong())
+  await settle()
+  const prepare = probe.sent.find((frame) => frame.tag === TAG.PREPARE)
+  expect(prepare, 'the client should have staged its upgrade').toBeDefined()
+  return {
+    channel,
+    connection,
+    probe,
+    posted,
+    get streams() {
+      return streams
+    },
+    get releasePost() {
+      return releasePost
+    },
+    holdNextPost: () => {
+      holdNextPost = true
+    },
+    ready: () => probe.deliver(encode.ready({ upgradeId: prepare!.payload.upgradeId })),
+  }
+}
+
+const fakeTimers = () =>
+  vi.useFakeTimers({
+    shouldAdvanceTime: true,
+    toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date', 'performance'],
+  })
 
 const realWebSocket = globalThis.WebSocket
 
@@ -222,6 +280,7 @@ beforeEach(() => {
   ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = FakeWebSocket
 })
 afterEach(() => {
+  vi.useRealTimers()
   ;(globalThis as unknown as { WebSocket: unknown }).WebSocket = realWebSocket
 })
 
@@ -236,7 +295,7 @@ describe('SSE→WS handoff join', () => {
     await settle()
     expect(h.dispatched).toEqual([])
 
-    h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
     await settle()
     expect(h.dispatched, 'RECONCILED alone must not end the join — FIN is still outstanding').toEqual([])
 
@@ -255,19 +314,100 @@ describe('SSE→WS handoff join', () => {
     expect(h.dispatched, 'FIN alone must not end the join — COMMITTED is still outstanding').toEqual([])
 
     h.probe.deliver(encode.text(h.ix, '"new-1"', 2))
-    h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
     await settle()
     expect(h.dispatched.map((f) => (f as { text: string }).text)).toEqual(['"old-1"', '"new-1"'])
+  })
+
+  test('the join waits past its timeout for a FIN the old wire is still delivering frames ahead of', async () => {
+    fakeTimers()
+    const h = await upgradeToBarrier()
+    const { upgradeId } = await h.barrierSent
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+    // What the old wire still carries takes 6 s to arrive, and its FIN comes behind it.
+    const texts = Array.from({ length: 12 }, (_, i) => `"old-${i + 1}"`)
+    for (const [i, text] of texts.entries()) {
+      expect(h.probe.readyState, `the page kept the WebSocket ${i * 500} ms in`).toBe(1)
+      h.pushOld(encode.text(h.ix, text, i + 1))
+      await vi.advanceTimersByTimeAsync(500)
+    }
+    h.pushOld(encode.fin())
+    await vi.advanceTimersByTimeAsync(100)
+    expect(h.probe.readyState, 'the page kept the WebSocket').toBe(1)
+    expect(h.dispatched.map((f) => (f as { text: string }).text)).toEqual(texts)
+  })
+
+  test('the join falls back 2 s after the old wire, its FIN still out, delivered its last bytes', async () => {
+    fakeTimers()
+    const h = await upgradeToBarrier()
+    const { upgradeId } = await h.barrierSent
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId }))
+    for (let i = 1; i <= 6; i++) {
+      h.pushOld(encode.text(h.ix, `"old-${i}"`, i))
+      await vi.advanceTimersByTimeAsync(500)
+    }
+    // The old wire stalls: its last bytes came 500 ms ago, and no FIN follows.
+    await vi.advanceTimersByTimeAsync(1_400)
+    expect(h.probe.readyState, 'the page kept the WebSocket 1.9 s after the last bytes').toBe(1)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(h.probe.readyState, 'the page fell back 2 s after the last bytes').toBe(3)
   })
 
   test("a RECONCILED for another upgrade's id does not settle this one", async () => {
     const h = await upgradeToBarrier()
     await h.barrierSent
 
-    h.probe.deliver(reconciled({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId: 'someone-elses' }))
+    h.probe.deliver(reconciledOf({ ix: h.ix, sessionId: crypto.randomUUID(), upgradeId: 'someone-elses' }))
     h.pushOld(encode.fin())
     h.probe.deliver(encode.text(h.ix, '"new-1"', 1))
     await settle()
     expect(h.dispatched, 'the join must still be waiting for its own COMMITTED').toEqual([])
+  })
+})
+
+describe('an upgrade attempt behind an upload', () => {
+  test('a barrier that finds a batch POST still out puts the upgrade off until it is out, and keeps the old wire', async () => {
+    fakeTimers()
+    const upgrade = await stageBatchUpgrade()
+
+    // An upload is out when the barrier is due, and stays out past the attempt's 10 s.
+    upgrade.holdNextPost()
+    upgrade.connection.send(upgrade.channel, '"upload"')
+    await settle()
+    upgrade.ready()
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(upgrade.streams, 'the page kept its SSE wire').toBe(1)
+    expect(upgrade.probe.readyState, 'the attempt was given up').toBe(3)
+
+    upgrade.releasePost!()
+    await settle()
+    expect(FakeWebSocket.last, 'the upgrade went again once the upload was out').not.toBe(upgrade.probe)
+    expect(upgrade.streams).toBe(1)
+  })
+})
+
+describe('flow control across an upgrade attempt', () => {
+  // Sends are held from the barrier's emission until its COMMITTED. An attempt that ends without emitting its barrier
+  // releases the hold with no reattach, so no limit advertised again on attach repairs a refresh dropped meanwhile.
+  test('a window refresh made while the barrier waits for the old wire reaches the server when the attempt ends without it', async () => {
+    const upgrade = await stageBatchUpgrade()
+
+    // A batch POST is in flight when the upgrade commits, so the barrier waits for it with sends held.
+    upgrade.holdNextPost()
+    upgrade.connection.send(upgrade.channel, '"in-flight"')
+    await settle()
+    expect(upgrade.releasePost).not.toBeNull()
+    upgrade.ready()
+    await settle()
+    upgrade.connection.sendMsgWindowUpdate(upgrade.channel, 2_000, false)
+
+    // The attempt ends before the barrier could go: the probe dies, then the POST it waited for settles.
+    upgrade.probe.close()
+    upgrade.releasePost!()
+    await settle()
+    expect(upgrade.posted.some((frame) => frame.tag === TAG.BARRIER)).toBe(false)
+    expect(upgrade.posted.filter((frame) => frame.tag === TAG.MSG_WINDOW)).toEqual([
+      { tag: TAG.MSG_WINDOW, index: expect.any(Number), count: 2_000 },
+    ])
   })
 })

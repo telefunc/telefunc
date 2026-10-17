@@ -10,8 +10,8 @@ import { throwAbortError, throwBugError } from './errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
-import { appendSessionParam, getSessionToken, setSessionToken } from '../../wire-protocol/client/session-registry.js'
-import { TELEFUNC_SESSION_HEADER, type ChannelTransports } from '../../wire-protocol/constants.js'
+import { getSessionUrl } from '../../wire-protocol/client/session-registry.js'
+import type { ChannelTransports } from '../../wire-protocol/constants.js'
 import {
   STATUS_CODE_SUCCESS,
   STATUS_CODE_THROW_ABORT,
@@ -41,9 +41,7 @@ async function makeHttpRequest(callContext: {
 }): Promise<unknown> {
   const isBinaryFrame = typeof callContext.httpRequestBody !== 'string'
   const requestKind = isBinaryFrame ? REQUEST_KIND.BINARY : REQUEST_KIND.TEXT
-  const sessionToken = getSessionToken(callContext.telefuncUrl)
-  const fetchUrl = sessionToken ? appendSessionParam(callContext.telefuncUrl, sessionToken) : callContext.telefuncUrl
-  const requestUrl = getMarkedRequestUrl(fetchUrl, requestKind)
+  const requestUrl = getMarkedRequestUrl(getSessionUrl(callContext.telefuncUrl), requestKind)
   const contentType = isBinaryFrame ? { 'Content-Type': 'application/octet-stream' } : { 'Content-Type': 'text/plain' }
   const requestKindHeader = { [REQUEST_KIND_HEADER]: requestKind }
   let response: Response
@@ -57,7 +55,6 @@ async function makeHttpRequest(callContext: {
         ...contentType,
         ...requestKindHeader,
         ...callContext.headers,
-        ...(sessionToken ? { [TELEFUNC_SESSION_HEADER]: sessionToken } : undefined),
       },
       signal: callContext.abortController.signal,
     })
@@ -69,9 +66,6 @@ async function makeHttpRequest(callContext: {
   }
 
   const statusCode = response.status
-  const newSessionToken = response.headers.get(TELEFUNC_SESSION_HEADER) ?? undefined
-
-  if (newSessionToken) setSessionToken(callContext.telefuncUrl, newSessionToken)
 
   if (statusCode === STATUS_CODE_SUCCESS) {
     const parsed = await parseResponse(response, callContext, callContext.connectionKey, callContext.channelIdleTimeout)

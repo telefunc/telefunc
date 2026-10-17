@@ -1,149 +1,130 @@
 export { IndexedPeer }
 export type { PeerSender }
 
-import { ACK_STATUS, encode, payloadBytes } from '../shared-ws.js'
-import type { AckResultStatus } from '../shared-ws.js'
+import { ACK_STATUS, encode, chargedBytes } from '../shared-ws.js'
+import type { AckResultStatus, ErrorReason } from '../shared-ws.js'
 import { ReplayBuffer } from '../replay-buffer.js'
+import type { SendWait } from '../link.js'
+import type { ByteWindowKind } from '../flow-control/flow-control.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
+  /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
+  carry(frame: Uint8Array): void
+  /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
+  bufferedAmount(): number | undefined
+  /** The wait the wire reports for the frames that go at once (see `SocketWait`). */
+  sendWait(): SendWait
+  /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
+  deliveredBeforeFrame(ms: number): number
 }
 
-/** Wraps a crossws peer, encodes frames with a fixed channel index.
- *  Assigns sequence numbers. Frames are added to the replay buffer only once
- *  they are committed to a transport send path. */
+/** Encodes a channel's frames with its index; a sequenced one joins the replay buffer once its wire commits it. */
 class IndexedPeer {
   constructor(
-    private sender: PeerSender,
+    readonly sender: PeerSender,
     private index: number,
     private replay: ReplayBuffer,
   ) {}
 
-  /** Returns the frame's payload byte count (the caller's flow-control unit). */
+  /** Returns the bytes the frame counts against flow control. */
   sendText(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.text(this.index, data, seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame))
-    return payloadBytes(frame)
+    this.sendSequenced(seq, frame)
+    return chargedBytes(frame)
   }
 
-  /** Send a text frame that requests an ack response from the receiver. Returns seq. */
-  sendTextAckReq(data: string, onQueued?: (seq: number) => void): number {
+  /** Send a text frame that requests an ack response from the receiver. `onQueued` gets its seq and charged bytes. */
+  sendTextAckReq(data: string, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
     const frame = encode.textAckReq(this.index, data, seq)
-    onQueued?.(seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame))
-    return seq
+    onQueued(seq, chargedBytes(frame))
+    this.sendSequenced(seq, frame)
   }
 
-  sendBinary(data: Uint8Array): void {
+  /** Returns the bytes the frame counts against flow control. */
+  sendBinary(data: Uint8Array): number {
     const seq = this.replay.nextSeq()
     const frame = encode.binary(this.index, data, seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame, true))
+    this.sendSequenced(seq, frame)
+    return chargedBytes(frame)
   }
 
-  /** Send a binary frame that requests an ack response from the receiver. Returns seq. */
-  sendBinaryAckReq(data: Uint8Array, onQueued?: (seq: number) => void): number {
+  /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and charged bytes. */
+  sendBinaryAckReq(data: Uint8Array, onQueued: (seq: number, bytes: number) => void): void {
     const seq = this.replay.nextSeq()
     const frame = encode.binaryAckReq(this.index, data, seq)
-    onQueued?.(seq)
-    this.sender.send(frame, () => this.replay.push(seq, frame, true))
-    return seq
+    onQueued(seq, chargedBytes(frame))
+    this.sendSequenced(seq, frame)
   }
 
   /** Send an acknowledgement response for a message the client sent.
    *  ACK_RES frames use the normal sequenced send path and are replayable on reconnect. */
   sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     const seq = this.replay.nextSeq()
-    const frame = encode.ackRes(this.index, seq, ackedSeq, result, status)
-    try {
-      this.sender.send(frame, () => this.replay.push(seq, frame))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendSequenced(seq, encode.ackRes(this.index, seq, ackedSeq, result, status))
   }
 
-  sendCloseRequest(timeoutMs: number): void {
-    try {
-      this.sender.send(encode.close(this.index, timeoutMs))
-    } catch {
-      /* transport may already be closed */
-    }
+  /** Returns its seq. */
+  sendCloseRequest(timeoutMs: number): number {
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.close(this.index, timeoutMs, seq))
+    return seq
   }
 
   sendCloseAck(): void {
-    try {
-      this.sender.send(encode.closeAck(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.closeAck(this.index, seq))
   }
 
   sendAbort(abortValue: string): void {
-    try {
-      this.sender.send(encode.abort(this.index, abortValue))
-    } catch {
-      /* transport may already be closed */
-    }
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.abort(this.index, abortValue, seq))
   }
 
-  sendError(): void {
-    try {
-      this.sender.send(encode.error(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+  sendError(reason: ErrorReason): void {
+    const seq = this.replay.nextSeq()
+    this.sendSequenced(seq, encode.error(this.index, reason, seq))
   }
 
-  sendByteWindowUpdate(bytes: number): void {
-    try {
-      this.sender.send(encode.window(this.index, bytes))
-    } catch {
-      /* transport may already be closed */
-    }
+  /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
+  sendByteWindowUpdate(limit: number, lastSeq: number, kind: ByteWindowKind): void {
+    const frame = encode.window(this.index, limit, lastSeq)
+    if (kind === 'acknowledgement') this.sender.carry(frame)
+    else this.sender.send(frame)
   }
 
-  sendMsgWindowUpdate(count: number): void {
-    try {
-      this.sender.send(encode.msgWindow(this.index, count))
-    } catch {
-      /* transport may already be closed */
-    }
+  sendMsgWindowUpdate(limit: number): void {
+    this.sender.send(encode.msgWindow(this.index, limit))
   }
 
-  sendBdpPing(): void {
-    try {
-      this.sender.send(encode.bdpPing(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+  sendBdpPing(probe: number): void {
+    this.sender.send(encode.bdpPing(this.index, probe))
   }
 
-  sendBdpPingAck(): void {
-    try {
-      this.sender.send(encode.bdpPingAck(this.index))
-    } catch {
-      /* transport may already be closed */
-    }
+  sendBdpPingAck(probe: number, backlog: number, pathRtt: number): void {
+    this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
-  sendPublish(data: string): void {
+  /** Returns the bytes the frame counts against flow control. */
+  sendPublish(data: string): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publish(this.index, data, seq)
-    try {
-      this.sender.send(frame, () => this.replay.push(seq, frame))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendSequenced(seq, frame)
+    return chargedBytes(frame)
   }
 
-  sendPublishBinary(data: Uint8Array): void {
+  /** Returns the bytes the frame counts against flow control. */
+  sendPublishBinary(data: Uint8Array): number {
     const seq = this.replay.nextSeq()
     const frame = encode.publishBinary(this.index, data, seq)
-    try {
-      this.sender.send(frame, () => this.replay.push(seq, frame, true))
-    } catch {
-      /* transport may already be closed */
-    }
+    this.sendSequenced(seq, frame)
+    return chargedBytes(frame)
+  }
+
+  /** Replayed once committed, so a frame a dead wire lost goes again. */
+  private sendSequenced(seq: number, frame: Uint8Array<ArrayBuffer>): void {
+    this.sender.send(frame, () => this.replay.push(seq, frame))
   }
 }

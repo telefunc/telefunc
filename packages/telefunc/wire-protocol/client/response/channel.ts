@@ -9,6 +9,7 @@ const channelReviver: ReviverType<ChannelContract, ClientReviverContext> = {
     const channel = context.createChannel({
       channelId: metadata.channelId,
       ack: metadata.ack,
+      maxFrameBytes: metadata.maxFrameBytes,
     })
     return {
       value: channel,
@@ -17,6 +18,9 @@ const channelReviver: ReviverType<ChannelContract, ClientReviverContext> = {
       },
       abort(abortError) {
         channel.abort(abortError.abortValue, abortError.message)
+      },
+      onEnd(callback) {
+        channel.onClose(callback)
       },
     }
   },

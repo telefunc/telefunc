@@ -5,6 +5,10 @@ import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import { TAG } from '../shared-ws.js'
 import { assert } from '../../utils/assert.js'
 
+/** Held beyond an entry's payload: a send's callbacks and promise (about 480 B), a publish's slots (about 52 B). */
+const HELD_SEND_OVERHEAD_BYTES = 512
+const HELD_PUBLISH_OVERHEAD_BYTES = 64
+
 /** Callback pair for buffered entries — resolve on flush, reject on eviction. */
 type EntryCallback = {
   resolve: (...args: any[]) => void
@@ -16,8 +20,9 @@ type EntryCallback = {
  *
  * Buffers text, publish, binary, and ack-request messages sent before the client connects.
  * After every push, oldest entries are evicted (FIFO) until the byte
- * total is within the cap. Delivery callbacks on evicted entries are rejected
- * immediately so channel memory stays hard-capped.
+ * total, each entry counted with what holding it retains, is within the cap.
+ * Delivery callbacks on evicted entries are rejected immediately so channel
+ * memory stays hard-capped.
  *
  * Binary messages (tags 1 and 4) are stored in a separate lane with its own
  * byte budget. An oversized binary only clears the binary lane — text messages
@@ -37,7 +42,6 @@ class ServerChannelBuffer<TAck = never> {
   #insertionSeq = 0
 
   constructor(maxBytes: number, binaryMaxBytes: number) {
-    if (maxBytes <= 0) throw new Error('maxBytes must be > 0')
     this.#text = new BufferLane(maxBytes)
     this.#binary = new BufferLane(binaryMaxBytes)
   }
@@ -48,6 +52,11 @@ class ServerChannelBuffer<TAck = never> {
 
   get size(): number {
     return this.#text.size + this.#binary.size
+  }
+
+  /** An entry was dropped to stay within the budget since the buffer was last flushed or cleared. */
+  get dropped(): boolean {
+    return this.#text.dropped || this.#binary.dropped
   }
 
   pushText(data: string, resolve: () => void, reject: (err: Error) => void): void {
@@ -62,12 +71,19 @@ class ServerChannelBuffer<TAck = never> {
     this.#text.push(TAG.PUBLISH, data, utf8ByteLength(data), null, this.#insertionSeq++)
   }
 
+  /** Holds a copy, as an attached send encodes the caller's bytes at once and the caller may then reuse them. */
   pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void): void {
-    this.#binary.push(TAG.BINARY, data, data.byteLength, { resolve, reject }, this.#insertionSeq++)
+    this.#binary.push(TAG.BINARY, new Uint8Array(data), data.byteLength, { resolve, reject }, this.#insertionSeq++)
   }
 
   pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void): void {
-    this.#binary.push(TAG.BINARY_ACK_REQ, data, data.byteLength, { resolve, reject }, this.#insertionSeq++)
+    this.#binary.push(
+      TAG.BINARY_ACK_REQ,
+      new Uint8Array(data),
+      data.byteLength,
+      { resolve, reject },
+      this.#insertionSeq++,
+    )
   }
 
   pushPublishBinary(data: Uint8Array): void {
@@ -83,8 +99,8 @@ class ServerChannelBuffer<TAck = never> {
     sendText: (data: string) => void
     sendPublish: (data: string) => void
     sendBinary: (data: Uint8Array) => void
-    sendTextAck: (data: string, cb: EntryCallback) => void
-    sendBinaryAck: (data: Uint8Array, cb: EntryCallback) => void
+    sendTextAck: (data: string, cb: EntryCallback | null) => void
+    sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
     sendPublishBinary: (data: Uint8Array) => void
   }): void {
     let ti = this.#text.head
@@ -114,8 +130,8 @@ class ServerChannelBuffer<TAck = never> {
       sendText: (data: string) => void
       sendPublish: (data: string) => void
       sendBinary: (data: Uint8Array) => void
-      sendTextAck: (data: string, cb: EntryCallback) => void
-      sendBinaryAck: (data: Uint8Array, cb: EntryCallback) => void
+      sendTextAck: (data: string, cb: EntryCallback | null) => void
+      sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
       sendPublishBinary: (data: Uint8Array) => void
     },
   ): void {
@@ -129,7 +145,7 @@ class ServerChannelBuffer<TAck = never> {
         cb.resolve()
         break
       case TAG.TEXT_ACK_REQ:
-        assert(typeof data === 'string' && cb)
+        assert(typeof data === 'string')
         h.sendTextAck(data, cb)
         break
       case TAG.PUBLISH:
@@ -142,7 +158,7 @@ class ServerChannelBuffer<TAck = never> {
         cb.resolve()
         break
       case TAG.BINARY_ACK_REQ:
-        assert(data instanceof Uint8Array && cb)
+        assert(data instanceof Uint8Array)
         h.sendBinaryAck(data, cb)
         break
       case TAG.PUBLISH_BINARY:
@@ -156,6 +172,12 @@ class ServerChannelBuffer<TAck = never> {
     this.#text.clear(err)
     this.#binary.clear(err)
     this.#insertionSeq = 0
+  }
+
+  /** Rejects the ack requests, whose answers can't be taken, and keeps them to flush with the rest. */
+  rejectAcks(err: Error): void {
+    this.#text.rejectAcks(err)
+    this.#binary.rejectAcks(err)
   }
 }
 
@@ -175,9 +197,9 @@ class BufferLane {
   #head = 0
   #totalBytes = 0
   readonly #maxBytes: number
+  dropped = false
 
   constructor(maxBytes: number) {
-    if (maxBytes <= 0) throw new Error('maxBytes must be > 0')
     this.#maxBytes = maxBytes
   }
 
@@ -220,9 +242,11 @@ class BufferLane {
     callback: EntryCallback | EntryCallback | null,
     order: number,
   ): void {
-    const overflowErr = new ChannelOverflowError()
+    bytes += callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES
     if (bytes > this.#maxBytes) {
+      const overflowErr = new ChannelOverflowError()
       this.clear(overflowErr)
+      this.dropped = true
       callback?.reject(overflowErr)
       return
     }
@@ -232,7 +256,7 @@ class BufferLane {
     this.#callbacks.push(callback)
     this.#order.push(order)
     this.#totalBytes += bytes
-    this.#evict(overflowErr)
+    this.#evict()
   }
 
   clear(err?: Error): void {
@@ -248,16 +272,27 @@ class BufferLane {
     this.#order.length = 0
     this.#head = 0
     this.#totalBytes = 0
+    this.dropped = false
+  }
+
+  rejectAcks(err: Error): void {
+    for (let i = this.#head; i < this.#callbacks.length; i++) {
+      if (!isAckTag(this.#tags[i]!)) continue
+      this.#callbacks[i]?.reject(err)
+      this.#callbacks[i] = null
+    }
   }
 
   // ── Private ──
 
-  #evict(evictionErr: Error): void {
+  #evict(): void {
+    let evictionErr: ChannelOverflowError | undefined
     // Evict oldest entries until within the cap.
     // Safe to run after push: the oversized guard ensures the new entry has
     // bytes ≤ maxBytes, so eviction drains old entries and always leaves it.
     while (this.#totalBytes > this.#maxBytes && this.#head < this.#data.length) {
-      this.#callbacks[this.#head]?.reject(evictionErr)
+      this.dropped = true
+      this.#callbacks[this.#head]?.reject((evictionErr ??= new ChannelOverflowError()))
       this.#totalBytes -= this.#sizes[this.#head]!
       this.#head++
     }
@@ -271,4 +306,8 @@ class BufferLane {
       this.#head = 0
     }
   }
+}
+
+function isAckTag(tag: number): boolean {
+  return tag === TAG.TEXT_ACK_REQ || tag === TAG.BINARY_ACK_REQ
 }

@@ -6,7 +6,10 @@ import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
 import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
-import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/pumpToChannel.js'
+import {
+  pumpClientProducerToChannel,
+  type PumpChannelOptions,
+} from '../../wire-protocol/client/request/pumpToChannel.js'
 import { ClientChannel } from '../../wire-protocol/client/channel.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
@@ -15,6 +18,7 @@ import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wi
 import { CloseHandler } from '../close.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
+import { randomUuid } from '../../utils/randomUuid.js'
 
 const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
   gcRegistry: new GcRegistry(),
@@ -30,6 +34,7 @@ type CallContext = {
   extensions?: Record<string, unknown>
   extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
   connectionKey?: string
+  channelIdleTimeout?: number
   headers?: Record<string, string> | null
   telefuncUrl: string
 }
@@ -55,10 +60,13 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     dataMain.extensions = callContext.extensions
   }
 
-  const channelTransports = callContext.channel.transports
-  const connectionKey = callContext.connectionKey
-  const headers = callContext.headers ?? undefined
-  const telefuncUrl = callContext.telefuncUrl
+  const channelOptions: PumpChannelOptions = {
+    transports: callContext.channel.transports,
+    connectionKey: callContext.connectionKey,
+    headers: callContext.headers ?? undefined,
+    telefuncUrl: callContext.telefuncUrl,
+    idleTimeout: callContext.channelIdleTimeout,
+  }
   const abortSignal = callContext.abortController.signal
   const files: Blob[] = []
   const requestCloseHandlers: CloseHandler[] = []
@@ -71,17 +79,10 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
         return index
       },
       createChannel(opts) {
-        return new ClientChannel({
-          channelId: crypto.randomUUID(),
-          ack: opts?.ack,
-          transports: channelTransports,
-          connectionKey,
-          headers,
-          telefuncUrl,
-        })
+        return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, ...channelOptions })
       },
       sendStream(createProducer) {
-        return pumpClientProducerToChannel(createProducer, channelTransports, telefuncUrl, connectionKey, headers)
+        return pumpClientProducerToChannel(createProducer, channelOptions)
       },
     },
     function onReplaced(replaced) {

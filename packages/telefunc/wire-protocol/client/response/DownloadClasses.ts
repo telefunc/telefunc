@@ -5,6 +5,7 @@ export { isBlobDownload }
 
 import { LazyBlob, LazyFile } from '../../LazyFile.js'
 import type { StreamSource, FileDownloadMetadata, BlobDownloadMetadata, DownloadProgress } from '../../types.js'
+import { randomUuid } from '../../../utils/randomUuid.js'
 
 const FILE_DOWNLOAD_BRAND = Symbol.for('telefunc.client.FileDownload')
 const BLOB_DOWNLOAD_BRAND = Symbol.for('telefunc.client.BlobDownload')
@@ -169,7 +170,7 @@ class DownloadCore {
 
   async saveToOpfs(path?: string): Promise<File> {
     this.#markConsumed()
-    const finalPath = path ?? `__telefunc_opfs/${crypto.randomUUID()}${this.#name ? `-${this.#name}` : ''}`
+    const finalPath = path ?? `__telefunc_opfs/${randomUuid()}${this.#name ? `-${this.#name}` : ''}`
     const handle = await openOpfsHandle(finalPath)
     return pipeAndGetFile(this.#source, this.state, handle)
   }
@@ -280,7 +281,7 @@ function triggerDownload(file: File, filename: string): void {
  *  Cost: a tab crash before the timer fires leaks one OPFS file until storage-quota
  *  eviction. The leak is browser-private and bounded. */
 async function streamToOpfsThenTrigger(source: StreamSource, state: ProgressState, filename: string): Promise<File> {
-  const tempName = `${crypto.randomUUID()}-${filename || 'download'}`
+  const tempName = `${randomUuid()}-${filename || 'download'}`
   const handle = await openOpfsHandle(`${TEMP_DIR}/${tempName}`)
   let file: File
   try {

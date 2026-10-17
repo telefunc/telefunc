@@ -48,6 +48,8 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
         log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
         log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
+        // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
+        log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
         (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
       )
     },

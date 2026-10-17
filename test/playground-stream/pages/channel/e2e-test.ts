@@ -383,9 +383,9 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   }
 
-  // ── Client abort(value) → server onClose (clean close) ─────────────
+  // ── Client abort(value) → server onClose (Abort) ──────────────────
 
-  test('channel: client abort(value) — server onClose fires cleanly when client aborts while still connected', async () => {
+  test('channel: client abort(value) — server onClose receives Abort with the value when client aborts while still connected', async () => {
     await page.click('#channel-test-client-abort-server')
 
     let channelId: string | null = null
@@ -398,7 +398,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await autoRetry(async () => {
       const ss = await getCleanupState()
       expect(ss[`clientAbort_${channelId}_serverOnClose`]).toBe('true')
-      expect(ss[`clientAbort_${channelId}_serverOnCloseErr`]).toBe('none')
+      expect(ss[`clientAbort_${channelId}_serverOnCloseErr`]).toBe('abort:{"reason":"client-abort"}')
     })
   })
 

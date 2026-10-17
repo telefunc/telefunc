@@ -11,7 +11,14 @@ declare module 'crossws' {
   }
 }
 
-function getTelefuncChannelHooks() {
+/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. */
+function getTelefuncChannelHooks({
+  terminate = (peer) => peer.terminate(),
+  bufferedAmount = (peer) => peer.websocket.bufferedAmount,
+}: {
+  terminate?: (peer: Peer) => void
+  bufferedAmount?: (peer: Peer) => number | undefined
+} = {}) {
   enableChannelTransports(['ws'])
   const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
@@ -25,17 +32,21 @@ function getTelefuncChannelHooks() {
     sendNow: (peer, frame) => {
       peer.send(frame)
     },
-    terminateConnection: (peer) => peer.terminate(),
+    wholeMessages: true,
+    bufferedAmount,
+    // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
+    terminateConnection: (peer) => {
+      const permanent = mux.readPermanentTermination(peer)
+      terminate(peer)
+      mux.onConnectionClosed(peer, { permanent })
+    },
   }
 
   return defineHooks({
     open: (peer) => mux.onConnectionOpen(peer, transport),
     message: (peer, message) => mux.onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     close: (peer, details) => {
-      const terminatePermanently = mux.readPermanentTermination(peer)
-      const isPermanent =
-        terminatePermanently === true ||
-        (terminatePermanently === null && (details?.code === 1000 || details?.code === 1001))
+      const isPermanent = mux.readPermanentTermination(peer) || details?.code === 1000 || details?.code === 1001
       mux.onConnectionClosed(peer, { permanent: isPermanent })
     },
     error: (peer) => mux.onConnectionClosed(peer, { permanent: false }),

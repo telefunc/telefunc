@@ -37,13 +37,15 @@ class GcRegistry {
     this.finalReg = new FinalizationRegistry<Entry>((entry) => this.fireCleanup(entry))
   }
 
-  register(target: object, close: CloseFn): void {
+  /** Returns what forgets `target` without closing it, once nothing is left for `close` to do. */
+  register(target: object, close: CloseFn): () => void {
     const entry: Entry = { ref: new WeakRef(target), close, cleaned: false }
     this.entries.add(entry)
     // Pass `entry` as both held value and unregister token so we can deregister
     // from inside fireCleanup without keeping a separate token map.
     this.finalReg.register(target, entry, entry)
     if (!this.scanTimer) this.scanTimer = unrefTimer(setInterval(() => this.scan(), this.periodicScanMs))
+    return () => this.forget(entry)
   }
 
   private scan(): void {
@@ -55,15 +57,20 @@ class GcRegistry {
 
   private fireCleanup(entry: Entry): void {
     if (entry.cleaned) return
-    entry.cleaned = true
-    this.entries.delete(entry)
-    this.finalReg.unregister(entry)
+    this.forget(entry)
     try {
       void entry.close()
     } catch {
       // Cleanup errors are swallowed — there's no caller to surface them to,
       // and a throw here would break other entries' cleanup in the same scan.
     }
+  }
+
+  private forget(entry: Entry): void {
+    if (entry.cleaned) return
+    entry.cleaned = true
+    this.entries.delete(entry)
+    this.finalReg.unregister(entry)
     this.stopScanIfIdle()
   }
 

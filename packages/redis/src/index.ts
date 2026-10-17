@@ -25,12 +25,13 @@ type RedisBroadcastOptions = {
   prefix?: string
 }
 
-// Wire frame: [u32 BE seq][u32 BE ts_hi][u32 BE ts_lo][payload bytes]. `ts` split into two
-// u32s to keep ms-Unix accurate beyond ~50 days. `INCR` + `PUBLISH` happen in one Lua call;
-// `TIME` from the single Redis clock orders concurrent publishers across instances.
+// Wire frame: [u32 BE seq_hi][u32 BE seq_lo][u32 BE ts_hi][u32 BE ts_lo][payload bytes]. `seq` and `ts` each split
+// into two u32s, so the seq doesn't wrap past 2^32 publishes on a key and ms-Unix stays accurate beyond ~50 days.
+// `INCR` + `PUBLISH` happen in one Lua call; `TIME` from the single Redis clock orders concurrent publishers across
+// instances.
 
 const DEFAULT_PREFIX = 'tf:'
-const HEADER_BYTES = 12
+const HEADER_BYTES = 16
 const U32_RANGE = 0x1_0000_0000
 
 /** KEYS[1]=seq counter, KEYS[2]=broadcast channel, ARGV[1]=payload bytes; returns [seq,ts]. */
@@ -38,9 +39,11 @@ const PUBLISH_LUA = `
 local seq = redis.call('INCR', KEYS[1])
 local t = redis.call('TIME')
 local ts = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local seq_hi = math.floor(seq / 4294967296)
+local seq_lo = seq - seq_hi * 4294967296
 local ts_hi = math.floor(ts / 4294967296)
 local ts_lo = ts - ts_hi * 4294967296
-local header = struct.pack('>I4I4I4', seq, ts_hi, ts_lo)
+local header = struct.pack('>I4I4I4I4', seq_hi, seq_lo, ts_hi, ts_lo)
 redis.call('PUBLISH', KEYS[2], header .. ARGV[1])
 return {seq, ts}
 `.trim()
@@ -95,8 +98,8 @@ class RedisTransport implements BroadcastTransport {
   private readonly _onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
     assert(frame.byteLength >= HEADER_BYTES, 'Malformed publish frame: header too short')
     const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
-    const seq = view.getUint32(0, false)
-    const timestamp = view.getUint32(4, false) * U32_RANGE + view.getUint32(8, false)
+    const seq = view.getUint32(0, false) * U32_RANGE + view.getUint32(4, false)
+    const timestamp = view.getUint32(8, false) * U32_RANGE + view.getUint32(12, false)
     const payload = frame.subarray(HEADER_BYTES)
     const channel = utf8.decode(channelBytes)
     const text = this.textCallbacks.get(channel)
@@ -117,9 +120,9 @@ class RedisTransport implements BroadcastTransport {
   ): Promise<{ seq: number; timestamp: number }> {
     // ioredis 5.x checks `arg instanceof Buffer` to pick its binary path; a raw
     // `Uint8Array` falls into `String(arg)` and gets serialised as a comma-joined
-    // string of byte values, corrupting the bytes. `Buffer.from(buf, off, len)`
-    // constructs a zero-copy Buffer view over the same ArrayBuffer.
-    const buf = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength)
+    // string of byte values, corrupting the bytes. A copy, as ioredis may hold the
+    // command past the call (connecting, auto-pipelining, a NOSCRIPT retry).
+    const buf = Buffer.from(payload)
     const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
     assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')
     const [seq, timestamp] = reply

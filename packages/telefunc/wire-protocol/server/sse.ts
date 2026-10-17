@@ -1,8 +1,9 @@
 export { getTelefuncSseChannelHooks, handleSseChannelRequest }
-export type { SseChannelHttpResponse }
+export type { SseChannelHttpResponse, SseConnection }
 
 import type { Readable } from 'node:stream'
 import { assert } from '../../utils/assert.js'
+import { Fifo } from '../../utils/Fifo.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
@@ -16,7 +17,7 @@ import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, ProtocolViolationError } from '../shared-ws.js'
+import { encode, passesData, ProtocolViolationError } from '../shared-ws.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -27,10 +28,7 @@ type SseChannelHttpResponse = {
 
 type SseConnection = {
   connId: string
-  /** Node-native `PushReadable` when the adapter passes a Node `IncomingMessage` (piped via
-   *  `pipeline`); `PushReadableStream` (Web `ReadableStream`-backed) everywhere else. Both
-   *  expose `push`, `close`, `isClosed`. */
-  stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
+  events: EventStream
   closed: boolean
   sessionId: string | null
   /** Resolved by `runStreamResponse` once the stream-response POST's body is consumed. Data
@@ -44,6 +42,59 @@ type SseConnection = {
 
 const sseOpenComment = textEncoder.encode(': open\n\n')
 
+/** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. */
+class EventStream {
+  readonly stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
+  private readonly waiting = new Fifo<Uint8Array<ArrayBuffer>>()
+  private waitingBytes = 0
+  /** Whether the stream asks for more. */
+  private takes: boolean
+
+  constructor(useNodeStream: boolean, onCancel: () => void) {
+    const onTake = () => this.handWaiting()
+    this.stream = useNodeStream
+      ? createPushReadable(onCancel, onTake)
+      : createPushReadableStream<Uint8Array<ArrayBuffer>>(onCancel, onTake)
+    this.takes = this.stream.push(sseOpenComment)
+  }
+
+  /** The encoded bytes the stream holds, and those waiting for it to ask. */
+  get heldBytes(): number {
+    return this.stream.bufferedAmount + this.waitingBytes
+  }
+
+  get streamBytes(): number {
+    return this.stream.bufferedAmount
+  }
+
+  /** Data waits for the stream to ask for it, so a frame that goes at once is behind no more than the stream holds. */
+  send(frame: Uint8Array<ArrayBuffer>): void {
+    const event = textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`)
+    if (passesData(frame[0]!) || (this.takes && this.waiting.length === 0)) {
+      this.takes = this.stream.push(event)
+      return
+    }
+    this.waiting.push(event)
+    this.waitingBytes += event.byteLength
+  }
+
+  close(): void {
+    while (this.waiting.length > 0) this.stream.push(this.waiting.shift()!)
+    this.waitingBytes = 0
+    this.stream.close()
+  }
+
+  /** Hands the stream the data that waits, as far as it asks. */
+  private handWaiting(): void {
+    this.takes = true
+    while (this.takes && this.waiting.length > 0) {
+      const event = this.waiting.shift()!
+      this.waitingBytes -= event.byteLength
+      this.takes = this.stream.push(event)
+    }
+  }
+}
+
 const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
   defaultHooks: null as ReturnType<typeof getTelefuncSseChannelHooks> | null,
 })
@@ -53,6 +104,8 @@ class SseConnectionTransport {
    *  connection — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
+  /** When each wire closed, for `connectTtl`: a page never reuses a connId, so a POST for one is refused. */
+  private readonly closedAt = new Map<string, number>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
@@ -61,6 +114,11 @@ class SseConnectionTransport {
     },
     getConnId: (connection) => connection.connId,
     sendNow: (connection, frame) => this.sendNow(connection, frame),
+    wholeMessages: false,
+    // Events carry frames in base64 plus framing, so three quarters of what waits is at least the frames it carries.
+    bufferedAmount: (connection) => Math.floor((connection.events.heldBytes * 3) / 4),
+    // A frame that goes at once passes the data waiting for the stream to ask: it waits behind the stream's alone.
+    queuedAhead: (connection) => Math.floor((connection.events.streamBytes * 3) / 4),
     terminateConnection: (connection) => this.terminateConnection(connection),
   }
 
@@ -112,9 +170,7 @@ class SseConnectionTransport {
       const conn = this.mux.getConnectionByConnId<SseConnection>(connId)
       if (conn) this.closeConnection(conn, { permanent: false })
     }
-    const stream = useNodeStream
-      ? createPushReadable(onCancel)
-      : createPushReadableStream<Uint8Array<ArrayBuffer>>(onCancel)
+    const events = new EventStream(useNodeStream, onCancel)
 
     let resolveReady!: () => void
     const ready = new Promise<void>((resolve) => {
@@ -122,7 +178,7 @@ class SseConnectionTransport {
     })
     const connection: SseConnection = {
       connId,
-      stream,
+      events,
       closed: false,
       sessionId: null,
       ready,
@@ -131,7 +187,6 @@ class SseConnectionTransport {
     }
     this.mux.onConnectionOpen(connection, this.transport)
     this.resolvePendingConnections(connId, connection)
-    stream.push(sseOpenComment)
     void this.runStreamResponse(connection, reader)
 
     return {
@@ -141,7 +196,7 @@ class SseConnectionTransport {
         ['Cache-Control', 'no-cache, no-transform'],
         ['X-Accel-Buffering', 'no'],
       ],
-      body: stream,
+      body: events.stream,
     }
   }
 
@@ -150,12 +205,15 @@ class SseConnectionTransport {
   private async handleStreamRequestPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
+    reader.onChunk = () => this.mux.onConnectionBytes(connection)
     // The open-ack is the client's duplex probe (ACK ⇒ its upload bytes reached the server) and must
     // not wait on reconcile settlement, or a slow attach would falsely demote a healthy duplex wire to
     // sticky batch. Dispatch safety is owned by `runStreamResponse` releasing `ready` only after
     // RECONCILED — the read loop below still waits on that gate, so early bytes sit unread until then.
     this.sendNow(connection, encode.streamRequestOpenAck())
-    if (!(await this.waitReady(connection))) return badRequest()
+    // No deadline: the client trusts this POST from the ack on; runStreamResponse's end or the close opens the gate.
+    await connection.ready
+    if (connection.closed) return badRequest()
     try {
       while (true) {
         const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
@@ -175,6 +233,7 @@ class SseConnectionTransport {
   private async handleBatchPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
+    reader.onChunk = () => this.mux.onConnectionBytes(connection)
     if (!(await this.waitReady(connection))) return badRequest()
     const drain = this.drainDeferred(connection, reader)
     connection.pendingDispatches.add(drain)
@@ -239,7 +298,19 @@ class SseConnectionTransport {
   }
 
   private async resolveConnection(connId: string): Promise<SseConnection | null> {
-    return this.mux.getConnectionByConnId<SseConnection>(connId) ?? (await this.waitForConnection(connId))
+    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
+    if (connection) return connection
+    if (this.closedAt.has(connId)) return null
+    return await this.waitForConnection(connId)
+  }
+
+  private rememberClosed(connId: string): void {
+    const now = performance.now()
+    for (const [closed, at] of this.closedAt) {
+      if (now - at < this.mux.connectTtl) break
+      this.closedAt.delete(closed)
+    }
+    this.closedAt.set(connId, now)
   }
 
   /** Mirrors `ChannelMux.waitForChannelRegistration`: the timeout path must remove the
@@ -282,8 +353,7 @@ class SseConnectionTransport {
   }
 
   private sendNow(connection: SseConnection, frame: Uint8Array<ArrayBuffer>): void {
-    if (connection.closed) return
-    connection.stream.push(textEncoder.encode(`data: ${uint8ArrayToBase64url(frame)}\n\n`))
+    if (!connection.closed) connection.events.send(frame)
   }
 
   /** Resolves false on timeout — caller drops the POST. */
@@ -300,15 +370,15 @@ class SseConnectionTransport {
   private closeConnection(connection: SseConnection, { permanent }: { permanent: boolean }): void {
     if (connection.closed) return
     connection.closed = true
+    this.rememberClosed(connection.connId)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
     connection.resolveReady()
     this.mux.onConnectionClosed(connection, { permanent })
-    connection.stream.close()
+    connection.events.close()
   }
 
   private terminateConnection(connection: SseConnection): void {
-    const terminatePermanently = this.mux.readPermanentTermination(connection)
-    this.closeConnection(connection, { permanent: terminatePermanently === true })
+    this.closeConnection(connection, { permanent: this.mux.readPermanentTermination(connection) })
   }
 }
 

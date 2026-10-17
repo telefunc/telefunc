@@ -4,6 +4,7 @@ import type { ChannelContract, ReplacerType, ServerReplacerContext } from '../..
 import { SERIALIZER_PREFIX_CHANNEL } from '../../constants.js'
 
 import { ServerChannel } from '../channel.js'
+import { getAdapterMaxFrameBytes } from '../../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -13,12 +14,13 @@ const channelReplacer: ReplacerType<ChannelContract, ServerReplacerContext> = {
     return ServerChannel.isServerChannel(value)
   },
   replace(channel, context) {
+    const maxFrameBytes = getAdapterMaxFrameBytes()
     context.registerChannel(channel)
+    const metadata: ChannelContract['metadata'] = { channelId: channel.id }
+    if (channel.ack) metadata.ack = channel.ack
+    if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
     return {
-      metadata: {
-        channelId: channel.id,
-        ...(channel.ack && { ack: channel.ack }),
-      },
+      metadata,
       async close() {
         await channel.close()
       },

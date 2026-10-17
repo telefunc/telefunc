@@ -23,7 +23,12 @@ const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
       return res
     }
     return {
-      value: fn,
+      value: (...args: unknown[]) => {
+        const result = fn(...args)
+        // A call nothing awaits leaves no unhandled rejection; one awaited still sees the error.
+        result.catch(() => {})
+        return result
+      },
       async close() {
         await channel.close()
       },

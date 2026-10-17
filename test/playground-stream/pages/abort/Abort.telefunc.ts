@@ -78,7 +78,7 @@ async function onSlowNormalTelefunc(): Promise<{ stepsCompleted: number }> {
 
 // Single file upload — read slowly so client has time to abort mid-upload.
 // The sleep(100) between reads stretches consumption to ~1.6s for ~16 chunks,
-// giving the client's 300ms abort time to arrive mid-read.
+// giving the client's abort time to arrive mid-read.
 async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; error: string | null }> {
   cleanupState.uploadAbortSingle = 'running'
   cleanupState.uploadAbortSingleError = ''
@@ -106,7 +106,6 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
 
 // Multiple file upload — read each file fully, sleep between files.
 // Client aborts during the sleep after file1. File2+file3 should error.
-// On localhost 50MB is consumed in well under 3s, so file1 completes fully.
 // The 5s sleep after file1 is where the abort lands. File2/file3 may have
 // leftover bytes in StreamReader's buffer from chunk boundaries.
 async function onUploadAbortMultiple(
@@ -133,6 +132,7 @@ async function onUploadAbortMultiple(
         if (done) break
         bytesRead += value.byteLength
       }
+      cleanupState.uploadAbortMultiFilesRead = String(results.length + 1)
       await sleep(5000)
       results.push({ name: file.name, bytesRead, error: null })
     } catch (e: any) {

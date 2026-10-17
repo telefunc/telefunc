@@ -8,14 +8,12 @@ export {
   assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
-  getShardIndicesForBucket,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
 }
 export type { CloudflareScale, LocationBucket, SessionRoutingTarget }
 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
-import { TELEFUNC_SESSION_HEADER } from '../../../constants.js'
 import { assert, assertUsage } from '../../../../utils/assert.js'
 
 /**
@@ -35,6 +33,8 @@ const DEFAULT_BROADCAST_BUCKETS = [
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
 /** Internal: forwarded to the DO so it knows its own instance name. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
+/** Internal: forwarded to the DO with the session token its client presented. */
+const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'
 const KNOWN_BROADCAST_BUCKETS = new Set<string>(DEFAULT_BROADCAST_BUCKETS as readonly string[])
 
 type LocationBucket = DurableObjectLocationHint
@@ -72,16 +72,6 @@ function getBucketCoordinatorShardIndices(
   return Array.from({ length: shardCount }, (_, shardOrdinal) => shardOrdinal)
 }
 
-/**
- * Maps one location bucket to its local session-shard ordinals.
- * Buckets no longer share one global shard index space; each bucket owns ordinals `0..n-1` independently.
- */
-function getShardIndicesForBucket(scale: CloudflareScale | undefined, locationBucket: LocationBucket): number[] {
-  const shardCount = getBucketScale(scale, locationBucket)
-  assert(shardCount > 0, `Cloudflare session scale does not define any shards for location bucket "${locationBucket}".`)
-  return Array.from({ length: shardCount }, (_, shardOrdinal) => shardOrdinal)
-}
-
 /** Builds the concrete session Durable Object name for one bucket-local shard ordinal. */
 function getSessionShardName(baseInstanceName: string, locationBucket: LocationBucket, shardOrdinal: number): string {
   assert(
@@ -99,6 +89,7 @@ function resolveSessionRoutingTarget(
   scale: CloudflareScale | undefined,
   request: Request,
   locationFallback: DurableObjectLocationHint,
+  token: string,
 ): SessionRoutingTarget {
   let locationBucket = resolveCloudflareLocationHint(request, locationFallback)
   // With a per-region `scale` map, a recognized region the user didn't list has no Durable Objects
@@ -106,8 +97,8 @@ function resolveSessionRoutingTarget(
   if (getScaleCountForBucket(scale, locationBucket) === 0) {
     locationBucket = locationFallback
   }
-  const shardIndices = getShardIndicesForBucket(scale, locationBucket)
-  const shardOrdinal = shardIndices[Math.floor(Math.random() * shardIndices.length)]!
+  // By the session's token, so its calls and channels in one region reach one shard without a KV pin.
+  const shardOrdinal = getDeterministicKeyBucketIndex(token, getBucketScale(scale, locationBucket))
   const sessionInstanceName = getSessionShardName(baseInstanceName, locationBucket, shardOrdinal)
 
   return { sessionInstanceName, locationBucket, shardOrdinal }
