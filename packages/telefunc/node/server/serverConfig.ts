@@ -17,6 +17,7 @@ export type {
 }
 
 import { assertUsage } from '../../utils/assert.js'
+import { assertDuration } from '../../utils/assertDuration.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
@@ -498,13 +499,6 @@ function applyStreamConfig(val: unknown): void {
 }
 
 /** Milliseconds a timer waits, at most `max`, which `bound` explains. */
-function assertDuration(value: unknown, configPath: string, max: number, bound: string): asserts value is number {
-  assertUsage(
-    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max,
-    `\`${configPath}\` should be a non-negative safe integer of milliseconds, at most ${max}, ${bound}`,
-  )
-}
-
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
