@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import { Link } from './link.js'
-import { PieceSender } from './pieces.js'
+import { PieceSender, type SendRoom } from './pieces.js'
 import { PagePieceReceiver } from './client/page-piece-receiver.js'
 import { ServerPieceReceiver } from './server/server-piece-receiver.js'
 import { Uplink } from './client/uplink.js'
@@ -30,12 +30,26 @@ const lengths = (transmitted: Uint8Array[]) =>
 /** What the microtasks queued so far send: the end of the task. */
 const flush = () => Promise.resolve()
 
+const UNBOUNDED: SendRoom = {
+  cuts: false,
+  dataRoom: () => Number.POSITIVE_INFINITY,
+  handed: () => {},
+  sentFrame: () => {},
+}
+
+/** A sender with a 5 s ping interval, on a link of its own unless given one, its data unbounded unless given a room. */
+const pieceSender = (
+  transmit: (message: Uint8Array<ArrayBuffer>) => void,
+  queued: () => number,
+  link = new Link(),
+  room = UNBOUNDED,
+) => new PieceSender(transmit, queued, 5_000, link, room)
+
 test("with no rate measured, a task's frames go as they are sent behind an announcement it closes as it ends, the first large one in pieces that at most double from a probe pair", async () => {
   const transmitted: Uint8Array[] = []
-  const sender = new PieceSender(
+  const sender = pieceSender(
     (message) => void transmitted.push(message),
     () => 0,
-    5_000,
   )
   sender.send(data(60_000))
   // 8 KiB may follow any piece; the last two of a frame are cut so the last is the larger.
@@ -67,10 +81,9 @@ test("a probe pair's receiver spacing measures the rate later frames are cut by,
   const clock = { now: 0 }
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
   const transmitted: Uint8Array[] = []
-  const sender = new PieceSender(
+  const sender = pieceSender(
     (message) => void transmitted.push(message),
     () => 0,
-    5_000,
   )
   sender.send(data(100_000))
   await flush()
@@ -92,10 +105,9 @@ test('a rate that lapsed still cuts a frame at once, until the next measure repl
   const clock = { now: 0 }
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
   const transmitted: Uint8Array[] = []
-  const sender = new PieceSender(
+  const sender = pieceSender(
     (message) => void transmitted.push(message),
     () => 0,
-    5_000,
   )
   sender.send(data(20_000))
   await flush()
@@ -121,10 +133,9 @@ test('a rate that lapsed still cuts a frame at once, until the next measure repl
 test('an acknowledgement within one tick of a coarsened clock measures a probe at the tick, and nothing of a larger frame', async () => {
   vi.spyOn(performance, 'now').mockReturnValue(1_000)
   const transmitted: Uint8Array[] = []
-  const sender = new PieceSender(
+  const sender = pieceSender(
     (message) => void transmitted.push(message),
     () => 0,
-    5_000,
   )
   sender.send(data(20_000))
   await flush()
@@ -148,10 +159,9 @@ test('a rate counts what the socket holds ahead of a frame but the largest messa
   const link = new Link()
   // 32 B per ms: a frame of 20 000 B goes whole in 5 s / 8.
   link.rise(32, 0)
-  const sender = new PieceSender(
+  const sender = pieceSender(
     () => {},
     () => queued,
-    5_000,
     link,
   )
   sender.send(data(80_000))
@@ -173,10 +183,9 @@ test('a rate leaves out how long its receiver held what arrived before it acknow
   vi.spyOn(performance, 'now').mockImplementation(() => clock.now)
   const link = new Link()
   link.rise(32, 0)
-  const sender = new PieceSender(
+  const sender = pieceSender(
     () => {},
     () => 0,
-    5_000,
     link,
   )
   sender.send(data(20_000))
@@ -187,10 +196,9 @@ test('a rate leaves out how long its receiver held what arrived before it acknow
 })
 
 test('an acknowledgement counts the bytes handed to the socket, announcements and piece headers included, and refuses more, or nothing new', () => {
-  const sender = new PieceSender(
+  const sender = pieceSender(
     () => {},
     () => 0,
-    5_000,
   )
   sender.send(new Uint8Array(4_000))
   sender.send(new Uint8Array(100))
@@ -212,10 +220,9 @@ test('a frame held for room goes, once room comes, in one message behind what wa
   let dataRoom = 0
   const link = new Link()
   link.rise(100, performance.now())
-  const sender = new PieceSender(
+  const sender = pieceSender(
     (message) => void transmitted.push(message),
     () => 0,
-    5_000,
     link,
     { cuts: true, dataRoom: () => dataRoom, handed: () => {}, sentFrame: () => {} },
   )
@@ -234,10 +241,9 @@ test('a frame held for room goes, once room comes, in one message behind what wa
 })
 
 test('an acknowledgement is read modulo 2^32', () => {
-  const sender = new PieceSender(
+  const sender = pieceSender(
     () => {},
     () => 0,
-    5_000,
   )
   sender.send(new Uint8Array(5_000))
   expect(sender.acknowledged({ bytes: 4_096, heldMs: 0, spanUs: 0 })).toBe(true)
