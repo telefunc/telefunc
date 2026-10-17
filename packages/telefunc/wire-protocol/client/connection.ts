@@ -112,7 +112,7 @@ type OutboundFrame = {
 interface MuxChannel {
   readonly id: string
   readonly isClosed: boolean
-  /** The largest frame its server takes. */
+  /** The largest frame its server takes on a WebSocket. */
   readonly _maxFrameBytes: number
   /** It opened on `uplink`'s wire: the one of the channel's last attach means that same wire, which lost nothing. */
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
@@ -410,7 +410,7 @@ class ClientConnection implements MuxConnection {
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
   /** The windows the replay buffers allow, the page's and the server's, as the last RECONCILED says them. */
   private replayWindows: { window: number; peerWindow: number } | null = null
-  /** The largest frame the server takes, as the last RECONCILED says it. */
+  /** The largest frame the server takes on a WebSocket, as the last RECONCILED says it. */
   private maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES
   private constructor(telefuncUrl: string, options: ClientConnectionOptions, cacheKey: string) {
     this.cacheKey = cacheKey
@@ -719,8 +719,9 @@ class ClientConnection implements MuxConnection {
     if (ackedSeq === this.lastSeqByChannel.get(ix)) channel._answered()
   }
 
-  /** The largest frame of `channel`'s the server takes: the channel's own limit, or its connection's once smaller. */
+  /** The largest frame of `channel`'s the server takes: a runtime's lower limit is its WebSocket's. */
   private maxFrameBytesOf(channel: MuxChannel): number {
+    if (!this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.WS)) return WIRE_MAX_RAW_FRAME_BYTES
     return Math.min(channel._maxFrameBytes, this.maxFrameBytes)
   }
 
@@ -1553,8 +1554,7 @@ class ClientConnection implements MuxConnection {
   /** The timeouts, replay sizes and frame limit the server sets, each replay fitted to them. */
   private takeServerSettings(ctrl: ReconciledPayload): void {
     this.reconnectTimeoutMs = ctrl.reconnectTimeout
-    // A runtime's lower limit is its WebSocket's.
-    if (this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.WS)) this.maxFrameBytes = ctrl.maxFrameBytes
+    this.maxFrameBytes = ctrl.maxFrameBytes
     // A per-call `idleTimeout` (withContext) is kept over the server's.
     if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
     this.clientReplayBufferBytes = ctrl.clientReplayBuffer

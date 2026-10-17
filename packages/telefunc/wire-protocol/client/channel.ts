@@ -37,12 +37,7 @@ import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCal
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './session-registry.js'
-import {
-  FC_PAGE_YIELD_BYTES,
-  CHANNEL_TRANSPORT,
-  WIRE_MAX_RAW_FRAME_BYTES,
-  type ChannelTransports,
-} from '../constants.js'
+import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import type { Uplink } from './uplink.js'
@@ -119,8 +114,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = channelId
     this.ack = ack
     this.key = key
-    // A runtime's lower limit is its WebSocket's.
-    this._maxFrameBytes = transports.includes(CHANNEL_TRANSPORT.WS) ? maxFrameBytes : WIRE_MAX_RAW_FRAME_BYTES
+    this._maxFrameBytes = maxFrameBytes
     this._flow = new FlowControl(
       {
         byteWindowUpdate: (limit, kind) => this._connection.sendByteWindowUpdate(this, limit, kind),
