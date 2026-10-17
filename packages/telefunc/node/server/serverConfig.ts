@@ -498,7 +498,6 @@ function applyStreamConfig(val: unknown): void {
   configState.stream = next
 }
 
-/** Milliseconds a timer waits, at most `max`, which `bound` explains. */
 function applyChannelConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.channel should be an object')
   const next: ChannelConfigUser = {}
