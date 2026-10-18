@@ -386,6 +386,8 @@ function webSocketTo(net: Net): new (url: string) => unknown {
     onclose: (() => void) | null = null
     onerror: (() => void) | null = null
     private readonly link = net.open()
+    /** Settles as the last frame the server sent comes due at the page: the next one waits behind it. */
+    private due = Promise.resolve()
     private readonly peer = {
       context: {},
       // It hands each frame on as it is sent, or holds what its link hasn't carried.
@@ -395,11 +397,8 @@ function webSocketTo(net: Net): new (url: string) => unknown {
         if (this.link.dead) return
         const data = frame.slice().buffer
         const at = net.arrival(this.link, frame.byteLength, frame[0])
-        if (at > Date.now()) {
-          void until(at).then(() => this.deliver(data))
-          return
-        }
-        queueMicrotask(() => this.deliver(data))
+        this.due = this.due.then(() => (at > Date.now() ? until(at) : undefined))
+        void this.due.then(() => this.deliver(data))
       },
       // A socket the server destroys closes with 1006, without a close frame.
       terminate: () => this.end(1006),
