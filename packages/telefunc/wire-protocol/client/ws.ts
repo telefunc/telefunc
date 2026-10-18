@@ -378,20 +378,17 @@ function receiveMessage(
   take: (frame: DecodedFrame, byteLength: number, at: number) => boolean,
 ): boolean {
   // The frames before a message's last ride on it: each taken as it would be alone, but not dated apart from the last.
-  let riding: { frame: DecodedFrame; bytes: number }[] | undefined
+  const riding: { frame: DecodedFrame; bytes: number }[] = []
   let last: DecodedFrame | null = null
   let lastBytes = 0
   try {
-    const frames = isOneFrame(raw) ? null : Array.from(messageFrames(raw))
-    const own = frames === null ? raw : frames.pop()!
-    if (frames !== null) {
-      riding = []
-      for (const each of frames) {
-        const frame = decode(each)
-        pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
-        if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
-        riding.push({ frame, bytes: each.byteLength })
-      }
+    const frames = isOneFrame(raw) ? [raw] : Array.from(messageFrames(raw))
+    const own = frames.pop()!
+    for (const each of frames) {
+      const frame = decode(each)
+      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
+      if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
+      riding.push({ frame, bytes: each.byteLength })
     }
     const frame = decode(own)
     if (frame.tag === TAG.ANNOUNCE) pieces.announce(frame.bytes, at, frame.floor)
@@ -409,8 +406,6 @@ function receiveMessage(
   } catch {
     return false
   }
-  if (riding !== undefined) {
-    for (const { frame, bytes } of riding) if (!take(frame, bytes, at)) return false
-  }
+  for (const { frame, bytes } of riding) if (!take(frame, bytes, at)) return false
   return last === null || take(last, lastBytes, at)
 }
