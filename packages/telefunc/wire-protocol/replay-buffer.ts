@@ -49,7 +49,8 @@ export class ReplayBuffer {
   /** Stores a frame, its seq no less than the last pushed, in its lane; none larger than the lane's budget. */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     assert(seq <= this._seq)
-    if (seq > this.pushedSeq) this.pushedSeq = seq
+    assert(seq >= this.pushedSeq)
+    this.pushedSeq = seq
     this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
   }
 
