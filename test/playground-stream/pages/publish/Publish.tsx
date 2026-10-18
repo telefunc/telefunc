@@ -95,12 +95,16 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const room = await onBinaryBroadcast()
+          // A GC pass would close `room` and its subscription before the server's frames arrive.
+          const releaseRoom = keepReachable(room)
           const received: Array<{ size: number; firstByte: number }> = []
           room.subscribeBinary((data, info) => {
             received.push({ size: data.byteLength, firstByte: data[0]! })
             setResult(JSON.stringify({ received, done: received.length >= 5 }))
           })
           await room.publish({ start: true })
+          for (let poll = 0; poll < 50 && received.length < 5; poll++) await new Promise((r) => setTimeout(r, 200))
+          releaseRoom()
         }}
       >
         Server broadcasts 5 binary frames
