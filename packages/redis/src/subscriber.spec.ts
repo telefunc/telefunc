@@ -55,6 +55,15 @@ function orderingFrame(seq: number, payload: string, timestamp = 1): Uint8Array 
   return frame
 }
 
+/** A Broadcast frame: the seq of its key's previous publish of its kind, eight bytes, then its ordering frame. */
+function broadcastFrame(predecessor: number, seq: number, payload: string, timestamp = 1): Uint8Array {
+  const ordered = orderingFrame(seq, payload, timestamp)
+  const frame = new Uint8Array(8 + ordered.byteLength)
+  new DataView(frame.buffer).setUint32(4, predecessor)
+  frame.set(ordered, 8)
+  return frame
+}
+
 /** A frame on an every-track channel: its lane key, two bytes of length first, then the lane's ordering frame. */
 function everyTrackFrame(laneKey: string, seq: number, payload: string): Uint8Array {
   const key = new TextEncoder().encode(laneKey)
@@ -116,12 +125,12 @@ test('re-subscribes on a fresh connection and resumes delivery after a drop', as
   await untilReady(attempt)
   attempt.onStateChange((state) => states.push(state))
   const channel = sockets[0]!.subscribed[0]![0]!
-  sockets[0]!.deliver(channel, orderingFrame(5, 'one'))
+  sockets[0]!.deliver(channel, broadcastFrame(4, 5, 'one'))
   starts = startsAt()
   sockets[0]!.socket.emit('close')
   await vi.waitFor(() => expect(states).toEqual(['lost', 'ready']))
   expect(sockets[1]!.subscribed).toEqual([[channel]])
-  sockets[1]!.deliver(channel, orderingFrame(1, 'two'))
+  sockets[1]!.deliver(channel, broadcastFrame(0, 1, 'two'))
   expect(received).toEqual(['one', 'two'])
 })
 
@@ -285,7 +294,7 @@ test('a lane whose seq a failover rewound goes on from the rewound frame, and a 
     [4, 9, 'late'],
     [7, 22, 'e'],
   ] as const) {
-    sockets[0]!.deliver(channel, orderingFrame(seq, payload, timestamp))
+    sockets[0]!.deliver(channel, broadcastFrame(seq - 1, seq, payload, timestamp))
   }
   expect(received).toEqual(['a@5', 'b@6', 'c@5', 'd@6', 'e@7'])
 })
@@ -297,9 +306,44 @@ test("a frame that arrives just ahead of its lane's first after subscribing wait
   const attempt = openAttempt(driver, route, (payload, info) => void received.push(`${payload}@${info.seq}`))
   await untilReady(attempt)
   const channel = sockets[0]!.subscribed[0]![0]!
-  sockets[0]!.deliver(channel, orderingFrame(6, 'b'))
-  sockets[0]!.deliver(channel, orderingFrame(5, 'a'))
+  sockets[0]!.deliver(channel, broadcastFrame(5, 6, 'b'))
+  sockets[0]!.deliver(channel, broadcastFrame(4, 5, 'a'))
   expect(received).toEqual(['a@5', 'b@6'])
+})
+
+test("a Broadcast frame goes out at once past the seqs its key's publishes of the other kind took", async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets, startsAt(['', 4]))
+  const received: string[] = []
+  const attempt = openAttempt(
+    driver,
+    { key: 'chat', kind: 'binary' },
+    (payload, info) => void received.push(`${new TextDecoder().decode(payload as Uint8Array)}@${info.seq}`),
+  )
+  await untilReady(attempt)
+  const channel = sockets[0]!.subscribed[0]![0]!
+  // Text publishes took seqs 5 and 7.
+  sockets[0]!.deliver(channel, broadcastFrame(3, 6, 'a'))
+  sockets[0]!.deliver(channel, broadcastFrame(6, 8, 'b'))
+  expect(received).toEqual(['a@6', 'b@8'])
+})
+
+test('a Broadcast frame that arrives ahead of the previous publish of its kind waits for it, and both go out in order', async () => {
+  const sockets: ReturnType<typeof fakeSubscriber>[] = []
+  const { driver } = driverWith(sockets, startsAt(['', 4]))
+  const received: string[] = []
+  const attempt = openAttempt(
+    driver,
+    { key: 'chat', kind: 'binary' },
+    (payload, info) => void received.push(`${new TextDecoder().decode(payload as Uint8Array)}@${info.seq}`),
+  )
+  await untilReady(attempt)
+  const channel = sockets[0]!.subscribed[0]![0]!
+  // Text publishes took seqs 5 and 7.
+  sockets[0]!.deliver(channel, broadcastFrame(6, 8, 'b'))
+  expect(received).toEqual([])
+  sockets[0]!.deliver(channel, broadcastFrame(3, 6, 'a'))
+  expect(received).toEqual(['a@6', 'b@8'])
 })
 
 test("a fan-in frame that arrives just ahead of its lane's first after subscribing waits for it, a lane with no commit yet starting at 1", async () => {
@@ -337,7 +381,7 @@ test('a frame that arrives while its lane is being read goes out once the read i
     [6, 'b'],
     [5, 'a'],
   ] as const) {
-    sockets[0]!.deliver(channel, orderingFrame(seq, payload))
+    sockets[0]!.deliver(channel, broadcastFrame(seq - 1, seq, payload))
   }
   read.resolve(new Map([['', { seq: 4, timestamp: 1 }]]))
   await untilReady(attempt)

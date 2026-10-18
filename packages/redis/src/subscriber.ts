@@ -38,7 +38,7 @@ type Connection =
 
 type Connected = Extract<Connection, { phase: 'connected' }>
 
-/** A lane's last frame delivered, and the frames that arrived past a missing one, by seq,
+/** A lane's last frame delivered, and the frames that arrived past a missing one, by their predecessor's seq,
  *  until it arrives or the wait ends. */
 type LaneOrder = {
   last: number
@@ -317,6 +317,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
   private _early: Buffer[] = []
   private readonly _fanIn: boolean
+  private readonly _broadcast: boolean
 
   constructor(
     readonly source: RedisSubscriptionSource,
@@ -329,6 +330,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     super()
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
     this._fanIn = 'roomId' in source && (source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track')
+    this._broadcast = !('roomId' in source)
   }
 
   async unsubscribe(): Promise<void> {
@@ -402,8 +404,9 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     this._order(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH), token)
   }
 
-  /** Delivers each lane in seq order: a frame past a missing seq waits `REORDER_WAIT_MS` for it, and one at or below
-   *  the last delivered is dropped. Its commit's fence settles once it is delivered or dropped. */
+  /** Delivers each lane in seq order: a frame whose predecessor is past the last delivered waits `REORDER_WAIT_MS` for
+   *  it, and one at or below the last delivered is dropped. Its commit's fence settles once it is delivered or
+   *  dropped. */
   private _order(frame: Buffer, token: string | null): void {
     let lane = ''
     if (this._fanIn) {
@@ -411,19 +414,21 @@ class RedisSubscriptionAttempt extends DriverAttempt {
       lane = frame.toString('latin1', 2, end)
       frame = frame.subarray(end)
     }
-    const { payload, info } = decodeOrderingFrame(frame)
+    // A Broadcast key's kinds share one sequence, so its frame leads with the seq of the previous publish of its kind.
+    const { payload, info } = decodeOrderingFrame(this._broadcast ? frame.subarray(8) : frame)
+    const predecessor = this._broadcast ? Number(frame.readBigUInt64BE(0)) : info.seq - 1
     let order = this._orders.get(lane)
     if (order === undefined) {
       // A lane with no commit when the subscription went live: every one of its commits is after.
       order = { last: 0, lastTimestamp: 0, held: null, release: null }
       this._orders.set(lane, order)
     }
-    if (info.seq === order.last + 1) {
+    if (predecessor <= order.last && info.seq > order.last) {
       this._advance(order, payload, info, token)
       if (order.held !== null) this._drain(order)
       return
     }
-    if (info.seq > order.last + 1) return this._hold(order, payload, info, token)
+    if (predecessor > order.last) return this._hold(order, predecessor, payload, info, token)
     // A commit never sets its lane's time back, so a later time on a seq at or below the last is a failover's rewind.
     if (info.timestamp <= order.lastTimestamp) return this._settle(token)
     if (order.held !== null) this._release(order)
@@ -436,10 +441,16 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     this._deliver(payload, info, token)
   }
 
-  private _hold(order: LaneOrder, payload: Uint8Array, info: OrderingInfo, token: string | null): void {
-    if (order.held?.has(info.seq)) return this._settle(token)
+  private _hold(
+    order: LaneOrder,
+    predecessor: number,
+    payload: Uint8Array,
+    info: OrderingInfo,
+    token: string | null,
+  ): void {
+    if (order.held?.has(predecessor)) return this._settle(token)
     order.held ??= new Map()
-    order.held.set(info.seq, { payload, info, token })
+    order.held.set(predecessor, { payload, info, token })
     if (order.release !== null) return
     order.release = setTimeout(() => this._release(order), REORDER_WAIT_MS)
     order.release.unref()
@@ -448,10 +459,10 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   /** The held frames that now follow in order. */
   private _drain(order: LaneOrder): void {
     const held = order.held!
-    for (let next = held.get(order.last + 1); next !== undefined; next = held.get(order.last + 1)) {
+    for (let next = held.get(order.last); next !== undefined; next = held.get(order.last)) {
       // A receiver may close the lane.
       if (this.state() !== 'ready') return
-      held.delete(next.info.seq)
+      held.delete(order.last)
       this._advance(order, next.payload, next.info, next.token)
     }
     if (held.size > 0) return

@@ -77,15 +77,15 @@ describe('Redis real three-master Cluster CI certification', () => {
       return await publish(...args)
     })
     // An existing counter isn't seeded, so it counts executions exactly.
-    await cluster.set(broadcastSequenceKey(prefix, 'once'), '0:0')
+    await cluster.set(broadcastSequenceKey(prefix, 'once'), '0:0:0:0')
     await expect(backend.publish({ key: 'once', kind: 'text' }, 'once')).rejects.toThrow()
-    expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toMatch(/^1:\d+$/)
+    expect(await cluster.get(broadcastSequenceKey(prefix, 'once'))).toMatch(/^1:\d+:1:0$/)
   })
   it("never sets a Broadcast key's time back, so a frame a failover rewound is told from a late one", async () => {
     const prefix = uniquePrefix('time-clamp')
     const backend = ownBackend(cluster, prefix)
     const ahead = Date.now() + 60_000
-    await cluster.set(broadcastSequenceKey(prefix, 'clamp'), `5:${ahead}`)
+    await cluster.set(broadcastSequenceKey(prefix, 'clamp'), `5:${ahead}:0:0`)
     expect(await backend.publish({ key: 'clamp', kind: 'text' }, 'clamped')).toMatchObject({ seq: 6, timestamp: ahead })
   })
   it('covers shipped command KEYS and terminates live and in-flight attempts when their generation drops', async () => {
@@ -548,6 +548,25 @@ process.exit(0)`,
     expect(error).toBeInstanceOf(Error)
     expect(String(error)).toMatch(/delivery fence|connection closed/i)
     expect(observed).toEqual(['late-first', 'late-second'])
+  })
+  it("delivers a Broadcast key's publishes at once after one of the key's other kind", async () => {
+    const backend = ownBackend(cluster, uniquePrefix('mixed-kinds'))
+    const text = { key: 'mixed', kind: 'text' } as const
+    const binary = { key: 'mixed', kind: 'binary' } as const
+    const observed: string[] = []
+    const subscriptions = [
+      ownSubscription(backend.subscribe(text, (payload) => void observed.push(payload))),
+      ownSubscription(backend.subscribe(binary, (payload) => void observed.push(Buffer.from(payload).toString()))),
+    ]
+    await Promise.all(subscriptions.map((subscription) => subscription.ready))
+    const started = performance.now()
+    await backend.publish(text, 'text 1')
+    for (let i = 1; i <= 5; i++) await backend.publish(binary, bytes(`binary ${i}`))
+    await backend.publish(text, 'text 2')
+    await waitFor(() => observed.length === 7)
+    // A frame held for a missing seq goes out after 1 s.
+    expect(performance.now() - started).toBeLessThan(500)
+    expect(observed).toEqual(['text 1', 'binary 1', 'binary 2', 'binary 3', 'binary 4', 'binary 5', 'text 2'])
   })
   it('omits unknowable receiver counts and shares empty-key text/binary ordering across nodes', async () => {
     const prefix = uniquePrefix('receivers')

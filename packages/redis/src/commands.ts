@@ -86,26 +86,37 @@ local function tf_ordering_frame(seq, ts, payload)
 end
 `
 
-// Broadcast publish: next per-key seq, authority time that never goes back on the key,
-// one PUBLISH of the ordering frame.
-//   KEYS: [1]=order ('seq:ts') [2]=channel
-//   ARGV: [1]=payload
+// Broadcast publish: next per-key seq, authority time that never goes back on the key, one PUBLISH of the seq of the
+// key's previous publish of this kind (two u32 big-endian words, 0 if none) and the ordering frame.
+//   KEYS: [1]=order ('seq:ts:last text seq:last binary seq') [2]=channel
+//   ARGV: [1]=payload [2]=kind ('text'|'binary')
 const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
 local prev = redis.call('GET', KEYS[1])
 local ts = tf_now()
 local seq
+local text, binary = '0', '0'
 if prev then
-  local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
+  local pseq, pts, ptext, pbinary = string.match(prev, '^(%d+):(%d+):(%d+):(%d+)$')
   if not pseq then return redis.error_reply('publish: invalid ordering watermark') end
   seq = tonumber(pseq) + 1
   if tonumber(pts) > ts then ts = tonumber(pts) end
+  text, binary = ptext, pbinary
 else
   -- A missing order (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
   local t = redis.call('TIME')
   seq = tonumber(t[1]) * 1000000 + tonumber(t[2]) + 1
 end
-redis.call('SET', KEYS[1], string.format('%.0f', seq) .. ':' .. string.format('%.0f', ts))
-local frame = tf_ordering_frame(seq, ts, ARGV[1])
+local seq_text = string.format('%.0f', seq)
+local predecessor
+if ARGV[2] == 'text' then
+  predecessor, text = tonumber(text), seq_text
+else
+  predecessor, binary = tonumber(binary), seq_text
+end
+redis.call('SET', KEYS[1], seq_text .. ':' .. string.format('%.0f', ts) .. ':' .. text .. ':' .. binary)
+local predecessor_hi = math.floor(predecessor / 4294967296)
+local frame = struct.pack('>I4I4', predecessor_hi, predecessor - predecessor_hi * 4294967296)
+  .. tf_ordering_frame(seq, ts, ARGV[1])
 local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
 `
@@ -250,13 +261,13 @@ return marks
 
 // Read once SUBSCRIBE is acknowledged: a key's frames start after its last publish. A key with none starts at authority
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
-//   KEYS: [1]=order ('seq:ts')
+//   KEYS: [1]=order ('seq:ts:last text seq:last binary seq')
 const BROADCAST_START_LUA = `
 redis.replicate_commands()
 local mark = redis.call('GET', KEYS[1])
 if mark then return mark end
 local t = redis.call('TIME')
-mark = string.format('%.0f', tonumber(t[1]) * 1000000 + tonumber(t[2])) .. ':0'
+mark = string.format('%.0f', tonumber(t[1]) * 1000000 + tonumber(t[2])) .. ':0:0:0'
 redis.call('SET', KEYS[1], mark)
 return mark
 `
@@ -531,7 +542,7 @@ const REDIS_COMMANDS = {
     invoke: (prefix, { route, payload }: { route: BroadcastRoute; payload: BroadcastPayload }) => ({
       keys: [broadcastSequenceKey(prefix, route.key), broadcastChannel(prefix, route)],
       // ioredis sends a string as UTF-8.
-      argv: [typeof payload === 'string' ? payload : toBuffer(payload)],
+      argv: [typeof payload === 'string' ? payload : toBuffer(payload), route.kind],
     }),
     parse: (reply) => {
       // A shared client with ioredis's `stringNumbers` returns integer replies as decimal strings.
