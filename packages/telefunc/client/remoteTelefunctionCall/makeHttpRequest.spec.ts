@@ -2,6 +2,22 @@ import { expect, test } from 'vitest'
 import { makeHttpRequest } from './makeHttpRequest.js'
 import { TELEFUNC_SESSION_HEADER } from '../../wire-protocol/server/adapter/cloudflare/routing.js'
 
+/** A call of `onLoad` at `telefuncUrl` whose request goes to `fetch`, its failure ignored. */
+function callOnLoad(telefuncUrl: string, fetch: typeof globalThis.fetch) {
+  return makeHttpRequest({
+    telefuncUrl,
+    httpRequestBody: '{}',
+    telefunctionName: 'onLoad',
+    telefuncFilePath: '/page.telefunc.ts',
+    headers: null,
+    fetch,
+    abortController: new AbortController(),
+    channel: { transports: ['sse'] },
+    requestCloseHandlers: [],
+    extensionResponseTypes: [],
+  }).catch(() => {})
+}
+
 test("a page's concurrent first calls present one session token, so they reach one session", async () => {
   const requests: Array<{ session: string | null; headers: Record<string, string> }> = []
   const fetch = (async (url: string, init: RequestInit) => {
@@ -11,19 +27,7 @@ test("a page's concurrent first calls present one session token, so they reach o
     })
     return new Response('', { status: 500 })
   }) as unknown as typeof globalThis.fetch
-  const call = () =>
-    makeHttpRequest({
-      telefuncUrl: 'http://first-calls.test/_telefunc',
-      httpRequestBody: '{}',
-      telefunctionName: 'onLoad',
-      telefuncFilePath: '/page.telefunc.ts',
-      headers: null,
-      fetch,
-      abortController: new AbortController(),
-      channel: { transports: ['sse'] },
-      requestCloseHandlers: [],
-      extensionResponseTypes: [],
-    }).catch(() => {})
+  const call = () => callOnLoad('http://first-calls.test/_telefunc', fetch)
   await Promise.all([call(), call()])
   expect(requests[0]!.session).toEqual(expect.any(String))
   expect(requests[1]!.session).toBe(requests[0]!.session)
@@ -37,19 +41,7 @@ test("a page's later calls present the session token its first call named", asyn
     sessions.push(new URL(url).searchParams.get('session'))
     return new Response('', { status: 500 })
   }) as unknown as typeof globalThis.fetch
-  const call = () =>
-    makeHttpRequest({
-      telefuncUrl: 'http://kept-token.test/_telefunc',
-      httpRequestBody: '{}',
-      telefunctionName: 'onLoad',
-      telefuncFilePath: '/page.telefunc.ts',
-      headers: null,
-      fetch,
-      abortController: new AbortController(),
-      channel: { transports: ['sse'] },
-      requestCloseHandlers: [],
-      extensionResponseTypes: [],
-    }).catch(() => {})
+  const call = () => callOnLoad('http://kept-token.test/_telefunc', fetch)
   await call()
   await call()
   expect(sessions[1]).toBe(sessions[0])
