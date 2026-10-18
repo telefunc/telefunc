@@ -1,5 +1,6 @@
-// ioredis policy: the connection the backend's commands run on, subscriber creation, and calls to defined commands.
-export { createCommandClient, createSubscriberSocket, callDefinedCommand, isCluster }
+// ioredis policy: a client's deployment, the connection the backend's commands run on, subscriber creation, and calls
+// to defined commands.
+export { createCommandClient, createSubscriberSocket, callDefinedCommand, isCluster, deploymentOf }
 export type { RedisClient, SubscriberSocket }
 
 import { randomUUID } from 'node:crypto'
@@ -21,6 +22,14 @@ type SubscriberSocket = {
 
 function isCluster(redis: RedisClient): redis is Cluster {
   return redis instanceof Cluster
+}
+
+/** What a client connects to: a Cluster's startup nodes, or a server's address, database and Sentinel name. */
+function deploymentOf(redis: RedisClient): string {
+  // ioredis keeps a Cluster's startup nodes private; its own duplicate() reads the same field.
+  if (isCluster(redis)) return JSON.stringify((redis as unknown as { startupNodes: unknown }).startupNodes)
+  const { path, host, port, db, sentinels, name } = redis.options
+  return JSON.stringify({ path, host, port, db, sentinels, name })
 }
 
 /** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), reads masters
