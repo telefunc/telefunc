@@ -75,7 +75,7 @@ type BufferedFrame = {
   channelIx: number
   seq?: number
 }
-type SequencedFrame = BufferedFrame & { seq: number }
+type HeldFrame = BufferedFrame & { seq: number }
 
 /** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
  *  until the swap commits — typically driven via a transient Heartbeat. */
@@ -397,7 +397,7 @@ class ClientConnection implements MuxConnection {
   /** Frames held while sends are, or for their channel's ATTACH_RESULT. */
   private sendBuffer: BufferedFrame[] = []
   /** Sequenced frames waiting only for the transport's room, in order: a channel's next send waits behind them. */
-  private heldForRoom = new Fifo<SequencedFrame>()
+  private heldForRoom = new Fifo<HeldFrame>()
   private heldForRoomBytes = 0
   /** Channels whose queued frames go, all in one pass when they're next read (see `settleQueue`). */
   private droppedQueues = new Set<number>()
@@ -687,7 +687,7 @@ class ClientConnection implements MuxConnection {
     this.holdForRoom({ frame, channelIx: ix, seq })
   }
 
-  private holdForRoom(entry: SequencedFrame): void {
+  private holdForRoom(entry: HeldFrame): void {
     this.heldForRoom.push(entry)
     this.heldForRoomBytes += entry.frame.byteLength
   }
@@ -1743,7 +1743,7 @@ class ClientConnection implements MuxConnection {
     const dropped = this.droppedQueues
     this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => !dropped.has(channelIx))
     if (this.heldForRoom.length > 0) {
-      const kept = new Fifo<SequencedFrame>()
+      const kept = new Fifo<HeldFrame>()
       for (const entry of this.heldForRoom) {
         if (dropped.has(entry.channelIx)) this.heldForRoomBytes -= entry.frame.byteLength
         else kept.push(entry)
