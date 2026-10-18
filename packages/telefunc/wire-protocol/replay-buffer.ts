@@ -124,7 +124,6 @@ function mergeBySeq(a: Run, b: Run): Run {
 }
 
 /** Bounded FIFO lane with parallel arrays and amortised O(1) compaction. */
-
 class ReplayLane {
   // Parallel arrays — seqs separate for cache-friendly access
   private seqs: number[] = []
