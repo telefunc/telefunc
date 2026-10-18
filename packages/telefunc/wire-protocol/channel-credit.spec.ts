@@ -2553,27 +2553,6 @@ test("on a 10 B/ms uplink the page measured, a 20 MB/s download's acknowledgemen
   expect(wire.down / 20_000 / 1_000).toBeGreaterThanOrEqual(19.9)
 })
 
-test.each([
-  [100, 16, { down: 19.9055, up: 44.7, wait: 2_583, longest: 3_316 }],
-  [100, 64, { down: 19.0699, up: 56.16, wait: 2_210, longest: 3_316 }],
-  [1_250, 64, { down: 20.0006, up: 134.78, wait: 2_885, longest: 3_315 }],
-  [1_250, 16, { down: 20.0006, up: 79.1, wait: 2_886, longest: 3_316 }],
-])(
-  "on a %i B/ms uplink with an upload that awaits each %i KiB message, a 20 MB/s download and the upload carry what they do on main's growth rule, and another channel's messages wait no longer",
-  async (up, message, main) => {
-    const row = await downloadBeside(up, (page) => {
-      void (async () => {
-        while (!page.isClosed) await page.sendBinary(new Uint8Array(message * KIB))
-      })().catch(() => {})
-      return () => {}
-    })
-    expect(row.down).toBeGreaterThanOrEqual(main.down - CUT_FRAME / 1_000)
-    expect(row.up).toBeGreaterThanOrEqual(main.up - CUT_FRAME)
-    expect(row.waits[row.waits.length >> 1]).toBeLessThanOrEqual(main.wait)
-    expect(row.waits.at(-1)).toBeLessThanOrEqual(main.longest)
-  },
-)
-
 /** A hidden tab: the timers the page's send budget sets wait `every` ms at least. */
 function throttlePacing(every: number): () => void {
   const budget = SendBudget.prototype as unknown as { pace: () => void }
@@ -2622,15 +2601,19 @@ test.each(
   },
 )
 
-// The awaited rows a hidden tab lost, the verifier's and the perturbed ones, with the page's timers never firing.
+// The awaited rows, then the ones a hidden tab lost, the verifier's and the perturbed ones, its timers never firing.
 test.each([
-  [100, 64, { down: 19.0699, up: 56.16, wait: 2_210, longest: 3_316 }],
-  [100, 48, { down: 16.7234, up: 71.64, wait: 1_619, longest: 3_297 }],
-  [1_250, 24, { down: 20.0006, up: 97.52, wait: 2_886, longest: 3_316 }],
-])(
-  "in a hidden tab, on a %i B/ms uplink with an upload that awaits each %i KiB message, a 20 MB/s download and the upload carry what they do on main's growth rule, with the page's timers never firing",
-  async (up, message, main) => {
-    const restore = throttlePacing(1e9)
+  ['', 100, 16, { down: 19.9055, up: 44.7, wait: 2_583, longest: 3_316 }],
+  ['', 100, 64, { down: 19.0699, up: 56.16, wait: 2_210, longest: 3_316 }],
+  ['', 1_250, 64, { down: 20.0006, up: 134.78, wait: 2_885, longest: 3_315 }],
+  ['', 1_250, 16, { down: 20.0006, up: 79.1, wait: 2_886, longest: 3_316 }],
+  ['in a hidden tab, ', 100, 64, { down: 19.0699, up: 56.16, wait: 2_210, longest: 3_316 }],
+  ['in a hidden tab, ', 100, 48, { down: 16.7234, up: 71.64, wait: 1_619, longest: 3_297 }],
+  ['in a hidden tab, ', 1_250, 24, { down: 20.0006, up: 97.52, wait: 2_886, longest: 3_316 }],
+] as const)(
+  "%son a %i B/ms uplink with an upload that awaits each %i KiB message, a 20 MB/s download and the upload carry what they do on main's growth rule, and another channel's messages wait no longer",
+  async (hidden, up, message, main) => {
+    const restore = hidden ? throttlePacing(1e9) : () => {}
     try {
       const row = await downloadBeside(up, (page) => {
         void (async () => {
