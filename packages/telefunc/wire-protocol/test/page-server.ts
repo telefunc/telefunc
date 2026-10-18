@@ -396,15 +396,10 @@ function webSocketTo(net: Net): new (url: string) => unknown {
         const data = frame.slice().buffer
         const at = net.arrival(this.link, frame.byteLength, frame[0])
         if (at > Date.now()) {
-          void until(at).then(() => {
-            if (this.link.dead) return
-            net.pageGets(new Uint8Array(data))
-            this.onmessage?.({ data })
-          })
+          void until(at).then(() => this.deliver(data))
           return
         }
-        net.pageGets(frame)
-        queueMicrotask(() => this.onmessage?.({ data }))
+        queueMicrotask(() => this.deliver(data))
       },
       // A socket the server destroys closes with 1006, without a close frame.
       terminate: () => this.end(1006),
@@ -440,6 +435,12 @@ function webSocketTo(net: Net): new (url: string) => unknown {
     }
     close() {
       this.end(1000)
+    }
+    private deliver(data: ArrayBuffer) {
+      // A closed socket fires no message event.
+      if (this.link.dead || this.readyState === 3) return
+      net.pageGets(new Uint8Array(data))
+      this.onmessage?.({ data })
     }
     private end(code: number) {
       if (this.readyState === 3) return
