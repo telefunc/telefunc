@@ -378,51 +378,31 @@ describe.each(WIRES)('over %s, from the server', (wire) => {
     expect((pageClosed.err as { abortValue: unknown }).abortValue).toBe('gone')
   })
 
-  test("a server's answer that completes its close, written into a dying wire, reaches the page", async () => {
-    const { net, channel } = page(wire)
-    channel(register().id) // another channel on the page
-    const server = register<string, never>()
-    let answer!: () => void
-    server.listen(() => new Promise<string>((resolve) => (answer = () => resolve('reply'))))
-    const pageChannel = channel<string, never>(server.id)
-    const pageClosed = closedWith(pageChannel)
-    const serverClosed = closedWith(server)
-    await advance(500)
-    const asked = settled(pageChannel.send('question', { ack: true }))
-    await advance(100)
-    const closing = settled(server.close({ timeout: 20_000 }))
-    await advance(100) // the page acknowledges the close
-    net.whenServerSends(TAG.ACK_RES, () => net.die())
-    answer() // written into the dead wire, it completes the server's close
-    await advance(10_000)
-    expect(asked.value).toBe('reply')
-    expect(closing.value).toBe(0)
-    expect(pageClosed.err).toBeUndefined()
-    expect(serverClosed.err).toBeUndefined()
-  })
-
-  test("a server's answer that completes the page's close, written into a dying wire, reaches the page", async () => {
-    const { net, channel } = page(wire)
-    channel(register().id) // another channel on the page
-    const server = register<string, never>()
-    let answer!: () => void
-    server.listen(() => new Promise<string>((resolve) => (answer = () => resolve('reply'))))
-    const pageChannel = channel<string, never>(server.id)
-    const pageClosed = closedWith(pageChannel)
-    const serverClosed = closedWith(server)
-    await advance(500)
-    const asked = settled(pageChannel.send('question', { ack: true }))
-    await advance(100)
-    const closing = settled(pageChannel.close({ timeout: 20_000 }))
-    await advance(100) // the server acknowledges the close
-    net.whenServerSends(TAG.ACK_RES, () => net.die())
-    answer()
-    await advance(10_000)
-    expect(asked.value).toBe('reply')
-    expect(closing.value).toBe(0)
-    expect(pageClosed.err).toBeUndefined()
-    expect(serverClosed.err).toBeUndefined()
-  })
+  test.each(['server', 'page'] as const)(
+    "a server's answer that completes the %s's close, written into a dying wire, reaches the page",
+    async (closer) => {
+      const { net, channel } = page(wire)
+      channel(register().id) // another channel on the page
+      const server = register<string, never>()
+      let answer!: () => void
+      server.listen(() => new Promise<string>((resolve) => (answer = () => resolve('reply'))))
+      const pageChannel = channel<string, never>(server.id)
+      const pageClosed = closedWith(pageChannel)
+      const serverClosed = closedWith(server)
+      await advance(500)
+      const asked = settled(pageChannel.send('question', { ack: true }))
+      await advance(100)
+      const closing = settled((closer === 'server' ? server : pageChannel).close({ timeout: 20_000 }))
+      await advance(100) // the other end acknowledges the close
+      net.whenServerSends(TAG.ACK_RES, () => net.die())
+      answer() // written into the dead wire, it completes the close
+      await advance(10_000)
+      expect(asked.value).toBe('reply')
+      expect(closing.value).toBe(0)
+      expect(pageClosed.err).toBeUndefined()
+      expect(serverClosed.err).toBeUndefined()
+    },
+  )
 
   test("a server's answer made while its page is away, which completes its close, reaches the page once it's back", async () => {
     const { net, channel } = page(wire)
