@@ -39,9 +39,7 @@ async function nodeReadableToWebRequest(
     // @ts-expect-error duplex required for streaming request bodies
     duplex: 'half',
   })
-  // The readable closes as soon as its body is read: a later disconnect only shows on the response, or else on the
-  // connection, watched until `unwatch()`. `req.socket`: an HTTP/1 connection, which keep-alive reuses, or an HTTP/2
-  // request's stream.
+  // A disconnect after the body was read shows on the response, else on `req.socket`, which HTTP/1 keep-alive reuses.
   let unwatch = () => {}
   const socket = (readable as { socket?: EventEmitter | null }).socket
   if (response) {
