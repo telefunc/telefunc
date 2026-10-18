@@ -423,10 +423,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // The wire carries a seq's low 32 bits, widened here from the next one this channel expects.
     if (isSequencedFrame(frame)) {
       frame.seq = seqNear(frame.seq, this._lastClientSeq + 1)
-      if (frame.seq) {
-        if (frame.seq <= this._lastClientSeq) return
-        this._lastClientSeq = frame.seq
-      }
+      if (frame.seq !== 0 && frame.seq <= this._lastClientSeq) return
+      if (frame.seq > this._lastClientSeq) this._lastClientSeq = frame.seq
     }
     // An ended channel keeps only how far the page's frames reached it.
     if (this._didShutdown) return
