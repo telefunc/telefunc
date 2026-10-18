@@ -1,4 +1,5 @@
 export { ClientChannel, ClientBroadcast }
+export type { ClientChannelOptions }
 
 import type {
   ChannelAck,
@@ -48,6 +49,18 @@ import { isPromise } from '../../utils/isPromise.js'
 import { hasProp } from '../../utils/hasProp.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
+
+type ClientChannelOptions = {
+  channelId: string
+  ack?: boolean
+  key?: string
+  maxFrameBytes?: number
+  transports: ChannelTransports
+  connectionKey?: string
+  headers?: Record<string, string>
+  telefuncUrl: string
+  idleTimeout?: number
+}
 
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel
@@ -100,17 +113,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     headers,
     telefuncUrl,
     idleTimeout,
-  }: {
-    channelId: string
-    ack?: boolean
-    key?: string
-    maxFrameBytes?: number
-    transports: ChannelTransports
-    connectionKey?: string
-    headers?: Record<string, string>
-    telefuncUrl: string
-    idleTimeout?: number
-  }) {
+  }: ClientChannelOptions) {
     this.id = channelId
     this.ack = ack
     this.key = key
@@ -630,8 +633,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   /** The subscriptions this page asks the server for. */
   private readonly _subscribed = { text: false, binary: false }
 
-  constructor(...args: ConstructorParameters<typeof ClientChannel>) {
-    super(...args)
+  constructor(options: ClientChannelOptions) {
+    super(options)
     // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
     this._flow.widenByteWindow()
   }

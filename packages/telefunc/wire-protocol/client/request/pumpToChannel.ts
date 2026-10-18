@@ -4,12 +4,12 @@ export type { PumpChannelOptions }
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
 import { concat, textEncoder } from '../../frame.js'
 import { ChannelClosedError } from '../../channel-errors.js'
-import { ClientChannel } from '../channel.js'
+import { ClientChannel, type ClientChannelOptions } from '../channel.js'
 import type { StreamingProducer } from '../../types.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 
 /** What the pump's channel shares with the call's other channels. */
-type PumpChannelOptions = Omit<ConstructorParameters<typeof ClientChannel>[0], 'channelId' | 'ack' | 'key'>
+type PumpChannelOptions = Omit<ClientChannelOptions, 'channelId' | 'ack' | 'key'>
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
