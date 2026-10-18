@@ -566,13 +566,7 @@ const encode = {
     return frame
   },
   closeAck: (index: number, seq = 0) => encodeBareFrame(TAG.CLOSE_ACK, index, seq),
-  abort(index: number, abortValue: string, seq = 0): Uint8Array<ArrayBuffer> {
-    const payload = textEncoder.encode(abortValue)
-    const frame = new Uint8Array(HEADER + payload.byteLength)
-    writeHeader(frame, TAG.ABORT, index, seq)
-    frame.set(payload, HEADER)
-    return frame
-  },
+  abort: (index: number, abortValue: string, seq = 0) => encodeTextFrame(TAG.ABORT, index, abortValue, seq),
   error(index: number, reason: ErrorReason, seq = 0): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
     writeHeader(frame, TAG.ERROR, index, seq)
