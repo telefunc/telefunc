@@ -279,8 +279,9 @@ class ChannelMux {
         (ack) => room.sender.carry(ack),
       ),
     }
+    const attaching = new Set<ServerChannel>()
     const wireSender = new WireSender(connection, transport as ServerTransport<unknown>, pieces, wait, () =>
-      this.wireChannels(entry, connection),
+      this.wireChannels(transport, connection, attaching),
     )
     const entry: ConnectionEntry = {
       state: {
@@ -296,7 +297,7 @@ class ChannelMux {
         retiredByBarrier: false,
         recvBacklog,
         awaited: new AwaitedChannels(recvBacklog),
-        attaching: new Set(),
+        attaching,
         wireSender,
       },
       transport: transport as ServerTransport<unknown>,
@@ -307,7 +308,7 @@ class ChannelMux {
           else this.send(connection, frame as Uint8Array<ArrayBuffer>)
         },
         bufferedAmount: () => this.bufferedAmount(connection),
-        sendWait: () => wireSender.wait,
+        sendWait: () => wait,
         deliveredBeforeFrame: (ms) => {
           const state = this.connectionEntries.get(connection)?.state
           return state ? state.deliveries.before(state.frameDelivery, ms) : 0
@@ -1019,10 +1020,14 @@ class ChannelMux {
   }
 
   /** The channels the wire's send headroom counts: its session's, and those attaching in this turn. */
-  private wireChannels(entry: ConnectionEntry, connection: Wire): Set<ServerChannel> {
-    const sessionId = entry.transport.getSessionId(connection)
+  private wireChannels<TConnection>(
+    transport: ServerTransport<TConnection>,
+    connection: TConnection,
+    attaching: Set<ServerChannel>,
+  ): Set<ServerChannel> {
+    const sessionId = transport.getSessionId(connection)
     const session = sessionId === undefined ? undefined : this.sessions.peekSession(sessionId)
-    const channels = new Set(entry.state.attaching)
+    const channels = new Set(attaching)
     for (const { channel } of session?.values() ?? []) channels.add(channel)
     return channels
   }

@@ -63,12 +63,12 @@ import { assert } from '../utils/assert.js'
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
 // `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
-// ctrl frames carry 0, but a WebSocket's PING, PONG and ANNOUNCE, which say a count there. Seqs count on past 32 bits,
-// and a u32 seq on the wire is their low 32 bits, which `decode` returns as they are: the frame's owner reads the whole
-// seq from where it stands on the channel (`seqNear`, `seqThrough`).
+// ctrl frames carry 0, but a LENGTH and a WebSocket's PING, PONG and ANNOUNCE, which say a count there. Seqs count on
+// past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` returns as they are: the frame's owner
+// reads the whole seq from where it stands on the channel (`seqNear`, `seqThrough`).
 //
 // Tag layout — sparse ranges so range checks classify:
-//   0x01–0x0f  connection-level control (no ix, no seq)
+//   0x01–0x0f  connection-level control (no ix; seq 0 except on a LENGTH and a WebSocket's PING, PONG and ANNOUNCE)
 //   0x10–0x29  data plane (carries seq, payload varies)
 //   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 //
@@ -101,7 +101,7 @@ const textDecoder = new TextDecoder()
 // ===== Tags =====
 
 const TAG = {
-  // ─── Connection-level control (no ix, no seq) ───
+  // ─── Connection-level control (no ix) ───
   /** Client → server heartbeat: a `PingEntry` per closed attached channel; on a WebSocket, its seq is what it took. */
   PING: 0x01 as const,
   /** Server → client heartbeat: a `PongEntry` per channel the PING names; on a WebSocket, its seq is what it took. */
@@ -575,13 +575,7 @@ const encode = {
     return frame
   },
   closeAck: (index: number, seq = 0) => encodeBareFrame(TAG.CLOSE_ACK, index, seq),
-  abort(index: number, abortValue: string, seq = 0): Uint8Array<ArrayBuffer> {
-    const payload = textEncoder.encode(abortValue)
-    const frame = new Uint8Array(HEADER + payload.byteLength)
-    writeHeader(frame, TAG.ABORT, index, seq)
-    frame.set(payload, HEADER)
-    return frame
-  },
+  abort: (index: number, abortValue: string, seq = 0) => encodeTextFrame(TAG.ABORT, index, abortValue, seq),
   error(index: number, reason: ErrorReason, seq = 0): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
     writeHeader(frame, TAG.ERROR, index, seq)

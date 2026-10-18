@@ -153,6 +153,32 @@ test.each(['text', 'binary'] as const)(
   },
 )
 
+test.each(['text', 'binary'] as const)(
+  "a %s message with an ack the page has no listener for rejects the server's send, and the channel stays open",
+  async (kind) => {
+    vi.useFakeTimers()
+    try {
+      const { channel } = page('sse')
+      const server = register()
+      const client = channel(server.id)
+      channels.push(client as ClientChannel<never, string>)
+      await vi.advanceTimersByTimeAsync(100)
+      const sent =
+        kind === 'text' ? server.send('question', { ack: true }) : server.sendBinary(new Uint8Array(1), { ack: true })
+      const answered = sent.then(
+        () => 'resolved',
+        (err: Error) => err.message,
+      )
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await answered).toBe('No listener registered for ack request')
+      expect([client.isClosed, server.isClosed]).toEqual([false, false])
+    } finally {
+      vi.unstubAllGlobals()
+      vi.useRealTimers()
+    }
+  },
+)
+
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = stalledChannel()
   const seen: string[] = []

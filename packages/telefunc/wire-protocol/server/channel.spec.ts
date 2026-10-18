@@ -1,8 +1,15 @@
-import { expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { ServerChannel } from './channel.js'
 import { ERROR_REASON, ProtocolViolationError, TAG } from '../shared-ws.js'
 import { ChannelOverflowError } from '../channel-errors.js'
 import { CHANNEL_BUFFER_LIMIT_BINARY_BYTES, CHANNEL_BUFFER_LIMIT_BYTES } from '../constants.js'
+import { config } from '../../client/clientConfig.js'
+import { page, register } from '../test/page-server.js'
+
+afterEach(() => {
+  delete config.fetch
+  vi.restoreAllMocks()
+})
 
 test("a channel listener that stops listening itself doesn't make the next one miss the message", () => {
   const channel = new ServerChannel<string, never>()
@@ -43,5 +50,36 @@ test.each(['text', 'binary'] as const)(
       kind === 'text' ? Math.floor(CHANNEL_BUFFER_LIMIT_BYTES / 514) : CHANNEL_BUFFER_LIMIT_BINARY_BYTES / 512
     expect(count - overflowed).toBe(held)
     channel.abort()
+  },
+)
+
+test.each(['text', 'binary'] as const)(
+  "an ack answer to a %s message that can't be serialized rejects the page's send as a listener's throw does, and the channel stays open",
+  async (kind) => {
+    vi.useFakeTimers()
+    const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { channel } = page('sse')
+      const server = register()
+      const client = channel(server.id)
+      const cyclic: { self?: unknown } = {}
+      cyclic.self = cyclic
+      server.listen(() => cyclic)
+      server.listenBinary(() => cyclic)
+      await vi.advanceTimersByTimeAsync(100)
+      const sent =
+        kind === 'text' ? client.send('question', { ack: true }) : client.sendBinary(new Uint8Array(1), { ack: true })
+      const answered = sent.then(
+        () => 'resolved',
+        (err: Error) => err.message,
+      )
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(await answered).toBe('Internal Server Error — see server logs')
+      expect(reported).toHaveBeenCalledOnce()
+      expect([client.isClosed, server.isClosed]).toEqual([false, false])
+      client.abort()
+    } finally {
+      vi.useRealTimers()
+    }
   },
 )

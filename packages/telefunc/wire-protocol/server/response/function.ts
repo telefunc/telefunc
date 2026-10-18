@@ -14,7 +14,6 @@ const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = 
   },
   replace(fn, { createChannel, validators }) {
     const channel = createChannel<readonly unknown[], unknown>({ ack: true })
-    const maxFrameBytes = getAdapterMaxFrameBytes()
     const validateArgs = validators.get('args')
     channel.listen((args) => {
       if (validateArgs) {
@@ -25,6 +24,7 @@ const functionReplacer: ReplacerType<FunctionContract, ServerReplacerContext> = 
       return fn(...args)
     })
     const metadata: FunctionContract['metadata'] = { channelId: channel.id }
+    const maxFrameBytes = getAdapterMaxFrameBytes()
     if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
     return {
       metadata,

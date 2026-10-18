@@ -24,6 +24,7 @@ import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../shared-w
 import { encodeLengthPrefixedBlob, encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 import { SSEEvents } from './SSEEvents.js'
+import { Fifo } from '../../utils/Fifo.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 import { settledOrAborted } from '../../utils/settledOrAborted.js'
 import type {
@@ -639,7 +640,7 @@ function createSseEventStreamReader(
   readNextEntry: () => Promise<Uint8Array<ArrayBuffer> | null>
 } {
   const sse = new SSEEvents()
-  const ready: Array<Uint8Array<ArrayBuffer>> = []
+  const ready = new Fifo<Uint8Array<ArrayBuffer>>()
   let cancelled = false
 
   const cancel = () => {
@@ -650,7 +651,7 @@ function createSseEventStreamReader(
 
   abortController.signal.addEventListener('abort', cancel, { once: true })
 
-  const onEvent = (event: Uint8Array<ArrayBuffer>) => void ready.push(event)
+  const onEvent = (event: Uint8Array<ArrayBuffer>) => ready.push(event)
 
   const readNextEntry = async (): Promise<Uint8Array<ArrayBuffer> | null> => {
     while (true) {

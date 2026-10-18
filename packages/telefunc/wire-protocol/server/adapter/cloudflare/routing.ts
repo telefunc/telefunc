@@ -105,10 +105,7 @@ function resolveSessionRoutingTarget(
   return { sessionInstanceName, locationBucket, shardOrdinal }
 }
 
-/**
- * Deterministically maps one channel key into one bucket index.
- * Shared by both coordinator-bucket selection and in-bucket shard selection so all keyed broadcast routing uses the same hash.
- */
+/** Deterministically maps a key, a broadcast's channel key or a session's token, into one bucket index. */
 function getDeterministicKeyBucketIndex(key: string, bucketCount: number): number {
   assert(
     Number.isInteger(bucketCount) && bucketCount > 0,

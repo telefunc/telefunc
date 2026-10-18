@@ -159,9 +159,8 @@ class ReplayLane {
   }
 
   acknowledge(lastSeq: number): void {
-    const head = this.head
     while (this.head < this.frames.length && this.seqs[this.head]! <= lastSeq) this.dropHead()
-    if (this.head > head) this.compact()
+    this.compact()
   }
 
   setBudget(maxBytes: number): void {
@@ -190,9 +189,8 @@ class ReplayLane {
 
   /** Evicts the oldest entries while over the byte budget. */
   private trim(): void {
-    const head = this.head
     while (this.head < this.frames.length && this.totalBytes > this.maxBytes) this.dropHead()
-    if (this.head > head) this.compact()
+    this.compact()
   }
 
   /** Drops the oldest entry, leaving its slot for `compact`. */

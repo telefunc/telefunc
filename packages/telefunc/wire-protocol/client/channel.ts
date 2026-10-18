@@ -40,12 +40,7 @@ import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCal
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './session-registry.js'
-import {
-  FC_PAGE_YIELD_BYTES,
-  CHANNEL_TRANSPORT,
-  WIRE_MAX_RAW_FRAME_BYTES,
-  type ChannelTransports,
-} from '../constants.js'
+import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../constants.js'
 import { FlowControl } from '../flow-control/flow-control.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import type { Uplink } from './uplink.js'
@@ -123,8 +118,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.id = channelId
     this.ack = ack
     this.key = key
-    // A runtime's lower limit is its WebSocket's.
-    this._maxFrameBytes = transports.includes(CHANNEL_TRANSPORT.WS) ? maxFrameBytes : WIRE_MAX_RAW_FRAME_BYTES
+    this._maxFrameBytes = maxFrameBytes
     this._flow = new FlowControl(
       {
         byteWindowUpdate: (limit, kind) => this._connection.sendByteWindowUpdate(this, limit, kind),
@@ -333,11 +327,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onTransportAckReqMessage(data: string, seq: number): Promise<void> {
-    return this._trackAck(this._dispatchAckReq(data, seq))
+    return this._trackAck(this._answerAckReq(this._listeners, parse(data) as ChannelData<ServerToClient>, seq))
   }
 
   _onTransportBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._trackAck(this._dispatchBinaryAckReq(data, seq))
+    return this._trackAck(this._answerAckReq(this._binaryListeners, data, seq))
   }
 
   _onTransportBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
@@ -560,34 +554,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     for (const waiter of waiters) waiter()
   }
 
-  private async _dispatchAckReq(data: string, seq: number): Promise<void> {
-    if (this._listeners.size === 0) {
-      this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
-      return
-    }
-    const parsed = parse(data) as ChannelData<ServerToClient>
-    let answer: string
-    try {
-      let lastResult: unknown
-      for (const cb of this._listeners.list()) lastResult = await cb(parsed)
-      answer = stringify(lastResult)
-    } catch (err) {
-      if (this._handleCallbackError(err)) return
-      this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
-      return
-    }
-    this._connection.sendAckRes(this, seq, answer)
-  }
-
-  private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
-    if (this._binaryListeners.size === 0) {
+  private async _answerAckReq<T>(listeners: Listeners<(data: T) => unknown>, data: T, seq: number): Promise<void> {
+    if (listeners.size === 0) {
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     let answer: string
     try {
       let lastResult: unknown
-      for (const cb of this._binaryListeners.list()) lastResult = await cb(data)
+      for (const cb of listeners.list()) lastResult = await cb(data)
       answer = stringify(lastResult)
     } catch (err) {
       if (this._handleCallbackError(err)) return
