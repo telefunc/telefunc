@@ -109,7 +109,7 @@ function resolveSessionRoutingTarget(
 function getDeterministicKeyBucketIndex(key: string, bucketCount: number): number {
   assert(
     Number.isInteger(bucketCount) && bucketCount > 0,
-    `Cloudflare keyed broadcast routing requires a positive bucket count. Received ${String(bucketCount)}.`,
+    `Cloudflare key routing requires a positive bucket count. Received ${String(bucketCount)}.`,
   )
 
   let hash = 0

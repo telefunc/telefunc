@@ -53,33 +53,61 @@ test.each(['text', 'binary'] as const)(
   },
 )
 
+/** What the page's send of a `kind` message with an ack settles with, and both ends' isClosed after it. */
+async function ackAnswer(kind: 'text' | 'binary', listen: (server: ServerChannel) => void = () => {}) {
+  vi.useFakeTimers()
+  try {
+    const { channel } = page('sse')
+    const server = register()
+    const client = channel(server.id)
+    listen(server)
+    await vi.advanceTimersByTimeAsync(100)
+    const sent =
+      kind === 'text' ? client.send('question', { ack: true }) : client.sendBinary(new Uint8Array(1), { ack: true })
+    const answered = sent.then(
+      () => 'resolved',
+      (err: Error) => String(err),
+    )
+    await vi.advanceTimersByTimeAsync(10_000)
+    const closed = [client.isClosed, server.isClosed]
+    client.abort()
+    return { answer: await answered, closed }
+  } finally {
+    vi.useRealTimers()
+  }
+}
+
 test.each(['text', 'binary'] as const)(
   "an ack answer to a %s message that can't be serialized rejects the page's send as a listener's throw does, and the channel stays open",
   async (kind) => {
-    vi.useFakeTimers()
     const reported = vi.spyOn(console, 'error').mockImplementation(() => {})
-    try {
-      const { channel } = page('sse')
-      const server = register()
-      const client = channel(server.id)
-      const cyclic: { self?: unknown } = {}
-      cyclic.self = cyclic
+    const cyclic: { self?: unknown } = {}
+    cyclic.self = cyclic
+    const { answer, closed } = await ackAnswer(kind, (server) => {
       server.listen(() => cyclic)
       server.listenBinary(() => cyclic)
-      await vi.advanceTimersByTimeAsync(100)
-      const sent =
-        kind === 'text' ? client.send('question', { ack: true }) : client.sendBinary(new Uint8Array(1), { ack: true })
-      const answered = sent.then(
-        () => 'resolved',
-        (err: Error) => err.message,
-      )
-      await vi.advanceTimersByTimeAsync(10_000)
-      expect(await answered).toBe('Internal Server Error — see server logs')
-      expect(reported).toHaveBeenCalledOnce()
-      expect([client.isClosed, server.isClosed]).toEqual([false, false])
-      client.abort()
-    } finally {
-      vi.useRealTimers()
-    }
+    })
+    expect(answer).toBe('Error: Internal Server Error — see server logs')
+    expect(reported).toHaveBeenCalledOnce()
+    expect(closed).toEqual([false, false])
   },
 )
+
+test.each(['text', 'binary'] as const)(
+  "a %s message with an ack the server has no listener for rejects the page's send, and the channel stays open",
+  async (kind) => {
+    const { answer, closed } = await ackAnswer(kind)
+    expect(answer).toBe('Error: No listener registered for ack request')
+    expect(closed).toEqual([false, false])
+  },
+)
+
+test("a data shield refusing a text message with an ack rejects the page's send with its verdict, and checks no binary one", async () => {
+  const shielded = (server: ServerChannel) => {
+    server._validators.set('data', () => 'not a question')
+    server.listen(() => 'answer')
+    server.listenBinary(() => 'answer')
+  }
+  expect((await ackAnswer('text', shielded)).answer).toBe('ShieldValidationError: not a question')
+  expect((await ackAnswer('binary', shielded)).answer).toBe('resolved')
+})

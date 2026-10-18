@@ -24,7 +24,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { hasProp } from '../../utils/hasProp.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 import { isAbort } from '../../node/server/Abort.js'
-import type { ShieldValidators } from '../../node/server/shield.js'
+import type { ShieldValidator, ShieldValidators } from '../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../shared/Abort.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
@@ -151,7 +151,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */ _lastClientSeq = 0
 
   /** Shield validators keyed by name (see `ChannelShield` in ../channel.ts).
-   *  - `data`: validates incoming client data (_onPeerMessage / _dispatchAckReq)
+   *  - `data`: validates incoming client data (_onPeerMessage / _answerAckReq)
    *  - `ack`: validates client ack responses (_onPeerAckRes)
    *  Each returns `true` on success or an error string — callers decide the action (drop, throw). */
   _validators: ShieldValidators = new Map()
@@ -555,7 +555,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const validateData = this._validators.get('data')
     // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
     // await a response, so there's no `ShieldValidationError` to surface — listeners simply
-    // never see the bad value. Ack-bearing sends go through `_dispatchAckReq` and *do*
+    // never see the bad value. Ack-bearing sends go through `_answerAckReq` and *do*
     // reject the sender's promise via the `shield-error` wire status.
     // Dropping still consumes: window refreshes are consumption-driven, so skipping
     // `onConsumed` would leak receive credit and eventually stall the client's sends.
@@ -584,11 +584,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
     // Parsed here rather than inside the async dispatch so a malformed payload throws in the recv
     // turn, where the violation still names the wire that sent it.
-    return this._trackAck(this._dispatchAckReq(parsePeerText(text) as ChannelData<ClientToServer>, seq))
+    const data = parsePeerText(text) as ChannelData<ClientToServer>
+    return this._trackAck(this._answerAckReq(this._listeners, data, seq, this._validators.get('data')))
   }
 
   _onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._trackAck(this._dispatchBinaryAckReq(data, seq))
+    return this._trackAck(this._answerAckReq(this._binaryListeners, data, seq))
   }
 
   _onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
@@ -910,43 +911,27 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     for (const waiter of waiters) waiter()
   }
 
-  private async _dispatchAckReq(data: ChannelData<ClientToServer>, seq: number): Promise<void> {
-    if (this._listeners.size === 0) {
+  private async _answerAckReq<T>(
+    listeners: Listeners<(data: T) => unknown>,
+    data: T,
+    seq: number,
+    validate?: ShieldValidator,
+  ): Promise<void> {
+    if (listeners.size === 0) {
       this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
-    const validateData = this._validators.get('data')
-    if (validateData) {
-      const result = validateData(data)
-      // `shield-error` status lets the client reject its `send()` promise with a branded
-      // ShieldValidationError — same identity every other shield-fail surface produces.
-      if (result !== true) {
-        this._sendAckRes(seq, result, ACK_STATUS.SHIELD_ERROR)
-        return
-      }
-    }
-    let answer: string
-    try {
-      let lastResult: unknown
-      for (const cb of this._listeners.list()) lastResult = await cb(data)
-      answer = stringify(lastResult)
-    } catch (err) {
-      if (this._handleCallbackError(err)) return
-      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
-      return
-    }
-    this._sendAckRes(seq, answer)
-  }
-
-  private async _dispatchBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
-    if (this._binaryListeners.size === 0) {
-      this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
+    const verdict = validate ? validate(data) : true
+    // `shield-error` status lets the client reject its `send()` promise with a branded
+    // ShieldValidationError — same identity every other shield-fail surface produces.
+    if (verdict !== true) {
+      this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
       return
     }
     let answer: string
     try {
       let lastResult: unknown
-      for (const cb of this._binaryListeners.list()) lastResult = await cb(data)
+      for (const cb of listeners.list()) lastResult = await cb(data)
       answer = stringify(lastResult)
     } catch (err) {
       if (this._handleCallbackError(err)) return
