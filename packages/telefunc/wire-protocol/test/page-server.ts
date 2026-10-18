@@ -169,15 +169,11 @@ function page(wire: Wire, { upgrade = false } = {}) {
   const connectionKey = crypto.randomUUID()
   return {
     net,
-    /** A channel the page opens, such as a call's callback. `maxFrameBytes` as the page's reviver gives it. */
-    channel<ClientToServer = unknown, ServerToClient = unknown>(
-      channelId: string = crypto.randomUUID(),
-      { maxFrameBytes }: { maxFrameBytes?: number } = {},
-    ) {
+    /** A channel the page opens, such as a call's callback. */
+    channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string = crypto.randomUUID()) {
       return new ClientChannel<ClientToServer, ServerToClient>({
         channelId,
         ack: true,
-        maxFrameBytes,
         transports: wire === 'ws' ? ['ws'] : upgrade ? ['sse', 'ws'] : ['sse'],
         telefuncUrl,
         connectionKey,
