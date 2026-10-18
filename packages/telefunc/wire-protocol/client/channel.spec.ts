@@ -70,30 +70,6 @@ test('a text send or a publish whose frame the server would refuse throws at onc
   expect([channel.isClosed, broadcast.isClosed]).toEqual([false, false])
 })
 
-test("an ack answer larger than the server takes rejects the server's send, and the page's wire stays up", async () => {
-  vi.useFakeTimers()
-  setAdapterMaxFrameBytes(1024 * 1024)
-  try {
-    const { net, channel } = page('ws')
-    const server = register()
-    const client = channel(server.id, { maxFrameBytes: 1024 * 1024 })
-    channels.push(client as ClientChannel<never, string>)
-    client.listen(() => 'x'.repeat(2 * 1024 * 1024))
-    await vi.advanceTimersByTimeAsync(100)
-    const answered = server.send('question', { ack: true }).then(
-      () => 'resolved',
-      (err: Error) => err.message,
-    )
-    await vi.advanceTimersByTimeAsync(10_000)
-    expect(await answered).toMatch(/bytes encoded, the server accepts 1048576 at most$/)
-    expect(net.traffic.requests).toBe(1)
-  } finally {
-    setAdapterMaxFrameBytes(undefined)
-    vi.unstubAllGlobals()
-    vi.useRealTimers()
-  }
-})
-
 test("a channel the page opens takes the server's limit from its connection's RECONCILED: a larger ack answer rejects the server's send, a larger send() throws, and the channel stays open", async () => {
   vi.useFakeTimers()
   setAdapterMaxFrameBytes(1024 * 1024)

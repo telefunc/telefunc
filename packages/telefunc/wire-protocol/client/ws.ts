@@ -24,7 +24,7 @@ import type { ClientConnection, OutboundFrame, ProbeWire, UpgradeTarget } from '
 import type { Heartbeat } from './heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */
-type WsEnds = { uplink: Uplink; downlink: Downlink; budget: SendBudget; pieces: PagePieceReceiver }
+type WsEnds = { uplink: Uplink; downlink: Downlink; budget: SendBudget; sender: PieceSender; pieces: PagePieceReceiver }
 
 class WsTransport implements UpgradeTarget {
   readonly type = CHANNEL_TRANSPORT.WS
@@ -65,8 +65,7 @@ class WsTransport implements UpgradeTarget {
     }
     ws.binaryType = 'arraybuffer'
     const ends = this.wsEnds(ws)
-    const { budget, pieces } = ends
-    const { sender } = budget
+    const { budget, sender, pieces } = ends
 
     let onPong: (() => void) | null = null
     let onClose: (() => void) | null = null
@@ -189,7 +188,7 @@ class WsTransport implements UpgradeTarget {
     this.heartbeat = hb
     // What the server announced comes at the rate it arrives at; a PONG, behind what the page announced.
     hb.expectFrom(() =>
-      Math.max(this.ends?.pieces.expectedBy(hb.pongTimeoutMs) ?? 0, this.ends?.budget.sender.acknowledgedBy ?? 0),
+      Math.max(this.ends?.pieces.expectedBy(hb.pongTimeoutMs) ?? 0, this.ends?.sender.acknowledgedBy ?? 0),
     )
   }
 
@@ -200,7 +199,7 @@ class WsTransport implements UpgradeTarget {
 
   drained(): Promise<void> {
     // A socket sends what it buffered before its close, but not what its piece sender holds for room.
-    if (!this.ws || !this.ends?.budget.sender.heldBytes) return Promise.resolve()
+    if (!this.ws || !this.ends?.sender.heldBytes) return Promise.resolve()
     return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
 
@@ -229,6 +228,7 @@ class WsTransport implements UpgradeTarget {
       uplink,
       downlink,
       budget,
+      sender,
       pieces: new PagePieceReceiver(
         (frame) => sender.send(frame),
         (ack) => sender.carry(ack),
@@ -238,8 +238,7 @@ class WsTransport implements UpgradeTarget {
   }
 
   private setupHandlers(ws: WebSocket, ends: WsEnds): void {
-    const { downlink, budget, pieces } = ends
-    const { sender } = budget
+    const { downlink, budget, sender, pieces } = ends
     this.ends = ends
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
@@ -285,7 +284,7 @@ class WsTransport implements UpgradeTarget {
 
   sendFrame(frame: OutboundFrame): void {
     assert(this.ws && this.ends)
-    if (frame.kind === 'acknowledgement') this.ends.budget.sender.carry(() => frame.frame)
+    if (frame.kind === 'acknowledgement') this.ends.sender.carry(() => frame.frame)
     else this.ends.budget.send(frame.frame)
   }
 
@@ -306,7 +305,7 @@ class WsTransport implements UpgradeTarget {
 
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
   bufferedAmount(): number {
-    return (this.ws?.bufferedAmount ?? 0) + (this.ends?.budget.sender.unhandedBytes ?? 0)
+    return (this.ws?.bufferedAmount ?? 0) + (this.ends?.sender.unhandedBytes ?? 0)
   }
 
   abandonActiveTransport(): void {
@@ -332,23 +331,23 @@ class WsTransport implements UpgradeTarget {
   applyReconciledSettings(ctrl: ReconciledPayload): void {
     assert(this.ends) // a RECONCILED came on its wire
     this.pingInterval = ctrl.pingInterval
-    this.ends.budget.sender.setPingInterval(this.pingInterval)
-    this.probed?.ends.budget.sender.setPingInterval(this.pingInterval)
+    this.ends.sender.setPingInterval(this.pingInterval)
+    this.probed?.ends.sender.setPingInterval(this.pingInterval)
     // The server sends nothing on a wire before the page's first frame arrived: that frame crossed by now.
-    this.ends.budget.sender.answered(performance.now())
+    this.ends.sender.answered(performance.now())
   }
 
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.ends)
-    this.ends.budget.sender.send(withTook(frame, this.ends.pieces.took))
+    this.ends.sender.send(withTook(frame, this.ends.pieces.took))
   }
 
   dispose(): void {
     this.connecting = false
     // A socket sends what it was handed before its close.
-    this.probed?.ends.budget.sender.flush()
-    if (this.ws) this.ends?.budget.sender.flush()
+    this.probed?.ends.sender.flush()
+    if (this.ws) this.ends?.sender.flush()
     const wsProbed = this.probed?.ws
     this.probed = null
     if (wsProbed) {

@@ -169,15 +169,11 @@ function page(wire: Wire, { upgrade = false } = {}) {
   const connectionKey = crypto.randomUUID()
   return {
     net,
-    /** A channel the page opens, such as a call's callback. `maxFrameBytes` as the page's reviver gives it. */
-    channel<ClientToServer = unknown, ServerToClient = unknown>(
-      channelId: string = crypto.randomUUID(),
-      { maxFrameBytes }: { maxFrameBytes?: number } = {},
-    ) {
+    /** A channel the page opens, such as a call's callback. */
+    channel<ClientToServer = unknown, ServerToClient = unknown>(channelId: string = crypto.randomUUID()) {
       return new ClientChannel<ClientToServer, ServerToClient>({
         channelId,
         ack: true,
-        maxFrameBytes,
         transports: wire === 'ws' ? ['ws'] : upgrade ? ['sse', 'ws'] : ['sse'],
         telefuncUrl,
         connectionKey,
@@ -386,6 +382,8 @@ function webSocketTo(net: Net): new (url: string) => unknown {
     onclose: (() => void) | null = null
     onerror: (() => void) | null = null
     private readonly link = net.open()
+    /** Settles as the last frame the server sent comes due at the page: the next one waits behind it. */
+    private due = Promise.resolve()
     private readonly peer = {
       context: {},
       // It hands each frame on as it is sent, or holds what its link hasn't carried.
@@ -395,16 +393,8 @@ function webSocketTo(net: Net): new (url: string) => unknown {
         if (this.link.dead) return
         const data = frame.slice().buffer
         const at = net.arrival(this.link, frame.byteLength, frame[0])
-        if (at > Date.now()) {
-          void until(at).then(() => {
-            if (this.link.dead) return
-            net.pageGets(new Uint8Array(data))
-            this.onmessage?.({ data })
-          })
-          return
-        }
-        net.pageGets(frame)
-        queueMicrotask(() => this.onmessage?.({ data }))
+        this.due = this.due.then(() => (at > Date.now() ? until(at) : undefined))
+        void this.due.then(() => this.deliver(data))
       },
       // A socket the server destroys closes with 1006, without a close frame.
       terminate: () => this.end(1006),
@@ -440,6 +430,12 @@ function webSocketTo(net: Net): new (url: string) => unknown {
     }
     close() {
       this.end(1000)
+    }
+    private deliver(data: ArrayBuffer) {
+      // A closed socket fires no message event.
+      if (this.link.dead || this.readyState === 3) return
+      net.pageGets(new Uint8Array(data))
+      this.onmessage?.({ data })
     }
     private end(code: number) {
       if (this.readyState === 3) return
