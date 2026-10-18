@@ -27,13 +27,11 @@ class SocketWait implements SendWait {
     this.spanHanded += bytes
   }
 
-  /** `SendWait`. */
   waitNow(): number {
     const ahead = this.ahead()
     return ahead === undefined || this.drainRate === 0 ? 0 : ahead / this.drainRate
   }
 
-  /** `SendWait`. */
   longestWaitSince(at: number): number {
     return Math.max(this.waits.since(at), this.waitNow())
   }

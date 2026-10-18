@@ -60,12 +60,10 @@ class Uplink implements SendWait {
     this.queued = Math.min(this.inUplink(), unacknowledged)
   }
 
-  /** `SendWait`. */
   waitNow(): number {
     return this.drainRate > 0 ? this.inUplink() / this.drainRate : 0
   }
 
-  /** `SendWait`. */
   longestWaitSince(at: number): number {
     return Math.max(this.waits.since(at), this.waitNow())
   }
