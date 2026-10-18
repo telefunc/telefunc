@@ -339,6 +339,8 @@ class ClientConnection implements MuxConnection {
   private readonly cacheKey: string
   private readonly telefuncUrl: string
   private readonly connectionOptions: ClientConnectionOptions
+  /** Its transports include a WebSocket, whose runtime may take smaller frames than the wire's limit. */
+  private readonly usesWebSocket: boolean
   private transport: ClientChannelTransport
 
   private state: ConnectionState = { tag: 'fresh' }
@@ -416,6 +418,7 @@ class ClientConnection implements MuxConnection {
     this.cacheKey = cacheKey
     this.telefuncUrl = telefuncUrl
     this.connectionOptions = options
+    this.usesWebSocket = options.transports.includes(CHANNEL_TRANSPORT.WS)
     this.idleTimeoutMs = options.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS
     this.transport = TRANSPORT_REGISTRY[options.transports[0]!](telefuncUrl, options, this)
   }
@@ -721,7 +724,7 @@ class ClientConnection implements MuxConnection {
 
   /** The largest frame of `channel`'s the server takes: a runtime's lower limit is its WebSocket's. */
   private maxFrameBytesOf(channel: MuxChannel): number {
-    if (!this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.WS)) return WIRE_MAX_RAW_FRAME_BYTES
+    if (!this.usesWebSocket) return WIRE_MAX_RAW_FRAME_BYTES
     return Math.min(channel._maxFrameBytes, this.maxFrameBytes)
   }
 
