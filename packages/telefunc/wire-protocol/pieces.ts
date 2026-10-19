@@ -594,7 +594,7 @@ abstract class PieceReceiver {
   protected abstract tookPiece(whole: boolean, data: boolean, announced: boolean): void
   /** An ANNOUNCE that arrived at `at` closed an announcement. */
   protected abstract tookClose(at: number): void
-  /** How long an acknowledgement waits from now. */
+  /** How long an acknowledgement waits after the newest arrival, the frame being taken. */
   protected abstract ackWait(): number
 
   /** A whole frame of `bytes` arrived at `at`, `riding` if ahead of its message's last frame, which alone dates it. */
@@ -703,13 +703,13 @@ abstract class PieceReceiver {
     else this.acknowledgeWithNext()
   }
 
-  /** Acknowledges `ms` from now, or sooner where it already would. */
+  /** Acknowledges `ms` after the newest arrival, or sooner where it already would. */
   protected acknowledgeIn(ms: number): void {
     this.ackAlone = true
     this.armAck(ms)
   }
 
-  /** Acknowledges `ms` from now, or sooner where it already would: alone if `ackAlone`, else with the next message. */
+  /** Acknowledges `ms` after the newest arrival, or sooner where it already would: alone if `ackAlone`, else with the next message. */
   private armAck(ms: number): void {
     // Dated from the newest arrival, not the clock, so frames taken later after theirs don't each re-arm it.
     const due = this.newestAt + ms
@@ -723,7 +723,7 @@ abstract class PieceReceiver {
         this.ackTimer = null
         if (this.ackAlone) this.acknowledge()
         else this.acknowledgeWithNext()
-      }, ms),
+      }, due - performance.now()),
     )
   }
 

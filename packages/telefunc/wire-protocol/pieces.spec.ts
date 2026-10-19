@@ -334,6 +334,34 @@ test('a receiver arms one timer for the acknowledgement that waits out its 50 ms
   vi.useRealTimers()
 })
 
+test('a receiver acknowledges a frame by its own due when the frame before it was taken late', () => {
+  vi.useFakeTimers()
+  vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
+  let carries = 0
+  let carried: (() => Uint8Array | null) | null = null
+  const receiver = new PagePieceReceiver(
+    () => {},
+    (ack) => {
+      carries++
+      carried = ack
+    },
+    new Uplink(),
+  )
+  const t0 = Date.now()
+  receiver.arrived(20_000, true, t0, false)
+  carried!()
+  carries = 0
+  vi.advanceTimersByTime(40)
+  // Arrived at t0, taken 40 ms late.
+  receiver.arrived(20_000, true, t0, false)
+  vi.advanceTimersByTime(1)
+  // Arrived and taken at t0 + 41: its acknowledgement waits out the 50 ms after the last, to t0 + 50.
+  receiver.arrived(20_000, true, t0 + 41, false)
+  vi.advanceTimersByTime(9)
+  expect(carries).toBe(1)
+  vi.useRealTimers()
+})
+
 test('a receiver puts back a frame from pieces of any size, acknowledging the two after an empty one at once, and holds nothing for empty ones', () => {
   vi.useFakeTimers()
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
