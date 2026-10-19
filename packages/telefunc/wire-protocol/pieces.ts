@@ -711,7 +711,7 @@ abstract class PieceReceiver {
 
   /** Acknowledges `ms` from now, or sooner where it already would: alone if `ackAlone`, else with the next message. */
   private armAck(ms: number): void {
-    // From the arrival `ackWait` counts from: a clock read would make each message's due differ, and re-arm it.
+    // Dated from the newest arrival, not the clock, so frames taken later after theirs don't each re-arm it.
     const due = this.newestAt + ms
     if (this.ackTimer !== null) {
       if (this.ackDue <= due) return
