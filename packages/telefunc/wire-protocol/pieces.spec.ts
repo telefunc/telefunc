@@ -313,27 +313,6 @@ test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB 
   vi.useRealTimers()
 })
 
-test('a receiver arms one timer for the acknowledgement that waits out its 50 ms, however late after its arrival each frame is taken', () => {
-  vi.useFakeTimers()
-  vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
-  let carried: (() => Uint8Array | null) | null = null
-  const receiver = new PagePieceReceiver(
-    () => {},
-    (ack) => void (carried = ack),
-    new Uplink(),
-  )
-  receiver.arrived(20_000, true, Date.now(), false)
-  carried!()
-  const timers = vi.spyOn(globalThis, 'setTimeout')
-  // Each taken sooner after it arrived than the one before.
-  for (let late = 9; late >= 0; late--) {
-    vi.advanceTimersByTime(1)
-    receiver.arrived(20_000, true, Date.now() - late / 10, false)
-  }
-  expect(timers).toHaveBeenCalledTimes(1)
-  vi.useRealTimers()
-})
-
 test('a receiver acknowledges a frame by its own due when the frame before it was taken late', () => {
   vi.useFakeTimers()
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
