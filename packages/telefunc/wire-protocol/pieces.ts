@@ -718,12 +718,13 @@ abstract class PieceReceiver {
       clearTimeout(this.ackTimer)
     }
     this.ackDue = due
+    const wait = Math.max(0, due - performance.now())
     this.ackTimer = unrefTimer(
       setTimeout(() => {
         this.ackTimer = null
         if (this.ackAlone) this.acknowledge()
         else this.acknowledgeWithNext()
-      }, due - performance.now()),
+      }, wait),
     )
   }
 
