@@ -82,7 +82,7 @@ Two fields describe a participant:
 
 <Warning>Never authorize on `meta`. `from.meta.role` is whatever that client last typed. Gate on `identity` (checked against your own server-side `identity`-to-role map), never on `meta`. The rule: **`identity` is trusted, `meta` is not.**</Warning>
 
-Participant IDs are per-membership: the same person is a different `id` in every room, tab, and reconnect. Correlate a human across memberships by `identity`, never by `id`.
+Participant IDs are per-membership: each join gets a new `id`, so the same person has a different one in every room and tab, and after rejoining. A client that reconnects within `config.channel.reconnectTimeout` keeps its membership and its `id`. Correlate a human across memberships by `identity`, never by `id`.
 
 
 ## Presence & membership
@@ -547,7 +547,7 @@ type RoomGetOptions = {
 }
 ```
 
-- `Room.get(id, { tail: true })` starts keeping live messages as soon as the room is returned to a client, and hands them to its first text `subscribe()` (see <Link href="#history-live-tail">History</Link>). It keeps the latest 256 messages, up to 1,048,576 characters (UTF-16 code units) of serialized text; older ones are dropped, and a larger single message isn't kept. If the client doesn't subscribe within 60 seconds, the kept messages are dropped. A message published just before tailing began can be missing from both the tail and the history you read, if its `onAfterPublish` store hadn't finished; a later history load has it.
+- `Room.get(id, { tail: true })` starts keeping live messages before it resolves, and hands them to the first text `subscribe()` of the client the room is returned to (see <Link href="#history-live-tail">History</Link>). It keeps the latest 256 messages, up to 1,048,576 characters (UTF-16 code units) of serialized text; older ones are dropped, and a larger single message isn't kept. If the client doesn't subscribe within 60 seconds, the kept messages are dropped. A message published just before tailing began can be missing from both the tail and the history you read, if its `onAfterPublish` store hadn't finished; a later history load has it.
 - `Room.close(id)` is idempotent: a missing or already closed room is already at the requested state.
 - A room closes on its own `departureTimeout` after nothing holds it any more, or `emptyTimeout` after if nobody joined it (see <Link href="#when-a-room-closes">When a room closes</Link>). `Infinity` keeps it until `Room.close(id)`. A join made just as the room closes succeeds, and the participant then leaves with `'closed'`.
 - `Room.announce(id, data)` returns `{ seq, timestamp }` from the room-global order shared with participant `publish()`.

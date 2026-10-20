@@ -54,7 +54,7 @@ installRedis(redis)
 
 On a Cluster, a room's keys share one hash slot.
 
-All subscriptions share one subscriber connection. When it drops, they resume on a fresh one; messages published in between are lost. Delivery stays at-most-once while a Cluster reshards: a message that arrives after a newer one is dropped, never replayed, so callbacks never go back in order. A failover whose new master missed the last writes rewinds their sequence numbers, so subscribers still connected drop as many later messages as it lost. When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops. Keep master clocks synchronized: expiries use the clock of the master that owns the room's slot.
+All subscriptions share one subscriber connection. When it drops, they resume on a fresh one; messages published in between are lost. While a Cluster reshards or fails over, a message can arrive late: subscribers wait up to one second for it, so they still receive messages in the order they were published, and drop one later than that. After a failover whose new master missed the last writes, subscribers still connected receive the later messages with `seq` numbers they already saw. When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops. Keep master clocks synchronized: expiries use the clock of the master that owns the room's slot.
 
 Room keeps its state (rooms, members, lane order) in keys that Redis must never evict: use `maxmemory-policy noeviction`. Any other policy can silently close a room.
 
