@@ -10,6 +10,8 @@ const SHARD_TOKEN_TTL_SECONDS = 86400
 const SHARD_TOKEN_REPIN_MS = (SHARD_TOKEN_TTL_SECONDS * 1000) / 2
 /** KV takes one write a second to a key. */
 const SHARD_TOKEN_RETRY_MS = 1000
+/** A token reaching a session Durable Object fits KV's 512-byte key, so two generations of this many hold under 10 MB of an isolate's 128 MB. */
+const SHARD_TOKENS_GENERATION = 5_000
 
 type StoredShardToken = {
   s: string
@@ -27,35 +29,43 @@ async function readSessionPin(
 
 /** The session Durable Object, not the Worker, writes each pin: a Worker's KV read caches a miss up to 60 s. */
 class SessionPins {
-  /** When each session token this isolate's Durable Objects serve is due to be pinned, in the order they were pinned. */
-  private readonly dueAt = new Map<string, number>()
+  /** When each session token this isolate's Durable Objects served lately is due to be pinned. */
+  private dueAt = new Map<string, number>()
+  /** The generation `dueAt` held before it filled, forgotten once `dueAt` fills again. */
+  private dueAtBefore = new Map<string, number>()
 
   /** Pins the session of `request`, as the Worker forwarded it, if its pin is due. */
   pin(request: Request, kv: KVNamespace): void {
     const token = request.headers.get(TELEFUNC_SESSION_HEADER)
     if (!token) return
     const now = Date.now()
-    const due = this.dueAt.get(token)
-    if (due !== undefined && now < due) return
+    const due = this.dueAt.get(token) ?? this.dueAtBefore.get(token)
+    if (due !== undefined && now < due) {
+      this.recordDue(token, due)
+      return
+    }
     const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
     const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
     if (!shard || !bucket) return
-    this.dueAt.delete(token)
-    this.dueAt.set(token, now + SHARD_TOKEN_REPIN_MS)
-    for (const [oldToken, oldDue] of this.dueAt) {
-      if (now < oldDue) break
-      this.dueAt.delete(oldToken)
-    }
+    this.recordDue(token, now + SHARD_TOKEN_REPIN_MS)
     const pin: StoredShardToken = { s: shard, b: bucket }
     // A Durable Object lives on while the write is pending.
     const written = kv.put(`session:${token}`, JSON.stringify(pin), { expirationTtl: SHARD_TOKEN_TTL_SECONDS })
     written.catch((err: unknown) => {
-      this.dueAt.set(token, Date.now() + SHARD_TOKEN_RETRY_MS)
+      this.recordDue(token, Date.now() + SHARD_TOKEN_RETRY_MS)
       assertWarning(
         false,
         `A session's shard couldn't be pinned in KV, and is retried after a second: ${String(err)}`,
         { onlyOnce: false },
       )
     })
+  }
+
+  private recordDue(token: string, due: number): void {
+    if (this.dueAt.size >= SHARD_TOKENS_GENERATION) {
+      this.dueAtBefore = this.dueAt
+      this.dueAt = new Map()
+    }
+    this.dueAt.set(token, due)
   }
 }

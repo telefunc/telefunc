@@ -495,6 +495,40 @@ describe("the session Durable Object's pin", () => {
     expect(put).toHaveBeenCalledTimes(2)
   })
 
+  it('writes the pin of a page that makes a request every 1,000 other pins once in 12 h, while 30,000 other pages pin', async () => {
+    const kv = createMockKV()
+    const put = vi.spyOn(kv, 'put')
+    const { request } = sessionObject(kv)
+    for (let i = 0; i < 30_000; i++) {
+      if (i % 1000 === 0) await request('token-live')
+      await request(`token-${i}`)
+    }
+    await request('token-live')
+    await flush()
+    expect(put.mock.calls.filter(([key]) => key === 'session:token-live')).toHaveLength(1)
+  })
+
+  it('writes the pin of a page that made no request while 10,000 other pages pinned again on its next request', async () => {
+    const kv = createMockKV()
+    const put = vi.spyOn(kv, 'put')
+    const { request } = sessionObject(kv)
+    await request('token-idle')
+    for (let i = 0; i < 10_000; i++) await request(`token-${i}`)
+    await request('token-idle')
+    await flush()
+    expect(put.mock.calls.filter(([key]) => key === 'session:token-idle')).toHaveLength(2)
+  })
+
+  it('remembers the last 10,000 tokens at most, however many pages pin', async () => {
+    const kv = createMockKV()
+    const put = vi.spyOn(kv, 'put')
+    const { request } = sessionObject(kv)
+    for (let i = 0; i < 30_000; i++) await request(`token-${i}`)
+    for (let i = 0; i < 20_000; i++) await request(`token-${i}`)
+    await flush()
+    expect(put).toHaveBeenCalledTimes(50_000)
+  })
+
   it("reports a pin it failed to write, and writes it again on the token's first request a second later, as KV takes a key's writes", async () => {
     const kv = createMockKV()
     const put = vi.spyOn(kv, 'put').mockRejectedValueOnce(new Error('KV is down'))
