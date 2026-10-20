@@ -75,7 +75,7 @@ A handler (`subscribe()`, `subscribeBinary()`, `listen()`, `onAnnounce()`) start
 
 ## Identity vs meta
 
-Two fields describe a participant, and confusing them is the most common mistake:
+Two fields describe a participant:
 
 - **`meta`** is display state the participant sets on itself (`name`, `avatar`, `score`). Any client can set it to anything.
 - **`identity`** is an app id (a user id) stamped server-side at join. It is trusted, immutable, and stable across a user's tabs and reconnects.

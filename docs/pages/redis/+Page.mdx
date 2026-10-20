@@ -47,7 +47,7 @@ On a Redis Cluster, a reshard or a failover can delay a message by up to one sec
 
 Telefunc runs its commands on its own connection, duplicated from your client with retries off, so a command whose reply was lost can't execute twice. Your client keeps its options, and Telefunc's connection closes when your client does. Pub/Sub channels ignore an ioredis `keyPrefix`, so `installRedis()` throws for a client that sets one: pass `installRedis(redis, { prefix })` instead. It also throws for a `prefix` that contains `{`.
 
-Room keeps its state (rooms, members, lane order) in Redis keys with no expiry, so Redis must never evict them: use `maxmemory-policy noeviction`, or a `volatile-*` policy, which evicts only keys with an expiry. An `allkeys-*` policy can silently break a room.
+Room keeps its state (rooms, members, lane order) in Redis keys that Redis must never evict: use `maxmemory-policy noeviction`. Any other policy can silently close a room.
 
 Keep your Redis masters' clocks synchronized: message timestamps come from them, as does the moment a stopped server's rooms close and its members leave.
 
