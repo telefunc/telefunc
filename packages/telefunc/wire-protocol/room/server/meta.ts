@@ -351,8 +351,13 @@ async function readMembersMetaCells(room: RoomIncarnation, id?: string): Promise
   return byMember
 }
 
-/** The member's meta from its generation's cells, sorted a run at a time, then merged and built a slice per turn. */
-async function memberMetaOf(id: string, gen: number, cells: MemberMetaCells): Promise<ParticipantMeta> {
+/** The member's meta from its generation's cells, sorted a run at a time, then merged and built a slice per turn. A
+ *  newer generation among the cells is a replace that committed after the record was read, which may have dropped the
+ *  record's: the meta is read from it. */
+async function memberMetaOf(id: string, recordGen: number, cells: MemberMetaCells): Promise<ParticipantMeta> {
+  const genStart = memberMetaCellPrefix(id).length
+  let gen = recordGen
+  for (const [cellKey] of cells) gen = Math.max(gen, Number(cellKey.slice(genStart, cellKey.indexOf(':', genStart))))
   const prefix = memberMetaGenPrefix(id, gen)
   const runs: RoomMetaEntry[][] = []
   const slice = new Slice()

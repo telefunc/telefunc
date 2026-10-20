@@ -21,7 +21,13 @@ import {
 import { DEFAULT_TRACK, decodeBinaryFrame, encodeBinaryFrame } from '../binary.js'
 import { ROOM_BUG_MESSAGE, RoomError, isRoomError, roomAckError, toRoomFailure } from '../errors.js'
 import type { InboxMessage } from '../protocol.js'
-import { HOLDS_CELL_KEY, MEMBER_CELL_PREFIX, SESSION_CELL_PREFIX, memberCellKey } from './cells.js'
+import {
+  HOLDS_CELL_KEY,
+  MEMBER_CELL_PREFIX,
+  MEMBER_META_CELL_PREFIX,
+  SESSION_CELL_PREFIX,
+  memberCellKey,
+} from './cells.js'
 import type { Sender } from '../types.js'
 import { ClientRoom } from '../client.js'
 import { RoomModel, remoteBacking } from '../state.js'
@@ -392,6 +398,35 @@ describe('Room public behavior', () => {
     await leaving
     expect(causes).toEqual([{ type: 'left' }])
   })
+  it.each([
+    ['roster', undefined],
+    ['identity', { identity: 'alice' }],
+  ] as const)(
+    "reads a member's meta as written before or after a replace that drops it while its %s read waits",
+    async (kind, target) => {
+      const room = await Room.create(`replaced-during-${kind}-read`)
+      const member = await room.join({ meta: { name: 'before' }, identity: 'alice' })
+      const reached = createDeferred()
+      const release = createDeferred()
+      const readCellPages = driver.readCellPages.bind(driver)
+      let held = false
+      vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+        if (!held && prefix.startsWith(MEMBER_META_CELL_PREFIX)) {
+          held = true
+          reached.resolve()
+          await release.promise
+        }
+        yield* readCellPages(roomId, inc, prefix)
+      })
+      const reading = Room.getParticipants(room.id, target)
+      await reached.promise
+      await member.setMeta({ name: 'after' })
+      release.resolve()
+      const [read, ...more] = await reading
+      expect(more).toEqual([])
+      expect([{ name: 'before' }, { name: 'after' }]).toContainEqual(read!.meta)
+    },
+  )
   it('lists without a room that closes between its head read and its roster read', async () => {
     await Room.create('list-open')
     const closing = (await Room.create('list-closing')) as ServerRoom
