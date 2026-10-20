@@ -4829,6 +4829,22 @@ describe('Room public behavior', () => {
     expect(Object.isFrozen(changed.participants[0]!.meta)).toBe(true)
     expect(changes).toBe(1)
   })
+  it("refuses an edit of a snapshot's nested meta, which leaves another handle's meta as it was", async () => {
+    const first = await Room.create('snapshot-nested', { meta: { theme: { color: 'blue' } } })
+    const member = await first.join({ meta: { preferences: { color: 'blue' } } })
+    await member.setAttributes({ tags: ['a'] })
+    const second = await Room.get(first.id)
+    const snapshot = first.snapshot()
+    expect(() => {
+      ;(snapshot.meta.theme as { color: string }).color = 'red'
+    }).toThrow(TypeError)
+    expect(() => {
+      ;(snapshot.participants[0]!.meta.preferences as { color: string }).color = 'red'
+    }).toThrow(TypeError)
+    expect(() => (snapshot.participants[0]!.meta.tags as string[]).push('b')).toThrow(TypeError)
+    expect(second.meta).toEqual({ theme: { color: 'blue' } })
+    expect((await second.getParticipant(member.id))!.meta).toEqual({ preferences: { color: 'blue' }, tags: ['a'] })
+  })
   it('keeps remote serializer backing unforgeable and exact-keyed', async () => {
     const room = await Room.create('remote-backing')
     const joined = await room.join()
