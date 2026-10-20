@@ -10,6 +10,7 @@ import {
 import '../../../../node/server/async_hooks.js'
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from './broadcast.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
+import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../broadcast.js'
 
@@ -401,6 +402,46 @@ describe('cloudflare broadcast routing', () => {
     expect(published).toEqual([[1, 2, 3]])
 
     _resetBroadcastAdapterForTesting(previousTransport)
+  })
+
+  it('refuses a binary publish larger than the buffer of a subscription waiting for KV presence setup before copying its bytes', async () => {
+    const transport = new CloudflareBroadcastTransport({ baseInstanceName: 'telefunc', scale: 1 })
+    const kv = createMockKV()
+    let releaseKVPut: (() => void) | null = null
+    const kvPutReady = new Promise<void>((resolve) => {
+      releaseKVPut = resolve
+    })
+    const originalPut = kv.put.bind(kv)
+    kv.put = (async (key: string, value: string, options?: any) => {
+      await kvPutReady
+      return originalPut(key, value, options)
+    }) as any
+    transport.attachBinding(createBasicBinding(), 'TelefuncDurableObject')
+    transport.attachKV(kv)
+    transport.attachIsolateInfo('telefunc-shard-weur-0', 'weur')
+    const unsubscribe = transport.subscribeBinary('room:binary', () => {})
+
+    const refused = new Uint8Array(CHANNEL_BUFFER_LIMIT_BYTES + 1)
+    let copied = 0
+    const Bytes = globalThis.Uint8Array
+    globalThis.Uint8Array = new Proxy(Bytes, {
+      construct(target, args, newTarget) {
+        if (args[0] === refused) copied++
+        return Reflect.construct(target, args, newTarget)
+      },
+    })
+    let refusal: Promise<unknown>
+    try {
+      refusal = transport.publishBinary('room:binary', refused).catch((err: unknown) => err)
+    } finally {
+      globalThis.Uint8Array = Bytes
+    }
+
+    expect(String(await refusal)).toContain('exceeded the Cloudflare bucket buffer limit')
+    expect(copied).toBe(0)
+    unsubscribe()
+    releaseKVPut!()
+    await flushCoordinatorTurn()
   })
 
   it('does not deliver locally before ordered publish setup completes', async () => {

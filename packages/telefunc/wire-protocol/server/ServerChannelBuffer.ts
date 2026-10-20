@@ -73,17 +73,11 @@ class ServerChannelBuffer<TAck = never> {
 
   /** Holds a copy, as an attached send encodes the caller's bytes at once and the caller may then reuse them. */
   pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void): void {
-    this.#binary.push(TAG.BINARY, new Uint8Array(data), data.byteLength, { resolve, reject }, this.#insertionSeq++)
+    this.#binary.pushCopy(TAG.BINARY, data, { resolve, reject }, this.#insertionSeq++)
   }
 
   pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void): void {
-    this.#binary.push(
-      TAG.BINARY_ACK_REQ,
-      new Uint8Array(data),
-      data.byteLength,
-      { resolve, reject },
-      this.#insertionSeq++,
-    )
+    this.#binary.pushCopy(TAG.BINARY_ACK_REQ, data, { resolve, reject }, this.#insertionSeq++)
   }
 
   pushPublishBinary(data: Uint8Array): void {
@@ -242,21 +236,14 @@ class BufferLane {
     callback: EntryCallback | EntryCallback | null,
     order: number,
   ): void {
-    bytes += callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES
-    if (bytes > this.#maxBytes) {
-      const overflowErr = new ChannelOverflowError()
-      this.clear(overflowErr)
-      this.dropped = true
-      callback?.reject(overflowErr)
-      return
-    }
-    this.#tags.push(tag)
-    this.#data.push(data)
-    this.#sizes.push(bytes)
-    this.#callbacks.push(callback)
-    this.#order.push(order)
-    this.#totalBytes += bytes
-    this.#evict()
+    const held = this.#admit(bytes, callback)
+    if (held !== null) this.#append(tag, data, held, callback, order)
+  }
+
+  /** Holds a copy of `data`, made only once the lane admits it. */
+  pushCopy(tag: number, data: Uint8Array, callback: EntryCallback, order: number): void {
+    const held = this.#admit(data.byteLength, callback)
+    if (held !== null) this.#append(tag, new Uint8Array(data), held, callback, order)
   }
 
   clear(err?: Error): void {
@@ -284,6 +271,27 @@ class BufferLane {
   }
 
   // ── Private ──
+
+  /** The bytes holding the entry takes, or `null` once the lane is cleared for an entry larger than it. */
+  #admit(bytes: number, callback: EntryCallback | null): number | null {
+    const held = bytes + (callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES)
+    if (held <= this.#maxBytes) return held
+    const overflowErr = new ChannelOverflowError()
+    this.clear(overflowErr)
+    this.dropped = true
+    callback?.reject(overflowErr)
+    return null
+  }
+
+  #append(tag: number, data: string | Uint8Array, bytes: number, callback: EntryCallback | null, order: number): void {
+    this.#tags.push(tag)
+    this.#data.push(data)
+    this.#sizes.push(bytes)
+    this.#callbacks.push(callback)
+    this.#order.push(order)
+    this.#totalBytes += bytes
+    this.#evict()
+  }
 
   #evict(): void {
     let evictionErr: ChannelOverflowError | undefined

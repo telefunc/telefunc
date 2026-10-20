@@ -78,17 +78,18 @@ class CloudflareBucketPublishBuffer {
   }
 
   push(entry: BufferedPublish): void {
-    if (entry.bytes > this.maxBytes) {
-      entry.pending.reject(
-        new Error('Keyed publish exceeded the Cloudflare bucket buffer limit during cold-path setup'),
-      )
-      this.clear()
-      return
-    }
+    if (this.admit(entry.bytes, entry.pending)) this.append(entry)
+  }
 
-    this.entries.push(entry)
-    this.totalBytes += entry.bytes
-    this.evict()
+  /** Holds a copy of `data` for `send`, made only once the buffer admits it. */
+  pushCopy(
+    data: Uint8Array,
+    send: (data: Uint8Array) => Promise<BroadcastPublishResult>,
+    pending: PendingBucketPublish,
+  ): void {
+    if (!this.admit(data.byteLength, pending)) return
+    const copy = new Uint8Array(data)
+    this.append({ send: () => send(copy), bytes: copy.byteLength, pending })
   }
 
   get flushing(): boolean {
@@ -123,6 +124,20 @@ class CloudflareBucketPublishBuffer {
     this.entries.length = 0
     this.head = 0
     this.totalBytes = 0
+  }
+
+  /** Whether an entry of `bytes` fits; one that can't clears the buffer and rejects `pending`. */
+  private admit(bytes: number, pending: PendingBucketPublish): boolean {
+    if (bytes <= this.maxBytes) return true
+    pending.reject(new Error('Keyed publish exceeded the Cloudflare bucket buffer limit during cold-path setup'))
+    this.clear()
+    return false
+  }
+
+  private append(entry: BufferedPublish): void {
+    this.entries.push(entry)
+    this.totalBytes += entry.bytes
+    this.evict()
   }
 
   private evict(): void {
@@ -438,12 +453,10 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     if (memberState) {
       if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
         // The caller may reuse or transfer its buffer once the publish returns.
-        const queuedData = new Uint8Array(data)
         return new Promise<BroadcastPublishResult>((resolve, reject) => {
-          memberState.pendingPublishes.push({
-            send: () => memberState.publishBinary(queuedData),
-            bytes: queuedData.byteLength,
-            pending: { resolve, reject },
+          memberState.pendingPublishes.pushCopy(data, (queuedData) => memberState.publishBinary(queuedData), {
+            resolve,
+            reject,
           })
         })
       }
