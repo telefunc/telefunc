@@ -115,6 +115,7 @@ vi.mock('./routing.js', () => ({
 
 import { Telefunc } from '../../../../serve/cloudflare.js'
 import { resolveSessionRoutingTarget } from './routing.js'
+import { SessionPins } from './session-pin.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -519,14 +520,21 @@ describe("the session Durable Object's pin", () => {
     expect(put.mock.calls.filter(([key]) => key === 'session:token-idle')).toHaveLength(2)
   })
 
-  it('remembers the last 10,000 tokens at most, however many pages pin', async () => {
+  it('keeps 10,000 tokens at most, however many pages pin', () => {
+    const pins = new SessionPins()
+    const kept = pins as unknown as { dueAt: Map<string, number>; dueAtBefore: Map<string, number> }
     const kv = createMockKV()
-    const put = vi.spyOn(kv, 'put')
-    const { request } = sessionObject(kv)
-    for (let i = 0; i < 30_000; i++) await request(`token-${i}`)
-    for (let i = 0; i < 20_000; i++) await request(`token-${i}`)
-    await flush()
-    expect(put).toHaveBeenCalledTimes(50_000)
+    let peak = 0
+    for (let i = 1; i <= 30_000; i++) {
+      const headers = {
+        'x-telefunc-shard': 'telefunc-shard-weur-0',
+        'x-telefunc-broadcast-bucket': 'weur',
+        'x-telefunc-session': `token-${i}`,
+      }
+      pins.pin(new Request('https://telefunc.test/_telefunc', { headers }), kv)
+      peak = Math.max(peak, kept.dueAt.size + kept.dueAtBefore.size)
+    }
+    expect(peak).toBe(10_000)
   })
 
   it("reports a pin it failed to write, and writes it again on the token's first request a second later, as KV takes a key's writes", async () => {
