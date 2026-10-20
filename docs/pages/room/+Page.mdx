@@ -407,11 +407,9 @@ export async function onJoinChat(roomId) {
 const { room, history } = await onJoinChat('lobby')
 const me = await room.join({ meta: { name } }) // post with me.publish()
 
-let lastSeq = 0
-const show = (message, seq) => { if (seq > lastSeq) { lastSeq = seq; render(message) } } // skips what history had
-
-for (const m of history) show(m, m.seq)                    // the past, oldest first
-room.subscribe((data, info) => show(data, info.seq))       // messages since tailing began, then new ones
+const stored = new Set(history.map((m) => m.seq))
+for (const m of history) render(m)                                                  // the past, oldest first
+room.subscribe((data, info) => { if (!stored.has(info.seq)) render(data) })         // messages since tailing began, then new ones
 ```
 
 Order history and live messages by `info.seq`; `info.timestamp` is for display. The tail holds only the most recent messages, so the history you load stays the source of truth.
@@ -447,7 +445,7 @@ export async function onJoinLobby(name) {
 
 ### When a room closes
 
-A room closes on its own once nothing holds it open. Its members hold it open, and so does each page a telefunction returned the room to, joined or not, until that page closes. A hidden participant and a server's `Room` handle don't.
+A room closes on its own once nothing holds it open. Its members hold it open, and so does each page a telefunction returned the room to, joined or not, until that page's connection times out. A hidden participant and a server's `Room` handle don't.
 
 Once nothing holds it, it closes `departureTimeout` later if a member had joined it, and `emptyTimeout` later if none had: 20 seconds and 5 minutes by default. A room no page was returned to and nobody joined closes `emptyTimeout` after it's created. Anything that holds it open again before then keeps it open.
 
@@ -595,7 +593,7 @@ State getters: `id`, `meta`, `count`, `isEmpty`, `isClosed`. Counts and presence
 
 `info.seq` counts up by one per message in its order. Participant `publish()` text and `Room.announce()` share one order; each member's binary track and each participant's private messages have their own. A participant's publishes take their `seq` in the order it called `publish()`. Closing and recreating a room restarts every order at `1`, so persist your own lifecycle id beside `seq` if one history spans several.
 
-A client is disconnected (its room closes and its participants leave with `'disconnected'`) when it falls more than 80 MiB behind the room's messages, as a <Link href="/channel#errors">`BroadcastChannel`</Link> does. That's with the default <Link href="/channel-config">replay buffers</Link>; lowering `serverReplayBuffer` or `serverReplayBufferBinary` lowers it. It is also disconnected when it reconnects after losing a room message: one dropped because more than `config.channel.bufferLimit` (`bufferLimitBinary` for binary) was sent to it while it was offline. If only room state was dropped (members, their meta, the room's meta), it gets the current state as it reconnects and stays. Its requests still in flight reject with `ChannelOverflowError`. A `LocalParticipant` returned to a client on its own follows a channel's limits instead (see <Link href="/channel#backpressure">Backpressure</Link>).
+A client is disconnected (its room closes and its participants leave with `'disconnected'`) when it falls more than 80 MiB behind the room's messages, as a <Link href="/channel#errors">`BroadcastChannel`</Link> does. That's with the default <Link href="/channel-config">replay buffers</Link>; lowering `serverReplayBuffer` or `serverReplayBufferBinary` lowers it. It is also disconnected when it reconnects after losing a room message: one dropped because more than `config.channel.bufferLimit` (`bufferLimitBinary` for binary) was sent to it while it was offline. If only room state was dropped (members, their meta, the room's meta), it gets the current state as it reconnects and stays. Its requests still in flight reject with `ChannelOverflowError`. A `LocalParticipant` returned to a client on its own is disconnected the same way, at a channel's limits instead (see <Link href="/channel#backpressure">Backpressure</Link>).
 
 ### `LocalParticipant`
 
