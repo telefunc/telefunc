@@ -267,9 +267,9 @@ info.timestamp  // server timestamp (Unix epoch ms)
 info.receivers  // publish() only: who the message was handed to
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt once the message is accepted. A publish right after a `subscribe()` on the same server (on Cloudflare, in the same session) reaches that subscriber: while the new subscription is being set up, that server's publishes on its key wait for it, in call order, for up to 60 seconds. The publishes waiting on a key hold at most `config.channel.bufferLimit` (`bufferLimitBinary` for binary) bytes; a publish past that rejects with a `ChannelOverflowError`.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt once the message is accepted. A publish right after a `subscribe()` on the same server (on Cloudflare, in the same session) waits up to a minute for that subscription, so it reaches that subscriber.
 
-`receivers` counts who the message was handed to: subscribers with the in-memory backend, server instances with standalone Redis, session Durable Objects on Cloudflare. With each of them `0` means nobody anywhere is subscribed; Redis Cluster omits it, since a node counts only its own subscribers.
+`receivers` is `0` when nobody anywhere is subscribed to the key. Otherwise it counts subscribers with the in-memory backend, server instances with standalone Redis, and Durable Objects on Cloudflare; Redis Cluster leaves it out.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -427,6 +427,8 @@ Channels and broadcasts signal failure through four errors:
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
 > A `BroadcastChannel` whose client falls 80 MiB behind (less if you lowered the replay buffers), or misses more than `bufferLimit` (`bufferLimitBinary` for binary) while offline, closes with `ChannelOverflowError`. Call its telefunction again to rejoin.
+
+> The `Broadcast.publish()` calls waiting for a new subscription on their key hold at most `bufferLimit` (`bufferLimitBinary` for binary) bytes; one past that rejects with `ChannelOverflowError`.
 
 See also:
 - <Link href="/stream#error-handling" />
