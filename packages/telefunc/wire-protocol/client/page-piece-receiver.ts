@@ -4,7 +4,9 @@ import { WIRE_PIECES_ACK_GAP_MS } from '../constants.js'
 import { PieceReceiver, acknowledges } from '../pieces.js'
 import type { Uplink } from './uplink.js'
 
-/** The page's: it acknowledges frames over `WIRE_PIECES_ACK_BYTES` and announcements' close, within its uplink's share. */
+/** The page's `PieceReceiver`, which puts a WebSocket frame sent in pieces back together. It acknowledges each frame
+ *  over `WIRE_PIECES_ACK_BYTES` and the ANNOUNCE that closes an announcement,
+ *  at most every `WIRE_PIECES_ACK_GAP_MS`. */
 class PagePieceReceiver extends PieceReceiver {
   constructor(
     send: (frame: Uint8Array<ArrayBuffer>) => void,

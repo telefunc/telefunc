@@ -3,7 +3,9 @@ export { ServerPieceReceiver }
 import { WIRE_PIECES_ACK_BYTES, WIRE_SEND_ACK_GAP_MS, WIRE_SEND_ACK_MIN_BYTES, WIRE_SEND_ACK_MS } from '../constants.js'
 import { PieceReceiver } from '../pieces.js'
 
-/** The server's: it acknowledges data soon, as the page's send budget waits on it, and in its answers. */
+/** The server's `PieceReceiver`, which puts a WebSocket frame sent in pieces back together. Once it took
+ *  `WIRE_SEND_ACK_MIN_BYTES` since it last acknowledged, headers and control frames included, it acknowledges them
+ *  within `WIRE_SEND_ACK_MS` of a data frame, as the page's send budget waits on it, or in its next answer. */
 class ServerPieceReceiver extends PieceReceiver {
   /** Its side answers: the answer carries the acknowledgement, so the page's next request doesn't wait on its timer. */
   answering(): void {
