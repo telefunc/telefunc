@@ -15,7 +15,7 @@ type CloudflareSession = {
   mux: ChannelMux
 }
 
-const SESSION = Symbol('telefunc.cloudflare.session')
+const SESSION = Symbol.for('telefunc.cloudflare.session')
 
 function withCloudflareSession<T>(session: CloudflareSession, fn: () => T): T {
   return restoreContext({ [SESSION]: session, [CHANNEL_MUX]: session.mux }, fn)

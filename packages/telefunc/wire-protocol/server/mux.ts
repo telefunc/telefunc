@@ -167,7 +167,7 @@ type ConnectionEntry = {
 }
 
 /** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
-const CHANNEL_MUX = Symbol('telefunc.channelMux')
+const CHANNEL_MUX = Symbol.for('telefunc.channelMux')
 
 function getChannelMux(): ChannelMux {
   return (getRawContext()?.[CHANNEL_MUX] as ChannelMux | undefined) ?? getGlobals().mux

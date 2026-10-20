@@ -99,6 +99,21 @@ test('a room reaches every session DO in the isolate that subscribes to it, each
   expect(await probe('/room-sessions')).toEqual({ a: ['one'], b: ['one'] })
 })
 
+test("a telefunction in a session DO of the package's second copy subscribes through the backend the first copy installed, and both copies see its channels", async () => {
+  const twoCopies = new Miniflare({
+    modules: [{ type: 'ESModule', path: 'two-copies.mjs', contents: await bundleWorker('two-copies-entry.ts') }],
+    compatibilityDate: '2025-08-15',
+    compatibilityFlags: ['nodejs_compat'],
+    durableObjects: { TELEFUNC: { className: 'TwoCopiesDurableObject', useSQLite: true } },
+  })
+  try {
+    const response = await twoCopies.dispatchFetch('https://room.test/')
+    expect(await response.json()).toEqual({ status: 200, subscribed: 'subscribed', sameMux: true })
+  } finally {
+    await twoCopies.dispose()
+  }
+})
+
 test("a session DO whose calls' callbacks all closed keeps no timer of the GC scan, while another session DO's callback is open (#469)", async () => {
   expect(await probe('/callback-timers')).toEqual({
     whileOnlyBHolds: { a: 0, made: ['a', 'b'] },
