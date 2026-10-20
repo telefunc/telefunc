@@ -8,7 +8,7 @@ import {
   WIRE_SEND_ACK_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../constants.js'
-import { PieceSender, type SendRoom } from '../pieces.js'
+import { PieceSender, type PieceSenderOptions, type SendRoom } from '../pieces.js'
 import type { Uplink } from './uplink.js'
 import type { Downlink } from './downlink.js'
 import { isSequencedTag, type PiecesAck } from '../shared-ws.js'
@@ -25,11 +25,21 @@ const SAMPLE_MERGE_MS = 1
 /** Data handed to the socket at once; `ahead` is what the uplink held ahead of it. */
 type SentData = { end: number; bytes: number; ahead: number; at: number }
 
+type SendBudgetOptions = Pick<PieceSenderOptions, 'transmit' | 'queued' | 'pingInterval'> & {
+  uplink: Uplink
+  downlink: Downlink
+  /** Called when the timer finds the uplink drained some of what it held. */
+  onRoom: () => void
+}
+
 /** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
 class SendBudget implements SendRoom {
   readonly cuts = true
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
+  private readonly uplink: Uplink
+  private readonly downlink: Downlink
+  private readonly onRoom: () => void
   /** The allowance as measured delays moved it, null before the first: till then it is the least. */
   private movedAllowance: number | null = null
   /** The data handed to the socket and not covered by an acknowledgement. */
@@ -45,17 +55,11 @@ class SendBudget implements SendRoom {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   private paceDue = 0
 
-  /** `transmit`, `queued` and `pingInterval` as `PieceSender`'s. */
-  constructor(
-    transmit: (message: Uint8Array<ArrayBuffer>) => void,
-    queued: () => number,
-    pingInterval: number,
-    private readonly uplink: Uplink,
-    private readonly downlink: Downlink,
-    /** Called when the timer finds the uplink drained some of what it held. */
-    private readonly onRoom: () => void,
-  ) {
-    this.sender = new PieceSender(transmit, queued, pingInterval, uplink.link, this)
+  constructor({ transmit, queued, pingInterval, uplink, downlink, onRoom }: SendBudgetOptions) {
+    this.uplink = uplink
+    this.downlink = downlink
+    this.onRoom = onRoom
+    this.sender = new PieceSender({ transmit, queued, pingInterval, link: uplink.link, room: this })
   }
 
   /** Sends `frame` through the sender. */

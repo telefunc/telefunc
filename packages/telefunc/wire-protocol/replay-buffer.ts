@@ -1,6 +1,11 @@
 import { chargedBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
 import { assert } from '../utils/assert.js'
 
+type ReplayBufferOptions = {
+  maxBytes: number
+  binaryMaxBytes: number
+}
+
 /** Sent sequenced frames till their peer acks them, in lanes by tag; a data lane evicts its oldest past its budget. */
 export class ReplayBuffer {
   private readonly lanes: Record<ReplayLaneKind, ReplayLane>
@@ -18,7 +23,7 @@ export class ReplayBuffer {
     return this._seq
   }
 
-  constructor(maxBytes: number, binaryMaxBytes: number) {
+  constructor({ maxBytes, binaryMaxBytes }: ReplayBufferOptions) {
     const budgets = laneBudgets(maxBytes, binaryMaxBytes)
     this.lanes = {
       text: new ReplayLane(budgets.text),

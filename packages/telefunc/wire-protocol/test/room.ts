@@ -238,8 +238,8 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
     if (missed === null) throw new Error('The replay dropped a frame the peer lacks')
     frames.push(...missed)
   }
-  const peer = new IndexedPeer(
-    {
+  const peer = new IndexedPeer({
+    sender: {
       send: (frame, onCommit) => {
         frames.push(frame)
         onCommit?.()
@@ -249,9 +249,9 @@ function attachPeer(stub: ServerChannel, lastSeq?: number, broadcast?: Broadcast
       deliveredBeforeFrame: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
-    7,
-    replay,
-  )
+    index: 7,
+    replay: replay,
+  })
   stub._attachPeer(peer, { broadcast })
   return { peer, decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }

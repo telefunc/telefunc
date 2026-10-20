@@ -208,29 +208,29 @@ class WsTransport implements UpgradeTarget {
   private wsEnds(ws: WebSocket): WsEnds {
     const uplink = new Uplink()
     const downlink = new Downlink(uplink)
-    const budget = new SendBudget(
-      (message) => ws.send(message),
-      () => ws.bufferedAmount,
-      this.pingInterval,
+    const budget = new SendBudget({
+      transmit: (message) => ws.send(message),
+      queued: () => ws.bufferedAmount,
+      pingInterval: this.pingInterval,
       uplink,
       downlink,
-      () => {
+      onRoom: () => {
         if (this.ws !== ws) return
         sender.sendHeld()
         this.onRoom(sender)
       },
-    )
+    })
     const { sender } = budget
     return {
       uplink,
       downlink,
       budget,
       sender,
-      pieces: new PagePieceReceiver(
-        (frame) => sender.send(frame),
-        (ack) => sender.carry(ack),
+      pieces: new PagePieceReceiver({
+        send: (frame) => sender.send(frame),
+        carry: (ack) => sender.carry(ack),
         uplink,
-      ),
+      }),
     }
   }
 
@@ -382,7 +382,7 @@ function receiveMessage(
     const own = frames.pop()!
     for (const each of frames) {
       const frame = decode(each)
-      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
+      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, 'riding')
       if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
       riding.push({ frame, bytes: each.byteLength })
     }
@@ -395,7 +395,7 @@ function receiveMessage(
         lastBytes = whole.byteLength
       }
     } else {
-      pieces.arrived(own.byteLength, isSequencedTag(frame.tag), at, false)
+      pieces.arrived(own.byteLength, isSequencedTag(frame.tag), at, 'alone')
       last = frame
       lastBytes = own.byteLength
     }

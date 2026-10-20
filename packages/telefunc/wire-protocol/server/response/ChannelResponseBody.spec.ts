@@ -38,7 +38,7 @@ test('a returned stream that ends while its page is away is still closing when i
     const channel = register.mock.calls[0]![0] as ServerChannel
     const lost: Uint8Array[] = []
     // The page's side of the wire dies silently: what the server sends is lost.
-    const gone = new IndexedPeer(createSender(lost), 7, channel._replayBuffer!)
+    const gone = new IndexedPeer({ sender: createSender(lost), index: 7, replay: channel._replayBuffer! })
     channel._attachPeer(gone)
     await vi.advanceTimersByTimeAsync(8_000)
     // The stream ended meanwhile: its chunk, its end and the close.

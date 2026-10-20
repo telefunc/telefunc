@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FlowControl, replayWindow } from './flow-control.js'
-import type { ByteWindowKind, FlowControlEmit } from './flow-control.js'
+import type { ByteWindowKind, FlowControlOptions } from './flow-control.js'
 import {
   BDP_PING_MIN_INTERVAL_MS,
   CREDIT_MSG_WINDOW_INITIAL,
@@ -52,7 +52,7 @@ function watch(promises: (void | Promise<void>)[]): boolean[] {
 // Spy emit — captures calls so tests can assert which wire frames the flow
 // would have produced. Each test starts with a fresh `Emit` so the spec
 // doesn't need cross-test reset hygiene.
-type Emit = FlowControlEmit & {
+type Emit = FlowControlOptions & {
   windowCalls: number[]
   msgWindowCalls: number[]
   /** The kind of each `windowCalls` entry. */
@@ -63,7 +63,8 @@ type Emit = FlowControlEmit & {
   /** The number of the last probe sent. */
   probe: number
 }
-function makeEmit(): Emit {
+/** `backlog` is what its wire holds, nothing unless a test says otherwise. */
+function makeEmit(backlog: () => number | undefined = () => 0): Emit {
   const e: Emit = {
     windowCalls: [],
     msgWindowCalls: [],
@@ -83,13 +84,13 @@ function makeEmit(): Emit {
       e.bdpPingCalls++
       e.probe = probe
     },
+    backlog,
   }
   return e
 }
-/** `backlog` is what its wire holds, nothing unless a test says otherwise. */
-function makeFlow(backlog: () => number | undefined = () => 0) {
-  const emit = makeEmit()
-  return { emit, flow: fitted(new FlowControl(emit, backlog)) }
+function makeFlow(backlog?: () => number | undefined) {
+  const emit = makeEmit(backlog)
+  return { emit, flow: fitted(new FlowControl(emit)) }
 }
 /** Fitted to the default replay buffers, which allow the largest window either way. */
 function fitted(flow: FlowControl): FlowControl {
@@ -169,7 +170,7 @@ describe('FlowControl — sender-side credit', () => {
   })
 
   it('a page yields a macrotask once per yieldBytes it sends, counted again from a yield or a wait for credit', async () => {
-    const flow = fitted(new FlowControl(makeEmit(), () => 0, 1000))
+    const flow = fitted(new FlowControl({ ...makeEmit(), yieldBytes: 1000 }))
     expect(flow.decrement(400)).toBeUndefined()
     expect(flow.decrement(400)).toBeUndefined()
     const resolved = watch([flow.decrement(400)])
@@ -496,7 +497,7 @@ describe('FlowControl — replay buffers', () => {
   // have more in flight than that holds.
   it('until it knows the replay buffers, a receiver advertises no byte limit, and a sender assumes the initial window', () => {
     const emit = makeEmit()
-    const flow = new FlowControl(emit, () => 0)
+    const flow = new FlowControl(emit)
     expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
     flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
     flow.onConsumed(CREDIT_WINDOW_INITIAL_BYTES)
@@ -551,20 +552,22 @@ describe('FlowControl — replay buffers', () => {
 /** A sender and a receiver linked by the u32 wire, as `WINDOW` and `MSG_WINDOW` frames link a channel's ends.
  *  BDP pings go unanswered, so the windows stay at their initial size. */
 function makePair() {
-  const toSender: FlowControlEmit = {
+  const toSender: FlowControlOptions = {
     byteWindowUpdate: (limit) =>
       sender.onPeerByteWindow((decode(encode.window(0, limit, 0)) as { bytes: number }).bytes),
     msgWindowUpdate: (limit) =>
       sender.onPeerMessageWindow((decode(encode.msgWindow(0, limit)) as { count: number }).count),
     bdpPing: () => {},
+    backlog: () => 0,
   }
-  const toReceiver: FlowControlEmit = {
+  const toReceiver: FlowControlOptions = {
     byteWindowUpdate: () => {},
     msgWindowUpdate: () => {},
     bdpPing: () => {},
+    backlog: () => 0,
   }
-  const receiver = fitted(new FlowControl(toSender, () => 0))
-  const sender = fitted(new FlowControl(toReceiver, () => 0))
+  const receiver = fitted(new FlowControl(toSender))
+  const sender = fitted(new FlowControl(toReceiver))
   return { sender, receiver }
 }
 
@@ -634,20 +637,20 @@ async function runPath({
   const toSender: { at: number; deliver: () => void }[] = []
   let now = 0
   const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
-  const sender = fitted(new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {} }, () => wireBytes))
+  const sender = fitted(
+    new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {}, backlog: () => wireBytes }),
+  )
   const senderUplink = new Uplink()
   sender.attach(senderUplink, new Downlink(senderUplink))
   const answer = (probe: number, backlog: number, pathRtt: number) =>
     wire.push(decode(encode.bdpPingAck(0, probe, backlog, pathRtt)) as Ack)
   const receiver = fitted(
-    new FlowControl(
-      {
-        byteWindowUpdate: (limit) => upstream(() => sender.onPeerByteWindow(limit)),
-        msgWindowUpdate: (limit) => upstream(() => sender.onPeerMessageWindow(limit)),
-        bdpPing: (probe) => upstream(() => answer(probe, sender.onPing(), sender.pathRtt())),
-      },
-      () => 0,
-    ),
+    new FlowControl({
+      byteWindowUpdate: (limit) => upstream(() => sender.onPeerByteWindow(limit)),
+      msgWindowUpdate: (limit) => upstream(() => sender.onPeerMessageWindow(limit)),
+      bdpPing: (probe) => upstream(() => answer(probe, sender.onPing(), sender.pathRtt())),
+      backlog: () => 0,
+    }),
   )
   let attached = false
   const receiverUplink = new Uplink()

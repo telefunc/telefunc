@@ -74,17 +74,17 @@ function registeredBroadcast<T = unknown>(key: string): ServerBroadcast<T> {
 }
 
 function peer(send: (frame: Uint8Array) => void): IndexedPeer {
-  return new IndexedPeer(
-    {
+  return new IndexedPeer({
+    sender: {
       send,
       carry: send,
       bufferedAmount: () => 0,
       deliveredBeforeFrame: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
-    7,
-    new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
-  )
+    index: 7,
+    replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
+  })
 }
 
 /** A mux, and the texts of the PUBLISH frames it sends down any wire. */

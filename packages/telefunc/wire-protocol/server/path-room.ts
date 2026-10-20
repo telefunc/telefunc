@@ -2,16 +2,19 @@ export { PathRoom }
 
 import { WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../constants.js'
 import { DRAIN_SPAN_MS, Link, newestFastest } from '../link.js'
-import { PieceSender, acknowledges, type SendRoom } from '../pieces.js'
+import { PieceSender, acknowledges, type PieceSenderOptions, type SendRoom } from '../pieces.js'
 import type { PiecesAck } from '../shared-ws.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
+
+type PathRoomOptions = Pick<PieceSenderOptions, 'transmit' | 'queued' | 'pingInterval'>
 
 /** The path to the page holds what `dataRoom` allows; the rest waits whole in its sender. */
 class PathRoom implements SendRoom {
   readonly cuts = false
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
+  private readonly queued: () => number
   /** In bytes per ms: the fastest of the newest drain rates, 0 before any; `spanBytes` and `spanMs` gather the next. */
   private drainRate = 0
   private readonly drainRates: number[] = []
@@ -36,13 +39,9 @@ class PathRoom implements SendRoom {
   private inPathAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
 
-  /** `transmit`, `queued` and `pingInterval` as `PieceSender`'s. */
-  constructor(
-    transmit: (message: Uint8Array<ArrayBuffer>) => void,
-    private readonly queued: () => number,
-    pingInterval: number,
-  ) {
-    this.sender = new PieceSender(transmit, queued, pingInterval, new Link(), this)
+  constructor({ transmit, queued, pingInterval }: PathRoomOptions) {
+    this.queued = queued
+    this.sender = new PieceSender({ transmit, queued, pingInterval, link: new Link(), room: this })
   }
 
   /** Sends `frame` through the sender. */

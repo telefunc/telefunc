@@ -6,8 +6,23 @@ import type { ServerChannel } from './channel.js'
 import type { ServerTransport, Wire, WirePieces } from './mux.js'
 import type { SocketWait } from './socket-wait.js'
 
+type WireSenderOptions = {
+  wire: Wire
+  transport: ServerTransport<unknown>
+  pieces: WirePieces | null
+  /** How long the frames that go at once wait behind what the socket holds. */
+  wait: SocketWait
+  /** The channels whose flow control the headroom counts. */
+  channels: () => Iterable<ServerChannel>
+}
+
 /** Sends a wire's frames in call order, and terminates the wire once its backlog passes what its channels allow. */
 class WireSender {
+  private readonly wire: Wire
+  private readonly transport: ServerTransport<unknown>
+  private readonly pieces: WirePieces | null
+  private readonly wait: SocketWait
+  private readonly channels: () => Iterable<ServerChannel>
   /** What may be written before the backlog is read again against what its channels' flow control allows. */
   private headroom = 0
   /** The largest frame sent on the wire. */
@@ -17,15 +32,13 @@ class WireSender {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor(
-    private readonly wire: Wire,
-    private readonly transport: ServerTransport<unknown>,
-    private readonly pieces: WirePieces | null,
-    /** How long the frames that go at once wait behind what the socket holds. */
-    private readonly wait: SocketWait,
-    /** The channels whose flow control the headroom counts. */
-    private readonly channels: () => Iterable<ServerChannel>,
-  ) {}
+  constructor({ wire, transport, pieces, wait, channels }: WireSenderOptions) {
+    this.wire = wire
+    this.transport = transport
+    this.pieces = pieces
+    this.wait = wait
+    this.channels = channels
+  }
 
   send(frame: Uint8Array<ArrayBuffer>): void {
     if (this.pastBacklog) return

@@ -175,16 +175,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    this._flow = new FlowControl(
-      {
-        byteWindowUpdate: (limit, kind) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq, kind),
-        msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
-        bdpPing: (probe) => this._peer?.sendBdpPing(probe),
-      },
-      () => this._peer?.sender.bufferedAmount(),
-      Number.POSITIVE_INFINITY,
-      () => this._peer?.sender.sendWait() ?? null,
-    )
+    this._flow = new FlowControl({
+      byteWindowUpdate: (limit, kind) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq, kind),
+      msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
+      bdpPing: (probe) => this._peer?.sendBdpPing(probe),
+      backlog: () => this._peer?.sender.bufferedAmount(),
+      sendWait: () => this._peer?.sender.sendWait() ?? null,
+    })
     const c = getServerConfig().channel
     this._flow.fitReplays(
       replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary),
@@ -399,7 +396,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // becomes addressable on the wire, so a peer can attach immediately after this
     // returns.
     const c = getServerConfig().channel
-    this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, c.serverReplayBufferBinary)
+    this._replayBuffer = new ReplayBuffer({
+      maxBytes: c.serverReplayBuffer,
+      binaryMaxBytes: c.serverReplayBufferBinary,
+    })
     this._clearTimer('_ttlTimer')
     this._ttlTimer = unrefTimer(
       setTimeout(() => {

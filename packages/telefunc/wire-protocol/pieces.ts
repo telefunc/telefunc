@@ -1,5 +1,5 @@
 export { PieceSender, PieceReceiver, acknowledges }
-export type { SendRoom }
+export type { PieceReceiverOptions, PieceSenderOptions, SendRoom }
 
 import {
   WIRE_ANNOUNCED_MIN_BYTES,
@@ -52,8 +52,23 @@ type SendRoom = {
   sentFrame(tag: number, bytes: number): void
 }
 
+type PieceSenderOptions = {
+  transmit: (message: Uint8Array<ArrayBuffer>) => void
+  /** The bytes its socket holds unsent. */
+  queued: () => number
+  /** Its wire's ping interval, which sizes the frames it sends whole. */
+  pingInterval: number
+  /** Its wire's: the rates it measures go there. */
+  link: Link
+  room: SendRoom
+}
+
 /** One WebSocket's sender: a turn's frames go in one message, one that may take a ping interval to cross in pieces. */
 class PieceSender {
+  private readonly queued: () => number
+  private pingInterval: number
+  private readonly link: Link
+  private readonly room: SendRoom
   /** The frames and pieces sent and not yet acknowledged that measure the rate. */
   private readonly unacknowledged = new Fifo<{ crossing: number; at: number; end: number; probe: boolean }>()
   /** The bytes the receiver has acknowledged; the first frame's, and when it was sent. */
@@ -94,19 +109,17 @@ class PieceSender {
   /** The frames counted and not yet handed to the socket. */
   private readonly turn: TurnMessage
 
-  constructor(
-    transmit: (message: Uint8Array<ArrayBuffer>) => void,
-    /** The bytes its socket holds unsent. */
-    private readonly queued: () => number,
-    /** Its wire's ping interval, which sizes the frames it sends whole. */
-    private pingInterval: number,
-    /** Its wire's: the rates it measures go there. */
-    private readonly link: Link,
-    private readonly room: SendRoom,
-  ) {
+  constructor({ transmit, queued, pingInterval, link, room }: PieceSenderOptions) {
+    this.queued = queued
+    this.pingInterval = pingInterval
+    this.link = link
+    this.room = room
     // As the turn ends, it hands what it gathered unless an announcement is open; what was only carried waits.
-    this.turn = new TurnMessage(transmit, () => {
-      if (this.open === null) this.turn.flush()
+    this.turn = new TurnMessage({
+      transmit,
+      turnEnded: () => {
+        if (this.open === null) this.turn.flush()
+      },
     })
     this.setWholeUpTo()
   }
@@ -193,7 +206,7 @@ class PieceSender {
     }
     this.count(frame, data)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
-    turn.add(frame, data, true)
+    turn.addSent(frame, data)
   }
 
   /** Counts `frame` as it joins what it gathers, after the LENGTH the frame before it needs now. */
@@ -463,13 +476,21 @@ class PieceSender {
       if (frame === null) continue
       this.room.sentFrame(frame[0]!, frame.byteLength)
       this.count(frame, false)
-      this.turn.add(frame, false, false)
+      this.turn.add(frame)
     }
   }
 }
 
+type TurnMessageOptions = {
+  transmit: (message: Uint8Array<ArrayBuffer>) => void
+  /** Runs as the turn that added a frame ends, while it holds frames that weren't carried. */
+  turnEnded: () => void
+}
+
 /** The frames one turn of a sender gathers, handed to its socket in one message (see `messageFrames`). */
 class TurnMessage {
+  private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void
+  private readonly turnEnded: () => void
   /** The bytes of the frames it holds, with the LENGTH ahead of each that needs one. */
   bytes = 0
   /** It holds frames that weren't carried. */
@@ -486,11 +507,10 @@ class TurnMessage {
   private flushQueued = false
   private closed = false
 
-  constructor(
-    private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void,
-    /** Runs as the turn that added a frame ends, while it holds frames that weren't carried. */
-    private readonly turnEnded: () => void,
-  ) {}
+  constructor({ transmit, turnEnded }: TurnMessageOptions) {
+    this.transmit = transmit
+    this.turnEnded = turnEnded
+  }
 
   /** The bytes of the LENGTH the next frame takes ahead of it. */
   get lengthAhead(): number {
@@ -502,16 +522,19 @@ class TurnMessage {
     this.bytes += this.lengthAhead
   }
 
-  /** Adds `frame`, of data or not, sent (`own`) or carried, after its LENGTH. */
-  add(frame: Uint8Array<ArrayBuffer>, data: boolean, own: boolean): void {
+  /** Adds `frame`, of data or not, that it sends, after its LENGTH. */
+  addSent(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
+    this.own = true
+    if (data) this.data = true
+    else this.atOnce = true
+    this.add(frame)
+  }
+
+  /** Adds `frame`, sent or carried, after its LENGTH. */
+  add(frame: Uint8Array<ArrayBuffer>): void {
     this.frames.push(frame)
     this.bytes += frame.byteLength
     this.lastVaries = fixedBytes(frame[0]!) === 0
-    if (own) {
-      this.own = true
-      if (data) this.data = true
-      else this.atOnce = true
-    }
     if (this.flushQueued) return
     this.flushQueued = true
     queueMicrotask(this.endTurn)
@@ -548,8 +571,16 @@ class TurnMessage {
   }
 }
 
+type PieceReceiverOptions = {
+  send: (frame: Uint8Array<ArrayBuffer>) => void
+  /** Its side's `PieceSender.carry`. */
+  carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
+}
+
 /** One WebSocket's receiver: puts a frame sent in pieces back together, and acknowledges the bytes it took. */
 abstract class PieceReceiver {
+  private readonly send: (frame: Uint8Array<ArrayBuffer>) => void
+  private readonly carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
   private frame = new Uint8Array(0)
   private received = 0
@@ -582,11 +613,10 @@ abstract class PieceReceiver {
   /** An acknowledgement waits to go in the message its side sends next (see `PieceSender.carry`). */
   private carrying = false
 
-  constructor(
-    private readonly send: (frame: Uint8Array<ArrayBuffer>) => void,
-    /** Its side's `PieceSender.carry`. */
-    private readonly carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void,
-  ) {}
+  constructor({ send, carry }: PieceReceiverOptions) {
+    this.send = send
+    this.carry = carry
+  }
 
   /** A whole frame of `bytes` arrived at `at`, as an announced message if `announced`. */
   protected abstract tookFrame(bytes: number, data: boolean, announced: boolean, at: number): void
@@ -597,10 +627,10 @@ abstract class PieceReceiver {
   /** How long an acknowledgement waits from now. */
   protected abstract ackWait(): number
 
-  /** A whole frame of `bytes` arrived at `at`, `riding` if ahead of its message's last frame, which alone dates it. */
-  arrived(bytes: number, data: boolean, at: number, riding: boolean): void {
+  /** A whole frame of `bytes` arrived at `at`, `'riding'` ahead of its message's last frame, which alone dates it. */
+  arrived(bytes: number, data: boolean, at: number, arrival: 'alone' | 'riding'): void {
     this.took += bytes
-    this.tookFrame(bytes, data, !riding && this.paced(bytes, at), at)
+    this.tookFrame(bytes, data, arrival === 'alone' && this.paced(bytes, at), at)
   }
 
   /** Takes an ANNOUNCE that arrived at `at`: one of no bytes opens an announcement, one of its `bytes` closes it. */

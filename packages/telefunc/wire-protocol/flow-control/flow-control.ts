@@ -1,5 +1,5 @@
 export { FlowControl, replayWindow }
-export type { AttachedDownlink, AttachedUplink, ByteWindowKind, FlowControlEmit }
+export type { AttachedDownlink, AttachedUplink, ByteWindowKind, FlowControlOptions }
 
 import { BdpEstimator } from './bdp-estimator.js'
 import type { Link, SendWait } from '../link.js'
@@ -19,11 +19,18 @@ import { unrefTimer } from '../../utils/unrefTimer.js'
 /** A batching wire sends `urgent-flow-control` at once; an `acknowledgement` may ride the next message it sends. */
 type ByteWindowKind = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
 
-/** Limits go out mod 2^32; a byte limit carries the last seq this side has, which acknowledges what arrived. */
-interface FlowControlEmit {
+/** What a channel's flow control sends and reads. */
+interface FlowControlOptions {
+  // Limits go out mod 2^32; a byte limit carries the last seq this side has, which acknowledges what arrived.
   byteWindowUpdate(limit: number, kind: ByteWindowKind): void
   msgWindowUpdate(limit: number, urgent: boolean): void
   bdpPing(probe: number): void
+  /** Bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell. */
+  backlog(): number | undefined
+  /** A page's: Chromium takes what a page queued on a socket only between tasks, so its sender yields past this. */
+  yieldBytes?: number
+  /** How long frames that go at once wait behind the wire's own data where no attach tells it, `null` for unknown. */
+  sendWait?(): SendWait | null
 }
 
 /** The page's uplink, as a channel's credit reads it. */
@@ -46,6 +53,11 @@ function replayWindow(text: number, binary: number): number {
 
 /** A channel's byte and message credit both ways, as cumulative limits, as QUIC's MAX_DATA. */
 class FlowControl {
+  private readonly _byteWindowUpdate: FlowControlOptions['byteWindowUpdate']
+  private readonly _msgWindowUpdate: FlowControlOptions['msgWindowUpdate']
+  private readonly _bdpPing: FlowControlOptions['bdpPing']
+  private readonly _backlog: FlowControlOptions['backlog']
+  private readonly _sendWait: FlowControlOptions['sendWait']
   private _bdp = new BdpEstimator()
   /** The page's uplink of the last `attach`. */
   private _uplink: AttachedUplink | null = null
@@ -91,6 +103,7 @@ class FlowControl {
   private _releases = 0
   /** Bytes sent since this side's sender last yielded or waited. */
   private _unyieldedBytes = 0
+  private readonly _yieldBytes: number
   private _shutdown = false
   /** Since it last answered a `BDP_PING`, the least its wire held as credit ran out; 0: unknown, `Infinity`: none. */
   private _leastBacklog = Infinity
@@ -101,15 +114,13 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  constructor(
-    private readonly _emit: FlowControlEmit,
-    /** Bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell. */
-    private readonly _backlog: () => number | undefined,
-    /** A page's: Chromium takes what a page queued on a socket only between tasks, so its sender yields past this. */
-    private readonly _yieldBytes = Infinity,
-    /** How long frames that go at once wait behind the wire's own data where no attach tells it, `null` for unknown. */
-    private readonly _sendWait: () => SendWait | null = () => null,
-  ) {
+  constructor({ byteWindowUpdate, msgWindowUpdate, bdpPing, backlog, yieldBytes, sendWait }: FlowControlOptions) {
+    this._byteWindowUpdate = byteWindowUpdate
+    this._msgWindowUpdate = msgWindowUpdate
+    this._bdpPing = bdpPing
+    this._backlog = backlog
+    this._yieldBytes = yieldBytes ?? Infinity
+    this._sendWait = sendWait
     macrotaskYield.assertSupported()
   }
 
@@ -203,12 +214,12 @@ class FlowControl {
     this._arrived = true
     this._receivedBytes += bytes
     this._downlink?.creditArrived(bytes)
-    if (this._bdp.onReceive(bytes, this._wireWait())) this._emit.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, this._wireWait())) this._bdpPing(this._bdp.probe)
   }
 
   /** How long the frames that go at once wait behind the wire's own data: the attached uplink's, else `sendWait`'s. */
   private _wireWait(): SendWait | null {
-    return this._uplink ?? this._sendWait()
+    return this._uplink ?? this._sendWait?.() ?? null
   }
 
   /** Receiver-side: a probe number for an attach on `link`'s RECONCILE entry; `undefined` where `link` is measured. */
@@ -407,14 +418,14 @@ class FlowControl {
       this._urgentBytes = this._consumedBytes
       sent = 'urgent-flow-control'
     }
-    this._emit.byteWindowUpdate(limit >>> 0, sent)
+    this._byteWindowUpdate(limit >>> 0, sent)
   }
 
   private _advertiseMessages(): void {
     this._advertisedMessages = this._consumedMessages
     const urgent = (this._consumedMessages - this._urgentMessages) * 2 > this._bdp.msgWindow
     if (urgent) this._urgentMessages = this._consumedMessages
-    this._emit.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, urgent)
+    this._msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, urgent)
   }
 
   private _noteBacklog(): void {

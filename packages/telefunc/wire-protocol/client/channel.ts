@@ -122,15 +122,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.key = key
     this._maxFrameBytes = maxFrameBytes
-    this._flow = new FlowControl(
-      {
-        byteWindowUpdate: (limit, kind) => this._connection.sendByteWindowUpdate(this, limit, kind),
-        msgWindowUpdate: (limit, urgent) => this._connection.sendMsgWindowUpdate(this, limit, urgent),
-        bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
-      },
-      () => this._connection.bufferedAmount(),
-      FC_PAGE_YIELD_BYTES,
-    )
+    this._flow = new FlowControl({
+      byteWindowUpdate: (limit, kind) => this._connection.sendByteWindowUpdate(this, limit, kind),
+      msgWindowUpdate: (limit, urgent) => this._connection.sendMsgWindowUpdate(this, limit, urgent),
+      bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
+      backlog: () => this._connection.bufferedAmount(),
+      yieldBytes: FC_PAGE_YIELD_BYTES,
+    })
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
       transports,

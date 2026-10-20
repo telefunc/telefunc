@@ -618,8 +618,8 @@ function register(room: ServerRoom): RoomStubChannel {
 /** `keep: false` drops the frames sent. */
 function attachPeer(stub: RoomStubChannel, { keep = true } = {}) {
   const frames: Uint8Array[] = []
-  const peer = new IndexedPeer(
-    {
+  const peer = new IndexedPeer({
+    sender: {
       send: (frame, onCommit) => {
         if (keep) frames.push(frame)
         onCommit?.()
@@ -631,9 +631,9 @@ function attachPeer(stub: RoomStubChannel, { keep = true } = {}) {
       deliveredBeforeFrame: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
-    7,
-    stub._replayBuffer!,
-  )
+    index: 7,
+    replay: stub._replayBuffer!,
+  })
   stub._attachPeer(peer)
   return { peer, decoded: () => frames.map((frame) => decode(frame as Uint8Array<ArrayBuffer>)) }
 }

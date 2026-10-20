@@ -42,6 +42,11 @@ type SseConnection = {
 
 const sseOpenComment = textEncoder.encode(': open\n\n')
 
+type EventStreamOptions = {
+  useNodeStream: boolean
+  onCancel: () => void
+}
+
 /** The event stream to the page: data waits for it to ask for more, and the frames that go at once pass that data. */
 class EventStream {
   readonly stream: PushReadable | PushReadableStream<Uint8Array<ArrayBuffer>>
@@ -50,7 +55,7 @@ class EventStream {
   /** Whether the stream asks for more. */
   private takes: boolean
 
-  constructor(useNodeStream: boolean, onCancel: () => void) {
+  constructor({ useNodeStream, onCancel }: EventStreamOptions) {
     const onTake = () => this.handWaiting()
     this.stream = useNodeStream
       ? createPushReadable(onCancel, onTake)
@@ -173,7 +178,7 @@ class SseConnectionTransport {
       const conn = this.mux.getConnectionByConnId<SseConnection>(connId)
       if (conn) this.closeConnection(conn, { permanent: false })
     }
-    const events = new EventStream(useNodeStream, onCancel)
+    const events = new EventStream({ useNodeStream, onCancel })
 
     let resolveReady!: () => void
     const ready = new Promise<void>((resolve) => {

@@ -9,8 +9,8 @@ import { config, reconnectWindow } from './serverConfig.js'
 
 /** Records what the channel sends, but for the flow-control limits every attach sends. */
 function createPeer(frames: Uint8Array[]) {
-  return new IndexedPeer(
-    {
+  return new IndexedPeer({
+    sender: {
       send(frame) {
         if (frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW) return
         frames.push(frame)
@@ -21,9 +21,9 @@ function createPeer(frames: Uint8Array[]) {
       deliveredBeforeFrame: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
-    7,
-    new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
-  )
+    index: 7,
+    replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
+  })
 }
 
 function expectCloseFrame(frame: Uint8Array) {

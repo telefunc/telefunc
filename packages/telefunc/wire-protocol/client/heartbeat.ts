@@ -2,9 +2,20 @@ export { Heartbeat }
 
 import { Deliveries } from '../deliveries.js'
 
+type HeartbeatOptions = {
+  intervalMs: number
+  pongTimeoutMs: number
+  send: () => void
+  onDead: () => void
+}
+
 /** Ping-then-pong-deadline loop. Each transport owns one for its wire; the upgrade probe
  *  flow constructs a transient instance for the probed wire until the swap commits. */
 class Heartbeat {
+  readonly intervalMs: number
+  readonly pongTimeoutMs: number
+  private readonly send: () => void
+  private readonly onDead: () => void
   private pingTimer: ReturnType<typeof setInterval> | null = null
   private pongTimer: ReturnType<typeof setTimeout> | null = null
   /** When the wire last delivered a frame, or the heartbeat started or got a PONG. */
@@ -13,12 +24,12 @@ class Heartbeat {
   /** Until when the wire may deliver nothing: what it still carries takes that long. */
   private expectedBy = () => 0
 
-  constructor(
-    readonly intervalMs: number,
-    readonly pongTimeoutMs: number,
-    private readonly send: () => void,
-    private readonly onDead: () => void,
-  ) {}
+  constructor({ intervalMs, pongTimeoutMs, send, onDead }: HeartbeatOptions) {
+    this.intervalMs = intervalMs
+    this.pongTimeoutMs = pongTimeoutMs
+    this.send = send
+    this.onDead = onDead
+  }
 
   /** `pingNow`: its first PING goes at once, rather than once its interval passed. */
   start(pingNow: boolean): void {

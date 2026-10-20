@@ -2,8 +2,17 @@ export { SocketWait }
 
 import { DRAIN_SPAN_MS, Waits, newestFastest, type SendWait } from '../link.js'
 
+type SocketWaitOptions = {
+  /** All the wire holds, which drains as the frames it is handed arrive. */
+  held: () => number | undefined
+  /** What of that a frame that goes at once counts ahead of it: on SSE the stream's, elsewhere all `held`. */
+  ahead: () => number | undefined
+}
+
 /** The wait of a frame that goes at once: what `ahead` reads, over the fastest newest rate the wire drained at. */
 class SocketWait implements SendWait {
+  private readonly held: () => number | undefined
+  private readonly ahead: () => number | undefined
   private drainRate = 0
   private readonly drainRates: number[] = []
   /** The span being measured: when it started, what it held then, and the bytes sent since. */
@@ -12,12 +21,10 @@ class SocketWait implements SendWait {
   private spanHanded = 0
   private readonly waits = new Waits()
 
-  constructor(
-    /** All the wire holds, which drains as the frames it is handed arrive. */
-    private readonly held: () => number | undefined,
-    /** What of that a frame that goes at once counts ahead of it: on SSE the stream's, elsewhere all `held`. */
-    private readonly ahead: () => number | undefined,
-  ) {}
+  constructor({ held, ahead }: SocketWaitOptions) {
+    this.held = held
+    this.ahead = ahead
+  }
 
   /** Notes `bytes` about to be sent, of a frame that goes at once if `atOnce`. */
   handed(bytes: number, atOnce: boolean): void {
