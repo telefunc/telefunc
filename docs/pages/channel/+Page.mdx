@@ -250,7 +250,7 @@ The static methods run purely on the server — no client, no handle, no lifecyc
 import { Broadcast } from 'telefunc'
 
 // Publish to every subscriber of the key
-Broadcast.publish('room:lobby', { text: 'Hello!' })
+await Broadcast.publish('room:lobby', { text: 'Hello!' })
 
 // Subscribe on the server
 const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
@@ -264,12 +264,14 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 info.key        // 'room:lobby' — the broadcast key
 info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
-info.receivers  // publish() only: who the message was handed to
+info.receivers  // publish() only: whether anyone received it (see below)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt once the message is accepted. A publish right after a `subscribe()` on the same server (on Cloudflare, in the same session) waits up to a minute for that subscription, so it reaches that subscriber.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt once the backend has given the message its `seq`, and rejects if the backend fails it (a Redis error, say).
 
-`receivers` is `0` when nobody anywhere is subscribed to the key. Otherwise it counts subscribers with the in-memory backend, server instances with standalone Redis, and Durable Objects on Cloudflare; Redis Cluster leaves it out.
+A publish right after a `subscribe()` on the same server (on <Link href="/stream/cloudflare">Cloudflare</Link>, in the same Durable Object) waits until that subscriber can receive it. After a minute, it goes out without waiting.
+
+`receivers` is a number: `0` when nobody anywhere is subscribed to the key, and more than `0` when someone is, a client subscribed through `new BroadcastChannel()` included. On Redis Cluster it's `undefined`.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -422,13 +424,13 @@ Channels and broadcasts signal failure through four errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | The client fell too far behind the server's sends, or `bufferLimit` (`bufferLimitBinary` for binary) filled while it was offline | **Open** | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
+| `ChannelOverflowError` | The client fell too far behind the server's sends, or `bufferLimit` (`bufferLimitBinary` for binary) filled while it was offline | **Open** (a `BroadcastChannel` closes) | Only the dropped `send()` rejects; `await` your sends to apply backpressure |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` whose client falls 80 MiB behind (less if you lowered the replay buffers), or misses more than `bufferLimit` (`bufferLimitBinary` for binary) while offline, closes with `ChannelOverflowError`. Call its telefunction again to rejoin.
+> A `BroadcastChannel` closes with `ChannelOverflowError` when its client falls more than 80 MiB behind, or misses more than `bufferLimit` (`bufferLimitBinary` for binary) while offline. The 80 MiB is with the default replay buffers; lowering `serverReplayBuffer` or `serverReplayBufferBinary` lowers it. Call its telefunction again to rejoin.
 
-> The `Broadcast.publish()` calls waiting for a new subscription on their key hold at most `bufferLimit` (`bufferLimitBinary` for binary) bytes; one past that rejects with `ChannelOverflowError`.
+> A `Broadcast.publish()` that waits for a new subscription (see <Link href="#broadcast">`Broadcast`</Link>) counts its size plus 256 bytes against `bufferLimit` (`bufferLimitBinary` for binary). The publish past that rejects with `ChannelOverflowError`: `await` each publish, or raise `bufferLimit`.
 
 See also:
 - <Link href="/stream#error-handling" />
