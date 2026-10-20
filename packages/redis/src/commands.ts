@@ -94,13 +94,13 @@ const PUBLISH_LUA = `${NOW_LUA}${REDIS_ORDERING_FRAME_LUA}
 local prev = redis.call('GET', KEYS[1])
 local ts = tf_now()
 local seq
-local text, binary = '0', '0'
+local last_text, last_binary = '0', '0'
 if prev then
   local pseq, pts, ptext, pbinary = string.match(prev, '^(%d+):(%d+):(%d+):(%d+)$')
   if not pseq then return redis.error_reply('publish: invalid ordering watermark') end
   seq = tonumber(pseq) + 1
   if tonumber(pts) > ts then ts = tonumber(pts) end
-  text, binary = ptext, pbinary
+  last_text, last_binary = ptext, pbinary
 else
   -- A missing order (new, evicted or flushed) starts at authority time in microseconds, above every seq it issued.
   local t = redis.call('TIME')
@@ -109,11 +109,11 @@ end
 local seq_text = string.format('%.0f', seq)
 local predecessor
 if ARGV[2] == 'text' then
-  predecessor, text = tonumber(text), seq_text
+  predecessor, last_text = tonumber(last_text), seq_text
 else
-  predecessor, binary = tonumber(binary), seq_text
+  predecessor, last_binary = tonumber(last_binary), seq_text
 end
-redis.call('SET', KEYS[1], seq_text .. ':' .. string.format('%.0f', ts) .. ':' .. text .. ':' .. binary)
+redis.call('SET', KEYS[1], seq_text .. ':' .. string.format('%.0f', ts) .. ':' .. last_text .. ':' .. last_binary)
 local predecessor_hi = math.floor(predecessor / 4294967296)
 local frame = struct.pack('>I4I4', predecessor_hi, predecessor - predecessor_hi * 4294967296)
   .. tf_ordering_frame(seq, ts, ARGV[1])
