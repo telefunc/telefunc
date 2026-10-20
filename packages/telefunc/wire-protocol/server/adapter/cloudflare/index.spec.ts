@@ -602,7 +602,7 @@ describe("the session Durable Object's pin", () => {
     // Its maps are `#` fields: each one it writes a token to, in order, of which it keeps the last two.
     const kept: Map<unknown, unknown>[] = []
     const set = Map.prototype.set
-    vi.spyOn(Map.prototype, 'set').mockImplementation(function (this: Map<unknown, unknown>, key, value) {
+    const spy = vi.spyOn(Map.prototype, 'set').mockImplementation(function (this: Map<unknown, unknown>, key, value) {
       if (String(key).startsWith('token-') && kept.at(-1) !== this) kept.push(this)
       return set.call(this, key, value)
     })
@@ -620,6 +620,7 @@ describe("the session Durable Object's pin", () => {
         kept.slice(-2).reduce((size, map) => size + map.size, 0),
       )
     }
+    spy.mockRestore()
     expect(peak).toBe(10_000)
   })
 
