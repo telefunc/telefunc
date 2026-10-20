@@ -561,7 +561,10 @@ class ClientConnection implements MuxConnection {
     }
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
-    this.replayBuffers.set(ix, new ReplayBuffer(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes))
+    this.replayBuffers.set(
+      ix,
+      new ReplayBuffer({ maxBytes: this.clientReplayBufferBytes, binaryMaxBytes: this.clientReplayBufferBinaryBytes }),
+    )
     this.fitReplays(channel)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
@@ -939,12 +942,12 @@ class ClientConnection implements MuxConnection {
     transport.detachHeartbeat()
     if (!provisional) this.pingIntervalMs = intervalMs
     this.provisionalHeartbeat = provisional
-    const hb = new Heartbeat(
+    const hb = new Heartbeat({
       intervalMs,
-      intervalMs * 2,
-      () => this.beat(transport),
-      () => this.handlePongTimeout(transport),
-    )
+      pongTimeoutMs: intervalMs * 2,
+      send: () => this.beat(transport),
+      onDead: () => this.handlePongTimeout(transport),
+    })
     transport.attachHeartbeat(hb)
     hb.start(!provisional)
   }
@@ -1232,12 +1235,12 @@ class ClientConnection implements MuxConnection {
   /** The probe is nobody's transport yet, so it has no heartbeat of its own: this one keeps it
    *  alive until the flip adopts it, and any death — its own or the attempt's — closes both. */
   private keepProbeAlive(probe: ProbeWire, attempt: AbortController): Heartbeat {
-    const heartbeat = new Heartbeat(
-      this.pingIntervalMs,
-      this.pingIntervalMs * 2,
-      () => probe.ping(),
-      () => attempt.abort(),
-    )
+    const heartbeat = new Heartbeat({
+      intervalMs: this.pingIntervalMs,
+      pongTimeoutMs: this.pingIntervalMs * 2,
+      send: () => probe.ping(),
+      onDead: () => attempt.abort(),
+    })
     probe.onPong(() => heartbeat.resetPong())
     probe.onClose(() => attempt.abort())
     heartbeat.start(true)
@@ -1758,7 +1761,7 @@ const TRANSPORT_REGISTRY: Record<
 > = {
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport(telefuncUrl, owner),
   [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
-    new SseTransport(telefuncUrl, options.fetchImpl, options.headers, owner),
+    new SseTransport({ telefuncUrl, fetchImpl: options.fetchImpl, userHeaders: options.headers, owner }),
 }
 
 /** Defines which transport can upgrade to which. */

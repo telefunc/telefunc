@@ -59,7 +59,18 @@ type SseEventStreamReader = ReturnType<typeof createSseEventStreamReader>
 /** What `SseTransport.foldOutbox` adds to the next POST's body at a time. */
 const SSE_FOLD_BYTES = 1024 * 1024
 
+type SseTransportOptions = {
+  telefuncUrl: string
+  fetchImpl: typeof fetch
+  userHeaders: Record<string, string> | undefined
+  owner: ClientConnection
+}
+
 class SseTransport implements UpgradeSource {
+  private readonly telefuncUrl: string
+  private readonly fetchImpl: typeof fetch
+  private readonly userHeaders: Record<string, string> | undefined
+  private readonly owner: ClientConnection
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
   readonly reconcileMode = 'batch-on-reconcile' as const
@@ -110,12 +121,12 @@ class SseTransport implements UpgradeSource {
       }
     | { tag: 'failed' } = { tag: 'idle' }
 
-  constructor(
-    private readonly telefuncUrl: string,
-    private readonly fetchImpl: typeof fetch,
-    private readonly userHeaders: Record<string, string> | undefined,
-    private readonly owner: ClientConnection,
-  ) {}
+  constructor({ telefuncUrl, fetchImpl, userHeaders, owner }: SseTransportOptions) {
+    this.telefuncUrl = telefuncUrl
+    this.fetchImpl = fetchImpl
+    this.userHeaders = userHeaders
+    this.owner = owner
+  }
 
   async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
     if (this.streamRequest.tag === 'active') return this.emitBarrierStreamRequest(buildFrame)

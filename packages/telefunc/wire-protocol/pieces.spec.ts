@@ -43,7 +43,7 @@ const pieceSender = (
   queued: () => number,
   link = new Link(),
   room = UNBOUNDED,
-) => new PieceSender(transmit, queued, 5_000, link, room)
+) => new PieceSender({ transmit, queued, pingInterval: 5_000, link, room })
 
 test("with no rate measured, a task's frames go as they are sent behind an announcement it closes as it ends, the first large one in pieces that at most double from a probe pair", async () => {
   const transmitted: Uint8Array[] = []
@@ -279,10 +279,10 @@ test('a receiver whose peer holds data back acknowledges data within 25 ms once 
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
   const acks = () => sent.map((frame) => decode(frame))
-  const receiver = new ServerPieceReceiver(
-    (frame) => void sent.push(frame),
-    () => {},
-  )
+  const receiver = new ServerPieceReceiver({
+    send: (frame) => void sent.push(frame),
+    carry: () => {},
+  })
   receiver.arrived(1_000, true, Date.now(), false)
   vi.advanceTimersByTime(100)
   expect(sent).toHaveLength(0)
@@ -305,11 +305,11 @@ test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB 
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
   let carried: (() => Uint8Array | null) | null = null
-  const receiver = new PagePieceReceiver(
-    (frame) => void sent.push(frame),
-    (ack) => void (carried = ack),
-    new Uplink(),
-  )
+  const receiver = new PagePieceReceiver({
+    send: (frame) => void sent.push(frame),
+    carry: (ack) => void (carried = ack),
+    uplink: new Uplink(),
+  })
   const next = () => {
     const ack = carried?.() ?? null
     carried = null
@@ -337,14 +337,14 @@ test('a receiver acknowledges a frame by its own due when the frame before it wa
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   let carries = 0
   let carried: (() => Uint8Array | null) | null = null
-  const receiver = new PagePieceReceiver(
-    () => {},
-    (ack) => {
+  const receiver = new PagePieceReceiver({
+    send: () => {},
+    carry: (ack) => {
       carries++
       carried = ack
     },
-    new Uplink(),
-  )
+    uplink: new Uplink(),
+  })
   const t0 = Date.now()
   receiver.arrived(20_000, true, t0, false)
   carried!()
@@ -364,11 +364,11 @@ test('a receiver puts back a frame from pieces of any size, acknowledging the tw
   vi.useFakeTimers()
   vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
   const sent: Uint8Array[] = []
-  const receiver = new PagePieceReceiver(
-    (frame) => void sent.push(frame),
-    () => {},
-    new Uplink(),
-  )
+  const receiver = new PagePieceReceiver({
+    send: (frame) => void sent.push(frame),
+    carry: () => {},
+    uplink: new Uplink(),
+  })
   const frame = data(10_000).map((byte, i) => (i === 0 ? byte : i % 251))
   expect(receiver.add(10_000, frame.subarray(0, 0), Date.now())).toBeNull()
   expect(receiver.add(10_000, frame.subarray(0, 0), Date.now())).toBeNull()
@@ -395,11 +395,11 @@ test('a receiver puts back a frame from pieces of any size, acknowledging the tw
 })
 
 test('a receiver waits for the next message of an open announcement twice the time it takes at the rate the newest came at, which may carry twice as much, or 8 KiB, until an announcement of their bytes closes it', () => {
-  const receiver = new PagePieceReceiver(
-    () => {},
-    () => {},
-    new Uplink(),
-  )
+  const receiver = new PagePieceReceiver({
+    send: () => {},
+    carry: () => {},
+    uplink: new Uplink(),
+  })
   receiver.announce(0, 0)
   // Before a message of it arrived, it knows no rate.
   expect(receiver.expectedBy(10_000)).toBe(0)
@@ -421,11 +421,11 @@ test.each([
   ['empty after the first', [100, 0]],
   ['longer than what is left of its frame', [100, 9_901]],
 ])('a receiver refuses a piece %s', (_, sizes) => {
-  const receiver = new PagePieceReceiver(
-    () => {},
-    () => {},
-    new Uplink(),
-  )
+  const receiver = new PagePieceReceiver({
+    send: () => {},
+    carry: () => {},
+    uplink: new Uplink(),
+  })
   const frame = data(20_000)
   expect(() => {
     let at = 0

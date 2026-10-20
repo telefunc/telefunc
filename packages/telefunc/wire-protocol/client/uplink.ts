@@ -21,8 +21,8 @@ class Uplink implements SendWait {
   private readonly waits = new Waits()
   readonly link = new Link()
   /** The acknowledgements and the window refreshes of what this side receives, each within its share of the link. */
-  readonly acks = new Share(this.link, WIRE_ACK_SHARE)
-  readonly refreshes = new Share(this.link, WIRE_REFRESH_SHARE)
+  readonly acks = new Share({ link: this.link, share: WIRE_ACK_SHARE })
+  readonly refreshes = new Share({ link: this.link, share: WIRE_REFRESH_SHARE })
 
   /** In bytes per ms, the slower of the drain rate and the rate the newest acknowledgement says data arrived at. */
   uplinkRate(): number {
@@ -80,14 +80,21 @@ class Uplink implements SendWait {
   }
 }
 
+type ShareOptions = {
+  link: Link
+  share: number
+}
+
 /** Frames of one kind that take at most `share` of the rate their link carries, none before a rate is measured. */
 class Share {
+  private readonly link: Link
+  private readonly share: number
   private at = 0
 
-  constructor(
-    private readonly link: Link,
-    private readonly share: number,
-  ) {}
+  constructor({ link, share }: ShareOptions) {
+    this.link = link
+    this.share = share
+  }
 
   /** How long a frame of the kind sent now waits. */
   wait(): number {

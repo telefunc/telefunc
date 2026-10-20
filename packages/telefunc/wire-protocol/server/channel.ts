@@ -373,7 +373,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // becomes addressable on the wire, so a peer can attach immediately after this
     // returns.
     const c = getServerConfig().channel
-    this._replayBuffer = new ReplayBuffer(c.serverReplayBuffer, c.serverReplayBufferBinary)
+    this._replayBuffer = new ReplayBuffer({
+      maxBytes: c.serverReplayBuffer,
+      binaryMaxBytes: c.serverReplayBufferBinary,
+    })
     this._clearTimer('_ttlTimer')
     this._ttlTimer = unrefTimer(
       setTimeout(() => {

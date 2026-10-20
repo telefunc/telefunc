@@ -47,8 +47,8 @@ class LoopbackSocket {
   onmessage: ((event: { data: ArrayBuffer }) => void) | null = null
   onclose: (() => void) | null = null
   onerror: (() => void) | null = null
-  readonly toServer = new Pipe(LATENCY_MS, READ_BYTES)
-  readonly toPage = new Pipe(LATENCY_MS, READ_BYTES)
+  readonly toServer = new Pipe({ latencyMs: LATENCY_MS, readBytes: READ_BYTES })
+  readonly toPage = new Pipe({ latencyMs: LATENCY_MS, readBytes: READ_BYTES })
   constructor(_url: string) {
     this.toServer.bytesPerMs = this.toPage.bytesPerMs = loop.linkBytesPerMs
     loop.sockets.push(this)

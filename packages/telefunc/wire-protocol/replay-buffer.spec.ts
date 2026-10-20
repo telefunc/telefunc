@@ -11,7 +11,7 @@ afterEach(() => {
 })
 
 test('gives a peer all it lacks, text, binary and closing frames merged by seq', () => {
-  const replay = new ReplayBuffer(1_024, 1_024)
+  const replay = new ReplayBuffer({ maxBytes: 1_024, binaryMaxBytes: 1_024 })
   replay.push(replay.nextSeq(), text(1))
   replay.push(replay.nextSeq(), encode.binary(0, new Uint8Array(8), 2))
   replay.push(replay.nextSeq(), encode.close(0, 1_000, 3))
@@ -21,7 +21,7 @@ test('gives a peer all it lacks, text, binary and closing frames merged by seq',
 })
 
 test('a frame it dropped to stay within its size, and one larger than that, fail a peer that lacks them, and no other', () => {
-  const replay = new ReplayBuffer(256, 1_024)
+  const replay = new ReplayBuffer({ maxBytes: 256, binaryMaxBytes: 1_024 })
   replay.push(replay.nextSeq(), text(1, 200))
   replay.push(replay.nextSeq(), text(2, 200)) // drops 1
   replay.push(replay.nextSeq(), text(3, 300)) // larger than the text budget
@@ -34,7 +34,7 @@ test('a frame it dropped to stay within its size, and one larger than that, fail
 
 test('keeps what the peer lacks however long the peer takes to acknowledge it', () => {
   vi.useFakeTimers()
-  const replay = new ReplayBuffer(1_024, 1_024)
+  const replay = new ReplayBuffer({ maxBytes: 1_024, binaryMaxBytes: 1_024 })
   replay.push(replay.nextSeq(), text(1))
   vi.advanceTimersByTime(2 ** 31 - 1)
   replay.push(replay.nextSeq(), text(2))
@@ -42,7 +42,7 @@ test('keeps what the peer lacks however long the peer takes to acknowledge it', 
 })
 
 test('what is past `throughSeq` is not asked for, so its loss fails no one', () => {
-  const replay = new ReplayBuffer(256, 1_024)
+  const replay = new ReplayBuffer({ maxBytes: 256, binaryMaxBytes: 1_024 })
   replay.push(replay.nextSeq(), text(1))
   replay.push(replay.nextSeq(), text(2, 300)) // larger than the text budget
   expect(replay.getAfter(0, 1)).toEqual([text(1)])
@@ -50,13 +50,13 @@ test('what is past `throughSeq` is not asked for, so its loss fails no one', () 
 })
 
 test('a closing frame is kept past the data budgets', () => {
-  const replay = new ReplayBuffer(8, 8)
+  const replay = new ReplayBuffer({ maxBytes: 8, binaryMaxBytes: 8 })
   replay.push(replay.nextSeq(), encode.close(0, 1_000, 1))
   expect(replay.getAfter(0)).toEqual([encode.close(0, 1_000, 1)])
 })
 
 test('lets go of what the peer acknowledged, in every lane, and gives the rest', () => {
-  const replay = new ReplayBuffer(1_024, 1_024)
+  const replay = new ReplayBuffer({ maxBytes: 1_024, binaryMaxBytes: 1_024 })
   replay.push(replay.nextSeq(), text(1))
   replay.push(replay.nextSeq(), encode.binary(0, new Uint8Array(8), 2))
   replay.push(replay.nextSeq(), text(3))
@@ -71,7 +71,7 @@ test('lets go of what the peer acknowledged, in every lane, and gives the rest',
 })
 
 test('counts what flow control counts, the whole frames, so it holds a bounded number of empty messages', () => {
-  const replay = new ReplayBuffer(70, 70)
+  const replay = new ReplayBuffer({ maxBytes: 70, binaryMaxBytes: 70 })
   for (let seq = 1; seq <= 1_000; seq++) replay.push(replay.nextSeq(), encode.binary(0, new Uint8Array(0), seq))
   // An empty message's frame is its 7-byte header.
   expect(replay.byteLength).toBe(70)
@@ -80,7 +80,7 @@ test('counts what flow control counts, the whole frames, so it holds a bounded n
 })
 
 test('a lower budget keeps what was sent under the higher one until the peer has it, then holds what came after to it', () => {
-  const replay = new ReplayBuffer(1_024, 1_024)
+  const replay = new ReplayBuffer({ maxBytes: 1_024, binaryMaxBytes: 1_024 })
   const send = (bytes: number) => {
     const seq = replay.nextSeq()
     replay.push(seq, text(seq, bytes))
@@ -101,7 +101,7 @@ test('a lower budget keeps what was sent under the higher one until the peer has
 })
 
 test('a higher budget applies at once, and a lower one at once when the peer has all that was sent', () => {
-  const replay = new ReplayBuffer(256, 1_024)
+  const replay = new ReplayBuffer({ maxBytes: 256, binaryMaxBytes: 1_024 })
   replay.setLimits(1_024, 1_024)
   replay.push(replay.nextSeq(), text(1, 400))
   replay.push(replay.nextSeq(), text(2, 400))

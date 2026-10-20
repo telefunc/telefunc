@@ -208,29 +208,29 @@ class WsTransport implements UpgradeTarget {
   private wsEnds(ws: WebSocket): WsEnds {
     const uplink = new Uplink()
     const downlink = new Downlink(uplink)
-    const budget = new SendBudget(
-      (message) => ws.send(message),
-      () => ws.bufferedAmount,
-      this.pingInterval,
+    const budget = new SendBudget({
+      transmit: (message) => ws.send(message),
+      queued: () => ws.bufferedAmount,
+      pingInterval: this.pingInterval,
       uplink,
       downlink,
-      () => {
+      onRoom: () => {
         if (this.ws !== ws) return
         sender.sendHeld()
         this.onRoom(sender)
       },
-    )
+    })
     const { sender } = budget
     return {
       uplink,
       downlink,
       budget,
       sender,
-      pieces: new PagePieceReceiver(
-        (frame) => sender.send(frame),
-        (ack) => sender.carry(ack),
+      pieces: new PagePieceReceiver({
+        send: (frame) => sender.send(frame),
+        carry: (ack) => sender.carry(ack),
         uplink,
-      ),
+      }),
     }
   }
 

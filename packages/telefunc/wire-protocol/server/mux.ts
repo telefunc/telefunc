@@ -252,29 +252,33 @@ class ChannelMux {
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
-    const wait = new SocketWait(
-      () => this.bufferedAmount(connection),
-      () => this.queuedAhead(connection),
-    )
+    const wait = new SocketWait({
+      held: () => this.bufferedAmount(connection),
+      ahead: () => this.queuedAhead(connection),
+    })
     const recvBacklog = { bytes: 0, frames: 0 }
     const room = transport.wholeMessages
-      ? new PathRoom(
-          (message) => transport.sendNow(connection, message),
-          () => transport.bufferedAmount(connection) ?? 0,
-          this.options.pingInterval,
-        )
+      ? new PathRoom({
+          transmit: (message) => transport.sendNow(connection, message),
+          queued: () => transport.bufferedAmount(connection) ?? 0,
+          pingInterval: this.options.pingInterval,
+        })
       : null
     const pieces = room && {
       room,
-      receiver: new ServerPieceReceiver(
-        (frame) => this.send(connection, frame),
-        (ack) => room.sender.carry(ack),
-      ),
+      receiver: new ServerPieceReceiver({
+        send: (frame) => this.send(connection, frame),
+        carry: (ack) => room.sender.carry(ack),
+      }),
     }
     const attaching = new Set<ServerChannel>()
-    const wireSender = new WireSender(connection, transport as ServerTransport<unknown>, pieces, wait, () =>
-      this.wireChannels(transport, connection, attaching),
-    )
+    const wireSender = new WireSender({
+      wire: connection,
+      transport: transport as ServerTransport<unknown>,
+      pieces,
+      wait,
+      channels: () => this.wireChannels(transport, connection, attaching),
+    })
     const entry: ConnectionEntry = {
       state: {
         pingTimer: null,
@@ -932,7 +936,7 @@ class ChannelMux {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
     channel._onPageHas(open.lastSeq)
-    const peer = new IndexedPeer(sender, open.ix, buffer)
+    const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     const missed = replay ? buffer.getAfter(open.lastSeq) : []
     if (missed === null) {
       channel._onReplayLost(peer)

@@ -19,13 +19,23 @@ interface PeerSender {
   deliveredBeforeFrame(ms: number): number
 }
 
+type IndexedPeerOptions = {
+  sender: PeerSender
+  index: number
+  replay: ReplayBuffer
+}
+
 /** Encodes a channel's frames with its index; a sequenced one joins the replay buffer once its wire commits it. */
 class IndexedPeer {
-  constructor(
-    readonly sender: PeerSender,
-    private index: number,
-    private replay: ReplayBuffer,
-  ) {}
+  readonly sender: PeerSender
+  private index: number
+  private replay: ReplayBuffer
+
+  constructor({ sender, index, replay }: IndexedPeerOptions) {
+    this.sender = sender
+    this.index = index
+    this.replay = replay
+  }
 
   /** Returns the bytes the frame counts against flow control. */
   sendText(data: string): number {

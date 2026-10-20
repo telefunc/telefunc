@@ -1,5 +1,10 @@
 export { Pipe }
 
+type PipeOptions = {
+  latencyMs: number
+  readBytes?: number
+}
+
 /** One direction of a link: what is pushed leaves once what was pushed before it has, at `bytesPerMs`, and arrives
  *  `latencyMs` after it left. One delivery hands over `readBytes` at most, as a socket read does: the receiver's
  *  microtasks run between two. */
@@ -12,13 +17,12 @@ class Pipe {
   /** A slow link carries what is pushed only once what was pushed before it has gone through. */
   bytesPerMs = Infinity
   latencyMs: number
+  private readonly readBytes: number
   private lastAt = 0
 
-  constructor(
-    latencyMs: number,
-    private readonly readBytes = Number.POSITIVE_INFINITY,
-  ) {
+  constructor({ latencyMs, readBytes = Number.POSITIVE_INFINITY }: PipeOptions) {
     this.latencyMs = latencyMs
+    this.readBytes = readBytes
   }
 
   /** Carries `bytes`, and calls `deliver` once they arrived. */

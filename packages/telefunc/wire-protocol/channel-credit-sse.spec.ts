@@ -36,8 +36,8 @@ function link({
   refusedAfter = 2 * LATENCY_MS,
   downHolds = Number.POSITIVE_INFINITY,
 }: { batched: boolean; refusedAfter?: number; downHolds?: number }) {
-  const up = new Pipe(LATENCY_MS)
-  const down = new Pipe(LATENCY_MS)
+  const up = new Pipe({ latencyMs: LATENCY_MS })
+  const down = new Pipe({ latencyMs: LATENCY_MS })
   const sse = getTelefuncSseChannelHooks()
   let streams = 0
   const fetch = (async (url: string, init: RequestInit) => {

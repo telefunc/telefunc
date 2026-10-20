@@ -12,17 +12,17 @@ const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
 
 function recordingPeer(frames: Uint8Array[]): IndexedPeer {
-  return new IndexedPeer(
-    {
+  return new IndexedPeer({
+    sender: {
       send: (frame) => void frames.push(frame),
       carry: (frame) => void frames.push(frame),
       bufferedAmount: () => 0,
       deliveredBeforeFrame: () => 0,
       sendWait: () => ({ waitNow: () => 0, longestWaitSince: () => 0 }),
     },
-    7,
-    new ReplayBuffer(1024 * 1024, 2 * 1024 * 1024),
-  )
+    index: 7,
+    replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
+  })
 }
 
 // ───────────────────────────────────────────────────────────────────────────
