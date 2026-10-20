@@ -14,7 +14,7 @@ import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
 import { ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
 import { config } from '../../node/server/serverConfig.js'
-import { HELD_SEND_OVERHEAD_BYTES } from '../backend/held-send-weight.js'
+import { ESTABLISHING_HOLD_OVERHEAD_BYTES } from '../backend/held-send-weight.js'
 
 let memoryState: MemoryBackendState
 beforeEach(async () => {
@@ -506,7 +506,7 @@ describe('binary in-process broadcast', () => {
     const receiver = new ServerBroadcast({ key: 'broadcast:bounded-ready' })
     const sender = new ServerBroadcast({ key: 'broadcast:bounded-ready' })
     receiver.subscribeBinary(() => {})
-    const payload = new Uint8Array(CHANNEL_BUFFER_LIMIT_BINARY_BYTES - HELD_SEND_OVERHEAD_BYTES)
+    const payload = new Uint8Array(CHANNEL_BUFFER_LIMIT_BINARY_BYTES - ESTABLISHING_HOLD_OVERHEAD_BYTES)
     payload[0] = 7
     const first = sender.publishBinary(payload)
     payload[0] = 9
