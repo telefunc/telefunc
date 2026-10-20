@@ -166,8 +166,8 @@ describe('keyed in-process broadcast', () => {
     broadcast.subscribe((m) => seen.push(m))
     broadcast.subscribeBinary((data) => seenBinary.push(data.length))
     for (const binary of [false, true]) {
-      broadcast._onPeerSubscription(binary, true)
-      broadcast._onPeerSubscription(binary, false)
+      broadcast._onPeerSubscription({ binary, subscribed: true })
+      broadcast._onPeerSubscription({ binary, subscribed: false })
     }
 
     broadcast.publish('after')
@@ -197,7 +197,7 @@ describe('keyed in-process broadcast', () => {
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
     sender._registerChannel()
     receiver._registerChannel()
-    receiver._onPeerSubscription(false, true) // simulate client subscribe over wire
+    receiver._onPeerSubscription({ binary: false, subscribed: true }) // simulate client subscribe over wire
 
     sender.publish({ text: 'hello' })
 
@@ -215,7 +215,7 @@ describe('keyed in-process broadcast', () => {
       const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:zero-limit' })
       sender._registerChannel()
       receiver._registerChannel()
-      receiver._onPeerSubscription(false, true)
+      receiver._onPeerSubscription({ binary: false, subscribed: true })
 
       sender.publish({ text: 'hello' })
 
