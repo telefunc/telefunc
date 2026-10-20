@@ -240,6 +240,25 @@ test('a frame held for room goes, once room comes, in one message behind what wa
   expect(sender.acknowledged({ bytes: all, heldMs: 0, spanUs: 0 })).toBe(true)
 })
 
+test('a data frame sent in a turn that holds a frame sent at once goes in a message of its own, which later data joins', async () => {
+  const transmitted: Uint8Array<ArrayBuffer>[] = []
+  const link = new Link()
+  link.rise(100, performance.now())
+  const sender = pieceSender(
+    (message) => void transmitted.push(message),
+    () => 0,
+    link,
+  )
+  sender.send(encode.window(1, 0, 0))
+  sender.send(data(10))
+  sender.send(data(20))
+  await flush()
+  expect(transmitted.map((message) => Array.from(messageFrames(message), (frame) => frame[0]))).toEqual([
+    [TAG.WINDOW],
+    [TAG.BINARY, TAG.BINARY],
+  ])
+})
+
 test('an acknowledgement is read modulo 2^32', () => {
   const sender = pieceSender(
     () => {},
