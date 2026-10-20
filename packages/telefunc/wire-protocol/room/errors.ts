@@ -15,6 +15,7 @@ export {
 import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { stringify } from '@brillout/json-serializer/stringify'
+import { ChannelOverflowError } from '../channel-errors.js'
 import { classifyTelefuncError } from '../error-classification.js'
 import { ACK_STATUS, type AckResultStatus } from '../shared-ws.js'
 import type { DmReply, RoomFailure } from './protocol.js'
@@ -70,6 +71,7 @@ function roomAckError(err: unknown, report: (err: unknown) => void): { text: str
   if (classified.kind === 'abort') return { text: stringify(classified.error.abortValue), status: ACK_STATUS.ABORT }
   if (classified.kind === 'expected') return { text: classified.error.message, status: ACK_STATUS.ERROR }
   if (classified.kind === 'shield') return { text: classified.error.message, status: ACK_STATUS.SHIELD_ERROR }
+  if (err instanceof ChannelOverflowError) return { text: err.message, status: ACK_STATUS.OVERFLOW }
   report(err)
   return { text: ROOM_BUG_MESSAGE, status: ACK_STATUS.ERROR }
 }

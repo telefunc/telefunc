@@ -2703,6 +2703,28 @@ describe('Room public behavior', () => {
     )
     expect(responseAbort).not.toHaveBeenCalled()
   })
+  it("rejects a client-held participant's publish that a full readiness hold refuses with ChannelOverflowError, and reports no bug", async () => {
+    const bugs: unknown[] = []
+    onBug((err) => bugs.push(err))
+    const room = await Room.create('standalone-binary-overflow')
+    const release = delayDriverLane((lane) => lane.kind === 'binary-track')
+    room.subscribeBinary(() => {}, { track: 'camera' })
+    const holder = (await room.join()) as ServerLocalParticipant
+    const channel = new RoomParticipantStubChannel(holder)
+    channel._registerChannel()
+    const peer = attachPeer(channel as unknown as RoomStubChannel)
+    const payload = new Uint8Array(getServerConfig().channel.bufferLimitBinary + 1)
+    const data = encodeBinaryFrame(holder.id, payload, { track: 'camera' })
+    channel._dispatchFrame({ tag: TAG.BINARY_ACK_REQ, index: 7, seq: 1, data, bytes: data.byteLength })
+    await vi.waitFor(() =>
+      expect(peer.decoded().find((frame) => frame.tag === TAG.ACK_RES)).toMatchObject({
+        status: ACK_STATUS.OVERFLOW,
+        text: 'Room readiness buffer overflow',
+      }),
+    )
+    release()
+    expect(bugs).toEqual([])
+  })
   it("answers, not throws, a client-held participant's binary frame that arrives after it left", async () => {
     const room = await Room.create('standalone-binary-after-leave')
     const holder = (await room.join()) as ServerLocalParticipant
