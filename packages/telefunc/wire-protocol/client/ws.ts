@@ -382,7 +382,7 @@ function receiveMessage(
     const own = frames.pop()!
     for (const each of frames) {
       const frame = decode(each)
-      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, true)
+      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, 'riding')
       if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
       riding.push({ frame, bytes: each.byteLength })
     }
@@ -395,7 +395,7 @@ function receiveMessage(
         lastBytes = whole.byteLength
       }
     } else {
-      pieces.arrived(own.byteLength, isSequencedTag(frame.tag), at, false)
+      pieces.arrived(own.byteLength, isSequencedTag(frame.tag), at, 'alone')
       last = frame
       lastBytes = own.byteLength
     }

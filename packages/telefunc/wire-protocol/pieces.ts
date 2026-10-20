@@ -627,10 +627,10 @@ abstract class PieceReceiver {
   /** How long an acknowledgement waits from now. */
   protected abstract ackWait(): number
 
-  /** A whole frame of `bytes` arrived at `at`, `riding` if ahead of its message's last frame, which alone dates it. */
-  arrived(bytes: number, data: boolean, at: number, riding: boolean): void {
+  /** A whole frame of `bytes` arrived at `at`, `'riding'` ahead of its message's last frame, which alone dates it. */
+  arrived(bytes: number, data: boolean, at: number, arrival: 'alone' | 'riding'): void {
     this.took += bytes
-    this.tookFrame(bytes, data, !riding && this.paced(bytes, at), at)
+    this.tookFrame(bytes, data, arrival === 'alone' && this.paced(bytes, at), at)
   }
 
   /** Takes an ANNOUNCE that arrived at `at`: one of no bytes opens an announcement, one of its `bytes` closes it. */

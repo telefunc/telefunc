@@ -283,19 +283,19 @@ test('a receiver whose peer holds data back acknowledges data within 25 ms once 
     send: (frame) => void sent.push(frame),
     carry: () => {},
   })
-  receiver.arrived(1_000, true, Date.now(), false)
+  receiver.arrived(1_000, true, Date.now(), 'alone')
   vi.advanceTimersByTime(100)
   expect(sent).toHaveLength(0)
-  receiver.arrived(1_500, true, Date.now(), false)
+  receiver.arrived(1_500, true, Date.now(), 'alone')
   vi.advanceTimersByTime(24)
   expect(sent).toHaveLength(0)
   vi.advanceTimersByTime(1)
   expect(acks()).toEqual([{ tag: TAG.PIECES_ACK, bytes: 2_500, heldMs: 25, spanUs: 0 }])
   // 100 ms on, 8 KB twice and 1 KB: past 16 KiB, at once, 125 ms after the data the first ack covered.
   vi.advanceTimersByTime(100)
-  receiver.arrived(8_000, true, Date.now(), false)
-  receiver.arrived(8_000, true, Date.now(), false)
-  receiver.arrived(1_000, true, Date.now(), false)
+  receiver.arrived(8_000, true, Date.now(), 'alone')
+  receiver.arrived(8_000, true, Date.now(), 'alone')
+  receiver.arrived(1_000, true, Date.now(), 'alone')
   expect(acks()[1]).toEqual({ tag: TAG.PIECES_ACK, bytes: 19_500, heldMs: 0, spanUs: 125_000 })
   vi.useRealTimers()
 })
@@ -315,15 +315,15 @@ test('a receiver whose peer holds nothing back acknowledges a frame over 16 KiB 
     carried = null
     return ack && decode(ack)
   }
-  for (let i = 0; i < 1_000; i++) receiver.arrived(64, true, Date.now(), false)
+  for (let i = 0; i < 1_000; i++) receiver.arrived(64, true, Date.now(), 'alone')
   vi.advanceTimersByTime(1_000)
   expect(carried).toBeNull()
-  receiver.arrived(20_000, true, Date.now(), false)
+  receiver.arrived(20_000, true, Date.now(), 'alone')
   vi.advanceTimersByTime(5)
   expect(next()).toEqual({ tag: TAG.PIECES_ACK, bytes: 84_000, heldMs: 5, spanUs: 0 })
   // 50 ms after that one went, which was 5 ms after the first arrived.
   vi.advanceTimersByTime(5)
-  receiver.arrived(20_000, true, Date.now(), false)
+  receiver.arrived(20_000, true, Date.now(), 'alone')
   vi.advanceTimersByTime(44)
   expect(carried).toBeNull()
   vi.advanceTimersByTime(1)
@@ -346,15 +346,15 @@ test('a receiver acknowledges a frame by its own due when the frame before it wa
     uplink: new Uplink(),
   })
   const t0 = Date.now()
-  receiver.arrived(20_000, true, t0, false)
+  receiver.arrived(20_000, true, t0, 'alone')
   carried!()
   carries = 0
   vi.advanceTimersByTime(40)
   // Arrived at t0, taken 40 ms late.
-  receiver.arrived(20_000, true, t0, false)
+  receiver.arrived(20_000, true, t0, 'alone')
   vi.advanceTimersByTime(1)
   // Arrived and taken at t0 + 41: its acknowledgement waits out the 50 ms after the last, to t0 + 50.
-  receiver.arrived(20_000, true, t0 + 41, false)
+  receiver.arrived(20_000, true, t0 + 41, 'alone')
   vi.advanceTimersByTime(9)
   expect(carries).toBe(1)
   vi.useRealTimers()

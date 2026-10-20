@@ -434,7 +434,7 @@ class ChannelMux {
     if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, rawFrame)
     const now = performance.now()
     if (arrival !== 'pieced') {
-      state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now, arrival === 'riding')
+      state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now, arrival)
       state.deliveries.note(now, byteLength)
     }
     state.recvBacklog.bytes += byteLength
