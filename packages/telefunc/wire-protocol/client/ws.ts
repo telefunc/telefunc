@@ -37,7 +37,6 @@ class WsTransport implements UpgradeTarget {
   private ws: WebSocket | null = null
   private abandonedWs: WebSocket | null = null
   private connecting = false
-  private everOpened = false
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private ends: WsEnds | null = null
   private drainCallbacks: Array<() => void> = []
@@ -147,7 +146,6 @@ class WsTransport implements UpgradeTarget {
     assert(probed !== null)
     this.probed = null
     this.ws = probed.ws
-    this.everOpened = true
     this.connecting = false
     this.setupHandlers(probed.ws, probed.ends)
   }
@@ -179,7 +177,6 @@ class WsTransport implements UpgradeTarget {
 
   private handleOpen(ws: WebSocket): void {
     if (this.ws !== ws) return
-    this.everOpened = true
     this.connecting = false
     this.owner._onTransportOpen(this)
   }
@@ -263,7 +260,7 @@ class WsTransport implements UpgradeTarget {
       if (this.ws === ws) this.ws = null
       this.connecting = false
       this.settleDrained()
-      this.owner._onTransportClosed(this, { rejectedByServer: !this.everOpened })
+      this.owner._onTransportClosed(this)
     }
     ws.onerror = () => {}
   }

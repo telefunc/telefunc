@@ -53,6 +53,35 @@ test.each(['text', 'binary'] as const)(
   },
 )
 
+test.each([false, true])(
+  'a binary send with ack %s larger than the buffer of a channel no page attached to is refused before its bytes are copied, and one that fits is copied once',
+  async (ack) => {
+    const channel = new ServerChannel<never, string>()
+    const refused = new Uint8Array(CHANNEL_BUFFER_LIMIT_BINARY_BYTES + 1)
+    const held = new Uint8Array(1)
+    const copies: string[] = []
+    const send = (data: Uint8Array) => (ack ? channel.sendBinary(data, { ack: true }) : channel.sendBinary(data))
+    const Bytes = globalThis.Uint8Array
+    globalThis.Uint8Array = new Proxy(Bytes, {
+      construct(target, args, newTarget) {
+        if (args[0] === refused) copies.push('refused')
+        if (args[0] === held) copies.push('held')
+        return Reflect.construct(target, args, newTarget)
+      },
+    })
+    let refusal: Promise<unknown>
+    try {
+      refusal = send(refused).catch((err: unknown) => err)
+      send(held).catch(() => {})
+    } finally {
+      globalThis.Uint8Array = Bytes
+    }
+    expect(await refusal).toBeInstanceOf(ChannelOverflowError)
+    expect(copies).toEqual(['held'])
+    channel.abort()
+  },
+)
+
 /** What the page's send of a `kind` message with an ack settles with, and both ends' isClosed after it. */
 async function ackAnswer(kind: 'text' | 'binary', listen: (server: ServerChannel) => void = () => {}) {
   vi.useFakeTimers()

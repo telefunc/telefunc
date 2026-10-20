@@ -1109,12 +1109,7 @@ class ClientConnection implements MuxConnection {
     if (this.state.tag === 'open' && this.state.upgrade.tag !== 'none' && !this.flipped) {
       this.state.upgrade.attempt.abort()
     }
-    const err = new NetworkError(
-      rejectedByServer
-        ? `Server rejected ${this.transport.type === CHANNEL_TRANSPORT.SSE ? 'SSE' : 'WebSocket'} connection`
-        : 'Connection dropped',
-      true,
-    )
+    const err = new NetworkError(rejectedByServer ? 'Server rejected SSE connection' : 'Connection dropped', true)
     this.handleTransportLoss(err, rejectedByServer)
   }
 

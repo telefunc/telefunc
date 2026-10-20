@@ -17,6 +17,8 @@ import { OrderedStubs } from './ordered-stubs.js'
 import type { TelefuncDurableObjectNamespace } from './namespace.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../server-broadcast.js'
+import { ChannelOverflowError } from '../../../channel-errors.js'
+import { getServerConfig } from '../../../../node/server/serverConfig.js'
 import { disposeBackend, installBackend } from '../../../backend/install.js'
 import { CloudflareBackend } from './backend.js'
 import { CloudflareRoomSessionManager } from './room/subscription.js'
@@ -427,6 +429,37 @@ describe('cloudflare broadcast routing', () => {
         receivers: 1,
       })
       expect(received).toEqual(['hello'])
+    })
+  })
+
+  it('refuses a binary publish larger than the buffer of a subscription waiting for the authority to record it before copying its bytes', async () => {
+    const authority = createAuthorityState()
+    const recorded = Promise.withResolvers<void>()
+    const broadcast = createBroadcast(
+      createBasicBinding({ onPresence: presenceAt(authority, { beforeRecord: () => recorded.promise }) }),
+    )
+    installCloudflareBroadcast(broadcast)
+    const member = createMember(broadcast)
+    await inSession(member, async () => {
+      new ServerBroadcast({ key: 'room:binary' }).subscribeBinary(() => {})
+      const refused = new Uint8Array(getServerConfig().channel.bufferLimitBinary + 1)
+      let copied = 0
+      const Bytes = globalThis.Uint8Array
+      globalThis.Uint8Array = new Proxy(Bytes, {
+        construct(target, args, newTarget) {
+          if (args[0] === refused) copied++
+          return Reflect.construct(target, args, newTarget)
+        },
+      })
+      let refusal: Promise<unknown>
+      try {
+        refusal = new ServerBroadcast({ key: 'room:binary' }).publishBinary(refused).catch((err: unknown) => err)
+      } finally {
+        globalThis.Uint8Array = Bytes
+      }
+      expect(await refusal).toBeInstanceOf(ChannelOverflowError)
+      expect(copied).toBe(0)
+      recorded.resolve()
     })
   })
 

@@ -1847,6 +1847,19 @@ test('a WebSocket that cannot be constructed sends the channel to its reconnect 
   expect(thrown).toBeUndefined()
 })
 
+test('a WebSocket that closes before it opens, as the network drops while it connects, sends the channel to its reconnect, which delivers', async () => {
+  const { server, page } = loop.open<never, string>()
+  const closed = closedWith({ server, page })
+  const got = consume<string>(page)
+  await run(0)
+  loop.socket.cut()
+  await run(3_000)
+  void server.send('after the drop')
+  await run(100)
+  expect(closed).toEqual({ page: 'open', server: 'open' })
+  expect(got.received).toEqual(['after the drop'])
+})
+
 test('a burst of large frames gets a few PIECES_ACKs, not one each, and the last covers all of it', async () => {
   const { server, page } = loop.open<Uint8Array, Uint8Array>()
   const at = { server: 0, page: 0 }
