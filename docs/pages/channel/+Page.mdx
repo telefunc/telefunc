@@ -264,14 +264,14 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 info.key        // 'room:lobby' — the broadcast key
 info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
-info.receivers  // publish() only: whether anyone received it (see below)
+info.receivers  // publish() only: how many subscriptions it was sent to (see below)
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt once the backend has given the message its `seq`, and rejects if the backend fails it (a Redis error, say).
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt once the message has its `seq`, and rejects if the publish fails (on a Redis error, say).
 
-A publish right after a `subscribe()` on the same server (on <Link href="/stream/cloudflare">Cloudflare</Link>, in the same Durable Object) waits until that subscriber can receive it. After a minute, it goes out without waiting.
+The first `subscribe()` to a key on a server, by `Broadcast.subscribe()` or by a `BroadcastChannel`, takes a moment to start receiving. A publish on that server meanwhile waits for it, up to a minute, so that subscriber gets it; its promise resolves after the wait. After a minute, the publish is sent anyway, and that subscriber can miss it. On <Link href="/stream/cloudflare">Cloudflare</Link>, a publish waits only for subscriptions made in its own Durable Object.
 
-`receivers` is a number: `0` when nobody anywhere is subscribed to the key, and more than `0` when someone is, a client subscribed through `new BroadcastChannel()` included. On Redis Cluster it's `undefined`.
+`receivers` counts the subscriptions the message was sent to when it was published: each subscriber with the in-memory backend, each server with Redis, each Durable Object on Cloudflare. A client subscribed through `new BroadcastChannel()` counts too. So `0` means nobody anywhere was subscribed to the key. On Redis Cluster it's `undefined`.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -428,9 +428,9 @@ Channels and broadcasts signal failure through four errors:
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` closes with `ChannelOverflowError` when its client falls more than 80 MiB behind, or misses more than `bufferLimit` (`bufferLimitBinary` for binary) while offline. The 80 MiB is with the default replay buffers; lowering `serverReplayBuffer` or `serverReplayBufferBinary` lowers it. Call its telefunction again to rejoin.
+> A `BroadcastChannel` closes with `ChannelOverflowError` when its client falls more than 80 MiB behind, or when more than `bufferLimit` (`bufferLimitBinary` for binary) is published to it while its client is offline. The 80 MiB is with the default replay buffers; lowering `serverReplayBuffer` or `serverReplayBufferBinary` lowers it. Call its telefunction again to rejoin.
 
-> A `Broadcast.publish()` that waits for a new subscription (see <Link href="#broadcast">`Broadcast`</Link>) counts its size plus 256 bytes against `bufferLimit` (`bufferLimitBinary` for binary). The publish past that rejects with `ChannelOverflowError`: `await` each publish, or raise `bufferLimit`.
+> A `Broadcast.publish()` made while a first `subscribe()` to its key starts receiving waits for it (see <Link href="#broadcast">`Broadcast`</Link>). The publishes waiting on one key share the server's `bufferLimit` (`bufferLimitBinary` for binary), and the one past it rejects with `ChannelOverflowError`: `await` each publish, or raise `bufferLimit`.
 
 See also:
 - <Link href="/stream#error-handling" />
