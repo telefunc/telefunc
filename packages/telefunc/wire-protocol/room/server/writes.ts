@@ -91,8 +91,8 @@ class RoomWrites {
   async publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const host = this._host
     const { sender, commit } = await this._inCallOrder(from, async (sent) => {
-      const sender = await this._admitPublish(from, data)
-      const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...this._stampOf(from, sender) }
+      const { sender, stamp } = await this._admitPublish(from, data)
+      const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...stamp }
       const record = encodeRoomRecord(envelope)
       const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitRoomLaneOrThrow(host.id, host._incarnation.inc, SEMANTIC_LANE, record, opts)
@@ -108,7 +108,7 @@ class RoomWrites {
     const { from } = frame
     const lane = { kind: 'binary', member: from, track: frame.track } as const
     const { sender, commit } = await this._inCallOrder(inProcessBinaryLaneKey(from, lane.track), async (sent) => {
-      const sender = await this._admitPublish(from, frame.payload)
+      const { sender } = await this._admitPublish(from, frame.payload)
       const planned = host._replica.plan.lanePlanned(from, lane.track)
       if (planned !== null) await planned
       host._replica.demand.published(from, lane.track)
@@ -136,12 +136,14 @@ class RoomWrites {
     }
   }
 
-  private async _admitPublish(from: string, payload: unknown): Promise<Sender> {
+  /** The sender as its guard sees it, with its stamp. */
+  private async _admitPublish(from: string, payload: unknown): Promise<{ sender: Sender; stamp: SenderStamp }> {
     if (this._host._model.closed) throw roomClosedError(this._host.id)
     const sender = this._memberSender(from)
+    const stamp = this._stampOf(from, sender)
     const onBeforePublish = this._of.guards()?.onBeforePublish
     if (onBeforePublish) await onBeforePublish(sender, payload)
-    return sender
+    return { sender, stamp }
   }
 
   private async _finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
@@ -152,7 +154,7 @@ class RoomWrites {
     return { key: this._host.id, ...receipt }
   }
 
-  /** `sender` with the meta seq it reflects, as `_memberSender(from)` just read it. */
+  /** `sender` with the meta seq it reflects, read before a guard waits: a meta write meanwhile takes the next seq. */
   private _stampOf(from: string, sender: Sender): SenderStamp {
     const seq = this._host._model.memberMetaSeq(from) ?? this._of.local(from)!._metaSeq
     const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: seq }
@@ -208,9 +210,10 @@ class RoomWrites {
     const target = await this._resolveMember(to)
     if (!target) throw participantGoneError(to)
     const sender = this._memberSender(from)
+    const stamp = this._stampOf(from, sender)
     const onBeforeSend = this._of.guards()?.onBeforeSend
     if (onBeforeSend) await onBeforeSend(sender, target, data)
-    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...this._stampOf(from, sender), data }
+    const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
     if (ackId) envelope.ackId = ackId
     const receipt = await commitToInbox(host.id, host._incarnation.inc, envelope, [from])
     if ('gone' in receipt) throw participantGoneError(receipt.gone)

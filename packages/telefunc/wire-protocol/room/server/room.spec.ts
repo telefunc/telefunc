@@ -1460,6 +1460,44 @@ describe('Room public behavior', () => {
     expect(named).toEqual([{ v: 2 }])
     expect(relayed(peer).find((event) => event.__r === 'data')).not.toHaveProperty('fromMeta')
   })
+  it.each([
+    ['publish', 'onBeforePublish'],
+    ['send', 'onBeforeSend'],
+  ] as const)(
+    "names a %s's sender as its waiting guard saw it, and leaves a meta write made meanwhile to apply on every view",
+    async (kind, guard) => {
+      const authority = await Room.create(`stamp-guard-${kind}`)
+      const sender = await authority.join({ meta: { name: 'before' } })
+      const other = await anotherServer()
+      const control = holdLaneDelivery((lane) => lane.kind === 'control', other)
+      const observer = (await other.Room.get(authority.id)) as ServerRoom
+      const stub = register(observer)
+      const peer = attachPeer(stub)
+      await vi.waitFor(() => expect(rosterEnded(peer)).toBe(true))
+      await subsOf(observer)._semantic.ready
+      const target = await joinThrough(stub)
+      const named: unknown[] = []
+      observer.subscribe((_data, _info, from) => named.push(from.meta))
+      const entered = createDeferred()
+      const release = createDeferred()
+      Room.guard(authority, {
+        [guard]: async () => {
+          entered.resolve()
+          await release.promise
+        },
+      })
+      const sending = kind === 'publish' ? sender.publish('hello') : sender.send(target, 'hello')
+      await entered.promise
+      await sender.setMeta({ name: 'after' })
+      release.resolve()
+      await sending
+      if (kind === 'publish') await vi.waitFor(() => expect(named).toEqual([{ name: 'before' }]))
+      await control.release()
+      expect((await observer.getParticipant(sender.id))?.meta).toEqual({ name: 'after' })
+      await syncOf(observer).reconcileAuthority()
+      expect((await observer.getParticipant(sender.id))?.meta).toEqual({ name: 'after' })
+    },
+  )
   it('keeps local and verified sender metadata at the newest accepted sequence', async () => {
     const room = (await Room.create('participant-meta-order')) as ServerRoom
     const participant = await room.join()
