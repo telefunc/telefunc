@@ -560,6 +560,33 @@ describe('binary in-process broadcast', () => {
     }
   })
 
+  it('keeps a Node Buffer publish intact for every binary subscriber and the page', () => {
+    const key = 'room:bin-owned-buffer'
+    const payload = Buffer.from([1, 2, 3])
+    const seen: number[][] = []
+    const relayed: Uint8Array[] = []
+    vi.spyOn(ServerChannel.prototype, '_sendPublishBinary').mockImplementation((frame) => void relayed.push(frame))
+    const unsubscribe = [
+      Broadcast.subscribeBinary(key, (bytes) => bytes.fill(9)),
+      Broadcast.subscribeBinary(key, (bytes) => seen.push([...bytes])),
+    ]
+    const receiver = registeredBroadcast(key)
+    receiver.subscribeBinary((bytes) => bytes.fill(8))
+    receiver.subscribeBinary((bytes) => seen.push([...bytes]))
+    receiver._onPeerSubscription('binary', true)
+    try {
+      registeredBroadcast(key).publishBinary(payload)
+      expect(seen).toEqual([
+        [1, 2, 3],
+        [1, 2, 3],
+      ])
+      expect([...payload]).toEqual([1, 2, 3])
+      expect(relayed.map((frame) => [...frame.subarray(-3)])).toEqual([[1, 2, 3]])
+    } finally {
+      for (const stop of unsubscribe) stop()
+    }
+  })
+
   it('binary subscribers do NOT receive text publishes (and vice versa)', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })

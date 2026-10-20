@@ -734,7 +734,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     // Each listener gets bytes of its own: one may write into them or transfer their buffer.
     for (const cb of this._subscribers.binary.list()) {
-      if (invokeChannelListener(cb, [data.slice(), info], this._onListenerError)) return
+      if (invokeChannelListener(cb, [new Uint8Array(data), info], this._onListenerError)) return
     }
     this._flow.onPublishConsumed(bytes)
   }

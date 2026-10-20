@@ -117,7 +117,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     // Each listener gets bytes of its own: one may write into them or transfer their buffer.
-    if (!this._callListeners(this._subscribers.binary.list(), rawInfo, (cb, info) => cb(data.slice(), info))) return
+    const listeners = this._subscribers.binary.list()
+    if (!this._callListeners(listeners, rawInfo, (cb, info) => cb(new Uint8Array(data), info))) return
     if (!this._peerSubscriptions.binary) return
     this._sendPublishBinary(encodePublishBinary(data, rawInfo))
   }
@@ -259,7 +260,7 @@ const Broadcast = {
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     // Bytes of its own: every subscriber on the key gets the same delivery.
-    return subscribeRoute({ key, kind: 'binary' }, (payload) => payload.slice(), callback)
+    return subscribeRoute({ key, kind: 'binary' }, (payload) => new Uint8Array(payload), callback)
   },
 }
 
