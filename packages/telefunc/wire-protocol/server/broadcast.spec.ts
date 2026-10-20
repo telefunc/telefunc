@@ -533,6 +533,33 @@ describe('binary in-process broadcast', () => {
     expect(Array.from(received[0]!)).toEqual([0x00, 0x7f, 0x80, 0xff])
   })
 
+  it("gives each binary subscriber bytes of its own, so one that transfers them leaves the next one's and the page's intact", () => {
+    const key = 'room:bin-owned'
+    const transfer = (bytes: Uint8Array) => structuredClone(bytes.buffer, { transfer: [bytes.buffer] })
+    const seen: number[][] = []
+    const relayed: Uint8Array[] = []
+    vi.spyOn(ServerChannel.prototype, '_sendPublishBinary').mockImplementation((frame) => void relayed.push(frame))
+    const unsubscribe = [
+      Broadcast.subscribeBinary(key, transfer),
+      Broadcast.subscribeBinary(key, (bytes) => seen.push([...bytes])),
+    ]
+    const receiver = registeredBroadcast(key)
+    receiver.subscribeBinary(transfer)
+    receiver.subscribeBinary((bytes) => seen.push([...bytes]))
+    receiver._onPeerSubscription('binary', true)
+    try {
+      registeredBroadcast(key).publishBinary(new Uint8Array([1, 2, 3]))
+      expect(seen).toEqual([
+        [1, 2, 3],
+        [1, 2, 3],
+      ])
+      // A publish frame ends with its payload.
+      expect(relayed.map((frame) => [...frame.subarray(-3)])).toEqual([[1, 2, 3]])
+    } finally {
+      for (const stop of unsubscribe) stop()
+    }
+  })
+
   it('binary subscribers do NOT receive text publishes (and vice versa)', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })

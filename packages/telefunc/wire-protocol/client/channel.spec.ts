@@ -295,6 +295,23 @@ describe.each([
   })
 })
 
+test("a broadcast gives each binary subscriber bytes of its own, so one that transfers them leaves the next one's intact", () => {
+  const broadcast = stalledBroadcast()
+  const seen: number[][] = []
+  broadcast.subscribeBinary((bytes) => structuredClone(bytes.buffer, { transfer: [bytes.buffer] }))
+  broadcast.subscribeBinary((bytes) => void seen.push([...bytes]))
+  const data = new Uint8Array([1, 2, 3])
+  broadcast._dispatchFrame({
+    tag: TAG.PUBLISH_BINARY,
+    index: 0,
+    seq: 1,
+    data,
+    info: { seq: 1, timestamp: 1 },
+    bytes: 3,
+  })
+  expect(seen).toEqual([[1, 2, 3]])
+})
+
 test('a broadcast delivers each publish with the seq its key was given, to text and binary subscribers alike, past 2^32', () => {
   const broadcast = stalledBroadcast()
   const seen: number[] = []

@@ -871,9 +871,10 @@ class RoomState {
     }
     const entry = this.model._entry(from)
     const sender = entry ? this._remote(entry) : senderOf(from, {}, null)
-    this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload, frameInfo, sender))
+    // Each listener gets bytes of its own: one may write into them or transfer their buffer.
+    this._fireTrackFiltered(this._roomBinaryCbs, track, (cb) => cb(payload.slice(), frameInfo, sender))
     const binary = entry && this._memberListeners.get(entry)?.binary
-    if (binary) this._fireTrackFiltered(binary.cbs, track, (cb) => cb(payload, frameInfo))
+    if (binary) this._fireTrackFiltered(binary.cbs, track, (cb) => cb(payload.slice(), frameInfo))
   }
 
   /** Fire the listeners whose track filter admits `track`. */

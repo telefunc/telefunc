@@ -110,28 +110,29 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const data = parse(serialized) as ChannelData<T>
-    if (!this._callListeners(this._subscribers.text.list(), data, rawInfo)) return
+    if (!this._callListeners(this._subscribers.text.list(), rawInfo, (cb, info) => cb(data, info))) return
     if (!this._peerSubscriptions.text) return
     this._sendPublish(encodePublishText(serialized, rawInfo))
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
-    if (!this._callListeners(this._subscribers.binary.list(), data, rawInfo)) return
+    // Each listener gets bytes of its own: one may write into them or transfer their buffer.
+    if (!this._callListeners(this._subscribers.binary.list(), rawInfo, (cb, info) => cb(data.slice(), info))) return
     if (!this._peerSubscriptions.binary) return
     this._sendPublishBinary(encodePublishBinary(data, rawInfo))
   }
 
   /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once
    *  a listener's error ended the channel. */
-  private _callListeners<Data>(
-    listeners: readonly ((data: Data, info: ChannelPublishInfo) => unknown)[],
-    data: Data,
+  private _callListeners<CB>(
+    listeners: readonly CB[],
     rawInfo: WirePublishInfo,
+    call: (cb: CB, info: ChannelPublishInfo) => unknown,
   ): boolean {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     for (const cb of listeners) {
       try {
-        const result = cb(data, info)
+        const result = call(cb, info)
         if (isPromise(result)) void result.catch((error: unknown) => this._handleCallbackError(error))
       } catch (error) {
         if (this._handleCallbackError(error)) return false
@@ -257,7 +258,8 @@ const Broadcast = {
     return markHandled(getBroadcastBackend().publish({ key, kind: 'binary' }, data))
   },
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
-    return subscribeRoute({ key, kind: 'binary' }, (payload) => payload, callback)
+    // Bytes of its own: every subscriber on the key gets the same delivery.
+    return subscribeRoute({ key, kind: 'binary' }, (payload) => payload.slice(), callback)
   },
 }
 

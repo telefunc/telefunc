@@ -70,4 +70,27 @@ describe('RoomState', () => {
     await Promise.resolve()
     expect(errors).toEqual(failures)
   })
+  it("gives each binary listener bytes of its own, so one that transfers them leaves the next one's and the frame's intact", () => {
+    const memberId = crypto.randomUUID()
+    const state = newState({
+      roomId: 'binary-ownership',
+      seed: { members: [{ id: memberId, meta: {}, joinedAt: 1, metaSeq: 0 }] },
+    })
+    const seen: number[][] = []
+    const transfer = (bytes: Uint8Array) => structuredClone(bytes.buffer, { transfer: [bytes.buffer] })
+    state.subscribeBinary(transfer)
+    state.subscribeBinary((bytes) => seen.push([...bytes]))
+    state.getRemote(memberId)!.subscribeBinary(transfer)
+    state.getRemote(memberId)!.subscribeBinary((bytes) => seen.push([...bytes]))
+    const payload = new Uint8Array([1, 2, 3])
+    state.applyBinary(
+      { from: memberId, payload, track: DEFAULT_TRACK, meta: null, retain: false },
+      { key: state.roomId, seq: 1, timestamp: 1 },
+    )
+    expect(seen).toEqual([
+      [1, 2, 3],
+      [1, 2, 3],
+    ])
+    expect([...payload]).toEqual([1, 2, 3])
+  })
 })
