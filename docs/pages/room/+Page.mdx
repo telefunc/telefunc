@@ -445,7 +445,7 @@ export async function onJoinLobby(name) {
 
 ### When a room closes
 
-A room closes on its own once nothing holds it open. Its members hold it open, and so does each page a telefunction returned the room to, joined or not, until that page's connection times out. A hidden participant and a server's `Room` handle don't.
+A room closes on its own once nothing holds it open. Its members hold it open, and so does each page a telefunction returned the room to, joined or not, until that page lets the room go or its connection times out. A hidden participant and a server's `Room` handle don't.
 
 Once nothing holds it, it closes `departureTimeout` later if a member had joined it, and `emptyTimeout` later if none had: 20 seconds and 5 minutes by default. A room no page was returned to and nobody joined closes `emptyTimeout` after it's created. Anything that holds it open again before then keeps it open.
 
