@@ -73,6 +73,33 @@ export class TelefuncProbeDurableObject extends TelefuncDurableObject {
       .toArray()
   }
 
+  // As broadcastSubscribe(), on a room: the first session DO creates it.
+  roomSubscribe(roomId: string, create: boolean): Promise<void> {
+    return this.#inSession(async () => {
+      this.ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS probe_room_received (text TEXT NOT NULL)')
+      const room = create ? await Room.create(roomId) : await Room.get(roomId)
+      room.subscribe((text) => {
+        this.ctx.storage.sql.exec('INSERT INTO probe_room_received (text) VALUES (?)', String(text))
+      })
+      await room.getParticipants()
+    })
+  }
+
+  roomPublish(roomId: string, text: string): Promise<void> {
+    return this.#inSession(async () => {
+      const member = await Room.join(roomId)
+      await member.publish(text)
+      await member.leave()
+    })
+  }
+
+  roomReceived(): string[] {
+    return this.ctx.storage.sql
+      .exec<{ text: string }>('SELECT text FROM probe_room_received ORDER BY rowid')
+      .toArray()
+      .map(({ text }) => text)
+  }
+
   // A call whose argument is a callback, as a page makes it: the telefunction holds the callback, and the response
   // went out.
   callWithCallback(name: string): Promise<string> {
@@ -269,6 +296,8 @@ type BroadcastSession = RpcMethods<
   Pick<TelefuncProbeDurableObject, 'broadcastSubscribe' | 'broadcastPublish' | 'broadcastReceived'>
 >
 
+type RoomSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'roomSubscribe' | 'roomPublish' | 'roomReceived'>>
+
 type CallbackSession = RpcMethods<Pick<TelefuncProbeDurableObject, 'callWithCallback' | 'leave'>>
 type RoomServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'createRoom' | 'metaKeyOrder' | 'lostDmAck' | 'die'>>
 type LaneServer = RpcMethods<Pick<TelefuncProbeDurableObject, 'watchFrames' | 'framesSeen' | 'joinAndKeepFrame'>>
@@ -283,6 +312,7 @@ const probes: Record<string, (env: Env, suffix: string) => Promise<unknown>> = {
   '/native-rpc': nativeRpcRoundTrip,
   '/large-retained': largeRetainedReplay,
   '/broadcast-sessions': broadcastAcrossSessions,
+  '/room-sessions': roomAcrossSessions,
   '/refused-first-write': refusedFirstWrite,
   '/callback-timers': callbackTimers,
   '/auto-close': autoClose,
@@ -457,6 +487,23 @@ async function broadcastAcrossSessions(env: Env, suffix: string) {
   await b.broadcastSubscribe(key)
   await a.broadcastPublish(key, ['one', 'two', 'three'])
   return { a: await a.broadcastReceived(), b: await b.broadcastReceived() }
+}
+
+// As broadcastAcrossSessions(), on a room.
+async function roomAcrossSessions(env: Env, suffix: string) {
+  const roomId = `room-sessions-${suffix}`
+  const roomSession = (name: string) =>
+    env.TELEFUNC.get(env.TELEFUNC.idFromName(`room-session-${name}-${suffix}`)) as unknown as RoomSession
+  const [a, b] = [roomSession('a'), roomSession('b')]
+  await a.roomSubscribe(roomId, true)
+  await b.roomSubscribe(roomId, false)
+  await a.roomPublish(roomId, 'one')
+  const received = (session: RoomSession) =>
+    poll(
+      () => session.roomReceived(),
+      (texts) => texts.length > 0,
+    )
+  return { a: await received(a), b: await received(b) }
 }
 
 // Two session DOs in one isolate each take a call with a callback; a's page leaves, then b's. Reports, per session DO,

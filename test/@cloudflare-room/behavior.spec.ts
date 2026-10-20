@@ -95,6 +95,10 @@ test('Broadcast reaches every session DO in the isolate in seq order, each throu
   expect(await probe('/broadcast-sessions')).toEqual({ a: inOrder, b: inOrder })
 })
 
+test('a room reaches every session DO in the isolate that subscribes to it, each through its own I/O', async () => {
+  expect(await probe('/room-sessions')).toEqual({ a: ['one'], b: ['one'] })
+})
+
 test("a session DO whose calls' callbacks all closed keeps no timer of the GC scan, while another session DO's callback is open (#469)", async () => {
   expect(await probe('/callback-timers')).toEqual({
     whileOnlyBHolds: { a: 0, made: ['a', 'b'] },
