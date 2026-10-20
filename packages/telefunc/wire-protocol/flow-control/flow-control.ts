@@ -53,6 +53,11 @@ function replayWindow(text: number, binary: number): number {
 
 /** A channel's byte and message credit both ways, as cumulative limits, as QUIC's MAX_DATA. */
 class FlowControl {
+  private readonly _byteWindowUpdate: FlowControlOptions['byteWindowUpdate']
+  private readonly _msgWindowUpdate: FlowControlOptions['msgWindowUpdate']
+  private readonly _bdpPing: FlowControlOptions['bdpPing']
+  private readonly _backlog: FlowControlOptions['backlog']
+  private readonly _sendWait: FlowControlOptions['sendWait']
   private _bdp = new BdpEstimator()
   /** The page's uplink of the last `attach`. */
   private _uplink: AttachedUplink | null = null
@@ -109,8 +114,13 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  constructor(private readonly _options: FlowControlOptions) {
-    this._yieldBytes = _options.yieldBytes ?? Infinity
+  constructor({ byteWindowUpdate, msgWindowUpdate, bdpPing, backlog, yieldBytes, sendWait }: FlowControlOptions) {
+    this._byteWindowUpdate = byteWindowUpdate
+    this._msgWindowUpdate = msgWindowUpdate
+    this._bdpPing = bdpPing
+    this._backlog = backlog
+    this._yieldBytes = yieldBytes ?? Infinity
+    this._sendWait = sendWait
     macrotaskYield.assertSupported()
   }
 
@@ -204,12 +214,12 @@ class FlowControl {
     this._arrived = true
     this._receivedBytes += bytes
     this._downlink?.creditArrived(bytes)
-    if (this._bdp.onReceive(bytes, this._wireWait())) this._options.bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, this._wireWait())) this._bdpPing(this._bdp.probe)
   }
 
   /** How long the frames that go at once wait behind the wire's own data: the attached uplink's, else `sendWait`'s. */
   private _wireWait(): SendWait | null {
-    return this._uplink ?? this._options.sendWait?.() ?? null
+    return this._uplink ?? this._sendWait?.() ?? null
   }
 
   /** Receiver-side: a probe number for an attach on `link`'s RECONCILE entry; `undefined` where `link` is measured. */
@@ -408,19 +418,19 @@ class FlowControl {
       this._urgentBytes = this._consumedBytes
       sent = 'urgent-flow-control'
     }
-    this._options.byteWindowUpdate(limit >>> 0, sent)
+    this._byteWindowUpdate(limit >>> 0, sent)
   }
 
   private _advertiseMessages(): void {
     this._advertisedMessages = this._consumedMessages
     const urgent = (this._consumedMessages - this._urgentMessages) * 2 > this._bdp.msgWindow
     if (urgent) this._urgentMessages = this._consumedMessages
-    this._options.msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, urgent)
+    this._msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, urgent)
   }
 
   private _noteBacklog(): void {
     if (this._leastBacklog === 0 || !this._isOutOfCredit()) return
-    this._leastBacklog = Math.min(this._leastBacklog, this._options.backlog() ?? 0)
+    this._leastBacklog = Math.min(this._leastBacklog, this._backlog() ?? 0)
   }
 
   private _isOutOfCredit(): boolean {
