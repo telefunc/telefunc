@@ -142,10 +142,26 @@ function* separatorPrefixes(key: string): Generator<string> {
   for (let end = key.indexOf(':'); end !== -1; end = key.indexOf(':', end + 1)) yield key.slice(0, end + 1)
 }
 
-function cellKeysWithPrefix(gen: Generation, prefix: string): Iterable<string> {
+/** The collection `prefix`'s keys are among: its longest separator prefix's index entry, or every cell. */
+function cellKeyIndex(gen: Generation, prefix: string): Map<string, StoredCell> | Set<string> | undefined {
   const indexed = prefix.slice(0, prefix.lastIndexOf(':') + 1)
-  const keys = indexed === '' ? gen.cells.keys() : (gen.cellsByPrefix.get(indexed) ?? [])
-  return indexed === prefix ? keys : [...keys].filter((key) => key.startsWith(prefix))
+  return indexed === '' ? gen.cells : gen.cellsByPrefix.get(indexed)
+}
+
+function cellKeysWithPrefix(gen: Generation, prefix: string): Iterable<string> {
+  const keys = cellKeyIndex(gen, prefix)?.keys() ?? []
+  return prefix.endsWith(':') ? keys : [...keys].filter((key) => key.startsWith(prefix))
+}
+
+/** Up to a page of `keys` under `prefix` not yet `seen`, which it adds to `seen`. */
+function takePage(keys: Iterator<string>, prefix: string, seen: Set<string>): string[] {
+  const page: string[] = []
+  for (let next = keys.next(); !next.done; next = keys.next()) {
+    if (!next.value.startsWith(prefix) || seen.has(next.value)) continue
+    seen.add(next.value)
+    if (page.push(next.value) === CELL_PAGE_SIZE) break
+  }
+  return page
 }
 
 function readCellsOf(gen: Generation, keys: Iterable<string>, now: number): CellsRead {
@@ -301,18 +317,28 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix), this._state.now())
   }
 
-  /** The prefix's keys as the read starts, so a page costs its own size and a join adds nothing to the read. */
+  /** Iterates the prefix's index entry live, which visits a key added during the read, and skips a key it returned
+   *  that was removed and added again; an entry made since the read began, its last key removed in between, holds only
+   *  keys written during the read. */
   async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
-    let keys: string[] | null = null
-    for (let at = 0; keys === null || at < keys.length; at += CELL_PAGE_SIZE) {
+    let index: Map<string, StoredCell> | Set<string> | undefined
+    let keys: Iterator<string> = [].values()
+    const seen = new Set<string>()
+    let page: string[]
+    do {
       const gen = this._readableGeneration(roomId, inc)
       if (gen === null) {
         yield { staleInc: true }
         return
       }
-      keys ??= [...cellKeysWithPrefix(gen, prefix)]
-      yield readCellsOf(gen, keys.slice(at, at + CELL_PAGE_SIZE), this._state.now())
-    }
+      const current = cellKeyIndex(gen, prefix)
+      if (current !== index) {
+        index = current
+        keys = current?.keys() ?? [].values()
+      }
+      page = takePage(keys, prefix, seen)
+      yield readCellsOf(gen, page, this._state.now())
+    } while (page.length === CELL_PAGE_SIZE)
   }
 
   /** Closing tails may read; only writes require an open head. */

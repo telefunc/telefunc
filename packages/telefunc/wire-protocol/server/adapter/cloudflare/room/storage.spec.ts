@@ -100,7 +100,7 @@ test("a prefix read selects the incarnation's cells under it as a primary-key ra
   expect(listed('')).toHaveLength(keys.length)
 })
 
-test('a prefix read pages at most 1,024 cells from the cursor it hands back: each cell there throughout exactly once, whatever is written or removed between pages', () => {
+test('a prefix read pages at most 1,024 cells from the cursor it hands back: each cell there throughout exactly once, and one written between pages after every key read so far', () => {
   const { sql, plans } = sqlStorage()
   const now = Date.now()
   const config = new TextEncoder().encode('config')
@@ -142,6 +142,7 @@ test('a prefix read pages at most 1,024 cells from the cursor it hands back: eac
   const unchanged = keys(2_500).filter((key) => !removed.includes(key))
   expect(read.filter((key) => unchanged.includes(key))).toEqual(unchanged)
   expect(read.every((key) => [...unchanged, ...removed, ...added].includes(key))).toBe(true)
+  expect(read).toContain('p:02450x')
 })
 
 test('an exchange commits while the cells it expects are as read, whatever else changed, and never conflicts on a count', () => {

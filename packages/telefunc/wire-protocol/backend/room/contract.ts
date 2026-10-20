@@ -143,8 +143,9 @@ type RoomDriver = {
   readHead(roomId: string): Promise<RoomHead | null>
   compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult>
   readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead>
-  /** The cells under `prefix`, a bounded page at a time: one present for the whole read comes exactly once, one written
-   *  or removed during it may or may not. A `staleInc` page is the last. */
+  /** The cells under `prefix`, a bounded page at a time, each key at most once: one present for the whole read comes,
+   *  one written during it and kept that sorts after every key returned before the write comes, any other written or
+   *  removed during it may or may not. A `staleInc` page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
   compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult>
   commitLane(

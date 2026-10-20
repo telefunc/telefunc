@@ -419,7 +419,7 @@ describe('memory backend behind the supervised consumer', () => {
     const subscription = getRoomBackend().subscribeLane('refused-room', 'refused-inc', semanticLane, () => {})
     await expect(subscription.ready).rejects.toThrow("has no open incarnation 'refused-inc'")
   })
-  it('reads a prefix a page of at most 1,024 cells at a time: each cell there throughout exactly once, whatever is written or removed between pages', async () => {
+  it('reads a prefix a page of at most 1,024 cells at a time: each cell there throughout exactly once, and one written between pages after every key read so far', async () => {
     const backend = getRoomBackend()
     await backend.compareExchangeHead(
       'pages',
@@ -455,6 +455,28 @@ describe('memory backend behind the supervised consumer', () => {
     const unchanged = keys(2_500).filter((key) => !removed.includes(key))
     expect(read.filter((key) => unchanged.includes(key)).sort()).toEqual(unchanged)
     expect(read.every((key) => [...unchanged, ...removed, ...added].includes(key))).toBe(true)
+    expect(read).toContain('p:02450x')
+  })
+  it('reads a cell written between pages after every key read so far, and no cell twice, though every cell read before it was removed', async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'refilled',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    const write = (keys: string[], bytes: Uint8Array | null) =>
+      backend.compareExchangeCells('refilled', 'inc-1', { expect: [], mutations: keys.map((key) => ({ key, bytes })) })
+    const keys = Array.from({ length: 1_024 }, (_, i) => `p:${String(i).padStart(4, '0')}`)
+    await write(keys, encoder.encode('v'))
+    const read: string[] = []
+    for await (const page of backend.readCellPages('refilled', 'inc-1', 'p:')) {
+      if ('staleInc' in page) throw new Error('cell read fenced unexpectedly')
+      read.push(...page.cells.keys())
+      if (read.length !== 1_024) continue
+      await write(keys, null)
+      await write(['p:0000', 'p:x'], encoder.encode('v'))
+    }
+    expect(read).toEqual([...keys, 'p:x'])
   })
   it('reads a prefix without scanning the other cells, and drops its index entries with its cells', async () => {
     const backend = getRoomBackend()

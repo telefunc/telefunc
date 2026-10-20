@@ -36,6 +36,7 @@ import {
   memberIdOfMetaCellKey,
   memberMetaCellPrefix,
   memberMetaGenPrefix,
+  memberMetaGenOfCellKey,
   metaDropCellKey,
   metaKeyCellKey,
   metaKeyOfCellKey,
@@ -355,9 +356,8 @@ async function readMembersMetaCells(room: RoomIncarnation, id?: string): Promise
  *  newer generation among the cells is a replace that committed after the record was read, which may have dropped the
  *  record's: the meta is read from it. */
 async function memberMetaOf(id: string, recordGen: number, cells: MemberMetaCells): Promise<ParticipantMeta> {
-  const genStart = memberMetaCellPrefix(id).length
   let gen = recordGen
-  for (const [cellKey] of cells) gen = Math.max(gen, Number(cellKey.slice(genStart, cellKey.indexOf(':', genStart))))
+  for (const [cellKey] of cells) gen = Math.max(gen, memberMetaGenOfCellKey(id, cellKey))
   const prefix = memberMetaGenPrefix(id, gen)
   const runs: RoomMetaEntry[][] = []
   const slice = new Slice()

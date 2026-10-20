@@ -7,6 +7,8 @@ import { generationKeysKey } from './keys.js'
 import { encodeLaneKey } from 'telefunc/__internal'
 import { disposeBackend, getRoomBackend } from '../../telefunc/dist/wire-protocol/backend/install.js'
 import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
+import { MEMBER_META_CELL_PREFIX } from '../../telefunc/dist/wire-protocol/room/server/cells.js'
+import { createDeferred } from '../../telefunc/dist/utils/createDeferred.js'
 import { longestGapWhile } from '../../telefunc/wire-protocol/test/event-loop.js'
 
 // Room on a real Redis: REDIS_URL names a standalone server, REDIS_CLUSTER_NODES a Cluster's nodes; each one set runs.
@@ -77,7 +79,7 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     ])
   })
 
-  it('reads a prefix a page of at most 1,024 cells at a time: each cell there throughout exactly once, whatever is written or removed between pages', async () => {
+  it('reads a prefix a page of at most 1,024 cells at a time: each cell there throughout exactly once, and one written between pages after every key read so far', async () => {
     const backend = new RedisBackend({ redis: ownClient(connect()), prefix: uniquePrefix('pages') })
     await backend.compareExchangeHead(
       'pages',
@@ -116,7 +118,43 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     const unchanged = keys(2_500).filter((key) => !removed.includes(key))
     expect(read.filter((key) => unchanged.includes(key)).sort()).toEqual(unchanged)
     expect(read.every((key) => [...unchanged, ...removed, ...added].includes(key))).toBe(true)
+    expect(read).toContain('p:02450x')
   })
+
+  it.each([9, 99])(
+    "reads a member's meta of more than a page as written before or after a replace from generation %i to the next that commits between its pages",
+    async (gen) => {
+      installRedis(ownClient(connect()), { prefix: uniquePrefix(`meta-pages-${gen}`) })
+      onTestFinished(() => disposeBackend())
+      const metaOf = (value: string) => Object.fromEntries(Array.from({ length: 1100 }, (_, i) => [`k${i}`, value]))
+      const room = await Room.create('meta-pages')
+      onTestFinished(() => Room.close(room.id))
+      const member = await room.join({ meta: {} })
+      for (let seq = 1; seq < gen; seq++) await member.setAttributes({ seq })
+      await member.setMeta(metaOf('before'))
+      const backend = getRoomBackend()
+      const readCellPages = backend.readCellPages.bind(backend)
+      const reached = createDeferred()
+      const release = createDeferred()
+      let held = false
+      vi.spyOn(backend, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+        for await (const page of readCellPages(roomId, inc, prefix)) {
+          yield page
+          if (!held && prefix.startsWith(MEMBER_META_CELL_PREFIX)) {
+            held = true
+            reached.resolve()
+            await release.promise
+          }
+        }
+      })
+      const reading = Room.getParticipants(room.id)
+      await reached.promise
+      await member.setMeta(metaOf('after'))
+      release.resolve()
+      const [read] = await reading
+      expect([metaOf('before'), metaOf('after')]).toContainEqual(read!.meta)
+    },
+  )
 
   it('reads the roster of 100,000 members in a heartbeat tick with no Redis command over 20 ms and the event loop turning', async () => {
     const prefix = uniquePrefix('roster-pages')

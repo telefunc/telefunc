@@ -427,6 +427,41 @@ describe('Room public behavior', () => {
       expect([{ name: 'before' }, { name: 'after' }]).toContainEqual(read!.meta)
     },
   )
+  it.each([
+    ['roster', 9, undefined],
+    ['identity', 9, { identity: 'alice' }],
+    ['roster', 99, undefined],
+  ] as const)(
+    "reads a member's meta of more than a page as written before or after a replace that its %s read waits on between pages, from generation %i to the next",
+    async (kind, gen, target) => {
+      const metaOf = (value: string) => Object.fromEntries(Array.from({ length: 1100 }, (_, i) => [`k${i}`, value]))
+      const room = await Room.create(`replaced-between-${kind}-pages-${gen}`)
+      const member = await room.join({ meta: {}, identity: 'alice' })
+      for (let seq = 1; seq < gen; seq++) await member.setAttributes({ seq })
+      await member.setMeta(metaOf('before'))
+      const reached = createDeferred()
+      const release = createDeferred()
+      const readCellPages = driver.readCellPages.bind(driver)
+      let held = false
+      vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+        for await (const page of readCellPages(roomId, inc, prefix)) {
+          yield page
+          if (!held && prefix.startsWith(MEMBER_META_CELL_PREFIX)) {
+            held = true
+            reached.resolve()
+            await release.promise
+          }
+        }
+      })
+      const reading = Room.getParticipants(room.id, target)
+      await reached.promise
+      await member.setMeta(metaOf('after'))
+      release.resolve()
+      const [read, ...more] = await reading
+      expect(more).toEqual([])
+      expect([metaOf('before'), metaOf('after')]).toContainEqual(read!.meta)
+    },
+  )
   it('lists without a room that closes between its head read and its roster read', async () => {
     await Room.create('list-open')
     const closing = (await Room.create('list-closing')) as ServerRoom

@@ -25,6 +25,7 @@ export {
   MEMBER_META_CELL_PREFIX,
   memberMetaCellPrefix,
   memberMetaGenPrefix,
+  memberMetaGenOfCellKey,
   memberIdOfMetaCellKey,
   metaKeyCellKey,
   metaKeyOfCellKey,
@@ -97,13 +98,18 @@ function roomMetaGenPrefix(gen: number): string {
 }
 
 /** A member's meta, a cell per top-level key in the generation its record names (`RoomMemberRecord.metaGen`). Member
- *  ids hold no `:`. */
+ *  ids hold no `:`. A generation's digit count goes ahead of it as a letter, so key order is generation order. */
 const MEMBER_META_CELL_PREFIX = 'pm:'
 function memberMetaCellPrefix(memberId: string): string {
   return `${MEMBER_META_CELL_PREFIX}${memberId}:`
 }
 function memberMetaGenPrefix(memberId: string, gen: number): string {
-  return `${memberMetaCellPrefix(memberId)}${gen}:`
+  const digits = String(gen)
+  return `${memberMetaCellPrefix(memberId)}${String.fromCharCode(96 + digits.length)}${digits}:`
+}
+function memberMetaGenOfCellKey(memberId: string, cellKey: string): number {
+  const start = memberMetaCellPrefix(memberId).length + 1
+  return Number(cellKey.slice(start, cellKey.indexOf(':', start)))
 }
 function memberIdOfMetaCellKey(cellKey: string): string {
   return cellKey.slice(MEMBER_META_CELL_PREFIX.length, cellKey.indexOf(':', MEMBER_META_CELL_PREFIX.length))
