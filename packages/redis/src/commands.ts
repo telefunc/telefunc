@@ -77,12 +77,12 @@ end
 // The same bytes as telefunc's ordering frame (wire-protocol/ordering-frame.ts): four u32 big-endian words,
 // then the payload.
 const REDIS_ORDERING_FRAME_LUA = `
+local function tf_u64(n)
+  local hi = math.floor(n / 4294967296)
+  return struct.pack('>I4I4', hi, n - hi * 4294967296)
+end
 local function tf_ordering_frame(seq, ts, payload)
-  local seq_hi = math.floor(seq / 4294967296)
-  local seq_lo = seq - seq_hi * 4294967296
-  local ts_hi = math.floor(ts / 4294967296)
-  local ts_lo = ts - ts_hi * 4294967296
-  return struct.pack('>I4I4I4I4', seq_hi, seq_lo, ts_hi, ts_lo) .. payload
+  return tf_u64(seq) .. tf_u64(ts) .. payload
 end
 `
 
@@ -114,9 +114,7 @@ else
   predecessor, last_binary = tonumber(last_binary), seq_text
 end
 redis.call('SET', KEYS[1], seq_text .. ':' .. string.format('%.0f', ts) .. ':' .. last_text .. ':' .. last_binary)
-local predecessor_hi = math.floor(predecessor / 4294967296)
-local frame = struct.pack('>I4I4', predecessor_hi, predecessor - predecessor_hi * 4294967296)
-  .. tf_ordering_frame(seq, ts, ARGV[1])
+local frame = tf_u64(predecessor) .. tf_ordering_frame(seq, ts, ARGV[1])
 local receivers = redis.call('PUBLISH', KEYS[2], frame)
 return {seq, ts, receivers}
 `
