@@ -53,7 +53,7 @@ const me = await lobby.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })
 ```
 
-Open it in two browser tabs and the first sees the second join and say hello. That is the whole feature; the guides below take one task at a time.
+Open it in two browser tabs and the first sees the second join and say hello.
 
 
 ## Core concepts
@@ -81,7 +81,7 @@ Every message carries its verified sender, and each kind of message has one send
 
 `from` is the verified sender (`from.id`, `from.meta`, `from.identity`), stamped by the server and impossible to spoof; `from === null` means the room itself spoke.
 
-A handler (`subscribe()`, `subscribeBinary()`, `listen()`, `onAnnounce()`) starts receiving a moment after you register it. Register the ones that must see a message during setup, before anything can send it, and publish what a late subscriber needs with `{ retain: true }`.
+A handler (`subscribe()`, `subscribeBinary()`, `listen()`, `onAnnounce()`) starts receiving once the server has registered it, shortly after your call. Register the ones that must see a message during setup, before anything can send it, and publish what a late subscriber needs with `{ retain: true }`.
 
 ### Identity vs meta
 
@@ -99,7 +99,7 @@ Participant IDs are per-membership: the same person is a different `id` in every
 
 ### Presence & membership
 
-`getParticipants()` gives you the member list; `onJoin` and each member's `onLeave` keep it fresh; each member's `onUpdate` tracks their metadata. Listen before you read: events keep arriving while `getParticipants()` resolves, so a join then reaches you both ways, and a member that left meanwhile fires its `onLeave` at once:
+`getParticipants()` gives you the member list; `onJoin` and each member's `onLeave` keep it fresh; each member's `onUpdate` tracks their metadata. Register `onJoin` before you call `getParticipants()`, so you miss no join. A member who joins meanwhile then shows up in both, so skip one you already listed. A member who left meanwhile fires its `onLeave` as soon as you register it:
 
 ```js
 room.onJoin((member) => addToList(member))
@@ -155,24 +155,26 @@ room.onJoin((member) => {
 
 A member's `publish()` reaches both room-level subscribers (with `from`) and that member's subscribers. By default your own publishes echo back to your side; turn that off per participant with `join({ meta, selfDelivery: false })` (video, where you don't want your own frames back).
 
-**High-frequency updates** (cursors, live reactions) can flood a slow connection. On the client, pass `{ coalesce: key }`, and while a publish with that key is still in flight, newer ones collapse into a single pending send carrying only the latest value (a server publish has no connection to conflate):
+**High-frequency updates** (cursors, live reactions) can flood a slow connection. On the client, pass `{ coalesce: key }`: while a publish with that key is still in flight, newer ones collapse into a single pending send carrying only the latest value:
 
 ```js
 onCursorMove((pos) => me.publish({ pos }, { coalesce: 'cursor' }))
 ```
 
-A client that falls too far behind the room's messages is let go rather than sent a gap: on that client the room closes and the participants it joined leave, both with `'disconnected'`, and everyone else sees them leave. Return the room from a telefunction again to rejoin.
+A client that falls too far behind the room's messages is disconnected, so it never misses a message silently. On that client, the room closes and the participants it joined leave, both with `'disconnected'`; everyone else sees them leave. Return the room from a telefunction again to rejoin. The limits are in <Link href="#room">Reference</Link>.
 
 ### Validating messages
 
 Declare the room's message type and every client `publish()` is checked against it at the server, before any guard or subscriber runs. Pass it as the third type parameter to `Room.create` / `Room.get` / `Room.getOrCreate`:
 
 ```ts
+type ChatMeta = { topic: string }   // room.meta
+type MemberMeta = { name: string }  // each participant's meta
 type ChatMsg = { kind: 'chat'; text: string }
 const room = await Room.get<ChatMeta, MemberMeta, ChatMsg>(roomId)
 ```
 
-`publish()` and `subscribe()` are now typed to `ChatMsg` end to end, and that same type becomes a runtime contract: a client that sends anything else, an untyped caller or a tampered payload, has its `publish()` rejected with a `ShieldValidationError` before the message reaches a guard, a subscriber, or the room. It's Telefunc's <Link href="/shield">shield</Link>, auto-generated from the type; there's no separate shield to write. It guards a room, or a `LocalParticipant` of it, that the telefunction returns where its type names `ChatMsg`; a room a client reaches only through a returned `RemoteParticipant` is unshielded, so return the room itself when clients publish to it.
+`publish()` and `subscribe()` are now typed to `ChatMsg` end to end, and that same type becomes a runtime contract: a client that sends anything else, an untyped caller or a tampered payload, has its `publish()` rejected with a `ShieldValidationError` before the message reaches a guard, a subscriber, or the room. It's Telefunc's <Link href="/shield">shield</Link>, generated from the type; there's no separate shield to write. The check applies when the telefunction returns the room, or a `LocalParticipant` of it, typed with `ChatMsg`. A client that reaches the room only through a returned `RemoteParticipant` isn't checked, so return the room itself when clients publish to it. In JavaScript there is no type to generate it from: check messages in a guard's `onBeforePublish` instead.
 
 The shield checks shape, not authorization: it guarantees the payload matches the declared type, never that this sender is allowed to send it. Gate who may do what in a guard's `onBeforePublish`, on `identity` (see <Link href="#moderation">Moderation</Link>), and reach for a guard too for the semantic rules a type can't state, like a non-empty body or a length cap.
 
@@ -188,7 +190,7 @@ me.listen((data, from) => showDm(from.meta.name, data))
 const { seq, timestamp } = await bob.send(aliceId, 'meet me in room 2')
 ```
 
-`send()` resolves once the message is sequenced onto the recipient's inbox, so awaiting it waits for the hand-off, not just the local enqueue. Delivery is best-effort: the pub/sub underneath is at-most-once.
+`send()` resolves once the server has queued the message for the recipient. It is never retried: a message that doesn't arrive is lost.
 
 **Need a reply, or a delivery guarantee?** Pass `{ ack: true }`. It waits for the recipient's handler and returns its reply; the receipt gains a `response`, and it rejects if the recipient leaves first — or with the handler's `Abort` if it raises one (a plain throw is hidden as a bug, like any telefunction):
 
@@ -197,7 +199,7 @@ const { response, seq, timestamp } = await bob.send(aliceId, { move: 'e4' }, { a
 // Alice: me.listen((move) => rules.check(move) ? 'ok' : 'illegal') // her return is Bob's `response`
 ```
 
-**Delivery that outlives a disconnect** (advanced). A plain `send()` reaches a live participant at most once, never retried or stored; a `{ identity }` send to an offline user is a no-op. To survive a full disconnect, persist on send and redeliver on the next join, keyed by `identity` (stable across reconnects). A join the client makes carries no `identity` (see <Link href="#moderation">Moderation</Link>), so redeliver by the telefunction's own user; a DM to a member without one is delivered once, like a plain `send()`:
+**Delivery that outlives a disconnect** (advanced). A `send()` reaches only a participant that is in the room, and `Room.send(id, { identity }, data)` to a user with no membership does nothing. To survive a full disconnect, save each message on send and deliver it again on the user's next join, keyed by `identity` (stable across reconnects). This needs each join to carry the user's `identity`, as the telefunction in <Link href="#moderation">Moderation</Link> does; a message to a member without one isn't saved:
 
 ```js
 // Server, in the telefunction that returns the room
@@ -205,14 +207,17 @@ const { user } = getContext()
 Room.guard(room, {
   onAfterSend: async (from, to, data) => { if (to.identity) await db.saveDm(to.identity, data) },
   onAfterJoin: async (member) => {
-    for (const dm of await db.undeliveredDms(user.id)) await Room.send(room.id, { id: member.id }, dm.data)
+    for (const dm of await db.undeliveredDms(user.id)) {
+      await Room.send(room.id, { id: member.id }, dm.data)
+      await db.markDelivered(dm.id)
+    }
   },
 })
 ```
 
 ### Moderation
 
-`Room.guard()` attaches server-side policy to one room instance. It runs on every client-visible membership granted through that instance: your own `join()`, and every `join()`, `publish()`, and `send()` a client makes after you return the room. A trusted server `join({ hidden: true })` bypasses both join hooks; it is authority code, not client admission. Declare guards in the telefunction, where `getContext()` is available:
+`Room.guard()` attaches server-side policy to one room instance. It runs on every client-visible membership granted through that instance: your own `join()`, and every `join()`, `publish()`, and `send()` a client makes after you return the room. A server's own `join({ hidden: true })` skips both join hooks. Declare guards in the telefunction, where `getContext()` is available. A room instance takes one `Room.guard()` call (a second throws), so put every hook a telefunction needs in one object:
 
 ```js
 // Chat.telefunc.js (server)
@@ -231,13 +236,15 @@ export async function onJoinChat(roomId) {
 }
 ```
 
-Each `onBefore*` runs before the operation commits, and rejects the caller — on the client too — following Telefunc's usual <Link href="/error-handling">error contract</Link>: `throw Abort(value)` rejects with an `Abort` carrying `value` (the caller inspects `err.abortValue` / `err instanceof Abort`), the way to surface a reason a client can act on; any other throw is treated as a bug — the caller gets a generic error and the real one is logged server-side. Each `onAfter*` (`onAfterJoin`, `onAfterSend`, `onAfterPublish`) runs once it commits, with the receipt (`{ seq, timestamp }`; `onAfterJoin` gets `{ joinedAt }`): the place to persist a message in its server-assigned order (see <Link href="#history-live-tail">History</Link>).
+Each `onBefore*` runs before the operation takes effect, and a throw there rejects the caller, on the client too, following Telefunc's usual <Link href="/error-handling">error contract</Link>. `throw Abort(value)` rejects with an `Abort` carrying `value`, which the caller reads on `err.abortValue`: use it for a reason the client can act on. Any other throw is treated as a bug: the caller gets a generic error, and the real one is logged on the server.
 
-Room operations can also reject for expected conditions such as a closed room, a gone participant, or a target that isn't a member. These failures aren't reported as bugs, and their safe message reaches the caller.
+Each `onAfter*` (`onAfterJoin`, `onAfterSend`, `onAfterPublish`) runs once the operation took effect, with its receipt: `{ seq, timestamp }`, or `{ joinedAt }` for `onAfterJoin`. It's the place to store a message in its server-assigned order (see <Link href="#history-live-tail">History</Link>).
+
+Room operations can also reject for expected conditions such as a closed room, a gone participant, or a target that isn't a member. These aren't reported as bugs, and the caller gets their error message.
 
 A join the client makes through the returned room carries `identity: null` (identity is server-side only), so key a guard on the telefunction's own user, as above: every join and message through this instance is that user's. The guard admits only the telefunction's own join, which carries the user's `identity`, so a kick by `{ identity }` reaches every membership the user holds in the room.
 
-<Warning>Guards apply only to the specific instance passed to `Room.guard()`. Attach guards in the telefunction that hands the room to clients; other Room instances are unguarded. Returning a room, or a `RemoteParticipant` of it, opens that room instance to the client, which can join through it under that instance's guards; a returned `LocalParticipant` opens only that participant.</Warning>
+<Warning>Guards apply only to the specific instance passed to `Room.guard()`. Attach guards in the telefunction that hands the room to clients; other Room instances are unguarded. Returning a room, or a `RemoteParticipant` of it, lets the client join through that instance, under its guards. Returning a `LocalParticipant` gives the client only that participant.</Warning>
 
 **Kick a participant**, with a reason that arrives with the removal:
 
@@ -266,7 +273,7 @@ room.onAnnounce((data) => showBanner(data))
 me.listen((data, from) => (from === null ? showSystemNotice(data) : showDm(from.meta.name, data)))
 ```
 
-The receipt is `{ seq, timestamp }` in the same room-global order as participant text published with `publish()`, so their receipts are comparable until the room is closed and recreated.
+The receipt is `{ seq, timestamp }`, numbered in the same order as participant `publish()` text.
 
 ### Server-side authority
 
@@ -288,7 +295,7 @@ room.onEmpty(() => stopGameLoop(matchId)) // last player gone; the hidden author
 
 That is why the match turns both timeouts off: with the defaults, it would close 5 minutes after it was created if no player joined, or 20 seconds after its last player left, and the authority would leave with `'closed'` (see <Link href="#when-a-room-closes">When a room closes</Link>). Close it with `Room.close(matchId)` when the match ends.
 
-Join as many as you need (a game authority, a moderation bot, a metrics sink), each with its own trusted `identity`. They are server-side only (a client `join({ hidden: true })` throws) and out of every client's presence, though what they publish room-wide still reaches every room-wide subscriber, with `from` (for binary, `from.id` only: see <Link href="#senders">Senders</Link>). Read them back on the server with `getParticipants({ hidden: true })`, keyed by `identity` (never `meta.role`). Hand a client the one it should talk to by returning it from the telefunction:
+Join as many as you need (a game authority, a moderation bot, a metrics sink), each with its own trusted `identity`. Only the server can join hidden: a client `join({ hidden: true })` throws. No client sees them in presence, but what they publish room-wide reaches every room-wide subscriber, with `from` (for binary, only `from.id`: see <Link href="#senders">Senders</Link>). Read them back on the server with `getParticipants({ hidden: true })`, keyed by `identity` (never `meta.role`). Hand a client the one it should talk to by returning it from the telefunction:
 
 ```js
 // Match.telefunc.js (server)
@@ -315,7 +322,7 @@ Two properties to design around:
 
 ### Binary streams & tracks
 
-`publishBinary()` / `subscribeBinary()` carry raw bytes: canvas deltas, audio snippets, file chunks, small-scale audio/video. Mic, camera, and screen share travel over one member's stream as *named tracks*, several substreams sharing one connection. Publish with `{ track }`; subscribe with `{ track }` to receive only that substream (`{ track: null }` is the default, unnamed track). Attach per-frame `meta` for whatever the decoder needs, a keyframe marker or a timestamp, and read it back on `info.meta`. Track names are limited to 255 UTF-8 bytes and serialized metadata to 65,535 bytes; a participant can publish on any number of tracks. On the client, one room subscribes to at most 4,096 tracks at once: `{ track: 'mic' }` counts once room-wide and once per member you subscribe it on, and `subscribeBinary()` past that throws; subscribing without a `track` counts none. `room.subscribeBinary(cb, { track: 'mic' })` receives every participant's mic. Without a `track`, you receive every track:
+`publishBinary()` / `subscribeBinary()` carry raw bytes: canvas deltas, audio snippets, file chunks, small-scale audio/video. Mic, camera, and screen share travel over one member's stream as *named tracks*, several substreams sharing one connection. Publish with `{ track }`; subscribe with `{ track }` to receive only that substream (`{ track: null }` is the default, unnamed track). Attach per-frame `meta` for whatever the decoder needs, a keyframe marker or a timestamp, and read it back on `info.meta`. A participant can publish on any number of tracks (the limits are in <Link href="#localparticipant">Reference</Link>). `room.subscribeBinary(cb, { track: 'mic' })` receives every participant's mic. Without a `track`, you receive every track:
 
 ```js
 captureAndEncode(camera, (frame, isKey) => me.publishBinary(frame, { track: 'camera', meta: { key: isKey } }))
@@ -341,7 +348,7 @@ Across nodes, `onDemand` is eventually consistent, so a viewer on another node c
 me.publishBinary(keyframe, { track: 'camera', meta: { key: true }, retain: true }) // kept for late joiners
 ```
 
-`{ retain: true }` works the same on `publish()`: the server keeps the last retained text message and hands it to late subscribers, the current state a joiner needs (a game phase, a pinned notice). Retained text is the room's one last message; retained binary is one per publisher and track. A retained message clears when a newer one replaces it, when its publisher leaves, or when the room closes, so publish state meant to outlive any member from a hidden participant, which stays until you close the room.
+`{ retain: true }` works the same on `publish()`: the server keeps the last retained text message and hands it to late subscribers, the current state a joiner needs (a game phase, a pinned notice). Retained text is the room's one last message; retained binary is one per publisher and track. A retained message clears when a newer one replaces it, when its publisher leaves, or when the room closes. For state that must outlive every member, publish it from a hidden participant: it stays until you close the room.
 
 <Warning>Rooms move binary over the same reliable, ordered transport as text (WebSocket or SSE). That is right for binary *data* and for small or controlled-network A/V. It lacks what large-scale live video needs (congestion control, simulcast, jitter buffering). For production multi-party video, pair Rooms (presence, chat, signaling) with a WebRTC SFU for media. A lower-latency, unreliable media lane is tracked in [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
 
@@ -370,14 +377,14 @@ export async function onJoinChat(roomId) {
 // Chat.js (client)
 const { room, history } = await onJoinChat('lobby')
 
-const seen = new Set()
-const show = (m) => { if (!seen.has(m.id)) { seen.add(m.id); render(m) } }
+let lastSeq = 0
+const show = (message, seq) => { if (seq > lastSeq) { lastSeq = seq; render(message) } } // skips what history had
 
-for (const m of history) show(m)   // the past
-room.subscribe(show)               // flushes the held live tail, then stays live
+for (const m of history) show(m, m.seq)                    // the past, oldest first
+room.subscribe((data, info) => show(data, info.seq))       // the live tail from tailing on, then live
 ```
 
-Order history and live messages by `info.seq`; `info.timestamp` is for display. The tail holds only the most recent messages, for a prompt `subscribe()`, so the history you load stays the source of truth.
+Order history and live messages by `info.seq`; `info.timestamp` is for display. The tail holds only the most recent messages, so the history you load stays the source of truth.
 
 ### Switching rooms & capacity
 
@@ -410,15 +417,15 @@ export async function onJoinLobby(name) {
 
 ### When a room closes
 
-A room closes on its own once nothing holds it. A member holds it, and so does every page a telefunction returned it to, for as long as that page keeps it, joined or not. A hidden participant and a server's `Room` handle don't.
+A room closes on its own once nothing holds it open. Its members hold it open, and so does each page a telefunction returned the room to, joined or not, until that page closes. A hidden participant and a server's `Room` handle don't.
 
-Once nothing holds it, it closes `departureTimeout` later if a member had joined it, and `emptyTimeout` later if none had: 20 seconds and 5 minutes by default. A room no page was returned to and nobody joined closes `emptyTimeout` after it's created. Anything that holds it again before then keeps it open; a join that lands just as it closes is admitted, then closed with it.
+Once nothing holds it, it closes `departureTimeout` later if a member had joined it, and `emptyTimeout` later if none had: 20 seconds and 5 minutes by default. A room no page was returned to and nobody joined closes `emptyTimeout` after it's created. Anything that holds it open again before then keeps it open.
 
 ```js
 await Room.create('match-42', { emptyTimeout: 60_000, departureTimeout: Infinity }) // Infinity: until Room.close()
 ```
 
-It closes as `Room.close(id)` closes it: `onClose` fires and `Room.list()` drops it. A member whose page went away stays one until its connection is let go (see <Link href="#production">Production</Link>), so a reload doesn't start the countdown. Set the defaults for every room with <Link href="/room-config">`config.room`</Link>.
+Then it closes as `Room.close(id)` would: `onClose` fires and `Room.list()` drops it. A member whose page went away stays a member until its connection times out (see <Link href="#production">Production</Link>), so a reload doesn't start the countdown. Set the defaults for every room with <Link href="/room-config">`config.room`</Link>.
 
 
 ## Recipes
@@ -479,18 +486,18 @@ onPointerMove((pos) => me.publish({ cursor: pos }, { coalesce: 'cursor' }))
 board.subscribe((d, _i, from) => d.cursor && drawCursor(from.id, from.meta.color, d.cursor))
 ```
 
-A new participant subscribing to the board gets each present member's retained keyframe and renders their layers right away with nothing extra to wire up. Strokes a member drew between its retained keyframe and your subscribe show with its next keyframe; so does its whole layer when one of its newer deltas reached you first, since the retained keyframe then isn't replayed. A member's retained keyframe clears when it leaves, so a later joiner doesn't get that layer: keep a board that outlives its members in your database (see <Link href="#history-live-tail">History</Link>).
+A new participant subscribing to the board gets each present member's retained keyframe and renders their layers right away with nothing extra to wire up. Strokes a member drew after its last retained keyframe show with its next keyframe. A member's retained keyframe clears when it leaves, so a later joiner doesn't get that layer: keep a board that outlives its members in your database (see <Link href="#history-live-tail">History</Link>).
 
 For **team chat with subgroups**, give each team, breakout, or private thread its own room (a telefunction can return several at once, e.g. `team` and `team:red`); each has its own membership and guards, so a message never leaks across the boundary.
 
 
 ## Production
 
-Rooms work across multiple server nodes out of the box with <Link href="/redis">`@telefunc/redis`</Link> and the <Link href="/stream/cloudflare">Cloudflare</Link> integration.
+Rooms work across multiple server nodes with <Link href="/redis">`@telefunc/redis`</Link>: call `installRedis()` once, and route each client to one server with <Link href="/stream/scale#sticky-sessions">sticky sessions</Link>, as every channel needs. On <Link href="/stream/cloudflare">Cloudflare</Link>, `telefunc/cloudflare` needs neither.
 
 - **Crash-safe presence.** A clean `leave()` propagates immediately. After a server stops, within three minutes its participants leave with `'disconnected'` and it stops holding its rooms.
 - **Tuning presence latency.** A dropped connection is held for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link> before its members leave, so a brief blip does not flap presence; one that goes silent is noticed first, at the ping deadline (twice `config.channel.pingInterval`, which is at least one second). Lower them for snappier away-detection, raise `reconnectTimeout` to ride out flaky mobile networks.
-- **What a room instance costs.** Each `Room.get()` / `Room.getOrCreate()` call returns its own handle, with its own guards, and a server's handles to one room share one view of it, so another handle adds nothing to the server's periodic backend traffic for the room. Opening a handle and `getParticipants()` read the member list from the backend unless clients or listeners on that server already watch the room. `Room.list()` reads each listed room's members.
+- **What a room instance costs.** Each `Room.get()` / `Room.getOrCreate()` call returns its own handle, with its own guards. Handles to one room on one server share its state, so another handle adds no ongoing backend traffic. Opening a handle and `getParticipants()` read the member list from the backend, unless clients or listeners on that server already watch the room. `Room.list()` reads the members of every room it lists.
 
 ## Reference
 
@@ -525,12 +532,12 @@ type RoomGetOptions = {
 }
 ```
 
-- `Room.get(id, { tail: true })` starts relaying live messages as soon as the room is returned to a client, and holds them until its first text `subscribe()` (see <Link href="#history-live-tail">History</Link>): the latest 256 messages and 1,048,576 characters (UTF-16 code units) of serialized text at most, dropping the oldest, and none larger than that. It lets them go if the client doesn't subscribe within 60 seconds. A message sequenced just before tailing began, whose `onAfterPublish` store hadn't committed when you read history, is in neither; a later history load has it.
+- `Room.get(id, { tail: true })` starts keeping live messages as soon as the room is returned to a client, and hands them to its first text `subscribe()` (see <Link href="#history-live-tail">History</Link>). It keeps the latest 256 messages, up to 1,048,576 characters (UTF-16 code units) of serialized text; older ones are dropped, and a larger single message isn't kept. If the client doesn't subscribe within 60 seconds, the kept messages are dropped. A message published just before tailing began can be missing from both the tail and the history you read, if its `onAfterPublish` store hadn't finished; a later history load has it.
 - `Room.close(id)` is idempotent: a missing or already closed room is already at the requested state.
-- A room closes on its own `departureTimeout` after nothing holds it any more, or `emptyTimeout` after if nobody joined it (see <Link href="#when-a-room-closes">When a room closes</Link>). `Infinity` keeps it until `Room.close(id)`.
+- A room closes on its own `departureTimeout` after nothing holds it any more, or `emptyTimeout` after if nobody joined it (see <Link href="#when-a-room-closes">When a room closes</Link>). `Infinity` keeps it until `Room.close(id)`. A join made just as the room closes succeeds, and the participant then leaves with `'closed'`.
 - `Room.announce(id, data)` returns `{ seq, timestamp }` from the room-global order shared with participant `publish()`.
 - `Room.setMeta(id, meta)` replaces the room's metadata wholesale; `Room.setAttributes(id, attributes)` merges per key (a key set to `undefined` is removed). Both propagate to observers.
-- `Room.removeParticipant(id, target)` and `Room.send(id, target, data)` take one participant ref for `target`: `{ id }` for a single membership (throws when unknown), or `{ identity }` for every membership of an identity at once. An absent `{ identity }` matches nobody and is a successful no-op; for `removeParticipant`, so is any `{ identity }` in a room that is missing or closed. `removeParticipant` carries its `reason` in that object: `{ id, reason? }` or `{ identity, reason? }`.
+- `Room.removeParticipant(id, target)` and `Room.send(id, target, data)` take one participant ref for `target`: `{ id }` for a single membership (throws when unknown), or `{ identity }` for every membership of an identity at once. An absent `{ identity }` matches nobody and succeeds, doing nothing. `removeParticipant` with `{ identity }` also succeeds, doing nothing, when the room is missing or closed. `removeParticipant` carries its `reason` in that object: `{ id, reason? }` or `{ identity, reason? }`.
 - `Room.getParticipants(id, target?)` is a server-side point-in-time read (no live view, no subscription). Omit `target` for the whole roster; pass `{ identity }` to read one user's memberships, the cheap "is this user online" check that doesn't load the roster. `[]` for an absent identity.
 - Typed generics: `Room.get<ChatMeta, MemberMeta, ChatMsg>(id)` types `room.meta`, `join`/`setMeta`, and `from.meta` (the first two generics) and `publish`/`subscribe` (the third, the message type); `Room.list<ChatMeta>()` types each `RoomInfo.meta`. The metadata generics are unchecked assertions you supply; the message type is different, it is enforced at runtime (see <Link href="#validating-messages">Validating messages</Link>).
 
@@ -553,7 +560,7 @@ State getters: `id`, `meta`, `count`, `isEmpty`, `isClosed`. Counts and presence
 
 `info.seq` counts up by one per message in its order. Participant `publish()` text and `Room.announce()` share one order; each member's binary track and each participant's private messages have their own. A participant's publishes take their `seq` in the order it called `publish()`. Closing and recreating a room restarts every order at `1`, so persist your own lifecycle id beside `seq` if one history spans several.
 
-A client is let go once it falls further behind the room's messages than the server holds for it, 80 MiB with the defaults as for a <Link href="/channel#errors">`BroadcastChannel`</Link>, or was offline while more than `config.channel.bufferLimit` (`bufferLimitBinary` for binary) was sent to it and one of the room's messages was dropped. If it missed only room state (members, their meta, the room's meta), it gets the current state as it reconnects and stays. The requests it still has in flight reject with `ChannelOverflowError`.
+A client is disconnected (its room closes and its participants leave with `'disconnected'`) when it falls more than 80 MiB behind the room's messages, as a <Link href="/channel#errors">`BroadcastChannel`</Link> does. That's with the default <Link href="/channel-config">replay buffers</Link>; lowering `serverReplayBuffer` or `serverReplayBufferBinary` lowers it. It is also disconnected when it was offline while more than `config.channel.bufferLimit` (`bufferLimitBinary` for binary) was sent to it, and a room message was dropped. If only room state was dropped (members, their meta, the room's meta), it gets the current state as it reconnects and stays. Its requests still in flight reject with `ChannelOverflowError`. A `LocalParticipant` returned to a client on its own follows a channel's limits instead (see <Link href="/channel#backpressure">Backpressure</Link>).
 
 ### `LocalParticipant`
 
@@ -564,17 +571,21 @@ Your own handle, from `join()`. Room-wide messages arrive on the room and each `
 | `publish(data, { coalesce?, retain? }?)` | Publish to the whole room. `coalesce` conflates a same-key burst on the client; `retain: true` keeps it as the room's last message for late subscribers (`retain` is a boolean). |
 | `publishBinary(data, { track?, meta?, retain? }?)` | Publish raw binary. `retain` keeps the last frame per track for late subscribers. Its receipt's `receivers` is `0` when nobody anywhere subscribes to the track; Redis Cluster leaves it out. |
 | `send(to, data)` | Private message to one participant (or their id). Resolves with the receipt `{ seq, timestamp }` (best-effort). |
-| `send(to, data, { ack: true })` | Confirmed send: waits up to 60 seconds for the recipient's `listen` handler and resolves with `{ response, seq, timestamp }`, rejecting on timeout, the sender's or recipient's leave, pre-listener inbox overflow, or a recipient that removed every `listen` handler — or with the handler's `Abort` (a plain throw is hidden as a bug). |
+| `send(to, data, { ack: true })` | Confirmed send: resolves with `{ response, seq, timestamp }` once the recipient's `listen` handler returns. |
 | `listen(cb)` | Receive private messages: `(data, from)`, `from` is `null` for room-authored. Return a value to reply to a `send(…, { ack: true })` sender; `throw Abort(value)` to reject them with it. |
 | `setMeta(meta)` / `setAttributes(partial)` | Replace / merge your metadata. |
 | `onDemand(cb)` | `(track, wanted)` when a track of yours goes watched or unwatched; `wanted === false` means nobody watching. |
 | `leave()` / `onLeave(cb)` | Leave / observe your own departure: `cause.type` is `'left' \| 'removed' \| 'closed' \| 'disconnected'`. |
 
-Read-only: `id`, `meta`, `identity`, `selfDelivery`. A participant leaves automatically when its holder's connection is gone, or when the client holding it falls further behind than the server holds for it (`cause: 'disconnected'`). A `LocalParticipant` returned to a client is let go once that client falls further behind the messages sent to it than the server holds for a <Link href="/channel#backpressure">channel's receiver</Link>, or misses one of them offline.
+Read-only: `id`, `meta`, `identity`, `selfDelivery`. A participant leaves with `'disconnected'` when its client's connection is gone, or when its client is disconnected for falling behind (see <Link href="#room">`Room`</Link>).
 
-A late subscriber gets a retained message once, ahead of the live messages, and not at all if a newer message of the same publisher (and, for binary, the same track) already reached it; listeners added later on the same client or server share that copy. A replayed message keeps its `info.seq` and `info.timestamp`.
+A `send(…, { ack: true })` waits up to 60 seconds. It rejects on timeout, when the sender or recipient leaves, when the recipient's inbox overflows before its first `listen()`, or when the recipient removed every `listen` handler. It rejects with the handler's `Abort` if the handler throws one; any other throw is hidden as a bug.
 
-A publish made while its server is still subscribing to the same messages, as right after a `subscribe()` there, waits for that subscription. The publishes waiting hold at most `config.channel.bufferLimit` (`bufferLimitBinary` for binary) bytes; one past that rejects with `ChannelOverflowError`.
+Track names are limited to 255 UTF-8 bytes and a frame's serialized `meta` to 65,535 bytes. On the client, one room subscribes to at most 4,096 tracks at once, and `subscribeBinary()` past that throws. `{ track: 'mic' }` counts once room-wide and once per member you subscribe it on; subscribing without a `track` counts none.
+
+A late subscriber gets a retained message once, ahead of the live messages, and not at all if a newer message of the same publisher (and, for binary, the same track) already reached it; listeners you add later on the same client or server don't get it again. A replayed message keeps its `info.seq` and `info.timestamp`.
+
+A publish right after a `subscribe()` on the same server waits, up to a minute, until that subscriber can receive it; after a minute it goes out without waiting. Waiting publishes count their size plus 256 bytes against `config.channel.bufferLimit` (`bufferLimitBinary` for binary), and one past that rejects with `ChannelOverflowError`. To avoid it, `await` each publish, or raise the limit.
 
 Before the first `listen()`, a participant holds private messages up to `config.channel.bufferLimit` bytes and drops the oldest past that. If that message requested an acknowledgement, its sender rejects with an inbox-overflow error; an unacknowledged send has no delivery confirmation.
 
