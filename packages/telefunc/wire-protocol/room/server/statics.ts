@@ -50,7 +50,7 @@ import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
 import { metaEntriesAt, metaObjectOf } from '../meta-state.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { cleanupFinalizedIncarnation, closeIncarnation, takeOverClose } from './close.js'
-import { createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
+import { cancelClose, createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
 import { listRoom, repairRoomIndex, sweepLapsedRoomsSoon } from './directory.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 
@@ -316,7 +316,8 @@ async function setRoomAttributes(id: string, attributes: RoomMeta): Promise<void
 
 async function closeRoom(id: string): Promise<void> {
   assertRoomId(id)
-  await closeIncarnation(id)
+  const closed = await closeIncarnation(id)
+  if (closed !== null) cancelClose(id, closed)
 }
 
 async function resolveParticipantRef(incarnation: RoomIncarnation, target: ParticipantRef): Promise<MemberSnapshot[]> {

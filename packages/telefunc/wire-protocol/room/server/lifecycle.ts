@@ -1,4 +1,4 @@
-export { newHoldConfig, holdCounts, holdChange, afterHoldChange, createHold, maintainHold, lapseNewRoom }
+export { newHoldConfig, holdCounts, holdChange, afterHoldChange, createHold, maintainHold, lapseNewRoom, cancelClose }
 export type { RoomIncarnation }
 
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
@@ -170,19 +170,28 @@ async function extendLapse({ id, inc }: RoomIncarnation, record: HoldRecord, fir
   })
 }
 
-/** One close timer per room in this process; it checks the record again when it fires. */
-const closeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+/** One close timer per room in this process, with the incarnation it closes; it checks the record again when it
+ *  fires. */
+const closeTimers = new Map<string, { inc: string; timer: ReturnType<typeof setTimeout> }>()
 
 function scheduleClose(room: RoomIncarnation, closesIn: number): void {
-  clearTimeout(closeTimers.get(room.id))
+  clearTimeout(closeTimers.get(room.id)?.timer)
   const delay = Math.min(Math.max(closesIn, 0), TIMER_DELAY_MAX_MS)
   const timer = unrefTimer(
     setTimeout(() => {
-      if (closeTimers.get(room.id) === timer) closeTimers.delete(room.id)
+      if (closeTimers.get(room.id)?.timer === timer) closeTimers.delete(room.id)
       void closeIfUnheld(room).catch(reportRoomError)
     }, delay),
   )
-  closeTimers.set(room.id, timer)
+  closeTimers.set(room.id, { inc: room.inc, timer })
+}
+
+/** Incarnation `inc` closed: its close timer goes, a recreated room's stays. */
+function cancelClose(id: string, inc: string): void {
+  const scheduled = closeTimers.get(id)
+  if (scheduled?.inc !== inc) return
+  clearTimeout(scheduled.timer)
+  closeTimers.delete(id)
 }
 
 async function closeIfUnheld(room: RoomIncarnation): Promise<void> {

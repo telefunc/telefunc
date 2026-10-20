@@ -26,6 +26,7 @@ import type { Sender } from '../types.js'
 import { ClientRoom } from '../client.js'
 import { RoomModel, remoteBacking } from '../state.js'
 import { Room } from './statics.js'
+import { cancelClose } from './lifecycle.js'
 import { ServerRoom, type ServerLocalParticipant } from './room.js'
 import { configFromHead, decodeRoomText, encodeRoomRecord } from './lanes.js'
 import { config, getServerConfig, reconnectWindow } from '../../../node/server/serverConfig.js'
@@ -1690,6 +1691,22 @@ describe('Room public behavior', () => {
     await Room.create('next-session')
     await vi.waitFor(() => expect(memoryState.rooms.has(room.id)).toBe(false))
     expect(memoryState.directory.has(room.id)).toBe(false)
+  })
+  it('keeps no close timer of a room it closed, however many rooms it creates and closes', async () => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] })
+    const before = vi.getTimerCount()
+    for (let i = 0; i < 100; i++) await Room.close((await Room.create(`closed-timer-${i}`)).id)
+    await vi.advanceTimersByTimeAsync(75_000)
+    expect(vi.getTimerCount() - before).toBeLessThan(10)
+  })
+  it("closes a recreated room on its own, though a close of the room's earlier incarnation ends after it", async () => {
+    vi.useFakeTimers()
+    const first = (await Room.create('recreated', { emptyTimeout: 1_000 })) as ServerRoom
+    await Room.close(first.id)
+    await Room.create('recreated', { emptyTimeout: 1_000 })
+    cancelClose(first.id, first._incarnation.inc)
+    await vi.advanceTimersByTimeAsync(2_000)
+    expect((await driver.readHead(first.id))?.state).toBe('closed')
   })
   it('lists a closing room without dropping the incarnation its close still owns', async () => {
     const room = (await Room.create('closing-listed')) as ServerRoom

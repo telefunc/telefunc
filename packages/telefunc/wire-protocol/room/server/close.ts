@@ -6,18 +6,18 @@ import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from './constants.js'
 import { commitControl, configFromHead } from './lanes.js'
 
-/** Closes the room, or only its incarnation `inc` when given. */
-async function closeIncarnation(id: string, inc?: string): Promise<void> {
+/** Closes the room, or only its incarnation `inc` when given; returns the incarnation that ended closed, if any. */
+async function closeIncarnation(id: string, inc?: string): Promise<string | null> {
   const backend = getRoomBackend()
   for (;;) {
     const current = await backend.readHead(id)
-    if (current === null) return
+    if (current === null) return null
     if (current.state === 'closed') {
       await cleanupFinalizedIncarnation(backend, id, current)
-      return
+      return configFromHead(current).inc
     }
-    if (inc !== undefined && current.currentInc !== inc) return
-    if (await takeOverClose(backend, id, current)) return
+    if (inc !== undefined && current.currentInc !== inc) return null
+    if (await takeOverClose(backend, id, current)) return current.currentInc
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
 }
