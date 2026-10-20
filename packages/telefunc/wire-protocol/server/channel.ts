@@ -162,16 +162,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    this._flow = new FlowControl(
-      {
-        byteWindowUpdate: (limit, kind) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq, kind),
-        msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
-        bdpPing: (probe) => this._peer?.sendBdpPing(probe),
-      },
-      () => this._peer?.sender.bufferedAmount(),
-      Number.POSITIVE_INFINITY,
-      () => this._peer?.sender.sendWait() ?? null,
-    )
+    this._flow = new FlowControl({
+      byteWindowUpdate: (limit, kind) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq, kind),
+      msgWindowUpdate: (limit) => this._peer?.sendMsgWindowUpdate(limit),
+      bdpPing: (probe) => this._peer?.sendBdpPing(probe),
+      backlog: () => this._peer?.sender.bufferedAmount(),
+      sendWait: () => this._peer?.sender.sendWait() ?? null,
+    })
     const c = getServerConfig().channel
     this._flow.fitReplays(
       replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary),
