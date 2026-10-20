@@ -258,15 +258,16 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 })
 ```
 
-`publish()` returns a receipt and `subscribe()` receives the same `info`:
+`subscribe()` receives this `info`, and `publish()` resolves to the same fields plus `receivers`:
 
 ```js
 info.key        // 'room:lobby' — the broadcast key
 info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
+info.receivers  // publish() only: who the message was handed to
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted. A publish right after a `subscribe()` on the same server (on Cloudflare, in the same session) reaches that subscriber: while the new subscription is being set up, that server's publishes on its key wait for it, in call order, for up to 60 seconds. The publishes waiting on a key hold at most `config.channel.bufferLimit` (`bufferLimitBinary` for binary) bytes; a publish past that rejects with a `ChannelOverflowError`.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt once the message is accepted. A publish right after a `subscribe()` on the same server (on Cloudflare, in the same session) reaches that subscriber: while the new subscription is being set up, that server's publishes on its key wait for it, in call order, for up to 60 seconds. The publishes waiting on a key hold at most `config.channel.bufferLimit` (`bufferLimitBinary` for binary) bytes; a publish past that rejects with a `ChannelOverflowError`.
 
 `receivers` counts who the message was handed to: subscribers with the in-memory backend, server instances with standalone Redis, session Durable Objects on Cloudflare. With each of them `0` means nobody anywhere is subscribed; Redis Cluster omits it, since a node counts only its own subscribers.
 
@@ -407,7 +408,7 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 | Methods | `send()` / `listen()` | `publish()` / `subscribe()` |
 | Delivery | The other end | Every subscriber of the `key`, including the publisher |
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance, and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
-| Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
+| Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp, receivers }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
 | Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#broadcast">Cross-instance backend</Link> |
 

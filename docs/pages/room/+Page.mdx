@@ -268,7 +268,7 @@ room.onAnnounce((data) => showBanner(data))
 me.listen((data, from) => (from === null ? showSystemNotice(data) : showDm(from.meta.name, data)))
 ```
 
-The receipt is `{ seq, timestamp }` in the same room-global order as participant text published with `publish()`, so their receipts are comparable within the same room incarnation.
+The receipt is `{ seq, timestamp }` in the same room-global order as participant text published with `publish()`, so their receipts are comparable until the room is closed and recreated.
 
 ### Server-side authority
 
