@@ -1,6 +1,5 @@
 export { RoomMetaState, compareMetaEntries, metaEntriesAt, metaObjectOf }
 
-import { deepFreeze } from '../../utils/deepFreeze.js'
 import type { RoomMetaEntry, RoomMetaUpdate } from './protocol.js'
 import type { RoomMeta } from './types.js'
 
@@ -19,7 +18,7 @@ function metaObjectOf(entries: Iterable<RoomMetaEntry>): RoomMeta {
 }
 
 /** A room meta as a view keeps it: its updates apply in `seq` order, each in what it changed, and the plain object is
- *  built when read. Its entries are frozen all the way down: every read shares their values. */
+ *  built when read. */
 class RoomMetaState {
   /** In key order while `_ordered`. */
   private _entries: Map<string, RoomMetaEntry>
@@ -33,7 +32,7 @@ class RoomMetaState {
   private readonly _waiting = new Map<number, RoomMetaUpdate>()
 
   constructor(entries: readonly RoomMetaEntry[], seq: number) {
-    this._entries = new Map(entries.map((entry) => [entry[0], deepFreeze(entry)]))
+    this._entries = new Map(entries.map((entry) => [entry[0], entry]))
     this._last = entries.at(-1)
     this._seq = seq
   }
@@ -84,7 +83,7 @@ class RoomMetaState {
     this._seq = update.seq
     this._object = null
     if ('meta' in update) {
-      this._entries = new Map(update.meta.map((entry) => [entry[0], deepFreeze(entry)]))
+      this._entries = new Map(update.meta.map((entry) => [entry[0], entry]))
       this._last = update.meta.at(-1)
       this._ordered = true
       return
@@ -98,7 +97,6 @@ class RoomMetaState {
   /** A key keeps its spot while its place holds; a key placed anew goes after the last one, out of order if it sorts
    *  before it. */
   private _set(entry: RoomMetaEntry): void {
-    deepFreeze(entry)
     const found = this._entries.get(entry[0])
     if (found !== undefined && found[2] === entry[2] && found[3] === entry[3]) {
       this._entries.set(entry[0], entry)

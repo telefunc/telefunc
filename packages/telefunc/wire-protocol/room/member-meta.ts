@@ -1,7 +1,6 @@
 export { MemberMeta }
 export type { MetaRewinds }
 
-import { deepFreeze } from '../../utils/deepFreeze.js'
 import type { MemberMetaUpdate } from './protocol.js'
 import type { ParticipantMeta } from './types.js'
 
@@ -15,8 +14,7 @@ type MetaRewinds = { count: number }
 const NEVER_REWOUND: MetaRewinds = Object.freeze({ count: 0 })
 
 /** A member's meta as a view keeps it: its updates apply in `seq` order, a merge in what it changed, and the object is
- *  built when read. What it is given is owned already, as an API argument copied or a frame or record decoded, and it
- *  freezes it all the way down: every read shares it. */
+ *  built when read. What it is given is owned already, as an API argument copied or a frame or record decoded. */
 class MemberMeta {
   private _object: ParticipantMeta
   private _keys: number
@@ -28,7 +26,7 @@ class MemberMeta {
   private _rewindsSeen: number
 
   constructor(meta: ParticipantMeta, seq: number, rewinds = NEVER_REWOUND) {
-    this._object = deepFreeze(meta)
+    this._object = Object.freeze(meta)
     this._keys = Object.keys(this._object).length
     this._seq = seq
     this._rewinds = rewinds
@@ -86,7 +84,7 @@ class MemberMeta {
   apply(update: MemberMetaUpdate): 'applied' | 'stale' | 'gap' {
     if (update.seq <= this.seq) return 'stale'
     if ('meta' in update) {
-      this._object = deepFreeze(update.meta)
+      this._object = Object.freeze(update.meta)
       this._keys = Object.keys(this._object).length
       this._merges = null
       this._mergedKeys = 0
@@ -95,7 +93,7 @@ class MemberMeta {
     }
     if (update.seq > this._seq + 1) return 'gap'
     this._merges ??= []
-    this._merges.push(deepFreeze(update.attrs))
+    this._merges.push(update.attrs)
     this._mergedKeys += Object.keys(update.attrs).length
     this._seq = update.seq
     if (this._mergedKeys > Math.max(MEMBER_META_MERGES_HELD_MIN, this._keys)) this._fold(this._merges)
