@@ -193,7 +193,7 @@ class PieceSender {
     }
     this.count(frame, data)
     if (acknowledges(bytes)) this.track(bytes, performance.now(), false)
-    turn.add(frame, data, true)
+    turn.addSent(frame, data)
   }
 
   /** Counts `frame` as it joins what it gathers, after the LENGTH the frame before it needs now. */
@@ -463,7 +463,7 @@ class PieceSender {
       if (frame === null) continue
       this.room.sentFrame(frame[0]!, frame.byteLength)
       this.count(frame, false)
-      this.turn.add(frame, false, false)
+      this.turn.add(frame)
     }
   }
 }
@@ -502,16 +502,19 @@ class TurnMessage {
     this.bytes += this.lengthAhead
   }
 
-  /** Adds `frame`, of data or not, sent (`own`) or carried, after its LENGTH. */
-  add(frame: Uint8Array<ArrayBuffer>, data: boolean, own: boolean): void {
+  /** Adds `frame`, of data or not, that it sends, after its LENGTH. */
+  addSent(frame: Uint8Array<ArrayBuffer>, data: boolean): void {
+    this.own = true
+    if (data) this.data = true
+    else this.atOnce = true
+    this.add(frame)
+  }
+
+  /** Adds `frame`, sent or carried, after its LENGTH. */
+  add(frame: Uint8Array<ArrayBuffer>): void {
     this.frames.push(frame)
     this.bytes += frame.byteLength
     this.lastVaries = fixedBytes(frame[0]!) === 0
-    if (own) {
-      this.own = true
-      if (data) this.data = true
-      else this.atOnce = true
-    }
     if (this.flushQueued) return
     this.flushQueued = true
     queueMicrotask(this.endTurn)
