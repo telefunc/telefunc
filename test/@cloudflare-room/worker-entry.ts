@@ -394,6 +394,7 @@ async function everyTrackRoutes(env: Env, suffix: string) {
     ['m', 'mic', 'mic-1'],
     ['other', 'camera', 'other'],
     ['m', 'camera', 'camera-2'],
+    ['other', 'mic', 'unrouted'],
   ] as const) {
     const frame = textEncoder.encode(text)
     const commit = accepted(await probe.authority.commitLane(probe.inc, { kind: 'binary', member, track }, frame), text)

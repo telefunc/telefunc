@@ -147,6 +147,19 @@ describe('a room nothing holds closes on its own', () => {
     await vi.advanceTimersByTimeAsync(ROOM_EMPTY_TIMEOUT_MS)
     await expectClosed(room.id, closed)
   })
+  it("removes a stopped server's member with 'disconnected' within three minutes, and the room closes departureTimeout after at the latest", async () => {
+    const room = await Room.create('server-stops')
+    const closed = await observe(room.id)
+    const causes: string[] = []
+    room.onLeave((_, cause) => causes.push(cause.type))
+    const other = await anotherServer()
+    await (await other.Room.get(room.id)).join()
+    await other.crash()
+    await vi.advanceTimersByTimeAsync(3 * 60_000)
+    expect(causes).toEqual(['disconnected'])
+    await vi.advanceTimersByTimeAsync(ROOM_DEPARTURE_TIMEOUT_MS)
+    await expectClosed(room.id, closed)
+  })
   it("keeps a room whose creation's hold count failed to write open under its members", async () => {
     vi.spyOn(driver, 'compareExchangeCells').mockRejectedValueOnce(new Error('transient'))
     await expect(Room.create('hold-write-failed')).rejects.toThrow('transient')
