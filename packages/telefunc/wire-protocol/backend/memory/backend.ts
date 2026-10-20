@@ -38,6 +38,7 @@ import {
 import type { OrderingInfo } from '../../ordering-frame.js'
 import type { BroadcastKind } from '../../shared-ws.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
+import { Fifo } from '../../../utils/Fifo.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
@@ -208,10 +209,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
   private readonly _state: MemoryBackendState
-  /** Deliveries in seq order from `_next`: the running one stays queued, so a publish made inside
-   *  it is delivered after. */
-  private readonly _deliveries: Array<() => void> = []
-  private _next = 0
+  /** Deliveries in seq order: the running one stays queued, so a publish made inside it is delivered after. */
+  private readonly _deliveries = new Fifo<() => void>()
   private _deliveredThisTurn = 0
   /** Lane commits whose delivery is not queued yet. */
   private _committing = 0
@@ -249,7 +248,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   private _deliversNow(): boolean {
-    return this._deliveries.length === this._next && this._deliveredThisTurn < DELIVERIES_PER_TURN
+    return this._deliveries.length === 0 && this._deliveredThisTurn < DELIVERIES_PER_TURN
   }
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
@@ -260,20 +259,17 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   private _drain(): void {
-    for (; this._next < this._deliveries.length; this._next++) {
+    for (let delivery = this._deliveries.peek(); delivery !== undefined; delivery = this._deliveries.peek()) {
       if (this._deliveredThisTurn === DELIVERIES_PER_TURN) return
       if (this._deliveredThisTurn++ === 0) nextTurn(() => this._nextTurn())
-      this._deliveries[this._next]!()
+      delivery()
+      this._deliveries.shift()
     }
-    this._deliveries.length = 0
-    this._next = 0
   }
 
   private _nextTurn(): void {
     this._deliveredThisTurn = 0
-    this._deliveries.splice(0, this._next)
-    this._next = 0
-    if (this._deliveries.length > 0) this._drain()
+    this._drain()
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
@@ -397,7 +393,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack) + sumReceiverCounts(everyMember)
     // A commit past a turn's deliveries waits for the next turn, as a network write would,
     // so commits can't outrun them.
-    if (this._deliveries.length - this._next >= DELIVERIES_PER_TURN) await new Promise<void>(nextTurn)
+    if (this._deliveries.length >= DELIVERIES_PER_TURN) await new Promise<void>(nextTurn)
     if (delivered === null) return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers }
     return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
   }
@@ -473,7 +469,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     subs.set(key, [...(subs.get(key) ?? []), sub])
     // Ready once what was committed before it is delivered, as a network subscriber hears its confirmation after the
     // messages sent before it: a lane it replaces delivers those first.
-    if (this._committing === 0 && this._deliveries.length === this._next) sub.establish()
+    if (this._committing === 0 && this._deliveries.length === 0) sub.establish()
     else queueMicrotask(() => this._deliver(() => sub.establish()))
     return sub
   }
