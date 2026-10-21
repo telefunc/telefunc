@@ -65,8 +65,14 @@ class IndexedPeer {
 
   /** Returns its seq. */
   sendCloseRequest(timeoutMs: number): number {
-    this.sendSequenced((seq) => encode.close(this.index, timeoutMs, seq))
-    return this.replay.seq
+    let closeSeq = 0
+    this.sendSequenced(
+      (seq) => encode.close(this.index, timeoutMs, seq),
+      (seq) => {
+        closeSeq = seq
+      },
+    )
+    return closeSeq
   }
 
   sendCloseAck(): void {
