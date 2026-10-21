@@ -173,6 +173,37 @@ function testRoom() {
       expect(r.frames).deep.equal(numbers)
     },
   )
+  testRoomScenario<{
+    stored: { afterAttributes: string[]; roomMeta: [string, unknown][]; memberMeta: [string, unknown][] }
+    roomMeta: [string, unknown][]
+    otherRoomMeta: [string, unknown][]
+    memberMeta: [string, unknown][]
+    otherMemberMeta: [string, unknown][]
+  }>(
+    'meta-race',
+    'room: concurrent meta writes from many callers each apply, and every view ends on the stored meta in its key order',
+    (r) => {
+      const { afterAttributes, roomMeta, memberMeta } = r.stored
+      expect(afterAttributes.length).toBe(201) // the created `topic`, then all 200 keys
+      expect(afterAttributes[0]).toBe('topic')
+      // One Room.setMeta() won whole: its own two keys, in its order.
+      const winner = roomMeta[0]![1] as number
+      expect(roomMeta).deep.equal([
+        ['winner', winner],
+        [`w${winner}`, true],
+      ])
+      // A member's writes apply in call order: its last setMeta(), then the setAttributes() calls after it.
+      expect(memberMeta).deep.equal([
+        ['name', 'Writer'],
+        ['round', 90],
+        ...Array.from({ length: 9 }, (_, i) => [`a${91 + i}`, 91 + i]),
+      ])
+      expect(r.roomMeta).deep.equal(roomMeta)
+      expect(r.otherRoomMeta).deep.equal(roomMeta)
+      expect(r.memberMeta).deep.equal(memberMeta)
+      expect(r.otherMemberMeta).deep.equal(memberMeta)
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',

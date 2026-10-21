@@ -29,6 +29,7 @@ import {
   onSendReusingObjects,
   onPublishRightAfterSubscribe,
   onOpenSlowGuardRoom,
+  onConcurrentMetaWrites,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -383,6 +384,29 @@ function Room() {
         await Promise.all(numbers.flatMap((n) => [me.publish(n), me.publishBinary(new Uint8Array([n]))]))
 
         await pollUntil(() => ({ result: { texts, frames }, done: texts.length >= 20 && frames.length >= 20 }))
+      })}
+
+      {scenario('meta-race', 'Concurrent meta writes', 'Many writers at once', async () => {
+        const [roomId, room] = await createRoom('meta-race')
+        const other = await onGetRoom(roomId)
+        const stored = await onConcurrentMetaWrites(roomId)
+        const member = await getParticipantWhenJoined(room, stored.memberId)
+        const otherMember = await getParticipantWhenJoined(other, stored.memberId)
+
+        await pollUntil(() => {
+          const views = {
+            roomMeta: Object.entries(room.meta),
+            otherRoomMeta: Object.entries(other.meta),
+            memberMeta: Object.entries(member.meta),
+            otherMemberMeta: Object.entries(otherMember.meta),
+          }
+          const settled =
+            JSON.stringify(views.roomMeta) === JSON.stringify(stored.roomMeta) &&
+            JSON.stringify(views.otherRoomMeta) === JSON.stringify(stored.roomMeta) &&
+            JSON.stringify(views.memberMeta) === JSON.stringify(stored.memberMeta) &&
+            JSON.stringify(views.otherMemberMeta) === JSON.stringify(stored.memberMeta)
+          return { result: { stored, ...views }, done: settled }
+        })
       })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {
