@@ -1,7 +1,7 @@
 export { testFunction }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, forceServerGc } from '../../e2e-utils'
 
 function testFunction() {
   test('function: simple greeter returns correct string', async () => {
@@ -115,4 +115,21 @@ function testFunction() {
       expect(search.ms).lessThan(3000)
     })
   })
+
+  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).includes('ws')) {
+    test("function: a call's channel.idleTimeout of 0 closes its connection once the callback it passed is let go", async () => {
+      await navigate(`${getServerUrl()}/function`)
+      const webSocket = page.waitForEvent('websocket', { predicate: (ws) => ws.url().includes('/_telefunc') })
+      await page.click('#idle-timeout-run')
+      const ws = await webSocket
+
+      await autoRetry(async () => {
+        expect(await getResult<number[]>('#idle-timeout-result')).deep.equal([2, 4])
+      })
+      await forceServerGc()
+      await autoRetry(async () => {
+        expect(ws.isClosed()).toBe(true)
+      })
+    })
+  }
 }
