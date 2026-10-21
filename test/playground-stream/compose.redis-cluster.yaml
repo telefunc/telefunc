@@ -45,33 +45,11 @@ services:
           until redis-cli -h "$$host" cluster info | grep -q '^cluster_state:ok'; do sleep 1; done
         done
 
-  redis-cluster-certification:
-    image: node:24-bookworm-slim
-    working_dir: /repo
-    command:
-      - node
-      - node_modules/vitest/vitest.mjs
-      - run
-      - --config
-      - packages/redis/vitest.cluster.config.ts
-      - --reporter=verbose
-    volumes:
-      - ../..:/repo
-    environment:
-      REDIS_CLUSTER_NODES: redis:6379,redis-b:6379,redis-c:6379
-    depends_on:
-      redis:
-        condition: service_healthy
-      redis-b:
-        condition: service_healthy
-      redis-c:
-        condition: service_healthy
-
   playground-a: &cluster-playground
     environment:
       REDIS_CLUSTER_NODES: redis:6379,redis-b:6379,redis-c:6379
     depends_on:
-      redis-cluster-certification:
+      redis-cluster-init:
         condition: service_completed_successfully
 
   playground-b: { <<: *cluster-playground }
