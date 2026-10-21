@@ -17,7 +17,7 @@ import type { ChannelTransports, StreamTransport } from '../../wire-protocol/con
 import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/types.js'
 import { CloseHandler } from '../close.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
+import { GcRegistry } from '../../utils/GcRegistry.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 
 const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {

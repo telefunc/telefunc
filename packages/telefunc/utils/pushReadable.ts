@@ -2,7 +2,7 @@ export { createPushReadable }
 export type { PushReadable }
 
 import type { Readable } from 'node:stream'
-import { getStreamNodeModule } from '../utils/loadStreamNodeModule.js'
+import { getStreamNodeModule } from './loadStreamNodeModule.js'
 
 type PushReadable = Readable & {
   close(): void

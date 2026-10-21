@@ -1,6 +1,6 @@
 export { GcRegistry }
 
-import { unrefTimer } from '../utils/unrefTimer.js'
+import { unrefTimer } from './unrefTimer.js'
 
 type CloseFn = () => void | Promise<void>
 

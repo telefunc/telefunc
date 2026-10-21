@@ -1,6 +1,6 @@
 export { wrapProxy }
 
-import { isObjectOrFunction } from '../utils/isObjectOrFunction.js'
+import { isObjectOrFunction } from './isObjectOrFunction.js'
 
 /** Keeps the wrapper reachable as long as any object derived from it (e.g. a
  *  ReadableStreamReader obtained via `stream.getReader()`, a Promise chain, a

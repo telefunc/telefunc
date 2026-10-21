@@ -16,7 +16,7 @@ import {
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../constants.js'
 import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
-import { createPushReadableStream, type PushReadableStream } from '../push-readable-stream.js'
+import { createPushReadableStream, type PushReadableStream } from '../../utils/pushReadableStream.js'
 import { Uplink } from './uplink.js'
 import { Downlink } from './downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'

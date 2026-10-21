@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { GcRegistry } from './gcRegistry.js'
+import { GcRegistry } from './GcRegistry.js'
 
 const hasGc = typeof (globalThis as { gc?: () => void }).gc === 'function'
 

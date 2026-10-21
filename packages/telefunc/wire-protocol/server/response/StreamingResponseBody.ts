@@ -16,8 +16,8 @@ import type { ResponseAbortSource } from '../../../node/server/context/requestCo
 import type { TelefuncId } from '../../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { restoreContext } from '../../../node/server/context/context.js'
 import type { Context } from '../../../node/server/context/context.js'
-import { createPushReadable } from '../../push-readable.js'
-import { createPushReadableStream } from '../../push-readable-stream.js'
+import { createPushReadable } from '../../../utils/pushReadable.js'
+import { createPushReadableStream } from '../../../utils/pushReadableStream.js'
 
 const EMPTY = new Uint8Array(0)
 
