@@ -16,6 +16,7 @@ import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
+import { testWire } from './pages/channel/wire-e2e-test'
 
 function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
   run(cmd, {
@@ -84,6 +85,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   testClose()
 
   testChannel(isDev)
+
+  testWire(isDev)
 
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.
