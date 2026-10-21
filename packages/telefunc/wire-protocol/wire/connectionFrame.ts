@@ -5,7 +5,6 @@ export {
   encode,
   withTook,
   MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
-  LENGTH_BYTES,
   fixedBytes,
   isOneFrame,
   messageFrames,
@@ -59,12 +58,12 @@ import { assert } from '../../utils/assert.js'
 // `tag` discriminates the frame variant (data, connection ctrl, per-channel ctrl).
 // `index` is the channel ix for per-channel frames; 0 for connection-level frames.
 // `seq` is the replay sequence number of a sequenced frame: a data frame, or a CLOSE, CLOSE_ACK, ABORT or ERROR. Other
-// ctrl frames carry 0, but a LENGTH and a WebSocket's PING, PONG and ANNOUNCE, which say a count there. Seqs count on
+// ctrl frames carry 0, but a WebSocket's PING, PONG and ANNOUNCE, which say a count there. Seqs count on
 // past 32 bits, and a u32 seq on the wire is their low 32 bits, which `decode` returns as they are: the frame's owner
 // reads the whole seq from where it stands on the channel (`seqNear`, `seqThrough`).
 //
 // Tag layout — sparse ranges so range checks classify:
-//   0x01–0x0f  connection-level control (no ix; seq 0 except on a LENGTH and a WebSocket's PING, PONG and ANNOUNCE)
+//   0x01–0x0f  connection-level control (no ix; seq 0 except on a WebSocket's PING, PONG and ANNOUNCE)
 //   0x10–0x29  data plane (carries seq, payload varies)
 //   0x30–      per-channel control (carries ix; seq 0 except on the four closing frames)
 //
@@ -73,10 +72,8 @@ import { assert } from '../../utils/assert.js'
 // Each side tracks the highest seq received and replays after reconnect via reconcile.
 
 const HEADER = 7
-/** Where a header's u32 starts: a frame's seq, or the bytes a LENGTH, PING, PONG or ANNOUNCE carries in its place. */
+/** Where a header's u32 starts: a frame's seq, or the count a PING, PONG or ANNOUNCE carries in its place. */
 const SEQ_OFFSET = 3
-/** A LENGTH is its header. */
-const LENGTH_BYTES = HEADER
 /** How many seqs a u32 tells apart. */
 const SEQ_SPAN = 2 ** 32
 const PING_ENTRY_BYTES = 6
@@ -122,8 +119,6 @@ const TAG = {
   PIECES_ACK: 0x0b as const,
   /** The bytes of the frames that follow at once (see `pieces.ts`). Payload: u32; its seq: the floor in bytes/s. */
   ANNOUNCE: 0x0c as const,
-  /** Its seq: the bytes of the next frame, not its message's last, whose tag doesn't fix them (see `messageFrames`). */
-  LENGTH: 0x0d as const,
 
   // ─── Data plane ───
   TEXT: 0x10 as const,
@@ -537,17 +532,11 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
-  /** `frames`, of `bytes` in all with the LENGTH each before the last needs (see `messageFrames`), in one message. */
+  /** `frames`, of `bytes` in all, every one before the last of a size its tag fixes, in one message. */
   message(frames: readonly Uint8Array[], bytes: number): Uint8Array<ArrayBuffer> {
     const message = new Uint8Array(bytes)
-    const last = frames.length - 1
     let at = 0
-    for (let i = 0; i <= last; i++) {
-      const frame = frames[i]!
-      if (i < last && fixedBytes(frame[0]!) === 0) {
-        writeHeader(message.subarray(at), TAG.LENGTH, 0, frame.byteLength)
-        at += HEADER
-      }
+    for (const frame of frames) {
       message.set(frame, at)
       at += frame.byteLength
     }
@@ -657,7 +646,7 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
 /** Whether a WebSocket `message` holds one frame. */
 function isOneFrame(message: Uint8Array): boolean {
   const bytes = fixedBytes(message[0]!)
-  return message[0] !== TAG.LENGTH && (bytes === 0 || message.byteLength <= bytes)
+  return bytes === 0 || message.byteLength <= bytes
 }
 
 /** The frames of a message of several, each a copy (a `Buffer`'s `slice` is a view), read only as it is taken. */
@@ -665,21 +654,13 @@ function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<
   const end = message.byteLength
   let at = 0
   for (;;) {
-    let bytes = fixedBytes(message[at]!)
-    if (message[at] === TAG.LENGTH) {
-      assertProtocol(end - at > HEADER, 'LENGTH last in its message')
-      bytes = readU32(message, at + SEQ_OFFSET)
-      at += HEADER
-      assertProtocol(fixedBytes(message[at]!) === 0 && bytes >= HEADER && end - at > bytes, 'LENGTH of no frame')
-    } else if (bytes === 0 || end - at <= bytes) {
+    const bytes = fixedBytes(message[at]!)
+    if (bytes === 0 || end - at <= bytes) {
       yield new Uint8Array(message.subarray(at))
       return
     }
     const tag = message[at]
-    assertProtocol(
-      tag !== TAG.PIECE && tag !== TAG.ANNOUNCE && tag !== TAG.LENGTH,
-      'frame ahead of another it never is',
-    )
+    assertProtocol(tag !== TAG.PIECE && tag !== TAG.ANNOUNCE, 'frame ahead of another it never is')
     yield new Uint8Array(message.subarray(at, at + bytes))
     at += bytes
   }

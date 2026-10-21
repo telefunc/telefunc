@@ -11,16 +11,7 @@ import {
   WIRE_PROBE_PAIR_BYTES,
 } from '../constants.js'
 import type { Link } from './Link.js'
-import {
-  LENGTH_BYTES,
-  TAG,
-  assertProtocol,
-  encode,
-  fixedBytes,
-  isSequencedTag,
-  passesData,
-  type PiecesAck,
-} from '../wire/connectionFrame.js'
+import { TAG, assertProtocol, encode, isSequencedTag, passesData, type PiecesAck } from '../wire/connectionFrame.js'
 import { pingDeadline } from '../channel/pingDeadline.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
@@ -541,12 +532,11 @@ abstract class PieceReceiver {
   protected abstract ackWait(): number
 
   /** A whole frame of `tag` and `bytes` arrived at `at`, `'riding'` ahead of its message's last frame, which alone
-   *  dates it; a riding frame whose bytes vary came after its LENGTH, taken with it. */
+   *  dates it. */
   arrived(tag: number, bytes: number, at: number, arrival: 'alone' | 'riding'): void {
     this.took += bytes
     const announced = arrival === 'alone' && this.paced(bytes, at)
     this.tookFrame({ bytes, data: isSequencedTag(tag), announced, at })
-    if (arrival === 'riding' && fixedBytes(tag) === 0) this.took += LENGTH_BYTES
   }
 
   /** Takes an ANNOUNCE that arrived at `at`: one of no bytes opens an announcement, one of its `bytes` closes it. */
