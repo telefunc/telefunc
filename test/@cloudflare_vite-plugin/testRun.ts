@@ -22,7 +22,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
       // workerd logs a response it wrote to a connection the browser closed as it navigated away,
       // before the request's signal could report it.
-      (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')),
+      (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')) ||
+      // testRefusedPresence()'s authority refuses a presence, and the subscription it ended is reported.
+      log.logText.includes('Backend subscription closed: text:refused-presence'),
   })
   testTodolist()
   testChannel()
@@ -352,7 +354,7 @@ function testResubscribe() {
 }
 
 function testRefusedPresence() {
-  test("Broadcast: a publish made while KV refuses its subscriber's presence write settles, and the presence's next refresh writes it", async () => {
+  test("Broadcast: a publish made while the key's authority refuses its subscriber's presence settles, and the subscription that replaces it receives the next publish", async () => {
     await page.goto(getServerUrl() + '/refused-presence')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -361,14 +363,11 @@ function testRefusedPresence() {
     await autoRetry(async () => {
       expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
     })
-    // Each try publishes again: the presence is written at its next refresh, within 30 s.
-    await autoRetry(
-      async () => {
-        await page.click('#publish')
-        expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
-      },
-      { timeout: 40_000 },
-    )
+    // Each try publishes again, until the replacing subscription's presence is recorded.
+    await autoRetry(async () => {
+      await page.click('#publish')
+      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
+    })
   })
 }
 

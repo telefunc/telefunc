@@ -14,32 +14,27 @@ config.channel = {
 // Cloudflare requires Durable Object classes to be named exports of the worker entry.
 // `wrangler.jsonc`'s `main: "vike:server-entry"` re-exports everything from this file,
 // so these reach Cloudflare's binding resolver intact.
-export class TelefuncDurableObject extends tf.TelefuncDurableObject {
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, { ...env, TelefuncKV: refusingFirstPresenceWrite(env.TelefuncKV) })
+export class TelefuncDurableObject extends (tf.TelefuncDurableObject as TelefuncDurableObjectWithPresence) {
+  // Test-only: the key's authority refuses the first presence of each `refused-presence:` key's subscriber.
+  override async telefuncBroadcastPresence(request: PresenceRequest) {
+    if (request.key.startsWith('refused-presence:') && request.bucket !== null && !refusedPresences.has(request.key)) {
+      refusedPresences.add(request.key)
+      throw new Error('Test: the authority refused the presence')
+    }
+    return super.telefuncBroadcastPresence(request)
   }
 }
 export { TodoListDurableObject } from './database/todoItems'
 
-// Test-only: KV refuses the first write of each `refused-presence:` key's presence, as it does a second write to a key within a second.
-const refusedPresences = new Set<string>()
-function refusingFirstPresenceWrite(kv: KVNamespace): KVNamespace {
-  return new Proxy(kv, {
-    get(target, property) {
-      if (property === 'put') {
-        return (key: string, value: Parameters<KVNamespace['put']>[1], options?: KVNamespacePutOptions) => {
-          if (key.startsWith('tfps:refused-presence') && !refusedPresences.has(key)) {
-            refusedPresences.add(key)
-            return Promise.reject(new Error('KV PUT failed: 429 Too Many Requests'))
-          }
-          return target.put(key, value, options)
-        }
-      }
-      const value = Reflect.get(target, property)
-      return typeof value === 'function' ? value.bind(target) : value
-    },
-  })
+// The Durable Object's Broadcast presence RPC, which its public type doesn't name.
+type PresenceRequest = { key: string; bucket: string | null }
+type TelefuncDurableObjectWithPresence = new (
+  ctx: DurableObjectState,
+  env: Env,
+) => InstanceType<typeof tf.TelefuncDurableObject> & {
+  telefuncBroadcastPresence(request: PresenceRequest): Promise<void>
 }
+const refusedPresences = new Set<string>()
 
 // vike's docs example uses `export default vike` directly — meaning when vike is the
 // worker entry's default, Cloudflare invokes vike.fetch with `(request, env, ctx)`.
