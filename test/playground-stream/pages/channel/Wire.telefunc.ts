@@ -73,13 +73,16 @@ async function onWireOverrun(count: number) {
  * A channel the server closes or aborts at server action wireEnd_<id>_close or wireEnd_<id>_abort, after sending
  * `before` messages, or the page ends.
  *
- * cleanupState: wireEnd_<id>_onClose = 'none', 'abort:<value as JSON>' or the error's name; wireEnd_<id>_close = what the server's close() resolved to.
+ * cleanupState: wireEnd_<id>_onOpen = 'true' once it opens; wireEnd_<id>_onClose = 'none', 'abort:<value as JSON>' or the error's name; wireEnd_<id>_close = what the server's close() resolved to.
  */
 async function onWireEnd(before: number) {
   const ch = new Channel<never, (message: string) => void>()
   const sendBefore = () => {
     for (let n = 0; n < before; n++) void ch.send(`m${n}`)
   }
+  ch.onOpen(() => {
+    cleanupState[`wireEnd_${ch.id}_onOpen`] = 'true'
+  })
   ch.onClose((err) => {
     cleanupState[`wireEnd_${ch.id}_onClose`] = describeEnd(err)
   })

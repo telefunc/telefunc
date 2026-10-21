@@ -1,7 +1,7 @@
 export { testWire, testWireSmallReplay }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState, runServerAction, cutWire } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, runServerAction, cutWire, dropNextWebSocket } from '../../e2e-utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
@@ -97,6 +97,19 @@ function testWire(isDev: boolean) {
       expect(ss[`wireEnd_${channelId}_onClose`]).toBe('abort:undefined')
     })
   })
+
+  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
+    test('channel: a channel whose first WebSocket a network drop stops opens on the next', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await dropNextWebSocket()
+      await page.click('#wire-end-open')
+      await autoRetry(async () => {
+        const { end } = await getResult<WireState>('#wire-state')
+        expect((await getCleanupState())[`wireEnd_${end!.channelId}_onOpen`]).toBe('true')
+        expect(end!.received).deep.equal([])
+      })
+    })
+  }
 }
 
 async function openEnd(): Promise<string> {
