@@ -1,11 +1,11 @@
 import { expect, test } from 'vitest'
-import '../../../../node/server/async_hooks.js'
+import '../../../node/server/async_hooks.js'
 import { CloudflareBackend, type CloudflareRoomNamespace } from './backend.js'
 import { CloudflareRoomSessionManager } from './room/subscription.js'
-import { CloudflareBroadcast } from '../../../adapter/cloudflare/broadcast.js'
+import { CloudflareBroadcast } from './broadcast.js'
 import { withCloudflareSession } from './session.js'
-import { OrderedStubs } from './ordered-stubs.js'
-import { ChannelMux } from '../../../channel/server/mux.js'
+import { OrderedStubs } from './OrderedStubs.js'
+import { ChannelMux } from '../../channel/server/mux.js'
 
 const noBroadcast = () => {
   throw new Error('this spec uses no Broadcast')

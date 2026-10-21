@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
-import { OrderedStubs } from '../../server/adapter/cloudflare/ordered-stubs.js'
+import { OrderedStubs } from './OrderedStubs.js'
 
 const mocks = vi.hoisted(() => {
   const crosswsAdapter = {

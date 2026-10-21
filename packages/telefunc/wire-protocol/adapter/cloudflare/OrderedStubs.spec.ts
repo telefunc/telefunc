@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createDeferred } from '../../../../utils/createDeferred.js'
-import { OrderedStubs } from './ordered-stubs.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
+import { OrderedStubs } from './OrderedStubs.js'
 
 type Stub = { id: number; calls: string[] }
 

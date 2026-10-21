@@ -7,7 +7,7 @@ import type {
   BroadcastPayload,
   BroadcastRoute,
   PublishResult,
-} from '../../../backend/broadcast/contract.js'
+} from '../../backend/broadcast/contract.js'
 import type {
   CellsCx,
   CellSelector,
@@ -26,10 +26,10 @@ import type {
   RoomDriver,
   RoomHead,
   RoomSubscriptionSource,
-} from '../../../backend/room/contract.js'
-import type { SubscriptionBinding, SubscriptionDriver } from '../../../backend/subscription.js'
-import type { OrderingInfo } from '../../../wire/orderingFrame.js'
-import type { CloudflareBroadcast } from '../../../adapter/cloudflare/broadcast.js'
+} from '../../backend/room/contract.js'
+import type { SubscriptionBinding, SubscriptionDriver } from '../../backend/subscription.js'
+import type { OrderingInfo } from '../../wire/orderingFrame.js'
+import type { CloudflareBroadcast } from './broadcast.js'
 import type { CloudflareRoomAuthorityStub } from './room/do.js'
 import { currentCloudflareSession, requireCloudflareSession } from './session.js'
 

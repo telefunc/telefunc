@@ -23,7 +23,7 @@ import type {
   BroadcastPresenceRequest,
   BroadcastPublishRequest,
 } from '../wire-protocol/adapter/cloudflare/broadcast.js'
-import { OrderedStubs } from '../wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
+import { OrderedStubs } from '../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
@@ -36,14 +36,14 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
-import { CloudflareBackend } from '../wire-protocol/server/adapter/cloudflare/backend.js'
+import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/backend.js'
 import {
   CloudflareRoomSessionManager,
   type RoomSessionDeliveryRequest,
-} from '../wire-protocol/server/adapter/cloudflare/room/subscription.js'
-import { RoomAuthority } from '../wire-protocol/server/adapter/cloudflare/room/do.js'
-import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/server/adapter/cloudflare/session.js'
-import type { TelefuncDurableObjectNamespace } from '../wire-protocol/server/adapter/cloudflare/namespace.js'
+} from '../wire-protocol/adapter/cloudflare/room/subscription.js'
+import { RoomAuthority } from '../wire-protocol/adapter/cloudflare/room/do.js'
+import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
+import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 
 /** A Durable Object takes a WebSocket message of 32 MiB at most. */

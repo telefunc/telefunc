@@ -3,12 +3,12 @@ import { DurableObject } from 'cloudflare:workers'
 import { Telefunc } from '../../packages/telefunc/serve/cloudflare.js'
 import { decorateTelefunction } from '../../packages/telefunc/node/server/runTelefunc/decorateTelefunction.js'
 import type { HeadCxResult, RoomHead } from '../../packages/telefunc/wire-protocol/backend/room/contract.js'
-import type { RoomSessionDeliveryRequest } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/subscription.js'
+import type { RoomSessionDeliveryRequest } from '../../packages/telefunc/wire-protocol/adapter/cloudflare/room/subscription.js'
 import {
   RoomAuthority,
   type AcceptedCommitWire,
   type CommitWire,
-} from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
+} from '../../packages/telefunc/wire-protocol/adapter/cloudflare/room/do.js'
 import { TELEFUNC_BROADCAST_BUCKET_HEADER } from '../../packages/telefunc/wire-protocol/adapter/cloudflare/routing.js'
 import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/broadcast/ServerBroadcast.js'
 import { getChannelMux } from '../../packages/telefunc/wire-protocol/channel/server/mux.js'

@@ -1,6 +1,6 @@
 import { expect, test, vi } from 'vitest'
-import { ROOM_HORIZON_MS } from '../../../../room/server/constants.js'
-import { Fanout, type RoomSessionNamespace } from './fanout.js'
+import { ROOM_HORIZON_MS } from '../../../room/server/constants.js'
+import { Fanout, type RoomSessionNamespace } from './Fanout.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
 
 const route = { roomId: 'room', inc: 'inc', laneKey: 'semantic', sessionDoId: 'session', leaseId: 'lease' }

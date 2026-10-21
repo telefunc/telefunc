@@ -1,11 +1,11 @@
 export { Fanout }
 export type { RoomSessionNamespace, RoomSessionStub }
 
-import type { OrderingInfo } from '../../../../wire/orderingFrame.js'
-import { ROOM_HORIZON_MS } from '../../../../room/server/constants.js'
+import type { OrderingInfo } from '../../../wire/orderingFrame.js'
+import { ROOM_HORIZON_MS } from '../../../room/server/constants.js'
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
-import { OrderedStubs, reportLostDeliveries } from '../ordered-stubs.js'
+import { OrderedStubs, reportLostDeliveries } from '../OrderedStubs.js'
 
 type RoomSessionStub = {
   telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void>

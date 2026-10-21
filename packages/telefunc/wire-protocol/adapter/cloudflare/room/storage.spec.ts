@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import type { CellsCx } from '../../../../backend/room/contract.js'
+import type { CellsCx } from '../../../backend/room/contract.js'
 import {
   advanceOrder,
   compareExchangeCells,
@@ -16,8 +16,8 @@ import {
 } from './storage.js'
 import { snapshotRoutes, upsertRoute } from './routes.js'
 import { deleteRetained, installRetained, listRetained } from './retained.js'
-import { encodeLaneKey } from '../../../../backend/room/laneKey.js'
-import { sqliteStorage } from '../../../../test/cloudflare-sql.js'
+import { encodeLaneKey } from '../../../backend/room/laneKey.js'
+import { sqliteStorage } from '../../../test/cloudflare-sql.js'
 
 function sqlStorage() {
   const { storage, plans } = sqliteStorage()

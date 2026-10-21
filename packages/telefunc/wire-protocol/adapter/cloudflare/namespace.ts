@@ -1,9 +1,9 @@
 /// <reference types="@cloudflare/workers-types" />
 export type { TelefuncDurableObjectNamespace }
 
-import type { TelefuncBroadcastStub } from '../../../adapter/cloudflare/broadcast.js'
+import type { TelefuncBroadcastStub } from './broadcast.js'
 import type { CloudflareRoomAuthorityStub } from './room/do.js'
-import type { RoomSessionStub } from './room/fanout.js'
+import type { RoomSessionStub } from './room/Fanout.js'
 
 /** The Telefunc Durable Object binding, typed by the RPC methods its roles call on one another. */
 type TelefuncDurableObjectNamespace = {

@@ -36,7 +36,7 @@ import {
   type CellSelector,
   type CellsRead,
   type DirectoryPage,
-} from '../../../../backend/room/contract.js'
+} from '../../../backend/room/contract.js'
 import {
   countCell,
   encodeCellCounter,
@@ -45,9 +45,9 @@ import {
   materializeHead,
   nextOrderMark,
   type StoredHead,
-} from '../../../../backend/room/semantics.js'
-import type { OrderingInfo } from '../../../../wire/orderingFrame.js'
-import { binaryLaneKeyPrefix, encodeLaneKey } from '../../../../backend/room/laneKey.js'
+} from '../../../backend/room/semantics.js'
+import type { OrderingInfo } from '../../../wire/orderingFrame.js'
+import { binaryLaneKeyPrefix, encodeLaneKey } from '../../../backend/room/laneKey.js'
 
 type HeadCxOutcome = { head: StoredHead } | { conflict: true; current: StoredHead | null }
 

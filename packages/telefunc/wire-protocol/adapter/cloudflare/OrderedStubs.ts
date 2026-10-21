@@ -1,6 +1,6 @@
 export { OrderedStubs, reportLostDeliveries }
 
-import { createDeferred, type Deferred } from '../../../../utils/createDeferred.js'
+import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
 
 type Line<Stub> = {
   readonly stub: Stub

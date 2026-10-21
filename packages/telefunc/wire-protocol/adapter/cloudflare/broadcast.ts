@@ -15,7 +15,7 @@ import {
   getDeterministicKeyBucketIndex,
   getScaleCountForBucket,
 } from './routing.js'
-import { reportLostDeliveries, type OrderedStubs } from '../../server/adapter/cloudflare/ordered-stubs.js'
+import { reportLostDeliveries, type OrderedStubs } from './OrderedStubs.js'
 import { assert } from '../../../utils/assert.js'
 import type { BroadcastPayload, BroadcastRoute, PublishResult } from '../../backend/broadcast/contract.js'
 import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
@@ -26,7 +26,7 @@ import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
-import { currentCloudflareSession } from '../../server/adapter/cloudflare/session.js'
+import { currentCloudflareSession } from './session.js'
 
 const PRESENCE_TTL_MS = 90_000
 const PRESENCE_REFRESH_INTERVAL_MS = 30_000

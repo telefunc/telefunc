@@ -1,12 +1,12 @@
 export { CloudflareRoomSessionManager, CloudflareRoomSubscriptionAttempt }
 export type { RoomSessionDeliveryRequest }
 
-import type { BackendReceiver } from '../../../../backend/subscription.js'
-import type { OrderingInfo } from '../../../../wire/orderingFrame.js'
-import type { RoomSubscriptionSource } from '../../../../backend/room/contract.js'
-import { encodeLaneKey } from '../../../../backend/room/laneKey.js'
-import { DriverAttempt } from '../../../../backend/attempt.js'
-import { OrderedStubs } from '../ordered-stubs.js'
+import type { BackendReceiver } from '../../../backend/subscription.js'
+import type { OrderingInfo } from '../../../wire/orderingFrame.js'
+import type { RoomSubscriptionSource } from '../../../backend/room/contract.js'
+import { encodeLaneKey } from '../../../backend/room/laneKey.js'
+import { DriverAttempt } from '../../../backend/attempt.js'
+import { OrderedStubs } from '../OrderedStubs.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RegisterWire } from './do.js'
 

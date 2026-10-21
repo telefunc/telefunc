@@ -1,5 +1,5 @@
-import type { TelefuncDurableObjectNamespace } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/namespace.js'
-import type { RoomSessionNamespace } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/fanout.js'
+import type { TelefuncDurableObjectNamespace } from '../../packages/telefunc/wire-protocol/adapter/cloudflare/namespace.js'
+import type { RoomSessionNamespace } from '../../packages/telefunc/wire-protocol/adapter/cloudflare/room/Fanout.js'
 
 declare global {
   var __TELEFUNC__IS_NON_RUNNABLE_DEV: undefined | true
