@@ -163,6 +163,8 @@ const transientNetworkErrors = [
   'ERR_INTERNET_DISCONNECTED',
   'ERR_ALPN_NEGOTIATION_FAILED',
   'ERR_SSL_PROTOCOL_ERROR',
+  // Chromium aborts a navigation that starts just after a test's setOffline(false).
+  'ERR_ABORTED',
 ]
 function isTransientNetworkError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
