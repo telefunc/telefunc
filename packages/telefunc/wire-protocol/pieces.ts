@@ -21,7 +21,7 @@ import {
   isSequencedTag,
   passesData,
   type PiecesAck,
-} from './shared-ws.js'
+} from './wire/connectionFrame.js'
 import { assert } from '../utils/assert.js'
 import { Fifo } from '../utils/Fifo.js'
 import { unrefTimer } from '../utils/unrefTimer.js'

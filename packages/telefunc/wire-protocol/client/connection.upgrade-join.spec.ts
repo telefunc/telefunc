@@ -10,10 +10,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { ClientConnection } from './connection.js'
-import { decode, encode, TAG } from '../shared-ws.js'
-import type { DecodedFrame } from '../shared-ws.js'
-import { decodeU32 } from '../frame.js'
-import { uint8ArrayToBase64url } from '../base64url.js'
+import { decode, encode, TAG } from '../wire/connectionFrame.js'
+import type { DecodedFrame } from '../wire/connectionFrame.js'
+import { decodeU32 } from '../wire/frame.js'
+import { uint8ArrayToBase64url } from '../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))

@@ -1,4 +1,4 @@
-import { chargedBytes, replayLaneOf, type ReplayLaneKind } from './shared-ws.js'
+import { chargedBytes, replayLaneOf, type ReplayLaneKind } from './wire/connectionFrame.js'
 import { assert } from '../utils/assert.js'
 
 type ReplayBufferOptions = {

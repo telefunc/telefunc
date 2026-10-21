@@ -2,7 +2,7 @@ export { promiseReviver }
 
 import type { ReviverType, PromiseContract, ClientReviverContext } from '../../types.js'
 import { parse } from '@brillout/json-serializer/parse'
-import { textDecoder } from '../../frame.js'
+import { textDecoder } from '../../wire/frame.js'
 import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
 
 const promiseReviver: ReviverType<PromiseContract, ClientReviverContext> = {

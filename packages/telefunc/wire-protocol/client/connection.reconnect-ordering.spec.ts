@@ -17,9 +17,9 @@ import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
 import { ServerChannel } from '../server/channel.js'
-import { decode, encode, TAG } from '../shared-ws.js'
-import { decodeU32, concat } from '../frame.js'
-import { uint8ArrayToBase64url } from '../base64url.js'
+import { decode, encode, TAG } from '../wire/connectionFrame.js'
+import { decodeU32, concat } from '../wire/frame.js'
+import { uint8ArrayToBase64url } from '../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))

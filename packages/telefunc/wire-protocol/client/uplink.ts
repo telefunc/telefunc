@@ -2,7 +2,7 @@ export { Uplink }
 
 import { WIRE_ACK_SHARE, WIRE_REFRESH_SHARE } from '../constants.js'
 import { DRAIN_SPAN_MS, Link, Waits, newestFastest, type SendWait } from '../link.js'
-import { TAG } from '../shared-ws.js'
+import { TAG } from '../wire/connectionFrame.js'
 
 /** A page's uplink: the rate the server takes data at, what the uplink holds, and the shares its control frames take. */
 class Uplink implements SendWait {

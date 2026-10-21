@@ -3,7 +3,7 @@ export { asyncGeneratorReplacer }
 import type { StreamingReplacerType, AsyncGeneratorContract, ServerReplacerContext } from '../../types.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { isAsyncGenerator } from '../../../utils/isAsyncGenerator.js'
-import { textEncoder } from '../../frame.js'
+import { textEncoder } from '../../wire/frame.js'
 import { SERIALIZER_PREFIX_GENERATOR } from '../../constants.js'
 
 const asyncGeneratorReplacer: StreamingReplacerType<AsyncGeneratorContract, ServerReplacerContext> = {

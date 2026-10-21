@@ -3,7 +3,7 @@ export { PathRoom }
 import { WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../constants.js'
 import { DRAIN_SPAN_MS, Link, newestFastest } from '../link.js'
 import { PieceSender, acknowledges, type PieceSenderOptions, type SendRoom } from '../pieces.js'
-import type { PiecesAck } from '../shared-ws.js'
+import type { PiecesAck } from '../wire/connectionFrame.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 

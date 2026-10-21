@@ -11,7 +11,7 @@ import {
 import { PieceSender, type PieceSenderOptions, type SendRoom } from '../pieces.js'
 import type { Uplink } from './uplink.js'
 import type { Downlink } from './downlink.js'
-import { isSequencedTag, type PiecesAck } from '../shared-ws.js'
+import { isSequencedTag, type PiecesAck } from '../wire/connectionFrame.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 

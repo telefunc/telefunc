@@ -19,7 +19,7 @@ import {
   withTook,
   type DecodedFrame,
   type ReconciledPayload,
-} from '../shared-ws.js'
+} from '../wire/connectionFrame.js'
 import type { ClientConnection, OutboundFrame, ProbeWire, UpgradeTarget } from './connection.js'
 import type { Heartbeat } from './heartbeat.js'
 

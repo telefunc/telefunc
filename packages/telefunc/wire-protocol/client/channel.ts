@@ -31,7 +31,7 @@ import {
   type ChannelFrame,
   type ReattachState,
   type WirePublishInfo,
-} from '../shared-ws.js'
+} from '../wire/connectionFrame.js'
 import { assert } from '../../utils/assert.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'

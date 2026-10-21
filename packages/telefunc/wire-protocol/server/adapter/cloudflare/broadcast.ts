@@ -13,7 +13,7 @@ import type {
   BroadcastAdapter,
   BroadcastUnsubscribe,
 } from '../../broadcast.js'
-import type { WirePublishInfo } from '../../../shared-ws.js'
+import type { WirePublishInfo } from '../../../wire/connectionFrame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90

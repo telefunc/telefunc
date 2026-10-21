@@ -11,7 +11,7 @@ export type {
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { Fifo } from '../../utils/Fifo.js'
-import type { WirePublishInfo } from '../shared-ws.js'
+import type { WirePublishInfo } from '../wire/connectionFrame.js'
 
 /** Most in-memory deliveries that run before the event loop gets a turn, so listeners answering each other can't starve it. */
 const IN_MEMORY_DELIVERY_BURST = 1024

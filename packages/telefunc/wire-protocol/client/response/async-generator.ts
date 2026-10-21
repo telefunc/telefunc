@@ -2,7 +2,7 @@ export { asyncGeneratorReviver }
 
 import type { ReviverType, AsyncGeneratorContract, ClientReviverContext } from '../../types.js'
 import { parse } from '@brillout/json-serializer/parse'
-import { textDecoder } from '../../frame.js'
+import { textDecoder } from '../../wire/frame.js'
 import { SERIALIZER_PREFIX_GENERATOR } from '../../constants.js'
 
 const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverContext> = {

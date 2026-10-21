@@ -15,12 +15,12 @@ import {
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../constants.js'
-import { encodeU32, encodeLengthPrefixedFrames } from '../frame.js'
+import { encodeU32, encodeLengthPrefixedFrames } from '../wire/frame.js'
 import { createPushReadableStream, type PushReadableStream } from '../../utils/pushReadableStream.js'
 import { Uplink } from './uplink.js'
 import { Downlink } from './downlink.js'
-import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../request-kind.js'
-import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../shared-ws.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../wire/requestKind.js'
+import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../wire/connectionFrame.js'
 import { encodeLengthPrefixedBlob, encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
 import { DeadlineScheduler } from './deadlineScheduler.js'
 import { SSEEvents } from './SSEEvents.js'

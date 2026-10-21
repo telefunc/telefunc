@@ -1,7 +1,7 @@
 export { ChannelStreamSource }
 
 import { parse } from '@brillout/json-serializer/parse'
-import { textDecoder } from './frame.js'
+import { textDecoder } from './wire/frame.js'
 import { CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from './constants.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { isObject } from '../utils/isObject.js'

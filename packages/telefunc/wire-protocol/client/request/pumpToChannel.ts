@@ -2,7 +2,7 @@ export { pumpClientProducerToChannel }
 export type { PumpChannelOptions }
 
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
-import { concat, textEncoder } from '../../frame.js'
+import { concat, textEncoder } from '../../wire/frame.js'
 import { ChannelClosedError } from '../../channel-errors.js'
 import { ClientChannel, type ClientChannelOptions } from '../channel.js'
 import type { StreamingProducer } from '../../types.js'

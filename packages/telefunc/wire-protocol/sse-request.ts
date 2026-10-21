@@ -1,7 +1,7 @@
 export { encodeSseRequest, encodeSseBatch, encodeSseRequestMetadata, encodeLengthPrefixedBlob, parseSseRequestMetadata }
 export type { SseRequestMetadata }
 
-import { encodeLengthPrefixedString, encodeU32 } from './frame.js'
+import { encodeLengthPrefixedString, encodeU32 } from './wire/frame.js'
 import { assert } from '../utils/assert.js'
 
 /** The metadata header that opens every SSE POST. The two booleans select the POST kind:

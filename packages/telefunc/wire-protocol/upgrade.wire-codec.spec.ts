@@ -12,7 +12,7 @@ import {
   type BarrierPayload,
   type ReconcilePayload,
   type ReconciledPayload,
-} from './shared-ws.js'
+} from './wire/connectionFrame.js'
 import {
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,

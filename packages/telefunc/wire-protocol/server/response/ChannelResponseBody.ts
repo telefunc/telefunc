@@ -2,7 +2,7 @@ export { pumpProducerToChannel }
 export type { ChannelPumpRunContext }
 
 import type { StreamingProducer } from '../../types.js'
-import { concat } from '../../frame.js'
+import { concat } from '../../wire/frame.js'
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../constants.js'
 import { ChannelClosedError, ServerChannel } from '../channel.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'

@@ -1,7 +1,7 @@
 export { AwaitedChannels }
 export type { AwaitedChannel, RecvBacklog }
 
-import type { ChannelFrame, ReconcileOpenEntry } from '../shared-ws.js'
+import type { ChannelFrame, ReconcileOpenEntry } from '../wire/connectionFrame.js'
 import type { ConnectionEntry, Wire } from './mux.js'
 
 /** What a wire received and hasn't handled yet. */

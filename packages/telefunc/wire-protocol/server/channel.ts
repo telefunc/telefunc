@@ -51,7 +51,7 @@ import {
   isSequencedFrame,
   seqNear,
   seqThrough,
-} from '../shared-ws.js'
+} from '../wire/connectionFrame.js'
 import type {
   AckResultStatus,
   ChannelCtrlFrame,
@@ -59,7 +59,7 @@ import type {
   ChannelFrame,
   ErrorReason,
   ReattachState,
-} from '../shared-ws.js'
+} from '../wire/connectionFrame.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {

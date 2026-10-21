@@ -49,8 +49,8 @@ export type {
   WirePublishInfo,
 }
 
-import type { ChannelTransports } from './constants.js'
-import { assert } from '../utils/assert.js'
+import type { ChannelTransports } from '../constants.js'
+import { assert } from '../../utils/assert.js'
 
 // ===== Wire protocol =====
 //

@@ -5,7 +5,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
-import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
+import { encodeRequestEnvelope } from '../../wire-protocol/wire/frame.js'
 import {
   pumpClientProducerToChannel,
   type PumpChannelOptions,

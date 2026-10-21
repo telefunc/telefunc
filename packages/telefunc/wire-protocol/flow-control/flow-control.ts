@@ -12,7 +12,7 @@ import {
   FC_SELF_TIME_WINDOW_MS,
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
-import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type BdpPingAck } from '../shared-ws.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type BdpPingAck } from '../wire/connectionFrame.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 

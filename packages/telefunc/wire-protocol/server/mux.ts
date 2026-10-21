@@ -37,7 +37,7 @@ import {
   peekTag,
   seqThrough,
   withTook,
-} from '../shared-ws.js'
+} from '../wire/connectionFrame.js'
 import type {
   BarrierPayload,
   ChannelFrame,
@@ -46,7 +46,7 @@ import type {
   PreparePayload,
   ReconcileOpenEntry,
   ReconcilePayload,
-} from '../shared-ws.js'
+} from '../wire/connectionFrame.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { PathRoom } from './path-room.js'
 import { ServerPieceReceiver } from './server-piece-receiver.js'

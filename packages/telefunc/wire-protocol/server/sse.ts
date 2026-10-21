@@ -11,13 +11,13 @@ import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTel
 import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
 import { createPushReadableStream, type PushReadableStream } from '../../utils/pushReadableStream.js'
 import { createPushReadable, type PushReadable } from '../../utils/pushReadable.js'
-import { uint8ArrayToBase64url } from '../base64url.js'
-import { textEncoder } from '../frame.js'
+import { uint8ArrayToBase64url } from '../wire/base64url.js'
+import { textEncoder } from '../wire/frame.js'
 import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
-import { OversizeFrameError, StreamReader, StreamTruncatedError } from './request/StreamReader.js'
+import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../wire/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, passesData, ProtocolViolationError } from '../shared-ws.js'
+import { encode, passesData, ProtocolViolationError } from '../wire/connectionFrame.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400

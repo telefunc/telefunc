@@ -1,7 +1,7 @@
 import { expect, test } from 'vitest'
 import { ChannelMux, type ServerTransport } from './server/mux.js'
 import { ServerChannel } from './server/channel.js'
-import { decode, encode, TAG, type DecodedFrame } from './shared-ws.js'
+import { decode, encode, TAG, type DecodedFrame } from './wire/connectionFrame.js'
 import { WIRE_MAX_CONN_CTRL_FRAME_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from './constants.js'
 
 function createHarness() {

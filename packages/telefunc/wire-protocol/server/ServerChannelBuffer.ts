@@ -2,7 +2,7 @@ export { ServerChannelBuffer }
 
 import { ChannelOverflowError } from '../channel-errors.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
-import { TAG } from '../shared-ws.js'
+import { TAG } from '../wire/connectionFrame.js'
 import { assert } from '../../utils/assert.js'
 
 /** Held beyond an entry's payload: a send's callbacks and promise (about 480 B), a publish's slots (about 52 B). */

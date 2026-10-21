@@ -10,7 +10,7 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 import type { Link, SendWait } from '../link.js'
-import type { BdpPingAck } from '../shared-ws.js'
+import type { BdpPingAck } from '../wire/connectionFrame.js'
 
 /** Per-axis verdict on a settled probe; `grow` needs the sample to saturate ≥ 2/3 of a window not at cap. */
 type AxisDecision = 'grow' | 'sample-too-small' | 'wire-busy' | 'window-grew' | 'at-cap'

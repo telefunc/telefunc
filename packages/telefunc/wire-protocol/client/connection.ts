@@ -47,7 +47,7 @@ import {
   chargedBytes,
   seqNear,
   seqThrough,
-} from '../shared-ws.js'
+} from '../wire/connectionFrame.js'
 import type {
   AckResultStatus,
   BdpPingAck,
@@ -60,7 +60,7 @@ import type {
   ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
-} from '../shared-ws.js'
+} from '../wire/connectionFrame.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { settledOrAborted } from '../../utils/settledOrAborted.js'

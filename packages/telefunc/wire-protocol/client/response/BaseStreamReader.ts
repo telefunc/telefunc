@@ -3,7 +3,7 @@ export { BaseStreamReader }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
-import { decodeU32, decodeIndexedFrame } from '../../frame.js'
+import { decodeU32, decodeIndexedFrame } from '../../wire/frame.js'
 import { STREAMING_ERROR_FRAME_MARKER, STREAMING_ERROR_TYPE } from '../../constants.js'
 import { throwAbortError, throwBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 

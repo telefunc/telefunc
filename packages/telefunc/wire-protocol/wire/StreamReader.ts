@@ -1,8 +1,8 @@
 export { StreamReader, OversizeFrameError, StreamTruncatedError }
 
 import type { Readable } from 'node:stream'
-import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
-import { concatAll, decodeU32 } from '../../frame.js'
+import { assert, assertUsage, assertWarning } from '../../utils/assert.js'
+import { concatAll, decodeU32 } from './frame.js'
 
 /** Shared sentinel — avoids zero-length subarray views that pin large ArrayBuffers. */
 const EMPTY = new Uint8Array(0)

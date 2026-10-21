@@ -3,7 +3,7 @@ export { promiseReplacer }
 import type { StreamingReplacerType, PromiseContract, ServerReplacerContext } from '../../types.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { isPromise } from '../../../utils/isPromise.js'
-import { textEncoder } from '../../frame.js'
+import { textEncoder } from '../../wire/frame.js'
 import { SERIALIZER_PREFIX_PROMISE } from '../../constants.js'
 
 const promiseReplacer: StreamingReplacerType<PromiseContract, ServerReplacerContext> = {
