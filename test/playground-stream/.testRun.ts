@@ -95,7 +95,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
 
   testFunction()
 
-  testStreamToServer()
+  testStreamToServer(isDev)
 
   testLiveQuery()
 

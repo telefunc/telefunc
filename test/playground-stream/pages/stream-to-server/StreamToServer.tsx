@@ -1,6 +1,6 @@
 export { StreamToServer }
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   onEcho,
   onCollect,
@@ -11,6 +11,7 @@ import {
   onAbortMidStream,
   onAbortMidRelay,
   onLiveLoopback,
+  onIngest,
 } from './StreamToServer.telefunc'
 import { Abort, abort } from 'telefunc/client'
 
@@ -18,6 +19,13 @@ function StreamToServer() {
   const [result, setResult] = useState<string>('')
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
+  const finishUploadRef = useRef<(() => void) | null>(null)
+
+  function ingest(source: UnderlyingDefaultSource<Uint8Array>) {
+    const key = crypto.randomUUID()
+    void onIngest(new ReadableStream(source), key).catch(() => {})
+    setResult(JSON.stringify({ key }))
+  }
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
@@ -212,10 +220,80 @@ function StreamToServer() {
       >
         Client abort(res)
       </button>
+      <h2>Uploads that end unusually</h2>
+
+      <button
+        id="test-one-large-chunk"
+        onClick={async () => {
+          setResult('')
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new Uint8Array(65 * 1024 * 1024))
+              controller.close()
+            },
+          })
+          try {
+            const { totalBytes } = await onCollect(stream)
+            setResult(JSON.stringify({ totalBytes }))
+          } catch (err: any) {
+            setResult(JSON.stringify({ error: err?.message ?? 'unknown' }))
+          }
+        }}
+      >
+        One 65 MiB chunk
+      </button>
+
+      <button
+        id="test-ingest-failing-source"
+        onClick={() => {
+          let pulls = 0
+          ingest({
+            pull(controller) {
+              if (pulls++ === 0) controller.enqueue(new Uint8Array(3))
+              else controller.error(new Error('upload-source-failure'))
+            },
+          })
+        }}
+      >
+        Upload whose source fails after a chunk
+      </button>
+
+      <button
+        id="test-ingest-endless"
+        onClick={() => {
+          ingest({
+            async pull(controller) {
+              await new Promise((r) => setTimeout(r, 50))
+              controller.enqueue(new Uint8Array(1024))
+            },
+          })
+        }}
+      >
+        Endless upload
+      </button>
+
+      <button
+        id="test-ingest-until-finish"
+        onClick={() => {
+          ingest({
+            start(controller) {
+              controller.enqueue(new Uint8Array(1))
+              finishUploadRef.current = () => {
+                controller.enqueue(new Uint8Array(1))
+                controller.close()
+              }
+            },
+          })
+        }}
+      >
+        Upload until Finish
+      </button>
+      <button id="test-ingest-finish" onClick={() => finishUploadRef.current!()}>
+        Finish upload
+      </button>
     </div>
   )
 }
-
 function makeTextStream(chunks: string[]) {
   const encoder = new TextEncoder()
   let index = 0

@@ -8,10 +8,12 @@ export {
   onAbortMidStream,
   onLiveLoopback,
   onAbortMidRelay,
+  onIngest,
 }
 
 import { Abort } from 'telefunc'
 import { sleep } from '../../sleep'
+import { cleanupState } from '../../cleanup-state'
 
 /** Read all chunks, return as string array. */
 async function onEcho(stream: ReadableStream<Uint8Array>) {
@@ -124,4 +126,23 @@ async function* onLiveLoopback(stream: ReadableStream<Uint8Array>): AsyncGenerat
     if (done) break
     yield decoder.decode(value)
   }
+}
+
+/** Records how the upload ends under `ingest_<key>`: 'completed:<bytes>' or 'errored:<error name>', 'reading:<bytes>' meanwhile. */
+async function onIngest(stream: ReadableStream<Uint8Array>, key: string) {
+  let bytes = 0
+  cleanupState[`ingest_${key}`] = 'reading:0'
+  const reader = stream.getReader()
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      bytes += value.byteLength
+      cleanupState[`ingest_${key}`] = `reading:${bytes}`
+    }
+  } catch (err: any) {
+    cleanupState[`ingest_${key}`] = `errored:${err?.name}`
+    return
+  }
+  cleanupState[`ingest_${key}`] = `completed:${bytes}`
 }
