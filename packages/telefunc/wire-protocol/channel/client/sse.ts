@@ -150,8 +150,7 @@ class SseTransport implements UpgradeSource {
     // A POST still out then is an upload, which the barrier would wait behind as long as it takes.
     if (this.flushing || !this.hasWire() || signal.aborted) return 'not-emitted'
     this.flushScheduler.cancel()
-    const queued = this.outbox.splice(0, this.outbox.length).map((entry) => entry.frame)
-    this.outboxBytes = 0
+    const queued = this.takeOutbox().map((entry) => entry.frame)
     queued.push(buildFrame().frame)
     // Not `flushOutbox`: it re-queues on failure, and a barrier must never be replayed onto the
     // next wire. `emitted` is already decided — this POST cannot report whether the server saw it,
@@ -317,10 +316,7 @@ class SseTransport implements UpgradeSource {
     // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
     abort.abort()
     this.streamRequest = { tag: 'failed' }
-    if (unsent) {
-      this.outbox = unsent.map((frame) => ({ frame, deadline: Date.now() })).concat(this.outbox)
-      for (const frame of unsent) this.outboxBytes += frame.byteLength
-    }
+    if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: Date.now() })))
     this.owner._onTransportBatched(this)
   }
 
@@ -375,9 +371,7 @@ class SseTransport implements UpgradeSource {
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
     // Sequenced frames replay after RECONCILED: sent now, they'd pass a POST in flight, making its frames duplicates.
-    const movedOutbox = this.outbox.filter(isWindowRefresh)
-    this.outbox = []
-    this.outboxBytes = 0
+    const movedOutbox = this.takeOutbox().filter(isWindowRefresh)
     for (const entry of movedOutbox) initialFrames.push({ kind: 'data', frame: entry.frame })
     for (const frame of movedBufferedFrames) initialFrames.push(frame)
     return { initialFrames, movedOutbox, movedBufferedFrames }
@@ -390,8 +384,21 @@ class SseTransport implements UpgradeSource {
       frame: entry.frame,
       deadline: this.getFrameDeadline(entry.kind, now),
     }))
-    this.outbox = stage.movedOutbox.concat(movedBuffered, this.outbox)
-    this.outboxBytes += bytesOf(stage.movedOutbox) + bytesOf(movedBuffered)
+    this.requeue(stage.movedOutbox.concat(movedBuffered))
+  }
+
+  /** Empties the outbox, and returns what it held. */
+  private takeOutbox(): OutboxEntry[] {
+    const entries = this.outbox
+    this.outbox = []
+    this.outboxBytes = 0
+    return entries
+  }
+
+  /** Puts `entries` back at the head of the outbox. */
+  private requeue(entries: OutboxEntry[]): void {
+    this.outbox = entries.concat(this.outbox)
+    this.outboxBytes += bytesOf(entries)
   }
 
   private async flushOutbox(): Promise<void> {
@@ -400,8 +407,7 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.cancel()
     this.flushing = true
     const now = Date.now()
-    const queued = this.outbox.splice(0, this.outbox.length)
-    this.outboxBytes = 0
+    const queued = this.takeOutbox()
     const head = this.foldHeading(queued)
     this.folded = null
     this.lastPostStartedAt = now
@@ -420,13 +426,10 @@ class SseTransport implements UpgradeSource {
     } catch {
       // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
       if (wire !== this.transportAbort) {
-        const refreshes = queued.filter(isWindowRefresh)
-        this.outbox = refreshes.concat(this.outbox)
-        this.outboxBytes += bytesOf(refreshes)
+        this.requeue(queued.filter(isWindowRefresh))
         return
       }
-      this.outbox = queued.concat(this.outbox)
-      this.outboxBytes += bytesOf(queued)
+      this.requeue(queued)
       this.abandonActiveTransport()
       this.owner._onTransportClosed(this)
     } finally {
@@ -611,8 +614,7 @@ class SseTransport implements UpgradeSource {
       this.startTimer = null
     }
     this.flushScheduler.cancel()
-    this.outbox = []
-    this.outboxBytes = 0
+    this.takeOutbox()
     this.folded = null
     this.closeStreamRequest()
     this.transportAbort?.abort()
