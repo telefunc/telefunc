@@ -63,7 +63,9 @@ app.post('/api/cleanup-state/reset', async (c) => {
 // dropped passed-callback's stub being reclaimed → its channel closing → context.onClose firing).
 // Requires the server to run with `--expose-gc` (see this playground's dev/preview scripts).
 app.post('/api/gc', async (c) => {
-  const gc = (globalThis as { gc?: () => void }).gc
+  // Bun has no --expose-gc: it collects with Bun.gc(true).
+  const { gc: exposedGc, Bun: bun } = globalThis as { gc?: () => void; Bun?: { gc(force: boolean): void } }
+  const gc = exposedGc ?? (bun && (() => bun.gc(true)))
   if (!gc) return c.json({ ok: false, reason: 'gc not exposed (run node with --expose-gc)' }, 500)
   for (let i = 0; i < 5; i++) {
     gc()
@@ -232,7 +234,8 @@ export default {
   prod: {
     port: Number(process.env.PORT) || (httpsAvailable ? 8443 : 3000),
     ...(tls ? { tls } : {}),
-    ...(tfBun ? { bun: { websocket: tfBun.websocket } } : {}),
+    // Bun.serve refuses a body over 128 MiB by default; the abort page uploads 150 MB.
+    ...(tfBun ? { bun: { websocket: tfBun.websocket, maxRequestBodySize: 2 ** 30 } } : {}),
     onCreate(server: { node?: { server?: HttpServer } }) {
       // srvx wraps the raw `http.Server` as `{ node: { server } }`. Unwrap to
       // the underlying Node server so the WebSocket upgrade listener can be

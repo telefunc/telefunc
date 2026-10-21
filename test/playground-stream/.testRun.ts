@@ -39,6 +39,8 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         log.logText.includes('[telefunc:channel-error]') ||
         log.logText.includes('Error: server-listener-bug') ||
         log.logText.includes('TypeError: Converting circular structure to JSON') ||
+        // Bun's wording of the same error.
+        log.logText.includes('TypeError: JSON.stringify cannot serialize cyclic structures') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||

@@ -135,8 +135,8 @@ function testFunction(isDev: boolean, inDocker = false) {
     })
   }
 
-  // Not on Deno: Deno.serve hands an upgrade request to the app, whose Vike logs a [Bug] rendering `//` (as it does a GET // on Node).
-  if (serverRuntime() !== 'deno')
+  // Node only: Bun.serve and Deno.serve hand this upgrade to the app's fetch handler (Node emits an 'upgrade' event): Deno's Vike logs a [Bug] rendering `//`, Bun gets no Response.
+  if (serverRuntime() === 'node')
     test("function: the server keeps answering after a WebSocket upgrade whose path isn't a URL", async () => {
       await navigate(`${getServerUrl()}/function`)
       await requestPath('//', {
