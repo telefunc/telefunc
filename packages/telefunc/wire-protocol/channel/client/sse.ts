@@ -83,6 +83,8 @@ class SseTransport implements UpgradeSource {
   }
   heartbeat: Heartbeat | null = null
   private connecting = false
+  /** The wire's open POST is unanswered: the server holds a POST on the wire until it has the open. */
+  private openPending = false
   private startTimer: ReturnType<typeof setTimeout> | null = null
   /** Abort handle for the active transport's fetches. `null` means no active transport. */
   private transportAbort: AbortController | null = null
@@ -244,16 +246,20 @@ class SseTransport implements UpgradeSource {
     this.owner._onTransportReconcileSent(this)
 
     let response: Response
+    this.openPending = true
     try {
       response = await ssePromise
     } catch {
       this.failOpen(stage, abortController, false)
       return
+    } finally {
+      this.openPending = false
     }
     if (!response.ok || !response.body) {
       this.failOpen(stage, abortController, true)
       return
     }
+    if (this.outbox.length > 0) void this.flushOutbox()
 
     const reader = createSseEventStreamReader(
       response.body.getReader() as ReadableStreamDefaultReader<Uint8Array<ArrayBuffer>>,
@@ -395,7 +401,8 @@ class SseTransport implements UpgradeSource {
   }
 
   private async flushOutbox(): Promise<void> {
-    if (!this.hasWire() || this.flushing || this.outbox.length === 0) return
+    // Each POST held for the open would take one of the browser's connections to the host, which the open may need.
+    if (!this.hasWire() || this.openPending || this.flushing || this.outbox.length === 0) return
     assert(this.transportAbort)
     this.flushScheduler.cancel()
     this.flushing = true
