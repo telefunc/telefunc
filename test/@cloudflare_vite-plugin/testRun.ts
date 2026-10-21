@@ -17,6 +17,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testTodolist()
   testChannel()
   testChannelOversized()
+  testBacklog()
   testChat()
 }
 
@@ -181,6 +182,48 @@ function testChat() {
       expect(text).toContain(`${username} is online`)
       expect(text.indexOf(`welcome ${username}`)).lessThan(text.indexOf(`${username} is online`))
     })
+  })
+}
+
+function testBacklog() {
+  test('Backlog: sends nobody awaits to a page that stops reading are refused with ChannelOverflowError, and what was taken arrives in order once it reads', async () => {
+    await page.goto(getServerUrl() + '/backlog')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#backlog-open')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#backlog-state'))!).open).toBe(true)
+    })
+    const cdp = await page.context().newCDPSession(page.mainFrame().page())
+    await cdp.send('Network.enable')
+    // A page that reads nothing: what the server sends waits on the way.
+    await cdp.send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: 1,
+      uploadThroughput: -1,
+    })
+    await page.click('#backlog-run')
+    // The server's sends are refused or taken within a turn of the request, which the page can't see while stalled.
+    await page.waitForTimeout(1000)
+    await cdp.send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+    })
+    await autoRetry(
+      async () => {
+        const state = JSON.parse((await page.textContent('#backlog-state'))!)
+        expect(state.refused.length).greaterThan(0)
+        expect(new Set(state.refused)).deep.equal(new Set(['ChannelOverflowError']))
+        expect(state.received).toBe(6000 - state.refused.length)
+        expect(state.outOfOrder).toBe(0)
+      },
+      { timeout: 30_000 },
+    )
+    await cdp.detach()
   })
 }
 
