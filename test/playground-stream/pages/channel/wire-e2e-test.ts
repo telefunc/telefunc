@@ -13,6 +13,7 @@ import {
   forceServerGc,
   holdNextSsePost,
   holdNextSseWire,
+  holdNextSseOpen,
   heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
@@ -285,6 +286,42 @@ function testWire(isDev: boolean) {
         })
       })
     }
+
+    test("channel: messages the page sends while the server holds its SSE open past the page's 10 s deadline arrive once and in order on the wire the page opens next", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-upstream-open')
+      let channelId = ''
+      await autoRetry(async () => {
+        channelId = (await getResult<{ upstreamReconnectChannelId: string | null }>('#channel-state'))
+          .upstreamReconnectChannelId!
+        expect(channelId).not.toBe(null)
+      })
+      await page.click('#channel-test-upstream-send')
+      await autoRetry(async () => {
+        expect((await getCleanupState())[`upstream_${channelId}_receivedCount`]).toBe('1')
+      })
+      await holdNextSseOpen()
+      await cutWire()
+      await autoRetry(async () => {
+        expect(await heldSsePosts()).toBe(1)
+      })
+      for (let i = 0; i < 3; i++) await page.click('#channel-test-upstream-send')
+      await autoRetry(
+        async () => {
+          expect((await getCleanupState())[`upstream_${channelId}_receivedCount`]).toBe('4')
+        },
+        { timeout: 40_000 },
+      )
+      // The held open is answered now, after the page moved on: it changes nothing.
+      expect(await releaseHeldSsePosts()).toBe(1)
+      await page.click('#channel-test-upstream-send')
+      await autoRetry(async () => {
+        const ss = await getCleanupState()
+        expect(ss[`upstream_${channelId}_receivedCount`]).toBe('5')
+        expect(ss[`upstream_${channelId}_lastSeq`]).toBe('5')
+        expect(ss[`upstream_${channelId}_hasGap`]).toBe('false')
+      })
+    })
   }
 }
 

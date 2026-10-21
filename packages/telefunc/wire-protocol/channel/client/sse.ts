@@ -249,11 +249,15 @@ class SseTransport implements UpgradeSource {
     try {
       response = await ssePromise
     } catch {
-      this.failOpen(stage, abortController, false)
+      // Its wire was dropped already: what the open carried goes as that wire's outbox does (see `flushOutbox`).
+      if (this.transportAbort !== abortController) this.requeue(stage.movedOutbox)
+      else this.failOpen(stage, abortController, false)
       return
     } finally {
-      this.openPending = false
+      if (this.transportAbort === abortController) this.openPending = false
     }
+    // Its wire was dropped while the open went unanswered: the answer is ignored, as a successor may be opening.
+    if (this.transportAbort !== abortController) return abortController.abort()
     if (!response.ok || !response.body) {
       this.failOpen(stage, abortController, true)
       return
@@ -279,6 +283,7 @@ class SseTransport implements UpgradeSource {
         setTimeout(() => resolve('timeout'), STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS),
       )
       const result = await Promise.race([handshakeOkP, timeoutP, upload.ended])
+      if (this.transportAbort !== abortController) return abortController.abort()
       if (result === 'ok') this.confirmUpload(upload, abortController)
       else this.abandonUpload(upload)
     }
@@ -570,6 +575,9 @@ class SseTransport implements UpgradeSource {
     const abortController = this.transportAbort
     if (!abortController) return
     this.transportAbort = null
+    // An open still unanswered goes with its wire: the next `start()` opens another.
+    this.connecting = false
+    this.openPending = false
     if (this.streamRequest.tag === 'active') this.streamRequest = { tag: 'idle' }
     this.closeAbandonedTransport()
     this.abandonedStream = abortController

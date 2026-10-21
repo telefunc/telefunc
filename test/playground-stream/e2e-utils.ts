@@ -7,6 +7,7 @@ export {
   runServerAction,
   holdNextSsePost,
   holdNextSseWire,
+  holdNextSseOpen,
   heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
@@ -93,6 +94,11 @@ async function holdNextSsePost() {
 /** The POST that opens the page's next SSE wire is answered, and its first batch reaches Telefunc only at `releaseHeldSsePosts()`. */
 async function holdNextSseWire() {
   await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold-stream`, { method: 'POST' })
+}
+
+/** The server hands the POST that opens the page's next SSE wire to Telefunc only at `releaseHeldSsePosts()`. */
+async function holdNextSseOpen() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold-open`, { method: 'POST' })
 }
 
 /** How many SSE POSTs the server holds. */
