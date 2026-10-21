@@ -9,7 +9,7 @@ import type {
   ChannelCloseOptions,
   ChannelCloseResult,
 } from '../channel/channel.js'
-import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { makePublishInfo } from '../channel/channel.js'
 import { ServerChannel } from '../channel/server/channel.js'
 import { getBroadcastAdapter } from './broadcastAdapter.js'
