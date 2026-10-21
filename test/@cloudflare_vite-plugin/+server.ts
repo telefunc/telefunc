@@ -23,6 +23,14 @@ export default {
       await Broadcast.publish('worker-publish', { from: 'worker' })
       return new Response(null, { status: 204 })
     }
+    if (new URL(request.url).pathname === '/__broadcast-subscribe-from-worker') {
+      try {
+        Broadcast.subscribe('worker-subscribe', () => {})
+        return new Response('subscribed')
+      } catch (error) {
+        return new Response(String(error))
+      }
+    }
     const resp = await tf.serve({ request, env, ctx })
     return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)
   },

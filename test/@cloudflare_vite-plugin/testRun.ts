@@ -7,6 +7,7 @@ import { testCounter, testRunClassic } from '../../test/utils'
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   // First, so no session Durable Object exists in the isolate yet.
   testBroadcastPublishFromWorker()
+  testSubscribeOutsideSession()
   testCloudflareBindings()
   testRunClassic(cmd, {
     // testResubscribe() waits out a presence's TTL.
@@ -31,12 +32,23 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testChatMembers()
   testResubscribe()
   testRoom()
+  testRoomAcrossSessions()
+  testRoomStorage()
 }
 
 function testBroadcastPublishFromWorker() {
   test('Broadcast.publish() from the Worker, outside any session', async () => {
     const response = await fetch(getServerUrl() + '/__broadcast-publish-from-worker')
     expect(response.status).toBe(204)
+  })
+}
+
+function testSubscribeOutsideSession() {
+  test('Broadcast.subscribe() from the Worker, outside any session, throws a usage error naming what it needs', async () => {
+    const response = await fetch(getServerUrl() + '/__broadcast-subscribe-from-worker')
+    expect(await response.text()).toContain(
+      'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
+    )
   })
 }
 
@@ -311,6 +323,110 @@ function testRoom() {
       { timeout: 10000 },
     )
   })
+}
+
+function testRoomAcrossSessions() {
+  test('Room and Broadcast: what two sessions publish at once reaches each in the order each called it, and both in the same order', async () => {
+    const id = crypto.randomUUID()
+    const pages = await openSessions(id, ['p1', 'p2'])
+    for (const page of pages) expect(await clickRoomCard(page, 'order-subscribe')).toBe('subscribed')
+    await Promise.all(pages.map((page) => clickRoomCard(page, 'order-publish')))
+    const calls = Array.from({ length: 30 }, (_, i) => i + 1)
+    await autoRetry(async () => {
+      const [first, second] = await Promise.all(pages.map((page) => clickRoomCard(page, 'order-received')))
+      for (const lane of ['broadcast', 'room'] as const) {
+        for (const from of ['p1', 'p2']) {
+          const own = first[lane].filter((message: string) => message.startsWith(`${from}:`))
+          expect({ lane, own }).deep.equal({ lane, own: calls.map((n) => `${from}:${n}`) })
+        }
+        expect({ lane, second: second[lane] }).deep.equal({ lane, second: first[lane] })
+      }
+    })
+    for (const page of pages) await page.context().close()
+  })
+
+  test('Room and Broadcast: two sessions listening in one isolate each get a message once, on their own listeners', async () => {
+    const id = crypto.randomUUID()
+    const pages = await openSessions(id, ['p1', 'p2'])
+    for (const page of pages) await clickRoomCard(page, 'listen')
+    await clickRoomCard(pages[0]!, 'publish')
+    await autoRetry(async () => {
+      for (const page of pages) {
+        expect((await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
+      }
+    })
+    for (const page of pages) await page.context().close()
+  })
+
+  test('Broadcast: a publish right after a subscribe reaches it', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'subscribe-then-publish')).deep.equal(['at-once'])
+  })
+}
+
+function testRoomStorage() {
+  test('Room.list(): lists rooms in code point order', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'list')).deep.equal(['B', 'a', 'b', 'z', 'é', '！', '😀'])
+  })
+
+  test('Room: a retained frame larger than a SQLite row reaches a later subscriber whole', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'retain-large')).deep.equal({ size: 3 * 1024 * 1024, intact: true })
+  })
+
+  test('Room: a room closes by itself once its last member left, and is no longer listed', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'close-when-left')).deep.equal({ listed: 0 })
+  })
+
+  test('Room: its meta keeps the key order its writes gave it', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'meta-key-order')).deep.equal({
+      merged: [
+        ['b', 1],
+        ['a', 4],
+        ['c', 3],
+      ],
+      replaced: [
+        ['z', 1],
+        ['y', 2],
+      ],
+    })
+  })
+}
+
+async function openRoomPage() {
+  await page.goto(getServerUrl() + '/room')
+  await autoRetry(async () => {
+    expect(await page.locator('#hydrated').count()).toBe(1)
+  })
+}
+
+/** Pages in browsers of their own, so each has its own Telefunc session. */
+async function openSessions(id: string, names: string[]) {
+  const browser = page.context().browser()!
+  return await Promise.all(
+    names.map(async (name) => {
+      const session = await (await browser.newContext()).newPage()
+      await session.goto(`${getServerUrl()}/room?id=${id}&page=${name}`)
+      await autoRetry(async () => {
+        expect(await session.locator('#hydrated').count()).toBe(1)
+      })
+      return session
+    }),
+  )
+}
+
+async function clickRoomCard(target: typeof page, id: string): Promise<any> {
+  await target.locator('#room-card-result').evaluate((element) => {
+    element.textContent = ''
+  })
+  await target.click(`#room-${id}`)
+  await target.waitForFunction(() => document.querySelector('#room-card-result')!.textContent !== '', undefined, {
+    timeout: 30_000,
+  })
+  return JSON.parse((await target.textContent('#room-card-result'))!)
 }
 
 async function getNumberOfItems() {
