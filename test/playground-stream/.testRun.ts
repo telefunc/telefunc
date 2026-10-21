@@ -36,6 +36,7 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         log.logText.includes('the server responded with a status of 422') ||
         log.logText.includes('[telefunc:channel-error]') ||
         log.logText.includes('Error: server-listener-bug') ||
+        log.logText.includes('room-listener-bug') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||

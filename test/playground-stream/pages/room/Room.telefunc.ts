@@ -20,6 +20,7 @@ export {
   onHiddenAfterPlayers,
   onGetHiddenAfterPlayers,
   onCloseRoomWithMember,
+  onBackgroundErrors,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -29,7 +30,7 @@ export {
   onCloseRoom,
 }
 
-import { Room, Abort, type LeaveCause, type LocalParticipant } from 'telefunc'
+import { Room, Abort, onBug, type LeaveCause, type LocalParticipant } from 'telefunc'
 
 async function onCreateRoom(roomId: string) {
   return await Room.create(roomId, { meta: { topic: 'e2e' } })
@@ -195,6 +196,55 @@ async function onCloseRoomWithMember(roomId: string) {
   await Room.close(roomId)
   await closed
   return { room, member }
+}
+
+let bugs: string[] | null = null
+onBug((err) => bugs?.push((err as Error).message))
+
+/** Listeners that fail in the background, and un-awaited writes of members a closed room let go. */
+async function onBackgroundErrors(roomId: string) {
+  bugs = []
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => void unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  const room = await Room.create(roomId)
+  room.onJoin(async () => {
+    throw new Error('room-listener-bug: async onJoin')
+  })
+  const left = await room.join()
+  await left.leave()
+  const member = await room.join()
+  const { promise: escaped, resolve } = Promise.withResolvers<void>()
+  member.listen(async (data) => {
+    if (data !== 'escape') throw new Error('room-listener-bug: async listen')
+    resolve()
+    const error = await left.publish('after-leave').then(
+      () => new Error('published after leave'),
+      (err: Error) => err,
+    )
+    error.message = `room-listener-bug: ${error.message}`
+    throw error
+  })
+  const sender = await room.join()
+  await sender.send(member.id, 'reject')
+  await sender.send(member.id, 'escape')
+  await escaped
+
+  const authority = await room.join({ hidden: true })
+  await Room.close(roomId)
+  authority.publish('after-close')
+  authority.publishBinary(new Uint8Array([1]))
+  authority.send(member.id, 'after-close')
+  const awaited = await authority.publish('after-close').then(
+    () => null,
+    (err: Error) => err.message,
+  )
+  // Node emits 'unhandledRejection' once the microtask queue drains, before the next macrotask.
+  await new Promise(setImmediate)
+  process.off('unhandledRejection', onUnhandled)
+  const reported = bugs.sort()
+  bugs = null
+  return { reported, unhandled: unhandled.length, awaited }
 }
 
 async function onAnnounce(roomId: string, data: unknown) {

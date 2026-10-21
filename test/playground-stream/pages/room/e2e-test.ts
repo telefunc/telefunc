@@ -322,4 +322,44 @@ function testRoom() {
       expect(await page.textContent('#room-live-count')).toBe('2')
     })
   })
+  test('room: a listener that fails or a RoomError that escapes app code is reported as a bug, and an un-awaited write that fails leaves no unhandled rejection', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    const consoleErrors: string[] = []
+    const onConsole = (msg: { type(): string; text(): string }) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text())
+    }
+    const pageErrors: string[] = []
+    const onPageError = (err: Error) => void pageErrors.push(err.message)
+    page.on('console', onConsole)
+    page.on('pageerror', onPageError)
+    try {
+      await page.click('#test-room-errors')
+      await autoRetry(async () => {
+        const r = await getResult<{
+          awaited: string | null
+          server: { reported: string[]; unhandled: number; awaited: string | null }
+        }>('#room-result')
+        expect(r.awaited).toBe('Participant left the room')
+        expect(r.server).deep.equal({
+          reported: [
+            'room-listener-bug: Participant left the room',
+            'room-listener-bug: async listen',
+            'room-listener-bug: async onJoin',
+            'room-listener-bug: async onJoin',
+            'room-listener-bug: async onJoin',
+          ],
+          unhandled: 0,
+          awaited: 'Participant left the room',
+        })
+        const reported = consoleErrors.filter((text) => text.includes('room-listener-bug'))
+        expect(reported.map((text) => text.split('\n')[0])).deep.equal([
+          '[telefunc:room-error] Error: room-listener-bug: async subscribe',
+        ])
+        expect(pageErrors).deep.equal([])
+      })
+    } finally {
+      page.off('console', onConsole)
+      page.off('pageerror', onPageError)
+    }
+  })
 }

@@ -24,6 +24,7 @@ import {
   onHiddenAfterPlayers,
   onGetHiddenAfterPlayers,
   onCloseRoomWithMember,
+  onBackgroundErrors,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -723,6 +724,26 @@ function Room() {
             closedIsClosed: closed.room.isClosed,
           }),
         )
+      })}
+
+      {scenario('errors', 'Background errors', 'Failing listeners and un-awaited writes', async () => {
+        const [, room] = await createRoom('errors')
+        room.subscribe(async () => {
+          throw new Error('room-listener-bug: async subscribe')
+        })
+        const me = await room.join({ meta: { name: 'Me' } })
+        await me.publish('hello')
+        await me.leave()
+        me.publish('after-leave')
+        me.publish('after-leave', { coalesce: 'cursor' })
+        me.publishBinary(new Uint8Array([1]))
+        me.send(me.id, 'after-leave')
+        const awaited = await me.publish('after-leave').then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const server = await onBackgroundErrors(`e2e-errors-server:${crypto.randomUUID()}`)
+        setResult(JSON.stringify({ awaited, server }))
       })}
     </div>
   )
