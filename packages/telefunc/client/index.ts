@@ -19,6 +19,6 @@ export type {
   ReviverType,
   ClientReplacerContext,
   ClientReviverContext,
-} from '../wire-protocol/types.js'
+} from '../wire-protocol/values/types.js'
 
 export { remoteTelefunctionCall as __remoteTelefunctionCall } from './remoteTelefunctionCall.js'

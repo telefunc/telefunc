@@ -8,8 +8,8 @@ export { PROVIDED_CONTEXT } from './context/getContext.js'
 export { REQUEST_CONTEXT } from './context/requestContext.js'
 export type { Context } from './context/context.js'
 export { Abort } from './Abort.js'
-export { download } from '../../wire-protocol/download.js'
-export type { FileDownload, BlobDownload, DownloadProgress } from '../../wire-protocol/types.js'
+export { download } from '../../wire-protocol/values/download.js'
+export type { FileDownload, BlobDownload, DownloadProgress } from '../../wire-protocol/values/types.js'
 export { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 export { shield } from './shield.js'
 export type { ShieldValidator, ShieldValidators } from './shield.js'
@@ -29,7 +29,7 @@ export type {
   StreamingReplacerType,
   ServerReplacerContext,
   ServerReviverContext,
-} from '../../wire-protocol/types.js'
+} from '../../wire-protocol/values/types.js'
 
 // TO-DO/next-major-release: remove
 export type { Telefunc } from './context/TelefuncNamespace.js'
