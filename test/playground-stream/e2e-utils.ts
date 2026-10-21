@@ -5,6 +5,7 @@ export {
   cutWire,
   dropNextWebSocket,
   runServerAction,
+  failBackend,
   holdNextSsePost,
   holdNextSseWire,
   heldSsePosts,
@@ -28,6 +29,7 @@ export {
 }
 
 import { page, getServerUrl } from '@brillout/test-e2e'
+import type { BackendFault } from './failing-backend'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -137,6 +139,12 @@ async function forceServerGc() {
 async function runServerAction(key: string) {
   const resp = await fetch(`${getServerUrl()}/api/server-action?key=${encodeURIComponent(key)}`, { method: 'POST' })
   if (!resp.ok) throw new Error(`runServerAction() failed: ${await resp.text()}`)
+}
+
+/** The server's store fails the call, or drops the message, `fault` names (failing-backend.ts). */
+async function failBackend(fault: BackendFault) {
+  const resp = await fetch(`${getServerUrl()}/api/backend/fault`, { method: 'POST', body: JSON.stringify(fault) })
+  if (!resp.ok) throw new Error(`failBackend() failed: ${await resp.text()}`)
 }
 
 /** Drops the page's WebSocket and SSE connections at the server, as a failing network would. */
