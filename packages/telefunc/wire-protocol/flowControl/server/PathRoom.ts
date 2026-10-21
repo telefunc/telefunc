@@ -69,8 +69,6 @@ class PathRoom implements SendRoom {
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
 
-  sentFrame(): void {}
-
   /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made room for. */
   acknowledged(ack: PiecesAck): boolean {
     const before = this.sender.acknowledgedBytes

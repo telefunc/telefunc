@@ -49,8 +49,6 @@ type SendRoom = {
   dataRoom(): number
   /** It handed the socket `bytes`, of data or not, or gathered them for the message its turn ends with. */
   handed(bytes: number, data: boolean): void
-  /** It was sent a frame of `tag` and `bytes`, which it hands the socket now or once room allows. */
-  sentFrame(tag: number, bytes: number): void
 }
 
 type PieceSenderOptions = {
@@ -158,7 +156,6 @@ class PieceSender {
     }
     this.takeCarried()
     const tag = frame[0]!
-    this.room.sentFrame(tag, frame.byteLength)
     // It passes what waits: the probe its peer waits on may be its own.
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) {
@@ -475,7 +472,6 @@ class PieceSender {
     for (const take of this.carried.splice(0)) {
       const frame = take()
       if (frame === null) continue
-      this.room.sentFrame(frame[0]!, frame.byteLength)
       this.count(frame, false)
       this.turn.add(frame)
     }

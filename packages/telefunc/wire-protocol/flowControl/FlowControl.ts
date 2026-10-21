@@ -14,7 +14,6 @@ import {
 } from '../constants.js'
 import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type BdpPingAck } from '../wire/connectionFrame.js'
 import { Fifo } from '../../utils/Fifo.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
 
 /** A batching wire sends `urgent-flow-control` at once; an `acknowledgement` may ride the next message it sends. */
 type ByteWindowKind = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
@@ -36,8 +35,6 @@ interface FlowControlOptions {
 /** The page's uplink, as a channel's credit reads it. */
 type AttachedUplink = SendWait & {
   readonly link: Link
-  readonly refreshes: { wait(): number }
-  noteWait(wait: number): void
 }
 
 /** The page's downlink, as a channel's credit tells it what it granted and what arrived. */
@@ -86,8 +83,6 @@ class FlowControl {
   /** What had been consumed when the last urgent limit was emitted. */
   private _urgentBytes = 0
   private _urgentMessages = 0
-  /** Waits for the wire's share to refresh the limits a quarter window of consumption made due (see `Uplink.refreshes`). */
-  private _refreshTimer: ReturnType<typeof setTimeout> | null = null
   /** Bytes of the frames credit doesn't count that arrived since the byte limit last went out. */
   private _uncountedBytes = 0
   /** A frame arrived since the byte limit last went out, which acknowledges what arrived. */
@@ -364,7 +359,6 @@ class FlowControl {
   shutdown(): void {
     if (this._shutdown) return
     this._shutdown = true
-    if (this._refreshTimer !== null) clearTimeout(this._refreshTimer)
     this._tryWakeCreditWaiters()
   }
 
@@ -386,19 +380,8 @@ class FlowControl {
     if (bytes || messages) this._advertiseDue(bytes, messages)
   }
 
-  /** Sends the limits due, once the wire's share allows. */
+  /** Sends the limits due. */
   private _advertiseDue(bytes: boolean, messages: boolean): void {
-    const wait = this._uplink?.refreshes.wait() ?? 0
-    if (wait > 0) {
-      this._uplink!.noteWait(wait)
-      this._refreshTimer ??= unrefTimer(
-        setTimeout(() => {
-          this._refreshTimer = null
-          this._refresh()
-        }, wait),
-      )
-      return
-    }
     if (bytes) this._advertiseBytes('flow-control')
     if (messages) this._advertiseMessages()
   }

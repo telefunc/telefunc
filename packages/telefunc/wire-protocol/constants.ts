@@ -202,10 +202,6 @@ export const WIRE_SEND_ACK_GAP_MS = 10
 export const WIRE_SEND_ACK_MS = 25
 /** What such an acknowledgement covers at least: its own bytes stay under 1% of it. */
 export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
-/** The most of a page uplink's rate its acknowledgements of what it receives take: past it, each waits its turn. */
-export const WIRE_ACK_SHARE = 0.0025
-/** The most its window refreshes take, which move the download's credit. */
-export const WIRE_REFRESH_SHARE = 0.0075
 /** The least a page's server may leave unacknowledged while the page hands its WebSocket data. */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 /** A server hands its socket data while its path holds less than the page takes in this many least round trips. */

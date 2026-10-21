@@ -83,11 +83,6 @@ class SendBudget implements SendRoom {
     return this.roomPast(this.sender.transmittedBytes)
   }
 
-  /** `SendRoom`: a PIECES_ACK or a window refresh takes its share of the uplink. */
-  sentFrame(tag: number, bytes: number): void {
-    this.uplink.sentFrame(tag, bytes)
-  }
-
   /** The room past all the sender was sent, what it holds included: none once the room is used or data waits for it. */
   roomPastSent(): number {
     return this.roomPast(this.sender.sentBytes)
