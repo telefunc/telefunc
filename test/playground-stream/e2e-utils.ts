@@ -6,6 +6,8 @@ export {
   dropNextWebSocket,
   runServerAction,
   holdNextSsePost,
+  holdNextSseWire,
+  heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
   navigate,
@@ -84,6 +86,17 @@ async function dropNextWebSocket() {
 /** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`, and answers it then. */
 async function holdNextSsePost() {
   await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold`, { method: 'POST' })
+}
+
+/** The POST that opens the page's next SSE wire is answered, and its first batch reaches Telefunc only at `releaseHeldSsePosts()`. */
+async function holdNextSseWire() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold-stream`, { method: 'POST' })
+}
+
+/** How many SSE POSTs the server holds. */
+async function heldSsePosts(): Promise<number> {
+  const resp = await fetch(`${getServerUrl()}/api/wire/held`)
+  return ((await resp.json()) as { held: number }).held
 }
 
 /** The server answers the page's next SSE batch POST with 400, as it does for a wire it closed. */

@@ -90,8 +90,10 @@ app.post('/api/server-close-trigger', async (c) => {
   return c.json({ ok: true })
 })
 
-// Test-only: lets an e2e test drop the page's connections, or hold or refuse its next SSE batch POST.
-let nextSsePost: 'hold' | 'refuse' | null = null
+// Test-only: lets an e2e test drop the page's connections, or hold or refuse its next SSE POST.
+// 'hold-stream': the next POST that opens an SSE wire gets its answer, and its first batch, which rides on it, is held.
+// The others: the next batch POST.
+let nextSsePost: 'hold' | 'refuse' | 'hold-stream' | null = null
 let dropNextWebSocket = false
 const heldSsePosts: (() => void)[] = []
 
@@ -106,10 +108,13 @@ app.post('/api/wire/next-websocket', (c) => {
 })
 app.post('/api/wire/next-sse-post', (c) => {
   const action = c.req.query('action')
-  if (action !== 'hold' && action !== 'refuse') return c.json({ ok: false, reason: 'action is hold or refuse' }, 400)
+  if (action !== 'hold' && action !== 'refuse' && action !== 'hold-stream') {
+    return c.json({ ok: false, reason: 'action is hold, refuse or hold-stream' }, 400)
+  }
   nextSsePost = action
   return c.json({ ok: true })
 })
+app.get('/api/wire/held', (c) => c.json({ held: heldSsePosts.length }))
 app.post('/api/wire/release', (c) => {
   const released = heldSsePosts.length
   for (const release of heldSsePosts.splice(0)) release()
@@ -125,13 +130,28 @@ app.all('/_telefunc', async (c) => {
     const body = new Uint8Array(await c.req.arrayBuffer())
     const metadataLength = new DataView(body.buffer).getUint32(0)
     const metadata = JSON.parse(new TextDecoder().decode(body.subarray(4, 4 + metadataLength)))
-    if (!metadata.streamResponse) {
-      const action = nextSsePost
-      nextSsePost = null
-      if (action === 'refuse') return c.text('', 400)
-      await new Promise<void>((resolve) => heldSsePosts.push(resolve))
-    }
-    const request = new Request(c.req.url, { method: 'POST', headers: c.req.raw.headers, body })
+    const action = (nextSsePost === 'hold-stream') === Boolean(metadata.streamResponse) ? nextSsePost : null
+    if (action) nextSsePost = null
+    if (action === 'refuse') return c.text('', 400)
+    if (action === 'hold') await new Promise<void>((resolve) => heldSsePosts.push(resolve))
+    const held = action === 'hold-stream'
+    const header = body.subarray(0, 4 + metadataLength)
+    const request = new Request(c.req.url, {
+      method: 'POST',
+      headers: c.req.raw.headers,
+      body: !held
+        ? body
+        : new ReadableStream<Uint8Array>({
+            async start(controller) {
+              controller.enqueue(header)
+              await new Promise<void>((resolve) => heldSsePosts.push(resolve))
+              controller.enqueue(body.subarray(header.byteLength))
+              controller.close()
+            },
+          }),
+      // @ts-ignore duplex is not yet in TypeScript's RequestInit
+      duplex: 'half',
+    })
     const response = await tf.serve({ request })
     return response ?? c.text('Not found', 404)
   }
