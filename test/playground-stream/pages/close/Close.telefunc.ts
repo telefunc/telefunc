@@ -5,6 +5,7 @@ export {
   onCloseStream,
   onCloseChannel,
   onAbortedChannel,
+  onCloseUnreturned,
   onCloseFn,
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
@@ -13,7 +14,7 @@ export {
 }
 
 import { EventEmitter } from 'node:events'
-import { Channel, getContext } from 'telefunc'
+import { BroadcastChannel, Channel, getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -104,6 +105,24 @@ async function onAbortedChannel() {
   const ch = new Channel<never, never>()
   ch.abort('before-return')
   return ch.client
+}
+
+/** Closes a `Channel` and a `BroadcastChannel` this telefunction never returns: how long each `close()` takes, and
+ *  what its `onClose` receives. */
+async function onCloseUnreturned() {
+  const closeOf = async (channel: Channel<never, never> | BroadcastChannel) => {
+    let onCloseErr = 'not-fired'
+    channel.onClose((err) => {
+      onCloseErr = err ? err.message : 'none'
+    })
+    const start = performance.now()
+    await channel.close()
+    return { ms: Math.round(performance.now() - start), onCloseErr }
+  }
+  return {
+    channel: await closeOf(new Channel<never, never>()),
+    broadcast: await closeOf(new BroadcastChannel({ key: `close-unreturned:${crypto.randomUUID()}` })),
+  }
 }
 
 async function onCloseFn(callback: () => void) {

@@ -358,7 +358,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
     const timeout = normalizeCloseTimeout(opts?.timeout)
     this._closeDeadline = Date.now() + timeout
-    this._awaitingCloseAck = true
+    // A channel no response carried yet has no page to acknowledge its close.
+    this._awaitingCloseAck = this._didRegister
     this._startClose()
     if (this._peer) this._closeRequestSeq = this._peer.sendCloseRequest(timeout)
     else this._pendingEnd.closeRequest = true

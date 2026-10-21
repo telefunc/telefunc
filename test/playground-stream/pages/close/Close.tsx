@@ -10,6 +10,7 @@ import {
   onCloseStream,
   onCloseChannel,
   onAbortedChannel,
+  onCloseUnreturned,
   onCloseFn,
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
@@ -121,6 +122,16 @@ function Close() {
         }}
       >
         Channel: aborted before it was returned
+      </button>
+
+      <button
+        id="test-close-unreturned"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ method: 'close() unreturned', ...(await onCloseUnreturned()) }))
+        }}
+      >
+        Channel: close() of one never returned
       </button>
 
       <h2>Function</h2>
