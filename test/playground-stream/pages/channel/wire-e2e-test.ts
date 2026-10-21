@@ -121,8 +121,7 @@ function testWire(isDev: boolean) {
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
     test('channel: a channel a call returns while the WebSocket is dead without a word opens on both ends once the page notices', async () => {
-      // Port in this machine's range for e2e runs; the proxy lives in the test process.
-      const proxy = await startBlackHoleProxy(getServerUrl(), 21150)
+      const proxy = await startBlackHoleProxy(getServerUrl())
       try {
         await navigate(`${proxy.url}/channel`)
         await page.click('#wire-end-open')
@@ -337,8 +336,7 @@ function testWireSmallReplay() {
 // A server pinging every 7 s outlives, by its 14 s ping deadline, a WebSocket the page gives up at its 10 s RECONCILE deadline.
 function testWireSlowPing() {
   test("channel: a channel keeps delivering after two drops in a row, the first reconnect's answer lost, once the server closes that dead WebSocket", async () => {
-    // Port in this machine's range for e2e runs; the proxy lives in the test process.
-    const proxy = await startBlackHoleProxy(getServerUrl(), 21151)
+    const proxy = await startBlackHoleProxy(getServerUrl())
     try {
       await navigate(`${proxy.url}/channel`)
       await page.click('#wire-end-open')

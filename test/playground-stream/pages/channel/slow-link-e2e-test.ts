@@ -16,7 +16,7 @@ function testSlowLink(isDev: boolean) {
   if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).length > 1) return
 
   test("channel: on a 1 MB/s link, a channel's acknowledged sends beside another channel's download answer, on the connection they started on", async () => {
-    const proxy = await startBlackHoleProxy(getServerUrl(), 21152)
+    const proxy = await startBlackHoleProxy(getServerUrl())
     try {
       await navigate(`${proxy.url}/channel`)
       proxy.pace({ downBytesPerSecond: 1_000_000, upBytesPerSecond: 1_000_000, queueBytes: 64 * 1024 })
@@ -40,7 +40,7 @@ function testSlowLink(isDev: boolean) {
   })
 
   test('channel: on a 125 kB/s uplink, a 2 MiB upload arrives and keeps the download coming on the connection it started on, and a channel opened meanwhile opens on it', async () => {
-    const proxy = await startBlackHoleProxy(getServerUrl(), 21153)
+    const proxy = await startBlackHoleProxy(getServerUrl())
     try {
       await navigate(`${proxy.url}/channel`)
       proxy.pace({ downBytesPerSecond: 10_000_000, upBytesPerSecond: 125_000, queueBytes: 64 * 1024 })

@@ -27,7 +27,7 @@ type Link = {
 }
 
 /** A TCP proxy in the test process, in front of the server at `target`. */
-async function startBlackHoleProxy(target: string, port: number): Promise<BlackHoleProxy> {
+async function startBlackHoleProxy(target: string): Promise<BlackHoleProxy> {
   const { hostname, port: targetPort } = new URL(target)
   const links = new Set<Link>()
   let muteNext = false
@@ -78,7 +78,8 @@ async function startBlackHoleProxy(target: string, port: number): Promise<BlackH
     page.on('error', () => {})
     server.on('error', () => {})
   })
-  await new Promise<void>((resolve) => proxy.listen(port, 'localhost', resolve))
+  await new Promise<void>((resolve) => proxy.listen(0, 'localhost', resolve))
+  const { port } = proxy.address() as net.AddressInfo
   return {
     url: `http://localhost:${port}`,
     blackHoleWebSockets() {
