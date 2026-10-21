@@ -1683,9 +1683,7 @@ class ClientConnection implements MuxConnection {
     let writeIx = 0
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
-      const frame = entry.frame
-      const channelIx = entry.channelIx
-      const seq = entry.seq
+      const { frame, channelIx, seq } = entry
       if (!releasable(channelIx)) {
         sendBuffer[writeIx++] = entry
         continue
