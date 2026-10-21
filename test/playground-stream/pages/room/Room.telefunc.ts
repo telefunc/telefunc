@@ -21,6 +21,7 @@ export {
   onGetHiddenAfterPlayers,
   onCloseRoomWithMember,
   onBackgroundErrors,
+  onRoomWhileAway,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -31,6 +32,8 @@ export {
 }
 
 import { Room, Abort, onBug, type LeaveCause, type LocalParticipant } from 'telefunc'
+import { cleanupState } from '../../cleanup-state'
+import { onServerAction } from '../../server-actions'
 
 async function onCreateRoom(roomId: string) {
   return await Room.create(roomId, { meta: { topic: 'e2e' } })
@@ -245,6 +248,24 @@ async function onBackgroundErrors(roomId: string) {
   const reported = bugs.sort()
   bugs = null
   return { reported, unhandled: unhandled.length, awaited }
+}
+
+const awayMembers = new Map<string, LocalParticipant[]>()
+
+/** What the room does while the page is away, run by the test with `runServerAction()`. */
+async function onRoomWhileAway(roomId: string, memberId: string) {
+  const room = await Room.get(roomId)
+  const srv = await room.join({ meta: { name: 'Srv' } })
+  const gone = await room.join({ meta: { name: 'Gone' } })
+  awayMembers.set(roomId, [srv, gone])
+  onServerAction(`roomAway_${roomId}`, async () => {
+    for (const text of ['m1', 'm2', 'm3']) await srv.publish(text)
+    await gone.leave()
+    await Room.setMeta(roomId, { topic: 'while-away' })
+    await Room.removeParticipant(roomId, { id: memberId, reason: 'while-away' })
+    await Room.close(roomId)
+    cleanupState[`roomAway_${roomId}`] = 'done'
+  })
 }
 
 async function onAnnounce(roomId: string, data: unknown) {

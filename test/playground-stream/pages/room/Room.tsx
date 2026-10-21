@@ -25,6 +25,7 @@ import {
   onGetHiddenAfterPlayers,
   onCloseRoomWithMember,
   onBackgroundErrors,
+  onRoomWhileAway,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -803,6 +804,33 @@ function Room() {
           }),
         )
         releasePubView()
+      })}
+
+      {scenario('away', 'Back from offline', 'What the room did while away', async () => {
+        const [roomId, view] = await createRoom('away')
+        const messages: string[] = []
+        const leaves: string[] = []
+        let closed = false
+        view.subscribe((data) => messages.push(data as string))
+        view.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onRoomWhileAway(roomId, me.id)
+        await pollUntil(() => ({ done: view.count === 3 }))
+        setResult(JSON.stringify({ roomId }))
+        for (let poll = 0; poll < 300 && !(closed && myCause); poll++) await new Promise((r) => setTimeout(r, 100))
+        setResult(
+          JSON.stringify({
+            roomId,
+            messages,
+            leaves: leaves.sort(),
+            topic: (view.meta as { topic?: string }).topic ?? null,
+            myCause,
+            closed,
+          }),
+        )
       })}
     </div>
   )

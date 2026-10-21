@@ -1,6 +1,6 @@
 export { testRoom }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, runServerAction, cutWire } from '../../e2e-utils'
 
 type ChatResult = {
   events: string[]
@@ -386,4 +386,30 @@ function testRoom() {
       expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
     },
   )
+  test('room: a page back from offline gets what its room sent meanwhile, in order, and the leaves, kick and close that happened while it was away, with their causes', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-away')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-away:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`roomAway_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomAway_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        roomId,
+        messages: ['m1', 'm2', 'm3'],
+        leaves: ['Gone:left', 'Me:removed'],
+        topic: 'while-away',
+        myCause: { type: 'removed', reason: 'while-away' },
+        closed: true,
+      })
+    })
+  })
 }
