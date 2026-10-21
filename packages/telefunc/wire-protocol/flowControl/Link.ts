@@ -12,12 +12,16 @@ const WAITS_KEPT_MS = 60_000
 
 /** A rate a wire drains at, in bytes per ms: the fastest of the newest `DRAIN_RATES` measured. */
 class DrainRate {
-  /** 0 before any rate. */
-  rate = 0
+  private fastest = 0
   private readonly rates: number[] = []
   /** The bytes and ms of a span not yet measured. */
   private spanBytes = 0
   private spanMs = 0
+
+  /** 0 before any rate. */
+  get rate(): number {
+    return this.fastest
+  }
 
   /** The newest rate measured, 0 before any. */
   get newest(): number {
@@ -30,7 +34,7 @@ class DrainRate {
     if (this.rates.length > DRAIN_RATES) this.rates.shift()
     let fastest = rate
     for (const each of this.rates) if (each > fastest) fastest = each
-    this.rate = fastest
+    this.fastest = fastest
   }
 
   /** Takes `bytes` drained over `ms`, and measures a rate once the span reaches `DRAIN_SPAN_MS`. */
