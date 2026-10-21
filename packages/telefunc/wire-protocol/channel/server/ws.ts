@@ -11,13 +11,16 @@ declare module 'crossws' {
   }
 }
 
-/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. */
+/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. `onMessage` runs as each
+ *  message arrives, before the mux takes it. */
 function getTelefuncChannelHooks({
   terminate = (peer) => peer.terminate(),
   bufferedAmount = (peer) => peer.websocket.bufferedAmount,
+  onMessage = () => {},
 }: {
   terminate?: (peer: Peer) => void
   bufferedAmount?: (peer: Peer) => number | undefined
+  onMessage?: (peer: Peer) => void
 } = {}) {
   enableChannelTransports(['ws'])
   const mux = getChannelMux()
@@ -44,7 +47,10 @@ function getTelefuncChannelHooks({
 
   return defineHooks({
     open: (peer) => mux.onConnectionOpen(peer, transport, peer.request),
-    message: (peer, message) => mux.onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
+    message: (peer, message) => {
+      onMessage(peer)
+      return mux.onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>)
+    },
     close: (peer, details) => {
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === 1000 || details?.code === 1001
       mux.onConnectionClosed(peer, { permanent: isPermanent })
