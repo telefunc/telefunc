@@ -50,9 +50,11 @@ function WireDemo() {
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
   // A channel the page drops closes once garbage-collected.
   const largeChannel = useRef<Awaited<ReturnType<typeof onWireLarge>>['channel'] | null>(null)
+  const resumeChannel = useRef<Awaited<ReturnType<typeof onWireResume>>['channel'] | null>(null)
 
   const resume = useCallback(async () => {
     const { channel, channelId } = await onWireResume(RESUME_COUNT)
+    resumeChannel.current = channel
     const tally = new Tally()
     const show = () => setState((s) => ({ ...s, resume: { channelId, received: { ...tally.state } } }))
     show()
@@ -95,8 +97,11 @@ function WireDemo() {
     const { channel, channelId } = await withContext(onWireEnd, { signal: endCall.current.signal })(END_BEFORE)
     endChannel.current = channel
     setState((s) => ({ ...s, end: { channelId, received: [], close: null } }))
+    // A channel the next open replaced may still close: its events aren't the next one's.
     const receive = (item: string) =>
-      setState((s) => ({ ...s, end: { ...s.end!, received: [...s.end!.received, item] } }))
+      setState((s) =>
+        s.end?.channelId === channelId ? { ...s, end: { ...s.end, received: [...s.end.received, item] } } : s,
+      )
     channel.listen(receive)
     channel.onClose((err) => {
       receive(`onClose:${!err ? 'none' : err instanceof Abort ? `abort:${JSON.stringify(err.abortValue)}` : err.name}`)

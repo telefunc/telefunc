@@ -287,6 +287,9 @@ function ChannelDemo() {
     null,
   )
   const upstreamReconnectSeqRef = useRef(0)
+  const noListenerAckServerChannelRef = useRef<
+    Awaited<ReturnType<typeof onChannelNoListenerAckServer>>['channel'] | null
+  >(null)
   const endedValuesRef = useRef<WeakRef<object>[]>([])
 
   useEffect(() => setHydrated(true), [])
@@ -765,6 +768,7 @@ function ChannelDemo() {
   const testNoListenerAckServer = useCallback(async () => {
     addLog('system', 'Starting no-listener-ack-server test...')
     const { channel, channelId } = await openChannel(onChannelNoListenerAckServer)
+    noListenerAckServerChannelRef.current = channel
     setChannelState((s) => ({ ...s, noListenerAckServerChannelId: channelId }))
     // No listener — server's send({ ack: true }) should reject
     channel.onClose(() => {
@@ -832,6 +836,8 @@ function ChannelDemo() {
       await trigger()
       const outcome = await getOutcome()
       setChannelState((s) => ({ ...s, shieldServerAckValid: outcome }))
+      // The channel stays reachable until the server's send is answered: a GC pass would close it.
+      void channel
     }
 
     // ── C2 — server sends, client listener returns invalid (wrong type) ───────
@@ -841,6 +847,7 @@ function ChannelDemo() {
       await trigger()
       const outcome = await getOutcome()
       setChannelState((s) => ({ ...s, shieldServerAckInvalid: outcome }))
+      void channel
     }
 
     addLog('system', 'Shield tests complete.')

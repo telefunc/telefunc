@@ -36,6 +36,8 @@ function Publish() {
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
   const reconnectRef = useRef<Awaited<ReturnType<typeof onBroadcastReconnect>> | null>(null)
+  // A broadcast the page drops closes once garbage-collected.
+  const listenedRef = useRef<unknown>(null)
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
@@ -108,6 +110,7 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const room = await onBinaryBroadcast()
+          listenedRef.current = room
           const received: Array<{ size: number; firstByte: number }> = []
           room.subscribeBinary((data, info) => {
             received.push({ size: data.byteLength, firstByte: data[0]! })
@@ -191,6 +194,7 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const room = await onBroadcastOnOpenPublish()
+          listenedRef.current = room
           const received: string[] = []
           room.subscribe((msg) => {
             received.push(msg)
@@ -243,6 +247,7 @@ function Publish() {
         onClick={async () => {
           setResult('')
           const { room, publish, getServerSeen } = await onBroadcastSelfUnsubscribe()
+          listenedRef.current = room
           const pageSeen: string[] = []
           const off = room.subscribe((msg) => {
             pageSeen.push(`once:${msg}`)
@@ -302,6 +307,7 @@ function Publish() {
           onClick={async () => {
             setResult('')
             const { key, room } = await onBroadcastWhileOffline(count)
+            listenedRef.current = room
             const received: string[] = []
             let closed: string | null = null
             const render = () => setResult(JSON.stringify({ key, received, closed }))

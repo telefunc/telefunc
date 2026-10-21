@@ -1,10 +1,12 @@
 export { RedisReconnect }
 
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { onBinaryBroadcastAcrossReconnect } from './RedisReconnect.telefunc'
 
 function RedisReconnect() {
   const [firstBytes, setFirstBytes] = useState<number[]>([])
+  // A broadcast the page drops closes once garbage-collected.
+  const roomRef = useRef<Awaited<ReturnType<typeof onBinaryBroadcastAcrossReconnect>> | null>(null)
 
   return (
     <div>
@@ -16,6 +18,7 @@ function RedisReconnect() {
         onClick={async () => {
           setFirstBytes([])
           const room = await onBinaryBroadcastAcrossReconnect()
+          roomRef.current = room
           room.subscribeBinary((data) => setFirstBytes((bytes) => [...bytes, data[0]!]))
           await room.publish({ start: true })
         }}
