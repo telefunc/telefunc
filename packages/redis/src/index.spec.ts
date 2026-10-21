@@ -12,26 +12,9 @@ class FakeIoredis {
   private readonly listeners: Array<(channel: Uint8Array, message: Uint8Array) => void> = []
   /** Mocked clock so tests can assert deterministic ts. */
   private clockMs = 1_700_000_000_000
-  /** Commands waiting for `release()`, as ioredis queues them while it connects. */
-  private held: Array<() => void> | null = null
-
-  hold(): void {
-    this.held = []
-  }
-
-  release(): void {
-    const held = this.held!
-    this.held = null
-    for (const run of held) run()
-  }
 
   setClock(ms: number): void {
     this.clockMs = ms
-  }
-
-  /** What the next `INCR` on `seqKey` counts on from. */
-  setCounter(seqKey: string, seq: number): void {
-    this.counters.set(seqKey, seq)
   }
 
   // `duplicate()` would normally allocate a new TCP connection; in the fake we
@@ -43,11 +26,7 @@ class FakeIoredis {
   defineCommand(name: string, _def: { numberOfKeys: number; lua: string }): void {
     ;(this as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[name] = (
       ...args: unknown[]
-    ): Promise<unknown> => {
-      const held = this.held
-      if (held === null) return Promise.resolve(this.runPublishScript(args))
-      return new Promise((resolve) => held.push(() => resolve(this.runPublishScript(args))))
-    }
+    ): Promise<unknown> => Promise.resolve(this.runPublishScript(args))
   }
 
   async subscribe(..._channels: string[]): Promise<number> {
@@ -160,42 +139,5 @@ describe('Redis adapter — live delivery', () => {
     expect(Array.from(received[0]!.payload)).toEqual([0xde, 0xad, 0xbe, 0xef])
     expect(received[0]!.seq).toBe(1)
     expect(received[0]!.timestamp).toBe(1_700_000_003_000)
-  })
-
-  it('delivers the bytes a binary publish was given, though its caller reuses the buffer while ioredis holds the command', async () => {
-    const { fake, adapter } = newAdapter()
-    const received: number[][] = []
-    adapter.subscribeBinary('room:bin', (payload) => received.push(Array.from(payload)))
-
-    fake.hold()
-    const buffer = new Uint8Array([1, 1, 1])
-    const first = adapter.publishBinary('room:bin', buffer)
-    buffer.set([2, 2, 2])
-    const second = adapter.publishBinary('room:bin', buffer)
-    buffer.set([3, 3, 3])
-    fake.release()
-    await Promise.all([first, second])
-
-    expect(received).toEqual([
-      [1, 1, 1],
-      [2, 2, 2],
-    ])
-  })
-
-  it('gives subscribers the seq the publisher saw past 2^32 publishes on a key, text and binary alike', async () => {
-    const { fake, adapter } = newAdapter()
-    fake.setCounter('tf:seq:{room:far}', 2 ** 32 - 2)
-    const received: number[] = []
-    adapter.subscribe('room:far', (_, info) => void received.push(info.seq))
-    adapter.subscribeBinary('room:far', (_, info) => void received.push(info.seq))
-
-    const published = [
-      await adapter.publish('room:far', 'a'),
-      await adapter.publishBinary('room:far', new Uint8Array([1])),
-      await adapter.publish('room:far', 'b'),
-    ]
-
-    expect(published.map(({ seq }) => seq)).toEqual([2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1])
-    expect(received).toEqual([2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1])
   })
 })

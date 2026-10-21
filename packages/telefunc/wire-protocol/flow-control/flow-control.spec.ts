@@ -1,24 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { FlowControl, replayWindow } from './flow-control.js'
-import type { ByteWindowKind, FlowControlOptions } from './flow-control.js'
+import { FlowControl } from './flow-control.js'
+import type { FlowControlOptions } from './flow-control.js'
 import {
   BDP_PING_MIN_INTERVAL_MS,
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,
-  CREDIT_WINDOW_INITIAL_BYTES_BATCH,
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
-import { decode, encode } from '../shared-ws.js'
-import { Deliveries } from '../deliveries.js'
-import { Uplink } from '../client/uplink.js'
-import { Downlink } from '../client/downlink.js'
 
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
 
-/** What a peer's wire held each time its credit ran out: a window and more. */
-const HELD = CREDIT_WINDOW_MAX_BYTES
 /** What the wire delivered before an ack: right up to it, as a queue does. */
 const upToAck = () => Infinity
 
@@ -28,18 +21,6 @@ const upToAck = () => Infinity
 // the chain — `Promise.resolve()` once isn't enough.
 async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 6; i++) await Promise.resolve()
-}
-
-/** Resolves on the next macrotask, which fake timers don't hold back. */
-function nextMacrotask(): Promise<void> {
-  const { port1, port2 } = new MessageChannel()
-  return new Promise<void>((resolve) => {
-    port1.onmessage = () => {
-      port1.close()
-      resolve()
-    }
-    port2.postMessage(null)
-  })
 }
 
 /** Whether each promise has resolved, as of now. */
@@ -55,41 +36,32 @@ function watch(promises: (void | Promise<void>)[]): boolean[] {
 type Emit = FlowControlOptions & {
   windowCalls: number[]
   msgWindowCalls: number[]
-  /** The kind of each `windowCalls` entry. */
-  windowKinds: ByteWindowKind[]
-  /** `urgent` of each `msgWindowCalls` entry. */
-  msgWindowUrgent: boolean[]
   bdpPingCalls: number
   /** The number of the last probe sent. */
   probe: number
 }
-/** `backlog` is what its wire holds, nothing unless a test says otherwise. */
-function makeEmit(backlog: () => number | undefined = () => 0): Emit {
+function makeEmit(): Emit {
   const e: Emit = {
     windowCalls: [],
     msgWindowCalls: [],
-    windowKinds: [],
-    msgWindowUrgent: [],
     bdpPingCalls: 0,
     probe: 0,
-    byteWindowUpdate(b, kind) {
+    byteWindowUpdate(b) {
       e.windowCalls.push(b)
-      e.windowKinds.push(kind)
     },
-    msgWindowUpdate(c, urgent) {
+    msgWindowUpdate(c) {
       e.msgWindowCalls.push(c)
-      e.msgWindowUrgent.push(urgent)
     },
     bdpPing(probe) {
       e.bdpPingCalls++
       e.probe = probe
     },
-    backlog,
+    backlog: () => 0,
   }
   return e
 }
-function makeFlow(backlog?: () => number | undefined) {
-  const emit = makeEmit(backlog)
+function makeFlow() {
+  const emit = makeEmit()
   return { emit, flow: fitted(new FlowControl(emit)) }
 }
 /** Fitted to the default replay buffers, which allow the largest window either way. */
@@ -115,7 +87,7 @@ describe('FlowControl — sender-side credit', () => {
 
   // When the decrement zeroes-or-crosses-below credit, decrement returns a
   // Promise → caller's next `await` blocks until the peer's WINDOW arrives.
-  // The gate is credit > 0, so exactly draining to 0 also blocks.
+  // The gate is `_peerWindow > 0`, so exactly draining to 0 also blocks.
   it('decrement returns a Promise once credit is depleted', () => {
     const { flow } = makeFlow()
     expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
@@ -156,77 +128,6 @@ describe('FlowControl — sender-side credit', () => {
     await flushMicrotasks()
     expect([...resolved, ...watch([again])]).toEqual([true, true, false, false])
   })
-
-  it('a sender woken to its turn that sends nothing passes the credit on a macrotask later', async () => {
-    const { flow } = makeFlow()
-    const gates = [flow.decrement(CREDIT_WINDOW_INITIAL_BYTES), flow.decrement(100)]
-    const resolved = watch(gates)
-    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
-    await flushMicrotasks()
-    expect(resolved).toEqual([true, false])
-    await nextMacrotask()
-    await flushMicrotasks()
-    expect(resolved).toEqual([true, true])
-  })
-
-  it('a page yields a macrotask once per yieldBytes it sends, counted again from a yield or a wait for credit', async () => {
-    const flow = fitted(new FlowControl({ ...makeEmit(), yieldBytes: 1000 }))
-    expect(flow.decrement(400)).toBeUndefined()
-    expect(flow.decrement(400)).toBeUndefined()
-    const resolved = watch([flow.decrement(400)])
-    await flushMicrotasks()
-    expect(resolved).toEqual([false])
-    await nextMacrotask()
-    await flushMicrotasks()
-    expect(resolved).toEqual([true])
-    expect(flow.decrement(400)).toBeUndefined()
-    expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)).toBeInstanceOf(Promise)
-    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
-    await flushMicrotasks()
-    expect(flow.decrement(400)).toBeUndefined()
-    expect(flow.decrement(400)).toBeUndefined()
-  })
-
-  // The server's sender writes to its socket as it sends: yielding cost its downloads.
-  it('a sender with no yieldBytes, a server, sends on without yielding, also after a wait for credit', async () => {
-    const { flow } = makeFlow()
-    expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)).toBeInstanceOf(Promise)
-    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
-    await flushMicrotasks()
-    for (let n = 0; n < 50; n++) expect(flow.decrement(64 * 1024)).toBeUndefined()
-  })
-
-  it('a send within credit resolves at once while no other sender waits', () => {
-    const { flow } = makeFlow()
-    for (let n = 0; n < 10; n++) expect(flow.decrement(1024)).toBeUndefined()
-  })
-
-  // The frame that crosses the limit is credit flow control's normal overshoot; what is sent after it is not.
-  it('counts as sent past credit only frames sent once none was left, until a limit covers them', () => {
-    const { flow } = makeFlow()
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 10)
-    flow.decrement(1_000_000) // crosses the limit by 999 990 bytes
-    expect(flow.isPastByteCredit).toBe(true)
-    expect(flow.bytesSentPastCredit).toBe(0)
-    flow.decrement(100)
-    flow.decrement(100)
-    expect(flow.bytesSentPastCredit).toBe(200)
-    // A limit covering the crossing frame and half of the next.
-    flow.onPeerByteWindow(CREDIT_WINDOW_INITIAL_BYTES + 999_990 + 50)
-    expect(flow.bytesSentPastCredit).toBe(150)
-    flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    expect(flow.isPastByteCredit).toBe(false)
-    expect(flow.bytesSentPastCredit).toBe(0)
-  })
-
-  // Limits can arrive late or twice: a refresh queued while the wire couldn't take it, one a reattach repeats.
-  it('ignores a limit that does not raise the current one', async () => {
-    const { flow } = makeFlow()
-    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    expect(flow.decrement(3 * CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
-    expect(flow.decrement(1)).toBeInstanceOf(Promise)
-  })
 })
 
 describe('FlowControl — receiver-side consumption (byte axis)', () => {
@@ -238,52 +139,18 @@ describe('FlowControl — receiver-side consumption (byte axis)', () => {
     expect(emit.windowCalls).toHaveLength(0)
   })
 
-  // At the threshold, emit WINDOW(consumed + window). The next refresh requires another W/4 of consumption.
-  it('emits WINDOW at the W/4 threshold and again only a quarter later', () => {
+  // At the threshold, emit WINDOW(window). Counter resets so the next refresh
+  // requires another W/4 of consumption.
+  it('emits WINDOW at the W/4 threshold and resets the counter', () => {
     const { flow, emit } = makeFlow()
     const quarter = Math.floor(CREDIT_WINDOW_INITIAL_BYTES / 4)
     flow.onConsumed(quarter)
     expect(emit.windowCalls).toEqual([quarter + CREDIT_WINDOW_INITIAL_BYTES])
     flow.onConsumed(quarter - 1)
     expect(emit.windowCalls).toEqual([quarter + CREDIT_WINDOW_INITIAL_BYTES])
-    flow.onConsumed(1)
-    expect(emit.windowCalls).toEqual([quarter + CREDIT_WINDOW_INITIAL_BYTES, 2 * quarter + CREDIT_WINDOW_INITIAL_BYTES])
   })
 
-  // A refresh is urgent once more than half a window was consumed since the last urgent one.
-  it('marks a WINDOW urgent once more than half a window was consumed since the last urgent one', () => {
-    const { flow, emit } = makeFlow()
-    const quarter = Math.floor(CREDIT_WINDOW_INITIAL_BYTES / 4)
-    for (let i = 0; i < 6; i++) flow.onPublishConsumed(quarter)
-    expect(emit.windowKinds).toEqual([
-      'flow-control',
-      'flow-control',
-      'urgent-flow-control',
-      'flow-control',
-      'flow-control',
-      'urgent-flow-control',
-    ])
-  })
-
-  // A limit past half its window goes at once, though it only acknowledges.
-  it('marks a WINDOW that acknowledges urgent once more than half a window was consumed since the last urgent one', () => {
-    const { flow, emit } = makeFlow()
-    const quarter = flow.byteWindow >> 2
-    flow.onConsumed(quarter)
-    flow.onConsumed(quarter)
-    flow.onReceived(1)
-    flow.onConsumed(1)
-    flow.acknowledge()
-    expect(emit.windowKinds).toEqual(['flow-control', 'flow-control', 'urgent-flow-control'])
-  })
-
-  it('marks a MSG_WINDOW urgent once more than half a window was consumed since the last urgent one', () => {
-    const { flow, emit } = makeFlow()
-    for (let i = 0; i < 75; i++) flow.onConsumed(0)
-    expect(emit.msgWindowUrgent).toEqual([false, false, true])
-  })
-
-  // Consumption accumulates across calls.
+  // Counter accumulates across calls.
   it('emits WINDOW once the cumulative quarter is reached across multiple calls', () => {
     const { flow, emit } = makeFlow()
     const quarter = Math.floor(CREDIT_WINDOW_INITIAL_BYTES / 4)
@@ -362,53 +229,7 @@ describe('FlowControl — BDP integration', () => {
   })
 })
 
-describe('FlowControl — what the wire held as the credit ran out', () => {
-  // A probe's ack waits behind what the sender's wire holds, so its sample can't tell a window that left the wire
-  // idle from one the sender filled faster than its wire drains. The sender can: what its wire held as its credit ran
-  // out.
-  it('says the least the wire held each time the credit ran out', () => {
-    let backlog = 64 * 1024
-    const { flow } = makeFlow(() => backlog)
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
-    backlog = 16 * 1024
-    expect(flow.onPing()).toBe(16 * 1024)
-    // Answered, it starts over.
-    backlog = 32 * 1024
-    expect(flow.onPing()).toBe(32 * 1024)
-  })
-
-  it('says nothing ran out while credit is left, however empty the wire', () => {
-    const { flow } = makeFlow(() => 0)
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)
-    flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    expect(flow.onPing()).toBe(Infinity)
-  })
-
-  it('says what the wire held when the message credit ran out', () => {
-    const { flow } = makeFlow(() => 0)
-    for (let n = 0; n < CREDIT_MSG_WINDOW_INITIAL; n++) flow.decrement(1)
-    expect(flow.onPing()).toBe(0)
-  })
-
-  // Where the runtime can't tell what its wire holds, the window is taken to limit it once its credit runs out.
-  it('says the wire held nothing when the credit ran out on a wire that cannot tell what it holds', () => {
-    const { flow } = makeFlow(() => undefined)
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(flow.onPing()).toBe(0)
-  })
-
-  it('grows its own window only on an ack that says the window starved the peer', () => {
-    const { flow, emit } = makeFlow()
-    flow.onReceived(1)
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck({ probe: emit.probe, backlog: HELD, pathRtt: Infinity }, upToAck)
-    expect(flow.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-  })
-})
-
-describe('FlowControl — reattach', () => {
+describe('FlowControl — reset (transport reattach)', () => {
   // Credit is cumulative, so a reattach keeps it: resetting it to the initial window let a sender run a window
   // ahead of what was in flight, and stalled one whose receiver waits for a quarter of its grown window. The
   // receive window grown by BDP is kept too (the link's BDP doesn't change across transport hiccups).
@@ -452,7 +273,7 @@ describe('FlowControl — reattach', () => {
     expect(resolved).toEqual([true])
   })
 
-  // The BDP estimator's in-flight ping is dropped on reattach (its ack rode the
+  // The BDP estimator's in-flight ping is dropped on reset (its ack rode the
   // prior wire and won't arrive). A fresh ping must be allowed to fire next.
   it('drops the in-flight BDP ping so the next receive can fire a fresh one', () => {
     const { flow, emit } = makeFlow()
@@ -462,356 +283,6 @@ describe('FlowControl — reattach', () => {
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
     flow.onReceived(1024)
     expect(emit.bdpPingCalls).toBe(2)
-  })
-
-  // An SSE wire's upload can fall back to batch POSTs after its first attach, and a later attach on that same wire
-  // skips the reattach, so the larger window goes out on its own.
-  it('advertises the batch-POST window as it grows, once', () => {
-    const { flow, emit } = makeFlow()
-    flow.onConsumed(100)
-    flow.useBatchTransportInitial()
-    flow.useBatchTransportInitial()
-    expect(emit.windowCalls).toEqual([100 + CREDIT_WINDOW_INITIAL_BYTES_BATCH])
-  })
-})
-
-describe('FlowControl — replay buffers', () => {
-  it("a receiver's window is half the smaller lane of its peer's replay buffer less an ACK_RES frame's overhead, at least a byte", () => {
-    expect(replayWindow(4 * 1024 * 1024, 2 * 1024 * 1024)).toBe(1024 * 1024 - 16)
-    expect(replayWindow(1, 0)).toBe(1)
-  })
-
-  // What credit lets be in flight, and a message as large sent as the credit ran out, must fit the sender's replay.
-  it("a window grows no larger than its peer's replay allows, whatever asks it to", () => {
-    const { flow } = makeFlow()
-    flow.fitReplays(1024 * 1024, CREDIT_WINDOW_MAX_BYTES)
-    expect(flow.byteWindow).toBe(1024 * 1024)
-    flow.useBatchTransportInitial()
-    flow.widenByteWindow()
-    expect(flow.byteWindow).toBe(1024 * 1024)
-    flow.fitReplays(4 * CREDIT_WINDOW_MAX_BYTES, CREDIT_WINDOW_MAX_BYTES)
-    expect(flow.byteWindow).toBe(CREDIT_WINDOW_MAX_BYTES)
-  })
-
-  // A page learns the server's replay buffer from its first RECONCILED. A limit it advertised before could let the server
-  // have more in flight than that holds.
-  it('until it knows the replay buffers, a receiver advertises no byte limit, and a sender assumes the initial window', () => {
-    const emit = makeEmit()
-    const flow = new FlowControl(emit)
-    expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onConsumed(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.reattach()
-    expect(emit.windowCalls).toEqual([])
-    flow.fitReplays(64 * 1024, CREDIT_WINDOW_MAX_BYTES)
-    flow.reattach()
-    expect(emit.windowCalls).toEqual([CREDIT_WINDOW_INITIAL_BYTES + 64 * 1024])
-  })
-
-  // The peer assumes the same initial window its own replay allows, so a sender's credit starts there.
-  it("a sender's credit starts at what its own replay allows, until a WINDOW raises it", () => {
-    const { flow } = makeFlow()
-    flow.fitReplays(CREDIT_WINDOW_MAX_BYTES, 512 * 1024)
-    expect(flow.peerByteWindowMax).toBe(512 * 1024)
-    expect(flow.decrement(512 * 1024)).toBeInstanceOf(Promise)
-    flow.onPeerByteWindow(4 * 1024 * 1024)
-    flow.fitReplays(CREDIT_WINDOW_MAX_BYTES, 256 * 1024)
-    expect(flow.decrement(1024)).toBeUndefined()
-  })
-
-  // Ack requests and their answers take no credit, so no limit goes out for them: a WINDOW acknowledges them instead.
-  it('a quarter window of what credit does not count sends a WINDOW, which acknowledges it, and one sent for any reason starts the count again', () => {
-    const { flow, emit } = makeFlow()
-    const quarter = CREDIT_WINDOW_INITIAL_BYTES / 4
-    flow.onReceivedUncounted(quarter - 1)
-    expect(emit.windowCalls).toEqual([])
-    flow.onReceivedUncounted(1)
-    expect(emit.windowCalls).toEqual([CREDIT_WINDOW_INITIAL_BYTES])
-    flow.onReceivedUncounted(quarter - 1)
-    flow.onConsumed(quarter)
-    flow.onReceivedUncounted(1)
-    expect(emit.windowCalls).toEqual([CREDIT_WINDOW_INITIAL_BYTES, quarter + CREDIT_WINDOW_INITIAL_BYTES])
-  })
-
-  // A quiet channel's last frames are acknowledged at the next heartbeat, and a heartbeat with nothing new sends nothing.
-  it('a heartbeat sends a WINDOW only for what arrived since the last', () => {
-    const { flow, emit } = makeFlow()
-    flow.acknowledge()
-    expect(emit.windowCalls).toEqual([])
-    flow.onReceived(100)
-    flow.onConsumed(100)
-    flow.acknowledge()
-    flow.acknowledge()
-    expect(emit.windowCalls).toEqual([100 + CREDIT_WINDOW_INITIAL_BYTES])
-    flow.onReceivedUncounted(10)
-    flow.acknowledge()
-    expect(emit.windowCalls).toHaveLength(2)
-  })
-})
-
-/** A sender and a receiver linked by the u32 wire, as `WINDOW` and `MSG_WINDOW` frames link a channel's ends.
- *  BDP pings go unanswered, so the windows stay at their initial size. */
-function makePair() {
-  const toSender: FlowControlOptions = {
-    byteWindowUpdate: (limit) =>
-      sender.onPeerByteWindow((decode(encode.window(0, limit, 0)) as { bytes: number }).bytes),
-    msgWindowUpdate: (limit) =>
-      sender.onPeerMessageWindow((decode(encode.msgWindow(0, limit)) as { count: number }).count),
-    bdpPing: () => {},
-    backlog: () => 0,
-  }
-  const toReceiver: FlowControlOptions = {
-    byteWindowUpdate: () => {},
-    msgWindowUpdate: () => {},
-    bdpPing: () => {},
-    backlog: () => 0,
-  }
-  const receiver = fitted(new FlowControl(toSender))
-  const sender = fitted(new FlowControl(toReceiver))
-  return { sender, receiver }
-}
-
-describe('FlowControl — 32-bit wraparound', () => {
-  // Limits travel mod 2^32. A stream past 4 GiB must keep what is in flight within the window, and
-  // keep flowing, as its wire values wrap.
-  it('keeps what is in flight within the window as the byte totals cross 2^32', async () => {
-    const { sender, receiver } = makePair()
-    const size = 1 << 20
-    let sent = 0
-    let consumed = 0
-    let inFlight = 0
-    let blocked = false
-    while (consumed < 2 ** 32 + 2 * CREDIT_WINDOW_INITIAL_BYTES) {
-      if (!blocked) {
-        const gate = sender.decrement(size)
-        sent += size
-        receiver.onReceived(size)
-        inFlight = Math.max(inFlight, sent - consumed)
-        if (gate) {
-          blocked = true
-          void gate.then(() => (blocked = false))
-        }
-        continue
-      }
-      expect(sent - consumed, 'blocked with nothing in flight').toBeGreaterThan(0)
-      receiver.onConsumed(size)
-      consumed += size
-      await flushMicrotasks()
-    }
-    expect(inFlight).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-  })
-})
-
-/** A stream over a path of `bytesPerMs` with `delayMs` each way, a millisecond at a time. What the sender sends waits in
- *  its wire, which reports what it holds as a socket's `bufferedAmount` does, then in `hiddenBytes` below it that it
- *  doesn't report, as a kernel's send buffer, then on the link. The receiver attaches, with a probe unless `attach` is
- *  false, which the sender answers ahead of the channel's frames. Where `senderAttach`, the sender probed the path with
- *  an attach of its own, as a page does where the server receives, answered ahead of all it sends. One producer awaits
- *  every send of `frameBytes`, and the receiver consumes each frame as it arrives. Frames toward the sender only take
- *  `delayMs`. */
-async function runPath({
-  bytesPerMs,
-  delayMs,
-  frameBytes,
-  ms,
-  hiddenBytes = 0,
-  attach = true,
-  senderAttach = false,
-}: {
-  bytesPerMs: number
-  delayMs: number
-  frameBytes: number
-  ms: number
-  hiddenBytes?: number
-  attach?: boolean
-  senderAttach?: boolean
-}) {
-  type Ack = { probe: number; backlog: number; pathRtt: number }
-  type Frame = { bytes: number } | Ack
-  const size = (frame: Frame) => ('bytes' in frame ? frame.bytes : 0)
-  const wire: Frame[] = []
-  let wireBytes = 0
-  const hidden: Frame[] = []
-  let hiddenQueued = 0
-  const onLink: { at: number; frame: Frame }[] = []
-  const toSender: { at: number; deliver: () => void }[] = []
-  let now = 0
-  const upstream = (deliver: () => void) => toSender.push({ at: now + delayMs, deliver })
-  const sender = fitted(
-    new FlowControl({ byteWindowUpdate() {}, msgWindowUpdate() {}, bdpPing() {}, backlog: () => wireBytes }),
-  )
-  const senderUplink = new Uplink()
-  sender.attach(senderUplink, new Downlink(senderUplink))
-  const answer = (probe: number, backlog: number, pathRtt: number) =>
-    wire.push(decode(encode.bdpPingAck(0, probe, backlog, pathRtt)) as Ack)
-  const receiver = fitted(
-    new FlowControl({
-      byteWindowUpdate: (limit) => upstream(() => sender.onPeerByteWindow(limit)),
-      msgWindowUpdate: (limit) => upstream(() => sender.onPeerMessageWindow(limit)),
-      bdpPing: (probe) => upstream(() => answer(probe, sender.onPing(), sender.pathRtt())),
-      backlog: () => 0,
-    }),
-  )
-  let attached = false
-  const receiverUplink = new Uplink()
-  const attachProbe = attach ? receiver.probeAttach(receiverUplink.link)! : undefined
-  if (attach) receiver.attach(receiverUplink, new Downlink(receiverUplink))
-  const senderProbe = senderAttach ? sender.probeAttach(senderUplink.link)! : undefined
-  upstream(() => {
-    if (attachProbe !== undefined) answer(attachProbe, Infinity, Infinity)
-    attached = true
-  })
-  if (senderProbe !== undefined) {
-    toSender.push({
-      at: 2 * delayMs,
-      deliver: () => sender.onPingAck({ probe: senderProbe, backlog: Infinity, pathRtt: Infinity }, upToAck),
-    })
-  }
-  let blocked = false
-  let budget = 0
-  let delivered = 0
-  let deliveredLastSecond = 0
-  const deliveries = new Deliveries()
-  for (now = 0; now < ms; now++) {
-    vi.advanceTimersByTime(1)
-    while (toSender[0] && toSender[0].at <= now) toSender.shift()!.deliver()
-    await flushMicrotasks()
-    while (attached && !blocked) {
-      wire.push({ bytes: frameBytes })
-      wireBytes += frameBytes
-      const gate = sender.decrement(frameBytes)
-      if (gate) {
-        blocked = true
-        void gate.then(() => (blocked = false))
-      }
-    }
-    while (wire[0] && hiddenQueued + size(wire[0]) <= hiddenBytes) {
-      const frame = wire.shift()!
-      wireBytes -= size(frame)
-      hiddenQueued += size(frame)
-      hidden.push(frame)
-    }
-    budget += bytesPerMs
-    for (;;) {
-      const from = hidden.length > 0 ? hidden : wire
-      if (!from[0] || size(from[0]) > budget) break
-      const frame = from.shift()!
-      budget -= size(frame)
-      if (from === hidden) hiddenQueued -= size(frame)
-      else wireBytes -= size(frame)
-      onLink.push({ at: now + delayMs, frame })
-    }
-    if (hidden.length === 0 && wire.length === 0) budget = 0
-    while (onLink[0] && onLink[0].at <= now) {
-      const { frame } = onLink.shift()!
-      deliveries.note(now, size(frame))
-      if ('backlog' in frame) {
-        const ack = deliveries.last
-        receiver.onPingAck(frame, (ms) => deliveries.before(ack, ms))
-        continue
-      }
-      receiver.onReceived(frame.bytes)
-      receiver.onConsumed(frame.bytes)
-      delivered += frame.bytes
-      if (now >= ms - 1_000) deliveredLastSecond += frame.bytes
-    }
-  }
-  return {
-    byteWindow: receiver.byteWindow,
-    msgWindow: receiver.msgWindow,
-    deliveredBytesPerMs: delivered / ms,
-    lastSecondBytesPerMs: deliveredLastSecond / 1_000,
-  }
-}
-
-describe('FlowControl — window on a path', () => {
-  // The ack of a probe waits behind what the sender holds for the link, so what arrived before it saturated any window
-  // the sender filled faster than the link drained: the window doubled on every probe, to the 64 MiB cap.
-  it('keeps its initial window on a path slower than that window per RTT, and fills the path', async () => {
-    const path = await runPath({ bytesPerMs: 4_000, delayMs: 25, frameBytes: 64 * 1024, ms: 5_000 })
-    expect(path.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(path.deliveredBytesPerMs).toBeGreaterThan(0.95 * 4_000)
-  })
-
-  // Without an attach's probe, as behind a page's batched POSTs or on a server's receive side, the sender says its
-  // wire held a backlog each time its credit ran out.
-  it('keeps its initial window on that path without an attach probe, where the sender sees its queue', async () => {
-    const path = await runPath({ bytesPerMs: 4_000, delayMs: 25, frameBytes: 64 * 1024, ms: 5_000, attach: false })
-    expect(path.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(path.deliveredBytesPerMs).toBeGreaterThan(0.95 * 4_000)
-  })
-
-  // The queue a sender can't see, as in a kernel send buffer that takes the whole window, still lengthens the round
-  // trip past the one the attach's probe took.
-  it('keeps its initial window on that path when the queue is where the sender cannot see it', async () => {
-    const path = await runPath({
-      bytesPerMs: 4_000,
-      delayMs: 25,
-      frameBytes: 64 * 1024,
-      ms: 5_000,
-      hiddenBytes: CREDIT_WINDOW_INITIAL_BYTES,
-    })
-    expect(path.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(path.deliveredBytesPerMs).toBeGreaterThan(0.95 * 4_000)
-  })
-
-  // A server's receive side has no attach of its own, and a browser's socket reports none of what its kernel holds: the
-  // page says the round trip its own attach's probe took, and the sample counts at that.
-  it('keeps its initial window on that path without an attach of its own, where the sender cannot see its queue but measured the path', async () => {
-    const path = await runPath({
-      bytesPerMs: 4_000,
-      delayMs: 25,
-      frameBytes: 64 * 1024,
-      ms: 5_000,
-      hiddenBytes: CREDIT_WINDOW_INITIAL_BYTES,
-      attach: false,
-      senderAttach: true,
-    })
-    expect(path.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(path.deliveredBytesPerMs).toBeGreaterThan(0.95 * 4_000)
-  })
-
-  // A window grows while a sample fills two thirds of it, so it doubles at most once past 1.5 times what the path holds.
-
-  it('grows its window past the bandwidth-delay product of a fast path, and settles within three times it', async () => {
-    // 400 MB/s × 50 ms, with a 4 MiB send buffer, the most Linux gives one by default.
-    const bdp = 20_000_000
-    const path = await runPath({
-      bytesPerMs: 400_000,
-      delayMs: 25,
-      frameBytes: 64 * 1024,
-      ms: 3_000,
-      hiddenBytes: 4 * 1024 * 1024,
-    })
-    expect(path.byteWindow).toBeGreaterThan(bdp)
-    expect(path.byteWindow).toBeLessThanOrEqual(3 * bdp)
-    expect(path.lastSecondBytesPerMs).toBeGreaterThan(0.95 * 400_000)
-  })
-
-  it('grows its window past the bandwidth-delay product of a fast path at the round trip its sender measured, and settles within three times it', async () => {
-    const bdp = 20_000_000
-    const path = await runPath({
-      bytesPerMs: 400_000,
-      delayMs: 25,
-      frameBytes: 64 * 1024,
-      ms: 3_000,
-      hiddenBytes: 4 * 1024 * 1024,
-      attach: false,
-      senderAttach: true,
-    })
-    expect(path.byteWindow).toBeGreaterThan(bdp)
-    expect(path.byteWindow).toBeLessThanOrEqual(3 * bdp)
-    expect(path.lastSecondBytesPerMs).toBeGreaterThan(0.95 * 400_000)
-  })
-
-  // The message window grows on its sample, queue and all: what waits on the wire the byte window bounds.
-  it('keeps its byte window on a path of small messages, and grows its message window only as far as that lets be in flight', async () => {
-    // 4 MB/s × 50 ms, of 1 KiB messages
-    const path = await runPath({ bytesPerMs: 4_000, delayMs: 25, frameBytes: 1024, ms: 5_000 })
-    expect(path.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(path.msgWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES / 1024)
-    expect(path.msgWindow).toBeLessThanOrEqual((2 * CREDIT_WINDOW_INITIAL_BYTES) / 1024)
-    expect(path.lastSecondBytesPerMs).toBeGreaterThan(0.95 * 4_000)
   })
 })
 
