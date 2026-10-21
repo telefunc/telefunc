@@ -1,8 +1,15 @@
 import vike from 'vike/fetch'
-import { Broadcast } from 'telefunc'
+import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
 
 const tf = new Telefunc({ scale: 5 })
+
+// The Cloudflare page's Hibernation snippet, assigned after the adapter.
+config.channel = {
+  reconnectTimeout: 5_000,
+  idleTimeout: 5_000,
+  pingInterval: 2_000,
+}
 
 // Cloudflare requires Durable Object classes to be named exports of the worker entry.
 // `wrangler.jsonc`'s `main: "vike:server-entry"` re-exports everything from this file,
@@ -18,18 +25,25 @@ const vikeAsCloudflareHandler = vike as unknown as ExportedHandler<Env>
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
+    const url = new URL(request.url)
     // Outside any session DO, as a cron trigger or a queue consumer publishes.
-    if (new URL(request.url).pathname === '/__broadcast-publish-from-worker') {
+    if (url.pathname === '/__broadcast-publish-from-worker') {
       await Broadcast.publish('worker-publish', { from: 'worker' })
       return new Response(null, { status: 204 })
     }
-    if (new URL(request.url).pathname === '/__broadcast-subscribe-from-worker') {
+    if (url.pathname === '/__broadcast-subscribe-from-worker') {
       try {
         Broadcast.subscribe('worker-subscribe', () => {})
         return new Response('subscribed')
       } catch (error) {
         return new Response(String(error))
       }
+    }
+    // Test-only: the run the backlog page asked for, as its telefunction recorded it; a POST says the page is stalled.
+    if (url.pathname === '/backlog-run') {
+      const run = `backlog:${url.searchParams.get('channel')}`
+      if (request.method === 'POST') await env.TelefuncKV.put(`${run}:stalled`, 'true')
+      return new Response(await env.TelefuncKV.get(run))
     }
     const resp = await tf.serve({ request, env, ctx })
     return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)

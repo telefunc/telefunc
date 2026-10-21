@@ -12,6 +12,7 @@ import {
   onGetTypedAdder,
   onCallBack,
   onSearch,
+  onCallBackUnawaited,
 } from './Function.telefunc'
 
 type FunctionState = {
@@ -28,6 +29,8 @@ type FunctionState = {
   shieldCallbackError: string | null
   /** ms: how long the second keystroke's call took. */
   searchResult: { result: string; ms: number } | null
+  idleTimeoutResult: number[] | null
+  unawaitedResult: string | null
 }
 
 function FunctionDemo() {
@@ -44,6 +47,8 @@ function FunctionDemo() {
     shieldCallbackOk: null,
     shieldCallbackError: null,
     searchResult: null,
+    idleTimeoutResult: null,
+    unawaitedResult: null,
   })
   const [log, setLog] = useState<string[]>([])
 
@@ -90,6 +95,20 @@ function FunctionDemo() {
     const r2 = await echo('world')
     addLog(`echo("world") → ${JSON.stringify(r2)}`)
     setState((s) => ({ ...s, echoResults: [r1, r2] }))
+  }
+
+  async function runIdleTimeout() {
+    const map = withContext(onMap, { channel: { idleTimeout: 0, connectionKey: 'idle-timeout' } })
+    const idleTimeoutResult = await map([1, 2], async (n) => n * 2)
+    setState((s) => ({ ...s, idleTimeoutResult }))
+  }
+
+  async function runUnawaited() {
+    const unawaitedResult = await onCallBackUnawaited(async (fail) => {
+      if (fail) throw new Error('callback-failure')
+      return 'answered'
+    })
+    setState((s) => ({ ...s, unawaitedResult }))
   }
 
   async function runMap() {
@@ -202,6 +221,32 @@ function FunctionDemo() {
         </button>
         <pre id="map-result" className="text-sm bg-zinc-50 p-2 rounded">
           {JSON.stringify(state.mapResult)}
+        </pre>
+      </section>
+
+      {/* Per-call idleTimeout */}
+      <section className="space-y-2">
+        <h2 className="font-medium">Per-call idleTimeout reaches a callback's channel</h2>
+        <p className="text-xs text-zinc-500">
+          <code>withContext(onMap, {'{ channel: { idleTimeout: 0 } }'})</code>: its connection closes once the
+          callback's channel does
+        </p>
+        <button id="idle-timeout-run" onClick={runIdleTimeout} className="px-3 py-1 border rounded text-sm">
+          Run
+        </button>
+        <pre id="idle-timeout-result" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.idleTimeoutResult)}
+        </pre>
+      </section>
+
+      {/* Unawaited callback */}
+      <section className="space-y-2">
+        <h2 className="font-medium">The server calls a failing callback without awaiting it</h2>
+        <button id="unawaited-run" onClick={runUnawaited} className="px-3 py-1 border rounded text-sm">
+          Run
+        </button>
+        <pre id="unawaited-result" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.unawaitedResult)}
         </pre>
       </section>
 

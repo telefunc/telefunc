@@ -1,7 +1,7 @@
 export { testPublish, testPublishSmallBuffer, testPublishFailingBackend }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, failBackend } from '../../e2e-utils'
+import { navigate, getResult, failBackend, getCleanupState, cutWire, runServerAction } from '../../e2e-utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -31,7 +31,7 @@ function consecutive(first: number): number[] {
   return [first, first + 1, first + 2]
 }
 
-function testPublish(inDocker = false) {
+function testPublish(isDev: boolean, inDocker = false) {
   test('broadcast: paired text publish/subscribe roundtrip', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-text-broadcast')
@@ -182,6 +182,119 @@ function testPublish(inDocker = false) {
       })
     })
   })
+  test("broadcast: the server's own listeners keep getting a key's messages after the page unsubscribes", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-server-listener')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: Array<string | number> }>('#publish-result')
+      expect(result.received).deep.equal(['after', 3])
+    })
+  })
+
+  test('broadcast: what onOpen publishes reaches the page that opened the broadcast', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-on-open-publish')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: string[] }>('#publish-result')
+      expect(result.received).deep.equal(['from-onOpen'])
+    })
+  })
+
+  test("broadcast: a listener's answer reaches every subscriber after the message it answers", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-answer-order')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ seen: string[] }>('#publish-result')
+      expect(result.seen).deep.equal(['first:1', 'second:1', 'first:2', 'second:2'])
+    })
+  })
+
+  test('broadcast: the server answers the next call while listeners answer every message on their own key', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-self-answer')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ answers: number }>('#publish-result')
+      expect(result.answers).greaterThan(0)
+    })
+  })
+
+  test('broadcast: a static Broadcast.publish() resolves to a receipt with its key', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-static-receipts')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ key: string; receipts: Array<{ key: string; seq: number }> }>('#publish-result')
+      expect(result.receipts).deep.equal([
+        { key: result.key, seq: 1 },
+        { key: result.key, seq: 2 },
+      ])
+    })
+  })
+
+  test("broadcast: a subscriber that unsubscribes itself doesn't make the next one miss a message", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-self-unsubscribe')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ pageSeen: string[]; serverSeen: string[] }>('#publish-result')
+      expect(result.pageSeen).deep.equal(['once:one', 'other:one', 'other:two'])
+      expect(result.serverSeen).deep.equal(['once:one', 'other:one', 'other:two'])
+    })
+  })
+
+  // Preview only: Vite HMR reloads an offline page.
+  if (!isDev && !inDocker) {
+    test('broadcast: a page that subscribes while its connection is silently dead gets what is published after it reconnects', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-reconnect-open')
+      await autoRetry(async () => {
+        expect((await getResult<{ open: boolean }>('#publish-result')).open).toBe(true)
+      })
+
+      await page.context().setOffline(true)
+      await page.click('#test-broadcast-reconnect-subscribe')
+      await page.waitForTimeout(3000)
+      await page.context().setOffline(false)
+      await page.click('#test-broadcast-reconnect-publish')
+
+      await autoRetry(async () => {
+        const result = await getResult<{ received: string[] }>('#publish-result')
+        expect(result.received).deep.equal(['after-reconnect'])
+      })
+    })
+
+    for (const { count, received, closed } of [
+      { count: 2, received: ['before', '0', '1'], closed: null },
+      { count: 8, received: ['before'], closed: 'ChannelOverflowError' },
+    ]) {
+      test(`broadcast: a page offline while ${count * 128} KiB is published ${closed ? 'leaves with ChannelOverflowError on both ends' : 'gets all of it once back'}`, async () => {
+        await navigate(`${getServerUrl()}/publish`)
+        await page.click(`#test-broadcast-while-offline-${count}`)
+        let key: string | null = null
+        await autoRetry(async () => {
+          const result = await getResult<{ key: string; received: string[] }>('#publish-result')
+          expect(result.received).deep.equal(['before'])
+          key = result.key
+        })
+
+        await page.context().setOffline(true)
+        await cutWire()
+        await runServerAction(`publish_${key}`)
+        await page.context().setOffline(false)
+
+        await autoRetry(async () => {
+          const result = await getResult<{ received: string[]; closed: string | null }>('#publish-result')
+          expect(result.received).deep.equal(received)
+          expect(result.closed).toBe(closed)
+          if (closed) expect((await getCleanupState())[`whileOffline_${key}_serverClose`]).toBe(closed)
+        })
+      })
+    }
+  }
 }
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */

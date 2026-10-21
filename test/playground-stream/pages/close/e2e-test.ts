@@ -108,6 +108,29 @@ function testClose() {
     })
   })
 
+  test('close: a channel the server aborted before returning it reaches the client aborted', async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await page.click('#test-aborted-channel')
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('aborted channel')
+      expect(result.abortValue).toBe('before-return')
+    })
+  })
+
+  test('close: a Channel and a BroadcastChannel the server never returned close at once, with a clean onClose', async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await page.click('#test-close-unreturned')
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('close() unreturned')
+      for (const closed of [result.channel, result.broadcast]) {
+        expect(closed.onCloseErr).toBe('none')
+        expect(closed.ms).below(1000)
+      }
+    })
+  })
+
   // ── Targeted: fn ─────────────────────────────────────────────────────
 
   test('close: fn — close(fn) closes backing channel; call after close throws ChannelClosedError', async () => {

@@ -26,9 +26,11 @@ export {
   snapshotRedis,
   rewindRedis,
   moveRedisSlot,
+  countConnections,
 }
 
 import { page, getServerUrl } from '@brillout/test-e2e'
+import type { Response, WebSocket } from 'playwright-chromium'
 import type { BackendFault } from './failing-backend'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
@@ -239,6 +241,8 @@ const transientNetworkErrors = [
   'ERR_INTERNET_DISCONNECTED',
   'ERR_ALPN_NEGOTIATION_FAILED',
   'ERR_SSL_PROTOCOL_ERROR',
+  // Chromium aborts a navigation that starts just after a test's setOffline(false).
+  'ERR_ABORTED',
 ]
 function isTransientNetworkError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
@@ -252,4 +256,24 @@ function isTransientNetworkError(err: unknown): boolean {
 
 async function getResult<T = any>(selector: string): Promise<T> {
   return JSON.parse((await page.textContent(selector))!)
+}
+
+/** Counts the WebSockets and SSE streams the page opens to Telefunc from now until `stop()`. */
+function countConnections() {
+  let opened = 0
+  const onWebSocket = (ws: WebSocket) => {
+    if (ws.url().includes('/_telefunc')) opened++
+  }
+  const onResponse = (response: Response) => {
+    if (response.headers()['content-type']?.startsWith('text/event-stream')) opened++
+  }
+  page.on('websocket', onWebSocket)
+  page.on('response', onResponse)
+  return {
+    stop() {
+      page.off('websocket', onWebSocket)
+      page.off('response', onResponse)
+      return opened
+    },
+  }
 }

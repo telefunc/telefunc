@@ -17,6 +17,7 @@ import {
   refuseNextSsePost,
   releaseHeldSsePosts,
 } from '../../e2e-utils'
+import { withNetworkConditions } from '../../../utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
@@ -120,8 +121,7 @@ function testWire(isDev: boolean) {
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
     test('channel: a channel a call returns while the WebSocket is dead without a word opens on both ends once the page notices', async () => {
-      // Port in this machine's range for e2e runs; the proxy lives in the test process.
-      const proxy = await startBlackHoleProxy(getServerUrl(), 21150)
+      const proxy = await startBlackHoleProxy(getServerUrl())
       try {
         await navigate(`${proxy.url}/channel`)
         await page.click('#wire-end-open')
@@ -171,40 +171,21 @@ function testWire(isDev: boolean) {
       }
       page.on('response', onResponse)
       page.on('websocket', onWebSocket)
-      // test-e2e's `page` is a proxy, which newCDPSession() doesn't take.
-      const cdp = await page.context().newCDPSession(
-        page
-          .context()
-          .pages()
-          .find((p) => p.url() === page.url())!,
-      )
       try {
-        await cdp.send('Network.enable')
         // 1 Mbit/s each way.
-        await cdp.send('Network.emulateNetworkConditions', {
-          offline: false,
-          latency: 0,
-          downloadThroughput: 125_000,
-          uploadThroughput: 125_000,
+        await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
+          await page.click('#wire-large')
+          await autoRetry(
+            async () => {
+              const { large } = await getResult<WireState>('#wire-state')
+              expect(large).toBe(1_000_000)
+            },
+            { timeout: 30_000 },
+          )
+          expect(sseStreams).toBe(1)
+          expect(webSockets).toBe(1)
         })
-        await page.click('#wire-large')
-        await autoRetry(
-          async () => {
-            const { large } = await getResult<WireState>('#wire-state')
-            expect(large).toBe(1_000_000)
-          },
-          { timeout: 30_000 },
-        )
-        expect(sseStreams).toBe(1)
-        expect(webSockets).toBe(1)
       } finally {
-        await cdp.send('Network.emulateNetworkConditions', {
-          offline: false,
-          latency: 0,
-          downloadThroughput: -1,
-          uploadThroughput: -1,
-        })
-        await cdp.detach()
         page.off('response', onResponse)
         page.off('websocket', onWebSocket)
       }
@@ -355,8 +336,7 @@ function testWireSmallReplay() {
 // A server pinging every 7 s outlives, by its 14 s ping deadline, a WebSocket the page gives up at its 10 s RECONCILE deadline.
 function testWireSlowPing() {
   test("channel: a channel keeps delivering after two drops in a row, the first reconnect's answer lost, once the server closes that dead WebSocket", async () => {
-    // Port in this machine's range for e2e runs; the proxy lives in the test process.
-    const proxy = await startBlackHoleProxy(getServerUrl(), 21151)
+    const proxy = await startBlackHoleProxy(getServerUrl())
     try {
       await navigate(`${proxy.url}/channel`)
       await page.click('#wire-end-open')

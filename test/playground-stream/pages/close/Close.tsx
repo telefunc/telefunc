@@ -1,7 +1,7 @@
 export { Close }
 
 import React, { useEffect, useRef, useState } from 'react'
-import { close } from 'telefunc/client'
+import { Abort, close } from 'telefunc/client'
 import type { ClientChannel } from 'telefunc'
 import {
   onMixedForClose,
@@ -9,6 +9,8 @@ import {
   onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onAbortedChannel,
+  onCloseUnreturned,
   onCloseFn,
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
@@ -102,6 +104,34 @@ function Close() {
         }}
       >
         Channel: close(channel)
+      </button>
+
+      <button
+        id="test-aborted-channel"
+        onClick={async () => {
+          setResult('')
+          const channel = await onAbortedChannel()
+          channel.onClose((err) => {
+            setResult(
+              JSON.stringify({
+                method: 'aborted channel',
+                abortValue: err instanceof Abort ? err.abortValue : (err?.name ?? 'none'),
+              }),
+            )
+          })
+        }}
+      >
+        Channel: aborted before it was returned
+      </button>
+
+      <button
+        id="test-close-unreturned"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ method: 'close() unreturned', ...(await onCloseUnreturned()) }))
+        }}
+      >
+        Channel: close() of one never returned
       </button>
 
       <h2>Function</h2>

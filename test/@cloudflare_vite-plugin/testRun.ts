@@ -2,7 +2,8 @@ export { testRun }
 export { testCloudflareBindings }
 
 import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
-import { testCounter, testRunClassic } from '../../test/utils'
+import type { WebSocket } from 'playwright-chromium'
+import { testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   const isDev = cmd === 'pnpm run dev'
@@ -19,11 +20,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // `net::ERR_ALPN_NEGOTIATION_FAILED` browser error; the channel still works
       // (the message flow is asserted by testChannel()/testChat()).
       log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
-      // Leaving the Chat page while its SSE response is being written makes workerd log the write to the gone
-      // browser; the next test navigates away from it.
-      (log.logSource === 'stderr' &&
-        log.logText.includes('disconnected: ::write') &&
-        log.logText.includes('Broken pipe')),
+      // workerd logs a response it wrote to a connection the browser closed as it navigated away,
+      // before the request's signal could report it.
+      (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')),
   })
   testTodolist()
   testChannel()
@@ -122,6 +121,9 @@ function testChannel() {
       },
       { timeout: 5000 },
     )
+    const webSockets: string[] = []
+    const onWebSocket = (ws: WebSocket) => webSockets.push(ws.url())
+    page.on('websocket', onWebSocket)
     await page.click('#connect-btn')
     // The client sends a `ping` on connect and the server replies with a `welcome`.
     await autoRetry(
@@ -132,6 +134,9 @@ function testChannel() {
       },
       { timeout: 10000 },
     )
+    page.off('websocket', onWebSocket)
+    // The channel goes over WebSocket, though +server.ts assigns config.channel after the adapter.
+    expect(webSockets.some((url) => new URL(url).pathname === '/_telefunc')).toBe(true)
     // The server pushes a `tick` message every second.
     await autoRetry(
       async () => {
@@ -226,38 +231,36 @@ function testBacklog() {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
     await page.click('#backlog-open')
+    let channelId: string | null = null
     await autoRetry(async () => {
-      expect(JSON.parse((await page.textContent('#backlog-state'))!).open).toBe(true)
+      channelId = JSON.parse((await page.textContent('#backlog-state'))!).channelId
+      expect(channelId).not.toBe(null)
     })
-    const cdp = await page.context().newCDPSession(page.mainFrame().page())
-    await cdp.send('Network.enable')
-    // A page that reads nothing: what the server sends waits on the way.
-    await cdp.send('Network.emulateNetworkConditions', {
-      offline: false,
-      latency: 0,
-      downloadThroughput: 1,
-      uploadThroughput: -1,
-    })
+    const runUrl = `${getServerUrl()}/backlog-run?channel=${channelId}`
     await page.click('#backlog-run')
-    // The server's sends are refused or taken within a turn of the request, which the page can't see while stalled.
-    await page.waitForTimeout(1000)
-    await cdp.send('Network.emulateNetworkConditions', {
-      offline: false,
-      latency: 0,
-      downloadThroughput: -1,
-      uploadThroughput: -1,
+    await autoRetry(async () => {
+      expect(await (await fetch(runUrl)).json()).deep.equal({ started: true })
     })
+    // A page that reads nothing: what the server sends waits on the way. The page can't see the run while stalled.
+    const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
+      await fetch(runUrl, { method: 'POST' })
+      let run: { sent: number; refused: string[] } | undefined
+      await autoRetry(async () => {
+        run = await (await fetch(runUrl)).json()
+        expect(run!.sent).toBe(6000)
+      })
+      return run!
+    })
+    expect(refused.length).greaterThan(0)
+    expect(new Set(refused)).deep.equal(new Set(['ChannelOverflowError']))
     await autoRetry(
       async () => {
         const state = JSON.parse((await page.textContent('#backlog-state'))!)
-        expect(state.refused.length).greaterThan(0)
-        expect(new Set(state.refused)).deep.equal(new Set(['ChannelOverflowError']))
-        expect(state.received).toBe(6000 - state.refused.length)
+        expect(state.received).toBe(sent - refused.length)
         expect(state.outOfOrder).toBe(0)
       },
       { timeout: 30_000 },
     )
-    await cdp.detach()
   })
 }
 

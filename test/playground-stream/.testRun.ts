@@ -17,6 +17,7 @@ import { testPublish, testPublishFailingBackend } from './pages/publish/e2e-test
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
 import { testWire } from './pages/channel/wire-e2e-test'
+import { testSlowLink } from './pages/channel/slow-link-e2e-test'
 
 /** `additionalTimeout`: how much longer than test-e2e's default a test of the lane may take. */
 function runPlayground(
@@ -47,6 +48,7 @@ function runPlayground(
         // The failing backend's failures, which the server reports (failing-backend.ts).
         log.logText.includes('failing-backend:') ||
         (log.logText.includes('Backend subscription closed:') && log.logText.includes('hiccup')) ||
+        log.logText.includes('TypeError: Converting circular structure to JSON') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||
@@ -99,19 +101,21 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
 
   testWire(isDev)
 
+  testSlowLink(isDev)
+
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.
   testUpgrade()
 
-  testFunction()
+  testFunction(isDev)
 
-  testStreamToServer()
+  testStreamToServer(isDev)
 
   testLiveQuery()
 
   testRxjs()
 
-  testPublish()
+  testPublish(isDev)
 
   testPublishFailingBackend()
 
