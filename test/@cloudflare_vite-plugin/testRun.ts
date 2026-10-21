@@ -5,6 +5,7 @@ import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
 import { testCounter, testRunClassic } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
+  const isDev = cmd === 'pnpm run dev'
   // First, so no session Durable Object exists in the isolate yet.
   testBroadcastPublishFromWorker()
   testSubscribeOutsideSession()
@@ -32,6 +33,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testChatMembers()
   testResubscribe()
   testRoom()
+  // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
+  if (!isDev) testRoomOrderAcrossSessions()
   testRoomAcrossSessions()
   testRoomStorage()
 }
@@ -325,7 +328,7 @@ function testRoom() {
   })
 }
 
-function testRoomAcrossSessions() {
+function testRoomOrderAcrossSessions() {
   test('Room and Broadcast: what two sessions publish at once reaches each in the order each called it, and both in the same order', async () => {
     const id = crypto.randomUUID()
     const pages = await openSessions(id, ['p1', 'p2'])
@@ -344,7 +347,9 @@ function testRoomAcrossSessions() {
     })
     for (const page of pages) await page.context().close()
   })
+}
 
+function testRoomAcrossSessions() {
   test('Room and Broadcast: two sessions listening in one isolate each get a message once, on their own listeners', async () => {
     const id = crypto.randomUUID()
     const pages = await openSessions(id, ['p1', 'p2'])
