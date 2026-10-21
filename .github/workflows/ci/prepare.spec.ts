@@ -409,14 +409,6 @@ describe('prepare()', () => {
                   "job": "Cloudflare",
                 },
               },
-              "testFilePath": "test/@cloudflare_vite-plugin/emitted-modules.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Cloudflare",
-                },
-              },
               "testFilePath": "test/@cloudflare_vite-plugin/test-dev.test.ts",
             },
             {
