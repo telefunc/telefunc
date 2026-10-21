@@ -3,7 +3,7 @@
 export { Telefunc }
 export type { CloudflareOptions }
 
-import { DurableObject, env } from 'cloudflare:workers'
+import { DurableObject } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
 import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { getServerConfig, enableChannelTransports, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
@@ -72,16 +72,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const jurisdiction = options?.jurisdiction
 
   const sessionPins = new SessionPins()
-  function pinSession(request: Request): void {
-    const kv = getKVBinding(env)
-    if (kv) sessionPins.pin(request, kv)
-  }
 
   const hooks = getTelefuncChannelHooks()
   const onMessage = hooks.message
   // A page may use its session over its WebSocket alone, so each message renews its pin when due, as a request does.
   hooks.message = (peer, message) => {
-    pinSession(peer.request)
+    sessionPins.pin(peer.request)
     return onMessage(peer, message)
   }
   const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
@@ -102,26 +98,31 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
   const TelefuncDurableObject = class extends DurableObject {
     private readonly authorityState: CloudflareBroadcastAuthorityState
+    private readonly instanceName: string
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
+      const { name } = ctx.id
+      assertUsage(name, 'Telefunc needs `ctx.id.name` in its Durable Objects: update wrangler.')
+      this.instanceName = name
       const binding = getBinding(env)
       assertUsage(binding, `Missing Cloudflare Durable Object binding "${bindingName}" in Durable Object constructor.`)
       broadcast.attachBinding(binding, bindingName)
       const kv = getKVBinding(env)
-      if (kv) broadcast.attachKV(kv)
+      if (kv) {
+        broadcast.attachKV(kv)
+        sessionPins.attachKV(kv)
+      }
       this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
 
     async fetch(request: Request) {
-      const { name } = this.ctx.id
-      assertUsage(name, 'Telefunc needs `ctx.id.name` in its Durable Objects: update wrangler.')
-      broadcast.attachRequest(request, name)
+      broadcast.attachRequest(request, this.instanceName)
       const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
       const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
       if (shard && bucket) broadcast.attachIsolateInfo(shard, bucket)
-      pinSession(request)
+      sessionPins.pin(request)
       if (request.headers.get('upgrade') === 'websocket') {
         return crosswsAdapter.handleDurableUpgrade(this, request)
       }

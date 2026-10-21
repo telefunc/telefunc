@@ -29,15 +29,21 @@ async function readSessionPin(
 
 /** The session Durable Object, not the Worker, writes each pin: a Worker's KV read caches a miss up to 60 s. */
 class SessionPins {
+  private kv: KVNamespace | null = null
   /** When each session token this isolate's Durable Objects served lately is due to be pinned. */
   private dueAt = new Map<string, number>()
   /** The generation `dueAt` held before it filled, forgotten once `dueAt` fills again. */
   private dueAtBefore = new Map<string, number>()
 
+  attachKV(kv: KVNamespace): void {
+    this.kv = kv
+  }
+
   /** Pins the session of `request`, as the Worker forwarded it, if its pin is due. */
-  pin(request: Request, kv: KVNamespace): void {
+  pin(request: Request): void {
+    const { kv } = this
     const token = request.headers.get(TELEFUNC_SESSION_HEADER)
-    if (!token) return
+    if (!kv || !token) return
     const now = Date.now()
     const due = this.dueAt.get(token) ?? this.dueAtBefore.get(token)
     if (due !== undefined && now < due) {
