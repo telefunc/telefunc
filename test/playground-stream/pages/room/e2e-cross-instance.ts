@@ -1,13 +1,21 @@
-export { testRedisRoomCrossInstance, testRedisBroadcastCrossInstance, testRedisOutages, testRedisAcrossServers }
+export {
+  testRedisRoomCrossInstance,
+  testRedisBroadcastCrossInstance,
+  testRedisOutages,
+  testRedisAcrossServers,
+  testServerCrash,
+}
 
 import { autoRetry, expect, expectLog, getServerUrl, test } from '@brillout/test-e2e'
 import {
   dropRedisConnections,
   getRedisChannels,
   getRedisKeys,
+  killInstance,
   restartRedis,
   rewindRedis,
   snapshotRedis,
+  startInstance,
 } from '../../e2e-utils'
 
 type Instance = 'a' | 'b' | 'c' | 'd'
@@ -284,6 +292,27 @@ function testRedisAcrossServers() {
       expect(keys.filter(({ ttl }) => ttl < 0).map(({ key }) => key)).deep.equal([])
     } finally {
       await leaveRoom(['a', 'b'], roomId)
+    }
+  })
+}
+
+function testServerCrash() {
+  test("room: within three minutes of a server crashing, its member leaves the other servers' view as 'disconnected', and the room it alone held closes", async () => {
+    const roomId = newId('redis-crash')
+    try {
+      await joinRoom('a', roomId, 'Alice', 1000)
+      await joinRoom('b', roomId, 'Bob')
+      // Alice's server keeps watching the room Bob alone holds.
+      await request('a', '/api/room-cross-instance/member-leave', roomId, 'POST')
+      killInstance('b')
+      await retry(3 * 60_000 + 10_000, async () => {
+        expect((await view('a', roomId)).events).to.include.members(['leave:Bob:disconnected', 'close'])
+      })
+    } finally {
+      startInstance('b')
+      await retry(30_000, async () => {
+        await request('b', '/api/room-cross-instance/leave', roomId, 'DELETE')
+      })
     }
   })
 }
