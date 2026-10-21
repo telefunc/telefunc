@@ -3,7 +3,6 @@ import * as path from 'node:path'
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http'
 import { Hono } from 'hono'
 import vike from '@vikejs/hono'
-import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 import { config } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
@@ -12,6 +11,7 @@ import { Telefunc as TelefuncDeno } from 'telefunc/deno'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 import { trackWireSocket, cutWireSockets } from './wire-sockets'
 import { runServerAction } from './server-actions'
+import { redis } from './redis'
 
 config.channel.pingInterval = 1000
 config.shield = true
@@ -20,8 +20,8 @@ if (process.env.CHANNEL_CONFIG) Object.assign(config.channel, JSON.parse(process
 
 const INST = process.env.INSTANCE_ID ?? '?'
 
-if (process.env.REDIS_URL) {
-  installRedis(new IORedis(process.env.REDIS_URL))
+if (redis) {
+  installRedis(redis)
   console.log(`[INST=${INST}] Redis broadcast transport installed`)
 }
 
