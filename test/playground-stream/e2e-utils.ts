@@ -18,6 +18,9 @@ export {
   stopProxy,
   startProxy,
   countConnections,
+  serverRuntime,
+  setServerRuntime,
+  canCutWire,
 }
 
 import { page, getServerUrl } from '@brillout/test-e2e'
@@ -47,6 +50,23 @@ function stopProxy() {
 
 function startProxy() {
   execSync('docker compose start proxy', { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+type ServerRuntime = 'node' | 'bun' | 'deno'
+let runtime: ServerRuntime = 'node'
+
+/** The runtime serving the playground, as `runPlayground()` set it. */
+function serverRuntime(): ServerRuntime {
+  return runtime
+}
+
+function setServerRuntime(serving: ServerRuntime) {
+  runtime = serving
+}
+
+/** Whether `cutWire()` can drop the page's connections: it destroys the Node sockets the server tracked, and Bun.serve and Deno.serve hand a request no socket. */
+function canCutWire(): boolean {
+  return runtime === 'node'
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))

@@ -1,7 +1,7 @@
 export { testRun, runPlayground }
 
 import { page, test, expect, run, getServerUrl, autoRetry } from '@brillout/test-e2e'
-import { navigate } from './e2e-utils'
+import { navigate, setServerRuntime } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -20,6 +20,7 @@ import { testWire } from './pages/channel/wire-e2e-test'
 import { testSlowLink } from './pages/channel/slow-link-e2e-test'
 
 function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
+  setServerRuntime(cmd === 'pnpm preview:bun' ? 'bun' : cmd === 'pnpm preview:deno' ? 'deno' : 'node')
   run(cmd, {
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default

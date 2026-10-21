@@ -1,7 +1,7 @@
 export { testAbort }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { resetCleanupState, getCleanupState, navigate, getResult } from '../../e2e-utils'
+import { resetCleanupState, getCleanupState, navigate, getResult, serverRuntime } from '../../e2e-utils'
 
 function testAbort() {
   // ── Generator abort mechanisms ──────────────────────────────────────
@@ -138,31 +138,33 @@ function testAbort() {
   // ── Upload abort ────────────────────────────────────────────────────
 
   // 1MB file with sleep(100) between reads — the client aborts while the server reads it
-  test('abort: single file upload — client cancel, server disconnect error', async () => {
-    await navigate(`${getServerUrl()}/abort`)
-    await resetCleanupState()
+  // Node only: Bun and Deno hand the server the whole 1 MB the browser sent before it aborted, and only then report the disconnect.
+  if (serverRuntime() === 'node')
+    test('abort: single file upload — client cancel, server disconnect error', async () => {
+      await navigate(`${getServerUrl()}/abort`)
+      await resetCleanupState()
 
-    await page.click('#test-upload-abort-single')
-    // Abort once the server reads the file.
-    await autoRetry(async () => {
-      const state = await getCleanupState()
-      expect(state.uploadAbortSingle).toBe('running')
+      await page.click('#test-upload-abort-single')
+      // Abort once the server reads the file.
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.uploadAbortSingle).toBe('running')
+      })
+      await page.click('#test-upload-abort-single-abort')
+      await autoRetry(async () => {
+        const result = await getResult('#abort-result')
+        expect(result.isAbort).toBe(true)
+        expect(result.error).toContain('Aborted telefunction call')
+      })
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.uploadAbortSingleError).toContain('disconnected')
+      })
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.uploadAbortSingle).toBe('cleaned-up')
+      })
     })
-    await page.click('#test-upload-abort-single-abort')
-    await autoRetry(async () => {
-      const result = await getResult('#abort-result')
-      expect(result.isAbort).toBe(true)
-      expect(result.error).toContain('Aborted telefunction call')
-    })
-    await autoRetry(async () => {
-      const state = await getCleanupState()
-      expect(state.uploadAbortSingleError).toContain('disconnected')
-    })
-    await autoRetry(async () => {
-      const state = await getCleanupState()
-      expect(state.uploadAbortSingle).toBe('cleaned-up')
-    })
-  })
 
   // Three 50MB files — file1 consumed fully, the client aborts during the
   // post-file1 sleep, file2+file3 error on disconnect
