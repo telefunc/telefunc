@@ -26,6 +26,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testBacklog()
   testChat()
   testChatMembers()
+  testUnsubscribeTwice()
   testResubscribe()
 }
 
@@ -269,6 +270,36 @@ function testChatMembers() {
       }
     })
     for (const member of members) await member.context().close()
+  })
+}
+
+function testUnsubscribeTwice() {
+  test("Broadcast: a subscriber whose sibling's unsubscribe ran twice still gets what a page in another session publishes", async () => {
+    const url = `${getServerUrl()}/unsubscribe-twice?key=unsubscribe-twice:${Math.random()}`
+    await page.goto(url)
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#subscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#unsubscribe-twice-state'))!).subscribed).toBe(true)
+    })
+    // Another browser context is another session, routed by its own token.
+    const publisher = await (await page.context().browser()!.newContext()).newPage()
+    await publisher.goto(url)
+    await autoRetry(async () => {
+      expect(await publisher.locator('#hydrated').count()).toBe(1)
+    })
+    // Each try publishes again: the subscriber's presence may still be on its way to KV.
+    await autoRetry(
+      async () => {
+        await publisher.click('#publish')
+        await page.click('#read')
+        expect(JSON.parse((await page.textContent('#unsubscribe-twice-state'))!).received).include('hello')
+      },
+      { timeout: 10_000 },
+    )
+    await publisher.context().close()
   })
 }
 

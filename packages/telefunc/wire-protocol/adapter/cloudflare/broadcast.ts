@@ -421,13 +421,18 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       subs = new Map()
       subsByKey.set(key, subs)
     }
-    subs.set(onMessage, owner)
-    this.ensurePresence(key, locationBucket, owner)
+    // A function subscribed again keeps its one entry and its one presence count, and either unsubscribe removes it.
+    if (!subs.has(onMessage)) {
+      subs.set(onMessage, owner)
+      this.ensurePresence(key, locationBucket, owner)
+    }
     return () => {
       const current = subsByKey.get(key)
-      current?.delete(onMessage)
-      if (current?.size === 0) subsByKey.delete(key)
-      this.releasePresence(key, owner)
+      const entryOwner = current?.get(onMessage)
+      if (!current || entryOwner === undefined) return
+      current.delete(onMessage)
+      if (current.size === 0) subsByKey.delete(key)
+      this.releasePresence(key, entryOwner)
     }
   }
 
