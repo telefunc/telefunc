@@ -91,7 +91,7 @@ export function onWithTypedCallback(cb: (n: number) => Promise<number>) {}
 
   it('shielded-marker entries: every type (void, never, unknown) yields a concrete runtime shield', async () => {
     const code = `
-import type { TELEFUNC_SHIELDS } from './shield-key.js'
+import type { TELEFUNC_SHIELDS } from './shieldKey.js'
 declare global {
   namespace Telefunc {
     interface ShieldTypeMap {}
@@ -404,7 +404,7 @@ describe('return sub-shields — values flowing out of a telefunction', () => {
 
 describe('TELEFUNC_SHIELDS marker', () => {
   it('marker on the RETURN position with a generic parameter', async () => {
-    const code = `import type { TELEFUNC_SHIELDS } from './shield-key.js'
+    const code = `import type { TELEFUNC_SHIELDS } from './shieldKey.js'
 type Box<T> = { readonly [TELEFUNC_SHIELDS]: { value: T } }
 export function onBoxReturn(): Box<number> { return {} as any }`
     expect(await testGenerateShield(code)).toMatchInlineSnapshot(`
@@ -417,7 +417,7 @@ export function onBoxReturn(): Box<number> { return {} as any }`
   })
 
   it('marker intersected onto a room-shaped interface, returned as a Promise (the Room publish shield)', async () => {
-    const code = `import type { TELEFUNC_SHIELDS } from './shield-key.js'
+    const code = `import type { TELEFUNC_SHIELDS } from './shieldKey.js'
 type RoomShield<Pub> = { readonly [TELEFUNC_SHIELDS]: { data: Pub } }
 type Room<Pub> = {
   id: string
@@ -435,7 +435,7 @@ export async function onGetTypedRoom(): Promise<Room<ChatMsg>> { return {} as an
   })
 
   it('marker with multiple entries → grouped under one path key', async () => {
-    const code = `import type { TELEFUNC_SHIELDS } from './shield-key.js'
+    const code = `import type { TELEFUNC_SHIELDS } from './shieldKey.js'
 type Multi = { readonly [TELEFUNC_SHIELDS]: { a: string; b: number; c: boolean } }
 export function onMultiMarker(arg: Multi) {}`
     expect(await testGenerateShield(code)).toMatchInlineSnapshot(`

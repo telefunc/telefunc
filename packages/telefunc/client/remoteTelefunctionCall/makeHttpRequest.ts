@@ -3,14 +3,14 @@ export { makeHttpRequest }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isObject } from '../../utils/isObject.js'
-import { parseResponse } from '../../wire-protocol/client/response/parse.js'
-import type { ReviverType, TypeContract, ClientReviverContext } from '../../wire-protocol/types.js'
-import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/request-kind.js'
+import { parseResponse } from '../../wire-protocol/values/client/response/parse.js'
+import type { ReviverType, TypeContract, ClientReviverContext } from '../../wire-protocol/values/types.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/wire/requestKind.js'
 import { throwAbortError, throwBugError } from './errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
-import { getSessionUrl } from '../../wire-protocol/client/session-registry.js'
+import { getSessionUrl } from '../../wire-protocol/channel/client/sessionRegistry.js'
 import type { ChannelTransports } from '../../wire-protocol/constants.js'
 import {
   STATUS_CODE_SUCCESS,

@@ -1,12 +1,12 @@
 export { ParticipantBase }
 
 import { stringify } from '@brillout/json-serializer/stringify'
-import { invokeChannelListener, type ChannelPublishAck } from '../channel.js'
+import { invokeChannelListener, type ChannelPublishAck } from '../channel/channel.js'
 import { makeDisposer } from './disposer.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
-import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import { MemberMeta, type MetaRewinds } from './member-meta.js'

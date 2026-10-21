@@ -4,16 +4,16 @@ export type { Traffic, Wire }
 import type { Peer } from 'crossws'
 import { vi } from 'vitest'
 
-import { ClientChannel } from '../client/channel.js'
+import { ClientChannel } from '../channel/client/channel.js'
 import { config } from '../../client/clientConfig.js'
-import { ServerChannel } from '../server/channel.js'
-import { getChannelMux } from '../server/mux.js'
+import { ServerChannel } from '../channel/server/channel.js'
+import { getChannelMux } from '../channel/server/mux.js'
 
-import { getTelefuncSseChannelHooks } from '../server/sse.js'
-import { getTelefuncChannelHooks } from '../server/ws.js'
-import { TAG } from '../shared-ws.js'
-import { decodeU32 } from '../frame.js'
-import { base64urlToUint8Array } from '../base64url.js'
+import { getTelefuncSseChannelHooks } from '../channel/server/sse.js'
+import { getTelefuncChannelHooks } from '../channel/server/ws.js'
+import { TAG } from '../wire/connectionFrame.js'
+import { decodeU32 } from '../wire/frame.js'
+import { base64urlToUint8Array } from '../wire/base64url.js'
 
 /** One way of a link that carries `rate` bytes a second: what is written to it arrives in order, as fast as that. */
 class Rate {

@@ -3,10 +3,10 @@
 
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
-import { ClientBroadcast, ClientChannel } from './client/channel.js'
-import { ServerChannel } from './server/channel.js'
-import { Broadcast, ServerBroadcast } from './server/server-broadcast.js'
-import { ChannelMux, type ServerTransport } from './server/mux.js'
+import { ClientBroadcast, ClientChannel } from './channel/client/channel.js'
+import { ServerChannel } from './channel/server/channel.js'
+import { Broadcast, ServerBroadcast } from './broadcast/ServerBroadcast.js'
+import { ChannelMux, type ServerTransport } from './channel/server/mux.js'
 import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
@@ -17,10 +17,10 @@ import {
   MAX_CHANNELS_PER_CONNECTION,
   RECONCILE_TIMEOUT_MS,
 } from './constants.js'
-import { ChannelOverflowError } from './channel-errors.js'
+import { ChannelOverflowError } from './channel/channelErrors.js'
 import { Fifo } from '../utils/Fifo.js'
-import { TAG, encode, isOneFrame, messageFrames } from './shared-ws.js'
-import { SendBudget } from './client/send-budget.js'
+import { TAG, encode, isOneFrame, messageFrames } from './wire/connectionFrame.js'
+import { SendBudget } from './flowControl/client/SendBudget.js'
 import { NetworkError } from '../shared/NetworkError.js'
 import { config, getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { Room } from './room/server/statics.js'

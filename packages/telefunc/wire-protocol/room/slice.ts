@@ -2,7 +2,7 @@ export { Slice }
 
 import { Fifo } from '../../utils/Fifo.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { nextTurn } from '../flow-control/macrotask-yield.js'
+import { nextTurn } from '../flowControl/macrotaskYield.js'
 import { ROOM_PLAN_SLICE_MS } from './constants.js'
 
 /** The slices waiting in the process, and how many turns resumed one. */

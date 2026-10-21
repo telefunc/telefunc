@@ -15,9 +15,9 @@ export {
 import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { ChannelOverflowError } from '../channel-errors.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { classifyTelefuncError } from '../error-classification.js'
-import { ACK_STATUS, type AckResultStatus } from '../shared-ws.js'
+import { ACK_STATUS, type AckResultStatus } from '../wire/connectionFrame.js'
 import type { DmReply, RoomFailure } from './protocol.js'
 
 // Error contract: Abort carries its value, RoomError carries a safe message, and bugs are reported

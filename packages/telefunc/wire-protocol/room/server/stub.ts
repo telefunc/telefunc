@@ -5,7 +5,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
-import { ServerChannel, parsePeerText } from '../../server/channel.js'
+import { ServerChannel, parsePeerText } from '../../channel/server/channel.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import {
@@ -15,10 +15,10 @@ import {
   type BroadcastKind,
   type ReattachState,
   type WirePublishInfo,
-} from '../../shared-ws.js'
-import type { IndexedPeer } from '../../server/IndexedPeer.js'
+} from '../../wire/connectionFrame.js'
+import type { IndexedPeer } from '../../channel/server/IndexedPeer.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import type { ChannelPublishAck } from '../../channel.js'
+import type { ChannelPublishAck } from '../../channel/channel.js'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
 import { reportRoomError } from './errors.js'
 import {

@@ -5,7 +5,7 @@
     "client/**/*",
     "node/**/*",
     "serve/**/*",
-    "utils/**/*.spec.ts",
+    "utils/**/*",
     "wire-protocol/**/*"
   ],
   "exclude": []

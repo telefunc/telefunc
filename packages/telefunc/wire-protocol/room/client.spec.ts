@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ChannelClosedError } from '../channel-errors.js'
+import { ChannelClosedError } from '../channel/channelErrors.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { CHANNEL_TRANSPORT } from '../constants.js'
-import { ACK_STATUS, TAG } from '../shared-ws.js'
+import { ACK_STATUS, TAG } from '../wire/connectionFrame.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 import { ROOM_TRACK_WANTS_MAX } from './constants.js'
 import { DEFAULT_TRACK } from './binary.js'
 import { ClientRoom } from './client.js'
-import { ClientBroadcast } from '../client/channel.js'
+import { ClientBroadcast } from '../channel/client/channel.js'
 import { Room } from './server/statics.js'
 import { ServerRoom } from './server/room.js'
 import { config as clientConfig } from '../../client/clientConfig.js'
 import { roomRemoteReviver } from './response-client.js'
-import type { InternalClientReviverContext } from '../types.js'
+import type { InternalClientReviverContext } from '../values/types.js'
 import {
   attachPeer,
   disposeRoomBackend,

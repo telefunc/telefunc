@@ -36,14 +36,14 @@ import {
   type StoredHead,
 } from '../room/semantics.js'
 import type { OrderingInfo } from '../../ordering-frame.js'
-import type { BroadcastKind } from '../../shared-ws.js'
+import type { BroadcastKind } from '../../wire/connectionFrame.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
 import { DriverAttempt } from '../attempt.js'
-import { nextTurn } from '../../flow-control/macrotask-yield.js'
+import { nextTurn } from '../../flowControl/macrotaskYield.js'
 
 type MemoryBackendOptions = {
   /** @internal For specs: storage to inspect, or to share with another backend. */

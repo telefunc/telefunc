@@ -8,7 +8,7 @@ import { isBrowser } from '../utils/isBrowser.js'
 import { objectAssign } from '../utils/objectAssign.js'
 import { setAbortController } from './abort.js'
 import { getPendingContext } from './withContext.js'
-import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/async-generator-interface.js'
+import { addAsyncGeneratorInterface } from './remoteTelefunctionCall/asyncGeneratorInterface.js'
 
 function remoteTelefunctionCall(
   telefuncFilePath: string,

@@ -10,7 +10,7 @@ import { createBroadcastTransportDriver, type BroadcastTransport } from './broad
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { MemoryBackend } from './memory/backend.js'
 import { config } from '../../node/server/serverConfig.js'
-import { Broadcast, ServerBroadcast } from '../server/server-broadcast.js'
+import { Broadcast, ServerBroadcast } from '../broadcast/ServerBroadcast.js'
 afterEach(async () => {
   await disposeBackend()
   config.broadcast = {}

@@ -7,22 +7,22 @@ import { DurableObject, env as workerEnv } from 'cloudflare:workers'
 // A subscription finds its session through AsyncLocalStorage, which the setup's compatibility flag enables.
 import '../node/server/async_hooks.js'
 import crossws from 'crossws/adapters/cloudflare'
-import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
-import { ChannelMux } from '../wire-protocol/server/mux.js'
+import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
+import { ChannelMux } from '../wire-protocol/channel/server/mux.js'
 import { getServerConfig, enableChannelTransports, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBackend } from '../wire-protocol/backend/install.js'
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcast,
-} from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
+} from '../wire-protocol/adapter/cloudflare/broadcast.js'
 import type {
   BroadcastCalls,
   BroadcastDeliverRequest,
   BroadcastForwardRequest,
   BroadcastPresenceRequest,
   BroadcastPublishRequest,
-} from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
+} from '../wire-protocol/adapter/cloudflare/broadcast.js'
 import { OrderedStubs } from '../wire-protocol/server/adapter/cloudflare/ordered-stubs.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
@@ -30,11 +30,11 @@ import {
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   resolveSessionRoutingTarget,
-} from '../wire-protocol/server/adapter/cloudflare/routing.js'
-import { SessionPins, readSessionPin } from '../wire-protocol/server/adapter/cloudflare/session-pin.js'
+} from '../wire-protocol/adapter/cloudflare/routing.js'
+import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/sessionPin.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
-import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
+import type { CloudflareScale, LocationBucket } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/server/adapter/cloudflare/backend.js'
 import {

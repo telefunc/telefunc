@@ -1,7 +1,7 @@
 export type { BroadcastBackend, BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult }
 
-import type { BroadcastKind } from '../../shared-ws.js'
-import type { ChannelPublishAck } from '../../channel.js'
+import type { BroadcastKind } from '../../wire/connectionFrame.js'
+import type { ChannelPublishAck } from '../../channel/channel.js'
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
 
 /** A Broadcast route; text and binary of one key share one ordering domain. */

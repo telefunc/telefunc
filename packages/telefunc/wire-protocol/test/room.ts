@@ -70,8 +70,8 @@ export type { Peer }
 import { expect, vi } from 'vitest'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { IndexedPeer } from '../server/IndexedPeer.js'
-import { TAG, decode, type BroadcastSubscriptions } from '../shared-ws.js'
+import { IndexedPeer } from '../channel/server/IndexedPeer.js'
+import { TAG, decode, type BroadcastSubscriptions } from '../wire/connectionFrame.js'
 import { createDeferred } from '../../utils/createDeferred.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS } from '../room/server/constants.js'
 import { DEFAULT_TRACK } from '../room/binary.js'
@@ -86,7 +86,7 @@ import {
 } from '../room/server/cells.js'
 import type { ParticipantMeta } from '../room/types.js'
 import { ClientRoom, ClientStandaloneParticipant } from '../room/client.js'
-import { ClientBroadcast, type ClientChannel } from '../client/channel.js'
+import { ClientBroadcast, type ClientChannel } from '../channel/client/channel.js'
 import { RoomModel, RoomState, type RoomStateView } from '../room/state.js'
 import { Room } from '../room/server/statics.js'
 import { ServerRoom } from '../room/server/room.js'
@@ -95,9 +95,9 @@ import type { LaneSubscription } from '../room/server/lane-subscription.js'
 import { ResponseRoomGrants, RoomStubChannel } from '../room/server/stub.js'
 import { type DemandReport, RoomDemand } from '../room/server/demand.js'
 import { roomRemoteReviver } from '../room/response-client.js'
-import type { InternalClientReviverContext, InternalServerReplacerContext } from '../types.js'
-import type { ServerChannel } from '../server/channel.js'
-import type { ChannelPublishInfo } from '../channel.js'
+import type { InternalClientReviverContext, InternalServerReplacerContext } from '../values/types.js'
+import type { ServerChannel } from '../channel/server/channel.js'
+import type { ChannelPublishInfo } from '../channel/channel.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId, RoomSubscriptionSource } from '../backend/room/contract.js'
@@ -108,8 +108,8 @@ import type {
   SubscriptionAttempt,
   SubscriptionState,
 } from '../backend/subscription.js'
-import { GcRegistry } from '../gcRegistry.js'
-import { wrapProxy } from '../wrapProxy.js'
+import { GcRegistry } from '../../utils/GcRegistry.js'
+import { wrapProxy } from '../../utils/wrapProxy.js'
 
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()

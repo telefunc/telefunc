@@ -15,7 +15,7 @@ import {
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
-import type { ReconciledPayload } from '../shared-ws.js'
+import type { ReconciledPayload } from '../wire/connectionFrame.js'
 
 const run = (ms: number) => vi.advanceTimersByTimeAsync(ms)
 

@@ -10,7 +10,7 @@ export { ShieldValidationError, isShieldValidationError } from '../shared/Shield
 export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'
 export { NetworkError } from '../shared/NetworkError.js'
-export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
+export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel/channelErrors.js'
 export type {
   ClientRoom as Room,
   RoomInfo,
@@ -37,6 +37,6 @@ export type {
   ReviverType,
   ClientReplacerContext,
   ClientReviverContext,
-} from '../wire-protocol/types.js'
+} from '../wire-protocol/values/types.js'
 
 export { remoteTelefunctionCall as __remoteTelefunctionCall } from './remoteTelefunctionCall.js'

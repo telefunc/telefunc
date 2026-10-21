@@ -1,6 +1,6 @@
 export { heldSendWeight, ESTABLISHING_HOLD_OVERHEAD_BYTES }
 
-import { ChannelOverflowError } from '../channel-errors.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
 import type { HoldWeight } from './subscription-manager.js'
 

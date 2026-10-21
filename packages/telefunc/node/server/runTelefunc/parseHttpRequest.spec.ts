@@ -3,7 +3,7 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parseHttpRequest } from './parseHttpRequest.js'
 import { createRequestContext } from '../context/requestContext.js'
 import { getServerConfig } from '../serverConfig.js'
-import { getChannelMux } from '../../../wire-protocol/server/mux.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
 import { SERIALIZER_PREFIX_FUNCTION } from '../../../wire-protocol/constants.js'
 
 test("a callback's call whose channels closed leaves no scan timer, which would keep a Durable Object from hibernating (#469)", async () => {

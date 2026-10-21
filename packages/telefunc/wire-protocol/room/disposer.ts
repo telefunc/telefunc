@@ -1,6 +1,6 @@
 export { makeDisposer }
 
-import { untether } from '../wrapProxy.js'
+import { untether } from '../../utils/wrapProxy.js'
 
 /** A one-shot cleanup handle; no action creates an already-terminal handle. */
 function makeDisposer(dispose?: () => void, group?: Set<() => void>): () => void {

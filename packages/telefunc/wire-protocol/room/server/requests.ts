@@ -11,7 +11,7 @@ export {
 export type { RoomRequest, RoomDeclaration }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { ProtocolViolationError } from '../../shared-ws.js'
+import { ProtocolViolationError } from '../../wire/connectionFrame.js'
 import { ALL, decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { isRecord } from '../model.js'
 import type { DmReply, ParticipantStubRequest, RoomDataPublish, RoomStubRequest } from '../protocol.js'

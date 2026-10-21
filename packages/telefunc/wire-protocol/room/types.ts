@@ -28,8 +28,8 @@ export type {
   ParticipantSnapshotView,
 }
 
-import type { ChannelPublishAck, ChannelPublishInfo } from '../channel.js'
-import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
+import type { ChannelPublishAck, ChannelPublishInfo } from '../channel/channel.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 
 /** Type-only publish shield, generated from `Pub` and enforced at server ingress. */
 type RoomShield<Pub> = {

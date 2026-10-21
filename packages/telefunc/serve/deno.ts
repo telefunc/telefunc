@@ -4,7 +4,7 @@ import crossws from 'crossws/adapters/deno'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
-import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
+import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 

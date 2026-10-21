@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 import { Telefunc as FirstTelefunc } from '../../packages/telefunc/serve/cloudflare.js'
-import { getChannelMux as firstChannelMux } from '../../packages/telefunc/wire-protocol/server/mux.js'
+import { getChannelMux as firstChannelMux } from '../../packages/telefunc/wire-protocol/channel/server/mux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { Broadcast, Telefunc, decorateTelefunction, getChannelMux } from './second-copy.js'
 

@@ -1,12 +1,12 @@
 export { ServerRoom, ServerLocalParticipant }
 export type { MetaMirror }
 
-import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
+import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { markHandled } from '../../../utils/markHandled.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import type { ChannelPublishAck } from '../../channel.js'
-import type { WirePublishInfo } from '../../shared-ws.js'
+import type { ChannelPublishAck } from '../../channel/channel.js'
+import type { WirePublishInfo } from '../../wire/connectionFrame.js'
 import {
   encodeBinaryFrame,
   decodeBinaryFrame,
@@ -35,7 +35,7 @@ import type { RoomReplica } from './replica.js'
 import { RoomWrites, runAfterHook } from './writes.js'
 import { commitControlOrThrow, withinRoomHorizon } from './lanes.js'
 import { reportRoomError } from './errors.js'
-import { reportServerChannelError } from '../../server/channel.js'
+import { reportServerChannelError } from '../../channel/server/channel.js'
 import { getServerConfig, reconnectWindow } from '../../../node/server/serverConfig.js'
 import { createMember, evictMember } from './membership.js'
 import { memberCellKey } from './cells.js'

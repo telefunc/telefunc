@@ -9,9 +9,9 @@ import {
   type AcceptedCommitWire,
   type CommitWire,
 } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/room/do.js'
-import { TELEFUNC_BROADCAST_BUCKET_HEADER } from '../../packages/telefunc/wire-protocol/server/adapter/cloudflare/routing.js'
-import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/server/server-broadcast.js'
-import { getChannelMux } from '../../packages/telefunc/wire-protocol/server/mux.js'
+import { TELEFUNC_BROADCAST_BUCKET_HEADER } from '../../packages/telefunc/wire-protocol/adapter/cloudflare/routing.js'
+import { ServerBroadcast } from '../../packages/telefunc/wire-protocol/broadcast/ServerBroadcast.js'
+import { getChannelMux } from '../../packages/telefunc/wire-protocol/channel/server/mux.js'
 import { parseHttpRequest } from '../../packages/telefunc/node/server/runTelefunc/parseHttpRequest.js'
 import { createRequestContext } from '../../packages/telefunc/node/server/context/requestContext.js'
 import { getServerConfig } from '../../packages/telefunc/node/server/serverConfig.js'

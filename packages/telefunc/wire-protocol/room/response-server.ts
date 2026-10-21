@@ -1,6 +1,6 @@
 export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
-import type { InternalServerReplacerContext, ReplacerType, TypeContract } from '../types.js'
+import type { InternalServerReplacerContext, ReplacerType, TypeContract } from '../values/types.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,

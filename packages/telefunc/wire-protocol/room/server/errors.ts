@@ -1,7 +1,7 @@
 export { reportRoomError }
 
-import { ChannelOverflowError } from '../../channel-errors.js'
-import { reportServerChannelError } from '../../server/channel.js'
+import { ChannelOverflowError } from '../../channel/channelErrors.js'
+import { reportServerChannelError } from '../../channel/server/channel.js'
 import { isRoomError } from '../errors.js'
 
 /** Room's own background work: a RoomError there is an expected outcome (closed room, departed member). A write a

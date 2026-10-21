@@ -3,8 +3,8 @@ export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
-import { makePublishInfo, type ChannelPublishInfo } from '../../channel.js'
-import type { WirePublishInfo } from '../../shared-ws.js'
+import { makePublishInfo, type ChannelPublishInfo } from '../../channel/channel.js'
+import type { WirePublishInfo } from '../../wire/connectionFrame.js'
 import type { BinaryFrame, BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binary-wants.js'
 import type { MemberWants } from '../protocol.js'

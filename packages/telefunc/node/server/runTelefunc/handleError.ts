@@ -3,7 +3,7 @@ export { handleError }
 import type { ViteDevServer } from 'vite'
 import { hasProp } from '../../../utils/hasProp.js'
 import { getViteDevServer } from '../globalContext.js'
-import { StreamTruncatedError } from '../../../wire-protocol/server/request/StreamReader.js'
+import { StreamTruncatedError } from '../../../wire-protocol/wire/StreamReader.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 
 function handleError(err: unknown) {

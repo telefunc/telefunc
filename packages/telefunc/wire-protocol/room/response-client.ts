@@ -1,11 +1,11 @@
 export { roomRemoteReviver, roomTypes }
 
-import type { InternalClientReviverContext, ReviverType, TypeContract } from '../types.js'
+import type { InternalClientReviverContext, ReviverType, TypeContract } from '../values/types.js'
 import { ClientRoom, ClientStandaloneParticipant } from './client.js'
 import type { LocalParticipant, RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from './protocol.js'
 import { assert } from '../../utils/assert.js'
-import { untether } from '../wrapProxy.js'
+import { untether } from '../../utils/wrapProxy.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,

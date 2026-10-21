@@ -4,20 +4,20 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
-import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
-import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
+import { createRequestReplacer } from '../../wire-protocol/values/client/request/registry.js'
+import { encodeRequestEnvelope } from '../../wire-protocol/wire/frame.js'
 import {
   pumpClientProducerToChannel,
   type PumpChannelOptions,
-} from '../../wire-protocol/client/request/pumpToChannel.js'
-import { ClientChannel } from '../../wire-protocol/client/channel.js'
+} from '../../wire-protocol/values/client/request/pumpToChannel.js'
+import { ClientChannel } from '../../wire-protocol/channel/client/channel.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
-import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/types.js'
+import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/values/types.js'
 import { CloseHandler } from '../close.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
+import { GcRegistry } from '../../utils/GcRegistry.js'
 import { randomUuid } from '../../utils/randomUuid.js'
 
 const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
