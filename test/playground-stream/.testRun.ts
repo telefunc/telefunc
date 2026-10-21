@@ -50,8 +50,6 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
         log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
         // A test dropped an SSE stream's connection (wire-sockets.ts).
         log.logText.includes('ERR_INCOMPLETE_CHUNKED_ENCODING') ||
-        // A page's frame sent as its WebSocket closes under it: Chrome logs instead of throwing.
-        log.logText.includes('WebSocket is already in CLOSING or CLOSED state') ||
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
         // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
         log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
