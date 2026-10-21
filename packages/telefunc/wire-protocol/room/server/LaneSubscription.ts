@@ -17,11 +17,23 @@ class LaneSubscription {
   private _pendingReady: Deferred<void> | null = null
   private _delivering = false
 
-  constructor(
-    private readonly _onTerminal: (slot: LaneSubscription, error?: unknown) => void,
-    private readonly _onRecovered: () => void,
-    private readonly _onPending: (slot: LaneSubscription, pending: boolean) => void = ignorePending,
-  ) {}
+  private readonly _onTerminal: (slot: LaneSubscription, error?: unknown) => void
+  private readonly _onRecovered: () => void
+  private readonly _onPending: (slot: LaneSubscription, pending: boolean) => void
+
+  constructor({
+    onTerminal,
+    onRecovered,
+    onPending = ignorePending,
+  }: {
+    onTerminal: (slot: LaneSubscription, error?: unknown) => void
+    onRecovered: () => void
+    onPending?: (slot: LaneSubscription, pending: boolean) => void
+  }) {
+    this._onTerminal = onTerminal
+    this._onRecovered = onRecovered
+    this._onPending = onPending
+  }
 
   get established(): boolean {
     return this._subscription?.state() === 'ready'

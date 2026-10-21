@@ -30,7 +30,11 @@ function checkDelivery(route: BroadcastRoute, payload: BackendPayload, info: Ord
  *  on the key, of either kind, queue behind it. One that ends or never establishes doesn't fail the publish, and a
  *  later loss holds nothing. */
 function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
-  const subscriptions = new SubscriptionManager(driver.subscriptions, broadcastRouteKey, checkDelivery)
+  const subscriptions = new SubscriptionManager({
+    driver: driver.subscriptions,
+    sourceKey: broadcastRouteKey,
+    checkDelivery,
+  })
 
   const publishNow = (
     route: BroadcastRoute,

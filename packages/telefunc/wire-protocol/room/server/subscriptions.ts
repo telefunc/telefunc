@@ -73,12 +73,22 @@ class RoomSubscriptions {
   private readonly _onLaneRecovered = () => void this._host.sync.reconcileAuthority().catch(reportRoomError)
   /** Whether some handle observes the room, which the control lane serves. */
   private _observing = false
-  private readonly _control = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered)
-  private readonly _semantic = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered)
+  private readonly _control = new LaneSubscription({
+    onTerminal: this._onLaneTerminal,
+    onRecovered: this._onLaneRecovered,
+  })
+  private readonly _semantic = new LaneSubscription({
+    onTerminal: this._onLaneTerminal,
+    onRecovered: this._onLaneRecovered,
+  })
 
   /** While this process owns a member: only an owner reads demand. */
-  private readonly _demandLane = new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered, (slot, pending) => {
-    if (!pending && slot.wanted) this._host._askDemand()
+  private readonly _demandLane = new LaneSubscription({
+    onTerminal: this._onLaneTerminal,
+    onRecovered: this._onLaneRecovered,
+    onPending: (slot, pending) => {
+      if (!pending && slot.wanted) this._host._askDemand()
+    },
   })
 
   /** Named lanes, keyed by (member, track); `_binaryTracks` lists each member's, `_trackMembers` each track's. */
@@ -716,7 +726,7 @@ class RoomSubscriptions {
     const slot = getOrCreate(
       this._inbox,
       member,
-      () => new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered),
+      () => new LaneSubscription({ onTerminal: this._onLaneTerminal, onRecovered: this._onLaneRecovered }),
     )
     slot.sync(
       true,
@@ -751,11 +761,15 @@ class RoomSubscriptions {
 
   /** What a binary lane carries is demand once it delivers, so its readiness replans what `queue` queues. */
   private _newBinaryLane(queue: () => void): LaneSubscription {
-    return new LaneSubscription(this._onLaneTerminal, this._onLaneRecovered, (slot, pending) => {
-      this._onBinaryPending(slot, pending)
-      if (pending || !slot.wanted) return
-      queue()
-      this._schedulePlan()
+    return new LaneSubscription({
+      onTerminal: this._onLaneTerminal,
+      onRecovered: this._onLaneRecovered,
+      onPending: (slot, pending) => {
+        this._onBinaryPending(slot, pending)
+        if (pending || !slot.wanted) return
+        queue()
+        this._schedulePlan()
+      },
     })
   }
 

@@ -130,7 +130,15 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
   readonly #detach: () => Promise<void>
   readonly #stopPresenceObservation: () => void
 
-  constructor(memberRoute: MemberRoute, receiver: BackendReceiver<BackendPayload>, detach: () => Promise<void>) {
+  constructor({
+    memberRoute,
+    receiver,
+    detach,
+  }: {
+    memberRoute: MemberRoute
+    receiver: BackendReceiver<BackendPayload>
+    detach: () => Promise<void>
+  }) {
     super()
     this.#receiver = receiver
     this.#detach = detach
@@ -237,7 +245,7 @@ class CloudflareBroadcastMember {
   readonly #routes = new Map<string, MemberRoute>()
   readonly #subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
 
-  constructor(broadcast: CloudflareBroadcast, id: string, calls: BroadcastCalls) {
+  constructor({ broadcast, id, calls }: { broadcast: CloudflareBroadcast; id: string; calls: BroadcastCalls }) {
     this.#broadcast = broadcast
     this.#id = id
     this.calls = calls
@@ -259,11 +267,12 @@ class CloudflareBroadcastMember {
   ): CloudflareBroadcastSubscriptionAttempt {
     const routeKey = broadcastRouteKey(route)
     const memberRoute = this.#ensureRoute(route, routeKey)
-    const attempt = new CloudflareBroadcastSubscriptionAttempt(memberRoute, receiver, async () => {
+    const detach = async () => {
       this.#subscriptions.delete(routeKey)
       // An establishing route is released once its presence is recorded, if no subscription remains.
       if (memberRoute.state !== 'establishing') await this.#release(routeKey, memberRoute)
-    })
+    }
+    const attempt = new CloudflareBroadcastSubscriptionAttempt({ memberRoute, receiver, detach })
     this.#subscriptions.set(routeKey, attempt)
     return attempt
   }
@@ -341,7 +350,7 @@ class CloudflareBroadcast {
   }
 
   member(id: string, calls: BroadcastCalls): CloudflareBroadcastMember {
-    return new CloudflareBroadcastMember(this, id, calls)
+    return new CloudflareBroadcastMember({ broadcast: this, id, calls })
   }
 
   /** From a session DO, through its ordered stubs; from elsewhere, as a cron trigger, through a fresh stub. Async, so

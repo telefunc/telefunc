@@ -163,7 +163,13 @@ class ClientRoom extends RoomStateView implements Room {
         id: string
         joinedAt: number
       }
-      const participant = new ClientRoomParticipant(this, id, meta, selfDelivery, this._model.metaRewinds)
+      const participant = new ClientRoomParticipant({
+        clientRoom: this,
+        id,
+        meta,
+        selfDelivery,
+        rewinds: this._model.metaRewinds,
+      })
       const closedCause = this._model.closedCause
       if (closedCause) {
         participant._onLeft(closedCause)
@@ -443,13 +449,20 @@ abstract class ClientParticipantBase extends ParticipantBase {
   private readonly _bufferLimit: number
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
-  constructor(
-    participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>,
-    rewinds: MetaRewinds,
-    private readonly _requestParticipant: (request: MemberMutationRequest) => Promise<unknown>,
-  ) {
+  private readonly _requestParticipant: (request: MemberMutationRequest) => Promise<unknown>
+
+  constructor({
+    participant,
+    rewinds,
+    request,
+  }: {
+    participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>
+    rewinds: MetaRewinds
+    request: (request: MemberMutationRequest) => Promise<unknown>
+  }) {
     super(participant, rewinds)
     this._bufferLimit = participant.bufferLimit
+    this._requestParticipant = request
   }
 
   get _demandedTracks(): TrackKey[] {
@@ -564,11 +577,25 @@ abstract class ClientParticipantBase extends ParticipantBase {
 class ClientRoomParticipant extends ClientParticipantBase {
   private readonly _room: ClientRoom
 
-  constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean, rewinds: MetaRewinds) {
-    // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
-    super({ id, meta, selfDelivery, identity: null, bufferLimit: clientRoom._bufferLimit }, rewinds, (request) =>
-      clientRoom._request({ ...request, id }),
-    )
+  constructor({
+    clientRoom,
+    id,
+    meta,
+    selfDelivery,
+    rewinds,
+  }: {
+    clientRoom: ClientRoom
+    id: string
+    meta: ParticipantMeta
+    selfDelivery: boolean
+    rewinds: MetaRewinds
+  }) {
+    super({
+      // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
+      participant: { id, meta, selfDelivery, identity: null, bufferLimit: clientRoom._bufferLimit },
+      rewinds,
+      request: (request) => clientRoom._request({ ...request, id }),
+    })
     this._room = clientRoom
   }
 
@@ -606,7 +633,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
     const request = (req: ParticipantStubRequest) => channel.send(req, { ack: true })
     // Its own: the `rewound` notice forgets its seq.
-    super(metadata, { count: 0 }, request)
+    super({ participant: metadata, rewinds: { count: 0 }, request })
     this._channel = channel
     this._request = request
 

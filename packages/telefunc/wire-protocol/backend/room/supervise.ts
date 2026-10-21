@@ -35,7 +35,11 @@ function describeCommitHold(target: CommitTarget, payload: Uint8Array): SendHold
 /** Owns the Room subscription manager, holds a lane's commits while this instance's subscription on it establishes,
  *  and checks what the driver is given and returns. */
 function superviseRoomDriver(driver: RoomDriver): RoomBackend {
-  const subscriptions = new SubscriptionManager(driver.subscriptions, roomSubscriptionSourceKey, checkDelivery)
+  const subscriptions = new SubscriptionManager({
+    driver: driver.subscriptions,
+    sourceKey: roomSubscriptionSourceKey,
+    checkDelivery,
+  })
 
   return {
     readHead: (roomId) => driver.readHead(roomId),

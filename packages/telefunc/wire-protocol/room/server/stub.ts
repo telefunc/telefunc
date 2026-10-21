@@ -109,11 +109,23 @@ class MemberMessageTexts {
   private _stamped: string | null = null
   private _unstamped: string | null = null
 
-  constructor(
-    private readonly _serialized: string,
-    private readonly _info: WirePublishInfo,
-    private readonly _unstampedEvent: () => object,
-  ) {}
+  private readonly _serialized: string
+  private readonly _info: WirePublishInfo
+  private readonly _unstampedEvent: () => object
+
+  constructor({
+    serialized,
+    info,
+    unstampedEvent,
+  }: {
+    serialized: string
+    info: WirePublishInfo
+    unstampedEvent: () => object
+  }) {
+    this._serialized = serialized
+    this._info = info
+    this._unstampedEvent = unstampedEvent
+  }
 
   stamped(): string {
     return (this._stamped ??= encodePublishText(this._serialized, this._info))

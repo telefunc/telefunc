@@ -21,12 +21,24 @@ class RosterStream {
   /** The roster stream each stub is being sent; a newer one replaces it. */
   private readonly _streamOf = new WeakMap<RoomStubChannel, object>()
 
-  constructor(
-    private readonly _model: RoomModel,
-    /** The view's attached stubs; one that leaves it drops out of a stream. */
-    private readonly _stubs: ReadonlySet<RoomStubChannel>,
-    private readonly _ensureRoster: () => Promise<void>,
-  ) {}
+  private readonly _model: RoomModel
+  /** The view's attached stubs; one that leaves it drops out of a stream. */
+  private readonly _stubs: ReadonlySet<RoomStubChannel>
+  private readonly _ensureRoster: () => Promise<void>
+
+  constructor({
+    model,
+    stubs,
+    ensureRoster,
+  }: {
+    model: RoomModel
+    stubs: ReadonlySet<RoomStubChannel>
+    ensureRoster: () => Promise<void>
+  }) {
+    this._model = model
+    this._stubs = stubs
+    this._ensureRoster = ensureRoster
+  }
 
   /** Whether a client of the view was sent every member it holds, as it holds them:
    *  no roster reconciles into it unsent. */

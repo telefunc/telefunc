@@ -60,12 +60,23 @@ class SubscriptionManager<Source> {
   private readonly _held = new Map<string, number>()
   /** Slots not yet established, counted down a microtask after: at 0, no send has anything to wait for. */
   private _establishing = 0
+  private readonly _driver: SubscriptionDriver<Source>
+  private readonly _sourceKey: (source: Source) => string
+  private readonly _checkDelivery: DeliveryCheck<Source>
 
-  constructor(
-    private readonly _driver: SubscriptionDriver<Source>,
-    private readonly _sourceKey: (source: Source) => string,
-    private readonly _checkDelivery: DeliveryCheck<Source>,
-  ) {}
+  constructor({
+    driver,
+    sourceKey,
+    checkDelivery,
+  }: {
+    driver: SubscriptionDriver<Source>
+    sourceKey: (source: Source) => string
+    checkDelivery: DeliveryCheck<Source>
+  }) {
+    this._driver = driver
+    this._sourceKey = sourceKey
+    this._checkDelivery = checkDelivery
+  }
 
   subscribe(source: Source, receiver: BackendReceiver<BackendPayload>): BackendSubscription {
     const binding = this._driver.bind(source)

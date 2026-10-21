@@ -26,7 +26,7 @@ class MemberMeta {
   private readonly _rewinds: MetaRewinds
   private _rewindsSeen: number
 
-  constructor(meta: ParticipantMeta, seq: number, rewinds = NEVER_REWOUND) {
+  constructor({ meta, seq, rewinds = NEVER_REWOUND }: { meta: ParticipantMeta; seq: number; rewinds?: MetaRewinds }) {
     this._object = Object.freeze(meta)
     this._keys = Object.keys(this._object).length
     this._seq = seq

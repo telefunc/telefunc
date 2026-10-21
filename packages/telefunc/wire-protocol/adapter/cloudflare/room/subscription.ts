@@ -42,9 +42,12 @@ class CloudflareRoomSessionManager {
     const route = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, leaseId: crypto.randomUUID() }
     const callAuthority: AuthorityCall = (invoke) => this.callAuthority(roomId, openAuthority, invoke)
     const key = entryKey(route)
-    const attempt = new CloudflareRoomSubscriptionAttempt(route, callAuthority, receiver, () =>
-      this.#entries.delete(key),
-    )
+    const attempt = new CloudflareRoomSubscriptionAttempt({
+      route,
+      callAuthority,
+      receiver,
+      onClosed: () => this.#entries.delete(key),
+    })
     this.#entries.set(key, attempt)
     attempt.start()
     return attempt
@@ -77,7 +80,17 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   readonly #onClosed: () => void
   #renewalTimer: ReturnType<typeof setTimeout> | undefined
 
-  constructor(route: RouteInstallation, callAuthority: AuthorityCall, receiver: BackendReceiver, onClosed: () => void) {
+  constructor({
+    route,
+    callAuthority,
+    receiver,
+    onClosed,
+  }: {
+    route: RouteInstallation
+    callAuthority: AuthorityCall
+    receiver: BackendReceiver
+    onClosed: () => void
+  }) {
     super()
     this.#callAuthority = callAuthority
     this.#route = route

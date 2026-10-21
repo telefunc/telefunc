@@ -55,7 +55,7 @@ abstract class ParticipantBase implements LocalParticipant {
     rewinds: MetaRewinds,
   ) {
     this.id = participant.id
-    this._meta = new MemberMeta(participant.meta, 0, rewinds)
+    this._meta = new MemberMeta({ meta: participant.meta, seq: 0, rewinds })
     this.selfDelivery = participant.selfDelivery
     this.identity = participant.identity
   }

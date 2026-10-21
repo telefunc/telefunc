@@ -206,12 +206,23 @@ function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: num
 }
 
 class MemorySubscriptionAttempt extends DriverAttempt {
-  constructor(
-    private readonly _receiver: BackendReceiver<BackendPayload>,
-    private readonly _localReceiverCount: () => number,
-    private readonly _detach: () => void,
-  ) {
+  private readonly _receiver: BackendReceiver<BackendPayload>
+  private readonly _localReceiverCount: () => number
+  private readonly _detach: () => void
+
+  constructor({
+    receiver,
+    localReceiverCount,
+    detach,
+  }: {
+    receiver: BackendReceiver<BackendPayload>
+    localReceiverCount: () => number
+    detach: () => void
+  }) {
     super()
+    this._receiver = receiver
+    this._localReceiverCount = localReceiverCount
+    this._detach = detach
   }
 
   establish(): void {
@@ -496,9 +507,11 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       subs = this._broadcastSubs[source.kind]
       key = source.key
     }
-    const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt(receiver, localReceiverCount, () =>
-      removeSubscription(subs, key, sub),
-    )
+    const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt({
+      receiver,
+      localReceiverCount,
+      detach: () => removeSubscription(subs, key, sub),
+    })
     subs.set(key, [...(subs.get(key) ?? []), sub])
     // Ready once what was committed before it is delivered, as a network subscriber hears its confirmation after the
     // messages sent before it: a lane it replaces delivers those first.

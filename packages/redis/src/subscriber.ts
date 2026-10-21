@@ -127,13 +127,14 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   }
 
   private _open(source: RedisSubscriptionSource, receiver: BackendReceiver<BackendPayload>): SubscriptionAttempt {
-    const attempt: RedisSubscriptionAttempt = new RedisSubscriptionAttempt(
+    const attempt: RedisSubscriptionAttempt = new RedisSubscriptionAttempt({
       source,
-      laneChannel(this._prefix, source),
-      'roomId' in source ? generationInvalidationChannel(this._prefix, source.roomId, source.inc) : null,
+      laneChannel: laneChannel(this._prefix, source),
+      invalidationChannel:
+        'roomId' in source ? generationInvalidationChannel(this._prefix, source.roomId, source.inc) : null,
       receiver,
-      () => this._detach(attempt),
-    )
+      onDetach: () => this._detach(attempt),
+    })
     for (const channel of attempt.channels) {
       const attempts = this._byChannel.get(channel)
       if (attempts !== undefined) {
@@ -309,7 +310,13 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
 }
 
 class RedisSubscriptionAttempt extends DriverAttempt {
+  readonly source: RedisSubscriptionSource
+  readonly laneChannel: string
+  /** A Room lane's generation channel: a message on it means the generation was dropped. */
+  readonly invalidationChannel: string | null
   readonly channels: readonly string[]
+  private readonly _receiver: BackendReceiver<BackendPayload>
+  private readonly _onDetach: () => void
   private readonly _fences = new Map<string, Deferred<void>>()
   /** Each lane's order: an every-track or every-member channel carries many binary lanes, keyed by lane key; any other
    *  channel one lane, keyed `''`. */
@@ -319,15 +326,25 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   private readonly _fanIn: boolean
   private readonly _broadcast: boolean
 
-  constructor(
-    readonly source: RedisSubscriptionSource,
-    readonly laneChannel: string,
-    /** A Room lane's generation channel: a message on it means the generation was dropped. */
-    readonly invalidationChannel: string | null,
-    private readonly _receiver: BackendReceiver<BackendPayload>,
-    private readonly _onDetach: () => void,
-  ) {
+  constructor({
+    source,
+    laneChannel,
+    invalidationChannel,
+    receiver,
+    onDetach,
+  }: {
+    source: RedisSubscriptionSource
+    laneChannel: string
+    invalidationChannel: string | null
+    receiver: BackendReceiver<BackendPayload>
+    onDetach: () => void
+  }) {
     super()
+    this.source = source
+    this.laneChannel = laneChannel
+    this.invalidationChannel = invalidationChannel
+    this._receiver = receiver
+    this._onDetach = onDetach
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
     this._fanIn = 'roomId' in source && (source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track')
     this._broadcast = !('roomId' in source)

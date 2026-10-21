@@ -83,7 +83,8 @@ class RoomReplica {
   ): RoomReplica {
     const held = RoomReplica.of(config.inc)
     if (held !== undefined) return held
-    const replica = new RoomReplica({ id: roomId, inc: config.inc, hold: config.hold }, stored, seed)
+    const incarnation = { id: roomId, inc: config.inc, hold: config.hold }
+    const replica = new RoomReplica({ incarnation, stored, seed })
     const mux = getChannelMux()
     let replicas = RoomReplica._byHost.get(mux)
     if (replicas === undefined) {
@@ -136,11 +137,15 @@ class RoomReplica {
   private readonly _tails = new Set<ServerRoom>()
   private readonly _receivers = new Set<ServerRoom>()
 
-  private constructor(
-    incarnation: RoomIncarnation,
-    stored: StoredRoomMeta,
-    seed: { members: MemberSnapshot[] } | { count: number },
-  ) {
+  private constructor({
+    incarnation,
+    stored,
+    seed,
+  }: {
+    incarnation: RoomIncarnation
+    stored: StoredRoomMeta
+    seed: { members: MemberSnapshot[] } | { count: number }
+  }) {
     this.id = incarnation.id
     this._incarnation = incarnation
     this.model = new RoomModel({
@@ -163,7 +168,11 @@ class RoomReplica {
     })
     this.plan = new RoomSubscriptions(this, this.report)
     this.sync = new AuthoritySync(this, this.plan)
-    this.roster = new RosterStream(this.model, this.stubs, () => this.sync.ensureRoster())
+    this.roster = new RosterStream({
+      model: this.model,
+      stubs: this.stubs,
+      ensureRoster: () => this.sync.ensureRoster(),
+    })
   }
 
   /** Whether the handle's holders and holds are served: its stubs, participants and listeners, and its tail. */
@@ -470,11 +479,11 @@ class RoomReplica {
     this.applyStamp(envelope.from, envelope)
     for (const handle of this._receivers) handle._relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
-    const texts = new MemberMessageTexts(serialized, info, () => ({
-      __r: 'data',
-      from: envelope.from,
-      data: envelope.data,
-    }))
+    const texts = new MemberMessageTexts({
+      serialized,
+      info,
+      unstampedEvent: () => ({ __r: 'data', from: envelope.from, data: envelope.data }),
+    })
     for (const stub of this.stubs) stub._relayText(serialized, texts, envelope.from, info)
   }
 

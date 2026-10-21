@@ -550,7 +550,7 @@ class RoomModel {
     }
     assert(pending !== undefined)
     // With the meta changes relayed after the member's roster part.
-    const meta = new MemberMeta(pending.meta, pending.metaSeq)
+    const meta = new MemberMeta({ meta: pending.meta, seq: pending.metaSeq })
     for (const update of this._preRosterMeta.get(from) ?? []) meta.apply(update)
     return { sender: senderOf(from, meta.object, pending.identity ?? null) }
   }
@@ -1001,7 +1001,7 @@ function newEntry(
 ): MemberEntry {
   return {
     id,
-    meta: new MemberMeta(meta, metaSeq, rewinds),
+    meta: new MemberMeta({ meta, seq: metaSeq, rewinds }),
     joinedAt,
     identity: identity ?? null,
     hidden: hidden === true,
@@ -1023,7 +1023,7 @@ function replayMembershipEvent(
     const { id, update } = event.meta
     const member = members.get(id)
     if (member === undefined) return
-    const meta = new MemberMeta(member.meta, member.metaSeq)
+    const meta = new MemberMeta({ meta: member.meta, seq: member.metaSeq })
     if (meta.apply(update) === 'applied') members.set(id, { ...member, meta: meta.object, metaSeq: meta.seq })
   }
 }
