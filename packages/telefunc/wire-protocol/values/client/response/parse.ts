@@ -96,6 +96,7 @@ async function reviveResponse(
   }
 
   const pendingValues: PendingValue<unknown>[] = []
+  let demuxer: FrameDemuxer | undefined
   const context: ClientReviverContext = {
     createChannel(opts) {
       return new ClientChannel({
@@ -119,7 +120,8 @@ async function reviveResponse(
         return ChannelStreamSource.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')
-      return FrameDemuxer.getInstance(bodyStreamReader).create(metadata.__index)
+      demuxer ??= new FrameDemuxer(bodyStreamReader)
+      return demuxer.create(metadata.__index)
     },
   }
 
@@ -204,18 +206,7 @@ class FrameDemuxer {
   private doneIndices = new Set<number>()
   private totalConsumers = 0
 
-  private static instances = new Map<BaseStreamReader, FrameDemuxer>()
-
-  static getInstance(streamReader: BaseStreamReader) {
-    let instance = FrameDemuxer.instances.get(streamReader)
-    if (!instance) {
-      instance = new FrameDemuxer(streamReader)
-      FrameDemuxer.instances.set(streamReader, instance)
-    }
-    return instance
-  }
-
-  private constructor(streamReader: BaseStreamReader) {
+  constructor(streamReader: BaseStreamReader) {
     this.streamReader = streamReader
   }
 

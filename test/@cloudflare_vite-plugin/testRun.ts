@@ -2,6 +2,7 @@ export { testRun }
 export { testCloudflareBindings }
 
 import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
+import type { WebSocket } from 'playwright-chromium'
 import { testCounter, testRunClassic } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
@@ -92,6 +93,9 @@ function testChannel() {
       },
       { timeout: 5000 },
     )
+    const webSockets: string[] = []
+    const onWebSocket = (ws: WebSocket) => webSockets.push(ws.url())
+    page.on('websocket', onWebSocket)
     await page.click('#connect-btn')
     // The client sends a `ping` on connect and the server replies with a `welcome`.
     await autoRetry(
@@ -102,6 +106,9 @@ function testChannel() {
       },
       { timeout: 10000 },
     )
+    page.off('websocket', onWebSocket)
+    // The channel goes over WebSocket, though +server.ts assigns config.channel after the adapter.
+    expect(webSockets.some((url) => new URL(url).pathname === '/_telefunc')).toBe(true)
     // The server pushes a `tick` message every second.
     await autoRetry(
       async () => {

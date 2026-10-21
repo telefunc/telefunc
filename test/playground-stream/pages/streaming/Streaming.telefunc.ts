@@ -19,6 +19,11 @@ export {
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
+  onReturnTwoLargeStreams,
+  onReturnOneLargeChunk,
+  onReturnFinishedAndEndlessStreams,
+  onReturnFailingStream,
+  onGeneratorFinallyThrows,
 }
 
 import { Abort, Channel, getContext } from 'telefunc'
@@ -369,4 +374,67 @@ async function* onUploadWithProgress(
   }
   const t1 = Date.now()
   yield { bytesRead, totalSize, timestamp: t1, duration: t1 - t0 }
+}
+
+// ── Streams read one after the other, cancelled, or failing ──────────
+
+function byteStream(chunks: number) {
+  let i = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i++ >= chunks) return controller.close()
+      controller.enqueue(new Uint8Array(64 * 1024))
+    },
+  })
+}
+
+/** 2 MiB each, more than the page buffers for a stream it isn't reading. */
+const onReturnTwoLargeStreams = async () => {
+  return { first: byteStream(32), second: byteStream(32) }
+}
+
+const onReturnOneLargeChunk = async () => {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(256 * 1024 * 1024))
+      controller.close()
+    },
+  })
+}
+
+const onReturnFinishedAndEndlessStreams = async () => {
+  const key = crypto.randomUUID()
+  cleanupState[`endless_${key}`] = 'running'
+  const finished = byteStream(1)
+  const endless = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      await sleep(50)
+      controller.enqueue(new Uint8Array(1024))
+    },
+    cancel() {
+      cleanupState[`endless_${key}`] = 'cancelled'
+    },
+  })
+  return { key, finished, endless }
+}
+
+const onReturnFailingStream = async (chunksBeforeFailure: number) => {
+  let i = 0
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i++ >= chunksBeforeFailure) throw Abort({ reason: 'stream-source-failure' })
+      controller.enqueue(new Uint8Array([i]))
+    },
+  })
+}
+
+async function* onGeneratorFinallyThrows(): AsyncGenerator<string> {
+  try {
+    while (true) {
+      yield 'tick'
+      await sleep(50)
+    }
+  } finally {
+    throw Abort({ reason: 'generator-finally-failure' })
+  }
 }

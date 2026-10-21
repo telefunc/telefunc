@@ -17,6 +17,7 @@ import { testPublish } from './pages/publish/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
 import { testWire } from './pages/channel/wire-e2e-test'
+import { testSlowLink } from './pages/channel/slow-link-e2e-test'
 
 function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   run(cmd, {
@@ -36,6 +37,7 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         log.logText.includes('the server responded with a status of 422') ||
         log.logText.includes('[telefunc:channel-error]') ||
         log.logText.includes('Error: server-listener-bug') ||
+        log.logText.includes('TypeError: Converting circular structure to JSON') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||
@@ -88,19 +90,21 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
 
   testWire(isDev)
 
+  testSlowLink(isDev)
+
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.
   testUpgrade()
 
-  testFunction()
+  testFunction(isDev)
 
-  testStreamToServer()
+  testStreamToServer(isDev)
 
   testLiveQuery()
 
   testRxjs()
 
-  testPublish()
+  testPublish(isDev)
 
   testRefIdentity()
 }

@@ -4,7 +4,7 @@ import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node
 import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import { installRedis } from '@telefunc/redis'
-import { config } from 'telefunc'
+import { config, serve } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { Telefunc as TelefuncBun } from 'telefunc/bun'
 import { Telefunc as TelefuncDeno } from 'telefunc/deno'
@@ -47,7 +47,11 @@ const app = new Hono()
 // (`tf.serve({ request })`) so the same playground exercises both setups
 // without code edits — flip the env var between bench runs to A/B them.
 const USE_NATIVE = process.env.TELEFUNC_NATIVE === '1'
-console.log(`[INST=${INST}] /_telefunc adapter: ${USE_NATIVE ? 'node-native (req/res)' : 'web request'}`)
+// `TELEFUNC_NATIVE=readable` serves `/_telefunc` as the /serve page's Express example does: `serve({ readable: req })`.
+const USE_READABLE = process.env.TELEFUNC_NATIVE === 'readable'
+console.log(
+  `[INST=${INST}] /_telefunc adapter: ${USE_NATIVE ? 'node-native (req/res)' : USE_READABLE ? 'serve({ readable: req })' : 'web request'}`,
+)
 
 app.get('/api/cleanup-state', async (c) => c.json(await getCleanupStateSnapshot()))
 app.post('/api/cleanup-state/reset', async (c) => {
@@ -170,6 +174,15 @@ app.all('/_telefunc', async (c) => {
     const { req, res } = (c.req.raw as unknown as { runtime: { node: { req: IncomingMessage; res: ServerResponse } } })
       .runtime.node
     await tf!.serve({ req, res })
+    return new Response(null)
+  }
+  if (USE_READABLE) {
+    const { req, res } = (c.req.raw as unknown as { runtime: { node: { req: IncomingMessage; res: ServerResponse } } })
+      .runtime.node
+    const httpResponse = await serve({ url: req.url!, method: req.method!, readable: req, headers: req.headers })
+    res.statusCode = httpResponse.statusCode
+    for (const [name, value] of httpResponse.headers) res.setHeader(name, value)
+    await httpResponse.pipe(res)
     return new Response(null)
   }
   console.log(`[INST=${INST}] Handling /_telefunc via web request adapter`)

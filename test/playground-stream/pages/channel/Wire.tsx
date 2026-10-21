@@ -48,6 +48,8 @@ function WireDemo() {
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
+  // A channel the page drops closes once garbage-collected.
+  const largeChannel = useRef<Awaited<ReturnType<typeof onWireLarge>>['channel'] | null>(null)
 
   const resume = useCallback(async () => {
     const { channel, channelId } = await onWireResume(RESUME_COUNT)
@@ -108,6 +110,7 @@ function WireDemo() {
 
   const large = useCallback(async () => {
     const { channel } = await onWireLarge(LARGE_BYTES)
+    largeChannel.current = channel
     channel.listen((message) => setState((s) => ({ ...s, large: message.length })))
   }, [])
 
