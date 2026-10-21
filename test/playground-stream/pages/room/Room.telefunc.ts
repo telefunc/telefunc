@@ -26,6 +26,7 @@ export {
   onGetRoomOverflow,
   onRoomBurst,
   onGetWatchedCount,
+  onRoomRelease,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -303,6 +304,49 @@ async function onRoomBurst(roomId: string, count: number, size: number) {
 
 async function onGetWatchedCount(roomId: string) {
   return watched.get(roomId)?.length ?? 0
+}
+
+const releaseKeepers = new Map<string, LocalParticipant>()
+
+/** Server action roomRelease_<roomId> sets cleanupState roomRelease_<roomId> to what the server still holds. */
+async function onRoomRelease(roomId: string) {
+  const refs = await releaseRefs(roomId)
+  onServerAction(`roomRelease_${roomId}`, () => {
+    const held = Object.entries(refs).map(([name, ref]) => `${name}:${ref.deref() ? 'held' : 'released'}`)
+    cleanupState[`roomRelease_${roomId}`] = held.join()
+  })
+}
+
+// Apart from onRoomRelease: a closure made there would share the scope that holds them.
+async function releaseRefs(roomId: string) {
+  const room = await Room.create(roomId)
+  // Keeps the room open, so what is let go is let go of an open room.
+  releaseKeepers.set(roomId, await room.join({ meta: { name: 'Keeper' } }))
+
+  const left = await room.join({ meta: { name: 'Left' } })
+  left.listen(() => {})
+  left.onLeave(() => {})
+  left.onDemand(() => {})
+  const view = await Room.get(roomId)
+  const departed = (await view.getParticipant(left.id))!
+  departed.onUpdate(() => {})
+  await left.leave()
+  // Listeners added to a member that left, then the view's own, all gone.
+  departed.subscribe(() => {})
+  departed.subscribeBinary(() => {})
+  departed.onUpdate(() => {})
+  const offs = [view.subscribe(() => {}), view.subscribeBinary(() => {}), view.onJoin(() => {}), view.onLeave(() => {})]
+  for (const off of offs) off()
+
+  const closedId = `${roomId}:closed`
+  const closed = await Room.create(closedId)
+  closed.subscribe(() => {})
+  closed.onJoin(() => {})
+  const member = await closed.join()
+  member.listen(() => {})
+  await Room.close(closedId)
+
+  return { view: new WeakRef(view), left: new WeakRef(left), closed: new WeakRef(closed), member: new WeakRef(member) }
 }
 
 async function onAnnounce(roomId: string, data: unknown) {

@@ -1,7 +1,7 @@
 export { testRoom }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, runServerAction, cutWire } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc } from '../../e2e-utils'
 
 type ChatResult = {
   events: string[]
@@ -493,5 +493,24 @@ function testRoom() {
       page.off('response', onResponse)
       page.off('websocket', onWebSocket)
     }
+  })
+  test('room: the server lets go of a view whose listeners are gone, a member that left and the listeners on it, and a closed room and its members', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-release')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-release:/)
+    })
+    await autoRetry(
+      async () => {
+        await forceServerGc()
+        await runServerAction(`roomRelease_${roomId}`)
+        expect((await getCleanupState())[`roomRelease_${roomId}`]).toBe(
+          'view:released,left:released,closed:released,member:released',
+        )
+      },
+      { timeout: 10_000 },
+    )
   })
 }

@@ -30,6 +30,7 @@ import {
   onGetRoomOverflow,
   onRoomBurst,
   onGetWatchedCount,
+  onRoomRelease,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -870,6 +871,12 @@ function Room() {
           if (watched < 80) await new Promise((r) => setTimeout(r, 200))
         }
         setResult(JSON.stringify({ received, watched }))
+      })}
+
+      {scenario('release', 'What the server lets go', 'Unheld view, left member, closed room', async () => {
+        const roomId = `e2e-release:${crypto.randomUUID()}`
+        await onRoomRelease(roomId)
+        setResult(JSON.stringify({ roomId }))
       })}
     </div>
   )
