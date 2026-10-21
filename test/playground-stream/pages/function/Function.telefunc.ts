@@ -1,4 +1,14 @@
-export { onGetGreeter, onGetAdder, onGetEchoWithState, onMap, onReduce, onUpload, onGetTypedAdder, onCallBack }
+export {
+  onGetGreeter,
+  onGetAdder,
+  onGetEchoWithState,
+  onMap,
+  onReduce,
+  onUpload,
+  onGetTypedAdder,
+  onCallBack,
+  onSearch,
+}
 
 /** Returns a plain function — transparently proxied over an ack channel on the client. */
 async function onGetGreeter() {
@@ -65,4 +75,9 @@ async function onUpload(file: File, onProgress: (percent: number) => Promise<voi
     await new Promise((r) => setTimeout(r, 10))
   }
   return { name: file.name, size: total }
+}
+
+/** A search box's call: the server has the page's callback mark the query up. */
+async function onSearch(query: string, highlight: (query: string) => Promise<string>) {
+  return await highlight(query)
 }
