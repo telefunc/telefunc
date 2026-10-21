@@ -30,6 +30,7 @@ export {
   onChannelSlowLink,
   onChannelUnawaitedBurst,
   onChannelSmallPush,
+  onChannelManyListeners,
 }
 
 import { Channel, Abort, BroadcastChannel } from 'telefunc'
@@ -658,6 +659,18 @@ async function onChannelSmallPush() {
   const ch = new Channel<(count: number) => Promise<void>, (seq: number) => void>()
   ch.listen(async (count) => {
     for (let seq = 0; seq < count; seq++) void ch.send(seq)
+  })
+  return { channel: ch.client }
+}
+
+/** At the page's message, adds that many listeners and removes them, and answers with the milliseconds it took. */
+async function onChannelManyListeners() {
+  const ch = new Channel<(count: number) => number, never>()
+  ch.listen((count) => {
+    const start = performance.now()
+    const removes = Array.from({ length: count }, () => ch.listen(() => 0))
+    for (const remove of removes) remove()
+    return Math.round(performance.now() - start)
   })
   return { channel: ch.client }
 }

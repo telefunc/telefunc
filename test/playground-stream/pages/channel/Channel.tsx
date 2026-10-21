@@ -34,6 +34,7 @@ import {
   onChannelSlowLink,
   onChannelUnawaitedBurst,
   onChannelSmallPush,
+  onChannelManyListeners,
 } from './Channel.telefunc'
 
 /**
@@ -151,6 +152,7 @@ type ChannelState = {
   slowLinkReceived: number | null
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
   smallPushReceived: number[] | null
+  manyListenersMs: { page: number; server: number | null } | null
 }
 
 const initialState: ChannelState = {
@@ -218,6 +220,7 @@ const initialState: ChannelState = {
   slowLinkReceived: null,
   unawaitedBurst: null,
   smallPushReceived: null,
+  manyListenersMs: null,
 }
 
 function timestamp() {
@@ -984,6 +987,19 @@ function ChannelDemo() {
     await channel.send(60)
   }, [])
 
+  const testManyListeners = useCallback(async () => {
+    setChannelState((s) => ({ ...s, manyListenersMs: null }))
+    const { channel } = await openChannel(onChannelManyListeners)
+    const start = performance.now()
+    const removes = Array.from({ length: 100_000 }, () => channel.listen(() => {}))
+    for (const remove of removes) remove()
+    const page = Math.round(performance.now() - start)
+    setChannelState((s) => ({ ...s, manyListenersMs: { page, server: null } }))
+    const server = await channel.send(100_000, { ack: true })
+    setChannelState((s) => ({ ...s, manyListenersMs: { page, server } }))
+    channel.close()
+  }, [])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -1307,6 +1323,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Server Pushes 60 Small Messages
+          </button>
+          <button
+            id="channel-test-many-listeners"
+            type="button"
+            onClick={testManyListeners}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            100k Listeners Added and Removed
           </button>
           <button
             id="channel-test-unattached-flood"

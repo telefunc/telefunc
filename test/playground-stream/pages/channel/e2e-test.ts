@@ -69,6 +69,7 @@ type ChannelState = {
   slowLinkReceived: number | null
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
   smallPushReceived: number[] | null
+  manyListenersMs: { page: number; server: number | null } | null
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -857,6 +858,25 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(burst.received + burst.rejected.ChannelOverflowError!).toBe(100)
       expect(burst.isClosed).toBe(false)
     })
+  })
+
+  test('channel: 100,000 listeners added to a channel and removed take under a second, on the page and on the server', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-many-listeners')
+    const waitFor = async (side: 'page' | 'server') => {
+      let ms: number | null | undefined
+      await autoRetry(
+        async () => {
+          ms = (await getResult<ChannelState>('#channel-state')).manyListenersMs?.[side]
+          expect(ms).not.toBe(null)
+          expect(ms).not.toBe(undefined)
+        },
+        { timeout: 50_000 },
+      )
+      return ms!
+    }
+    expect(await waitFor('page')).lessThan(1000)
+    expect(await waitFor('server')).lessThan(1000)
   })
 
   if (channelTransport === 'ws') {
