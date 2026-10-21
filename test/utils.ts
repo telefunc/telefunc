@@ -1,6 +1,7 @@
 export { testCounter }
 export { testRunClassic }
 export { withNetworkConditions }
+export { newCDPSession }
 
 import {
   page,
@@ -15,13 +16,17 @@ import {
   editFileRevert,
 } from '@brillout/test-e2e'
 
+function newCDPSession() {
+  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
+  return page.context().newCDPSession(page.mainFrame().page())
+}
+
 /** In bytes per second each way, -1 for none. */
 type NetworkConditions = { downloadThroughput: number; uploadThroughput: number }
 
 /** Runs `run` with the page's link throttled as Chrome's DevTools throttle it, WebSockets included; lifted after, however `run` ends. */
 async function withNetworkConditions<T>(conditions: NetworkConditions, run: () => Promise<T>): Promise<T> {
-  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
-  const cdp = await page.context().newCDPSession(page.mainFrame().page())
+  const cdp = await newCDPSession()
   const emulate = ({ downloadThroughput, uploadThroughput }: NetworkConditions) =>
     cdp.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput, uploadThroughput })
   try {

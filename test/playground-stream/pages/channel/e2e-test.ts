@@ -11,7 +11,7 @@ import {
   startProxy,
   countConnections,
 } from '../../e2e-utils'
-import { withNetworkConditions } from '../../../utils'
+import { newCDPSession, withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
   connected: boolean
@@ -931,11 +931,6 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(canceled).deep.equal([])
     })
   }
-}
-
-function newCDPSession() {
-  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
-  return page.context().newCDPSession(page.mainFrame().page())
 }
 
 function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
