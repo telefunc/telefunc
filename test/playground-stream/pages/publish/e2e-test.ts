@@ -1,4 +1,4 @@
-export { testPublish }
+export { testPublish, testPublishSmallBuffer }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
@@ -155,6 +155,20 @@ function testPublish() {
       expect(state.invalidThrew).toBe(true)
       expect(state.invalidErrorMessage).not.toBe(null)
       expect(state.receivedAfterInvalid).deep.equal([{ text: 'hi' }])
+    })
+  })
+}
+
+/** Runs in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+function testPublishSmallBuffer() {
+  test('broadcast: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-hold-overflow')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        outcomes: ['sent', 'sent', 'ChannelOverflowError'],
+        seen: ['1', '2'],
+      })
     })
   })
 }

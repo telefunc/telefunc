@@ -1,4 +1,4 @@
-export { testRoom, testRoomAckTimeout }
+export { testRoom, testRoomAckTimeout, testRoomSmallBuffer }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
 
@@ -545,4 +545,25 @@ function testRoomAckTimeout() {
       { timeout: 75_000 },
     )
   })
+}
+
+/** Runs in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+function testRoomSmallBuffer() {
+  testRoomScenario<{ first: string; outcomes: string[]; got: string[] }>(
+    'dm-overflow',
+    'room: DMs to a page before its first listen() are held within bufferLimit and delivered on listen(); past it the oldest is dropped and its acknowledged send rejects',
+    (r) => {
+      expect(r.first).toBe('rejected')
+      expect(r.outcomes).deep.equal(['rejected', 'answered', 'answered'])
+      expect(r.got).deep.equal(['2', '3'])
+    },
+  )
+  testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
+    'hold-overflow',
+    'room: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError',
+    (r) => {
+      expect(r.serverOutcomes).deep.equal(['sent', 'sent', 'ChannelOverflowError'])
+      expect(r.seen).deep.equal(['1', '2'])
+    },
+  )
 }

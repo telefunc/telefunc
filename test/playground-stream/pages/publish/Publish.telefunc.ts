@@ -8,6 +8,7 @@ export {
   onBroadcastRightAfterSubscribe,
   onBroadcastAnswers,
   onBroadcastAnsweringLoop,
+  onBroadcastWhileEstablishing,
 }
 
 import { Buffer } from 'node:buffer'
@@ -170,4 +171,26 @@ async function onBroadcastAnsweringLoop() {
   const deliveredAtLastReceipt = delivered
   await Promise.all([loop.close(), counter.close()])
   return { timerFired: true, deliveredAtLastReceipt }
+}
+
+/** While another key's publishes are delivered, an instance subscribes and publishes three 1,500-byte messages at once,
+ *  past the 4,096-byte bufferLimit of the lane that runs it. */
+async function onBroadcastWhileEstablishing() {
+  const busy = new BroadcastChannel<number>({ key: `room:busy-test:${crypto.randomUUID()}` })
+  busy.subscribe(() => {})
+  for (let i = 0; i < 2000; i++) void busy.publish(i)
+  const room = new BroadcastChannel<string>({ key: `room:held-test:${crypto.randomUUID()}` })
+  const seen: string[] = []
+  room.subscribe((data) => seen.push(data[0]!))
+  const outcomes = await Promise.all(
+    ['1', '2', '3'].map((n) =>
+      room.publish(n.padEnd(1500, '.')).then(
+        () => 'sent',
+        (err: Error) => err.name,
+      ),
+    ),
+  )
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  await Promise.all([busy.close(), room.close()])
+  return { outcomes, seen }
 }

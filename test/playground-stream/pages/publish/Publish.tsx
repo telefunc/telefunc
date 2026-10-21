@@ -12,6 +12,7 @@ import {
   onBroadcastRightAfterSubscribe,
   onBroadcastAnswers,
   onBroadcastAnsweringLoop,
+  onBroadcastWhileEstablishing,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -198,6 +199,18 @@ function Publish() {
         }}
       >
         Listeners that answer
+      </button>
+
+      <h2>Held Past bufferLimit</h2>
+
+      <button
+        id="test-broadcast-hold-overflow"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastWhileEstablishing()))
+        }}
+      >
+        Publishes held past bufferLimit
       </button>
 
       <h2>Broadcast Shield Validation</h2>

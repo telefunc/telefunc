@@ -48,6 +48,7 @@ import {
   onJoinAnswering,
   onSeedAndChurn,
   onStopChurn,
+  onPublishWhileEstablishing,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -776,6 +777,35 @@ function Room() {
           }))
         },
       )}
+
+      {scenario('dm-overflow', 'DM hold overflow', 'Three acknowledged DMs before listen()', async () => {
+        const [, room] = await createRoom('dm-overflow')
+        const late = await room.join({ meta: { name: 'Late' } })
+        const sender = await room.join({ meta: { name: 'Sender' } })
+        // Three 1,500-byte DMs: two fit the 4,096-byte bufferLimit of the lane that runs this, three don't.
+        const sends = ['1', '2', '3'].map((n) =>
+          sender.send(late.id, n.padEnd(1500, '.'), { ack: true }).then(
+            () => 'answered',
+            () => 'rejected',
+          ),
+        )
+        // The third's arrival drops the oldest, whose acknowledged send rejects.
+        const first = await Promise.race([sends[0]!, new Promise((resolve) => setTimeout(() => resolve('held'), 5000))])
+        const got: string[] = []
+        late.listen((data) => {
+          got.push((data as string)[0]!)
+        })
+        setResult(JSON.stringify({ first, outcomes: await Promise.all(sends), got }))
+      })}
+
+      {scenario('hold-overflow', null, 'Publishes held past bufferLimit', async () => {
+        const roomId = await createRoomId('hold-overflow')
+        const serverOutcomes = await onPublishWhileEstablishing(roomId)
+        await pollUntil(async () => {
+          const seen = await onGetWatched(roomId)
+          return { result: { serverOutcomes, seen }, done: seen.length >= 2 }
+        })
+      })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {
         const [roomId, lobby] = await createRoom('member')
