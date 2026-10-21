@@ -16,7 +16,7 @@ import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
-import { classifyTelefuncError } from '../error-classification.js'
+import { classifyTelefuncError } from '../channel/errorClassification.js'
 import { ACK_STATUS, type AckResultStatus } from '../wire/connectionFrame.js'
 import type { DmReply, RoomFailure } from './protocol.js'
 

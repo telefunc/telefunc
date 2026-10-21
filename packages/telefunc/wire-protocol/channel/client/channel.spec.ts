@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
-import { ClientBroadcast, ClientChannel } from '../channel/client/channel.js'
-import { config } from '../../client/clientConfig.js'
-import { CHANNEL_TRANSPORT } from '../constants.js'
+import { ClientBroadcast, ClientChannel } from './channel.js'
+import { config } from '../../../client/clientConfig.js'
+import { CHANNEL_TRANSPORT } from '../../constants.js'
 import {
   ACK_STATUS,
   TAG,
@@ -12,11 +12,11 @@ import {
   encodePublishText,
   type AckResultStatus,
   type ChannelFrame,
-} from '../wire/connectionFrame.js'
-import { ChannelOverflowError } from '../channel/channelErrors.js'
-import { getSessionUrl } from '../channel/client/sessionRegistry.js'
-import { setAdapterMaxFrameBytes } from '../../node/server/serverConfig.js'
-import { page, register } from '../test/page-server.js'
+} from '../../wire/connectionFrame.js'
+import { ChannelOverflowError } from '../channelErrors.js'
+import { getSessionUrl } from './sessionRegistry.js'
+import { setAdapterMaxFrameBytes } from '../../../node/server/serverConfig.js'
+import { page, register } from '../../test/page-server.js'
 
 const broadcasts: ClientBroadcast[] = []
 const channels: ClientChannel<never, string>[] = []

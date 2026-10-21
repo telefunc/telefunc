@@ -50,7 +50,7 @@ import type { MuxChannel, MuxConnection } from './connection.js'
 import { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure } from '../channelErrors.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { hasProp } from '../../../utils/hasProp.js'
-import { classifyTelefuncError } from '../../error-classification.js'
+import { classifyTelefuncError } from '../errorClassification.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 

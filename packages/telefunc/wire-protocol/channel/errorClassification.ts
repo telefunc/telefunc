@@ -1,7 +1,7 @@
 export { classifyTelefuncError }
 
-import { isAbort, type AbortError } from '../shared/Abort.js'
-import { isShieldValidationError, type ShieldValidationError } from '../shared/ShieldValidationError.js'
+import { isAbort, type AbortError } from '../../shared/Abort.js'
+import { isShieldValidationError, type ShieldValidationError } from '../../shared/ShieldValidationError.js'
 
 type TelefuncErrorClassification =
   | { kind: 'abort'; error: AbortError }
