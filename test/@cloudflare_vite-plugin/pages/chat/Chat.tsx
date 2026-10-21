@@ -24,6 +24,10 @@ function ChatDemo() {
       setMessages((prev) => [...prev, msg])
     })
 
+    chat.subscribeBinary((data) => {
+      setMessages((prev) => [...prev, { user: 'system', text: new TextDecoder().decode(data), ts: Date.now() }])
+    })
+
     chat.onClose(() => {
       setMessages((prev) => [...prev, { user: 'system', text: 'Disconnected', ts: Date.now() }])
       setJoined(false)

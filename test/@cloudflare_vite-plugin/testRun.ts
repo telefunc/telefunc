@@ -174,6 +174,13 @@ function testChat() {
       },
       { timeout: 10000 },
     )
+    // `onOpen` also publishes two binary greetings from one reused buffer: each arrives as published.
+    await autoRetry(async () => {
+      const text = (await page.textContent('#root'))!
+      expect(text).toContain(`welcome ${username}`)
+      expect(text).toContain(`${username} is online`)
+      expect(text.indexOf(`welcome ${username}`)).lessThan(text.indexOf(`${username} is online`))
+    })
   })
 }
 
