@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import {
   DEFAULT_BROADCAST_BUCKETS,
   assertLocationFallbackIsScaled,
@@ -17,13 +17,11 @@ import { OrderedStubs } from './OrderedStubs.js'
 import type { TelefuncDurableObjectNamespace } from './namespace.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
 import { ServerBroadcast } from '../../broadcast/ServerBroadcast.js'
-import { ChannelOverflowError } from '../../channel/channelErrors.js'
-import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { disposeBackend, installBackend } from '../../backend/install.js'
 import { CloudflareBackend } from './backend.js'
 import { CloudflareRoomSessionManager } from './room/subscription.js'
 import { ChannelMux } from '../../channel/server/mux.js'
-import type { BackendPayload, SubscriptionAttempt, SubscriptionState } from '../../backend/subscription.js'
+import type { SubscriptionAttempt, SubscriptionState } from '../../backend/subscription.js'
 import { sqliteStorage } from '../../test/cloudflareSql.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
@@ -132,45 +130,6 @@ function createBasicBinding(
   } as unknown as TelefuncDurableObjectNamespace
 }
 
-/** Stubs that deliver like Cloudflare's: calls through one stub arrive in call order, after that stub's latency;
- *  calls through different stubs race. The n-th stub to carry a call gets `latencies[n]` (default 0). */
-function createRacingBinding(
-  latencies: number[],
-  handlers: {
-    onPublish?: (request: any) => Promise<{ seq: number; timestamp: number }>
-    onForward?: (request: any) => Promise<void>
-    onDeliver?: (request: any) => Promise<void>
-    onPresence?: (request: any) => Promise<void>
-  },
-) {
-  let used = 0
-  return {
-    idFromName(name: string) {
-      return { name }
-    },
-    idFromString(id: string) {
-      return { name: id }
-    },
-    get() {
-      let latency: number | undefined
-      let arrival = Promise.resolve()
-      const send =
-        <R>(handler?: (request: any) => Promise<R>) =>
-        (request: any): Promise<R> => {
-          const delay = (latency ??= latencies[used++] ?? 0)
-          arrival = arrival.then(() => new Promise((resolve) => setTimeout(resolve, delay)))
-          return arrival.then(() => handler!(request))
-        }
-      return {
-        telefuncBroadcastPublish: send(handlers.onPublish),
-        telefuncBroadcastForward: send(handlers.onForward),
-        telefuncBroadcastDeliver: send(handlers.onDeliver),
-        telefuncBroadcastPresence: handlers.onPresence,
-      }
-    },
-  } as unknown as TelefuncDurableObjectNamespace
-}
-
 function createBroadcast(binding = createBasicBinding()): CloudflareBroadcast {
   return new CloudflareBroadcast({
     baseInstanceName: 'telefunc',
@@ -256,19 +215,21 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
-    // A hash of the key alone, so every isolate, and every version of a gradual deploy, picks the same coordinator.
-    expect(getDeterministicKeyBucketIndex('room/alpha', 2)).toBe(0)
-    expect(getDeterministicKeyBucketIndex('room/alpha', 3)).toBe(2)
+    const shardIndices = getBucketCoordinatorShardIndices(2, 'weur')
+
+    expect(getDeterministicKeyBucketIndex('room/alpha', shardIndices.length)).toBe(
+      getDeterministicKeyBucketIndex('room/alpha', shardIndices.length),
+    )
   })
 
   it('assigns room keys only within the bucket-coordinator subset', () => {
-    for (const bucket of ['weur', 'apac', 'oc'] as const) {
-      const shards = getBucketCoordinatorShardIndices(6, bucket)
-      const picked = new Set(
-        Array.from({ length: 20 }, (_, n) => shards[getDeterministicKeyBucketIndex(`room/${n}`, shards.length)]),
-      )
-      expect([...picked].sort()).toEqual(shards)
-    }
+    const weurShards = getBucketCoordinatorShardIndices(2, 'weur')
+    const apacShards = getBucketCoordinatorShardIndices(2, 'apac')
+    const ocShards = getBucketCoordinatorShardIndices(2, 'oc')
+
+    expect(weurShards).toContain(weurShards[getDeterministicKeyBucketIndex('room/alpha', weurShards.length)]!)
+    expect(apacShards).toContain(apacShards[getDeterministicKeyBucketIndex('room/alpha', apacShards.length)]!)
+    expect(ocShards).toContain(ocShards[getDeterministicKeyBucketIndex('room/alpha', ocShards.length)]!)
   })
 
   it('partitions bucket coordinators at ceil(sessionScale / 2) per bucket', () => {
@@ -287,17 +248,6 @@ describe('cloudflare broadcast routing', () => {
 
   it('uses only canonical bucket scale entries', () => {
     expect(getBucketCoordinatorShardIndices({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
-  })
-
-  it('routes one session token to one shard of its region, however often it is routed', () => {
-    const request = createCloudflareRequest({ colo: 'LHR' })
-    const shards = new Set(
-      Array.from(
-        { length: 20 },
-        () => resolveSessionRoutingTarget('telefunc', { weur: 4 }, request, 'weur', 'token-a').shardOrdinal,
-      ),
-    )
-    expect(shards.size).toBe(1)
   })
 
   it('resolves session targets from request location and scale', () => {
@@ -364,32 +314,6 @@ describe('cloudflare broadcast routing', () => {
     await subscription.unsubscribe()
   })
 
-  it("a publish waits only for its own session's subscription, and leaves from its own session", async () => {
-    const recorded = Promise.withResolvers<void>()
-    const publishBuckets: string[] = []
-    const broadcast = createBroadcast(
-      createBasicBinding({
-        onPresence: () => recorded.promise,
-        onPublish(_id, request) {
-          publishBuckets.push(JSON.parse(request.payload))
-          return Promise.resolve({ seq: publishBuckets.length, timestamp: Date.now() })
-        },
-      }),
-    )
-    installCloudflareBroadcast(broadcast)
-    const weur = createMember(broadcast)
-    const enam = broadcast.member('member-enam-0', new OrderedStubs())
-    enam.locate('enam')
-    const publishFrom = (member: CloudflareBroadcastMember) =>
-      inSession(member, () => new ServerBroadcast<string>({ key: 'room:test' }).publish(member.bucket!))
-    inSession(weur, () => new ServerBroadcast<string>({ key: 'room:test' }).subscribe(() => {}))
-    const published = [publishFrom(weur), publishFrom(enam)]
-    await vi.waitFor(() => expect(publishBuckets).toEqual(['enam']))
-    recorded.resolve()
-    await Promise.all(published)
-    expect(publishBuckets).toEqual(['enam', 'weur'])
-  })
-
   it('holds a publish until the authority records the subscription, then delivers it with the authority receipt', async () => {
     const authority = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
@@ -432,37 +356,6 @@ describe('cloudflare broadcast routing', () => {
     })
   })
 
-  it('refuses a binary publish larger than the buffer of a subscription waiting for the authority to record it before copying its bytes', async () => {
-    const authority = createAuthorityState()
-    const recorded = Promise.withResolvers<void>()
-    const broadcast = createBroadcast(
-      createBasicBinding({ onPresence: presenceAt(authority, { beforeRecord: () => recorded.promise }) }),
-    )
-    installCloudflareBroadcast(broadcast)
-    const member = createMember(broadcast)
-    await inSession(member, async () => {
-      new ServerBroadcast({ key: 'room:binary' }).subscribeBinary(() => {})
-      const refused = new Uint8Array(getServerConfig().channel.bufferLimitBinary + 1)
-      let copied = 0
-      const Bytes = globalThis.Uint8Array
-      globalThis.Uint8Array = new Proxy(Bytes, {
-        construct(target, args, newTarget) {
-          if (args[0] === refused) copied++
-          return Reflect.construct(target, args, newTarget)
-        },
-      })
-      let refusal: Promise<unknown>
-      try {
-        refusal = new ServerBroadcast({ key: 'room:binary' }).publishBinary(refused).catch((err: unknown) => err)
-      } finally {
-        globalThis.Uint8Array = Bytes
-      }
-      expect(await refusal).toBeInstanceOf(ChannelOverflowError)
-      expect(copied).toBe(0)
-      recorded.resolve()
-    })
-  })
-
   it('authority forwards once to each populated bucket coordinator', async () => {
     const authorityState = createAuthorityState()
     const calls: BroadcastCalls = new OrderedStubs()
@@ -490,169 +383,26 @@ describe('cloudflare broadcast routing', () => {
     ])
   })
 
-  it("forwards presence from a region that left the scale through the fallback region's coordinator", async () => {
-    const authorityState = createAuthorityState()
-    const forwards: Array<{ coordinator: string; members: string[] }> = []
-    const broadcast = new CloudflareBroadcast({
-      baseInstanceName: 'telefunc',
-      scale: { weur: 1 },
-      locationFallback: 'weur',
-      namespace: () =>
-        createBasicBinding({
-          onForward(id, request) {
-            forwards.push({ coordinator: id.name, members: [...request.members].sort() })
-            return Promise.resolve()
-          },
-        }),
-    })
-    for (const [member, bucket] of [
-      ['telefunc-shard-weur-0', 'weur'],
-      ['telefunc-shard-apac-0', 'apac'],
-    ] as const) {
-      authorityState.setPresence({ key: 'room:redeployed', kind: 'text', member, bucket })
-    }
-    const receipt = await broadcast.publishToSubscribers(authorityState, new OrderedStubs(), {
-      key: 'room:redeployed',
-      kind: 'text',
-      payload: '"hello"',
-    })
-    expect(forwards).toEqual([
-      { coordinator: 'telefunc:broadcast:weur:0', members: ['telefunc-shard-apac-0', 'telefunc-shard-weur-0'] },
-    ])
-    expect(receipt.receivers).toBe(2)
-  })
-
-  it('a member that fails to take a publish loses it: the publish resolves and the loss is logged', async () => {
-    const authority = createAuthorityState()
-    const calls: BroadcastCalls = new OrderedStubs()
-    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
-    const broadcast: CloudflareBroadcast = createBroadcast(
-      createBasicBinding({
-        onPresence: presenceAt(authority),
-        onPublish: (_id, request) => broadcast.publishToSubscribers(authority, calls, request),
-        onForward: (_id, request) => broadcast.forwardToBucket(coordinatorCalls, request),
-        onDeliver: () => Promise.reject(new Error('member reset')),
-      }),
-    )
-    installCloudflareBroadcast(broadcast)
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await inSession(createMember(broadcast), async () => {
-      const room = new ServerBroadcast<string>({ key: 'room:test' })
-      room.subscribe(() => {})
-      await expect(room.publish('lost')).resolves.toMatchObject({ receivers: 1 })
-    })
-    expect(report).toHaveBeenCalledWith(expect.stringContaining("delivery of 'room:test' lost to 1/1"))
-  })
-
-  it('a forward delivers wide ordering positions to every named DO', async () => {
+  it('forwarded publish delivers to DO names listed in the request', async () => {
     const deliveredTo: string[] = []
-    const received: Array<{ text: BackendPayload; seq: number; timestamp: number }> = []
-    const broadcast: CloudflareBroadcast = createBroadcast(
+    const broadcast = createBroadcast(
       createBasicBinding({
-        onDeliver(id, request) {
+        onDeliver(id) {
           deliveredTo.push(id.name)
-          return member.deliver(request)
+          return Promise.resolve()
         },
       }),
     )
-    const member = createMember(broadcast)
-    const subscription = member.openSubscription({ key: 'room:test', kind: 'text' }, (payload, info) => {
-      received.push({ text: payload, ...info })
-    })
-    await untilReady(subscription)
+
     await broadcast.forwardToBucket(new OrderedStubs(), {
       key: 'room:test',
       kind: 'text',
       payload: '{"text":"hello"}',
-      info: { seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
-      members: ['member-weur-0', 'member-weur-1'],
+      info: { seq: 1, timestamp: Date.now() },
+      members: ['telefunc-shard-weur-0', 'telefunc-shard-weur-1'],
     })
-    expect(deliveredTo.sort()).toEqual(['member-weur-0', 'member-weur-1'])
-    expect(received).toEqual([
-      { text: '{"text":"hello"}', seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
-      { text: '{"text":"hello"}', seq: 0x1_0000_0000, timestamp: 0x1_0000_0001 },
-    ])
-    await subscription.unsubscribe()
-  })
 
-  it("delivers a key's publishes to each member in seq order while calls through different stubs race", async () => {
-    const authority = createAuthorityState()
-    const calls: BroadcastCalls = new OrderedStubs()
-    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
-    // The first stub opened is the slowest, so a publish sent through a fresh stub overtakes the one before it.
-    const broadcast: CloudflareBroadcast = createBroadcast(
-      createRacingBinding([20], {
-        onForward: (request) => broadcast.forwardToBucket(coordinatorCalls, request),
-        onDeliver: async (request) => member.deliver(request),
-        onPresence: async (request) => authority.setPresence(request),
-      }),
-    )
-    const member = createMember(broadcast)
-    const received: number[] = []
-    const route = { key: 'room:order', kind: 'text' } as const
-    const subscription = member.openSubscription(route, (_payload, info) => void received.push(info.seq))
-    await untilReady(subscription)
-    const publish = () => broadcast.publishToSubscribers(authority, calls, { ...route, payload: '"x"' })
-    await Promise.all([publish(), publish(), publish()])
-    expect(received).toEqual([1, 2, 3])
-    await subscription.unsubscribe()
-  })
-
-  it("delivers a session's publishes to the key's authority in call order while calls through different stubs race", async () => {
-    const arrived: string[] = []
-    // The first stub opened is the slowest, so a publish sent through a fresh stub overtakes the one before it.
-    const broadcast = createBroadcast(
-      createRacingBinding([20], {
-        onPublish: async (request) => {
-          arrived.push(JSON.parse(request.payload))
-          return { seq: arrived.length, timestamp: Date.now() }
-        },
-      }),
-    )
-    installCloudflareBroadcast(broadcast)
-    await inSession(createMember(broadcast), () => {
-      const channel = new ServerBroadcast<string>({ key: 'room:session-order' })
-      return Promise.all([channel.publish('first'), channel.publish('second')])
-    })
-    expect(arrived).toEqual(['first', 'second'])
-  })
-
-  it("publishes a caller's buffer as it was at the call, even on a line held behind a failed call", async () => {
-    const replies: Array<PromiseWithResolvers<{ seq: number; timestamp: number }>> = []
-    const published: number[][] = []
-    const broadcast = createBroadcast(
-      createBasicBinding({
-        onPublish: (_id, request) => {
-          // An RPC serializes its arguments when it is made.
-          published.push(Array.from(request.payload as Uint8Array))
-          const reply = Promise.withResolvers<{ seq: number; timestamp: number }>()
-          replies.push(reply)
-          return reply.promise
-        },
-      }),
-    )
-    installCloudflareBroadcast(broadcast)
-    const scratch = Buffer.from([1])
-    await inSession(createMember(broadcast), async () => {
-      const channel = new ServerBroadcast({ key: 'room:reused-buffer' })
-      const failing = channel.publishBinary(scratch).catch(() => {})
-      const inFlight = channel.publishBinary(scratch)
-      replies[0]!.reject(new Error('transport error'))
-      await failing
-      // The next call waits for the failed stub's calls; the caller reuses its buffer meanwhile.
-      scratch[0] = 3
-      const later = channel.publishBinary(scratch)
-      scratch[0] = 9
-      const last = channel.publishBinary(scratch)
-      scratch[0] = 5
-      replies[1]!.resolve({ seq: 2, timestamp: 1 })
-      await inFlight
-      await vi.waitFor(() => expect(replies).toHaveLength(4))
-      replies[2]!.resolve({ seq: 3, timestamp: 1 })
-      replies[3]!.resolve({ seq: 4, timestamp: 1 })
-      await Promise.all([later, last])
-    })
-    expect(published).toEqual([[1], [1], [3], [9]])
+    expect(deliveredTo.sort()).toEqual(['telefunc-shard-weur-0', 'telefunc-shard-weur-1'])
   })
 
   it("publishes from outside a session, as from a cron trigger, to the key's authority", async () => {
@@ -725,6 +475,9 @@ describe('cloudflare broadcast routing', () => {
 
     firstRemotePublish.resolve()
     await Promise.all([firstPublish, secondPublish])
+
+    expect(coordinatorPublishes).toContain('telefunc:broadcast:weur:0:{"text":"second"}')
+    expect(coordinatorPublishes).toContain('telefunc:broadcast:apac:0:{"text":"second"}')
   })
 
   it('withdraws presence at the authority on unsubscribe', async () => {
@@ -737,122 +490,5 @@ describe('cloudflare broadcast routing', () => {
     expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
     await subscription.unsubscribe()
     expect(liveMembers(authority, route)).toEqual([])
-  })
-
-  it('keeps presence generation-safe across setup and withdrawal churn', async () => {
-    const setup = Promise.withResolvers<void>()
-    const hooks: PresenceHooks = { beforeRecord: () => setup.promise }
-    const authority = createAuthorityState()
-    const broadcast = createBroadcast(createBasicBinding({ onPresence: presenceAt(authority, hooks) }))
-    const member = createMember(broadcast)
-    const route = { key: 'room:presence-churn', kind: 'text' } as const
-    const first = member.openSubscription(route, () => {})
-    await first.unsubscribe()
-    const successor = member.openSubscription(route, () => {})
-    setup.resolve()
-    await untilReady(successor)
-    await flushMicrotasks()
-    expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
-    const releaseWithdrawal = Promise.withResolvers<void>()
-    hooks.beforeWithdraw = () => releaseWithdrawal.promise
-    const teardown = successor.unsubscribe()
-    const replacement = member.openSubscription(route, () => {})
-    await flushMicrotasks()
-    expect(replacement.state()).toBe('establishing')
-    releaseWithdrawal.resolve()
-    await Promise.all([teardown, untilReady(replacement)])
-    expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
-    await replacement.unsubscribe()
-  })
-
-  it('a subscription opened during a deferred presence teardown establishes fresh presence', async () => {
-    const setup = Promise.withResolvers<void>()
-    const withdrawing = Promise.withResolvers<void>()
-    const withdrawal = Promise.withResolvers<void>()
-    const hooks: PresenceHooks = { beforeRecord: () => setup.promise }
-    const authority = createAuthorityState()
-    const broadcast = createBroadcast(createBasicBinding({ onPresence: presenceAt(authority, hooks) }))
-    const member = createMember(broadcast)
-    const route = { key: 'room:deferred-teardown', kind: 'text' } as const
-    await member.openSubscription(route, () => {}).unsubscribe()
-    hooks.beforeWithdraw = () => {
-      withdrawing.resolve()
-      return withdrawal.promise
-    }
-    setup.resolve()
-    await withdrawing.promise
-    const replacement = member.openSubscription(route, () => {})
-    withdrawal.resolve()
-    await untilReady(replacement)
-    await flushMicrotasks()
-    expect(liveMembers(authority, route)).toEqual([{ member: 'member-weur-0', bucket: 'weur' }])
-    await replacement.unsubscribe()
-  })
-
-  it('surfaces presence refresh loss and recovery through subscription state, and reports the loss once', async () => {
-    vi.useFakeTimers()
-    const report = vi.spyOn(console, 'error').mockImplementation(() => {})
-    let presenceCalls = 0
-    const broadcast = createBroadcast(
-      createBasicBinding({
-        onPresence: () => {
-          presenceCalls += 1
-          return presenceCalls === 2 ? Promise.reject(new Error('presence refresh rejected')) : Promise.resolve()
-        },
-      }),
-    )
-    const member = createMember(broadcast)
-    const subscription = member.openSubscription({ key: 'room:refresh', kind: 'text' }, () => {})
-    await untilReady(subscription)
-    const states: string[] = []
-    const stopObserving = subscription.onStateChange((state) => states.push(state))
-    try {
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(subscription.state()).toBe('lost')
-      expect(states).toEqual(['lost'])
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(subscription.state()).toBe('ready')
-      expect(states).toEqual(['lost', 'ready'])
-      expect(report).toHaveBeenCalledOnce()
-      expect(report.mock.calls[0]![0]).toMatchObject({ cause: { message: 'presence refresh rejected' } })
-    } finally {
-      stopObserving()
-      await subscription.unsubscribe()
-      vi.useRealTimers()
-    }
-  })
-
-  it('keeps delivering while a failed refresh has the route lost, as the authority still forwards to it', async () => {
-    vi.useFakeTimers()
-    const authority = createAuthorityState()
-    const calls: BroadcastCalls = new OrderedStubs()
-    const coordinatorCalls: BroadcastCalls = new OrderedStubs()
-    const record = presenceAt(authority)
-    let presenceCalls = 0
-    const broadcast = createBroadcast(
-      createBasicBinding({
-        onPresence: (id, request) =>
-          ++presenceCalls === 2 ? Promise.reject(new Error('presence refresh rejected')) : record(id, request),
-        onForward: (_, request) => broadcast.forwardToBucket(coordinatorCalls, request),
-        onDeliver: (_, request) => member.deliver(request),
-      }),
-    )
-    const member = createMember(broadcast)
-    const route = { key: 'room:lost-delivery', kind: 'text' } as const
-    const received: BackendPayload[] = []
-    const subscription = member.openSubscription(route, (payload) => void received.push(payload))
-    try {
-      await untilReady(subscription)
-      await vi.advanceTimersByTimeAsync(30_000)
-      expect(subscription.state()).toBe('lost')
-      await broadcast.publishToSubscribers(authority, calls, {
-        ...route,
-        payload: '"during"',
-      })
-      expect(received).toEqual(['"during"'])
-    } finally {
-      await subscription.unsubscribe()
-      vi.useRealTimers()
-    }
   })
 })

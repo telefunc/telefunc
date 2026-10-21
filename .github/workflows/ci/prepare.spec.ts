@@ -16,7 +16,6 @@ describe('prepare()', () => {
             },
           ],
           "jobTests": null,
-          "splitFiles": false,
         },
         {
           "jobCmd": "pnpm run test:types",
@@ -28,19 +27,6 @@ describe('prepare()', () => {
             },
           ],
           "jobTests": null,
-          "splitFiles": false,
-        },
-        {
-          "jobCmd": "pnpm run test:released-api",
-          "jobName": "Released API",
-          "jobSetups": [
-            {
-              "node_version": "23",
-              "os": "ubuntu-latest",
-            },
-          ],
-          "jobTests": null,
-          "splitFiles": false,
         },
         {
           "jobCmd": "pnpm exec test-e2e",
@@ -110,7 +96,7 @@ describe('prepare()', () => {
                   "job": "Vite",
                 },
               },
-              "testFilePath": "test/playground/.test-dev.test.ts",
+              "testFilePath": "test/playground-streaming/.test-dev.test.ts",
             },
             {
               "localConfig": {
@@ -118,151 +104,9 @@ describe('prepare()', () => {
                   "job": "Vite",
                 },
               },
-              "testFilePath": "test/playground/.test-preview.test.ts",
+              "testFilePath": "test/playground-streaming/.test-preview.test.ts",
             },
           ],
-          "splitFiles": false,
-        },
-        {
-          "jobCmd": "pnpm exec test-e2e",
-          "jobName": "Playground Stream",
-          "jobSetups": [
-            {
-              "node_version": "23",
-              "os": "ubuntu-latest",
-            },
-          ],
-          "jobTests": [
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-dev.binary-inline.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-dev.binary-inline.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-dev.channel.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-dev.channel.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-dev.sse-inline.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-dev.sse-inline.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-docker.binary-inline.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-docker.redis-cluster.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-docker.redis-room.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.binary-inline.node.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.binary-inline.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.binary-inline.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.channel.ws.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.sse-inline.sse.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Playground Stream",
-                },
-              },
-              "testFilePath": "test/playground-stream/.test-preview.sse-inline.ws.test.ts",
-            },
-          ],
-          "splitFiles": true,
         },
         {
           "jobCmd": "pnpm exec test-e2e",
@@ -287,11 +131,10 @@ describe('prepare()', () => {
               "testFilePath": "examples/babel/.test.ts",
             },
           ],
-          "splitFiles": false,
         },
         {
           "jobCmd": "pnpm exec test-e2e",
-          "jobName": "Cloudflare",
+          "jobName": "Cloudflare Workers",
           "jobSetups": [
             {
               "node_version": "26",
@@ -302,69 +145,28 @@ describe('prepare()', () => {
             {
               "localConfig": {
                 "ci": {
-                  "job": "Cloudflare",
+                  "job": "Cloudflare Workers",
                 },
               },
-              "testFilePath": "examples/cloudflare-workers/.test-dev.test.ts",
+              "testFilePath": "examples/cloudflare-workers/.dev.test.ts",
             },
             {
               "localConfig": {
                 "ci": {
-                  "job": "Cloudflare",
+                  "job": "Cloudflare Workers",
+                },
+              },
+              "testFilePath": "examples/cloudflare-workers/.test-miniflare.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Cloudflare Workers",
                 },
               },
               "testFilePath": "examples/cloudflare-workers/.test-wrangler.test.ts",
             },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Cloudflare",
-                },
-              },
-              "testFilePath": "test/@cloudflare_vite-plugin/emitted-modules.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Cloudflare",
-                },
-              },
-              "testFilePath": "test/@cloudflare_vite-plugin/test-dev.test.ts",
-            },
-            {
-              "localConfig": {
-                "ci": {
-                  "job": "Cloudflare",
-                },
-              },
-              "testFilePath": "test/@cloudflare_vite-plugin/test-preview.test.ts",
-            },
           ],
-          "splitFiles": false,
-        },
-        {
-          "jobCmd": "pnpm exec vitest run --config vitest.cloudflare-room.config.ts",
-          "jobName": "Cloudflare Room",
-          "jobSetups": [
-            {
-              "node_version": "23",
-              "os": "ubuntu-latest",
-            },
-          ],
-          "jobTests": null,
-          "splitFiles": false,
-        },
-        {
-          "jobCmd": "bash packages/redis/scripts/certification.sh",
-          "jobName": "Redis",
-          "jobSetups": [
-            {
-              "node_version": "23",
-              "os": "ubuntu-latest",
-            },
-          ],
-          "jobTests": null,
-          "splitFiles": false,
         },
         {
           "jobCmd": "pnpm exec test-e2e",
@@ -397,7 +199,6 @@ describe('prepare()', () => {
               "testFilePath": "examples/next/.prod.test.ts",
             },
           ],
-          "splitFiles": false,
         },
         {
           "jobCmd": "pnpm exec test-e2e",
@@ -430,7 +231,6 @@ describe('prepare()', () => {
               "testFilePath": "examples/svelte-kit/.test-preview.test.ts",
             },
           ],
-          "splitFiles": false,
         },
         {
           "jobCmd": "pnpm exec test-e2e",
@@ -459,7 +259,6 @@ describe('prepare()', () => {
               "testFilePath": "docs/.test-preview.test.ts",
             },
           ],
-          "splitFiles": false,
         },
       ]
     `)
