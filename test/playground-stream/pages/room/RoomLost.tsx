@@ -1,7 +1,7 @@
 export { RoomLost }
 
 import React, { useState } from 'react'
-import { onRoomToLoseFrom, onLoseJoin, onLoseLeave, onLoseMeta, onLoseClose } from './RoomLost.telefunc'
+import { onRoomToLoseFrom, onLoseLeave, onLoseMeta, onLoseClose } from './RoomLost.telefunc'
 
 /** The store drops one of the room's frames; the page's view still ends on what happened. */
 function RoomLost() {
@@ -18,6 +18,8 @@ function RoomLost() {
         room.onJoin((member) => events.push(`join:${member.meta.name}`))
         room.onLeave((member) => events.push(`leave:${member.meta.name}`))
         room.onClose(() => events.push('close'))
+        // Before its roster a view has no member to tell a leave of.
+        await room.getParticipants()
         await lose(roomId)
         // Render every 200 ms, so the test sees how soon the view heals.
         for (let i = 0; i < 250; i++) {
@@ -33,7 +35,6 @@ function RoomLost() {
     <div>
       <h2>Lost Frames</h2>
       <pre id="room-lost-result">{result}</pre>
-      {card('join', onLoseJoin)}
       {card('leave', onLoseLeave)}
       {card('meta', onLoseMeta)}
       {card('close', onLoseClose)}

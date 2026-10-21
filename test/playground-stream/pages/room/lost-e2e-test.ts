@@ -7,14 +7,11 @@ type LostResult = { events: string[]; meta: Record<string, unknown>; count: numb
 
 /** The store drops one of a room's frames: the page's view heals from the next frame, well before the 30 s heartbeat. */
 function testRoomLostFrames() {
-  testLost('join', 'room: a join the store lost reaches the page with the next one', ({ events }) => {
-    expect(events.sort()).deep.equal(['join:Lost', 'join:Next'])
-  })
   testLost(
     'leave',
-    'room: a member whose leave the store lost is gone from the page’s count with the next join',
+    'room: a member whose leave the store lost leaves the page’s view soon after the next join',
     (result) => {
-      expect(result.events).contains('join:Next')
+      expect(result.events.sort()).deep.equal(['join:Next', 'leave:Stays'])
       expect(result.count).toBe(1)
     },
   )

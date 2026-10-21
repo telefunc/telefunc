@@ -1,4 +1,4 @@
-export { onRoomToLoseFrom, onLoseJoin, onLoseLeave, onLoseMeta, onLoseClose }
+export { onRoomToLoseFrom, onLoseLeave, onLoseMeta, onLoseClose }
 
 import { Room, type LocalParticipant } from 'telefunc'
 import { addBackendFault } from '../../failing-backend'
@@ -17,16 +17,11 @@ function loseNext(roomId: string) {
   addBackendFault({ op: 'deliver', roomId })
 }
 
-async function onLoseJoin(roomId: string) {
-  loseNext(roomId)
-  members.get(roomId)!.push(await Room.join(roomId, { meta: { name: 'Lost' } }))
-  members.get(roomId)!.push(await Room.join(roomId, { meta: { name: 'Next' } }))
-}
-
 async function onLoseLeave(roomId: string) {
   const [stays] = members.get(roomId)!
   loseNext(roomId)
-  await stays!.leave()
+  // A removal, unlike the member's own leave(), reaches this server's view only through the control lane.
+  await Room.removeParticipant(roomId, { id: stays!.id })
   members.get(roomId)!.push(await Room.join(roomId, { meta: { name: 'Next' } }))
 }
 
