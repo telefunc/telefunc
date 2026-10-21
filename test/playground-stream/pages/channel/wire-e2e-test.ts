@@ -16,8 +16,8 @@ import {
   heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
-  withNetworkConditions,
 } from '../../e2e-utils'
+import { withNetworkConditions } from '../../../utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {

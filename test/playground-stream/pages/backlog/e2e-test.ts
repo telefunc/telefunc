@@ -1,7 +1,8 @@
 export { testBacklog }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState, withNetworkConditions } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState } from '../../e2e-utils'
+import { withNetworkConditions } from '../../../utils'
 
 type BacklogState = { channelId: string | null; received: number; outOfOrder: number }
 type Run = { sent: number; refused: string[] }

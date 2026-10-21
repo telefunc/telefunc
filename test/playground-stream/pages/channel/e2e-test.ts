@@ -10,8 +10,8 @@ import {
   stopProxy,
   startProxy,
   countConnections,
-  withNetworkConditions,
 } from '../../e2e-utils'
+import { withNetworkConditions } from '../../../utils'
 
 type ChannelState = {
   connected: boolean

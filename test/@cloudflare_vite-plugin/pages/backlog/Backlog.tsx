@@ -3,10 +3,10 @@ export { Backlog }
 import React, { useEffect, useRef, useState } from 'react'
 import { onBacklog } from './Backlog.telefunc'
 
-type BacklogState = { open: boolean; received: number; outOfOrder: number; refused: string[] | null }
+type BacklogState = { channelId: string | null; received: number; outOfOrder: number; refused: string[] | null }
 
 function Backlog() {
-  const [state, setState] = useState<BacklogState>({ open: false, received: 0, outOfOrder: 0, refused: null })
+  const [state, setState] = useState<BacklogState>({ channelId: null, received: 0, outOfOrder: 0, refused: null })
   const channelRef = useRef<Awaited<ReturnType<typeof onBacklog>> | null>(null)
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => {
@@ -24,7 +24,7 @@ function Backlog() {
       const inOrder = Number(message.trimEnd()) === expected++
       setState((s) => ({ ...s, received: s.received + 1, outOfOrder: s.outOfOrder + (inOrder ? 0 : 1) }))
     })
-    setState((s) => ({ ...s, open: true }))
+    setState((s) => ({ ...s, channelId: channel.id }))
   }
 
   const run = async () => {

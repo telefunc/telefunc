@@ -25,6 +25,13 @@ const vikeAsCloudflareHandler = vike as unknown as ExportedHandler<Env>
 
 export default {
   async fetch(request, env, ctx): Promise<Response> {
+    const url = new URL(request.url)
+    // Test-only: the run the backlog page asked for, as its telefunction recorded it; a POST says the page is stalled.
+    if (url.pathname === '/backlog-run') {
+      const run = `backlog:${url.searchParams.get('channel')}`
+      if (request.method === 'POST') await env.TelefuncKV.put(`${run}:stalled`, 'true')
+      return new Response(await env.TelefuncKV.get(run))
+    }
     const resp = await tf.serve({ request, env, ctx })
     return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)
   },
