@@ -15,6 +15,7 @@ type WireState = {
 const RESUME_COUNT = 256
 const OVERRUN_COUNT = 16
 const END_BEFORE = 3
+const END_CLOSE_TIMEOUT = 500
 
 function WireDemo() {
   const [state, setState] = useState<WireState>({ resume: null, overrun: null, end: null })
@@ -71,8 +72,8 @@ function WireDemo() {
       receive(`onClose:${!err ? 'none' : err instanceof Abort ? `abort:${JSON.stringify(err.abortValue)}` : err.name}`)
     })
   }, [])
-  const endClose = useCallback(async () => {
-    const close = String(await endChannel.current!.close())
+  const endClose = useCallback(async (opts?: { timeout: number }) => {
+    const close = String(await endChannel.current!.close(opts))
     setState((s) => ({ ...s, end: { ...s.end!, close } }))
   }, [])
   const endAbort = useCallback(() => endChannel.current!.abort({ by: 'page' }), [])
@@ -116,10 +117,18 @@ function WireDemo() {
         <button
           id="wire-end-close"
           type="button"
-          onClick={endClose}
+          onClick={() => endClose()}
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Close it
+        </button>
+        <button
+          id="wire-end-close-timeout"
+          type="button"
+          onClick={() => endClose({ timeout: END_CLOSE_TIMEOUT })}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Close it, waiting {END_CLOSE_TIMEOUT} ms for the server
         </button>
         <button
           id="wire-end-abort"

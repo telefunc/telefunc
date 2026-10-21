@@ -72,6 +72,22 @@ function testWire(isDev: boolean) {
       })
     })
   }
+
+  test('channel: a channel the page closes while offline, its close() timing out, ends gracefully on the server once the page is back', async () => {
+    const channelId = await openEnd()
+    await page.context().setOffline(true)
+    await page.click('#wire-end-close-timeout')
+    await autoRetry(async () => {
+      const { end } = await getResult<WireState>('#wire-state')
+      expect(end!.close).toBe('1')
+    })
+    await cutWire()
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      const ss = await getCleanupState()
+      expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
+    })
+  })
 }
 
 async function openEnd(): Promise<string> {
