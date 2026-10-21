@@ -818,23 +818,26 @@ function testChannel(isDev: boolean, inDocker = false) {
     await cdp.detach()
   })
 
-  test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    const connections = countConnections()
-    const link = await throttleLink(125_000)
-    try {
-      await page.click('#channel-test-slow-link')
-      await autoRetry(
-        async () => {
-          expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
-        },
-        { timeout: 40_000 },
-      )
-    } finally {
-      await link.restore()
-    }
-    expect(connections.stop()).toBe(1)
-  })
+  // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers that lane.
+  if (channelTransports.length === 1) {
+    test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      const connections = countConnections()
+      const link = await throttleLink(125_000)
+      try {
+        await page.click('#channel-test-slow-link')
+        await autoRetry(
+          async () => {
+            expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
+          },
+          { timeout: 40_000 },
+        )
+      } finally {
+        await link.restore()
+      }
+      expect(connections.stop()).toBe(1)
+    })
+  }
 
   test('channel: a burst of 32 MiB the server sends without awaiting all reaches the page', async () => {
     await navigate(`${getServerUrl()}/channel`)
