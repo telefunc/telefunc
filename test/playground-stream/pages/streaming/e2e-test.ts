@@ -331,6 +331,41 @@ function testStreaming() {
         expect(lastMs - firstMs).lessThan(last.duration)
       })
     })
+
+  test("streaming: reading one returned stream to its end, then the other, doesn't hang on the other's unread bytes", async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-two-large-streams-in-turn')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result).deep.equal({ firstBytes: 2 * 1024 * 1024, secondBytes: 2 * 1024 * 1024 })
+    })
+  })
+
+  for (const order of ['finish-first', 'cancel-first'] as const) {
+    test(`streaming: the server stops producing a returned stream the page cancels while it reads another to its end (${order})`, async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click(`#test-finished-and-cancelled-streams-${order}`)
+      let key: string | null = null
+      await autoRetry(async () => {
+        key = (await getResult('#streaming-result')).key
+      })
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state[`endless_${key}`]).toBe('cancelled')
+      })
+    })
+  }
+
+  test('streaming: cancelling a returned stream that failed, or a generator whose finally throws, leaves the server answering', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-cancel-failed-streams')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result.errors).to.have.length(2)
+      expect(result.errors).not.to.include('none')
+      expect(result.nextCall).deep.equal([1, 2, 3, 4, 5])
+    })
+  })
 }
 
 function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
