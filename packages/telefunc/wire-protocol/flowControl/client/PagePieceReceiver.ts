@@ -1,7 +1,13 @@
 export { PagePieceReceiver }
 
 import { WIRE_PIECES_ACK_GAP_MS } from '../../constants.js'
-import { PieceReceiver, acknowledges, type PieceReceiverOptions } from '../pieces.js'
+import {
+  PieceReceiver,
+  acknowledges,
+  type FrameArrival,
+  type PieceArrival,
+  type PieceReceiverOptions,
+} from '../pieces.js'
 import type { Uplink } from './Uplink.js'
 
 type PagePieceReceiverOptions = PieceReceiverOptions & {
@@ -19,13 +25,13 @@ class PagePieceReceiver extends PieceReceiver {
     this.uplink = options.uplink
   }
 
-  protected tookFrame(bytes: number, data: boolean, _announced: boolean, at: number): void {
+  protected tookFrame({ bytes, data, at }: FrameArrival): void {
     if (!acknowledges(bytes)) return
     this.date(data, at)
     this.acknowledgeWithNextSoon()
   }
 
-  protected tookPiece(whole: boolean): void {
+  protected tookPiece({ whole }: PieceArrival): void {
     if (whole && acknowledges(this.total)) this.acknowledgeWithNextSoon()
   }
 
