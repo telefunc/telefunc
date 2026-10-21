@@ -164,6 +164,15 @@ function testRoom() {
       expect(r.seen.filter(Array.isArray)).deep.equal([[2]])
     },
   )
+  testRoomScenario<{ texts: number[]; frames: number[] }>(
+    'call-order',
+    "room: a member's publishes arrive in the order it called them, though the guard takes longer for the earlier ones",
+    (r) => {
+      const numbers = Array.from({ length: 20 }, (_, i) => i)
+      expect(r.texts).deep.equal(numbers)
+      expect(r.frames).deep.equal(numbers)
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',

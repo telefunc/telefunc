@@ -28,6 +28,7 @@ import {
   onPublishBufferAsServer,
   onSendReusingObjects,
   onPublishRightAfterSubscribe,
+  onOpenSlowGuardRoom,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -367,6 +368,21 @@ function Room() {
           const serverSeen = await onGetWatched(roomId)
           return { result: { seen, serverSeen }, done: seen.length >= 3 && serverSeen.length >= 4 }
         })
+      })}
+
+      {scenario('call-order', 'Publishes in call order', 'Publish behind a slow guard', async () => {
+        const roomId = await createRoomId('call-order')
+        const room = await onOpenSlowGuardRoom(roomId)
+        const texts: number[] = []
+        room.subscribe((data) => texts.push(data as number))
+        const frames: number[] = []
+        room.subscribeBinary((data) => frames.push(data[0]!))
+        const me = await room.join({ meta: { name: 'Fast' } })
+
+        const numbers = Array.from({ length: 20 }, (_, i) => i)
+        await Promise.all(numbers.flatMap((n) => [me.publish(n), me.publishBinary(new Uint8Array([n]))]))
+
+        await pollUntil(() => ({ result: { texts, frames }, done: texts.length >= 20 && frames.length >= 20 }))
       })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {

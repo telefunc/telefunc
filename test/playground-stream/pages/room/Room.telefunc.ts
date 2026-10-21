@@ -24,6 +24,7 @@ export {
   onPublishBufferAsServer,
   onSendReusingObjects,
   onPublishRightAfterSubscribe,
+  onOpenSlowGuardRoom,
 }
 
 import { Buffer } from 'node:buffer'
@@ -224,4 +225,16 @@ async function onPublishRightAfterSubscribe(roomId: string) {
   const peer = await Room.join(roomId, { meta: { name: 'Peer' } })
   peer.listen((data) => seen.push(data))
   await me.send(peer.id, 'dm')
+}
+
+/** The guard takes longer for an earlier publish: 50 ms less the number the message or frame carries. */
+async function onOpenSlowGuardRoom(roomId: string) {
+  const room = await Room.get(roomId)
+  Room.guard(room, {
+    onBeforePublish: async (_from, data) => {
+      const n = data instanceof Uint8Array ? data[0]! : (data as number)
+      await new Promise((resolve) => setTimeout(resolve, 50 - n))
+    },
+  })
+  return room
 }
