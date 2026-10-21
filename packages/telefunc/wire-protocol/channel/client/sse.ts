@@ -502,14 +502,15 @@ class SseTransport implements UpgradeSource {
   /** Every request this transport makes. The three senders differ only in what they send and what
    *  a failure means to them, so that is all they say. */
   private post(body: BodyInit, signal: AbortSignal, extra?: { accept?: string; duplex?: 'half' }): Promise<Response> {
+    const headers: Record<string, string> = {
+      ...this.userHeaders,
+      'Content-Type': 'application/octet-stream',
+      [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
+    }
+    if (extra?.accept) headers.Accept = extra.accept
     return this.fetchImpl(getMarkedRequestUrl(this.telefuncUrl, REQUEST_KIND.SSE), {
       method: 'POST',
-      headers: {
-        ...this.userHeaders,
-        ...(extra?.accept ? { Accept: extra.accept } : undefined),
-        'Content-Type': 'application/octet-stream',
-        [REQUEST_KIND_HEADER]: REQUEST_KIND.SSE,
-      },
+      headers,
       body,
       signal,
       // @ts-ignore duplex is not yet in TypeScript's RequestInit
