@@ -200,7 +200,7 @@ export const WIRE_SEND_ACK_GAP_MS = 10
 export const WIRE_SEND_ACK_MS = 25
 /** What such an acknowledgement covers at least: its own bytes stay under 1% of it. */
 export const WIRE_SEND_ACK_MIN_BYTES = 2 * 1024
-/** The least a page's server may leave unacknowledged while the page hands its WebSocket data. */
+/** The least data a WebSocket's sender, the page's or the server's, hands its socket ahead of its peer's acknowledgements. */
 export const WIRE_SEND_AHEAD_MIN_BYTES = 64 * 1024
 /** A server hands its socket data while its path holds less than the page takes in this many least round trips. */
 export const WIRE_SEND_AHEAD_ROUND_TRIPS = 4
