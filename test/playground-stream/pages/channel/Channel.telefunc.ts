@@ -28,6 +28,7 @@ export {
   onChannelUnattachedFlood,
   onChannelEndedValues,
   onChannelSlowLink,
+  onChannelUnawaitedBurst,
 }
 
 import { Channel, Abort, BroadcastChannel } from 'telefunc'
@@ -631,6 +632,22 @@ async function onChannelSlowLink() {
   const ch = new Channel<(bytes: number) => Promise<void>, never>()
   ch.listen(async (bytes) => {
     await ch.sendBinary(new Uint8Array(bytes))
+  })
+  return { channel: ch.client }
+}
+
+/** At the page's message, sends that many 1 MiB messages without awaiting them, and answers with the rejected ones by error name. */
+async function onChannelUnawaitedBurst() {
+  const ch = new Channel<(count: number) => Promise<Record<string, number>>, never>()
+  ch.listen(async (count) => {
+    const rejected: Record<string, number> = {}
+    const sends = Array.from({ length: count }, () =>
+      ch.sendBinary(new Uint8Array(1024 * 1024)).catch((err: Error) => {
+        rejected[err.name] = (rejected[err.name] ?? 0) + 1
+      }),
+    )
+    await Promise.race([Promise.all(sends), new Promise((resolve) => setImmediate(resolve))])
+    return rejected
   })
   return { channel: ch.client }
 }

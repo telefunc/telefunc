@@ -67,6 +67,7 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
+  unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -832,6 +833,29 @@ function testChannel(isDev: boolean, inDocker = false) {
       await link.restore()
     }
     expect(connections.stop()).toBe(1)
+  })
+
+  test('channel: a burst of 32 MiB the server sends without awaiting all reaches the page', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-unawaited-burst-32')
+    await autoRetry(async () => {
+      expect((await getResult<ChannelState>('#channel-state')).unawaitedBurst).deep.equal({
+        rejected: {},
+        received: 32,
+        isClosed: false,
+      })
+    })
+  })
+
+  test('channel: a burst of 100 MiB the server sends without awaiting rejects what is past what the page may be behind with ChannelOverflowError, and the page gets the rest', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-unawaited-burst-100')
+    await autoRetry(async () => {
+      const burst = (await getResult<ChannelState>('#channel-state')).unawaitedBurst!
+      expect(Object.keys(burst.rejected)).deep.equal(['ChannelOverflowError'])
+      expect(burst.received + burst.rejected.ChannelOverflowError!).toBe(100)
+      expect(burst.isClosed).toBe(false)
+    })
   })
 
   if (channelTransport === 'sse') {

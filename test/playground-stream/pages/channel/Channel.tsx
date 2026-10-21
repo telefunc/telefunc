@@ -32,6 +32,7 @@ import {
   onChannelUnattachedFlood,
   onChannelEndedValues,
   onChannelSlowLink,
+  onChannelUnawaitedBurst,
 } from './Channel.telefunc'
 
 /**
@@ -147,6 +148,7 @@ type ChannelState = {
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
+  unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
 }
 
 const initialState: ChannelState = {
@@ -212,6 +214,7 @@ const initialState: ChannelState = {
   endedValuesReady: false,
   endedValuesCollected: null,
   slowLinkReceived: null,
+  unawaitedBurst: null,
 }
 
 function timestamp() {
@@ -950,6 +953,21 @@ function ChannelDemo() {
     await channel.send(1_000_000)
   }, [])
 
+  const testUnawaitedBurst = useCallback(async (count: number) => {
+    setChannelState((s) => ({ ...s, unawaitedBurst: null }))
+    const { channel } = await openChannel(onChannelUnawaitedBurst)
+    let received = 0
+    channel.listenBinary(() => {
+      received++
+    })
+    const rejected = await channel.send(count, { ack: true })
+    const sent = count - Object.values(rejected).reduce((sum, n) => sum + n, 0)
+    while (received < sent) await new Promise((r) => setTimeout(r, 100))
+    const unawaitedBurst = { rejected, received, isClosed: channel.isClosed }
+    setChannelState((s) => ({ ...s, unawaitedBurst }))
+    channel.close()
+  }, [])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -1255,6 +1273,17 @@ function ChannelDemo() {
           >
             1 MB Download
           </button>
+          {[32, 100].map((count) => (
+            <button
+              key={count}
+              id={`channel-test-unawaited-burst-${count}`}
+              type="button"
+              onClick={() => testUnawaitedBurst(count)}
+              className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+            >
+              Server Bursts {count} MiB Unawaited
+            </button>
+          ))}
           <button
             id="channel-test-unattached-flood"
             type="button"
