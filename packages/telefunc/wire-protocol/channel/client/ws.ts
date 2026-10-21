@@ -293,7 +293,7 @@ class WsTransport implements UpgradeTarget {
 
   sendRoom(): number {
     assert(this.ends)
-    return this.ends.budget.sendRoom
+    return this.ends.budget.roomPastSent()
   }
 
   get uplink(): Uplink {

@@ -78,7 +78,7 @@ class SendBudget implements SendRoom {
     return this.movedAllowance ?? this.least
   }
 
-  /** `SendRoom`: the room less what the sender handed. */
+  /** `SendRoom`: the room past what the sender handed the socket. */
   dataRoom(): number {
     return this.roomPast(this.sender.transmittedBytes)
   }
@@ -88,8 +88,8 @@ class SendBudget implements SendRoom {
     this.uplink.sentFrame(tag, bytes)
   }
 
-  /** The bytes of data it takes now: none, once the room is used or data waits for it. */
-  get sendRoom(): number {
+  /** The room past all the sender was sent, what it holds included: none once the room is used or data waits for it. */
+  roomPastSent(): number {
     return this.roomPast(this.sender.sentBytes)
   }
 
@@ -144,7 +144,7 @@ class SendBudget implements SendRoom {
   /** With no room and data in the uplink, looks again once it carried what the server acks at once, or all it holds. */
   private pace(): void {
     const drainRate = this.uplink.drain.rate
-    if (drainRate === 0 || this.sendRoom > 0 || this.paceTimer !== null) return
+    if (drainRate === 0 || this.roomPastSent() > 0 || this.paceTimer !== null) return
     const queued = this.uplink.inUplink()
     if (queued === 0) return
     const ms = Math.max(1, Math.min(queued, WIRE_PIECES_ACK_BYTES) / drainRate)
