@@ -104,18 +104,25 @@ async function onBroadcastOnOpenPublish() {
   return room
 }
 
-/** The first of two subscribers answers message 1 with message 2. */
+/** The first of two subscribers answers message 1 with message 2; both listen until the second sees it, or 10 s pass. */
 async function onBroadcastAnswerOrder() {
   const key = `room:answer-order:${crypto.randomUUID()}`
   const seen: string[] = []
+  // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
+  const sawAnswer = Promise.withResolvers<void>()
   const offFirst = Broadcast.subscribe<number>(key, (n) => {
     seen.push(`first:${n}`)
     if (n === 1) void Broadcast.publish(key, 2)
   })
   const offSecond = Broadcast.subscribe<number>(key, (n) => {
     seen.push(`second:${n}`)
+    if (n === 2) sawAnswer.resolve()
   })
   await Broadcast.publish(key, 1)
+  const deadline = Promise.withResolvers<void>()
+  const timer = setTimeout(deadline.resolve, 10_000)
+  await Promise.race([sawAnswer.promise, deadline.promise])
+  clearTimeout(timer)
   offFirst()
   offSecond()
   return seen
