@@ -11,7 +11,7 @@ import { ClientBroadcast } from '../../channel/client/channel.js'
 import { Room } from '../server/statics.js'
 import { ServerRoom } from '../server/room.js'
 import { config as clientConfig } from '../../../client/clientConfig.js'
-import { roomRemoteReviver } from '../response-client.js'
+import { roomRemoteReviver } from '../../values/client/response/room.js'
 import type { InternalClientReviverContext } from '../../values/types.js'
 import {
   attachPeer,

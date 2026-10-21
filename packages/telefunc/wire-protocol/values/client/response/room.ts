@@ -1,16 +1,20 @@
 export { roomRemoteReviver, roomTypes }
 
-import type { InternalClientReviverContext, ReviverType, TypeContract } from '../values/types.js'
-import { ClientRoom, ClientStandaloneParticipant } from './client/room.js'
-import type { LocalParticipant, RemoteParticipant } from './types.js'
-import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from './protocol.js'
-import { assert } from '../../utils/assert.js'
-import { untether } from '../../utils/wrapProxy.js'
+import type { InternalClientReviverContext, ReviverType, TypeContract } from '../../types.js'
+import { ClientRoom, ClientStandaloneParticipant } from '../../../room/client/room.js'
+import type { LocalParticipant, RemoteParticipant } from '../../../room/types.js'
+import type {
+  ParticipantStubMetadata,
+  RemoteParticipantMetadata,
+  RoomSnapshotMetadata,
+} from '../../../room/protocol.js'
+import { assert } from '../../../../utils/assert.js'
+import { untether } from '../../../../utils/wrapProxy.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
-} from '../constants.js'
+} from '../../../constants.js'
 
 type RoomReviverContract = TypeContract<never, ClientRoom, RoomSnapshotMetadata>
 type RoomParticipantReviverContract = TypeContract<never, LocalParticipant, ParticipantStubMetadata>

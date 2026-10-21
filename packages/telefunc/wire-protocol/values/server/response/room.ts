@@ -1,19 +1,23 @@
 export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
-import type { InternalServerReplacerContext, ReplacerType, TypeContract } from '../values/types.js'
+import type { InternalServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
-} from '../constants.js'
-import { ServerLocalParticipant, ServerRoom } from './server/room.js'
-import type { RemoteParticipant } from './types.js'
-import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from './protocol.js'
-import { RoomParticipantStubChannel, ResponseRoomGrants } from './server/stub.js'
-import { remoteBacking } from './state.js'
-import { getAdapterMaxFrameBytes, getServerConfig } from '../../node/server/serverConfig.js'
-import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
-import { getOrCreate } from '../../utils/getOrCreate.js'
+} from '../../../constants.js'
+import { ServerLocalParticipant, ServerRoom } from '../../../room/server/room.js'
+import type { RemoteParticipant } from '../../../room/types.js'
+import type {
+  ParticipantStubMetadata,
+  RemoteParticipantMetadata,
+  RoomSnapshotMetadata,
+} from '../../../room/protocol.js'
+import { RoomParticipantStubChannel, ResponseRoomGrants } from '../../../room/server/stub.js'
+import { remoteBacking } from '../../../room/state.js'
+import { getAdapterMaxFrameBytes, getServerConfig } from '../../../../node/server/serverConfig.js'
+import { assertIsNotBrowser } from '../../../../utils/assertIsNotBrowser.js'
+import { getOrCreate } from '../../../../utils/getOrCreate.js'
 assertIsNotBrowser()
 
 type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata>

@@ -164,7 +164,7 @@ async function reviveResponse(
   // Keeps Room's client code out of the entry bundle: only a response whose text holds a Room prefix loads it.
   let roomTypes: ReviverType<TypeContract, InternalClientReviverContext>[] = []
   if (body.includes(SERIALIZER_PREFIX_ROOM_STEM)) {
-    roomTypes = (await import('../../../room/response-client.js')).roomTypes
+    roomTypes = (await import('./room.js')).roomTypes
     // Aborted during the load, before any revived value listens for it.
     if (callContext.abortController.signal.aborted) {
       throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
