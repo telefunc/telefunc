@@ -1,6 +1,7 @@
 export { testChannel }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import type { Request } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, restartProxy, stopProxy, startProxy } from '../../e2e-utils'
 
 type ChannelState = {
@@ -795,6 +796,28 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(state.durationLimits?.ack).toBe('ack:still-open')
     })
   })
+
+  if (channelTransport === 'sse') {
+    test("channel: Chrome reports none of the page's SSE POSTs canceled", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      const canceled: string[] = []
+      const onRequestFailed = (request: Request) => {
+        const isSsePost = request.method() === 'POST' && request.url().includes('_telefunc=sse')
+        if (isSsePost && request.failure()?.errorText === 'net::ERR_ABORTED') canceled.push(request.url())
+      }
+      page.on('requestfailed', onRequestFailed)
+      await page.click('#channel-connect')
+      await page.fill('#channel-echo-input', 'sse-post')
+      await page.click('#channel-echo-send')
+      await autoRetry(async () => {
+        const state = await getResult<ChannelState>('#channel-state')
+        expect(state.pingAck).toBe('server-ack:ping')
+        expect(state.lastEchoAck).toBe('server-ack:echo')
+      })
+      page.off('requestfailed', onRequestFailed)
+      expect(canceled).deep.equal([])
+    })
+  }
 }
 
 function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
