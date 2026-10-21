@@ -1,6 +1,15 @@
-export { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient, onSubscribeThrows }
+export {
+  onTextBroadcast,
+  onBinaryBroadcastPair,
+  onBinaryBroadcast,
+  onBroadcastShieldClient,
+  onSubscribeThrows,
+  onChatLeaveOnClose,
+  onGetChatWatched,
+  onServerBroadcastChecks,
+}
 
-import { BroadcastChannel } from 'telefunc'
+import { Broadcast, BroadcastChannel } from 'telefunc'
 
 type TextMsg = { text: string; from: string }
 
@@ -86,4 +95,58 @@ async function onSubscribeThrows() {
   await channel.publish({ n: 1 })
   await delivered
   return { thrown, seen }
+}
+
+const chatWatched = new Map<string, { received: string[]; unsubscribe(): void }>()
+
+/** The documented chat pattern: a page's channel says it left from its onClose. */
+async function onChatLeaveOnClose() {
+  const key = `room:chat-leave:${crypto.randomUUID()}`
+  const received: string[] = []
+  chatWatched.set(key, { received, unsubscribe: Broadcast.subscribe<string>(key, (msg) => received.push(msg)) })
+  const chat = new BroadcastChannel<string>({ key })
+  chat.onClose(() => void chat.publish('left'))
+  return { key, chat }
+}
+
+async function onGetChatWatched(key: string) {
+  const watched = chatWatched.get(key)!
+  if (watched.received.length > 0) watched.unsubscribe()
+  return watched.received
+}
+
+async function onServerBroadcastChecks() {
+  const key = `room:server-checks:${crypto.randomUUID()}`
+
+  const aborted = new BroadcastChannel({ key })
+  aborted.abort()
+  aborted.subscribe(() => {})
+  aborted.subscribeBinary(() => {})
+  const afterAbort = [
+    (await Broadcast.publish(key, 'after-abort')).receivers,
+    (await Broadcast.publishBinary(key, new Uint8Array([1]))).receivers,
+  ]
+
+  const received: string[] = []
+  const unsubscribeLeaving = Broadcast.subscribe<string>(`${key}:leaving`, (msg) => {
+    received.push(msg)
+    unsubscribeLeaving()
+  })
+  const unsubscribeJoining = Broadcast.subscribe<string>(`${key}:joining`, (msg) => {
+    received.push(msg)
+    unsubscribeJoining()
+    Broadcast.subscribe(`${key}:joining`, () => {})
+  })
+  const duringDelivery = [
+    (await Broadcast.publish(`${key}:leaving`, 'leaving')).receivers,
+    (await Broadcast.publish(`${key}:joining`, 'joining')).receivers,
+  ]
+
+  const statically: string[] = []
+  const unsubscribe = Broadcast.subscribe<string>(`${key}:static`, (msg) => statically.push(msg))
+  await Broadcast.publish(`${key}:static`, 'first')
+  unsubscribe()
+  await Broadcast.publish(`${key}:static`, 'second')
+
+  return { afterAbort, received, duringDelivery, statically }
 }

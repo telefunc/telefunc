@@ -8,6 +8,9 @@ import {
   onBinaryBroadcast,
   onBroadcastShieldClient,
   onSubscribeThrows,
+  onChatLeaveOnClose,
+  onGetChatWatched,
+  onServerBroadcastChecks,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -167,6 +170,38 @@ function Publish() {
         }}
       >
         Subscribe refused by the store
+      </button>
+
+      <h2>Leave message from onClose</h2>
+
+      <button
+        id="test-chat-leave-on-close"
+        onClick={async () => {
+          setResult('')
+          const { key, chat } = await onChatLeaveOnClose()
+          await new Promise<void>((resolve) => chat.onOpen(resolve))
+          await chat.close()
+          for (let poll = 0; poll < 50; poll++) {
+            const received = await onGetChatWatched(key)
+            setResult(JSON.stringify({ received }))
+            if (received.length > 0) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+        }}
+      >
+        Close a chat channel
+      </button>
+
+      <h2>Server-side subscriptions</h2>
+
+      <button
+        id="test-server-broadcast-checks"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onServerBroadcastChecks()))
+        }}
+      >
+        Abort, receivers, unsubscribe
       </button>
     </div>
   )

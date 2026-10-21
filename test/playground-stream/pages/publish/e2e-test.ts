@@ -104,6 +104,27 @@ function testPublish() {
       expect(state.receivedAfterInvalid).deep.equal([{ text: 'hi' }])
     })
   })
+
+  test('broadcast: what a channel publishes from its onClose reaches its key, as the chat pattern does', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-chat-leave-on-close')
+    await autoRetry(async () => {
+      expect(await getResult<{ received: string[] }>('#publish-result')).deep.equal({ received: ['left'] })
+    })
+  })
+
+  test('broadcast: a subscribe after abort opens nothing, receivers counts the subscribers a publish reached, and an unsubscribe stops deliveries', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-server-broadcast-checks')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        afterAbort: [0, 0],
+        received: ['leaving', 'joining'],
+        duringDelivery: [1, 1],
+        statically: ['first'],
+      })
+    })
+  })
 }
 
 /** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
