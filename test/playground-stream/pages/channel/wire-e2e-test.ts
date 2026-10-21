@@ -1,6 +1,7 @@
 export { testWire, testWireSmallReplay }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import type { Response, WebSocket } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, runServerAction, cutWire, dropNextWebSocket } from '../../e2e-utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
@@ -8,6 +9,7 @@ type WireState = {
   resume: { channelId: string; received: Tally } | null
   overrun: { channelId: string; received: Tally; onClose: string | null } | null
   end: { channelId: string; received: string[]; close: string | null } | null
+  large: number | null
 }
 
 // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
@@ -108,6 +110,59 @@ function testWire(isDev: boolean) {
         expect((await getCleanupState())[`wireEnd_${end!.channelId}_onOpen`]).toBe('true')
         expect(end!.received).deep.equal([])
       })
+    })
+  }
+
+  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse', 'ws'])) {
+    test('channel: a 1 MB message the server sends at 1 Mbit/s as the page upgrades from SSE to WebSocket arrives, and the page moves to the WebSocket without opening another SSE stream', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      let sseStreams = 0
+      const onResponse = (response: Response) => {
+        if (response.headers()['content-type']?.startsWith('text/event-stream')) sseStreams++
+      }
+      let webSockets = 0
+      const onWebSocket = (ws: WebSocket) => {
+        if (ws.url().includes('/_telefunc')) webSockets++
+      }
+      page.on('response', onResponse)
+      page.on('websocket', onWebSocket)
+      // test-e2e's `page` is a proxy, which newCDPSession() doesn't take.
+      const cdp = await page.context().newCDPSession(
+        page
+          .context()
+          .pages()
+          .find((p) => p.url() === page.url())!,
+      )
+      try {
+        await cdp.send('Network.enable')
+        // 1 Mbit/s each way.
+        await cdp.send('Network.emulateNetworkConditions', {
+          offline: false,
+          latency: 0,
+          downloadThroughput: 125_000,
+          uploadThroughput: 125_000,
+        })
+        await page.click('#wire-large')
+        await autoRetry(
+          async () => {
+            const { large } = await getResult<WireState>('#wire-state')
+            expect(large).toBe(1_000_000)
+          },
+          { timeout: 30_000 },
+        )
+        expect(sseStreams).toBe(1)
+        expect(webSockets).toBe(1)
+      } finally {
+        await cdp.send('Network.emulateNetworkConditions', {
+          offline: false,
+          latency: 0,
+          downloadThroughput: -1,
+          uploadThroughput: -1,
+        })
+        await cdp.detach()
+        page.off('response', onResponse)
+        page.off('websocket', onWebSocket)
+      }
     })
   }
 }

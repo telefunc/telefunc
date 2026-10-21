@@ -1,4 +1,4 @@
-export { onWireResume, onWireOverrun, onWireEnd }
+export { onWireResume, onWireOverrun, onWireEnd, onWireLarge }
 
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -101,4 +101,13 @@ function describeEnd(err: Error | undefined): string {
   if (!err) return 'none'
   if (err instanceof Abort) return `abort:${JSON.stringify(err.abortValue)}`
   return err.name
+}
+
+/** A channel the server sends one text message of `bytes` on as it opens. */
+async function onWireLarge(bytes: number) {
+  const ch = new Channel<never, (message: string) => void>()
+  ch.onOpen(() => {
+    void ch.send('x'.repeat(bytes))
+  })
+  return { channel: ch.client }
 }

@@ -2,7 +2,7 @@ export { WireDemo }
 
 import React, { useCallback, useRef, useState } from 'react'
 import { Abort, withContext } from 'telefunc/client'
-import { onWireResume, onWireOverrun, onWireEnd } from './Wire.telefunc'
+import { onWireResume, onWireOverrun, onWireEnd, onWireLarge } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
 
 type WireState = {
@@ -10,15 +10,18 @@ type WireState = {
   overrun: { channelId: string; received: TallyState; onClose: string | null } | null
   /** received: the messages, then 'onClose:' and 'none', 'abort:<value as JSON>' or the error's name; close: what close() resolved to. */
   end: { channelId: string; received: string[]; close: string | null } | null
+  /** The length of the large message, once it arrived. */
+  large: number | null
 }
 
 const RESUME_COUNT = 256
 const OVERRUN_COUNT = 16
 const END_BEFORE = 3
 const END_CLOSE_TIMEOUT = 500
+const LARGE_BYTES = 1_000_000
 
 function WireDemo() {
-  const [state, setState] = useState<WireState>({ resume: null, overrun: null, end: null })
+  const [state, setState] = useState<WireState>({ resume: null, overrun: null, end: null, large: null })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
 
@@ -79,6 +82,11 @@ function WireDemo() {
   }, [])
   const endAbort = useCallback(() => endChannel.current!.abort({ by: 'page' }), [])
 
+  const large = useCallback(async () => {
+    const { channel } = await onWireLarge(LARGE_BYTES)
+    channel.listen((message) => setState((s) => ({ ...s, large: message.length })))
+  }, [])
+
   return (
     <div className="mt-6 p-4 border rounded">
       <h2 className="text-lg font-semibold mb-2">Wire</h2>
@@ -106,6 +114,14 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Send {OVERRUN_COUNT} messages unawaited
+        </button>
+        <button
+          id="wire-large"
+          type="button"
+          onClick={large}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Receive a {LARGE_BYTES} byte message as the channel opens
         </button>
         <button
           id="wire-end-open"
