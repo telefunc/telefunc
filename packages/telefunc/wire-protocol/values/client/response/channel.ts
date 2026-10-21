@@ -13,13 +13,14 @@ const channelReviver: ReviverType<ChannelContract, ClientReviverContext> = {
     })
     return {
       value: channel,
-      async close() {
+      // Not methods: on Bun (JavaScriptCore) a method keeps this object alive, and the proxy is put on it (parse.ts).
+      close: async () => {
         await channel.close()
       },
-      abort(abortError) {
+      abort: (abortError) => {
         channel.abort(abortError.abortValue, abortError.message)
       },
-      onEnd(callback) {
+      onEnd: (callback) => {
         channel.onClose(callback)
       },
     }
