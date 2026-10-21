@@ -18,7 +18,7 @@ import { ServerChannel, reportServerChannelError } from '../channel/server/chann
 import type { BroadcastPayload, BroadcastRoute } from '../backend/broadcast/contract.js'
 import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
-import { reportSubscriptionEnd } from '../backend/subscription-manager.js'
+import { reportSubscriptionEnd } from '../backend/SubscriptionManager.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'

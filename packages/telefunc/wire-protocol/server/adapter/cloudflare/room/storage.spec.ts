@@ -16,7 +16,7 @@ import {
 } from './storage.js'
 import { snapshotRoutes, upsertRoute } from './routes.js'
 import { deleteRetained, installRetained, listRetained } from './retained.js'
-import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { encodeLaneKey } from '../../../../backend/room/laneKey.js'
 import { sqliteStorage } from '../../../../test/cloudflare-sql.js'
 
 function sqlStorage() {

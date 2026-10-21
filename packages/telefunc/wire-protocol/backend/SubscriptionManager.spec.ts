@@ -1,5 +1,5 @@
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
-import { SubscriptionManager } from './subscription-manager.js'
+import { SubscriptionManager } from './SubscriptionManager.js'
 import type {
   BackendPayload,
   BackendReceiver,

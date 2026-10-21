@@ -12,7 +12,7 @@ import { CloudflareBroadcastAuthorityState, CloudflareBroadcast } from './broadc
 import type { BroadcastCalls, BroadcastPresenceRequest, CloudflareBroadcastMember } from './broadcast.js'
 import { withCloudflareSession } from '../../server/adapter/cloudflare/session.js'
 import type { BroadcastRoute } from '../../backend/broadcast/contract.js'
-import { broadcastRouteKey } from '../../backend/broadcast/route-key.js'
+import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
 import { OrderedStubs } from '../../server/adapter/cloudflare/ordered-stubs.js'
 import type { TelefuncDurableObjectNamespace } from '../../server/adapter/cloudflare/namespace.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'

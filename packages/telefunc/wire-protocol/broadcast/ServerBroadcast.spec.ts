@@ -14,7 +14,7 @@ import { ChannelClosedError, ChannelOverflowError } from '../channel/channelErro
 import { ESTABLISH_HOLD_MS, CHANNEL_BUFFER_LIMIT_BINARY_BYTES } from '../constants.js'
 import { Abort } from '../../shared/Abort.js'
 import { config } from '../../node/server/serverConfig.js'
-import { ESTABLISHING_HOLD_OVERHEAD_BYTES } from '../backend/held-send-weight.js'
+import { ESTABLISHING_HOLD_OVERHEAD_BYTES } from '../backend/heldSendWeight.js'
 
 let memoryState: MemoryBackendState
 beforeEach(async () => {

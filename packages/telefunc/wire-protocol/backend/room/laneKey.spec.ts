@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest'
 import type { LaneId } from './contract.js'
-import { decodeLaneKey, encodeLaneKey } from './lane-key.js'
+import { decodeLaneKey, encodeLaneKey } from './laneKey.js'
 
 it('decodes every lane key back to its lane, separators included', () => {
   const lanes: LaneId[] = [

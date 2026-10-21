@@ -2,7 +2,7 @@ export { heldSendWeight, ESTABLISHING_HOLD_OVERHEAD_BYTES }
 
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { getServerConfig } from '../../node/server/serverConfig.js'
-import type { HoldWeight } from './subscription-manager.js'
+import type { HoldWeight } from './SubscriptionManager.js'
 
 /** What holding a send retains beyond its payload (130–160 bytes measured), so small sends are bounded too. */
 const ESTABLISHING_HOLD_OVERHEAD_BYTES = 256

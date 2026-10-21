@@ -8,7 +8,7 @@ export {
   encodeLaneKey,
   everyMemberLaneKey,
   everyTrackLaneKey,
-} from '../../wire-protocol/backend/room/lane-key.js'
+} from '../../wire-protocol/backend/room/laneKey.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export type * from '../../wire-protocol/backend/room/contract.js'

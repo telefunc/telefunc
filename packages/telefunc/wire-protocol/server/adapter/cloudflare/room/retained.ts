@@ -2,7 +2,7 @@
 export { installRetained, readRetained, listRetained, deleteRetained }
 
 import type { LaneId, RetainedFrame, RetainedOf } from '../../../../backend/room/contract.js'
-import { binaryLaneKeyPrefix, decodeLaneKey, encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { binaryLaneKeyPrefix, decodeLaneKey, encodeLaneKey } from '../../../../backend/room/laneKey.js'
 import type { OrderingInfo } from '../../../../wire/orderingFrame.js'
 import { keyRange } from './storage.js'
 

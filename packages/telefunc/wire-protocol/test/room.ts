@@ -101,7 +101,7 @@ import type { ChannelPublishInfo } from '../channel/channel.js'
 import { disposeBackend, getRoomBackend, installBackend } from '../backend/install.js'
 import { MemoryBackend, MemoryBackendState } from '../backend/memory/backend.js'
 import type { LaneId, RoomSubscriptionSource } from '../backend/room/contract.js'
-import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/room/lane-key.js'
+import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../backend/room/laneKey.js'
 import type {
   BackendReceiver,
   BackendSubscription,

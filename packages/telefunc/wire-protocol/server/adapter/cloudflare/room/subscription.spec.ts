@@ -1,6 +1,6 @@
 import { afterEach, expect, test, vi } from 'vitest'
 import type { CloudflareRoomAuthorityStub } from './do.js'
-import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
+import { encodeLaneKey } from '../../../../backend/room/laneKey.js'
 import { ROUTE_RENEW_EVERY_MS } from './routes.js'
 import { CloudflareRoomSessionManager, type CloudflareRoomSubscriptionAttempt } from './subscription.js'
 

@@ -23,7 +23,7 @@ import type {
   DirectoryPage,
 } from '../room/contract.js'
 import { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from '../room/contract.js'
-import { encodeLaneKey } from '../room/lane-key.js'
+import { encodeLaneKey } from '../room/laneKey.js'
 import {
   commitPreconditionHolds,
   countCell,

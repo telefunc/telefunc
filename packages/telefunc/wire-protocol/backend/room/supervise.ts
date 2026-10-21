@@ -1,12 +1,12 @@
 export { superviseRoomDriver }
 
-import { SubscriptionManager, type SendHold } from '../subscription-manager.js'
-import { heldSendWeight } from '../held-send-weight.js'
+import { SubscriptionManager, type SendHold } from '../SubscriptionManager.js'
+import { heldSendWeight } from '../heldSendWeight.js'
 import type { HeadNext, LaneId, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import type { BackendPayload, BackendReceiver } from '../subscription.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
-import { roomSubscriptionSourceKey } from './lane-key.js'
-import { assertDriverPosition } from '../driver-position.js'
+import { roomSubscriptionSourceKey } from './laneKey.js'
+import { assertDriverPosition } from '../driverPosition.js'
 import { assert } from '../../../utils/assert.js'
 
 /** A lane carries bytes. */

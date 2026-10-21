@@ -18,7 +18,7 @@ import {
 import { reportLostDeliveries, type OrderedStubs } from '../../server/adapter/cloudflare/ordered-stubs.js'
 import { assert } from '../../../utils/assert.js'
 import type { BroadcastPayload, BroadcastRoute, PublishResult } from '../../backend/broadcast/contract.js'
-import { broadcastRouteKey } from '../../backend/broadcast/route-key.js'
+import { broadcastRouteKey } from '../../backend/broadcast/routeKey.js'
 import type { BackendPayload, BackendReceiver } from '../../backend/subscription.js'
 import { DriverAttempt } from '../../backend/attempt.js'
 import { createDeferred } from '../../../utils/createDeferred.js'

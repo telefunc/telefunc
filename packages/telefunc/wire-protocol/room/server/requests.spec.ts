@@ -18,7 +18,7 @@ import { ServerRoom } from './room.js'
 import { decodeBinaryWantChange } from './requests.js'
 import { TailHold } from './tail.js'
 import { getRoomBackend } from '../../backend/install.js'
-import { everyTrackLaneKey } from '../../backend/room/lane-key.js'
+import { everyTrackLaneKey } from '../../backend/room/laneKey.js'
 import {
   anotherServer,
   binaryLanes,
