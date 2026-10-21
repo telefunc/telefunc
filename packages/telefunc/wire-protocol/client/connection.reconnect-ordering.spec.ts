@@ -12,15 +12,34 @@
 // faithfully mirroring server/sse.ts runStreamResponse + server/mux.ts:313 (RECONCILED.lastSeq is
 // captured from _lastClientSeq at reconcile time, before the initial-batch data frames dispatch).
 
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { describe, expect, test } from 'vitest'
 import { stringify } from '@brillout/json-serializer/stringify'
 
 import { ClientConnection } from './connection.js'
-import { muxChannelStub } from '../test/mux-channel-stub.js'
 import { ServerChannel } from '../server/channel.js'
 import { decode, encode, TAG } from '../shared-ws.js'
 import { decodeU32, concat } from '../frame.js'
 import { uint8ArrayToBase64url } from '../base64url.js'
+import { WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+function createChannel(id = crypto.randomUUID()) {
+  return {
+    id,
+    isClosed: false,
+    _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
+    _onTransportOpen() {},
+    _dispatchFrame() {},
+    _onTransportClose() {},
+    _onTransportBatched() {},
+    _reattachState: () => ({}),
+    _onProbeAnswered() {},
+    _fitReplays() {},
+    _acknowledge() {},
+    _answered() {},
+  }
+}
 
 /** SSE downstream response stream the client reads (server→client). */
 function makeSseDownstream() {
@@ -173,47 +192,39 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
     })
   }) as unknown as typeof fetch
 
-  const channel = muxChannelStub()
-  const conn = ClientConnection.getOrCreate('http://test.local/_telefunc', channel, {
+  const channel = createChannel()
+  const conn = ClientConnection.getOrCreate('http://test.local/_telefunc', channel as never, {
     transports: ['sse'],
     fetchImpl,
     connectionKey: crypto.randomUUID(),
   })
 
   // 1) First connect + reconcile.
-  await vi.advanceTimersByTimeAsync(120)
+  await delay(120)
   expect(wire).toBe(1)
 
   // 2) Send seq 1 — goes onto wire 1's streamRequest (delivered, or "lost" in flight).
-  conn.send(channel, stringify(1))
-  await vi.advanceTimersByTimeAsync(40)
+  conn.send(channel as never, stringify(1))
+  await delay(40)
   expect(upstreamSeqsByPost[1]).toContain(1) // client always emits seq 1 on wire 1
 
   // 3) Sever wire 1 → client reconnects. From here upstream is delivered to the server.
   dropUpstream = false
   downstream!.close()
-  await vi.advanceTimersByTimeAsync(20)
+  await delay(20)
 
   // 4) Send seq 2 while reconnecting → buffered, picked up by the reconnect.
-  conn.send(channel, stringify(2))
+  conn.send(channel as never, stringify(2))
 
   // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) + settle.
-  await vi.advanceTimersByTimeAsync(900)
+  await delay(900)
   expect(wire).toBe(2)
-  await vi.advanceTimersByTimeAsync(50)
+  await delay(50)
 
   return { received, wire2Upstream: upstreamSeqsByPost[2] ?? [] }
 }
 
 describe('SSE reconnect preserves client→server seq order (exactly-once)', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
   test('an earlier send that survived the wire, then a buffered send → both delivered, in order', async () => {
     const { received } = await runScenario(/* loseSeq1 */ false)
     expect(received).toEqual([1, 2])

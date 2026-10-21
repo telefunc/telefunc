@@ -33,6 +33,7 @@ function testRunClassic(
     skipAboutPage,
     skipViteEcosystemCi,
     tolerateError,
+    additionalTimeout,
     testHmr,
     isVue,
   }: {
@@ -41,6 +42,7 @@ function testRunClassic(
     testHmr?: false | string
     isVue?: true
     tolerateError?: NonNullable<Parameters<typeof run>[1]>['tolerateError']
+    additionalTimeout?: number
   } = {},
 ) {
   const isDev = cmd === 'pnpm run dev'
@@ -50,7 +52,7 @@ function testRunClassic(
     return
   }
 
-  run(cmd, { tolerateError })
+  run(cmd, { tolerateError, additionalTimeout })
 
   test('page content is rendered to HTML', async () => {
     const html = await fetchHtml('/')

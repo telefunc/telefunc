@@ -104,4 +104,15 @@ function testFunction() {
       }
     })
   })
+
+  test("function: a search box's call answers at once, though the last keystroke's call, aborted before it left, passed a callback the server never got", async () => {
+    await page.click('#search-run')
+
+    await autoRetry(async () => {
+      const search = await getResult<{ result: string; ms: number }>('#search-result')
+      expect(search.result).toBe('<b>ab</b>')
+      // Not held for the server's connectTtl, which waits for the aborted call's callback.
+      expect(search.ms).lessThan(3000)
+    })
+  })
 }

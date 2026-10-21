@@ -16,8 +16,9 @@ import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
+import { testWire } from './pages/channel/wire-e2e-test'
 
-function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
+function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   run(cmd, {
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
@@ -47,6 +48,8 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
         log.logText.includes('Telefunc call cancelled') ||
         log.logText.includes('ERR_INTERNET_DISCONNECTED') ||
         log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
+        // A test dropped an SSE stream's connection (wire-sockets.ts).
+        log.logText.includes('ERR_INCOMPLETE_CHUNKED_ENCODING') ||
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
         // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
         log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
@@ -56,7 +59,7 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
   })
 }
 
-function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
+function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   runPlayground(cmd)
   const isDev = cmd === 'pnpm dev'
 
@@ -82,6 +85,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
   testClose()
 
   testChannel(isDev)
+
+  testWire(isDev)
 
   // Runs in every variant: asserts exactly-once commit where the env upgrades (['sse','ws']),
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.

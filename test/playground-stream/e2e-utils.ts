@@ -2,6 +2,14 @@ export {
   resetCleanupState,
   getCleanupState,
   forceServerGc,
+  cutWire,
+  dropNextWebSocket,
+  runServerAction,
+  holdNextSsePost,
+  holdNextSseWire,
+  heldSsePosts,
+  refuseNextSsePost,
+  releaseHeldSsePosts,
   navigate,
   getResult,
   sleep,
@@ -55,6 +63,52 @@ async function forceServerGc() {
   // Fail loudly on `gc not exposed` (server missing `--expose-gc`): silently ignoring it
   // degrades GC tests into waiting for natural GC, which times out with a misleading assertion.
   if (!resp.ok) throw new Error(`forceServerGc() failed: ${await resp.text()}`)
+}
+
+/** Runs what a telefunction left under `key` with `onServerAction()` (server-actions.ts), also while the page is offline. */
+async function runServerAction(key: string) {
+  const resp = await fetch(`${getServerUrl()}/api/server-action?key=${encodeURIComponent(key)}`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`runServerAction() failed: ${await resp.text()}`)
+}
+
+/** Drops the page's WebSocket and SSE connections at the server, as a failing network would. */
+async function cutWire() {
+  const resp = await fetch(`${getServerUrl()}/api/wire/cut`, { method: 'POST' })
+  const { cut } = (await resp.json()) as { cut: number }
+  if (cut === 0) throw new Error('cutWire() found no connection to cut')
+}
+
+/** The server drops the page's next WebSocket before it opens, as a brief network drop would. */
+async function dropNextWebSocket() {
+  await fetch(`${getServerUrl()}/api/wire/next-websocket`, { method: 'POST' })
+}
+
+/** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`, and answers it then. */
+async function holdNextSsePost() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold`, { method: 'POST' })
+}
+
+/** The POST that opens the page's next SSE wire is answered, and its first batch reaches Telefunc only at `releaseHeldSsePosts()`. */
+async function holdNextSseWire() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold-stream`, { method: 'POST' })
+}
+
+/** How many SSE POSTs the server holds. */
+async function heldSsePosts(): Promise<number> {
+  const resp = await fetch(`${getServerUrl()}/api/wire/held`)
+  return ((await resp.json()) as { held: number }).held
+}
+
+/** The server answers the page's next SSE batch POST with 400, as it does for a wire it closed. */
+async function refuseNextSsePost() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=refuse`, { method: 'POST' })
+}
+
+/** The server reads and answers the SSE POSTs it held; returns how many. */
+async function releaseHeldSsePosts(): Promise<number> {
+  const resp = await fetch(`${getServerUrl()}/api/wire/release`, { method: 'POST' })
+  const { released } = (await resp.json()) as { released: number }
+  return released
 }
 
 /**

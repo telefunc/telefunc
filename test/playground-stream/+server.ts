@@ -3,14 +3,21 @@ import * as path from 'node:path'
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http'
 import { Hono } from 'hono'
 import vike from '@vikejs/hono'
-import IORedis, { Cluster } from 'ioredis'
+import { Cluster } from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 import { BroadcastChannel, config, Room, type LocalParticipant } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
+import { Telefunc as TelefuncBun } from 'telefunc/bun'
+import { Telefunc as TelefuncDeno } from 'telefunc/deno'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
+import { trackWireSocket, cutWireSockets } from './wire-sockets'
+import { runServerAction } from './server-actions'
+import { redis } from './redis'
 
 config.channel.pingInterval = 1000
 config.shield = true
+// A lane reaching a channel limit sets it low, e.g. `{"serverReplayBuffer":65536}`.
+if (process.env.CHANNEL_CONFIG) Object.assign(config.channel, JSON.parse(process.env.CHANNEL_CONFIG))
 
 const INST = process.env.INSTANCE_ID ?? '?'
 
@@ -23,8 +30,8 @@ if (process.env.REDIS_CLUSTER_NODES) {
   })
   installRedis(new Cluster(nodes))
   console.log(`[INST=${INST}] Redis Cluster backend installed (${nodes.length} seeds)`)
-} else if (process.env.REDIS_URL) {
-  installRedis(new IORedis(process.env.REDIS_URL))
+} else if (redis) {
+  installRedis(redis)
   console.log(`[INST=${INST}] Redis backend installed`)
 }
 
@@ -37,7 +44,11 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
 
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
 
-const tf = new Telefunc()
+// `pnpm preview:bun` and `pnpm preview:deno` serve the same build through Telefunc's Bun and Deno adapters.
+const tfBun = 'Bun' in globalThis ? new TelefuncBun() : undefined
+const tfDeno = 'Deno' in globalThis ? new TelefuncDeno() : undefined
+// On Bun and Deno, fetch() answers /_telefunc before the app's route.
+const tf = tfBun || tfDeno ? undefined : new Telefunc()
 const app = new Hono()
 
 // Bench toggle: when `TELEFUNC_NATIVE=1` the `/_telefunc` route feeds the raw
@@ -197,7 +208,71 @@ app.post('/api/server-close-trigger', async (c) => {
   return c.json({ ok: true })
 })
 
+// Test-only: lets an e2e test drop the page's connections, or hold or refuse its next SSE POST.
+// 'hold-stream': the next POST that opens an SSE wire gets its answer, and its first batch, which rides on it, is held.
+// The others: the next batch POST.
+let nextSsePost: 'hold' | 'refuse' | 'hold-stream' | null = null
+let dropNextWebSocket = false
+const heldSsePosts: (() => void)[] = []
+
+app.post('/api/server-action', (c) => {
+  const key = c.req.query('key') ?? ''
+  return runServerAction(key) ? c.json({ ok: true }) : c.json({ ok: false, reason: `no action ${key}` }, 404)
+})
+app.post('/api/wire/cut', (c) => c.json({ cut: cutWireSockets() }))
+app.post('/api/wire/next-websocket', (c) => {
+  dropNextWebSocket = true
+  return c.json({ ok: true })
+})
+app.post('/api/wire/next-sse-post', (c) => {
+  const action = c.req.query('action')
+  if (action !== 'hold' && action !== 'refuse' && action !== 'hold-stream') {
+    return c.json({ ok: false, reason: 'action is hold, refuse or hold-stream' }, 400)
+  }
+  nextSsePost = action
+  return c.json({ ok: true })
+})
+app.get('/api/wire/held', (c) => c.json({ held: heldSsePosts.length }))
+app.post('/api/wire/release', (c) => {
+  const released = heldSsePosts.length
+  for (const release of heldSsePosts.splice(0)) release()
+  return c.json({ released })
+})
+
 app.all('/_telefunc', async (c) => {
+  const isSse = c.req.query('_telefunc') === 'sse'
+  const node = (c.req.raw as unknown as { runtime?: { node?: { req: IncomingMessage } } }).runtime?.node
+  if (isSse && node) trackWireSocket(node.req.socket)
+  // A batch POST has a length; the long-lived upload streams without one.
+  if (isSse && nextSsePost && c.req.header('content-length')) {
+    const body = new Uint8Array(await c.req.arrayBuffer())
+    const metadataLength = new DataView(body.buffer).getUint32(0)
+    const metadata = JSON.parse(new TextDecoder().decode(body.subarray(4, 4 + metadataLength)))
+    const action = (nextSsePost === 'hold-stream') === Boolean(metadata.streamResponse) ? nextSsePost : null
+    if (action) nextSsePost = null
+    if (action === 'refuse') return c.text('', 400)
+    if (action === 'hold') await new Promise<void>((resolve) => heldSsePosts.push(resolve))
+    const held = action === 'hold-stream'
+    const header = body.subarray(0, 4 + metadataLength)
+    const request = new Request(c.req.url, {
+      method: 'POST',
+      headers: c.req.raw.headers,
+      body: !held
+        ? body
+        : new ReadableStream<Uint8Array>({
+            async start(controller) {
+              controller.enqueue(header)
+              await new Promise<void>((resolve) => heldSsePosts.push(resolve))
+              controller.enqueue(body.subarray(header.byteLength))
+              controller.close()
+            },
+          }),
+      // @ts-ignore duplex is not yet in TypeScript's RequestInit
+      duplex: 'half',
+    })
+    const response = await tf!.serve({ request })
+    return response ?? c.text('Not found', 404)
+  }
   if (USE_NATIVE) {
     console.log(`[INST=${INST}] Handling /_telefunc via node-native adapter`)
     // srvx attaches `runtime.node = { req, res }` to the Request it constructs
@@ -206,11 +281,11 @@ app.all('/_telefunc', async (c) => {
     // request body parsing and response writing.
     const { req, res } = (c.req.raw as unknown as { runtime: { node: { req: IncomingMessage; res: ServerResponse } } })
       .runtime.node
-    await tf.serve({ req, res })
+    await tf!.serve({ req, res })
     return new Response(null)
   }
   console.log(`[INST=${INST}] Handling /_telefunc via web request adapter`)
-  const response = await tf.serve({ request: c.req.raw })
+  const response = await tf!.serve({ request: c.req.raw })
   return response ?? c.text('Not found', 404)
 })
 
@@ -228,11 +303,33 @@ const keyPath = path.join(certDir, 'localhost-key.pem')
 const httpsAvailable = !process.env.NO_HTTPS && fs.existsSync(certPath) && fs.existsSync(keyPath)
 const tls = httpsAvailable ? { cert: certPath, key: keyPath } : undefined
 
+type RuntimeRequest = Request & {
+  runtime?: {
+    bun?: { server: Parameters<TelefuncBun['serve']>[0]['server'] }
+    deno?: { info: Parameters<TelefuncDeno['serve']>[0]['info'] }
+  }
+}
+
+async function fetch(request: RuntimeRequest): Promise<Response | undefined> {
+  const { runtime } = request
+  if (tfBun && runtime?.bun) {
+    const response = await tfBun.serve({ request, server: runtime.bun.server })
+    // An upgraded request is answered by Bun.
+    if (response || request.headers.get('upgrade') === 'websocket') return response
+  }
+  if (tfDeno && runtime?.deno) {
+    const response = await tfDeno.serve({ request, info: runtime.deno.info })
+    if (response) return response
+  }
+  return app.fetch(request)
+}
+
 export default {
-  fetch: app.fetch,
+  fetch,
   prod: {
     port: Number(process.env.PORT) || (httpsAvailable ? 8443 : 3000),
     ...(tls ? { tls } : {}),
+    ...(tfBun ? { bun: { websocket: tfBun.websocket } } : {}),
     onCreate(server: { node?: { server?: HttpServer } }) {
       // srvx wraps the raw `http.Server` as `{ node: { server } }`. Unwrap to
       // the underlying Node server so the WebSocket upgrade listener can be
@@ -240,7 +337,18 @@ export default {
       // normally — the `/_telefunc` route reads `c.env.incoming`/`outgoing`
       // to reach the Node primitives when `TELEFUNC_NATIVE=1`.
       const httpServer = server?.node?.server
-      if (httpServer) tf.installWebSocket(httpServer)
+      if (!httpServer) return
+      // Registered first: a socket it destroys is one Telefunc's upgrade listener then leaves alone.
+      httpServer.on('upgrade', (req, socket) => {
+        if (!req.url?.startsWith('/_telefunc')) return
+        if (dropNextWebSocket) {
+          dropNextWebSocket = false
+          socket.destroy()
+          return
+        }
+        trackWireSocket(socket)
+      })
+      tf!.installWebSocket(httpServer)
     },
   },
 }

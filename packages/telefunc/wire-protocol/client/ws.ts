@@ -35,7 +35,8 @@ class WsTransport implements UpgradeTarget {
   /** The probe's socket and ends, kept as the transport adopts it: the server counts every frame the socket carries. */
   private probed: { ws: WebSocket; ends: WsEnds } | null = null
   private ws: WebSocket | null = null
-  private abandonedWs: WebSocket | null = null
+  /** The wire the page left, still read until the next takes over; its budget's timers may still send. */
+  private abandoned: { ws: WebSocket; budget: SendBudget } | null = null
   private connecting = false
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private ends: WsEnds | null = null
@@ -81,6 +82,7 @@ class WsTransport implements UpgradeTarget {
       if (!receiveMessage(pieces, new Uint8Array(data as ArrayBuffer), performance.now(), take)) ws.close()
     }
     ws.onclose = () => {
+      budget.close()
       if (this.probed?.ws === ws) this.probed = null
       onClose?.()
     }
@@ -100,6 +102,7 @@ class WsTransport implements UpgradeTarget {
       }
     })
     if (!ready) {
+      budget.close()
       try {
         ws.close()
       } catch {}
@@ -133,6 +136,7 @@ class WsTransport implements UpgradeTarget {
       },
       close: () => {
         if (this.probed?.ws === ws) this.probed = null
+        budget.close()
         try {
           ws.close()
         } catch {}
@@ -245,7 +249,7 @@ class WsTransport implements UpgradeTarget {
         sender.heartbeat(frame.took, at)
         this.heartbeat?.resetPong()
         this.owner._onTransportPong(frame.ended)
-      } else this.owner._onTransportFrame(frame, this, byteLength, ws === this.abandonedWs)
+      } else this.owner._onTransportFrame(frame, this, byteLength, ws === this.abandoned?.ws)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
@@ -257,6 +261,7 @@ class WsTransport implements UpgradeTarget {
       if (!receiveMessage(pieces, raw, now, take)) ws.close()
     }
     ws.onclose = () => {
+      budget.close()
       if (this.ws === ws) this.ws = null
       this.connecting = false
       this.settleDrained()
@@ -310,16 +315,20 @@ class WsTransport implements UpgradeTarget {
     if (!ws) return
     this.ws = null
     this.closeAbandonedTransport()
-    this.abandonedWs = ws
-    ws.onopen = ws.onerror = ws.onclose = null
+    assert(this.ends)
+    const { budget } = this.ends
+    this.abandoned = { ws, budget }
+    ws.onopen = ws.onerror = null
+    ws.onclose = () => budget.close()
     this.settleDrained()
   }
 
   closeAbandonedTransport(): void {
-    const ws = this.abandonedWs
-    if (!ws) return
-    this.abandonedWs = null
+    if (!this.abandoned) return
+    const { ws, budget } = this.abandoned
+    this.abandoned = null
     ws.onmessage = ws.onclose = null
+    budget.close()
     try {
       ws.close()
     } catch {}
@@ -344,7 +353,9 @@ class WsTransport implements UpgradeTarget {
     this.connecting = false
     // A socket sends what it was handed before its close.
     this.probed?.ends.sender.flush()
+    this.probed?.ends.budget.close()
     if (this.ws) this.ends?.sender.flush()
+    if (this.ws) this.ends?.budget.close()
     const wsProbed = this.probed?.ws
     this.probed = null
     if (wsProbed) {

@@ -24,6 +24,10 @@ function ChatDemo() {
       setMessages((prev) => [...prev, msg])
     })
 
+    chat.subscribeBinary((data) => {
+      setMessages((prev) => [...prev, { user: 'system', text: new TextDecoder().decode(data), ts: Date.now() }])
+    })
+
     chat.onClose(() => {
       setMessages((prev) => [...prev, { user: 'system', text: 'Disconnected', ts: Date.now() }])
       setJoined(false)
@@ -79,7 +83,7 @@ function ChatDemo() {
         <h1 style={{ fontSize: 18, fontWeight: 600 }}>Chat (pub/sub demo) &mdash; {username}</h1>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', fontSize: 14 }}>
+      <div id="messages" style={{ flex: 1, overflowY: 'auto', fontSize: 14 }}>
         {messages.map((msg, i) => (
           <div key={i} style={{ marginBottom: 6 }}>
             {msg.user === 'system' ? (
