@@ -254,7 +254,7 @@ function afterEventLoopTurn(fn: () => void): void {
 const globalObject = getGlobalObject<{
   adapter: BroadcastAdapter
   installed: boolean
-}>('wire-protocol/server/broadcast.ts', () => ({
+}>('wire-protocol/broadcast/broadcastAdapter.ts', () => ({
   adapter: new DefaultBroadcastAdapter(),
   installed: false,
 }))

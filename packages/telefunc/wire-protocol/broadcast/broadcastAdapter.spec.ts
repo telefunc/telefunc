@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { Broadcast, ServerBroadcast } from './server-broadcast.js'
+import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ReplayBuffer } from '../channel/ReplayBuffer.js'
 import { ACK_STATUS, TAG, decode } from '../wire/connectionFrame.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
-import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcast.js'
-import type { BroadcastTransport } from './broadcast.js'
+import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
+import type { BroadcastTransport } from './broadcastAdapter.js'
 
 const previousBroadcastAdapter = getBroadcastAdapter()
 afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))

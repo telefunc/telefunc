@@ -12,7 +12,7 @@ import type {
   BroadcastPublishResult,
   BroadcastAdapter,
   BroadcastUnsubscribe,
-} from '../../broadcast.js'
+} from '../../../broadcast/broadcastAdapter.js'
 import type { WirePublishInfo } from '../../../wire/connectionFrame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 

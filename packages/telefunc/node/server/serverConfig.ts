@@ -29,7 +29,7 @@ import {
   installBroadcastAdapter,
   DefaultBroadcastAdapter,
   type BroadcastTransport,
-} from '../../wire-protocol/server/broadcast.js'
+} from '../../wire-protocol/broadcast/broadcastAdapter.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,

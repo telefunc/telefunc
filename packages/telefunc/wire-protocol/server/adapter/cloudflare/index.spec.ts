@@ -86,7 +86,7 @@ vi.mock('../../../../node/server/telefunc.js', () => ({
   serve: mocks.telefuncMock,
 }))
 
-vi.mock('../../broadcast.js', () => ({
+vi.mock('../../../broadcast/broadcastAdapter.js', () => ({
   installBroadcastAdapter: mocks.installBroadcastAdapter,
 }))
 
