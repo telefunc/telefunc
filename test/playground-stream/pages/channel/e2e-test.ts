@@ -64,6 +64,8 @@ type ChannelState = {
   heldBinary: number[][] | null
   unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
   durationLimits: { withContext: string; close: string; ack: string } | null
+  endedValuesReady: boolean
+  endedValuesCollected: boolean[] | null
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -795,6 +797,22 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(state.durationLimits?.close).not.toBe('none')
       expect(state.durationLimits?.ack).toBe('ack:still-open')
     })
+  })
+
+  test('channel: the page lets go of a channel and a broadcast it closed and a generator it read to the end', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-ended-values')
+    await autoRetry(async () => {
+      expect((await getResult<ChannelState>('#channel-state')).endedValuesReady).toBe(true)
+    })
+    // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
+    const cdp = await page.context().newCDPSession(page.mainFrame().page())
+    await autoRetry(async () => {
+      await cdp.send('HeapProfiler.collectGarbage')
+      await page.click('#channel-test-ended-values-check')
+      expect((await getResult<ChannelState>('#channel-state')).endedValuesCollected).deep.equal([true, true, true])
+    })
+    await cdp.detach()
   })
 
   if (channelTransport === 'sse') {

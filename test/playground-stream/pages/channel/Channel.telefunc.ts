@@ -26,9 +26,10 @@ export {
   onChannelOversize,
   onChannelHeldBinary,
   onChannelUnattachedFlood,
+  onChannelEndedValues,
 }
 
-import { Channel, Abort } from 'telefunc'
+import { Channel, Abort, BroadcastChannel } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
@@ -609,4 +610,17 @@ async function onChannelUnattachedFlood() {
     ch.abort()
   }
   return rejected
+}
+
+/** A channel, a broadcast and a generator, each for the page to end. */
+async function onChannelEndedValues() {
+  async function* numbers() {
+    yield 1
+    yield 2
+  }
+  return {
+    channel: new Channel().client,
+    broadcast: new BroadcastChannel({ key: `ended-values:${crypto.randomUUID()}` }),
+    generator: numbers(),
+  }
 }

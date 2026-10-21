@@ -30,6 +30,7 @@ import {
   onChannelOversize,
   onChannelHeldBinary,
   onChannelUnattachedFlood,
+  onChannelEndedValues,
 } from './Channel.telefunc'
 
 /**
@@ -142,6 +143,8 @@ type ChannelState = {
   heldBinary: number[][] | null
   unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
   durationLimits: { withContext: string; close: string; ack: string } | null
+  endedValuesReady: boolean
+  endedValuesCollected: boolean[] | null
 }
 
 const initialState: ChannelState = {
@@ -204,6 +207,8 @@ const initialState: ChannelState = {
   heldBinary: null,
   unattachedFlood: null,
   durationLimits: null,
+  endedValuesReady: false,
+  endedValuesCollected: null,
 }
 
 function timestamp() {
@@ -263,6 +268,7 @@ function ChannelDemo() {
     null,
   )
   const upstreamReconnectSeqRef = useRef(0)
+  const endedValuesRef = useRef<WeakRef<object>[]>([])
 
   useEffect(() => setHydrated(true), [])
 
@@ -919,6 +925,19 @@ function ChannelDemo() {
     channel.close()
   }, [])
 
+  const testEndedValues = useCallback(async () => {
+    const { channel, broadcast, generator } = await openChannel(onChannelEndedValues)
+    await Promise.all([channel.close(), broadcast.close()])
+    for await (const _ of generator);
+    endedValuesRef.current = [new WeakRef(channel), new WeakRef(broadcast), new WeakRef(generator)]
+    setChannelState((s) => ({ ...s, endedValuesReady: true }))
+  }, [])
+
+  const checkEndedValues = useCallback(() => {
+    const endedValuesCollected = endedValuesRef.current.map((ref) => ref.deref() === undefined)
+    setChannelState((s) => ({ ...s, endedValuesCollected }))
+  }, [])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -1199,6 +1218,22 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-stone-700 text-white hover:bg-stone-800"
           >
             Durations Past 2^31 ms
+          </button>
+          <button
+            id="channel-test-ended-values"
+            type="button"
+            onClick={testEndedValues}
+            className="px-3 py-1.5 text-sm rounded bg-neutral-600 text-white hover:bg-neutral-700"
+          >
+            End a Channel, Broadcast and Generator
+          </button>
+          <button
+            id="channel-test-ended-values-check"
+            type="button"
+            onClick={checkEndedValues}
+            className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-white hover:bg-neutral-800"
+          >
+            Check They Were Collected
           </button>
           <button
             id="channel-test-unattached-flood"
