@@ -582,6 +582,25 @@ function Room() {
           done: cause !== null && observer.count === 0,
         }))
       })}
+
+      {scenario('listeners', 'Listener registrations', 'Same callback twice, unlisten each', async () => {
+        const [, room] = await createRoom('listeners')
+        const calls: string[] = []
+        const a = () => void calls.push('a')
+        const offFirst = room.onJoin(a)
+        room.onJoin(() => void calls.push('b'))
+        const offSecond = room.onJoin(a)
+        const joinAndWait = async (expected: number) => {
+          await room.join()
+          await pollUntil(() => ({ done: calls.length >= expected }))
+        }
+        await joinAndWait(3)
+        offFirst()
+        await joinAndWait(5)
+        offSecond()
+        await joinAndWait(6)
+        setResult(JSON.stringify({ calls }))
+      })}
     </div>
   )
 }

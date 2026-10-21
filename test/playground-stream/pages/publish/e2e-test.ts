@@ -1,7 +1,7 @@
-export { testPublish }
+export { testPublish, testPublishFailingBackend }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, failBackend } from '../../e2e-utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -102,6 +102,21 @@ function testPublish() {
       expect(state.invalidThrew).toBe(true)
       expect(state.invalidErrorMessage).not.toBe(null)
       expect(state.receivedAfterInvalid).deep.equal([{ text: 'hi' }])
+    })
+  })
+}
+
+/** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
+function testPublishFailingBackend() {
+  test('broadcast: a subscribe the store refuses throws and leaves no listener behind', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await failBackend({ op: 'bind', key: 'room:subscribe-throws:' })
+    await page.click('#test-subscribe-throws')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ thrown: string | null; seen: string[] }>('#publish-result')
+      expect(result.thrown).toBe('failing-backend: bind refused')
+      expect(result.seen).deep.equal(['second:1'])
     })
   })
 }

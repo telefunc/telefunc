@@ -261,4 +261,11 @@ function testRoom() {
       expect(r.empty).toBe(true)
     },
   )
+  testRoomScenario<{ calls: string[] }>(
+    'listeners',
+    'room: a callback registered twice is called once per registration, in registration order, and each unlisten removes only its own',
+    (r) => {
+      expect(r.calls).deep.equal(['a', 'b', 'a', 'b', 'a', 'b'])
+    },
+  )
 }

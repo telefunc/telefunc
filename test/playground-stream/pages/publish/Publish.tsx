@@ -2,7 +2,13 @@ export { Publish }
 
 import React, { useEffect, useState } from 'react'
 import { keepReachable } from '../keepReachable'
-import { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient } from './Publish.telefunc'
+import {
+  onTextBroadcast,
+  onBinaryBroadcastPair,
+  onBinaryBroadcast,
+  onBroadcastShieldClient,
+  onSubscribeThrows,
+} from './Publish.telefunc'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -149,6 +155,18 @@ function Publish() {
         }}
       >
         Broadcast Shield
+      </button>
+
+      <h2>Subscribe that throws</h2>
+
+      <button
+        id="test-subscribe-throws"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onSubscribeThrows()))
+        }}
+      >
+        Subscribe refused by the store
       </button>
     </div>
   )

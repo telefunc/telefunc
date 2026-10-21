@@ -1,4 +1,4 @@
-export { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient }
+export { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient, onSubscribeThrows }
 
 import { BroadcastChannel } from 'telefunc'
 
@@ -66,4 +66,24 @@ async function onBinaryBroadcast() {
     }
   })
   return room
+}
+
+/** The store refuses the first subscribe on this key (a test asks it to, see `failBackend()`). */
+async function onSubscribeThrows() {
+  const channel = new BroadcastChannel<{ n: number }>({ key: `room:subscribe-throws:${crypto.randomUUID()}` })
+  const seen: string[] = []
+  let thrown: string | null = null
+  try {
+    channel.subscribe((msg) => seen.push(`first:${msg.n}`))
+  } catch (err) {
+    thrown = (err as Error).message
+  }
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  channel.subscribe((msg) => {
+    seen.push(`second:${msg.n}`)
+    resolve()
+  })
+  await channel.publish({ n: 1 })
+  await delivered
+  return { thrown, seen }
 }
