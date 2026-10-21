@@ -1426,6 +1426,7 @@ function Room() {
         const tailed = await onGetRoomTail(roomId)
         const announcements: string[] = []
         tailed.onAnnounce((data) => announcements.push(data as string))
+        await tailed.join({ meta: { name: 'Tail' } }) // same-channel ack orders the declaration before the announcement
         await me.publish('a')
         await onAnnounce(roomId, 'ann')
         await pollUntil(() => ({ done: announcements.length > 0 }))
