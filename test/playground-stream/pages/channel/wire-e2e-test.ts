@@ -88,6 +88,15 @@ function testWire(isDev: boolean) {
       expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
     })
   })
+
+  test('channel: aborting the signal of the call that returned a channel ends the server end with Abort', async () => {
+    const channelId = await openEnd()
+    await page.click('#wire-end-abort-call')
+    await autoRetry(async () => {
+      const ss = await getCleanupState()
+      expect(ss[`wireEnd_${channelId}_onClose`]).toBe('abort:undefined')
+    })
+  })
 }
 
 async function openEnd(): Promise<string> {

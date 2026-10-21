@@ -1,7 +1,7 @@
 export { WireDemo }
 
 import React, { useCallback, useRef, useState } from 'react'
-import { Abort } from 'telefunc/client'
+import { Abort, withContext } from 'telefunc/client'
 import { onWireResume, onWireOverrun, onWireEnd } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
 
@@ -61,8 +61,9 @@ function WireDemo() {
     for (let n = 0; n < OVERRUN_COUNT; n++) void overrunChannel.current!.send(textMessage(n))
   }, [])
 
+  const endCall = useRef(new AbortController())
   const endOpen = useCallback(async () => {
-    const { channel, channelId } = await onWireEnd(END_BEFORE)
+    const { channel, channelId } = await withContext(onWireEnd, { signal: endCall.current.signal })(END_BEFORE)
     endChannel.current = channel
     setState((s) => ({ ...s, end: { channelId, received: [], close: null } }))
     const receive = (item: string) =>
@@ -137,6 +138,14 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Abort it
+        </button>
+        <button
+          id="wire-end-abort-call"
+          type="button"
+          onClick={() => endCall.current.abort()}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Abort the call that opened it
         </button>
       </div>
       <pre id="wire-state" className="text-xs">
