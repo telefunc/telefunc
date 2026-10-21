@@ -8,12 +8,13 @@ import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messa
 type WireState = {
   resume: { channelId: string; received: TallyState } | null
   overrun: { channelId: string; received: TallyState; onClose: string | null } | null
-  /** onClose: 'none', 'abort:<value as JSON>' or the error's name; close: what close() resolved to. */
-  end: { channelId: string; onClose: string | null; close: string | null } | null
+  /** received: the messages, then 'onClose:' and 'none', 'abort:<value as JSON>' or the error's name; close: what close() resolved to. */
+  end: { channelId: string; received: string[]; close: string | null } | null
 }
 
 const RESUME_COUNT = 256
 const OVERRUN_COUNT = 16
+const END_BEFORE = 3
 
 function WireDemo() {
   const [state, setState] = useState<WireState>({ resume: null, overrun: null, end: null })
@@ -60,12 +61,14 @@ function WireDemo() {
   }, [])
 
   const endOpen = useCallback(async () => {
-    const { channel, channelId } = await onWireEnd()
+    const { channel, channelId } = await onWireEnd(END_BEFORE)
     endChannel.current = channel
-    setState((s) => ({ ...s, end: { channelId, onClose: null, close: null } }))
+    setState((s) => ({ ...s, end: { channelId, received: [], close: null } }))
+    const receive = (item: string) =>
+      setState((s) => ({ ...s, end: { ...s.end!, received: [...s.end!.received, item] } }))
+    channel.listen(receive)
     channel.onClose((err) => {
-      const onClose = !err ? 'none' : err instanceof Abort ? `abort:${JSON.stringify(err.abortValue)}` : err.name
-      setState((s) => ({ ...s, end: { ...s.end!, onClose } }))
+      receive(`onClose:${!err ? 'none' : err instanceof Abort ? `abort:${JSON.stringify(err.abortValue)}` : err.name}`)
     })
   }, [])
   const endClose = useCallback(async () => {
