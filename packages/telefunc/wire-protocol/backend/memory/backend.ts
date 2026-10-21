@@ -1,6 +1,6 @@
-export { MemoryBackendState, MemoryBackend }
+export { MemoryBackend }
 
-// The in-process backend, and the reference for Room SPI semantics: its state's clock is authority time.
+// The in-process backend, and the reference for Room SPI semantics: its clock is authority time.
 
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
 import type {
@@ -45,11 +45,6 @@ import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../sub
 import { DriverAttempt } from '../attempt.js'
 import { nextTurn } from '../../flowControl/macrotaskYield.js'
 
-type MemoryBackendOptions = {
-  /** @internal For specs: storage to inspect, or to share with another backend. */
-  state?: MemoryBackendState
-}
-
 type MemorySubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 type Expiring = { expiresAt: number | null }
@@ -86,28 +81,6 @@ type DirectoryCheck = { at: number; roomId: string }
 
 /** Subscriptions by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
 type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
-
-/** @internal The backend's storage, kept apart from it so specs can inspect it and share it between backends. `now` is
- *  its authority time; a spec gives it a clock of its own to set the app servers' apart from it. */
-class MemoryBackendState {
-  readonly now: () => number
-  readonly rooms = new Map<string, RoomRecord>()
-  readonly directory = new Map<string, DirectoryEntry>()
-  /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
-  readonly directoryChecks: DirectoryCheck[] = []
-  readonly broadcastOrder = new Map<string, OrderingInfo>()
-
-  readonly broadcastSubs: Record<BroadcastKind, Subscriptions> = {
-    text: new Map(),
-    binary: new Map(),
-  }
-
-  revSeq = 0
-
-  constructor({ now = () => Date.now() }: { now?: () => number } = {}) {
-    this.now = now
-  }
-}
 
 /** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself
  *  can't starve the loop. */
@@ -261,15 +234,20 @@ class MemorySubscriptionAttempt extends DriverAttempt {
 class MemoryBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: SubscriptionDriver<MemorySubscriptionSource>
 
-  private readonly _state: MemoryBackendState
+  private readonly _rooms = new Map<string, RoomRecord>()
+  private readonly _directory = new Map<string, DirectoryEntry>()
+  /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
+  private readonly _directoryChecks: DirectoryCheck[] = []
+  private readonly _broadcastOrder = new Map<string, OrderingInfo>()
+  private readonly _broadcastSubs: Record<BroadcastKind, Subscriptions> = { text: new Map(), binary: new Map() }
+  private _revSeq = 0
   /** Deliveries in seq order: the running one stays queued, so a publish made inside it is delivered after. */
   private readonly _deliveries = new Fifo<() => void>()
   private _deliveredThisTurn = 0
   /** Lane commits whose delivery is not queued yet. */
   private _committing = 0
 
-  constructor(options: MemoryBackendOptions = {}) {
-    this._state = options.state ?? new MemoryBackendState()
+  constructor() {
     this.subscriptions = {
       bind: (source) => ({
         partition: '',
@@ -280,8 +258,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
-    const mark = advanceOrder(this._state.broadcastOrder, route.key, this._state.now())
-    const targets = this._state.broadcastSubs[route.kind].get(route.key) ?? []
+    const mark = advanceOrder(this._broadcastOrder, route.key, Date.now())
+    const targets = this._broadcastSubs[route.kind].get(route.key) ?? []
     // Counted before delivery, which may unsubscribe or subscribe.
     const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
     if (this._deliversNow()) {
@@ -326,13 +304,13 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
-    const head = this._liveHead(this._state.rooms.get(roomId))
+    const head = this._liveHead(this._rooms.get(roomId))
     return head === null ? null : publicHead(head, copyBytes(head.config))
   }
 
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
-    const current = this._liveHead(this._state.rooms.get(roomId))
-    if (!headCxMatches(cx, current, this._state.now())) {
+    const current = this._liveHead(this._rooms.get(roomId))
+    if (!headCxMatches(cx, current, Date.now())) {
       return { conflict: true, current: current === null ? null : publicHead(current, copyBytes(current.config)) }
     }
     // Only a CX that actually applies materializes a room record.
@@ -341,7 +319,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   private _storeHead(room: RoomRecord, next: HeadNext): StoredHead {
-    const materialized = materializeHead(next, this._state.now(), `rev-${++this._state.revSeq}`)
+    const materialized = materializeHead(next, Date.now(), `rev-${++this._revSeq}`)
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
     if (stored.currentInc !== null) this._generation(room, stored.currentInc)
@@ -351,7 +329,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
     const gen = this._readableGeneration(roomId, inc)
     if (gen === null) return { staleInc: true }
-    return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix), this._state.now())
+    return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix), Date.now())
   }
 
   /** Skips a key it returned that was removed and added again (see `liveKeysWithPrefix`). */
@@ -367,20 +345,20 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       }
       keys ??= liveKeysWithPrefix(gen, prefix)
       page = takePage(keys, seen)
-      yield readCellsOf(gen, page, this._state.now())
+      yield readCellsOf(gen, page, Date.now())
     } while (page.length === CELL_PAGE_SIZE)
   }
 
   /** Closing tails may read; only writes require an open head. */
   private _readableGeneration(roomId: string, inc: string): Generation | null {
-    const room = this._state.rooms.get(roomId)
+    const room = this._rooms.get(roomId)
     const head = this._liveHead(room)
     if (room === undefined || head === null || head.currentInc !== inc) return null
     return this._generation(room, inc)
   }
 
   async compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
-    const room = this._state.rooms.get(roomId)
+    const room = this._rooms.get(roomId)
     const head = this._liveHead(room)
     if (room === undefined || !isOpenIncarnation(head, inc)) return 'stale-inc'
     const gen = this._generation(room, inc)
@@ -389,7 +367,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     for (const mutation of cx.mutations) setCell(gen, mutation.key, mutation.bytes, version)
     const counters = new Map<string, CellCounter>()
     for (const count of cx.counts ?? []) {
-      const counted = countCell(gen.cells.get(count.key)?.bytes, count, this._state.now())
+      const counted = countCell(gen.cells.get(count.key)?.bytes, count, Date.now())
       if (counted === null) continue
       if (counted.written) setCell(gen, count.key, encodeCellCounter(counted.counter), version)
       counters.set(count.key, counted.counter)
@@ -404,9 +382,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    const room = this._state.rooms.get(roomId)
+    const room = this._rooms.get(roomId)
     const head = this._liveHead(room)
-    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, this._state.now())) {
+    if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
       return { stale: 'incarnation' }
     }
     const gen = this._generation(room, inc)
@@ -418,7 +396,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
       lane.kind === 'inbox' || lane.kind === 'binary'
         ? getOrCreate(gen.memberOrders, lane.member, () => new Map())
         : gen.order
-    const mark = advanceOrder(order, key, this._state.now())
+    const mark = advanceOrder(order, key, Date.now())
     if (opts?.retain) {
       // A lane holding a retained frame is already indexed: its frame and index entries leave together.
       if (lane.kind === 'binary' && !gen.retained.has(key)) {
@@ -455,20 +433,20 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
-    const gen = this._state.rooms.get(roomId)?.gens.get(inc)
+    const gen = this._rooms.get(roomId)?.gens.get(inc)
     const order = lane.kind === 'inbox' || lane.kind === 'binary' ? gen?.memberOrders.get(lane.member) : gen?.order
     const mark = order?.get(encodeLaneKey(lane))
     return mark === undefined ? null : { ...mark }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const entry = this._state.rooms.get(roomId)?.gens.get(inc)?.retained.get(encodeLaneKey(lane))
+    const entry = this._rooms.get(roomId)?.gens.get(inc)?.retained.get(encodeLaneKey(lane))
     if (entry === undefined) return null
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
-    const gen = this._state.rooms.get(roomId)?.gens.get(inc)
+    const gen = this._rooms.get(roomId)?.gens.get(inc)
     if (gen === undefined) return []
     if (of === undefined) return Array.from(gen.retained.values(), (entry) => copyLane(entry.lane))
     const keys = 'member' in of ? gen.retainedOf.get(of.member) : gen.retainedOfTrack.get(of.track)
@@ -476,7 +454,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    const gen = this._state.rooms.get(roomId)?.gens.get(inc)
+    const gen = this._rooms.get(roomId)?.gens.get(inc)
     const key = encodeLaneKey(lane)
     if (gen === undefined || (opts?.ifSeq !== undefined && gen.retained.get(key)?.seq !== opts.ifSeq)) return
     gen.retained.delete(key)
@@ -486,7 +464,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
-    this._state.rooms.get(roomId)?.gens.get(inc)?.memberOrders.delete(member)
+    this._rooms.get(roomId)?.gens.get(inc)?.memberOrders.delete(member)
   }
 
   private _openSubscription(
@@ -498,7 +476,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     let key: string
     if ('roomId' in source) {
       const { roomId, inc, lane } = source
-      const room = this._state.rooms.get(roomId)
+      const room = this._rooms.get(roomId)
       const head = this._liveHead(room)
       if (room === undefined || !isOpenIncarnation(head, inc)) {
         throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
@@ -516,7 +494,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         key = encodeLaneKey(lane)
       }
     } else {
-      subs = this._state.broadcastSubs[source.kind]
+      subs = this._broadcastSubs[source.kind]
       key = source.key
     }
     const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt(receiver, localReceiverCount, () =>
@@ -531,7 +509,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
-    const room = this._state.rooms.get(roomId)
+    const room = this._rooms.get(roomId)
     if (room === undefined) return
     const gen = room.gens.get(inc)
     if (gen === undefined) return // already dropped (the janitor is resumable)
@@ -540,21 +518,21 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
-    const at = Math.max(checkAt, this._state.now() + minDelayMs)
-    this._state.directory.set(roomId, { incTag, checkAt: at })
-    if (at !== Infinity) pushCheck(this._state.directoryChecks, { at, roomId })
+    const at = Math.max(checkAt, Date.now() + minDelayMs)
+    this._directory.set(roomId, { incTag, checkAt: at })
+    if (at !== Infinity) pushCheck(this._directoryChecks, { at, roomId })
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    if (this._state.directory.get(roomId)?.incTag === incTag) this._state.directory.delete(roomId)
+    if (this._directory.get(roomId)?.incTag === incTag) this._directory.delete(roomId)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
-    return this._state.directory.get(roomId)?.incTag
+    return this._directory.get(roomId)?.incTag
   }
 
   async directoryList(prefix: string): Promise<DirectoryPage> {
-    const entries = [...this._state.directory]
+    const entries = [...this._directory]
       .filter(([roomId]) => roomId.startsWith(prefix))
       .sort(([left], [right]) => compareCodePoints(left, right))
       .map(([roomId, { incTag }]) => ({ roomId, incTag }))
@@ -562,8 +540,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async directoryDue(): Promise<DirectoryPage['entries']> {
-    const { directory, directoryChecks: checks } = this._state
-    const now = this._state.now()
+    const directory = this._directory
+    const checks = this._directoryChecks
+    const now = Date.now()
     // A put twice at the same time scheduled two checks, both current.
     const due = new Map<string, DirectoryCheck>()
     while (due.size < DIRECTORY_PAGE_SIZE && checks.length > 0 && checks[0]!.at <= now) {
@@ -578,19 +557,19 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   // ── internals ──
 
   private _roomFor(roomId: string): RoomRecord {
-    return getOrCreate(this._state.rooms, roomId, () => ({ head: null, gens: new Map() }))
+    return getOrCreate(this._rooms, roomId, () => ({ head: null, gens: new Map() }))
   }
 
   /** A room with no incarnation left is forgotten once its tombstone lapses (revs are process-global, never reused). */
   private _releaseWhenLapsed(roomId: string, room: RoomRecord): void {
-    if (this._state.rooms.get(roomId) !== room || room.gens.size > 0) return
+    if (this._rooms.get(roomId) !== room || room.gens.size > 0) return
     const head = this._liveHead(room)
     if (head === null) {
-      this._state.rooms.delete(roomId)
+      this._rooms.delete(roomId)
       return
     }
     if (head.expiresAt === null) return
-    unrefTimer(setTimeout(() => this._releaseWhenLapsed(roomId, room), head.expiresAt - this._state.now()))
+    unrefTimer(setTimeout(() => this._releaseWhenLapsed(roomId, room), head.expiresAt - Date.now()))
   }
 
   private _generation(room: RoomRecord, inc: string): Generation {
@@ -600,7 +579,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   /** Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch. */
   private _liveHead(room: RoomRecord | undefined): StoredHead | null {
     const head = room?.head ?? null
-    return head === null || isExpired(head, this._state.now()) ? null : head
+    return head === null || isExpired(head, Date.now()) ? null : head
   }
 }
 
