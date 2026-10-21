@@ -17,7 +17,6 @@ export type {
   RoomDataPublish,
   RoomDmEnvelope,
   DmReply,
-  AcceptedMeta,
   MemberMetaUpdate,
   RoomFailure,
   RoomStubRequest,
@@ -139,8 +138,6 @@ type DmReply = { ok: true; result: unknown } | RoomFailure
 
 /** A member's meta at `seq`, whole, or as the merge at `seq` changed it: a key it removed as `undefined`. */
 type MemberMetaUpdate = { seq: number; meta: ParticipantMeta } | { seq: number; attrs: ParticipantMeta }
-/** The ack of a member meta write: what it changed, at its sequence. */
-type AcceptedMeta = MemberMetaUpdate
 
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }

@@ -11,7 +11,7 @@ import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { publicTrack, type TrackKey } from './binary.js'
-import type { AcceptedMeta, DmReply, InboxMessage } from './protocol.js'
+import type { MemberMetaUpdate, DmReply, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -81,13 +81,13 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   /** @internal Whole, as an attach resends it. */
-  get _acceptedMeta(): AcceptedMeta {
+  get _acceptedMeta(): MemberMetaUpdate {
     return { meta: this._meta.object, seq: this._meta.seq }
   }
 
   /** @internal A meta update the room accepted, applied in seq order; whether it applied. One past a gap waits for the
    *  whole meta its holder's next attach or roster sends. */
-  _acceptMeta(update: AcceptedMeta): boolean {
+  _acceptMeta(update: MemberMetaUpdate): boolean {
     return this._meta.apply(update) === 'applied'
   }
 

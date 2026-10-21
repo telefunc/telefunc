@@ -19,7 +19,7 @@ import {
   ROOM_BUG_MESSAGE,
 } from '../errors.js'
 import { ownMetaArgument, senderOf } from '../model.js'
-import type { AcceptedMeta, DmReply, RoomCtrlEnvelope, RoomDmEnvelope, SenderStamp } from '../protocol.js'
+import type { MemberMetaUpdate, DmReply, RoomCtrlEnvelope, RoomDmEnvelope, SenderStamp } from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
@@ -62,18 +62,18 @@ class RoomWrites {
   ) {}
 
   /** Full replace (`setMeta`). */
-  async setMemberMeta(id: string, meta: ParticipantMeta): Promise<AcceptedMeta> {
+  async setMemberMeta(id: string, meta: ParticipantMeta): Promise<MemberMetaUpdate> {
     return await this._writeMemberMeta(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
   }
 
   /** Per-key merge (`setAttributes`); an `undefined` value deletes the key. */
-  async mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<AcceptedMeta> {
+  async mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<MemberMetaUpdate> {
     return await this._writeMemberMeta(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
   }
 
   /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
    *  seq order. */
-  private async _writeMemberMeta(id: string, write: MemberMetaWrite): Promise<AcceptedMeta> {
+  private async _writeMemberMeta(id: string, write: MemberMetaWrite): Promise<MemberMetaUpdate> {
     const host = this._host
     return await this._inCallOrder(`meta:${id}`, async (sent) => {
       const { update, hidden, replaced } = await writeMemberMeta(host._incarnation, id, write)

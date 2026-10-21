@@ -19,7 +19,7 @@ import {
   type ParticipantStubMetadata,
   type ParticipantStubNotice,
   type ParticipantStubRequest,
-  type AcceptedMeta,
+  type MemberMetaUpdate,
   type RoomDemandEvent,
   type RoomDataPublish,
   type RoomDmEnvelope,
@@ -384,7 +384,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
-  _acceptParticipantMeta(id: string, accepted: AcceptedMeta): void {
+  _acceptParticipantMeta(id: string, accepted: MemberMetaUpdate): void {
     this._model.applyParticipantMeta(id, accepted)
     this._localParticipants.get(id)?._acceptMeta(accepted)
   }
@@ -522,17 +522,17 @@ abstract class ClientParticipantBase extends ParticipantBase {
   async setMeta(meta: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(meta, 'setMeta() meta')
-    this._onOwnMetaWritten((await this._requestParticipant({ __r: 'req-set-meta', meta: owned })) as AcceptedMeta)
+    this._onOwnMetaWritten((await this._requestParticipant({ __r: 'req-set-meta', meta: owned })) as MemberMetaUpdate)
   }
 
   async setAttributes(attrs: ParticipantMeta): Promise<void> {
     this._assertActive()
     const owned = ownMetaArgument(attrs, 'setAttributes() attributes')
-    this._onOwnMetaWritten((await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })) as AcceptedMeta)
+    this._onOwnMetaWritten((await this._requestParticipant({ __r: 'req-set-attrs', attrs: owned })) as MemberMetaUpdate)
   }
 
   /** Concurrent writes can commit out of request order: adopt the sequence-accepted value, as observers do. */
-  protected abstract _onOwnMetaWritten(accepted: AcceptedMeta): void
+  protected abstract _onOwnMetaWritten(accepted: MemberMetaUpdate): void
 
   private _drainCoalesce(key: string): void {
     const slot = this._coalescers.get(key)
@@ -577,7 +577,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
     return this._room._getRemote(id)
   }
 
-  protected override _onOwnMetaWritten(accepted: AcceptedMeta): void {
+  protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
     this._room._acceptParticipantMeta(this.id, accepted)
   }
 
@@ -635,7 +635,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   }
 
   /** Its own writes and the room's `p-meta` both land here. */
-  protected override _onOwnMetaWritten(accepted: AcceptedMeta): void {
+  protected override _onOwnMetaWritten(accepted: MemberMetaUpdate): void {
     this._acceptMeta(accepted)
   }
 

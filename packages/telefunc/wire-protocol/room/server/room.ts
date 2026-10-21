@@ -21,7 +21,7 @@ import {
   type SenderStamp,
   type RoomDmEnvelope,
   type RoomCtrlEnvelope,
-  type AcceptedMeta,
+  type MemberMetaUpdate,
   type RoomSnapshotMetadata,
 } from '../protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
@@ -62,7 +62,7 @@ type Admission = { id: string; meta: ParticipantMeta; identity: string | null; j
  *  (`committed`), or given up because the member left, its holder detached or the room closed (`abandoned`). Before
  *  that it is a guard running; once its join applies, a member like any other. */
 type AdmissionState = 'owned' | 'committed' | 'abandoned'
-type MetaMirror = { accepted(update: AcceptedMeta): void; rewound(): void }
+type MetaMirror = { accepted(update: MemberMetaUpdate): void; rewound(): void }
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
@@ -261,7 +261,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal A meta update of a member this handle owns, which its participant mirrors. */
-  _acceptMeta(id: string, accepted: AcceptedMeta): void {
+  _acceptMeta(id: string, accepted: MemberMetaUpdate): void {
     this._localParticipants.get(id)?._acceptMeta(accepted)
   }
 
@@ -524,7 +524,7 @@ class ServerLocalParticipant extends ParticipantBase {
     }
   }
 
-  override _acceptMeta(update: AcceptedMeta): boolean {
+  override _acceptMeta(update: MemberMetaUpdate): boolean {
     if (!super._acceptMeta(update)) return false
     this._metaMirror?.accepted(update)
     return true
@@ -558,13 +558,13 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   /** @internal The accepted write, which a client holder mirrors in revision order. */
-  async _setMeta(meta: ParticipantMeta): Promise<AcceptedMeta> {
+  async _setMeta(meta: ParticipantMeta): Promise<MemberMetaUpdate> {
     this._assertActive()
     return await this._room._writes.setMemberMeta(this.id, meta)
   }
 
   /** @internal */
-  async _setAttributes(attrs: ParticipantMeta): Promise<AcceptedMeta> {
+  async _setAttributes(attrs: ParticipantMeta): Promise<MemberMetaUpdate> {
     this._assertActive()
     return await this._room._writes.mergeMemberMeta(this.id, attrs)
   }
