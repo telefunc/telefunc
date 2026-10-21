@@ -132,9 +132,12 @@ function Publish() {
 
           // Valid publish: matches `{ text: string }` — server validates, fans out, resolves with receipt.
           const validAck = await room.publish({ text: 'hi' })
-          // Brief delay so the subscribe callback runs.
-          await new Promise((r) => setTimeout(r, 100))
-          const validReceived = await getReceived()
+          // A store like Redis delivers to the server's subscriber after publish() resolves.
+          let validReceived = await getReceived()
+          for (let poll = 0; poll < 50 && validReceived.length === 0; poll++) {
+            await new Promise((r) => setTimeout(r, 200))
+            validReceived = await getReceived()
+          }
           setShieldState((s) => ({
             ...s,
             validReceiptKey: validAck.key,
