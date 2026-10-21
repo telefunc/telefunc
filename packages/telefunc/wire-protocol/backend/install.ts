@@ -45,10 +45,7 @@ const FALLBACK_KEY = [Symbol('telefunc.memoryBackend')]
 
 /** Installs the process's one backend and returns its driver. Re-evaluating an entry with the same `key` returns the
  *  installed driver; the key names the factory's configuration, so that driver is the one the factory would build. */
-function installBackend<Driver extends BackendDriver>(
-  factory: () => Driver,
-  key: readonly unknown[] = [factory],
-): Driver {
+function installBackend<Driver extends BackendDriver>(factory: () => Driver, key: readonly unknown[]): Driver {
   const installed = state.installed
   if (installed === null) return install(factory, key, false).driver as Driver
   if (sameKey(installed.key, key)) return installed.driver as Driver
