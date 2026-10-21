@@ -7,6 +7,8 @@ import { testCounter, testRunClassic } from '../../test/utils'
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
   testRunClassic(cmd, {
+    // testResubscribe() waits out a presence's TTL.
+    additionalTimeout: 60_000,
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
       // The Channel/Chat streaming (SSE) connection surfaces a benign
@@ -16,7 +18,11 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   })
   testTodolist()
   testChannel()
+  testChannelOversized()
+  testBacklog()
   testChat()
+  testChatMembers()
+  testResubscribe()
 }
 
 function testCloudflareBindings() {
@@ -126,6 +132,29 @@ function testChannel() {
   })
 }
 
+function testChannelOversized() {
+  test('Channel: a 32 MiB message is refused, and the channel keeps working', async () => {
+    await page.goto(getServerUrl() + '/channel')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#connect-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain('{"type":"welcome"}')
+    })
+    await page.click('#send-oversized-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain('Channel message too large')
+    })
+    const echoText = `echo-${Math.random()}`
+    await page.fill('#echo-input', echoText)
+    await page.click('#send-echo-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain(`{"type":"echo","text":"${echoText}"}`)
+    })
+  })
+}
+
 // Tests the `BroadcastChannel` pub/sub use case (pages/chat): joining subscribes to
 // the channel, whose server-side `onOpen` publishes a "joined" system message that is
 // broadcast back to the subscribed client. This exercises the full BroadcastChannel
@@ -149,6 +178,110 @@ function testChat() {
         expect(await page.textContent('#root')).toContain(`${username} joined`)
       },
       { timeout: 10000 },
+    )
+    // `onOpen` also publishes two binary greetings from one reused buffer: each arrives as published.
+    await autoRetry(async () => {
+      const text = (await page.textContent('#root'))!
+      expect(text).toContain(`welcome ${username}`)
+      expect(text).toContain(`${username} is online`)
+      expect(text.indexOf(`welcome ${username}`)).lessThan(text.indexOf(`${username} is online`))
+    })
+  })
+}
+
+function testBacklog() {
+  test('Backlog: sends nobody awaits to a page that stops reading are refused with ChannelOverflowError, and what was taken arrives in order once it reads', async () => {
+    await page.goto(getServerUrl() + '/backlog')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#backlog-open')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#backlog-state'))!).open).toBe(true)
+    })
+    const cdp = await page.context().newCDPSession(page.mainFrame().page())
+    await cdp.send('Network.enable')
+    // A page that reads nothing: what the server sends waits on the way.
+    await cdp.send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: 1,
+      uploadThroughput: -1,
+    })
+    await page.click('#backlog-run')
+    // The server's sends are refused or taken within a turn of the request, which the page can't see while stalled.
+    await page.waitForTimeout(1000)
+    await cdp.send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: -1,
+      uploadThroughput: -1,
+    })
+    await autoRetry(
+      async () => {
+        const state = JSON.parse((await page.textContent('#backlog-state'))!)
+        expect(state.refused.length).greaterThan(0)
+        expect(new Set(state.refused)).deep.equal(new Set(['ChannelOverflowError']))
+        expect(state.received).toBe(6000 - state.refused.length)
+        expect(state.outOfOrder).toBe(0)
+      },
+      { timeout: 30_000 },
+    )
+    await cdp.detach()
+  })
+}
+
+function testChatMembers() {
+  test('Chat: members in separate browsers each get every message published after they joined, once', async () => {
+    const browser = page.context().browser()!
+    const names = ['member-1', 'member-2', 'member-3'].map((name) => `${name}-${Math.floor(Math.random() * 1e6)}`)
+    const members: (typeof page)[] = []
+    for (const name of names) {
+      const member = await (await browser.newContext()).newPage()
+      members.push(member)
+      await member.goto(getServerUrl() + '/chat')
+      await autoRetry(async () => {
+        expect(await member.locator('#hydrated').count()).toBe(1)
+      })
+      await member.fill('input[placeholder="Pick a username..."]', name)
+      await member.locator('button', { hasText: 'Join' }).click()
+      await autoRetry(async () => {
+        expect(await member.locator('#messages').textContent()).toContain(`${name} joined`)
+      })
+    }
+    // Each member's onOpen publishes `<name> joined` and two binary greetings.
+    await autoRetry(async () => {
+      for (const [i, member] of members.entries()) {
+        const messages = await member.locator('#messages > div').allTextContents()
+        const later = names.slice(i)
+        expect(messages.filter((text) => text.endsWith(' joined'))).deep.equal(later.map((name) => `${name} joined`))
+        expect(messages.filter((text) => text.startsWith('welcome ')).sort()).deep.equal(
+          later.map((name) => `welcome ${name}`).sort(),
+        )
+      }
+    })
+    for (const member of members) await member.context().close()
+  })
+}
+
+function testResubscribe() {
+  test("Broadcast: a subscriber that arrives as its key's last one leaves keeps getting publishes past the presence TTL", async () => {
+    await page.goto(getServerUrl() + '/resubscribe')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#resubscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#resubscribe-state'))!).subscribed).toBe(true)
+    })
+    // A presence lasts 90 s unless refreshed.
+    await page.waitForTimeout(95_000)
+    await page.click('#publish')
+    await autoRetry(
+      async () => {
+        expect(JSON.parse((await page.textContent('#resubscribe-state'))!).received).deep.equal(['hello'])
+      },
+      { timeout: 5000 },
     )
   })
 }

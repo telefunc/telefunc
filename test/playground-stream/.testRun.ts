@@ -18,7 +18,7 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
 import { testWire } from './pages/channel/wire-e2e-test'
 
-function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
+function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   run(cmd, {
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
@@ -59,7 +59,7 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview') {
   })
 }
 
-function testRun(cmd: 'pnpm dev' | 'pnpm preview') {
+function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   runPlayground(cmd)
   const isDev = cmd === 'pnpm dev'
 

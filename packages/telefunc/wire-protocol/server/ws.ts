@@ -43,7 +43,7 @@ function getTelefuncChannelHooks({
   }
 
   return defineHooks({
-    open: (peer) => mux.onConnectionOpen(peer, transport),
+    open: (peer) => mux.onConnectionOpen(peer, transport, peer.request),
     message: (peer, message) => mux.onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>),
     close: (peer, details) => {
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === 1000 || details?.code === 1001

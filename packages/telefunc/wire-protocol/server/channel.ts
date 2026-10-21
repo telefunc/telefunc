@@ -97,6 +97,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */ _didShutdown = false
   private _didRegister = false
   protected _peer: IndexedPeer | null = null
+  /** @internal The request that opened the wire the page last attached on. */
+  _wireRequest: Request | undefined = undefined
   private readonly _listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
   protected _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>

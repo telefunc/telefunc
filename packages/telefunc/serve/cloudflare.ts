@@ -118,6 +118,9 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     async fetch(request: Request) {
+      const { name } = this.ctx.id
+      assertUsage(name, 'Telefunc needs `ctx.id.name` in its Durable Objects: update wrangler.')
+      broadcast.attachRequest(request, name)
       const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
       const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
       if (shard && bucket) broadcast.attachIsolateInfo(shard, bucket)

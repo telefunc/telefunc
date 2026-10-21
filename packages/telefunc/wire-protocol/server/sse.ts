@@ -141,7 +141,7 @@ class SseConnectionTransport {
       const reader = new StreamReader(source)
       const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
       connId = metadata.connId
-      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream)
+      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream, request)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
       return await this.handleBatchPost(connId, reader)
     } catch (err) {
@@ -167,6 +167,7 @@ class SseConnectionTransport {
     connId: string,
     reader: StreamReader,
     useNodeStream: boolean,
+    request: Request,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getConnectionByConnId<SseConnection>(connId)
     if (existing) this.closeConnection(existing, { permanent: false })
@@ -190,7 +191,7 @@ class SseConnectionTransport {
       resolveReady,
       pendingDispatches: new Set(),
     }
-    this.mux.onConnectionOpen(connection, this.transport)
+    this.mux.onConnectionOpen(connection, this.transport, request)
     this.resolvePendingConnections(connId, connection)
     void this.runStreamResponse(connection, reader)
 
