@@ -14,6 +14,7 @@ import type {
   CellsRead,
   CommitAccepted,
   CommitOptions,
+  CommitTarget,
   CommitResult,
   CxResult,
   DirectoryPage,
@@ -95,9 +96,7 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
   }
 
   async commitLane(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
+    { roomId, inc, lane }: CommitTarget,
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {

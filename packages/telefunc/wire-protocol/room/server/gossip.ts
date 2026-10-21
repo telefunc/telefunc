@@ -80,7 +80,7 @@ class GossipOutbox {
       this._inFlight++
       // A stale commit is a closed room's: its gossip has no reader.
       void getRoomBackend()
-        .commitLane(this._room.id, this._room.inc, DEMAND_LANE, encodeDemandPage(page))
+        .commitLane({ roomId: this._room.id, inc: this._room.inc, lane: DEMAND_LANE }, encodeDemandPage(page))
         .catch(reportRoomError)
         .finally(() => {
           this._inFlight--

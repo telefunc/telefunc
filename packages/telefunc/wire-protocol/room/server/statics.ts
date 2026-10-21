@@ -371,7 +371,7 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   const record = encodeRoomRecord({ __r: 'announce', data } satisfies RoomEnvelope)
   const config = await requireRoom(id)
-  const commit = await commitRoomLaneOrThrow(id, config.inc, SEMANTIC_LANE, record)
+  const commit = await commitRoomLaneOrThrow({ roomId: id, inc: config.inc, lane: SEMANTIC_LANE }, record)
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 

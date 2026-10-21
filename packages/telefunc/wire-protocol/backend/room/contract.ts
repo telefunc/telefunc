@@ -8,6 +8,7 @@ export type {
   CellSelector,
   CellsRead,
   CommitOptions,
+  CommitTarget,
   DirectoryPage,
   EveryMemberLane,
   EveryTrackLane,
@@ -132,6 +133,9 @@ type StaleCommit = { stale: 'incarnation' } | { stale: 'cell'; key: string }
 
 type CommitResult = CommitAccepted | StaleCommit
 
+/** The lane a commit lands on, in `inc` of `roomId`. */
+type CommitTarget = { roomId: string; inc: string; lane: LaneId }
+
 type RoomSubscriptionSource = {
   roomId: string
   inc: string
@@ -150,13 +154,7 @@ type RoomDriver = {
    *  page is the last. */
   readCellPages(roomId: string, inc: string, prefix: string): AsyncIterable<CellsRead>
   compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult>
-  commitLane(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
-    payload: Uint8Array,
-    opts?: CommitOptions,
-  ): Promise<CommitResult>
+  commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult>
   /** The lane's last commit's seq and timestamp; null before its first, or once its incarnation or member is gone. */
   readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null>
   readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null>

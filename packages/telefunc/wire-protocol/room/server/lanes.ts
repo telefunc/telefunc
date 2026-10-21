@@ -21,7 +21,14 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { raceTimeout } from '../../../utils/raceTimeout.js'
 import { getRoomBackend } from '../../backend/install.js'
-import type { CommitAccepted, LaneId, RoomHead, StaleCommit, CommitOptions } from '../../backend/room/contract.js'
+import type {
+  CommitAccepted,
+  CommitOptions,
+  CommitTarget,
+  LaneId,
+  RoomHead,
+  StaleCommit,
+} from '../../backend/room/contract.js'
 import { hasRoomTag, type RoomCtrlEnvelope, type RoomDmEnvelope } from '../protocol.js'
 import type { RoomConfigRecord, RoomDemandPage, RoomDmAckEnvelope } from './protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
@@ -79,14 +86,12 @@ function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | 
 }
 
 async function commitRoomLaneOrThrow(
-  id: string,
-  inc: string,
-  lane: LaneId,
+  target: CommitTarget,
   payload: Uint8Array,
   opts?: Omit<CommitOptions, 'closingLease'>,
 ): Promise<CommitAccepted> {
-  const result = await getRoomBackend().commitLane(id, inc, lane, payload, opts)
-  if ('stale' in result) throw staleCommitError(id, result)
+  const result = await getRoomBackend().commitLane(target, payload, opts)
+  if ('stale' in result) throw staleCommitError(target.roomId, result)
   return result
 }
 
@@ -101,7 +106,9 @@ async function commitToInbox(
 ): Promise<CommitAccepted | { gone: string }> {
   const lane = { kind: 'inbox', member: envelope.to } as const
   const requiredCellKeys = [...requiring, envelope.to].map(memberCellKey)
-  const result = await getRoomBackend().commitLane(roomId, inc, lane, encodeRoomRecord(envelope), { requiredCellKeys })
+  const result = await getRoomBackend().commitLane({ roomId, inc, lane }, encodeRoomRecord(envelope), {
+    requiredCellKeys,
+  })
   if ('stale' in result && result.stale === 'cell') return { gone: memberIdOfCellKey(result.key) }
   if ('stale' in result) throw roomClosedError(roomId)
   await handedOff(roomId, result)
@@ -116,7 +123,7 @@ async function commitControl(
   event: RoomCtrlEnvelope,
   opts?: CommitOptions,
 ): Promise<CommitAccepted | StaleCommit> {
-  const result = await getRoomBackend().commitLane(roomId, inc, CONTROL_LANE, encodeRoomRecord(event), opts)
+  const result = await getRoomBackend().commitLane({ roomId, inc, lane: CONTROL_LANE }, encodeRoomRecord(event), opts)
   if (!('stale' in result)) await handedOff(roomId, result)
   return result
 }

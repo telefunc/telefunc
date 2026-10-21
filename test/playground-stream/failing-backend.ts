@@ -126,11 +126,12 @@ function callOf(source: Source): Call {
 
 function callOfArgs(op: string, args: unknown[]): Call {
   if (op === 'publish') return { keys: [(args[0] as BroadcastRoute).key] }
-  const [roomId, , selector] = args as [string, string, unknown]
   if (op === 'commitLane') {
-    const required = (args[4] as { requiredCellKeys?: string[] } | undefined)?.requiredCellKeys ?? []
-    return { roomId, keys: [(selector as { kind: string }).kind, ...required] }
+    const target = args[0] as { roomId: string; lane: { kind: string } }
+    const opts = args[2] as { requiredCellKeys?: string[] } | undefined
+    return { roomId: target.roomId, keys: [target.lane.kind, ...(opts?.requiredCellKeys ?? [])] }
   }
+  const [roomId, , selector] = args as [string, string, unknown]
   if (op === 'readCellPages') return { roomId, keys: [selector as string] }
   if (op === 'readCells') {
     const sel = selector as { keys: string[] } | { prefix: string }

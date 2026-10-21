@@ -18,6 +18,7 @@ import type {
   CellSelector,
   CellsRead,
   CommitOptions,
+  CommitTarget,
   RetainedFrame,
   RetainedOf,
   DirectoryPage,
@@ -376,9 +377,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async commitLane(
-    roomId: string,
-    inc: string,
-    lane: LaneId,
+    { roomId, inc, lane }: CommitTarget,
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {

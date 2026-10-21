@@ -2,7 +2,7 @@ export { superviseRoomDriver }
 
 import { SubscriptionManager, type SendHold } from '../SubscriptionManager.js'
 import { heldSendWeight } from '../heldSendWeight.js'
-import type { HeadNext, LaneId, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
+import type { CommitTarget, HeadNext, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import type { BackendPayload, BackendReceiver } from '../subscription.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
@@ -17,22 +17,17 @@ function checkDelivery(_source: RoomSubscriptionSource, payload: BackendPayload,
 
 /** What a commit holds while this instance's subscriptions on its lanes establish. A binary commit also reaches its
  *  member's every-track lane and its track's every-member lane, and its held bytes count against its member's. */
-function describeCommitHold(
-  roomId: string,
-  inc: string,
-  lane: LaneId,
-  payload: Uint8Array,
-): SendHold<RoomSubscriptionSource> {
-  const source = { roomId, inc, lane }
-  const key = roomSubscriptionSourceKey(source)
+function describeCommitHold(target: CommitTarget, payload: Uint8Array): SendHold<RoomSubscriptionSource> {
+  const { roomId, inc, lane } = target
+  const key = roomSubscriptionSourceKey(target)
   if (lane.kind !== 'binary') {
-    return { key, sources: [source], weight: heldSendWeight('text', key, () => payload.byteLength, 'Room') }
+    return { key, sources: [target], weight: heldSendWeight('text', key, () => payload.byteLength, 'Room') }
   }
   const everyTrack = { roomId, inc, lane: { kind: 'binary-all', member: lane.member } } as const
   const everyMember = { roomId, inc, lane: { kind: 'binary-track', track: lane.track } } as const
   return {
     key,
-    sources: [source, everyTrack, everyMember],
+    sources: [target, everyTrack, everyMember],
     weight: heldSendWeight('binary', roomSubscriptionSourceKey(everyTrack), () => payload.byteLength, 'Room'),
   }
 }
@@ -51,12 +46,12 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
     readCells: (roomId, inc, sel) => driver.readCells(roomId, inc, sel),
     readCellPages: (roomId, inc, prefix) => driver.readCellPages(roomId, inc, prefix),
     compareExchangeCells: (roomId, inc, cx) => driver.compareExchangeCells(roomId, inc, cx),
-    commitLane: async (roomId, inc, lane, payload, opts) => {
-      const commit = () => driver.commitLane(roomId, inc, lane, payload, opts)
+    commitLane: async (target, payload, opts) => {
+      const commit = () => driver.commitLane(target, payload, opts)
       // A close commits under its lease, which would lapse before the hold ends.
       const result =
         opts?.closingLease === undefined
-          ? await subscriptions.afterEstablished(commit, () => describeCommitHold(roomId, inc, lane, payload))
+          ? await subscriptions.afterEstablished(commit, () => describeCommitHold(target, payload))
           : await commit()
       if ('accepted' in result) assertDriverPosition(result)
       return result
