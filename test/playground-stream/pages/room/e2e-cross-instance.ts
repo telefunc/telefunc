@@ -1,6 +1,16 @@
-export { testRedisRoomCrossInstance, testRedisBroadcastCrossInstance }
+export { testRedisRoomCrossInstance, testRedisBroadcastCrossInstance, testRedisOutages }
 
-import { autoRetry, expect, getServerUrl, test } from '@brillout/test-e2e'
+import { autoRetry, expect, expectLog, getServerUrl, test } from '@brillout/test-e2e'
+import { dropRedisConnections, getRedisChannels, restartRedis, rewindRedis, snapshotRedis } from '../../e2e-utils'
+
+type Instance = 'a' | 'b' | 'c' | 'd'
+type RoomView = {
+  count: number
+  members: Record<string, Record<string, unknown>>
+  meta: Record<string, unknown>
+  frames: string[]
+  events: string[]
+}
 
 function testRedisRoomCrossInstance() {
   test('room: installRedis alone delivers a publish from instance A to a joined instance B', async () => {
@@ -65,12 +75,169 @@ function testRedisBroadcastCrossInstance() {
   })
 }
 
+function testRedisOutages() {
+  test("room: after a failover rewinds Redis, members on two servers get each other's messages again, in order, and see the next join and meta change", async () => {
+    const roomId = newId('redis-rewind')
+    try {
+      await joinRoom('a', roomId, 'Alice')
+      await joinRoom('b', roomId, 'Bob')
+      await publish('a', roomId, 'm1')
+      await retry(10_000, async () => {
+        expect(await received('b', roomId)).deep.equal(['m1'])
+      })
+
+      const snapshot = await snapshotRedis()
+      // What the failover loses.
+      await joinRoom('c', roomId, 'Carol')
+      await setMeta('b', roomId, { score: 1 })
+      await publish('a', roomId, 'lost')
+      await rewindRedis(snapshot)
+
+      await expectDeliveryResumes(roomId)
+      await joinRoom('d', roomId, 'Dave')
+      await setMeta('b', roomId, { score: 2 })
+      await retry(30_000, async () => {
+        for (const instance of ['a', 'b', 'd'] as const) {
+          const { members } = await view(instance, roomId)
+          expect(Object.keys(members)).to.include.members(['Alice', 'Bob', 'Dave'])
+          expect(members.Bob!.score).toBe(2)
+        }
+      })
+      // Each server reports the outage of its subscriber connection.
+      expectLog('Redis subscriber connection closed', { filter: (log) => log.logSource === 'stderr' })
+    } finally {
+      await leaveRoom(['a', 'b', 'c', 'd'], roomId)
+    }
+  })
+
+  test('room: when Redis restarts without its data, the servers holding the room are told it closed, and a room created again under its id delivers', async () => {
+    const roomId = newId('redis-restart')
+    try {
+      await joinRoom('a', roomId, 'Alice')
+      await joinRoom('b', roomId, 'Bob')
+
+      restartRedis()
+      await retry(30_000, async () => {
+        for (const instance of ['a', 'b'] as const) expect((await view(instance, roomId)).events).contains('close')
+      })
+      // Each server reports the room's subscriptions ending with its data.
+      expectLog('Backend subscription closed', { filter: (log) => log.logSource === 'stderr' })
+
+      await leaveRoom(['a', 'b'], roomId)
+      await joinRoom('a', roomId, 'Alice')
+      await joinRoom('b', roomId, 'Bob')
+      await publish('a', roomId, 'after')
+      await retry(10_000, async () => {
+        expect(await received('b', roomId)).deep.equal(['after'])
+      })
+      // Each server reports the outage of its subscriber connection.
+      expectLog('Redis subscriber connection closed', { filter: (log) => log.logSource === 'stderr' })
+    } finally {
+      await leaveRoom(['a', 'b'], roomId)
+    }
+  })
+
+  test("room and broadcast: after every Redis connection drops, servers get each other's messages again, in order, and a key nobody subscribes to any more holds no Redis subscription", async () => {
+    const roomId = newId('redis-drop')
+    const key = newId('redis-drop-key')
+    try {
+      await joinRoom('a', roomId, 'Alice')
+      await joinRoom('b', roomId, 'Bob')
+      await broadcastRequest('b', '/api/broadcast-cross-instance/subscribe', key, 'POST')
+
+      await dropRedisConnections()
+      await expectDeliveryResumes(roomId)
+      // Delivery is at-most-once while the connection comes back.
+      await retry(30_000, async () => {
+        await broadcastRequest('a', '/api/broadcast-cross-instance/publish', key, 'POST', 'probe')
+        expect(await broadcastReceived('b', key)).contains('probe')
+      })
+      for (const message of ['k1', 'k2', 'k3']) {
+        await broadcastRequest('a', '/api/broadcast-cross-instance/publish', key, 'POST', message)
+      }
+      await retry(10_000, async () => {
+        expect((await broadcastReceived('b', key)).filter((message) => message !== 'probe')).deep.equal([
+          'k1',
+          'k2',
+          'k3',
+        ])
+      })
+
+      await broadcastRequest('b', '/api/broadcast-cross-instance/unsubscribe', key, 'DELETE')
+      await retry(10_000, async () => {
+        expect(await getRedisChannels(`*${encodeURIComponent(key)}*`)).deep.equal([])
+      })
+      // Each server reports the outage of its subscriber connection.
+      expectLog('Redis subscriber connection closed', { filter: (log) => log.logSource === 'stderr' })
+    } finally {
+      await leaveRoom(['a', 'b'], roomId)
+      await broadcastRequest('b', '/api/broadcast-cross-instance/unsubscribe', key, 'DELETE').catch(() => {})
+    }
+  })
+}
+
+/** Once Redis is back, a member's publishes reach the other server again, then arrive there in order, once.
+ *  Delivery is at-most-once until then, so the publisher repeats a probe. */
+async function expectDeliveryResumes(roomId: string) {
+  await retry(30_000, async () => {
+    await publish('a', roomId, 'probe')
+    expect(await received('b', roomId)).contains('probe')
+  })
+  for (const message of ['m2', 'm3', 'm4']) await publish('a', roomId, message)
+  await retry(10_000, async () => {
+    const after = await received('b', roomId)
+    expect(after.slice(after.lastIndexOf('probe') + 1)).deep.equal(['m2', 'm3', 'm4'])
+  })
+}
+
+function newId(label: string) {
+  return `${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+async function joinRoom(instance: Instance, roomId: string, name: string, departureTimeout?: number) {
+  const query = `&name=${name}${departureTimeout === undefined ? '' : `&departureTimeout=${departureTimeout}`}`
+  await retry(30_000, async () => {
+    expect(await request(instance, `/api/room-cross-instance/join?${query}`, roomId, 'POST')).deep.include({ ok: true })
+  })
+}
+
+async function publish(instance: Instance, roomId: string, message: unknown, retain = false) {
+  await request(instance, `/api/room-cross-instance/publish?retain=${retain}`, roomId, 'POST', message)
+}
+
+async function setMeta(
+  instance: Instance,
+  roomId: string,
+  attributes: Record<string, unknown>,
+  target: 'member' | 'room' = 'member',
+) {
+  await request(instance, `/api/room-cross-instance/meta?target=${target}`, roomId, 'POST', attributes)
+}
+
+async function received(instance: Instance, roomId: string): Promise<unknown[]> {
+  return (await request(instance, '/api/room-cross-instance/received', roomId)).received as unknown[]
+}
+
+async function broadcastReceived(instance: Instance, key: string): Promise<unknown[]> {
+  return (await broadcastRequest(instance, '/api/broadcast-cross-instance/received', key)).received as unknown[]
+}
+
+async function view(instance: Instance, roomId: string): Promise<RoomView> {
+  return (await request(instance, '/api/room-cross-instance/view', roomId)) as unknown as RoomView
+}
+
+async function leaveRoom(instances: Instance[], roomId: string) {
+  await Promise.allSettled(
+    instances.map((instance) => request(instance, '/api/room-cross-instance/leave', roomId, 'DELETE')),
+  )
+}
+
 function retry(timeout: number, assertion: () => Promise<void>): Promise<void> {
   return autoRetry(assertion, { timeout })
 }
 
 async function request(
-  instance: 'a' | 'b',
+  instance: Instance,
   pathname: string,
   resourceId: string,
   method: 'GET' | 'POST' | 'DELETE' = 'GET',
@@ -91,7 +258,7 @@ async function request(
 }
 
 async function broadcastRequest(
-  instance: 'a' | 'b',
+  instance: Instance,
   pathname: string,
   key: string,
   method: 'GET' | 'POST' | 'DELETE' = 'GET',
