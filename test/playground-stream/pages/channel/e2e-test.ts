@@ -809,8 +809,7 @@ function testChannel(isDev: boolean, inDocker = false) {
     await autoRetry(async () => {
       expect((await getResult<ChannelState>('#channel-state')).endedValuesReady).toBe(true)
     })
-    // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
-    const cdp = await page.context().newCDPSession(page.mainFrame().page())
+    const cdp = await newCDPSession()
     await autoRetry(async () => {
       await cdp.send('HeapProfiler.collectGarbage')
       await page.click('#channel-test-ended-values-check')
@@ -944,10 +943,14 @@ function countConnections() {
   }
 }
 
+function newCDPSession() {
+  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
+  return page.context().newCDPSession(page.mainFrame().page())
+}
+
 /** Slows the page's link to `bytesPerSecond` each way, as Chrome's network throttling does, WebSockets included. */
 async function throttleLink(bytesPerSecond: number) {
-  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
-  const cdp = await page.context().newCDPSession(page.mainFrame().page())
+  const cdp = await newCDPSession()
   await cdp.send('Network.enable')
   const emulate = (throughput: number) =>
     cdp.send('Network.emulateNetworkConditions', {
