@@ -62,6 +62,7 @@ type ChannelState = {
   oversize: { channelId: string; thrown: string[]; followUp: string; isClosed: boolean } | null
   heldBinary: number[][] | null
   unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
+  durationLimits: { withContext: string; close: string; ack: string } | null
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -780,6 +781,18 @@ function testChannel(isDev: boolean, inDocker = false) {
       const state = await getResult<ChannelState>('#channel-state')
       expect(state.unattachedFlood?.text.ChannelOverflowError).greaterThan(0)
       expect(state.unattachedFlood?.binary.ChannelOverflowError).greaterThan(0)
+    })
+  })
+
+  test('channel: a per-call idleTimeout or a close() timeout longer than a timer waits is refused, and the channel stays open', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-duration-limits')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      expect(state.durationLimits?.withContext).not.toBe('none')
+      expect(state.durationLimits?.close).not.toBe('none')
+      expect(state.durationLimits?.ack).toBe('ack:still-open')
     })
   })
 }

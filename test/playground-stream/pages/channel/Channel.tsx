@@ -1,7 +1,7 @@
 export { ChannelDemo }
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Abort as TelefuncAbort, abort, ConnectionError } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort, ConnectionError, withContext } from 'telefunc/client'
 import {
   onChannelInit,
   onChannelAbortTest,
@@ -141,6 +141,7 @@ type ChannelState = {
   oversize: { channelId: string; thrown: string[]; followUp: string; isClosed: boolean } | null
   heldBinary: number[][] | null
   unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
+  durationLimits: { withContext: string; close: string; ack: string } | null
 }
 
 const initialState: ChannelState = {
@@ -202,6 +203,7 @@ const initialState: ChannelState = {
   oversize: null,
   heldBinary: null,
   unattachedFlood: null,
+  durationLimits: null,
 }
 
 function timestamp() {
@@ -898,6 +900,25 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, unattachedFlood }))
   }, [])
 
+  const testDurationLimits = useCallback(async () => {
+    const thrown = (run: () => unknown) =>
+      Promise.resolve()
+        .then(run)
+        .then(
+          () => 'none',
+          (err: any) => err?.name ?? 'unknown',
+        )
+    const longest = 2 ** 31 - 1
+    const withContextThrown = await thrown(() =>
+      withContext(onChannelPerSendAck, { channel: { idleTimeout: longest + 1 } }),
+    )
+    const { channel } = await openChannel(onChannelPerSendAck)
+    const closeThrown = await thrown(() => channel.close({ timeout: longest + 1 }))
+    const ack = String(await channel.send('still-open', { ack: true }))
+    setChannelState((s) => ({ ...s, durationLimits: { withContext: withContextThrown, close: closeThrown, ack } }))
+    channel.close()
+  }, [])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -1170,6 +1191,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-cyan-800 text-white hover:bg-cyan-900"
           >
             Binary Sent Before Attach
+          </button>
+          <button
+            id="channel-test-duration-limits"
+            type="button"
+            onClick={testDurationLimits}
+            className="px-3 py-1.5 text-sm rounded bg-stone-700 text-white hover:bg-stone-800"
+          >
+            Durations Past 2^31 ms
           </button>
           <button
             id="channel-test-unattached-flood"
