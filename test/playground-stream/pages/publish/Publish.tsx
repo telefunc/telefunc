@@ -1,7 +1,19 @@
 export { Publish }
 
-import React, { useEffect, useState } from 'react'
-import { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient } from './Publish.telefunc'
+import React, { useEffect, useRef, useState } from 'react'
+import {
+  onTextBroadcast,
+  onBinaryBroadcastPair,
+  onBinaryBroadcast,
+  onBroadcastShieldClient,
+  onBroadcastServerListener,
+  onBroadcastOnOpenPublish,
+  onBroadcastAnswerOrder,
+  onBroadcastSelfAnswer,
+  onStaticPublishReceipts,
+  onBroadcastSelfUnsubscribe,
+  onBroadcastReconnect,
+} from './Publish.telefunc'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -22,6 +34,7 @@ function Publish() {
   })
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
+  const reconnectRef = useRef<Awaited<ReturnType<typeof onBroadcastReconnect>> | null>(null)
 
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
@@ -144,6 +157,139 @@ function Publish() {
         }}
       >
         Broadcast Shield
+      </button>
+      <h2>Server Listener After Page Unsubscribe</h2>
+
+      <button
+        id="test-broadcast-server-listener"
+        onClick={async () => {
+          setResult('')
+          const { room, getReceived } = await onBroadcastServerListener()
+          const off = room.subscribe(() => {})
+          const offBinary = room.subscribeBinary(() => {})
+          await new Promise<void>((resolve) => room.onOpen(resolve))
+          off()
+          offBinary()
+          await room.publish('after')
+          await room.publishBinary(new Uint8Array(3))
+          for (let poll = 0; poll < 50; poll++) {
+            const received = await getReceived()
+            setResult(JSON.stringify({ received }))
+            if (received.length >= 2) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+        }}
+      >
+        Server listener after page unsubscribe
+      </button>
+
+      <h2>onOpen Publish</h2>
+
+      <button
+        id="test-broadcast-on-open-publish"
+        onClick={async () => {
+          setResult('')
+          const room = await onBroadcastOnOpenPublish()
+          const received: string[] = []
+          room.subscribe((msg) => {
+            received.push(msg)
+            setResult(JSON.stringify({ received }))
+          })
+        }}
+      >
+        onOpen publishes
+      </button>
+
+      <h2>Listener Answers</h2>
+
+      <button
+        id="test-broadcast-answer-order"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onBroadcastAnswerOrder() }))
+        }}
+      >
+        Listener answers a message
+      </button>
+
+      <button
+        id="test-broadcast-self-answer"
+        onClick={async () => {
+          setResult('')
+          const { stop } = await onBroadcastSelfAnswer()
+          setResult(JSON.stringify({ answers: await stop() }))
+        }}
+      >
+        Listeners answer their own key
+      </button>
+
+      <h2>Static Publish Receipts</h2>
+
+      <button
+        id="test-broadcast-static-receipts"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onStaticPublishReceipts()))
+        }}
+      >
+        Broadcast.publish() receipts
+      </button>
+
+      <h2>Subscriber Unsubscribes Itself</h2>
+
+      <button
+        id="test-broadcast-self-unsubscribe"
+        onClick={async () => {
+          setResult('')
+          const { room, publish, getServerSeen } = await onBroadcastSelfUnsubscribe()
+          const pageSeen: string[] = []
+          const off = room.subscribe((msg) => {
+            pageSeen.push(`once:${msg}`)
+            off()
+          })
+          room.subscribe((msg) => {
+            pageSeen.push(`other:${msg}`)
+          })
+          await new Promise<void>((resolve) => room.onOpen(resolve))
+          await publish()
+          for (let poll = 0; poll < 50; poll++) {
+            const serverSeen = await getServerSeen()
+            setResult(JSON.stringify({ pageSeen, serverSeen }))
+            if (pageSeen.length >= 3 && serverSeen.length >= 3) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+        }}
+      >
+        Subscriber unsubscribes itself
+      </button>
+
+      <h2>Subscribe Across a Reconnect</h2>
+
+      <button
+        id="test-broadcast-reconnect-open"
+        onClick={async () => {
+          setResult('')
+          const opened = await onBroadcastReconnect()
+          reconnectRef.current = opened
+          opened.room.onOpen(() => setResult(JSON.stringify({ open: true, received: [] })))
+        }}
+      >
+        Open broadcast
+      </button>
+      <button
+        id="test-broadcast-reconnect-subscribe"
+        onClick={() => {
+          const received: string[] = []
+          reconnectRef.current!.room.subscribe((msg) => {
+            received.push(msg)
+            setResult(JSON.stringify({ open: true, received }))
+          })
+        }}
+      >
+        Subscribe
+      </button>
+      <button id="test-broadcast-reconnect-publish" onClick={() => reconnectRef.current!.publish('after-reconnect')}>
+        Server publishes
       </button>
     </div>
   )

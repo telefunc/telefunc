@@ -100,7 +100,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
 
   testRxjs()
 
-  testPublish()
+  testPublish(isDev)
 
   testRefIdentity()
 }
