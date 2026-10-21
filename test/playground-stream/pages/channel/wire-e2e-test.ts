@@ -2,7 +2,17 @@ export { testWire, testWireSmallReplay }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, runServerAction, cutWire, dropNextWebSocket } from '../../e2e-utils'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  runServerAction,
+  cutWire,
+  dropNextWebSocket,
+  holdNextSsePost,
+  refuseNextSsePost,
+  releaseHeldSsePosts,
+} from '../../e2e-utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
@@ -164,6 +174,41 @@ function testWire(isDev: boolean) {
         page.off('websocket', onWebSocket)
       }
     })
+  }
+
+  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse'])) {
+    for (const post of ['refuses', 'reads late'] as const) {
+      test(`channel: messages the page sends in an SSE POST the server ${post} arrive once and in order`, async () => {
+        await navigate(`${getServerUrl()}/channel`)
+        await page.click('#channel-test-upstream-open')
+        let channelId = ''
+        await autoRetry(async () => {
+          channelId = (await getResult<{ upstreamReconnectChannelId: string | null }>('#channel-state'))
+            .upstreamReconnectChannelId!
+          expect(channelId).not.toBe(null)
+        })
+        await page.click('#channel-test-upstream-send')
+        await autoRetry(async () => {
+          expect((await getCleanupState())[`upstream_${channelId}_receivedCount`]).toBe('1')
+        })
+        if (post === 'refuses') await refuseNextSsePost()
+        else await holdNextSsePost()
+        for (let i = 0; i < 3; i++) await page.click('#channel-test-upstream-send')
+        if (post === 'reads late') {
+          await autoRetry(async () => {
+            expect((await getCleanupState())[`upstream_${channelId}_receivedCount`]).toBe('4')
+          })
+          expect(await releaseHeldSsePosts()).toBe(1)
+        }
+        await page.click('#channel-test-upstream-send')
+        await autoRetry(async () => {
+          const ss = await getCleanupState()
+          expect(ss[`upstream_${channelId}_receivedCount`]).toBe('5')
+          expect(ss[`upstream_${channelId}_lastSeq`]).toBe('5')
+          expect(ss[`upstream_${channelId}_hasGap`]).toBe('false')
+        })
+      })
+    }
   }
 }
 
