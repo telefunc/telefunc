@@ -34,7 +34,11 @@ import {
   onStopReplacingMeta,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
+  onOpenSlowJoinRoom,
+  onGetSlowJoins,
+  onGetSlowJoinRoom,
   onCloseWhenEmpty,
+  onIsOpen,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -552,6 +556,42 @@ function Room() {
           })
         },
       )}
+
+      {scenario('join-races', 'Join races', 'A closed tab during a slow join', async () => {
+        const roomId = await createRoomId('join-races')
+        const room = await onOpenSlowJoinRoom(roomId)
+        const events: string[] = []
+        room.onJoin((member) => events.push(`join:${member.meta.name}`))
+        room.onLeave((member, cause) => events.push(`leave:${member.meta.name}:${cause.type}`))
+
+        // The test joins `Closer` slowly from another tab and closes the tab during the wait.
+        // On SSE the server holds the closed tab for reconnectTimeout (60 s), so `Closer` may join, then leave.
+        let settledAt: number | null = null
+        await pollUntil(async () => {
+          const joins = await onGetSlowJoins(roomId)
+          if (settledAt === null && joins.done.includes('Closer')) settledAt = Date.now()
+          const serverCount = (await onGetRoom(roomId)).count
+          return {
+            result: {
+              roomId,
+              closerJoining: joins.entered.includes('Closer'),
+              events,
+              count: room.count,
+              serverCount,
+              settled: settledAt !== null,
+            },
+            // A member admitted after its tab closed would show within a second of the guard's end.
+            done: settledAt !== null && Date.now() - settledAt > 1000 && room.count === 0 && serverCount === 0,
+          }
+        }, CLOSED_TAB_POLLS)
+      })}
+
+      {scenario('join-slowly', null, 'Join the room named in the URL, slowly', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const room = await onGetSlowJoinRoom(roomId)
+        keepReachable(room)
+        await room.join({ meta: { name: 'Closer', slow: true } })
+      })}
 
       {scenario(
         'close-handles',

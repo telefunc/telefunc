@@ -30,7 +30,11 @@ export {
   onStopReplacingMeta,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
+  onOpenSlowJoinRoom,
+  onGetSlowJoins,
+  onGetSlowJoinRoom,
   onCloseWhenEmpty,
+  onIsOpen,
 }
 
 import { Buffer } from 'node:buffer'
@@ -324,6 +328,34 @@ async function onGetGuardCalls(roomId: string) {
   return guardCalls.get(roomId) ?? []
 }
 
+const slowJoins = new Map<string, { entered: string[]; done: string[] }>()
+
+/** A join whose meta has `slow` waits 1 s in its guard; the names that entered the wait and that ended it are kept. */
+async function onOpenSlowJoinRoom(roomId: string) {
+  const room = await Room.get(roomId)
+  const joins = { entered: [] as string[], done: [] as string[] }
+  slowJoins.set(roomId, joins)
+  watchedRooms.set(roomId, room)
+  Room.guard(room, {
+    onBeforeJoin: async (member) => {
+      if (!member.meta.slow) return
+      joins.entered.push(member.meta.name as string)
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      joins.done.push(member.meta.name as string)
+    },
+  })
+  return room
+}
+
+/** The view `onOpenSlowJoinRoom()` guarded: a guard applies to the joins made through it. */
+async function onGetSlowJoinRoom(roomId: string) {
+  return watchedRooms.get(roomId) as Awaited<ReturnType<typeof onOpenSlowJoinRoom>>
+}
+
+async function onGetSlowJoins(roomId: string) {
+  return slowJoins.get(roomId)!
+}
+
 /** A server view closes the room once it is empty, the cleanup the Room docs show. */
 async function onCloseWhenEmpty(roomId: string) {
   const room = await Room.get(roomId)
@@ -331,4 +363,8 @@ async function onCloseWhenEmpty(roomId: string) {
   room.onEmpty(() => {
     void Room.close(roomId)
   })
+}
+
+async function onIsOpen(roomId: string) {
+  return (await Room.list({ prefix: roomId })).some((room) => room.id === roomId)
 }

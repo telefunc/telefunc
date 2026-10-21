@@ -445,4 +445,26 @@ function testRoom() {
       ])
     }, CLOSED_TAB_WAIT)
   })
+  test('room: a join whose tab closes while its guard waits leaves no member behind', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-join-races')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'), { timeout: 10_000 })
+    const context = await page.context().browser()!.newContext()
+    const other = await context.newPage()
+    await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+    await other.click('#test-room-join-slowly')
+    await autoRetry(async () => expect(await getResult('#room-result')).deep.include({ closerJoining: true }))
+    await context.close()
+    await autoRetry(async () => {
+      const r = await getResult<{
+        events: string[]
+        count: number
+        serverCount: number
+        settled: boolean
+      }>('#room-result')
+      expect(r).deep.include({ settled: true, count: 0, serverCount: 0 })
+      // Shown joining at most once, then leaving once.
+      expect(r.events).to.be.deep.oneOf([[], ['join:Closer', 'leave:Closer:disconnected']])
+    }, CLOSED_TAB_WAIT)
+  })
 }
