@@ -6,6 +6,7 @@ import type { Uplink } from './Uplink.js'
 
 /** A page's downlink: the credit its channels granted the server, and the rate the server's messages arrive at. */
 class Downlink {
+  private readonly uplink: Uplink
   /** The credit the channels on this wire granted the peer that reached it. */
   private grantedBytes = 0
   private readonly grants = new Fifo<{ bytes: number; at: number }>()
@@ -18,7 +19,9 @@ class Downlink {
   /** The span being measured started as the one before it ended, not after a pause. */
   private deliveryGoesOn = false
 
-  constructor(private readonly uplink: Uplink) {}
+  constructor(uplink: Uplink) {
+    this.uplink = uplink
+  }
 
   /** The channels on this wire granted the peer `bytes` more credit: it reaches it once what the uplink holds drained. */
   granted(bytes: number): void {
