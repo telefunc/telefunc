@@ -16,6 +16,7 @@ import {
   heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
+  withNetworkConditions,
 } from '../../e2e-utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
@@ -171,40 +172,21 @@ function testWire(isDev: boolean) {
       }
       page.on('response', onResponse)
       page.on('websocket', onWebSocket)
-      // test-e2e's `page` is a proxy, which newCDPSession() doesn't take.
-      const cdp = await page.context().newCDPSession(
-        page
-          .context()
-          .pages()
-          .find((p) => p.url() === page.url())!,
-      )
       try {
-        await cdp.send('Network.enable')
         // 1 Mbit/s each way.
-        await cdp.send('Network.emulateNetworkConditions', {
-          offline: false,
-          latency: 0,
-          downloadThroughput: 125_000,
-          uploadThroughput: 125_000,
+        await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
+          await page.click('#wire-large')
+          await autoRetry(
+            async () => {
+              const { large } = await getResult<WireState>('#wire-state')
+              expect(large).toBe(1_000_000)
+            },
+            { timeout: 30_000 },
+          )
+          expect(sseStreams).toBe(1)
+          expect(webSockets).toBe(1)
         })
-        await page.click('#wire-large')
-        await autoRetry(
-          async () => {
-            const { large } = await getResult<WireState>('#wire-state')
-            expect(large).toBe(1_000_000)
-          },
-          { timeout: 30_000 },
-        )
-        expect(sseStreams).toBe(1)
-        expect(webSockets).toBe(1)
       } finally {
-        await cdp.send('Network.emulateNetworkConditions', {
-          offline: false,
-          latency: 0,
-          downloadThroughput: -1,
-          uploadThroughput: -1,
-        })
-        await cdp.detach()
         page.off('response', onResponse)
         page.off('websocket', onWebSocket)
       }

@@ -1,7 +1,7 @@
 export { testBacklog }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, withNetworkConditions } from '../../e2e-utils'
 
 type BacklogState = { channelId: string | null; received: number; outOfOrder: number }
 type Run = { sent: number; refused: string[] }
@@ -43,22 +43,10 @@ function testBacklog() {
 
   test('backlog: sends nobody awaits to a page that stops reading are refused with ChannelOverflowError, and what was taken arrives in order once it reads', async () => {
     const channelId = await openBacklog()
-    const cdp = await page.context().newCDPSession(page.mainFrame().page())
-    await cdp.send('Network.enable')
     // A page that reads nothing: what the server sends waits on the way.
-    await cdp.send('Network.emulateNetworkConditions', {
-      offline: false,
-      latency: 0,
-      downloadThroughput: 1,
-      uploadThroughput: -1,
-    })
-    await page.click('#backlog-run-unawaited')
-    const { sent, refused } = await getRun(channelId)
-    await cdp.send('Network.emulateNetworkConditions', {
-      offline: false,
-      latency: 0,
-      downloadThroughput: -1,
-      uploadThroughput: -1,
+    const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
+      await page.click('#backlog-run-unawaited')
+      return getRun(channelId)
     })
     expect(refused.length).greaterThan(0)
     expect(new Set(refused)).deep.equal(new Set(['ChannelOverflowError']))
@@ -72,6 +60,5 @@ function testBacklog() {
       },
       { timeout: 30_000 },
     )
-    await cdp.detach()
   })
 }

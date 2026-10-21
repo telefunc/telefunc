@@ -17,6 +17,7 @@ export {
   stopProxy,
   startProxy,
   countConnections,
+  withNetworkConditions,
 }
 
 import { page, getServerUrl } from '@brillout/test-e2e'
@@ -46,6 +47,25 @@ function stopProxy() {
 
 function startProxy() {
   execSync('docker compose start proxy', { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+/** In bytes per second each way, -1 for none. */
+type NetworkConditions = { downloadThroughput: number; uploadThroughput: number }
+
+/** Runs `run` with the page's link throttled as Chrome's DevTools throttle it, WebSockets included; lifted after, however `run` ends. */
+async function withNetworkConditions<T>(conditions: NetworkConditions, run: () => Promise<T>): Promise<T> {
+  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
+  const cdp = await page.context().newCDPSession(page.mainFrame().page())
+  const emulate = ({ downloadThroughput, uploadThroughput }: NetworkConditions) =>
+    cdp.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput, uploadThroughput })
+  try {
+    await cdp.send('Network.enable')
+    await emulate(conditions)
+    return await run()
+  } finally {
+    await emulate({ downloadThroughput: -1, uploadThroughput: -1 })
+    await cdp.detach()
+  }
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))

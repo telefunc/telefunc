@@ -10,6 +10,7 @@ import {
   stopProxy,
   startProxy,
   countConnections,
+  withNetworkConditions,
 } from '../../e2e-utils'
 
 type ChannelState = {
@@ -831,8 +832,8 @@ function testChannel(isDev: boolean, inDocker = false) {
     test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
       await navigate(`${getServerUrl()}/channel`)
       const connections = countConnections()
-      const link = await throttleLink(125_000)
-      try {
+      // 1 Mbit/s each way.
+      await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
         await page.click('#channel-test-slow-link')
         await autoRetry(
           async () => {
@@ -840,9 +841,7 @@ function testChannel(isDev: boolean, inDocker = false) {
           },
           { timeout: 40_000 },
         )
-      } finally {
-        await link.restore()
-      }
+      })
       expect(connections.stop()).toBe(1)
     })
   }
@@ -937,26 +936,6 @@ function testChannel(isDev: boolean, inDocker = false) {
 function newCDPSession() {
   // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
   return page.context().newCDPSession(page.mainFrame().page())
-}
-
-/** Slows the page's link to `bytesPerSecond` each way, as Chrome's network throttling does, WebSockets included. */
-async function throttleLink(bytesPerSecond: number) {
-  const cdp = await newCDPSession()
-  await cdp.send('Network.enable')
-  const emulate = (throughput: number) =>
-    cdp.send('Network.emulateNetworkConditions', {
-      offline: false,
-      latency: 0,
-      downloadThroughput: throughput,
-      uploadThroughput: throughput,
-    })
-  await emulate(bytesPerSecond)
-  return {
-    async restore() {
-      await emulate(-1)
-      await cdp.detach()
-    },
-  }
 }
 
 function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {
