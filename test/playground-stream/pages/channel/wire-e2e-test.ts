@@ -1,4 +1,4 @@
-export { testWire, testWireSmallReplay }
+export { testWire, testWireSmallReplay, testWireSlowPing }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
@@ -29,6 +29,9 @@ type WireState = {
   upload: { channelId: string; sent: number } | null
 }
 
+// The end card's channel sends these before the server ends it.
+const sentBefore = ['m0', 'm1', 'm2']
+
 // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
 function testWire(isDev: boolean) {
   if (isDev) return
@@ -48,8 +51,6 @@ function testWire(isDev: boolean) {
     })
   })
 
-  // The server sends these before it ends the channel.
-  const sentBefore = ['m0', 'm1', 'm2']
   const ends = [
     { by: 'server', dropped: 'after' },
     { by: 'server', dropped: 'before' },
@@ -349,4 +350,36 @@ function testWireSmallReplay() {
       })
     })
   }
+}
+
+// A server pinging every 7 s outlives, by its 14 s ping deadline, a WebSocket the page gives up at its 10 s RECONCILE deadline.
+function testWireSlowPing() {
+  test("channel: a channel keeps delivering after two drops in a row, the first reconnect's answer lost, once the server closes that dead WebSocket", async () => {
+    // Port in this machine's range for e2e runs; the proxy lives in the test process.
+    const proxy = await startBlackHoleProxy(getServerUrl(), 21151)
+    try {
+      await navigate(`${proxy.url}/channel`)
+      await page.click('#wire-end-open')
+      let channelId = ''
+      await autoRetry(async () => {
+        const { end } = await getResult<WireState>('#wire-state')
+        expect((await getCleanupState())[`wireEnd_${end!.channelId}_onOpen`]).toBe('true')
+        channelId = end!.channelId
+      })
+      // The reconnect's RECONCILED never reaches the page, which gives that WebSocket up and reconnects again.
+      proxy.muteNextWebSocket()
+      await cutWire()
+      // Only then does the server's ping deadline close it.
+      await autoRetry(() => expect(proxy.openedBeforeMutedClosed()).not.toBe(null))
+      expect(proxy.openedBeforeMutedClosed()).toBe(1)
+      await runServerAction(`wireEnd_${channelId}_close`)
+      await autoRetry(async () => {
+        const { end } = await getResult<WireState>('#wire-state')
+        expect(end!.received).deep.equal([...sentBefore, 'onClose:none'])
+        expect((await getCleanupState())[`wireEnd_${channelId}_close`]).toBe('0')
+      })
+    } finally {
+      await proxy.close()
+    }
+  })
 }
