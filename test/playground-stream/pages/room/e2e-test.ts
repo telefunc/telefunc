@@ -571,4 +571,18 @@ function testRoomLongWaits() {
     )
     expect(viewRoomId).match(/^e2e-hiccup-view:/)
   })
+
+  test('room: a room of 100,000 members streams its roster to a page, with a join and a leave landing meanwhile, and the server answers the page promptly through a heartbeat', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-scale')
+    await autoRetry(
+      async () => {
+        const r = await getResult<{ roster: unknown; pings: number; maxPingMs: number }>('#room-result')
+        expect(r.roster).deep.equal({ count: 100_000, listed: 100_000, late: true, m0: false })
+        expect(r.pings).greaterThan(100)
+        expect(r.maxPingMs).lessThan(1_000)
+      },
+      { timeout: 110_000 },
+    )
+  })
 }

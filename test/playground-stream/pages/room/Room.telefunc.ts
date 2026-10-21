@@ -31,6 +31,9 @@ export {
   onEndBackendSubscriptions,
   onListParticipantNames,
   onCreateRoomClosingAfter,
+  onSeedRoom,
+  onSeedChurn,
+  onPing,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -371,6 +374,33 @@ async function onListParticipantNames(roomId: string) {
 /** A room that closes `emptyTimeout` ms after nothing holds it, if nobody joined it. */
 async function onCreateRoomClosingAfter(roomId: string, emptyTimeout: number) {
   await Room.create(roomId, { emptyTimeout })
+}
+
+const seeded = new Map<string, LocalParticipant[]>()
+
+/** `count` server members join a new room, a thousand at a time. */
+async function onSeedRoom(roomId: string, count: number) {
+  const room = await Room.create(roomId)
+  const members: LocalParticipant[] = []
+  seeded.set(roomId, members)
+  while (members.length < count) {
+    const batch = Math.min(1_000, count - members.length)
+    const base = members.length
+    members.push(
+      ...(await Promise.all(Array.from({ length: batch }, (_, i) => room.join({ meta: { name: `m${base + i}` } })))),
+    )
+  }
+}
+
+/** One member joins and the first seeded one leaves. */
+async function onSeedChurn(roomId: string) {
+  const members = seeded.get(roomId)!
+  members.push(await (await Room.get(roomId)).join({ meta: { name: 'late' } }))
+  await members[0]!.leave()
+}
+
+async function onPing() {
+  return 'pong'
 }
 
 async function onAnnounce(roomId: string, data: unknown) {

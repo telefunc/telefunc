@@ -35,6 +35,9 @@ import {
   onEndBackendSubscriptions,
   onListParticipantNames,
   onCreateRoomClosingAfter,
+  onSeedRoom,
+  onSeedChurn,
+  onPing,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -987,6 +990,43 @@ function Room() {
           JSON.stringify({
             viewRoom: { listed: await onListRooms(viewRoomId), isClosed: view.isClosed },
             joinRoom: { firstJoin, listed: await onListParticipantNames(joinRoomId), count: joinView.count },
+          }),
+        )
+      })}
+
+      {scenario('scale', null, 'A room of 100,000 members', async () => {
+        const roomId = `e2e-scale:${crypto.randomUUID()}`
+        const seedStart = performance.now()
+        await onSeedRoom(roomId, 100_000)
+        const seedMs = Math.round(performance.now() - seedStart)
+        const view = await onGetRoom(roomId)
+        await onSeedChurn(roomId)
+        let names: string[] = []
+        for (let poll = 0; poll < 600 && !names.includes('late'); poll++) {
+          await new Promise((r) => setTimeout(r, 100))
+          names = (await view.getParticipants()).map((member) => member.meta.name as string)
+        }
+        const roster = {
+          count: view.count,
+          listed: new Set(names).size,
+          late: names.includes('late'),
+          m0: names.includes('m0'),
+        }
+        // Through the room's next 30 s heartbeat.
+        const pings: number[] = []
+        const pingUntil = performance.now() + 32_000
+        while (performance.now() < pingUntil) {
+          const start = performance.now()
+          await onPing()
+          pings.push(performance.now() - start)
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        setResult(
+          JSON.stringify({
+            roster,
+            pings: pings.length,
+            maxPingMs: Math.round(Math.max(...pings)),
+            seedMs,
           }),
         )
       })}
