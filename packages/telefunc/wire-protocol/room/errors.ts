@@ -36,7 +36,7 @@ class RoomError extends Error {
 }
 
 function isRoomError(thing: unknown): thing is RoomError {
-  return thing instanceof RoomError || (typeof thing === 'object' && thing !== null && roomErrorBrand in thing)
+  return typeof thing === 'object' && thing !== null && roomErrorBrand in thing
 }
 
 function roomClosedError(roomId: string): RoomError {
