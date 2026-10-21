@@ -87,6 +87,18 @@ function testPublish() {
     })
   })
 
+  test("broadcast: each binary listener gets bytes of its own, so one that writes into them or transfers them leaves the next one's and the page's intact", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-binary-broadcast-own-bytes')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: number[][]; seen: number[][]; keySeen: number[][] }>('#publish-result')
+      expect(result.received).deep.equal([[1, 2, 3, 4]])
+      expect(result.seen).deep.equal([[1, 2, 3, 4]])
+      expect(result.keySeen).deep.equal([[1, 2, 3, 4]])
+    })
+  })
+
   test('broadcast: shield validates client→server publishes', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-shield')

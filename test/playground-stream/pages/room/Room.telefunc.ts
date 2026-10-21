@@ -19,8 +19,12 @@ export {
   onKick,
   onKickByIdentity,
   onCloseRoom,
+  onWatchRoomBinary,
+  onGetWatchedBinary,
+  onPublishBufferAsServer,
 }
 
+import { Buffer } from 'node:buffer'
 import { Room, Abort } from 'telefunc'
 
 async function onCreateRoom(roomId: string) {
@@ -149,4 +153,26 @@ async function onKickByIdentity(roomId: string, identity: string) {
 
 async function onCloseRoom(roomId: string) {
   await Room.close(roomId)
+}
+
+/** Two server listeners on one room view: the first writes into the bytes it gets, the second records what it got. */
+const watchedBinary = new Map<string, number[][]>()
+
+async function onWatchRoomBinary(roomId: string) {
+  const room = await Room.get(roomId)
+  const seen: number[][] = []
+  watchedBinary.set(roomId, seen)
+  watchedRooms.set(roomId, room)
+  room.subscribeBinary((data) => data.fill(0))
+  room.subscribeBinary((data) => seen.push([...data]))
+  return room
+}
+
+async function onGetWatchedBinary(roomId: string) {
+  return watchedBinary.get(roomId) ?? []
+}
+
+async function onPublishBufferAsServer(roomId: string, bytes: number[]) {
+  const me = await Room.join(roomId, { meta: { name: 'Server' } })
+  await me.publishBinary(Buffer.from(bytes), { retain: true })
 }

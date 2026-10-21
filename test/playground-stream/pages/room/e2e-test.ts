@@ -114,6 +114,21 @@ function testRoom() {
     expect(result.defaultOnly).deep.equal([1, 2, 3])
     expect(result.camReceivers).greaterThanOrEqual(1)
   })
+  testRoomScenario<{ seen: number[][]; serverSeen: number[][]; lateSeen: number[][] }>(
+    'own-bytes',
+    "room: each binary listener gets bytes of its own, so one that writes into them or transfers them leaves the next one's, a late subscriber's and the page's intact",
+    (r) => {
+      expect(r.seen).deep.equal([
+        [1, 2, 3, 4],
+        [5, 6, 7, 8],
+      ])
+      expect(r.serverSeen).deep.equal([
+        [1, 2, 3, 4],
+        [5, 6, 7, 8],
+      ])
+      expect(r.lateSeen).deep.equal([[5, 6, 7, 8]]) // the retained frame, as published
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',

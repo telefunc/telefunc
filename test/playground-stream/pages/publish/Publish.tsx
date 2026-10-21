@@ -2,7 +2,13 @@ export { Publish }
 
 import React, { useEffect, useState } from 'react'
 import { keepReachable } from '../keepReachable'
-import { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient } from './Publish.telefunc'
+import {
+  onTextBroadcast,
+  onBinaryBroadcastPair,
+  onBinaryBroadcast,
+  onBroadcastShieldClient,
+  onBinaryBroadcastOwnBytes,
+} from './Publish.telefunc'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -108,6 +114,31 @@ function Publish() {
         }}
       >
         Server broadcasts 5 binary frames
+      </button>
+
+      <h2>Bytes of Its Own</h2>
+
+      <button
+        id="test-binary-broadcast-own-bytes"
+        onClick={async () => {
+          setResult('')
+          const { room, getSeen } = await onBinaryBroadcastOwnBytes()
+          const releaseRoom = keepReachable(room)
+          // The first listener detaches its buffer, as handing it to a worker does.
+          room.subscribeBinary((data) => structuredClone(data.buffer, { transfer: [data.buffer] }))
+          const received: number[][] = []
+          room.subscribeBinary((data) => received.push([...data]))
+          await room.publish({ start: true })
+          for (let poll = 0; poll < 50; poll++) {
+            const { seen, keySeen } = await getSeen()
+            setResult(JSON.stringify({ received, seen, keySeen }))
+            if (received.length >= 1 && seen.length >= 1 && keySeen.length >= 1) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+          releaseRoom()
+        }}
+      >
+        Listeners that write into or transfer their bytes
       </button>
 
       <h2>Broadcast Shield Validation</h2>

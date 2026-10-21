@@ -1,6 +1,7 @@
-export { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient }
+export { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient, onBinaryBroadcastOwnBytes }
 
-import { BroadcastChannel } from 'telefunc'
+import { Buffer } from 'node:buffer'
+import { Broadcast, BroadcastChannel } from 'telefunc'
 
 type TextMsg = { text: string; from: string }
 
@@ -66,4 +67,26 @@ async function onBinaryBroadcast() {
     }
   })
   return room
+}
+
+/** On the page's `start`, the server publishes a Node Buffer. On the channel and on the key, the first server listener
+ *  writes into the bytes it gets and the second records them. */
+async function onBinaryBroadcastOwnBytes() {
+  const key = `room:own-bytes-test:${crypto.randomUUID()}`
+  const room = new BroadcastChannel<{ start: true }>({ key })
+  const seen: number[][] = []
+  room.subscribeBinary((data) => data.fill(0))
+  room.subscribeBinary((data) => seen.push([...data]))
+  const keySeen: number[][] = []
+  const unsubscribes = [
+    Broadcast.subscribeBinary(key, (data) => data.fill(0)),
+    Broadcast.subscribeBinary(key, (data) => keySeen.push([...data])),
+  ]
+  room.subscribe(async () => {
+    await room.publishBinary(Buffer.from([1, 2, 3, 4]))
+  })
+  room.onClose(() => {
+    for (const unsubscribe of unsubscribes) unsubscribe()
+  })
+  return { room, getSeen: async () => ({ seen, keySeen }) }
 }

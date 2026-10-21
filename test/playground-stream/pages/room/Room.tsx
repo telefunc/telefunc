@@ -23,6 +23,9 @@ import {
   onKick,
   onKickByIdentity,
   onCloseRoom,
+  onWatchRoomBinary,
+  onGetWatchedBinary,
+  onPublishBufferAsServer,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -275,6 +278,30 @@ function Room() {
         )
 
         await pollUntil(() => ({ result: { okAck, badError, received }, done: received.length >= 1 }))
+      })}
+
+      {scenario('own-bytes', 'Bytes of its own', 'Listeners that write into or transfer their bytes', async () => {
+        const roomId = await createRoomId('own-bytes')
+        const room = await onWatchRoomBinary(roomId)
+        const me = await room.join({ meta: { name: 'Pub' } })
+        // The first listener detaches its buffer, as handing it to a worker does.
+        room.subscribeBinary((data) => structuredClone(data.buffer, { transfer: [data.buffer] }))
+        const seen: number[][] = []
+        room.subscribeBinary((data) => seen.push([...data]))
+
+        await me.publishBinary(new Uint8Array([1, 2, 3, 4]))
+        await onPublishBufferAsServer(roomId, [5, 6, 7, 8])
+        const late = await onGetRoom(roomId)
+        const lateSeen: number[][] = []
+        late.subscribeBinary((data) => lateSeen.push([...data]))
+
+        await pollUntil(async () => {
+          const serverSeen = await onGetWatchedBinary(roomId)
+          return {
+            result: { seen, serverSeen, lateSeen },
+            done: seen.length >= 2 && serverSeen.length >= 2 && lateSeen.length >= 1,
+          }
+        })
       })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {
