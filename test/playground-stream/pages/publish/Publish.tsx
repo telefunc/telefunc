@@ -13,6 +13,11 @@ import {
   onBroadcastAnswers,
   onBroadcastAnsweringLoop,
   onBroadcastWhileEstablishing,
+  onSubscribeThrows,
+  onChatLeaveOnClose,
+  onGetChatWatched,
+  onServerBroadcastChecks,
+  onBroadcastErrors,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -252,6 +257,62 @@ function Publish() {
         }}
       >
         Broadcast Shield
+      </button>
+
+      <h2>Subscribe that throws</h2>
+
+      <button
+        id="test-subscribe-throws"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onSubscribeThrows()))
+        }}
+      >
+        Subscribe refused by the store
+      </button>
+
+      <h2>Leave message from onClose</h2>
+
+      <button
+        id="test-chat-leave-on-close"
+        onClick={async () => {
+          setResult('')
+          const { key, chat } = await onChatLeaveOnClose()
+          await new Promise<void>((resolve) => chat.onOpen(resolve))
+          await chat.close()
+          for (let poll = 0; poll < 50; poll++) {
+            const received = await onGetChatWatched(key)
+            setResult(JSON.stringify({ received }))
+            if (received.length > 0) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+        }}
+      >
+        Close a chat channel
+      </button>
+
+      <h2>Server-side subscriptions</h2>
+
+      <button
+        id="test-server-broadcast-checks"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onServerBroadcastChecks()))
+        }}
+      >
+        Abort, receivers, unsubscribe
+      </button>
+
+      <h2>Failing subscribers and publishes</h2>
+
+      <button
+        id="test-broadcast-errors"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastErrors()))
+        }}
+      >
+        Subscribers throw, the store fails
       </button>
     </div>
   )

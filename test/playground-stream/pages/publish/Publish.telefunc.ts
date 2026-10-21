@@ -9,10 +9,16 @@ export {
   onBroadcastAnswers,
   onBroadcastAnsweringLoop,
   onBroadcastWhileEstablishing,
+  onSubscribeThrows,
+  onChatLeaveOnClose,
+  onGetChatWatched,
+  onServerBroadcastChecks,
+  onBroadcastErrors,
 }
 
 import { Buffer } from 'node:buffer'
-import { Broadcast, BroadcastChannel } from 'telefunc'
+import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
+import { addBackendFault, pendingBackendFaults } from '../../failing-backend'
 
 type TextMsg = { text: string; from: string }
 
@@ -193,4 +199,116 @@ async function onBroadcastWhileEstablishing() {
   await new Promise((resolve) => setTimeout(resolve, 0))
   await Promise.all([busy.close(), room.close()])
   return { outcomes, seen }
+}
+
+/** The store refuses the first subscribe on this key (a test asks it to, see `failBackend()`). */
+async function onSubscribeThrows() {
+  const channel = new BroadcastChannel<{ n: number }>({ key: `room:subscribe-throws:${crypto.randomUUID()}` })
+  const seen: string[] = []
+  let thrown: string | null = null
+  try {
+    channel.subscribe((msg) => seen.push(`first:${msg.n}`))
+  } catch (err) {
+    thrown = (err as Error).message
+  }
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  channel.subscribe((msg) => {
+    seen.push(`second:${msg.n}`)
+    resolve()
+  })
+  await channel.publish({ n: 1 })
+  await delivered
+  return { thrown, seen }
+}
+
+const chatWatched = new Map<string, { received: string[]; unsubscribe(): void }>()
+
+/** The documented chat pattern: a page's channel says it left from its onClose. */
+async function onChatLeaveOnClose() {
+  const key = `room:chat-leave:${crypto.randomUUID()}`
+  const received: string[] = []
+  chatWatched.set(key, { received, unsubscribe: Broadcast.subscribe<string>(key, (msg) => received.push(msg)) })
+  const chat = new BroadcastChannel<string>({ key })
+  chat.onClose(() => void chat.publish('left'))
+  return { key, chat }
+}
+
+async function onGetChatWatched(key: string) {
+  const watched = chatWatched.get(key)!
+  if (watched.received.length > 0) watched.unsubscribe()
+  return watched.received
+}
+
+async function onServerBroadcastChecks() {
+  const key = `room:server-checks:${crypto.randomUUID()}`
+
+  const aborted = new BroadcastChannel({ key })
+  aborted.abort()
+  aborted.subscribe(() => {})
+  aborted.subscribeBinary(() => {})
+  const afterAbort = [
+    (await Broadcast.publish(key, 'after-abort')).receivers,
+    (await Broadcast.publishBinary(key, new Uint8Array([1]))).receivers,
+  ]
+
+  const received: string[] = []
+  const unsubscribeLeaving = Broadcast.subscribe<string>(`${key}:leaving`, (msg) => {
+    received.push(msg)
+    unsubscribeLeaving()
+  })
+  const unsubscribeJoining = Broadcast.subscribe<string>(`${key}:joining`, (msg) => {
+    received.push(msg)
+    unsubscribeJoining()
+    Broadcast.subscribe(`${key}:joining`, () => {})
+  })
+  const duringDelivery = [
+    (await Broadcast.publish(`${key}:leaving`, 'leaving')).receivers,
+    (await Broadcast.publish(`${key}:joining`, 'joining')).receivers,
+  ]
+
+  const statically: string[] = []
+  const unsubscribe = Broadcast.subscribe<string>(`${key}:static`, (msg) => statically.push(msg))
+  await Broadcast.publish(`${key}:static`, 'first')
+  unsubscribe()
+  await Broadcast.publish(`${key}:static`, 'second')
+
+  return { afterAbort, received, duringDelivery, statically }
+}
+
+let bugs: string[] | null = null
+onBug((err) => bugs?.push((err as Error).message))
+
+/** Subscribers that throw or reject, and un-awaited publishes the store fails. */
+async function onBroadcastErrors() {
+  bugs = []
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => void unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  const key = `room:listener-errors:${crypto.randomUUID()}`
+  const channel = new BroadcastChannel<string>({ key })
+  channel.subscribe(() => {
+    throw new Error('broadcast-listener-bug: thrown')
+  })
+  channel.subscribe(async () => {
+    throw new Error('broadcast-listener-bug: rejected')
+  })
+  const seen: string[] = []
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  channel.subscribe((msg) => {
+    seen.push(msg)
+    if (msg === 'b') resolve()
+  })
+  await channel.publish('a')
+  await channel.publish('b')
+  await delivered
+
+  addBackendFault({ op: 'publish', key, times: 2 })
+  channel.publish('lost')
+  Broadcast.publish(key, 'lost')
+  // Node emits 'unhandledRejection' once the microtask queue drains, before the next macrotask.
+  await new Promise(setImmediate)
+  process.off('unhandledRejection', onUnhandled)
+  const reported = bugs.sort()
+  bugs = null
+  return { seen, reported, unhandled: unhandled.length, storeFailedBoth: pendingBackendFaults() === 0 }
 }

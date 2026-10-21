@@ -1,6 +1,7 @@
-export { testRoom, testRoomAckTimeout, testRoomSmallBuffer }
+export { testRoom, testRoomAckTimeout, testRoomSmallBuffer, testRoomLongWaits }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import type { Response, WebSocket } from 'playwright-chromium'
+import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc } from '../../e2e-utils'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
 const CLOSED_TAB_WAIT = { timeout: 90_000 }
@@ -529,6 +530,308 @@ function testRoom() {
       CLOSED_TAB_WAIT,
     )
   })
+  testRoomScenario<{ calls: string[] }>(
+    'listeners',
+    'room: a callback registered twice is called once per registration, in registration order, and each unlisten removes only its own',
+    (r) => {
+      expect(r.calls).deep.equal(['a', 'b', 'a', 'b', 'a', 'b'])
+    },
+  )
+  testRoomScenario<{
+    text: string[]
+    frames: Array<[string | null, number, string]>
+    later: string[]
+    server: { text: string[]; frames: number[] }
+  }>(
+    'retain-late',
+    'room: a late subscriber, on the page or the server, gets each retained message once before the live ones, and none of a member who left',
+    (r) => {
+      expect(r.text).deep.equal(['pinned', 'live', 'live-2'])
+      expect(r.frames).deep.equal([
+        ['cam', 1, 'A'],
+        ['cam', 4, 'A'],
+      ])
+      expect(r.later).deep.equal(['live-2'])
+      expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4] })
+    },
+  )
+  testRoomScenario<{
+    events: string[]
+    handedEvents: string[]
+    memberEvents: string[]
+    counts: number[]
+    empty: boolean
+    alone: { cause: { type: string } | null; closed: boolean }
+  }>(
+    'hidden',
+    'room: a hidden member is not counted, its meta and leave reach only the page handed it, and it holds no room open',
+    (r) => {
+      expect(r.counts).deep.equal([1, 1])
+      expect(r.events).deep.equal(['join:P', 'leave:P', 'join:Q'])
+      expect(r.handedEvents.filter((e) => e.includes('Bot'))).deep.equal([])
+      expect(r.memberEvents).deep.equal(['update:Bot2', 'leave:left'])
+      expect(r.empty).toBe(true)
+      expect(r.alone).deep.equal({ cause: { type: 'closed' }, closed: true })
+    },
+  )
+  test('room: React reads a room through useSyncExternalStore with its methods as they are; a member returned with a closed room has left', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-proxy')
+    await autoRetry(async () => {
+      const r = await getResult<{
+        sameMethods: boolean
+        detachedCount: number
+        causes: unknown[]
+        closedIsClosed: boolean
+      }>('#room-result')
+      expect(r.sameMethods).toBe(true)
+      expect(r.detachedCount).greaterThanOrEqual(1)
+      expect(r.causes).deep.equal([{ type: 'closed' }])
+      expect(r.closedIsClosed).toBe(true)
+      expect(await page.textContent('#room-live-count')).toBe('2')
+    })
+  })
+  test('room: a listener that fails or a RoomError that escapes app code is reported as a bug, and an un-awaited write that fails leaves no unhandled rejection', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    const consoleErrors: string[] = []
+    const onConsole = (msg: { type(): string; text(): string }) => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text())
+    }
+    const pageErrors: string[] = []
+    const onPageError = (err: Error) => void pageErrors.push(err.message)
+    page.on('console', onConsole)
+    page.on('pageerror', onPageError)
+    try {
+      await page.click('#test-room-errors')
+      await autoRetry(async () => {
+        const r = await getResult<{
+          awaited: string | null
+          server: { reported: string[]; unhandled: number; awaited: string | null }
+        }>('#room-result')
+        expect(r.awaited).toBe('Participant left the room')
+        expect(r.server).deep.equal({
+          reported: [
+            'room-listener-bug: Participant left the room',
+            'room-listener-bug: async listen',
+            'room-listener-bug: async onJoin',
+            'room-listener-bug: async onJoin',
+            'room-listener-bug: async onJoin',
+          ],
+          unhandled: 0,
+          awaited: 'Participant left the room',
+        })
+        const reported = consoleErrors.filter((text) => text.includes('room-listener-bug'))
+        expect(reported.map((text) => text.split('\n')[0])).deep.equal([
+          '[telefunc:room-error] Error: room-listener-bug: async subscribe',
+        ])
+        expect(pageErrors).deep.equal([])
+      })
+    } finally {
+      page.off('console', onConsole)
+      page.off('pageerror', onPageError)
+    }
+  })
+  testRoomScenario<{
+    inOrder: number
+    defaultTrack: number[]
+    demand: Array<[string | null, boolean]>
+    wanted: number
+    otherOwn: Array<[string, boolean]>
+    tooMany: string | null
+  }>(
+    'tracks',
+    "room: each of 1,000 named tracks reaches its subscriber in order, onDemand follows the wants, and a selfDelivery:false member's own side is no demand",
+    (r) => {
+      expect(r.inOrder).toBe(1_000)
+      expect(r.defaultTrack).deep.equal([7])
+      expect(r.demand.filter(([track]) => track !== null)).deep.equal([
+        ['t0', true],
+        ['t999', true],
+        ['t0', false],
+      ])
+      expect(r.demand.filter(([track]) => track === null)).deep.equal([[null, true]])
+      expect(r.wanted).toBe(1_001)
+      expect(r.otherOwn).deep.equal([['own', true]])
+      expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
+    },
+  )
+  test('room: a page back from offline gets what its room sent meanwhile, in order, and the leaves, kick and close that happened while it was away, with their causes', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-away')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-away:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`roomAway_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomAway_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        roomId,
+        messages: ['m1', 'm2', 'm3'],
+        leaves: ['Gone:left', 'Me:removed'],
+        topic: 'while-away',
+        myCause: { type: 'removed', reason: 'while-away' },
+        closed: true,
+      })
+    })
+  })
+  test('room: a page offline while its room sent it more than bufferLimit holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-overflow')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-overflow:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`roomOverflow_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomOverflow_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        roomId,
+        seen: ['before'],
+        myCause: { type: 'disconnected' },
+        closed: true,
+        isClosed: true,
+        leaves: ['Me:disconnected'],
+      })
+    })
+  })
+  test("room: on a 1 Mbit/s link, a page gets 640 KB of its room's messages and publishes 640 KB without reconnecting", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    let sseStreams = 0
+    const onResponse = (response: Response) => {
+      if (response.headers()['content-type']?.startsWith('text/event-stream')) sseStreams++
+    }
+    let webSockets = 0
+    const onWebSocket = (ws: WebSocket) => {
+      if (ws.url().includes('/_telefunc')) webSockets++
+    }
+    page.on('response', onResponse)
+    page.on('websocket', onWebSocket)
+    // test-e2e's `page` is a proxy, which newCDPSession() doesn't take.
+    const cdp = await page.context().newCDPSession(
+      page
+        .context()
+        .pages()
+        .find((p) => p.url() === page.url())!,
+    )
+    try {
+      await cdp.send('Network.enable')
+      await cdp.send('Network.emulateNetworkConditions', {
+        offline: false,
+        latency: 0,
+        downloadThroughput: 125_000,
+        uploadThroughput: 125_000,
+      })
+      await page.click('#test-room-slow-link')
+      await autoRetry(
+        async () => {
+          expect(await getResult('#room-result')).deep.equal({
+            received: Array.from({ length: 40 }, (_, n) => n),
+            watched: 80,
+          })
+        },
+        { timeout: 40_000 },
+      )
+      // `['sse', 'ws']` starts on SSE and upgrades to a WebSocket.
+      const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+      expect({ sseStreams, webSockets }).deep.equal({
+        sseStreams: transports.includes('sse') ? 1 : 0,
+        webSockets: transports.includes('ws') ? 1 : 0,
+      })
+    } finally {
+      await cdp.send('Network.emulateNetworkConditions', {
+        offline: false,
+        latency: 0,
+        downloadThroughput: -1,
+        uploadThroughput: -1,
+      })
+      await cdp.detach()
+      page.off('response', onResponse)
+      page.off('websocket', onWebSocket)
+    }
+  })
+  test('room: the server lets go of a view whose listeners are gone, a member that left and the listeners on it, and a closed room and its members', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-release')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-release:/)
+    })
+    await autoRetry(
+      async () => {
+        await forceServerGc()
+        await runServerAction(`roomRelease_${roomId}`)
+        expect((await getCleanupState())[`roomRelease_${roomId}`]).toBe(
+          'view:released,left:released,closed:released,member:released',
+        )
+      },
+      { timeout: 10_000 },
+    )
+  })
+  testRoomScenario<{ received: string[]; announcements: string[]; kept: string[] }>(
+    'tail-order',
+    'room: a tail hands its first subscriber what it held in order, though an announcement came first, and only the latest 256',
+    (r) => {
+      expect(r.announcements).deep.equal(['ann'])
+      expect(r.received).deep.equal(['a', 'b'])
+      expect(r.kept).deep.equal(Array.from({ length: 256 }, (_, i) => `n${i + 44}`))
+    },
+  )
+  test('room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, and a lane the store ends is replaced', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-hiccups')
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        leave: {
+          firstLeave: 'Internal Server Error — see server logs',
+          publishAfter: 'ok',
+          secondLeave: 'ok',
+          leaves: ['Me:left'],
+          count: 0,
+        },
+        join: { firstJoin: 'Internal Server Error — see server logs', count: 1, listed: ['Second'] },
+        lane: { ended: true, got: ['before', 'after'] },
+      })
+    })
+  })
+  test('room: a page that reconnects while its join is pending gets the leave, with its cause, of a member removed while it was away', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-away-join')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-away-join:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await page.click('#test-room-away-join-now')
+    await runServerAction(`roomLeaveWhileJoining_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomLeaveWhileJoining_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        roomId,
+        joined: true,
+        leaves: [['Other', { type: 'removed', reason: 'while-joining' }]],
+        count: 1,
+      })
+    })
+  })
 }
 
 /** Waits out the 60 s acknowledgement timeout: one lane runs it. */
@@ -566,4 +869,50 @@ function testRoomSmallBuffer() {
       expect(r.seen).deep.equal(['1', '2'])
     },
   )
+}
+
+/** Tests that wait out Room's fixed timeouts, run in one lane. */
+function testRoomLongWaits() {
+  test('room: a tail nobody subscribes to within 60 seconds drops what it held', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-tail-lease')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#room-result')).deep.equal({ received: ['live'] })
+      },
+      { timeout: 75_000 },
+    )
+  })
+
+  test("room: a store write that fails once heals at the next heartbeat: a page's view keeps its room open, and a failed join leaves no member", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-hiccups-heartbeat')
+    let viewRoomId = ''
+    await autoRetry(
+      async () => {
+        const r = await getResult<{ viewRoom: { listed: string[] } }>('#room-result')
+        viewRoomId = r.viewRoom.listed[0] ?? ''
+        expect(r).deep.equal({
+          viewRoom: { listed: [viewRoomId], isClosed: false },
+          joinRoom: { firstJoin: 'Internal Server Error — see server logs', listed: ['Second'], count: 1 },
+        })
+      },
+      { timeout: 60_000 },
+    )
+    expect(viewRoomId).match(/^e2e-hiccup-view:/)
+  })
+
+  test('room: a room of 100,000 members streams its roster to a page, with a join and a leave landing meanwhile, and the server answers the page promptly through a heartbeat', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-scale')
+    await autoRetry(
+      async () => {
+        const r = await getResult<{ roster: unknown; pings: number; maxPingMs: number }>('#room-result')
+        expect(r.roster).deep.equal({ count: 100_000, listed: 100_000, late: true, m0: false })
+        expect(r.pings).greaterThan(100)
+        expect(r.maxPingMs).lessThan(1_000)
+      },
+      { timeout: 110_000 },
+    )
+  })
 }

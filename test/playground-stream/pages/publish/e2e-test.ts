@@ -1,7 +1,7 @@
-export { testPublish, testPublishSmallBuffer }
+export { testPublish, testPublishSmallBuffer, testPublishFailingBackend }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, failBackend } from '../../e2e-utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -155,6 +155,60 @@ function testPublish() {
       expect(state.invalidThrew).toBe(true)
       expect(state.invalidErrorMessage).not.toBe(null)
       expect(state.receivedAfterInvalid).deep.equal([{ text: 'hi' }])
+    })
+  })
+
+  test('broadcast: what a channel publishes from its onClose reaches its key, as the chat pattern does', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-chat-leave-on-close')
+    await autoRetry(async () => {
+      expect(await getResult<{ received: string[] }>('#publish-result')).deep.equal({ received: ['left'] })
+    })
+  })
+
+  test('broadcast: a subscribe after abort opens nothing, receivers counts the subscribers a publish reached, and an unsubscribe stops deliveries', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-server-broadcast-checks')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        afterAbort: [0, 0],
+        received: ['leaving', 'joining'],
+        duringDelivery: [1, 1],
+        statically: ['first'],
+      })
+    })
+  })
+}
+
+/** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
+function testPublishFailingBackend() {
+  test('broadcast: a subscribe the store refuses throws and leaves no listener behind', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await failBackend({ op: 'bind', key: 'room:subscribe-throws:' })
+    await page.click('#test-subscribe-throws')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ thrown: string | null; seen: string[] }>('#publish-result')
+      expect(result.thrown).toBe('failing-backend: bind refused')
+      expect(result.seen).deep.equal(['second:1'])
+    })
+  })
+
+  test('broadcast: a subscriber that throws or rejects is reported as a bug and the others get every message, and an un-awaited publish the store fails leaves no unhandled rejection', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-errors')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        seen: ['a', 'b'],
+        reported: [
+          'broadcast-listener-bug: rejected',
+          'broadcast-listener-bug: rejected',
+          'broadcast-listener-bug: thrown',
+          'broadcast-listener-bug: thrown',
+        ],
+        unhandled: 0,
+        storeFailedBoth: true,
+      })
     })
   })
 }

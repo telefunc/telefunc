@@ -13,6 +13,7 @@ import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './clea
 import { trackWireSocket, cutWireSockets } from './wire-sockets'
 import { runServerAction } from './server-actions'
 import { redis } from './redis'
+import { installFailingBackend, addBackendFault } from './failing-backend'
 
 config.channel.pingInterval = 1000
 config.shield = true
@@ -33,6 +34,8 @@ if (process.env.REDIS_CLUSTER_NODES) {
 } else if (redis) {
   installRedis(redis)
   console.log(`[INST=${INST}] Redis backend installed`)
+} else {
+  installFailingBackend()
 }
 
 // Translate Ctrl-C / docker-stop into a clean `process.exit(0)`. Without this, Node's
@@ -214,6 +217,12 @@ app.post('/api/server-close-trigger', async (c) => {
 let nextSsePost: 'hold' | 'refuse' | 'hold-stream' | null = null
 let dropNextWebSocket = false
 const heldSsePosts: (() => void)[] = []
+
+// Test-only: the in-memory backend fails a store call, or drops a message, when a test asks (failing-backend.ts).
+app.post('/api/backend/fault', async (c) => {
+  addBackendFault(await c.req.json())
+  return c.json({ ok: true })
+})
 
 app.post('/api/server-action', (c) => {
   const key = c.req.query('key') ?? ''
