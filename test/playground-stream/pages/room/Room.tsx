@@ -65,8 +65,8 @@ function Room() {
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
   /** Render every poll so e2e autoRetry sees fresh data; some reads are asynchronous. */
-  const pollUntil = async (render: () => PollResult | Promise<PollResult>) => {
-    for (let poll = 0; poll < 50; poll++) {
+  const pollUntil = async (render: () => PollResult | Promise<PollResult>, polls = 50) => {
+    for (let poll = 0; poll < polls; poll++) {
       const { done, result } = await render()
       if (result !== undefined) setResult(JSON.stringify(result))
       if (done) break
