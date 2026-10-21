@@ -1,7 +1,7 @@
 export { testRun, runPlayground }
 
 import { page, test, expect, run, getServerUrl, autoRetry } from '@brillout/test-e2e'
-import { navigate } from './e2e-utils'
+import { navigate, setServerRuntime } from './e2e-utils'
 import { testCounter } from '../utils'
 import { testFileUpload } from './pages/file-upload/e2e-test'
 import { testFileDownload } from './pages/file-download/e2e-test'
@@ -25,6 +25,7 @@ function runPlayground(
   // A room test waits out a 60 s timeout: the acknowledgement timeout, or the reconnectTimeout a closed tab gets on SSE.
   additionalTimeout = 40_000,
 ) {
+  setServerRuntime(cmd === 'pnpm preview:bun' ? 'bun' : cmd === 'pnpm preview:deno' ? 'deno' : 'node')
   run(cmd, {
     additionalTimeout,
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
@@ -49,6 +50,8 @@ function runPlayground(
         log.logText.includes('failing-backend:') ||
         (log.logText.includes('Backend subscription closed:') && log.logText.includes('hiccup')) ||
         log.logText.includes('TypeError: Converting circular structure to JSON') ||
+        // Bun's wording of the same error.
+        log.logText.includes('TypeError: JSON.stringify cannot serialize cyclic structures') ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||

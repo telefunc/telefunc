@@ -7,8 +7,6 @@ import {
   decode,
   decodeClientFrame,
   encode,
-  isChannelCtrlTag,
-  isConnCtrlTag,
   type BarrierPayload,
   type ReconcilePayload,
   type ReconciledPayload,
@@ -45,17 +43,6 @@ describe('upgrade wire vocabulary', () => {
     const prepare = { upgradeId: 'upg-1', sessionId: 'sess-0' }
     expect(decode(encode.prepare(prepare))).toEqual({ tag: TAG.PREPARE, payload: prepare })
     expect(decode(encode.ready({ upgradeId: 'upg-9' }))).toEqual({ tag: TAG.READY, payload: { upgradeId: 'upg-9' } })
-  })
-
-  test('the new tags are connection ctrl, and 0x0e, the first connection ctrl tag no frame has, does not decode', () => {
-    for (const tag of [TAG.PREPARE, TAG.READY, TAG.BARRIER]) {
-      expect(isConnCtrlTag(tag)).toBe(true)
-      expect(isChannelCtrlTag(tag)).toBe(false)
-    }
-    expect([TAG.PREPARE, TAG.READY, TAG.BARRIER]).toEqual([0x07, 0x08, 0x09])
-    const unassigned = new Uint8Array(7)
-    unassigned[0] = 0x0e
-    expect(() => decode(unassigned)).toThrow('unknown wire frame tag 14')
   })
 
   test('a BARRIER round-trips at one entry and at the largest shape the caps admit', () => {

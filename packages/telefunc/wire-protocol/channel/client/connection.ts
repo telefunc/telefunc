@@ -64,6 +64,7 @@ import { randomUuid } from '../../../utils/randomUuid.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 import { Heartbeat } from './Heartbeat.js'
+import { pingDeadline } from '../../wire/pingDeadline.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WsTransport } from './ws.js'
@@ -586,7 +587,7 @@ class ClientConnection implements MuxConnection {
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
   reconnectWindow(): number {
-    return Math.min(TIMER_DELAY_MAX_MS, 2 * this.pingIntervalMs + this.reconnectTimeoutMs)
+    return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(this.pingIntervalMs) + this.reconnectTimeoutMs)
   }
 
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
@@ -943,7 +944,7 @@ class ClientConnection implements MuxConnection {
     this.provisionalHeartbeat = provisional
     const hb = new Heartbeat({
       intervalMs,
-      pongTimeoutMs: intervalMs * 2,
+      pongTimeoutMs: pingDeadline(intervalMs),
       send: () => this.beat(transport),
       onDead: () => this.handlePongTimeout(transport),
     })
@@ -1236,7 +1237,7 @@ class ClientConnection implements MuxConnection {
   private keepProbeAlive(probe: ProbeWire, attempt: AbortController): Heartbeat {
     const heartbeat = new Heartbeat({
       intervalMs: this.pingIntervalMs,
-      pongTimeoutMs: this.pingIntervalMs * 2,
+      pongTimeoutMs: pingDeadline(this.pingIntervalMs),
       send: () => probe.ping(),
       onDead: () => attempt.abort(),
     })
@@ -1683,9 +1684,7 @@ class ClientConnection implements MuxConnection {
     let writeIx = 0
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
       const entry = sendBuffer[readIx]!
-      const frame = entry.frame
-      const channelIx = entry.channelIx
-      const seq = entry.seq
+      const { frame, channelIx, seq } = entry
       if (!releasable(channelIx)) {
         sendBuffer[writeIx++] = entry
         continue

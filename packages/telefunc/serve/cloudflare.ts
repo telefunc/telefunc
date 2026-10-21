@@ -94,13 +94,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     sessionPins.pin(request, () => requireBinding<KVNamespace>(workerEnv, kvBindingName, 'KV namespace'))
   }
 
-  const hooks = getTelefuncChannelHooks()
-  const onMessage = hooks.message
   // A page may use its session over its WebSocket alone, so each message renews its pin when due, as a request does.
-  hooks.message = (peer, message) => {
-    pinSession(peer.request)
-    return onMessage(peer, message)
-  }
+  const hooks = getTelefuncChannelHooks({ onMessage: (peer) => pinSession(peer.request) })
   const crosswsAdapter = crossws({ bindingName, instanceName: baseInstanceName, hooks })
   function telefuncNamespace(env: Cloudflare.Env): TelefuncDurableObjectNamespace {
     const namespace = requireBinding<TelefuncDurableObjectNamespace>(env, bindingName, 'Durable Object')

@@ -30,7 +30,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testBacklog()
   testChat()
   testChatMembers()
+  testUnsubscribeTwice()
   testResubscribe()
+  testRefusedPresence()
   testRoom()
   // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
   if (!isDev) testRoomOrderAcrossSessions()
@@ -297,6 +299,36 @@ function testChatMembers() {
   })
 }
 
+function testUnsubscribeTwice() {
+  test("Broadcast: a subscriber whose sibling's unsubscribe ran twice still gets what a page in another session publishes", async () => {
+    const url = `${getServerUrl()}/unsubscribe-twice?key=unsubscribe-twice:${Math.random()}`
+    await page.goto(url)
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#subscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#unsubscribe-twice-state'))!).subscribed).toBe(true)
+    })
+    // Another browser context is another session, routed by its own token.
+    const publisher = await (await page.context().browser()!.newContext()).newPage()
+    await publisher.goto(url)
+    await autoRetry(async () => {
+      expect(await publisher.locator('#hydrated').count()).toBe(1)
+    })
+    // Each try publishes again: the subscriber's presence may still be on its way to KV.
+    await autoRetry(
+      async () => {
+        await publisher.click('#publish')
+        await page.click('#read')
+        expect(JSON.parse((await page.textContent('#unsubscribe-twice-state'))!).received).include('hello')
+      },
+      { timeout: 10_000 },
+    )
+    await publisher.context().close()
+  })
+}
+
 function testResubscribe() {
   test("Broadcast: a subscriber that arrives as its key's last one leaves keeps getting publishes past the presence TTL", async () => {
     await page.goto(getServerUrl() + '/resubscribe')
@@ -315,6 +347,27 @@ function testResubscribe() {
         expect(JSON.parse((await page.textContent('#resubscribe-state'))!).received).deep.equal(['hello'])
       },
       { timeout: 5000 },
+    )
+  })
+}
+
+function testRefusedPresence() {
+  test("Broadcast: a publish made while KV refuses its subscriber's presence write settles, and the presence's next refresh writes it", async () => {
+    await page.goto(getServerUrl() + '/refused-presence')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#subscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
+    })
+    // Each try publishes again: the presence is written at its next refresh, within 30 s.
+    await autoRetry(
+      async () => {
+        await page.click('#publish')
+        expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
+      },
+      { timeout: 40_000 },
     )
   })
 }

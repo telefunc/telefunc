@@ -8,6 +8,7 @@ export {
   failBackend,
   holdNextSsePost,
   holdNextSseWire,
+  holdNextSseOpen,
   heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
@@ -27,6 +28,9 @@ export {
   rewindRedis,
   moveRedisSlot,
   countConnections,
+  serverRuntime,
+  setServerRuntime,
+  canCutWire,
 }
 
 import { page, getServerUrl } from '@brillout/test-e2e'
@@ -118,6 +122,23 @@ async function moveRedisSlot(key: string) {
   return (await resp.json()) as { moved: number }
 }
 
+type ServerRuntime = 'node' | 'bun' | 'deno'
+let runtime: ServerRuntime = 'node'
+
+/** The runtime serving the playground, as `runPlayground()` set it. */
+function serverRuntime(): ServerRuntime {
+  return runtime
+}
+
+function setServerRuntime(serving: ServerRuntime) {
+  runtime = serving
+}
+
+/** Whether `cutWire()` can drop the page's connections: it destroys the Node sockets the server tracked, and Bun.serve and Deno.serve hand a request no socket. */
+function canCutWire(): boolean {
+  return runtime === 'node'
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function resetCleanupState() {
@@ -169,6 +190,11 @@ async function holdNextSsePost() {
 /** The POST that opens the page's next SSE wire is answered, and its first batch reaches Telefunc only at `releaseHeldSsePosts()`. */
 async function holdNextSseWire() {
   await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold-stream`, { method: 'POST' })
+}
+
+/** The server hands the POST that opens the page's next SSE wire to Telefunc only at `releaseHeldSsePosts()`. */
+async function holdNextSseOpen() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold-open`, { method: 'POST' })
 }
 
 /** How many SSE POSTs the server holds. */

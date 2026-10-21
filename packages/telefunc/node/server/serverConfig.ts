@@ -50,6 +50,7 @@ import {
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
 } from '../../wire-protocol/constants.js'
+import { pingDeadline } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
   /**
@@ -404,7 +405,7 @@ function getServerConfig(): ConfigResolved {
 
 /** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
 function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
-  return Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS) * 2
+  return pingDeadline(Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS))
 }
 
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */

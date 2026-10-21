@@ -29,7 +29,7 @@ class PathRoom implements SendRoom {
   private appLimitedTo = 0
   /** Whether the sender is sending what it held for room. */
   private releasing = false
-  /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is gathered. */
+  /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is carried. */
   private handedSinceData = 0
   /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it, as `Uplink.inUplink`. */
   private inPath = 0
@@ -68,8 +68,6 @@ class PathRoom implements SendRoom {
     this.handedSinceData = 0
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
-
-  sentFrame(): void {}
 
   /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made room for. */
   acknowledged(ack: PiecesAck): boolean {

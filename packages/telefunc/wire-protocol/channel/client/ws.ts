@@ -234,7 +234,6 @@ class WsTransport implements UpgradeTarget {
       pieces: new PagePieceReceiver({
         send: (frame) => sender.send(frame),
         carry: (ack) => sender.carry(ack),
-        uplink,
       }),
     }
   }

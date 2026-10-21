@@ -420,7 +420,9 @@ app.delete('/api/broadcast-cross-instance/unsubscribe', async (c) => {
 // dropped passed-callback's stub being reclaimed → its channel closing → context.onClose firing).
 // Requires the server to run with `--expose-gc` (see this playground's dev/preview scripts).
 app.post('/api/gc', async (c) => {
-  const gc = (globalThis as { gc?: () => void }).gc
+  // Bun has no --expose-gc: it collects with Bun.gc(true).
+  const { gc: exposedGc, Bun: bun } = globalThis as { gc?: () => void; Bun?: { gc(force: boolean): void } }
+  const gc = exposedGc ?? (bun && (() => bun.gc(true)))
   if (!gc) return c.json({ ok: false, reason: 'gc not exposed (run node with --expose-gc)' }, 500)
   for (let i = 0; i < 5; i++) {
     gc()
@@ -459,8 +461,9 @@ app.post('/api/server-close-trigger', async (c) => {
 
 // Test-only: lets an e2e test drop the page's connections, or hold or refuse its next SSE POST.
 // 'hold-stream': the next POST that opens an SSE wire gets its answer, and its first batch, which rides on it, is held.
+// 'hold-open': the next POST that opens an SSE wire is held whole.
 // The others: the next batch POST.
-let nextSsePost: 'hold' | 'refuse' | 'hold-stream' | null = null
+let nextSsePost: 'hold' | 'refuse' | 'hold-stream' | 'hold-open' | null = null
 let dropNextWebSocket = false
 const heldSsePosts: (() => void)[] = []
 
@@ -481,8 +484,8 @@ app.post('/api/wire/next-websocket', (c) => {
 })
 app.post('/api/wire/next-sse-post', (c) => {
   const action = c.req.query('action')
-  if (action !== 'hold' && action !== 'refuse' && action !== 'hold-stream') {
-    return c.json({ ok: false, reason: 'action is hold, refuse or hold-stream' }, 400)
+  if (action !== 'hold' && action !== 'refuse' && action !== 'hold-stream' && action !== 'hold-open') {
+    return c.json({ ok: false, reason: 'action is hold, refuse, hold-stream or hold-open' }, 400)
   }
   nextSsePost = action
   return c.json({ ok: true })
@@ -506,10 +509,11 @@ app.all('/_telefunc', async (c) => {
     const body = new Uint8Array(await c.req.arrayBuffer())
     const metadataLength = new DataView(body.buffer).getUint32(0)
     const metadata = JSON.parse(new TextDecoder().decode(body.subarray(4, 4 + metadataLength)))
-    const action = (nextSsePost === 'hold-stream') === Boolean(metadata.streamResponse) ? nextSsePost : null
+    const opens = nextSsePost === 'hold-stream' || nextSsePost === 'hold-open'
+    const action = opens === Boolean(metadata.streamResponse) ? nextSsePost : null
     if (action) nextSsePost = null
     if (action === 'refuse') return c.text('', 400)
-    if (action === 'hold') await new Promise<void>((resolve) => heldSsePosts.push(resolve))
+    if (action === 'hold' || action === 'hold-open') await new Promise<void>((resolve) => heldSsePosts.push(resolve))
     const held = action === 'hold-stream'
     const header = body.subarray(0, 4 + metadataLength)
     const request = new Request(c.req.url, {
@@ -596,7 +600,8 @@ export default {
   prod: {
     port: Number(process.env.PORT) || (httpsAvailable ? 8443 : 3000),
     ...(tls ? { tls } : {}),
-    ...(tfBun ? { bun: { websocket: tfBun.websocket } } : {}),
+    // Bun.serve refuses a body over 128 MiB by default; the abort page uploads 150 MB.
+    ...(tfBun ? { bun: { websocket: tfBun.websocket, maxRequestBodySize: 2 ** 30 } } : {}),
     onCreate(server: { node?: { server?: HttpServer } }) {
       // srvx wraps the raw `http.Server` as `{ node: { server } }`. Unwrap to
       // the underlying Node server so the WebSocket upgrade listener can be

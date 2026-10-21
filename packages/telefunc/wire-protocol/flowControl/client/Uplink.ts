@@ -1,10 +1,8 @@
 export { Uplink }
 
-import { WIRE_ACK_SHARE, WIRE_REFRESH_SHARE } from '../../constants.js'
 import { DrainRate, Link, Waits, type SendWait } from '../Link.js'
-import { TAG } from '../../wire/connectionFrame.js'
 
-/** A page's uplink: the rate the server takes data at, what the uplink holds, and the shares its control frames take. */
+/** A page's uplink: the rate the server takes data at, and what the uplink holds. */
 class Uplink implements SendWait {
   /** The rate the peer takes data at. */
   readonly drain = new DrainRate()
@@ -16,9 +14,6 @@ class Uplink implements SendWait {
   /** How long the frames that go at once waited behind the uplink, and data did as the peer acknowledged it. */
   private readonly waits = new Waits()
   readonly link = new Link()
-  /** The acknowledgements and the window refreshes of what this side receives, each within its share of the link. */
-  readonly acks = new Share({ link: this.link, share: WIRE_ACK_SHARE })
-  readonly refreshes = new Share({ link: this.link, share: WIRE_REFRESH_SHARE })
 
   /** In bytes per ms, the slower of the drain rate and the rate the newest acknowledgement says data arrived at. */
   uplinkRate(): number {
@@ -39,12 +34,10 @@ class Uplink implements SendWait {
     return this.queued
   }
 
-  /** Notes `bytes` handed to the socket, and returns what the uplink held ahead of them. */
-  handed(bytes: number): number {
-    if (this.drain.rate === 0) return 0
-    const ahead = this.inUplink()
-    this.queued = ahead + bytes
-    return ahead
+  /** Notes `bytes` handed to the socket. */
+  handed(bytes: number): void {
+    if (this.drain.rate === 0) return
+    this.queued = this.inUplink() + bytes
   }
 
   /** The peer acknowledged all but `unacknowledged` bytes: those left the uplink, whatever the rate says. */
@@ -60,42 +53,8 @@ class Uplink implements SendWait {
     return Math.max(this.waits.since(at), this.waitNow())
   }
 
-  /** Notes a frame of `tag` and `bytes` sent: a PIECES_ACK or a window refresh takes its share. */
-  sentFrame(tag: number, bytes: number): void {
-    if (tag === TAG.PIECES_ACK) this.acks.sent(bytes)
-    else if (tag === TAG.WINDOW || tag === TAG.MSG_WINDOW) this.refreshes.sent(bytes)
-  }
-
   /** Notes a wait seen now: what a frame that goes at once waits, or what data waited. */
   noteWait(wait: number): void {
     this.waits.note(wait, performance.now())
-  }
-}
-
-type ShareOptions = {
-  link: Link
-  share: number
-}
-
-/** Frames of one kind that take at most `share` of the rate their link carries, none before a rate is measured. */
-class Share {
-  private readonly link: Link
-  private readonly share: number
-  private at = 0
-
-  constructor({ link, share }: ShareOptions) {
-    this.link = link
-    this.share = share
-  }
-
-  /** How long a frame of the kind sent now waits. */
-  wait(): number {
-    return Math.max(0, this.at - performance.now())
-  }
-
-  /** Notes a frame of the kind, of `bytes`, sent. */
-  sent(bytes: number): void {
-    if (this.link.fastest === 0) return
-    this.at = Math.max(performance.now(), this.at) + bytes / (this.share * this.link.fastest)
   }
 }

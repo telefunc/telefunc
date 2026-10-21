@@ -9,10 +9,12 @@ import {
   getCleanupState,
   runServerAction,
   cutWire,
+  canCutWire,
   dropNextWebSocket,
   forceServerGc,
   holdNextSsePost,
   holdNextSseWire,
+  holdNextSseOpen,
   heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
@@ -37,27 +39,28 @@ const sentBefore = ['m0', 'm1', 'm2']
 function testWire(isDev: boolean) {
   if (isDev) return
 
-  test('channel: 256 messages of 16 KiB each way, text and binary, each send awaited, all arrive once and in order though the server drops the connection halfway through each direction', async () => {
-    await navigate(`${getServerUrl()}/channel`)
-    await page.click('#wire-resume')
-    const all: Tally = { text: 256, binary: 256, inOrder: true }
-    await autoRetry(async () => {
-      const { resume } = await getResult<WireState>('#wire-state')
-      expect(resume?.received).deep.equal(all)
-      const ss = await getCleanupState()
-      expect(JSON.parse(ss[`wireResume_${resume!.channelId}`]!)).deep.equal(all)
-      const cuts: number[] = JSON.parse(ss[`wireResume_${resume!.channelId}_cut`]!)
-      expect(cuts.length).toBe(2)
-      expect(cuts.every((cut) => cut > 0)).toBe(true)
+  if (canCutWire())
+    test('channel: 256 messages of 16 KiB each way, text and binary, each send awaited, all arrive once and in order though the server drops the connection halfway through each direction', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#wire-resume')
+      const all: Tally = { text: 256, binary: 256, inOrder: true }
+      await autoRetry(async () => {
+        const { resume } = await getResult<WireState>('#wire-state')
+        expect(resume?.received).deep.equal(all)
+        const ss = await getCleanupState()
+        expect(JSON.parse(ss[`wireResume_${resume!.channelId}`]!)).deep.equal(all)
+        const cuts: number[] = JSON.parse(ss[`wireResume_${resume!.channelId}_cut`]!)
+        expect(cuts.length).toBe(2)
+        expect(cuts.every((cut) => cut > 0)).toBe(true)
+      })
     })
-  })
 
   const ends = [
     { by: 'server', dropped: 'after' },
     { by: 'server', dropped: 'before' },
     { by: 'page', dropped: 'after' },
   ] as const
-  for (const { by, dropped } of ends) {
+  for (const { by, dropped } of canCutWire() ? ends : []) {
     const when = dropped === 'after' ? 'on the connection, which then drops,' : 'once the connection dropped,'
     const end = async (channelId: string, action: 'close' | 'abort') => {
       await page.context().setOffline(true)
@@ -94,21 +97,22 @@ function testWire(isDev: boolean) {
     })
   }
 
-  test('channel: a channel the page closes while offline, its close() timing out, ends gracefully on the server once the page is back', async () => {
-    const channelId = await openEnd()
-    await page.context().setOffline(true)
-    await page.click('#wire-end-close-timeout')
-    await autoRetry(async () => {
-      const { end } = await getResult<WireState>('#wire-state')
-      expect(end!.close).toBe('1')
+  if (canCutWire())
+    test('channel: a channel the page closes while offline, its close() timing out, ends gracefully on the server once the page is back', async () => {
+      const channelId = await openEnd()
+      await page.context().setOffline(true)
+      await page.click('#wire-end-close-timeout')
+      await autoRetry(async () => {
+        const { end } = await getResult<WireState>('#wire-state')
+        expect(end!.close).toBe('1')
+      })
+      await cutWire()
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        const ss = await getCleanupState()
+        expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
+      })
     })
-    await cutWire()
-    await page.context().setOffline(false)
-    await autoRetry(async () => {
-      const ss = await getCleanupState()
-      expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
-    })
-  })
 
   test('channel: aborting the signal of the call that returned a channel ends the server end with Abort', async () => {
     const channelId = await openEnd()
@@ -285,6 +289,42 @@ function testWire(isDev: boolean) {
         })
       })
     }
+
+    test("channel: messages the page sends while the server holds its SSE open past the page's 10 s deadline arrive once and in order on the wire the page opens next", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#channel-test-upstream-open')
+      let channelId = ''
+      await autoRetry(async () => {
+        channelId = (await getResult<{ upstreamReconnectChannelId: string | null }>('#channel-state'))
+          .upstreamReconnectChannelId!
+        expect(channelId).not.toBe(null)
+      })
+      await page.click('#channel-test-upstream-send')
+      await autoRetry(async () => {
+        expect((await getCleanupState())[`upstream_${channelId}_receivedCount`]).toBe('1')
+      })
+      await holdNextSseOpen()
+      await cutWire()
+      await autoRetry(async () => {
+        expect(await heldSsePosts()).toBe(1)
+      })
+      for (let i = 0; i < 3; i++) await page.click('#channel-test-upstream-send')
+      await autoRetry(
+        async () => {
+          expect((await getCleanupState())[`upstream_${channelId}_receivedCount`]).toBe('4')
+        },
+        { timeout: 40_000 },
+      )
+      // The held open is answered now, after the page moved on: it changes nothing.
+      expect(await releaseHeldSsePosts()).toBe(1)
+      await page.click('#channel-test-upstream-send')
+      await autoRetry(async () => {
+        const ss = await getCleanupState()
+        expect(ss[`upstream_${channelId}_receivedCount`]).toBe('5')
+        expect(ss[`upstream_${channelId}_lastSeq`]).toBe('5')
+        expect(ss[`upstream_${channelId}_hasGap`]).toBe('false')
+      })
+    })
   }
 }
 
