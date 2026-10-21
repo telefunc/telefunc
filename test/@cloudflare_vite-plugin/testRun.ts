@@ -7,6 +7,8 @@ import { testCounter, testRunClassic } from '../../test/utils'
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testCloudflareBindings()
   testRunClassic(cmd, {
+    // testResubscribe() waits out a presence's TTL.
+    additionalTimeout: 60_000,
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
       // The Channel/Chat streaming (SSE) connection surfaces a benign
@@ -20,6 +22,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testBacklog()
   testChat()
   testChatMembers()
+  testResubscribe()
 }
 
 function testCloudflareBindings() {
@@ -258,6 +261,28 @@ function testChatMembers() {
       }
     })
     for (const member of members) await member.context().close()
+  })
+}
+
+function testResubscribe() {
+  test("Broadcast: a subscriber that arrives as its key's last one leaves keeps getting publishes past the presence TTL", async () => {
+    await page.goto(getServerUrl() + '/resubscribe')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#resubscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#resubscribe-state'))!).subscribed).toBe(true)
+    })
+    // A presence lasts 90 s unless refreshed.
+    await page.waitForTimeout(95_000)
+    await page.click('#publish')
+    await autoRetry(
+      async () => {
+        expect(JSON.parse((await page.textContent('#resubscribe-state'))!).received).deep.equal(['hello'])
+      },
+      { timeout: 5000 },
+    )
   })
 }
 

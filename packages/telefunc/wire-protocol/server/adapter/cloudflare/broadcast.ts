@@ -165,7 +165,6 @@ class MemberBucketState {
   readonly pendingPublishes: CloudflareBucketPublishBuffer
   /** Presences being written: publishes from here wait for them, so their own subscribers get them. */
   setupsInFlight = 0
-  teardownRequested = false
   /** Each Durable Object with subscribers on the key here, with how many: each has a presence of its own. */
   readonly owners = new Map<string, number>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -577,10 +576,8 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const memberState = this.memberStates.get(key)
     if (!memberState) return
 
-    if (memberState.setupsInFlight > 0 || memberState.pendingPublishes.flushing) {
-      memberState.teardownRequested = true
-      return
-    }
+    // The setup in flight tears it down once done, if no subscriber came meanwhile.
+    if (memberState.setupsInFlight > 0 || memberState.pendingPublishes.flushing) return
 
     memberState.stopRefresh()
     this.memberStates.delete(key)
@@ -594,7 +591,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       memberState.setupsInFlight--
     }
     // Its release may have deleted the presence before the put above wrote it.
-    if (!memberState.owners.has(owner)) await this.deletePresence(key, owner)
+    if (!memberState.owners.has(owner)) void this.deletePresence(key, owner)
     if (memberState.setupsInFlight > 0) return
 
     memberState.refreshTimer ??= setInterval(() => {
@@ -603,10 +600,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
     await memberState.pendingPublishes.flush()
 
-    if (memberState.teardownRequested) {
-      memberState.stopRefresh()
-      this.memberStates.delete(key)
-    }
+    this.teardownPresenceIfEmpty(key)
   }
 
   private getBucketCoordinatorStub(key: string, locationBucket: LocationBucket): TelefuncBroadcastStub {
