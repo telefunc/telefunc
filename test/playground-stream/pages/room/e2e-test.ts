@@ -296,6 +296,17 @@ function testRoom() {
       expect(r.refused).toBe('refused')
     },
   )
+  testRoomScenario<{ listed: number | string; serverCount: number; count: number; emptied: boolean }>(
+    'roster-churn',
+    'room: a page opening a room of 2,000 members while members join, leave and change meta loads its roster, counts only visible members, and sees no empty room',
+    (r) => {
+      expect(typeof r.listed).toBe('number') // the roster loaded, not an error
+      expect(r.listed).greaterThanOrEqual(2000)
+      expect(r.serverCount).toBe(2001) // 2,000 members and the page's; not the hidden one
+      expect(r.count).toBe(r.serverCount)
+      expect(r.emptied).toBe(false)
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',

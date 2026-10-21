@@ -46,6 +46,8 @@ import {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onSeedAndChurn,
+  onStopChurn,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -751,6 +753,29 @@ function Room() {
         )
         setResult(JSON.stringify({ error, seconds: Math.round((Date.now() - start) / 1000) }))
       })}
+
+      {scenario(
+        'roster-churn',
+        'Roster under churn',
+        'Open a big room while members come, go and write meta',
+        async () => {
+          const roomId = await createRoomId('roster-churn')
+          await onSeedAndChurn(roomId)
+          const room = await onGetRoom(roomId)
+          let emptied = false
+          room.onEmpty(() => (emptied = true))
+          const listed = await room.getParticipants().then(
+            (members) => members.length,
+            (err: Error) => err.message,
+          )
+          const me = await room.join({ meta: { name: 'Page' } })
+          const serverCount = await onStopChurn(roomId)
+          await pollUntil(() => ({
+            result: { listed, serverCount, count: room.count, emptied, joined: me.id !== '' },
+            done: room.count === serverCount,
+          }))
+        },
+      )}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {
         const [roomId, lobby] = await createRoom('member')

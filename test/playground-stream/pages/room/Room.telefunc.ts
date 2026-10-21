@@ -42,6 +42,8 @@ export {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onSeedAndChurn,
+  onStopChurn,
 }
 
 import { Buffer } from 'node:buffer'
@@ -426,4 +428,32 @@ async function onJoinAnswering(roomId: string) {
     return { echo: data }
   })
   return me.id
+}
+
+const churning = new Map<string, () => Promise<number>>()
+
+/** Joins 2,000 members and a hidden one, then every 5 ms changes a member's meta and has a member join or leave, until
+ *  `onStopChurn()`, which answers with the room's visible member count. */
+async function onSeedAndChurn(roomId: string) {
+  const members = await Promise.all(
+    Array.from({ length: 2000 }, (_, i) => Room.join(roomId, { meta: { name: `m${i}`, n: 0 } })),
+  )
+  await Room.join(roomId, { meta: { name: 'Hidden' }, hidden: true })
+  let tick = 0
+  const passing: Awaited<ReturnType<typeof Room.join>>[] = []
+  const timer = setInterval(() => {
+    tick++
+    void members[tick % members.length]!.setAttributes({ n: tick })
+    if (tick % 2 === 0) void Room.join(roomId, { meta: { name: `p${tick}` } }).then((member) => passing.push(member))
+    else void passing.shift()?.leave()
+  }, 5)
+  churning.set(roomId, async () => {
+    clearInterval(timer)
+    await Promise.all(passing.map((member) => member.leave()))
+    return (await Room.get(roomId)).count
+  })
+}
+
+async function onStopChurn(roomId: string) {
+  return await churning.get(roomId)!()
 }
