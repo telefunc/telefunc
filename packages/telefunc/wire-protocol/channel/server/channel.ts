@@ -803,8 +803,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal A PUBLISH frame to the peer, buffered until it attaches. The buffer may drop one `resentOnAttach`, which
    *  its page gets again at each attach, without leaving it a gap. */
-  _sendPublish(wireText: string, resentOnAttach = false): void {
-    this._forwardPublish(wireText, !resentOnAttach)
+  _sendPublish(wireText: string, opts?: { resentOnAttach?: boolean }): void {
+    this._forwardPublish(wireText, opts?.resentOnAttach !== true)
   }
 
   /** @internal A binary PUBLISH frame to the peer, buffered until it attaches. */

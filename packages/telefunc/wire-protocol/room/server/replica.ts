@@ -518,8 +518,8 @@ class RoomReplica {
     const text = wireText()
     const hiddenMember = hiddenMemberOf(event)
     // Each attach sends the roster and the room's meta again, which carry every event but the close.
-    const resentOnAttach = event.__r !== 'closed'
-    for (const stub of this.stubs) stub._relayControl(text, hiddenMember, resentOnAttach)
+    const opts = { resentOnAttach: event.__r !== 'closed' }
+    for (const stub of this.stubs) stub._relayControl(text, hiddenMember, opts)
   }
 
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */

@@ -78,7 +78,8 @@ class DemandReport {
   }
 
   /** Whether some holder here receives `track` of every member, and whether only of the members it is fetched by. */
-  setTrack(track: string, on: boolean, byMember = false): void {
+  setTrack(track: string, on: boolean, opts?: { byMember?: boolean }): void {
+    const byMember = opts?.byMember === true
     if (on === this._planned.tracks.has(track) && (on && byMember) === this._byMember.has(track)) return
     toggle(this._planned.tracks, track, on)
     toggle(this._byMember, track, on && byMember)

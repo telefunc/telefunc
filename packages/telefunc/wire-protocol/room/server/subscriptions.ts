@@ -179,7 +179,7 @@ class RoomSubscriptions {
   /** A holder attached, or its wants changed wholesale: its room-wide ones, and those of `members` when given. The next
    *  planning pass recounts each member it may have changed. */
   holderChanged(holder: LaneHolder, members?: Iterable<string>): void {
-    runAll(this._indexHolder(holder, false, members))
+    runAll(this._indexHolder(holder, { members }))
     this._replanAround(() => this._schedulePlan())
   }
 
@@ -192,7 +192,7 @@ class RoomSubscriptions {
 
   /** A holder's text wants changed: its room-wide ones, and those of `members`. */
   textChanged(holder: LaneHolder, members: Iterable<string>): void {
-    runAll(this._wants.updateText(holder, false, members))
+    runAll(this._wants.updateText(holder, { members }))
     this._replanAround(() => {})
   }
 
@@ -311,8 +311,8 @@ class RoomSubscriptions {
   }
 
   /** Indexes the holder's wants a step at a time, each step queueing the members it affected. */
-  private *_indexHolder(holder: LaneHolder, gone: boolean, members?: Iterable<string>): Generator<void> {
-    for (const affected of this._wants.update(holder, gone, members)) {
+  private *_indexHolder(holder: LaneHolder, opts: { gone?: boolean; members?: Iterable<string> }): Generator<void> {
+    for (const affected of this._wants.update(holder, opts)) {
       if (affected === 'all') {
         this._counts.clear()
         if (this._counting) this._counting.stale = true
@@ -351,7 +351,7 @@ class RoomSubscriptions {
         const plan = this._queued
         if (this._gone.size > 0) {
           await slice.next()
-          await this._replanEach(slice, drain(this._gone), (holder) => this._indexHolder(holder, true))
+          await this._replanEach(slice, drain(this._gone), (holder) => this._indexHolder(holder, { gone: true }))
         } else if (!isEmpty(plan)) {
           await this._planRound(slice, plan)
         } else if (this._demand.changed) {
@@ -553,7 +553,7 @@ class RoomSubscriptions {
     lane.resume()
     if (lane.delivering) this._byMemberTracks.delete(track)
     const byMember = this._byMemberTracks.has(track)
-    this._demand.setTrack(track, lane.delivering || byMember, byMember)
+    this._demand.setTrack(track, lane.delivering || byMember, { byMember })
   }
 
   /** An every-member lane that serves no holder here stops once the lanes replacing it deliver: the named lanes and
@@ -573,7 +573,7 @@ class RoomSubscriptions {
       this._stopFanIn(lane, this._establishingEveryMember)
     }
     toggle(this._byMemberTracks, track, named)
-    if (named) this._demand.setTrack(track, true, true)
+    if (named) this._demand.setTrack(track, true, { byMember: true })
     else this._demand.forgetTrack(track)
   }
 

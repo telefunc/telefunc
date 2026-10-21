@@ -40,11 +40,11 @@ function newHoldConfig(emptyTimeout: number, departureTimeout: number): HoldConf
 
 /** The counts that add `delta` holds, and a join with `joining`: whichever comes first, the room's creation or its
  *  first hold, creates both counters, and both come back with the commit. None in a room without hold timeouts. */
-function holdCounts(config: HoldConfig | null, delta: number, joining = false): CellCount[] {
+function holdCounts(config: HoldConfig | null, delta: number, opts?: { joining?: boolean }): CellCount[] {
   if (config === null) return []
   return [
     { key: HOLDS_CELL_KEY, delta, create: true },
-    { key: JOINS_CELL_KEY, delta: joining ? 1 : 0, create: true },
+    { key: JOINS_CELL_KEY, delta: opts?.joining ? 1 : 0, create: true },
   ]
 }
 
@@ -62,16 +62,16 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
   return record
 }
 
-/** The hold record a commit of `holdCounts(config, delta, joining)` left, and the counts before it. */
+/** The hold record a commit of `holdCounts(config, delta, opts)` left, and the counts before it. */
 function holdChange(
   config: HoldConfig | null,
   counters: ReadonlyMap<string, CellCounter>,
   delta: number,
-  joining = false,
+  opts?: { joining?: boolean },
 ): HoldChange | null {
   if (config === null) return null
   const after = holdRecord(config, counters)
-  return { before: { holds: after.holds - delta, joins: after.joins - (joining ? 1 : 0) }, after }
+  return { before: { holds: after.holds - delta, joins: after.joins - (opts?.joining ? 1 : 0) }, after }
 }
 
 /** Null once the incarnation is gone, or while nothing counted it: it has no hold timeouts, or its creation's count
@@ -95,7 +95,7 @@ function afterHoldChange(room: RoomIncarnation, change: HoldChange | null): void
   const { before, after } = change
   if (after.closesIn !== undefined) return scheduleClose(room, after.closesIn)
   if (before.holds === 0 || before.joins > 0 !== after.joins > 0) {
-    void extendLapse(room, after, before.holds === 0).catch(reportRoomError)
+    void extendLapse(room, after, { firstHold: before.holds === 0 }).catch(reportRoomError)
   }
 }
 
@@ -150,7 +150,12 @@ async function lapseNewRoom(room: RoomIncarnation): Promise<RoomHead | null> {
 /** A held room's head lapses once its holders' records would have lapsed and its timeout passed, with a heartbeat to
  *  spare: pushed out whenever less than that is left, so a holder's every heartbeat keeps it ahead. A first hold
  *  always writes, which fences a new room's lapse (`lapseNewRoom`) it raced. */
-async function extendLapse({ id, inc }: RoomIncarnation, record: HoldRecord, firstHold = false): Promise<void> {
+async function extendLapse(
+  { id, inc }: RoomIncarnation,
+  record: HoldRecord,
+  opts?: { firstHold?: boolean },
+): Promise<void> {
+  const firstHold = opts?.firstHold === true
   const timeout = unheldTimeout(record)
   const ttlMs = timeout === Infinity ? undefined : ROOM_SESSION_TTL_MS + timeout + 2 * ROOM_HEARTBEAT_INTERVAL_MS
   const backend = getRoomBackend()

@@ -343,12 +343,12 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   /** An event this instance originates for this client alone: state each attach sends again. */
   _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
-    this._sendPublish(unorderedEventText(event), true)
+    this._sendPublish(unorderedEventText(event), { resentOnAttach: true })
   }
 
   /** `_relayEvent` with the event's text already made, so one text can go to many clients. */
   _relayEventText(text: string): void {
-    this._sendPublish(text, true)
+    this._sendPublish(text, { resentOnAttach: true })
   }
 
   /** A roster part's members this client gets: `visible` itself unless the part holds a hidden member this client was
@@ -360,8 +360,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   /** A hidden member's events reach only the clients that were handed it. */
-  _relayControl(wireText: string, hiddenMember: string | null, resentOnAttach: boolean): void {
-    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._sendPublish(wireText, resentOnAttach)
+  _relayControl(wireText: string, hiddenMember: string | null, opts: { resentOnAttach: boolean }): void {
+    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._sendPublish(wireText, opts)
   }
 
   _relayAnnouncement(wireText: string, ord: WirePublishInfo): void {

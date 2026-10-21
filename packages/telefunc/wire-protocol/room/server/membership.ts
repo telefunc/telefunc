@@ -184,10 +184,10 @@ async function createMember(
     if (record.identity !== undefined) {
       mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
     }
-    const plan = () => ({ value: undefined, mutations, counts: holdCounts(config, 1, true) })
+    const plan = () => ({ value: undefined, mutations, counts: holdCounts(config, 1, { joining: true }) })
     return { keys: mutations.map(({ key }) => key), plan }
   })
-  afterHoldChange(room, holdChange(config, counters, 1, true))
+  afterHoldChange(room, holdChange(config, counters, 1, { joining: true }))
 }
 
 /** Writes pages' views under the session in one write, and returns their cells' keys; each holds the room, and a room

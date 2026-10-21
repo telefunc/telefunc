@@ -47,9 +47,10 @@ class WantsIndex {
 
   /** Indexes all of the holder's current wants (none once it is gone), a text member or a scope per step: its room-wide
    *  ones, and those of `members`, or of every member when omitted. Each step yields the members it affected. */
-  *update(holder: LaneHolder, gone = false, members?: Iterable<string>): Generator<Affected> {
-    const ids = members === undefined ? undefined : new Set(members)
-    for (const _ of this.updateText(holder, gone, ids)) yield NONE
+  *update(holder: LaneHolder, opts?: { gone?: boolean; members?: Iterable<string> }): Generator<Affected> {
+    const gone = opts?.gone === true
+    const ids = opts?.members === undefined ? undefined : new Set(opts.members)
+    for (const _ of this.updateText(holder, { gone, members: ids })) yield NONE
     const indexed = this._indexedOf(holder)
     const wants = gone ? null : holder._binaryWants
     // Read live: a scope listed twice is indexed already when its second step comes.
@@ -79,7 +80,9 @@ class WantsIndex {
 
   /** Indexes the holder's current text wants, a member per step: its room-wide ones, and those of `members`, or of
    *  every member when omitted. */
-  *updateText(holder: LaneHolder, gone = false, members?: Iterable<string>): Generator<void> {
+  *updateText(holder: LaneHolder, opts?: { gone?: boolean; members?: Iterable<string> }): Generator<void> {
+    const gone = opts?.gone === true
+    const members = opts?.members
     const indexed = this._indexedOf(holder)
     const text = gone ? null : holder._textDemand()
     const textAll = text?.all ?? false
