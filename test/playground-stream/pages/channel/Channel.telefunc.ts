@@ -29,6 +29,7 @@ export {
   onChannelEndedValues,
   onChannelSlowLink,
   onChannelUnawaitedBurst,
+  onChannelSmallPush,
 }
 
 import { Channel, Abort, BroadcastChannel } from 'telefunc'
@@ -648,6 +649,15 @@ async function onChannelUnawaitedBurst() {
     )
     await Promise.race([Promise.all(sends), new Promise((resolve) => setImmediate(resolve))])
     return rejected
+  })
+  return { channel: ch.client }
+}
+
+/** At the page's message, sends that many small messages without awaiting them. */
+async function onChannelSmallPush() {
+  const ch = new Channel<(count: number) => Promise<void>, (seq: number) => void>()
+  ch.listen(async (count) => {
+    for (let seq = 0; seq < count; seq++) void ch.send(seq)
   })
   return { channel: ch.client }
 }

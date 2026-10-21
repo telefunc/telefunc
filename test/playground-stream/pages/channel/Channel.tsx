@@ -33,6 +33,7 @@ import {
   onChannelEndedValues,
   onChannelSlowLink,
   onChannelUnawaitedBurst,
+  onChannelSmallPush,
 } from './Channel.telefunc'
 
 /**
@@ -149,6 +150,7 @@ type ChannelState = {
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
+  smallPushReceived: number[] | null
 }
 
 const initialState: ChannelState = {
@@ -215,6 +217,7 @@ const initialState: ChannelState = {
   endedValuesCollected: null,
   slowLinkReceived: null,
   unawaitedBurst: null,
+  smallPushReceived: null,
 }
 
 function timestamp() {
@@ -968,6 +971,19 @@ function ChannelDemo() {
     channel.close()
   }, [])
 
+  const testSmallPush = useCallback(async () => {
+    setChannelState((s) => ({ ...s, smallPushReceived: null }))
+    const { channel } = await openChannel(onChannelSmallPush)
+    const received: number[] = []
+    channel.listen((seq) => {
+      received.push(seq)
+      if (received.length < 60) return
+      setChannelState((s) => ({ ...s, smallPushReceived: received }))
+      channel.close()
+    })
+    await channel.send(60)
+  }, [])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -1284,6 +1300,14 @@ function ChannelDemo() {
               Server Bursts {count} MiB Unawaited
             </button>
           ))}
+          <button
+            id="channel-test-small-push"
+            type="button"
+            onClick={testSmallPush}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Server Pushes 60 Small Messages
+          </button>
           <button
             id="channel-test-unattached-flood"
             type="button"
