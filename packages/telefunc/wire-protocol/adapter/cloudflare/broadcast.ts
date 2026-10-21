@@ -266,7 +266,9 @@ class CloudflareBroadcastAuthorityState {
 // Multiple Durable Object instances in the same isolate share this transport.
 //
 // State stored here:
-//   - textSubs/binarySubs: local subscriber callbacks by key
+//   - textSubs/binarySubs: local subscriber callbacks by key, each with the DO that owns it
+//   - memberStates: per key, the presences of the DOs with subscribers here and the publishes waiting on them
+//   - requestOwners: each request a DO received, with its name
 //   - locationBucket: set once on first attachIsolateInfo call
 //   - representativeDOName: the first shard DO name, used for RPC delivery
 // ---------------------------------------------------------------------------
