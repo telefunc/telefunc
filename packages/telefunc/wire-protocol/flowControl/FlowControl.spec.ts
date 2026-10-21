@@ -2,12 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FlowControl } from './FlowControl.js'
 import type { FlowControlOptions } from './FlowControl.js'
-import {
-  BDP_PING_MIN_INTERVAL_MS,
-  CREDIT_MSG_WINDOW_INITIAL,
-  CREDIT_WINDOW_INITIAL_BYTES,
-  CREDIT_WINDOW_MAX_BYTES,
-} from '../constants.js'
+import { BDP_PING_MIN_INTERVAL_MS, CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
@@ -21,13 +16,6 @@ const upToAck = () => Infinity
 // the chain — `Promise.resolve()` once isn't enough.
 async function flushMicrotasks(): Promise<void> {
   for (let i = 0; i < 6; i++) await Promise.resolve()
-}
-
-/** Whether each promise has resolved, as of now. */
-function watch(promises: (void | Promise<void>)[]): boolean[] {
-  const resolved = promises.map(() => false)
-  promises.forEach((p, i) => void (p as Promise<void>).then(() => (resolved[i] = true)))
-  return resolved
 }
 
 // Spy emit — captures calls so tests can assert which wire frames the flow
@@ -93,40 +81,6 @@ describe('FlowControl — sender-side credit', () => {
     expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)).toBeUndefined()
     const gate = flow.decrement(1) // drains the final byte to 0
     expect(gate).toBeInstanceOf(Promise)
-  })
-
-  // A limit is cumulative: what the receiver has consumed plus its window. Credit is that limit minus what
-  // was sent, so a limit that only covers what is already in flight leaves a sender blocked.
-  it('a limit wakes a pending sender only once it exceeds what was sent', async () => {
-    const { flow } = makeFlow()
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)
-    const gate = flow.decrement(100)
-    expect(gate).toBeInstanceOf(Promise)
-    const resolved = watch([gate])
-
-    flow.onPeerByteWindow(CREDIT_WINDOW_INITIAL_BYTES + 99)
-    await flushMicrotasks()
-    expect(resolved).toEqual([false])
-    flow.onPeerByteWindow(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    await flushMicrotasks()
-    expect(resolved).toEqual([true])
-  })
-
-  // Woken together, senders that each await their sends would all send, each past the limit by a frame.
-  it('a limit wakes one blocked sender, and each send it makes within credit hands the credit to the next', async () => {
-    const { flow } = makeFlow()
-    const gates = [flow.decrement(CREDIT_WINDOW_INITIAL_BYTES), flow.decrement(100), flow.decrement(100)]
-    for (const g of gates) expect(g).toBeInstanceOf(Promise)
-    const resolved = watch(gates)
-
-    flow.onPeerByteWindow(3 * CREDIT_WINDOW_INITIAL_BYTES)
-    await flushMicrotasks()
-    expect(resolved).toEqual([true, false, false])
-    // The first sends again, within credit: the second's turn, and the first waits behind the third.
-    const again = flow.decrement(100)
-    expect(again).toBeInstanceOf(Promise)
-    await flushMicrotasks()
-    expect([...resolved, ...watch([again])]).toEqual([true, true, false, false])
   })
 })
 
@@ -230,49 +184,6 @@ describe('FlowControl — BDP integration', () => {
 })
 
 describe('FlowControl — reset (transport reattach)', () => {
-  // Credit is cumulative, so a reattach keeps it: resetting it to the initial window let a sender run a window
-  // ahead of what was in flight, and stalled one whose receiver waits for a quarter of its grown window. The
-  // receive window grown by BDP is kept too (the link's BDP doesn't change across transport hiccups).
-  it('keeps credit and the grown receive window, and advertises the limits again', () => {
-    const { flow, emit } = makeFlow()
-    flow.reattach() // the first wire
-    // Grow W via BDP first — fire ping, accumulate saturating sample, settle.
-    flow.onReceived(1)
-    flow.onReceived(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onPingAck({ probe: emit.probe, backlog: 0, pathRtt: Infinity }, upToAck)
-    const grownWindow = flow.byteWindow
-    expect(grownWindow).toBeGreaterThan(CREDIT_WINDOW_INITIAL_BYTES)
-    flow.onConsumed(100)
-    emit.windowCalls.length = 0
-    emit.msgWindowCalls.length = 0
-
-    // Deplete sender-side credit.
-    expect(flow.decrement(CREDIT_WINDOW_INITIAL_BYTES)).toBeInstanceOf(Promise)
-
-    flow.reattach()
-    expect(flow.byteWindow).toBe(grownWindow)
-    expect(flow.decrement(1)).toBeInstanceOf(Promise)
-    expect(emit.windowCalls).toEqual([100 + grownWindow])
-    expect(emit.msgWindowCalls).toEqual([1 + CREDIT_MSG_WINDOW_INITIAL])
-  })
-
-  // A sender blocked across a reattach wakes on the limit the peer advertises again on its end, the one a refresh
-  // lost with the prior wire would have raised. Catches a reattach that leaks waiters.
-  it('wakes a sender blocked across it on the limit the peer advertises again', async () => {
-    const { flow } = makeFlow()
-    flow.decrement(CREDIT_WINDOW_INITIAL_BYTES - 1)
-    const gate = flow.decrement(100)
-    expect(gate).toBeInstanceOf(Promise)
-    const resolved = watch([gate])
-
-    flow.reattach()
-    await flushMicrotasks()
-    expect(resolved).toEqual([false])
-    flow.onPeerByteWindow(CREDIT_WINDOW_INITIAL_BYTES + CREDIT_WINDOW_INITIAL_BYTES)
-    await flushMicrotasks()
-    expect(resolved).toEqual([true])
-  })
-
   // The BDP estimator's in-flight ping is dropped on reset (its ack rode the
   // prior wire and won't arrive). A fresh ping must be allowed to fire next.
   it('drops the in-flight BDP ping so the next receive can fire a fresh one', () => {

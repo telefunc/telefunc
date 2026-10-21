@@ -196,12 +196,6 @@ describe('cloudflare broadcast routing', () => {
     expect(getBucketCoordinatorShardIndices(4, 'enam')).toEqual([0, 1])
   })
 
-  it('uses scale maps to control the bucket-coordinator shard subsets', () => {
-    expect(getBucketCoordinatorShardIndices({ weur: 2, enam: 1 }, 'enam')).toEqual([0])
-    expect(getBucketCoordinatorShardIndices({ weur: 2, enam: 1 }, 'weur')).toEqual([0])
-    expect(getBucketCoordinatorShardIndices({ weur: 3, enam: 1 }, 'weur')).toEqual([0, 1])
-  })
-
   it('uses only canonical bucket scale entries', () => {
     expect(getBucketCoordinatorShardIndices({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
   })

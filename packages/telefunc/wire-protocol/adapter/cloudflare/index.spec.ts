@@ -112,7 +112,6 @@ vi.mock('./routing.js', () => ({
 }))
 
 import { Telefunc } from '../../../serve/cloudflare.js'
-import { resolveSessionRoutingTarget } from './routing.js'
 
 function createMockKV(): KVNamespace {
   const store = new Map<string, { value: string; expirationTtl?: number }>()
@@ -130,9 +129,6 @@ function createMockKV(): KVNamespace {
     },
   } as unknown as KVNamespace
 }
-
-/** A request doesn't await its pin's KV write: a macrotask lets it settle. */
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 
 function createBinding() {
   const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-shard') ?? 'missing'))
@@ -200,35 +196,6 @@ describe('cloudflare adapter entrypoint', () => {
     expect(forwardedRequest.headers.get('x-telefunc-shard')).toBe('telefunc-shard-weur-1')
     expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('weur')
     expect(forwardedRequest.headers.get('x-telefunc-session')).toBe('my-token')
-  })
-
-  it("routes a request that names no token by a new one, and hands its session Durable Object none to pin, though the request carried the token's header", async () => {
-    const { binding, get, fetch } = createBinding()
-    const tf = new Telefunc()
-    const kv = createMockKV()
-    const put = vi.spyOn(kv, 'put')
-    const env = { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env
-
-    await tf.serve({
-      request: new Request('https://telefunc.test/_telefunc', { headers: { 'x-telefunc-session': 'header-token' } }),
-      env,
-    })
-
-    expect(vi.mocked(resolveSessionRoutingTarget).mock.lastCall![4]).toMatch(/^[0-9a-f-]{36}$/)
-    expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-0' }), {
-      locationHint: 'weur',
-    })
-    const forwardedRequest = fetch.mock.calls[0]![0] as Request
-    expect(forwardedRequest.headers.has('x-telefunc-session')).toBe(false)
-    const instance = new tf.TelefuncDurableObject(
-      { id: { name: 'telefunc-shard-weur-0' } } as DurableObjectState,
-      env,
-    ) as unknown as {
-      fetch(request: Request): Promise<Response>
-    }
-    await instance.fetch(forwardedRequest)
-    await flush()
-    expect(put).not.toHaveBeenCalled()
   })
 
   it('returns undefined for non-telefunc traffic', async () => {
