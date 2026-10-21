@@ -1,9 +1,11 @@
 export { testFunction }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import * as http from 'node:http'
+import * as os from 'node:os'
 import { navigate, getResult, forceServerGc } from '../../e2e-utils'
 
-function testFunction() {
+function testFunction(isDev: boolean, inDocker = false) {
   test('function: simple greeter returns correct string', async () => {
     await navigate(`${getServerUrl()}/function`)
 
@@ -132,4 +134,61 @@ function testFunction() {
       })
     })
   }
+
+  test("function: the server keeps answering after a WebSocket upgrade whose path isn't a URL", async () => {
+    await navigate(`${getServerUrl()}/function`)
+    await requestPath('//', {
+      Connection: 'Upgrade',
+      Upgrade: 'websocket',
+      'Sec-WebSocket-Version': '13',
+      'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+    })
+    await page.click('#greeter-run')
+    await autoRetry(async () => {
+      expect(await getResult<string>('#greeter-result')).toBe('Hello, World! (from server)')
+    })
+  })
+
+  // A browser gives crypto.randomUUID() only to secure origins: HTTPS or localhost.
+  const lanAddress = Object.values(os.networkInterfaces())
+    .flat()
+    .find((address) => address?.family === 'IPv4' && !address.internal)?.address
+  // Preview only: Vite's dev server listens on localhost; Docker serves HTTPS.
+  if (!isDev && !inDocker && lanAddress) {
+    test('function: a page served over plain http from an address other than localhost opens a channel and passes a callback', async () => {
+      const url = new URL(getServerUrl())
+      url.hostname = lanAddress
+      await navigate(`${url.origin}/channel`)
+      await page.click('#channel-connect')
+      await autoRetry(async () => {
+        expect((await getResult<{ welcomeReceived: boolean }>('#channel-state')).welcomeReceived).toBe(true)
+      })
+      await navigate(`${url.origin}/function`)
+      await page.click('#map-run')
+      await autoRetry(async () => {
+        expect(await getResult<number[]>('#map-result')).to.deep.equal([1, 4, 9, 16, 25])
+      })
+    })
+  }
+}
+
+/** Sends a raw request for `path`, and resolves once the server answered or hung up. */
+function requestPath(path: string, headers: Record<string, string>) {
+  const { hostname, port } = new URL(getServerUrl())
+  return new Promise<void>((resolve) => {
+    const req = http.request({ hostname, port, path, headers, timeout: 2000 })
+    const done = () => {
+      req.destroy()
+      resolve()
+    }
+    req.on('response', (res) => {
+      res.resume()
+      res.on('end', done)
+    })
+    req.on('upgrade', done)
+    req.on('timeout', done)
+    req.on('error', done)
+    req.on('close', done)
+    req.end()
+  })
 }

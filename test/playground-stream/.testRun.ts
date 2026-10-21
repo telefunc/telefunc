@@ -93,7 +93,7 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
   // and zero commits everywhere else — each non-upgrading variant doubles as the control.
   testUpgrade()
 
-  testFunction()
+  testFunction(isDev)
 
   testStreamToServer(isDev)
 

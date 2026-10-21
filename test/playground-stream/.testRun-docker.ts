@@ -94,7 +94,7 @@ function testRunDocker() {
   testAbort()
   testClose()
   testChannel(false, true)
-  testFunction()
+  testFunction(false, true)
   testStreamToServer(false, true)
   testLiveQuery()
   testRxjs(true)
