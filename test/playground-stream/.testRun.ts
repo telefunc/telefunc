@@ -53,7 +53,9 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         log.logText.includes('Failed to load resource: the server responded with a status of 403') ||
         // A test's page change ends its SSE wire, and the server refuses a POST still in flight for it.
         log.logText.includes('Failed to load resource: the server responded with a status of 400') ||
-        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed'))
+        (log.logText.includes('WebSocket connection to') && log.logText.includes('failed')) ||
+        // Deno warns that a request's signal also aborts when its response completes.
+        log.logText.includes('Deno.serve: request.signal aborts on successful responses')
       )
     },
   })
