@@ -45,6 +45,7 @@ import {
   onListAsListed,
   onListWhileClosing,
   onRecreate,
+  onJoinAnswering,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -716,6 +717,39 @@ function Room() {
           const recreatedOpen = await onIsOpen(recreatedId)
           return { result: { order, whileClosing, recreated, recreatedOpen }, done: !recreatedOpen }
         })
+      })}
+
+      {scenario('ack-dm', 'Acknowledged DMs', 'DMs that wait for their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const peer = await room.join({ meta: { name: 'Peer' } })
+        peer.listen((data) => ({ echo: data }))
+        const serverMember = await onJoinAnswering(roomId)
+        const reply = (sent: Promise<{ response: unknown }>) =>
+          sent.then(
+            (receipt) => receipt.response,
+            (err: Error) => err.message,
+          )
+        setResult(
+          JSON.stringify({
+            fromPage: await reply(me.send(peer.id, 'hi', { ack: true })),
+            fromServer: await reply(me.send(serverMember, 'hi', { ack: true })),
+            refused: await reply(me.send(serverMember, 'refuse', { ack: true })),
+          }),
+        )
+      })}
+
+      {scenario('ack-timeout', null, 'An acknowledged DM nobody answers', async () => {
+        const [, room] = await createRoom('ack-timeout')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const silent = await room.join({ meta: { name: 'Silent' } })
+        silent.listen(() => new Promise(() => {}))
+        const start = Date.now()
+        const error = await me.send(silent.id, 'hello?', { ack: true }).then(
+          () => null,
+          () => 'rejected',
+        )
+        setResult(JSON.stringify({ error, seconds: Math.round((Date.now() - start) / 1000) }))
       })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {

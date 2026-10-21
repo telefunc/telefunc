@@ -1,4 +1,4 @@
-export { testRoom }
+export { testRoom, testRoomAckTimeout }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
 
@@ -287,6 +287,15 @@ function testRoom() {
       expect(r.recreatedOpen).toBe(false)
     },
   )
+  testRoomScenario<{ fromPage: unknown; fromServer: unknown; refused: unknown }>(
+    'ack-dm',
+    "room: an acknowledged DM resolves with its recipient's reply, from a page or a server member, and rejects with the recipient's Abort",
+    (r) => {
+      expect(r.fromPage).deep.equal({ echo: 'hi' })
+      expect(r.fromServer).deep.equal({ echo: 'hi' })
+      expect(r.refused).toBe('refused')
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',
@@ -507,6 +516,22 @@ function testRoom() {
     await autoRetry(
       async () => expect(await getResult('#room-result')).deep.equal({ heldOpen: false }),
       CLOSED_TAB_WAIT,
+    )
+  })
+}
+
+/** Waits out the 60 s acknowledgement timeout: one lane runs it. */
+function testRoomAckTimeout() {
+  test('room: an acknowledged DM its recipient never answers rejects at the 60 s acknowledgement timeout', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-ack-timeout')
+    await autoRetry(
+      async () => {
+        const r = await getResult<{ error: string | null; seconds: number }>('#room-result')
+        expect(r.error).toBe('rejected')
+        expect(r.seconds).within(59, 65)
+      },
+      { timeout: 75_000 },
     )
   })
 }

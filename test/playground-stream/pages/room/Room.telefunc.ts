@@ -41,6 +41,7 @@ export {
   onListAsListed,
   onListWhileClosing,
   onRecreate,
+  onJoinAnswering,
 }
 
 import { Buffer } from 'node:buffer'
@@ -415,4 +416,14 @@ async function onRecreate(roomId: string) {
   await Room.create(roomId, { meta: { incarnation: 2 }, emptyTimeout: 1000 })
   const room = await Room.get(roomId)
   return { meta: room.meta, count: room.count }
+}
+
+/** A server member that answers each DM with `{ echo }`, and refuses `refuse` with an Abort. */
+async function onJoinAnswering(roomId: string) {
+  const me = await Room.join(roomId, { meta: { name: 'Answering' } })
+  me.listen((data) => {
+    if (data === 'refuse') throw Abort('refused')
+    return { echo: data }
+  })
+  return me.id
 }
