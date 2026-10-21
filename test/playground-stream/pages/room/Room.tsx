@@ -431,6 +431,32 @@ function Room() {
         await onStopReplacingMeta(roomId)
       })}
 
+      {scenario('sender', 'Rename during a guard', 'Rename while a publish waits on its guard', async () => {
+        const roomId = await createRoomId('sender')
+        const room = await onOpenSlowGuardRoom(roomId)
+        const names: unknown[] = []
+        room.subscribe((_data, _info, from) => names.push(from.meta.name))
+        const me = await room.join({ meta: { name: 'A' } })
+        // A view whose roster may still be on its way.
+        const other = await onGetRoom(roomId)
+        const otherNames: unknown[] = []
+        other.subscribe((_data, _info, from) => otherNames.push(from.meta.name))
+
+        const published = me.publish(0) // its guard waits 50 ms
+        await me.setMeta({ name: 'B' })
+        await published
+        const view = await getParticipantWhenJoined(room, me.id)
+        const otherView = await getParticipantWhenJoined(other, me.id)
+
+        await pollUntil(() => {
+          const state = { names, otherNames, viewName: view.meta.name, otherViewName: otherView.meta.name }
+          return {
+            result: state,
+            done: names.length >= 1 && otherNames.length >= 1 && state.viewName === 'B' && state.otherViewName === 'B',
+          }
+        })
+      })}
+
       {scenario(
         'own-meta-race',
         'Own meta under concurrent writes',

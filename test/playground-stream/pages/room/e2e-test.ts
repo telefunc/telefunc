@@ -212,6 +212,16 @@ function testRoom() {
       for (const read of r.reads) expect(['a', 'b']).toContain(read)
     },
   )
+  testRoomScenario<{ names: unknown[]; otherNames: unknown[]; viewName: unknown; otherViewName: unknown }>(
+    'sender',
+    'room: a meta write made while a publish waits on its guard applies on every view, and the publish arrives once',
+    (r) => {
+      expect(r.names.length).toBe(1)
+      expect(r.otherNames.length).toBe(1)
+      expect(r.viewName).toBe('B')
+      expect(r.otherViewName).toBe('B')
+    },
+  )
   testRoomScenario<{ mine: [string, unknown][]; remote: [string, unknown][] }>(
     'own-meta-race',
     "room: a page's own member ends on the meta its unawaited writes stored, in call order, as other views do",
