@@ -51,7 +51,7 @@ export type {
   WirePublishInfo,
 }
 
-import { decodeOrderingFrame, encodeOrderingFrame } from '../ordering-frame.js'
+import { decodeOrderingFrame, encodeOrderingFrame } from './orderingFrame.js'
 import type { ChannelTransports } from '../constants.js'
 import { assert } from '../../utils/assert.js'
 

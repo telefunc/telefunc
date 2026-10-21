@@ -46,7 +46,7 @@ import {
   nextOrderMark,
   type StoredHead,
 } from '../../../../backend/room/semantics.js'
-import type { OrderingInfo } from '../../../../ordering-frame.js'
+import type { OrderingInfo } from '../../../../wire/orderingFrame.js'
 import { binaryLaneKeyPrefix, encodeLaneKey } from '../../../../backend/room/lane-key.js'
 
 type HeadCxOutcome = { head: StoredHead } | { conflict: true; current: StoredHead | null }

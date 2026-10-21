@@ -28,7 +28,7 @@ import type {
   RoomSubscriptionSource,
 } from '../../../backend/room/contract.js'
 import type { SubscriptionBinding, SubscriptionDriver } from '../../../backend/subscription.js'
-import type { OrderingInfo } from '../../../ordering-frame.js'
+import type { OrderingInfo } from '../../../wire/orderingFrame.js'
 import type { CloudflareBroadcast } from '../../../adapter/cloudflare/broadcast.js'
 import type { CloudflareRoomAuthorityStub } from './room/do.js'
 import { currentCloudflareSession, requireCloudflareSession } from './session.js'

@@ -12,7 +12,7 @@ export {
 export type { StoredHead }
 
 import type { CellCount, CellCounter, HeadCx, HeadNext, LaneId, RoomHead } from './contract.js'
-import type { OrderingInfo } from '../../ordering-frame.js'
+import type { OrderingInfo } from '../../wire/orderingFrame.js'
 
 // The authority rules both TypeScript drivers apply; Redis spells the same rules in Lua.
 

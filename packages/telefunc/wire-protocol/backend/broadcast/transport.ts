@@ -1,7 +1,7 @@
 export { createBroadcastTransportDriver }
 export type { BroadcastTransport }
 
-import { isOrderingPosition } from '../../ordering-frame.js'
+import { isOrderingPosition } from '../../wire/orderingFrame.js'
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from './contract.js'
 import type { BackendPayload, BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
 import { assertUsage } from '../../../utils/assert.js'

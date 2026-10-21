@@ -21,7 +21,7 @@ import type {
   RetainedOf,
   DirectoryPage,
 } from '../../../../backend/room/contract.js'
-import type { OrderingInfo } from '../../../../ordering-frame.js'
+import type { OrderingInfo } from '../../../../wire/orderingFrame.js'
 import { assert } from '../../../../../utils/assert.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../../../../backend/room/lane-key.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../../../../backend/room/semantics.js'

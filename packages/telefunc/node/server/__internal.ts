@@ -9,8 +9,8 @@ export {
   everyMemberLaneKey,
   everyTrackLaneKey,
 } from '../../wire-protocol/backend/room/lane-key.js'
-export { decodeOrderingFrame } from '../../wire-protocol/ordering-frame.js'
-export type { OrderingInfo } from '../../wire-protocol/ordering-frame.js'
+export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
+export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export type * from '../../wire-protocol/backend/room/contract.js'
 export { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from '../../wire-protocol/backend/room/contract.js'
 export type * from '../../wire-protocol/backend/subscription.js'

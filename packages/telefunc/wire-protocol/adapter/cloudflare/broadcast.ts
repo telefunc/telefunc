@@ -24,7 +24,7 @@ import { DriverAttempt } from '../../backend/attempt.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import type { OrderingInfo } from '../../ordering-frame.js'
+import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 import { currentCloudflareSession } from '../../server/adapter/cloudflare/session.js'
 

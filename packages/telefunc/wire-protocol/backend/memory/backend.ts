@@ -35,7 +35,7 @@ import {
   publicHead,
   type StoredHead,
 } from '../room/semantics.js'
-import type { OrderingInfo } from '../../ordering-frame.js'
+import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/connectionFrame.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { Fifo } from '../../../utils/Fifo.js'

@@ -2,7 +2,7 @@ export { CloudflareRoomSessionManager, CloudflareRoomSubscriptionAttempt }
 export type { RoomSessionDeliveryRequest }
 
 import type { BackendReceiver } from '../../../../backend/subscription.js'
-import type { OrderingInfo } from '../../../../ordering-frame.js'
+import type { OrderingInfo } from '../../../../wire/orderingFrame.js'
 import type { RoomSubscriptionSource } from '../../../../backend/room/contract.js'
 import { encodeLaneKey } from '../../../../backend/room/lane-key.js'
 import { DriverAttempt } from '../../../../backend/attempt.js'

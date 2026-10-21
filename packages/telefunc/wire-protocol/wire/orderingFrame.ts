@@ -1,7 +1,7 @@
 export { encodeOrderingFrame, decodeOrderingFrame, isOrderingPosition }
 export type { OrderingInfo }
 
-import { assert } from '../utils/assert.js'
+import { assert } from '../../utils/assert.js'
 
 type OrderingInfo = { seq: number; timestamp: number }
 

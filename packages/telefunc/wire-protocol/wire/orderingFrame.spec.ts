@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { decodeOrderingFrame, encodeOrderingFrame } from './ordering-frame.js'
+import { decodeOrderingFrame, encodeOrderingFrame } from './orderingFrame.js'
 
 describe('ordering frame', () => {
   it('encodes the wide ordering frame as four big-endian u32 words ahead of the payload', () => {

@@ -28,7 +28,7 @@ export type {
 }
 
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
-import type { OrderingInfo } from '../../ordering-frame.js'
+import type { OrderingInfo } from '../../wire/orderingFrame.js'
 
 /** The cells a prefix read's page holds. */
 const CELL_PAGE_SIZE = 1024
