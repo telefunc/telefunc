@@ -56,6 +56,10 @@ class RedisTransport implements BroadcastTransport {
   private readonly prefix: string
   private readonly textCallbacks = new Map<string, TextOnMessage>()
   private readonly binaryCallbacks = new Map<string, BinaryOnMessage>()
+  /** Settles once every SUBSCRIBE sent so far is acknowledged: Redis delivers a publish only to the subscriptions it has. */
+  private subscribesAcked: Promise<unknown> = Promise.resolve()
+  /** SUBSCRIBEs unacknowledged, and the publishes waiting for them. */
+  private waiting = 0
 
   constructor(options: RedisBroadcastOptions) {
     this.publisher = options.redis
@@ -77,7 +81,7 @@ class RedisTransport implements BroadcastTransport {
     const channel = this.channelKey(key, 't')
     assert(!this.textCallbacks.has(channel), `Duplicate text listener for key "${key}"`)
     this.textCallbacks.set(channel, onMessage)
-    void this.subscriber.subscribe(channel)
+    this.subscribe(channel)
     return () => {
       this.textCallbacks.delete(channel)
       void this.subscriber.unsubscribe(channel)
@@ -88,11 +92,24 @@ class RedisTransport implements BroadcastTransport {
     const channel = this.channelKey(key, 'b')
     assert(!this.binaryCallbacks.has(channel), `Duplicate binary listener for key "${key}"`)
     this.binaryCallbacks.set(channel, onMessage)
-    void this.subscriber.subscribe(channel)
+    this.subscribe(channel)
     return () => {
       this.binaryCallbacks.delete(channel)
       void this.subscriber.unsubscribe(channel)
     }
+  }
+
+  private subscribe(channel: string): void {
+    this.waiting++
+    const sent = this.subscriber.subscribe(channel)
+    const acked = new Promise<void>((resolve) => {
+      // `finally` rethrows: a SUBSCRIBE that fails is still an unhandled rejection, and the publishes go on.
+      void sent.finally(() => {
+        this.waiting--
+        resolve()
+      })
+    })
+    this.subscribesAcked = Promise.all([this.subscribesAcked, acked])
   }
 
   private readonly _onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
@@ -123,6 +140,12 @@ class RedisTransport implements BroadcastTransport {
     // string of byte values, corrupting the bytes. A copy, as ioredis may hold the
     // command past the call (connecting, auto-pipelining, a NOSCRIPT retry).
     const buf = Buffer.from(payload)
+    // Publishes keep their order: one waits while an earlier one does.
+    if (this.waiting > 0) {
+      this.waiting++
+      await this.subscribesAcked
+      this.waiting--
+    }
     const reply = await callDefinedCommand(this.publisher, PUBLISH_CMD, [seqKey, channelKey, buf])
     assert(Array.isArray(reply) && reply.length === 2, 'Publish script returned an unexpected shape')
     const [seq, timestamp] = reply
