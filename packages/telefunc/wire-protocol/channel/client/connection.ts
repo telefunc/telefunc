@@ -1758,7 +1758,7 @@ const TRANSPORT_REGISTRY: Record<
   ChannelTransport,
   (telefuncUrl: string, options: ClientConnectionOptions, owner: ClientConnection) => ClientChannelTransport
 > = {
-  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport(telefuncUrl, owner),
+  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport({ telefuncUrl, owner }),
   [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
     new SseTransport({ telefuncUrl, fetchImpl: options.fetchImpl, userHeaders: options.headers, owner }),
 }
@@ -1774,7 +1774,7 @@ const UPGRADE_TARGET_REGISTRY: Record<
   UpgradeTargetTransport,
   (telefuncUrl: string, owner: ClientConnection) => UpgradeTarget
 > = {
-  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport(telefuncUrl, owner),
+  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport({ telefuncUrl, owner }),
 }
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */

@@ -23,6 +23,11 @@ import type { Heartbeat } from './Heartbeat.js'
 /** What a WebSocket's frames go through, each way. */
 type WsEnds = { uplink: Uplink; downlink: Downlink; budget: SendBudget; sender: PieceSender; pieces: PagePieceReceiver }
 
+type WsTransportOptions = {
+  telefuncUrl: string
+  owner: ClientConnection
+}
+
 class WsTransport implements UpgradeTarget {
   readonly type = CHANNEL_TRANSPORT.WS
   readonly sendReconcileOnOpen = true
@@ -42,11 +47,10 @@ class WsTransport implements UpgradeTarget {
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
   private readonly wsUrl: string
+  private readonly owner: ClientConnection
 
-  constructor(
-    telefuncUrl: string,
-    private readonly owner: ClientConnection,
-  ) {
+  constructor({ telefuncUrl, owner }: WsTransportOptions) {
+    this.owner = owner
     const base = typeof window === 'undefined' ? undefined : window.location.href
     const url = new URL(telefuncUrl, base)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
