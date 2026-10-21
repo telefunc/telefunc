@@ -27,6 +27,7 @@ import {
   onGetWatchedBinary,
   onPublishBufferAsServer,
   onSendReusingObjects,
+  onPublishRightAfterSubscribe,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -345,6 +346,26 @@ function Room() {
               state.reuserTags?.[0] === 'b' &&
               state.roomTags !== null,
           }
+        })
+      })}
+
+      {scenario('right-after', 'Publish right after subscribe', 'Subscribe, then publish at once', async () => {
+        const roomId = await createRoomId('right-after')
+        await onPublishRightAfterSubscribe(roomId)
+        const room = await onGetRoom(roomId)
+        const me = await room.join({ meta: { name: 'Page' } })
+        const seen: unknown[] = []
+        room.subscribe((data, _info, from) => {
+          if (from.id === me.id) seen.push(data)
+        })
+        room.subscribeBinary((data, _info, from) => {
+          if (from.id === me.id) seen.push([...data])
+        })
+        await Promise.all([me.publish('p1'), me.publishBinary(new Uint8Array([2])), me.publish('p2')])
+
+        await pollUntil(async () => {
+          const serverSeen = await onGetWatched(roomId)
+          return { result: { seen, serverSeen }, done: seen.length >= 3 && serverSeen.length >= 4 }
         })
       })}
 

@@ -115,6 +115,16 @@ function testPublish() {
     })
   })
 
+  test('broadcast: publishes right after a subscribe reach it, text and binary in call order', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-right-after')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ seen: unknown[] }>('#publish-result')
+      expect(result.seen).deep.equal(['t1', [1], 't2'])
+    })
+  })
+
   test('broadcast: shield validates client→server publishes', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-shield')

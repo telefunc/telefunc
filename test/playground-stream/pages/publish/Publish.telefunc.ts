@@ -5,6 +5,7 @@ export {
   onBroadcastShieldClient,
   onBinaryBroadcastOwnBytes,
   onBinaryBroadcastReusedBuffer,
+  onBroadcastRightAfterSubscribe,
 }
 
 import { Buffer } from 'node:buffer'
@@ -114,4 +115,19 @@ async function onBinaryBroadcastReusedBuffer() {
     void sibling.close()
   })
   return { room, getSeen: async () => seen }
+}
+
+/** While another key's publishes are delivered, an instance subscribes text and binary and publishes text, binary and
+ *  text at once. */
+async function onBroadcastRightAfterSubscribe() {
+  const busy = new BroadcastChannel<number>({ key: `room:busy-test:${crypto.randomUUID()}` })
+  busy.subscribe(() => {})
+  for (let i = 0; i < 2000; i++) void busy.publish(i)
+  const room = new BroadcastChannel<string>({ key: `room:right-after-test:${crypto.randomUUID()}` })
+  const seen: unknown[] = []
+  room.subscribe((data) => seen.push(data))
+  room.subscribeBinary((data) => seen.push([...data]))
+  await Promise.all([room.publish('t1'), room.publishBinary(new Uint8Array([1])), room.publish('t2')])
+  await Promise.all([busy.close(), room.close()])
+  return seen
 }

@@ -23,6 +23,7 @@ export {
   onGetWatchedBinary,
   onPublishBufferAsServer,
   onSendReusingObjects,
+  onPublishRightAfterSubscribe,
 }
 
 import { Buffer } from 'node:buffer'
@@ -201,4 +202,26 @@ async function onSendReusingObjects(roomId: string, memberId: string) {
   bytes.fill(0)
   await Promise.all([published, sent, announced, systemSent, metaSet, roomMetaSet, binary])
   return me.id
+}
+
+/** While another member's publishes commit, a view subscribes and a member publishes at once; a member DMs one who just
+ *  joined. Each records only what the member sent. */
+async function onPublishRightAfterSubscribe(roomId: string) {
+  const busy = await Room.join(roomId, { meta: { name: 'Busy' } })
+  const me = await Room.join(roomId, { meta: { name: 'Me' } })
+  const room = await Room.get(roomId)
+  const seen: unknown[] = []
+  watched.set(roomId, seen)
+  watchedRooms.set(roomId, room)
+  for (let i = 0; i < 100; i++) void busy.publish(i)
+  room.subscribe((data, _info, from) => {
+    if (from.id === me.id) seen.push(data)
+  })
+  room.subscribeBinary((data, _info, from) => {
+    if (from.id === me.id) seen.push([...data])
+  })
+  await Promise.all([me.publish('t1'), me.publishBinary(new Uint8Array([1])), me.publish('t2')])
+  const peer = await Room.join(roomId, { meta: { name: 'Peer' } })
+  peer.listen((data) => seen.push(data))
+  await me.send(peer.id, 'dm')
 }

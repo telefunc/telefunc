@@ -9,6 +9,7 @@ import {
   onBroadcastShieldClient,
   onBinaryBroadcastOwnBytes,
   onBinaryBroadcastReusedBuffer,
+  onBroadcastRightAfterSubscribe,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -163,6 +164,18 @@ function Publish() {
         }}
       >
         Server publishes from one reused buffer
+      </button>
+
+      <h2>Publish Right After Subscribe</h2>
+
+      <button
+        id="test-broadcast-right-after"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seen: await onBroadcastRightAfterSubscribe() }))
+        }}
+      >
+        Subscribe, then publish at once
       </button>
 
       <h2>Broadcast Shield Validation</h2>

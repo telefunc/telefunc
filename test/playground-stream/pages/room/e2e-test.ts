@@ -152,6 +152,18 @@ function testRoom() {
       expect(r.roomTags).deep.equal(['x'])
     },
   )
+  testRoomScenario<{ seen: unknown[]; serverSeen: unknown[] }>(
+    'right-after',
+    'room: a publish right after subscribing, and a DM right after its recipient joined, arrive, each kind in call order',
+    (r) => {
+      // Text and binary travel apart: only each kind's own order is kept.
+      const texts = (list: unknown[]) => list.filter((data) => typeof data === 'string')
+      expect(texts(r.serverSeen)).deep.equal(['t1', 't2', 'dm'])
+      expect(r.serverSeen.filter(Array.isArray)).deep.equal([[1]])
+      expect(texts(r.seen)).deep.equal(['p1', 'p2'])
+      expect(r.seen.filter(Array.isArray)).deep.equal([[2]])
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',
