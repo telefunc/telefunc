@@ -369,7 +369,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Prepare channel state so the mux can register it. Called by
    *  `ChannelMux.registerChannel`; external code should call that instead. */
   _registerChannel(): void {
-    if (this._didShutdown || this._peer || this._didRegister) return
+    if (this._peer || this._didRegister) return
     this._didRegister = true
     // Allocate the replay buffer up-front: registration is the moment the channel
     // becomes addressable on the wire, so a peer can attach immediately after this
@@ -379,6 +379,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       maxBytes: c.serverReplayBuffer,
       binaryMaxBytes: c.serverReplayBufferBinary,
     })
+    if (this._didShutdown) return // the mux lets an ended channel go
     this._clearTimer('_ttlTimer')
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
@@ -875,7 +876,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // keeping the channel agnostic of who's listening.
     const shutdownCb = this._shutdownCallback
     this._shutdownCallback = null
-    const keep = !pageGone && shutdownCb !== null && !this._pageNeedsNothing()
+    // Before any response carried it, it keeps its end for the page a later one hands it to.
+    const keep = !pageGone && !this._pageNeedsNothing()
     if (!keep) this._release()
     shutdownCb?.(keep, pageAttached)
     this._fireClose(err)

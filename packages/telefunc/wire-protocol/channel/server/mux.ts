@@ -202,16 +202,18 @@ class ChannelMux {
 
   /** Callers must not invoke `channel._registerChannel()` directly. */
   registerChannel(channel: ServerChannel<any, any>): void {
-    // A shutdown channel's `_onShutdown` callback never fires, so inserting it would leave a
-    // permanent zombie entry whose later attach trips `attachChannel`'s replay-buffer assert.
-    if (channel._didShutdown) return
     channel._registerChannel()
     this.channels.set(channel.id, channel)
-    // Before a waiter attaches it: its `onOpen` may end it.
-    channel._onShutdown((keep, pageAttached) => {
-      if (keep) this.keepEnded(channel, pageAttached)
-      else this.unregisterChannel(channel.id)
-    })
+    if (channel._didShutdown) {
+      // It ended before a response carried it: it waits for its page as an ended channel does.
+      this.keepEnded(channel, false)
+    } else {
+      // Before a waiter attaches it: its `onOpen` may end it.
+      channel._onShutdown((keep, pageAttached) => {
+        if (keep) this.keepEnded(channel, pageAttached)
+        else this.unregisterChannel(channel.id)
+      })
+    }
     const waiters = this.pendingRegisterWaiters.get(channel.id)
     if (waiters) {
       this.pendingRegisterWaiters.delete(channel.id)

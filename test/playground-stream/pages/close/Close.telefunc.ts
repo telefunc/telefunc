@@ -4,6 +4,7 @@ export {
   onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onAbortedChannel,
   onCloseFn,
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
@@ -96,6 +97,12 @@ async function onCloseChannel() {
   ch.onClose((err) => {
     cleanupState.closeChannel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'
   })
+  return ch.client
+}
+
+async function onAbortedChannel() {
+  const ch = new Channel<never, never>()
+  ch.abort('before-return')
   return ch.client
 }
 

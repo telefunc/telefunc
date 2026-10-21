@@ -108,6 +108,16 @@ function testClose() {
     })
   })
 
+  test('close: a channel the server aborted before returning it reaches the client aborted', async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await page.click('#test-aborted-channel')
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('aborted channel')
+      expect(result.abortValue).toBe('before-return')
+    })
+  })
+
   // ── Targeted: fn ─────────────────────────────────────────────────────
 
   test('close: fn — close(fn) closes backing channel; call after close throws ChannelClosedError', async () => {
