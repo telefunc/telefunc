@@ -1,6 +1,6 @@
 export { Downlink }
 
-import { DRAIN_SPAN_MS, newestFastest } from '../Link.js'
+import { DRAIN_SPAN_MS, DrainRate } from '../Link.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import type { Uplink } from './Uplink.js'
 
@@ -10,9 +10,8 @@ class Downlink {
   private grantedBytes = 0
   private readonly grants = new Fifo<{ bytes: number; at: number }>()
   private creditArrivedBytes = 0
-  /** In bytes per ms: the fastest of the newest rates the peer's messages arrived at while they kept coming. */
-  private deliveryRate = 0
-  private readonly deliveryRates: number[] = []
+  /** The rate the peer's messages arrived at while they kept coming. */
+  private readonly delivery = new DrainRate()
   private deliveredBytes = 0
   private deliveredFrom = 0
   private deliveredAt = Number.NEGATIVE_INFINITY
@@ -45,7 +44,7 @@ class Downlink {
     this.deliveredBytes += bytes
     const span = at - this.deliveredFrom
     if (span < DRAIN_SPAN_MS) return
-    this.deliveryRate = newestFastest(this.deliveryRates, this.deliveredBytes / span)
+    this.delivery.measured(this.deliveredBytes / span)
     this.deliveredBytes = 0
     this.deliveredFrom = at
     this.deliveryGoesOn = true
@@ -54,16 +53,16 @@ class Downlink {
   /** How long a frame the peer sends now waits behind what it sent before, while its messages keep coming. */
   peerQueueWait(): number {
     const now = performance.now()
-    if (this.deliveryRate === 0 || now - this.deliveredAt > DRAIN_SPAN_MS) return 0
+    if (this.delivery.rate === 0 || now - this.deliveredAt > DRAIN_SPAN_MS) return 0
     // The span so far, or where it just started as the one before it ended, that one.
     const elapsed = now - this.deliveredFrom
     const lately = Math.max(
       this.deliveredBytes / Math.max(1, elapsed),
-      this.deliveryGoesOn && elapsed < DRAIN_SPAN_MS ? this.deliveryRates.at(-1)! : 0,
+      this.deliveryGoesOn && elapsed < DRAIN_SPAN_MS ? this.delivery.newest : 0,
     )
-    if (lately < this.deliveryRate / 2) return 0
+    if (lately < this.delivery.rate / 2) return 0
     this.grantsReached()
-    return Math.max(0, this.grantedBytes - this.creditArrivedBytes) / this.deliveryRate
+    return Math.max(0, this.grantedBytes - this.creditArrivedBytes) / this.delivery.rate
   }
 
   private grantsReached(): void {
