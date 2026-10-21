@@ -247,6 +247,27 @@ function testRoom() {
       expect(r.remote).deep.equal(stored)
     },
   )
+  testRoomScenario<{
+    leave: string
+    kick: string
+    close: string
+    atLeave: { cause: string; isClosed: boolean; count: number } | null
+    unsubscribeInOnClose: string | null
+    lateOnClose: boolean
+    isClosed: boolean[]
+  }>(
+    'close-handles',
+    'room: a leave or kick that empties a room onEmpty closes resolves, and Room.close() ends every handle: the leave callback sees the room closed and empty, an unsubscribe in onClose returns, and an onClose added after fires',
+    (r) => {
+      expect(r.leave).toBe('resolved')
+      expect(r.kick).toBe('resolved')
+      expect(r.close).toBe('resolved')
+      expect(r.isClosed).deep.equal([true, true])
+      expect(r.atLeave).deep.equal({ cause: 'closed', isClosed: true, count: 0 })
+      expect(r.unsubscribeInOnClose).toBe('returned')
+      expect(r.lateOnClose).toBe(true)
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',

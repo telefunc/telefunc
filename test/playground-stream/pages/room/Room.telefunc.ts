@@ -30,6 +30,7 @@ export {
   onStopReplacingMeta,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
+  onCloseWhenEmpty,
 }
 
 import { Buffer } from 'node:buffer'
@@ -321,4 +322,13 @@ async function onOpenRecordingGuardRoom(roomId: string) {
 
 async function onGetGuardCalls(roomId: string) {
   return guardCalls.get(roomId) ?? []
+}
+
+/** A server view closes the room once it is empty, the cleanup the Room docs show. */
+async function onCloseWhenEmpty(roomId: string) {
+  const room = await Room.get(roomId)
+  watchedRooms.set(roomId, room)
+  room.onEmpty(() => {
+    void Room.close(roomId)
+  })
 }

@@ -34,6 +34,7 @@ import {
   onStopReplacingMeta,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
+  onCloseWhenEmpty,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -499,6 +500,64 @@ function Room() {
             const state = { mine: Object.entries(me.meta), remote: Object.entries(remote.meta) }
             return { result: state, done: JSON.stringify(state.mine) === JSON.stringify(state.remote) }
           })
+        },
+      )}
+
+      {scenario(
+        'close-handles',
+        'Close ends every handle',
+        'Leave and kick into onEmpty, then Room.close()',
+        async () => {
+          const outcome = (done: Promise<unknown>) =>
+            done.then(
+              () => 'resolved',
+              (err: Error) => err.name,
+            )
+
+          // The last member's leave() empties the room, and onEmpty closes it.
+          const [leftId, left] = await createRoom('close-left')
+          await onCloseWhenEmpty(leftId)
+          const leaver = await left.join({ meta: { name: 'Leaver' } })
+          const leave = await outcome(leaver.leave())
+
+          // The last member's kick empties the room, and onEmpty closes it.
+          const [kickedId, kicked] = await createRoom('close-kicked')
+          await onCloseWhenEmpty(kickedId)
+          const kickedMember = await kicked.join({ meta: { name: 'Kicked' } })
+          const kick = await outcome(onKick(kickedId, kickedMember.id))
+
+          // Room.close() with a member in: what its leave callback sees, an unsubscribe in onClose, an onClose added after.
+          const [closedId, closed] = await createRoom('close-closed')
+          const member = await closed.join({ meta: { name: 'Member' } })
+          let atLeave: { cause: string; isClosed: boolean; count: number } | null = null
+          member.onLeave((cause) => (atLeave = { cause: cause.type, isClosed: closed.isClosed, count: closed.count }))
+          const unsubscribe = closed.subscribe(() => {})
+          let unsubscribeInOnClose: string | null = null
+          closed.onClose(() => {
+            try {
+              unsubscribe()
+              unsubscribeInOnClose = 'returned'
+            } catch (err) {
+              unsubscribeInOnClose = (err as Error).name
+            }
+          })
+          const close = await outcome(onCloseRoom(closedId))
+          await pollUntil(() => ({ done: closed.isClosed }))
+          let lateOnClose = false
+          closed.onClose(() => (lateOnClose = true))
+
+          await pollUntil(() => ({
+            result: {
+              leave,
+              kick,
+              close,
+              atLeave,
+              unsubscribeInOnClose,
+              lateOnClose,
+              isClosed: [left.isClosed, kicked.isClosed],
+            },
+            done: atLeave !== null && unsubscribeInOnClose !== null && lateOnClose && left.isClosed && kicked.isClosed,
+          }))
         },
       )}
 
