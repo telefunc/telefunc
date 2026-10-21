@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest'
-import { wrapProxy } from '../utils/wrapProxy.js'
+import { wrapProxy } from './wrapProxy.js'
 
 it('a proxied method keeps its identity across reads, as useSyncExternalStore requires', () => {
   const target = { onChange: (callback: () => void) => callback }
