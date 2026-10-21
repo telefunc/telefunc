@@ -11,6 +11,7 @@ import {
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
+  onBroadcastErrors,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -202,6 +203,18 @@ function Publish() {
         }}
       >
         Abort, receivers, unsubscribe
+      </button>
+
+      <h2>Failing subscribers and publishes</h2>
+
+      <button
+        id="test-broadcast-errors"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastErrors()))
+        }}
+      >
+        Subscribers throw, the store fails
       </button>
     </div>
   )

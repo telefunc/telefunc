@@ -7,9 +7,11 @@ export {
   onChatLeaveOnClose,
   onGetChatWatched,
   onServerBroadcastChecks,
+  onBroadcastErrors,
 }
 
-import { Broadcast, BroadcastChannel } from 'telefunc'
+import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
+import { addBackendFault, pendingBackendFaults } from '../../failing-backend'
 
 type TextMsg = { text: string; from: string }
 
@@ -149,4 +151,42 @@ async function onServerBroadcastChecks() {
   await Broadcast.publish(`${key}:static`, 'second')
 
   return { afterAbort, received, duringDelivery, statically }
+}
+
+let bugs: string[] | null = null
+onBug((err) => bugs?.push((err as Error).message))
+
+/** Subscribers that throw or reject, and un-awaited publishes the store fails. */
+async function onBroadcastErrors() {
+  bugs = []
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => void unhandled.push(reason)
+  process.on('unhandledRejection', onUnhandled)
+  const key = `room:listener-errors:${crypto.randomUUID()}`
+  const channel = new BroadcastChannel<string>({ key })
+  channel.subscribe(() => {
+    throw new Error('broadcast-listener-bug: thrown')
+  })
+  channel.subscribe(async () => {
+    throw new Error('broadcast-listener-bug: rejected')
+  })
+  const seen: string[] = []
+  const { promise: delivered, resolve } = Promise.withResolvers<void>()
+  channel.subscribe((msg) => {
+    seen.push(msg)
+    if (msg === 'b') resolve()
+  })
+  await channel.publish('a')
+  await channel.publish('b')
+  await delivered
+
+  addBackendFault({ op: 'publish', key, times: 2 })
+  channel.publish('lost')
+  Broadcast.publish(key, 'lost')
+  // Node emits 'unhandledRejection' once the microtask queue drains, before the next macrotask.
+  await new Promise(setImmediate)
+  process.off('unhandledRejection', onUnhandled)
+  const reported = bugs.sort()
+  bugs = null
+  return { seen, reported, unhandled: unhandled.length, storeFailedBoth: pendingBackendFaults() === 0 }
 }

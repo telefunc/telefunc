@@ -140,4 +140,22 @@ function testPublishFailingBackend() {
       expect(result.seen).deep.equal(['second:1'])
     })
   })
+
+  test('broadcast: a subscriber that throws or rejects is reported as a bug and the others get every message, and an un-awaited publish the store fails leaves no unhandled rejection', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-errors')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        seen: ['a', 'b'],
+        reported: [
+          'broadcast-listener-bug: rejected',
+          'broadcast-listener-bug: rejected',
+          'broadcast-listener-bug: thrown',
+          'broadcast-listener-bug: thrown',
+        ],
+        unhandled: 0,
+        storeFailedBoth: true,
+      })
+    })
+  })
 }
