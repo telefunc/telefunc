@@ -8,6 +8,8 @@ Redis-backed broadcast fan-out and Room state for Telefunc: one setup call makes
 npm install @telefunc/redis ioredis
 ```
 
+Requires Redis 5 or later.
+
 ## Setup
 
 ```ts

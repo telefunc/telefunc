@@ -53,9 +53,7 @@ const REDIS_DELIVERY_FENCE_TOKEN_LENGTH = 36
 const LANE_PAGE_SIZE = 1024
 
 // Authority time in ms from Redis TIME's [sec, µs] pair, never from the caller.
-// Redis 4 refuses a script's write after TIME unless the script replicates its effects, the default since Redis 5.
 const NOW_LUA = `
-redis.replicate_commands()
 local function tf_now()
   local t = redis.call('TIME')
   return tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
@@ -261,7 +259,6 @@ return marks
 // time in microseconds, as PUBLISH_LUA would start it, so its first publish follows.
 //   KEYS: [1]=order ('seq:ts:last text seq:last binary seq')
 const BROADCAST_START_LUA = `
-redis.replicate_commands()
 local mark = redis.call('GET', KEYS[1])
 if mark then return mark end
 local t = redis.call('TIME')
