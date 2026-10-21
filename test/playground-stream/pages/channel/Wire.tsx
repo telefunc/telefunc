@@ -2,7 +2,15 @@ export { WireDemo }
 
 import React, { useCallback, useRef, useState } from 'react'
 import { Abort, withContext } from 'telefunc/client'
-import { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireRelease } from './Wire.telefunc'
+import {
+  onWireResume,
+  onWireOverrun,
+  onWireEnd,
+  onWireLarge,
+  onWireOpen,
+  onWireRelease,
+  onWireUpload,
+} from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
 
 type WireState = {
@@ -16,6 +24,7 @@ type WireState = {
   many: { closed: number; next: string } | null
   /** close: what the page's close() resolved to, once the channel opened and the server's messages arrived. */
   release: { channelId: string; close: string } | null
+  upload: { channelId: string; sent: number } | null
 }
 
 const RESUME_COUNT = 256
@@ -35,6 +44,7 @@ function WireDemo() {
     large: null,
     many: null,
     release: null,
+    upload: null,
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
@@ -119,6 +129,22 @@ function WireDemo() {
     kept.close()
   }, [])
 
+  const uploadChannel = useRef<Awaited<ReturnType<typeof onWireUpload>>['channel'] | null>(null)
+  const uploadSent = useRef(0)
+  // Sends its first message in the turn the call returns, so it rides on the wire's first batch.
+  const uploadOpen = useCallback(async () => {
+    const { channel, channelId } = await onWireUpload()
+    uploadChannel.current = channel
+    uploadSent.current = 1
+    void channel.send(textMessage(0))
+    setState((s) => ({ ...s, upload: { channelId, sent: 1 } }))
+  }, [])
+  const uploadSend = useCallback(() => {
+    void uploadChannel.current!.send(textMessage(uploadSent.current++))
+    const sent = uploadSent.current
+    setState((s) => ({ ...s, upload: { ...s.upload!, sent } }))
+  }, [])
+
   const release = useCallback(async (when: 'arrived' | 'opened') => {
     const { channel, channelId } = await onWireRelease(RELEASE_COUNT)
     let received = 0
@@ -191,6 +217,22 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Close a channel as it opens, the server's {RELEASE_COUNT} messages on their way
+        </button>
+        <button
+          id="wire-upload-open"
+          type="button"
+          onClick={uploadOpen}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open a channel and send on it at once
+        </button>
+        <button
+          id="wire-upload-send"
+          type="button"
+          onClick={uploadSend}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Send the next message
         </button>
         <button
           id="wire-end-open"

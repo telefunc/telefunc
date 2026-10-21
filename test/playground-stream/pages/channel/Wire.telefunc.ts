@@ -1,4 +1,4 @@
-export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireRelease }
+export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireRelease, onWireUpload }
 
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -135,4 +135,15 @@ function reportRelease(id: string, channel: WeakRef<object>) {
   onServerAction(`wireRelease_${id}`, () => {
     cleanupState[`wireRelease_${id}`] = channel.deref() ? 'held' : 'released'
   })
+}
+
+/** A channel the page sends numbered text on. cleanupState: wireUpload_<id> = the server's tally. */
+async function onWireUpload() {
+  const ch = new Channel<(message: string) => void, never>()
+  const tally = new Tally()
+  ch.listen((message) => {
+    tally.text(message)
+    cleanupState[`wireUpload_${ch.id}`] = JSON.stringify(tally.state)
+  })
+  return { channel: ch.client, channelId: ch.id }
 }

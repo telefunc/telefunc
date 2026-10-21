@@ -12,6 +12,8 @@ import {
   dropNextWebSocket,
   forceServerGc,
   holdNextSsePost,
+  holdNextSseWire,
+  heldSsePosts,
   refuseNextSsePost,
   releaseHeldSsePosts,
 } from '../../e2e-utils'
@@ -24,6 +26,7 @@ type WireState = {
   large: number | null
   many: { closed: number; next: string } | null
   release: { channelId: string; close: string } | null
+  upload: { channelId: string; sent: number } | null
 }
 
 // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
@@ -242,6 +245,28 @@ function testWire(isDev: boolean) {
   })
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse'])) {
+    test("channel: a message sent with an SSE wire's first batch, which the server held until the connection dropped, arrives once and before the next", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await holdNextSseWire()
+      await page.click('#wire-upload-open')
+      await autoRetry(async () => {
+        expect(await heldSsePosts()).toBe(1)
+      })
+      await cutWire()
+      await page.click('#wire-upload-send')
+      await autoRetry(async () => {
+        const { upload } = await getResult<WireState>('#wire-state')
+        expect(upload!.sent).toBe(2)
+        const ss = await getCleanupState()
+        expect(JSON.parse(ss[`wireUpload_${upload!.channelId}`] ?? 'null')).deep.equal({
+          text: 2,
+          binary: 0,
+          inOrder: true,
+        })
+      })
+      await releaseHeldSsePosts()
+    })
+
     for (const post of ['refuses', 'reads late'] as const) {
       test(`channel: messages the page sends in an SSE POST the server ${post} arrive once and in order`, async () => {
         await navigate(`${getServerUrl()}/channel`)
