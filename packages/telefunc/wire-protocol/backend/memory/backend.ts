@@ -114,13 +114,22 @@ class MemoryBackendState {
 const DELIVERIES_PER_TURN = 1024
 
 const NO_TARGETS: readonly MemorySubscriptionAttempt[] = []
-const copyBytes = (bytes: Uint8Array): Uint8Array => new Uint8Array(bytes)
-const copyLane = (lane: LaneId): LaneId => ({ ...lane })
 
-const sumReceiverCounts = (targets: readonly MemorySubscriptionAttempt[]): number =>
-  targets.reduce((total, target) => total + target.receiverCount(), 0)
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes)
+}
 
-const isExpired = (entry: Expiring, now: number): boolean => entry.expiresAt !== null && entry.expiresAt <= now
+function copyLane(lane: LaneId): LaneId {
+  return { ...lane }
+}
+
+function sumReceiverCounts(targets: readonly MemorySubscriptionAttempt[]): number {
+  return targets.reduce((total, target) => total + target.receiverCount(), 0)
+}
+
+function isExpired(entry: Expiring, now: number): boolean {
+  return entry.expiresAt !== null && entry.expiresAt <= now
+}
 
 function newGeneration(): Generation {
   return {

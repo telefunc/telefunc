@@ -34,7 +34,9 @@ function ownMessage<T>(value: T): T {
 function ownMetadata<T extends RoomMeta | ParticipantMeta>(meta: T): T {
   return Object.freeze(ownMessage(meta))
 }
-const ownLeaveCause = (cause: LeaveCause): LeaveCause => Object.freeze({ ...cause })
+function ownLeaveCause(cause: LeaveCause): LeaveCause {
+  return Object.freeze({ ...cause })
+}
 /** A detached snapshot of a member, for guards and for senders a view doesn't know. */
 function senderOf(id: string, meta: ParticipantMeta, identity: string | null): Sender {
   return Object.freeze({ id, meta, identity })

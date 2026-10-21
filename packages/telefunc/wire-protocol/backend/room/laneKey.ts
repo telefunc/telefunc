@@ -49,5 +49,6 @@ function decodeLaneKey(key: string): LaneId {
   return { kind: 'binary', member: decodeURIComponent(member), track: decodeURIComponent(track) }
 }
 
-const roomSubscriptionSourceKey = (source: RoomSubscriptionSource): string =>
-  `${encodeURIComponent(source.roomId)}:${encodeURIComponent(source.inc)}:${encodeLaneKey(source.lane)}`
+function roomSubscriptionSourceKey(source: RoomSubscriptionSource): string {
+  return `${encodeURIComponent(source.roomId)}:${encodeURIComponent(source.inc)}:${encodeLaneKey(source.lane)}`
+}
