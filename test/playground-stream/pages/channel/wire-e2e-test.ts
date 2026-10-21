@@ -205,9 +205,13 @@ function testWire(isDev: boolean) {
         else await holdNextSsePost()
         for (let i = 0; i < 3; i++) await page.click('#channel-test-upstream-send')
         if (post === 'reads late') {
-          await autoRetry(async () => {
-            expect((await getCleanupState())[`upstream_${channelId}_receivedCount`]).toBe('4')
-          })
+          // The page gives a POST up 30 s after it went out, if no ping round trip failed first.
+          await autoRetry(
+            async () => {
+              expect((await getCleanupState())[`upstream_${channelId}_receivedCount`]).toBe('4')
+            },
+            { timeout: 40_000 },
+          )
           expect(await releaseHeldSsePosts()).toBe(1)
         }
         await page.click('#channel-test-upstream-send')
