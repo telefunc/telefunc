@@ -39,7 +39,7 @@ import {
   tellAgain,
   trackNames,
 } from '../../test/room.js'
-import { longestGapWhile } from '../../test/event-loop.js'
+import { longestGapWhile } from '../../test/eventLoop.js'
 
 beforeEach(() => installRoomBackend())
 afterEach(disposeRoomBackend)

@@ -16,7 +16,7 @@ import {
 import { ChannelOverflowError } from '../channelErrors.js'
 import { getSessionUrl } from './sessionRegistry.js'
 import { setAdapterMaxFrameBytes } from '../../../node/server/serverConfig.js'
-import { page, register } from '../../test/page-server.js'
+import { page, register } from '../../test/pageServer.js'
 
 const broadcasts: ClientBroadcast[] = []
 const channels: ClientChannel<never, string>[] = []

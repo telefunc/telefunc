@@ -99,7 +99,7 @@ import {
   wideBinaryScenario,
   yieldAfterEachReadAndCountWrites,
 } from '../../test/room.js'
-import { mark, ran, timeOutsideGc } from '../../test/event-loop.js'
+import { mark, ran, timeOutsideGc } from '../../test/eventLoop.js'
 
 beforeEach(() => installRoomBackend())
 afterEach(disposeRoomBackend)

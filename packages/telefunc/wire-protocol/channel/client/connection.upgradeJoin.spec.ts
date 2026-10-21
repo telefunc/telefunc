@@ -10,9 +10,9 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { ClientConnection } from './connection.js'
-import { muxChannelStub } from '../../test/mux-channel-stub.js'
-import { lengthPrefixed } from '../../test/page-server.js'
-import { reconciled } from '../../test/channel-specs.js'
+import { muxChannelStub } from '../../test/muxChannelStub.js'
+import { lengthPrefixed } from '../../test/pageServer.js'
+import { reconciled } from '../../test/channelSpecs.js'
 import { decode, encode, TAG } from '../../wire/connectionFrame.js'
 import type { DecodedFrame, ReconciledPayload } from '../../wire/connectionFrame.js'
 import { decodeU32 } from '../../wire/frame.js'

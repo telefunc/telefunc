@@ -24,7 +24,7 @@ import { CloudflareBackend } from './backend.js'
 import { CloudflareRoomSessionManager } from './room/subscription.js'
 import { ChannelMux } from '../../channel/server/mux.js'
 import type { BackendPayload, SubscriptionAttempt, SubscriptionState } from '../../backend/subscription.js'
-import { sqliteStorage } from '../../test/cloudflare-sql.js'
+import { sqliteStorage } from '../../test/cloudflareSql.js'
 
 /** Resolves once the attempt is ready; rejects if it ends first. */
 function untilReady(attempt: SubscriptionAttempt): Promise<void> {

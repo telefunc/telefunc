@@ -9,7 +9,7 @@ import { disposeBackend, getRoomBackend } from '../../telefunc/dist/wire-protoco
 import { Room } from '../../telefunc/dist/wire-protocol/room/server/statics.js'
 import { MEMBER_META_CELL_PREFIX } from '../../telefunc/dist/wire-protocol/room/server/cells.js'
 import { createDeferred } from '../../telefunc/dist/utils/createDeferred.js'
-import { longestGapWhile } from '../../telefunc/wire-protocol/test/event-loop.js'
+import { longestGapWhile } from '../../telefunc/wire-protocol/test/eventLoop.js'
 
 // Room on a real Redis: REDIS_URL names a standalone server, REDIS_CLUSTER_NODES a Cluster's nodes; each one set runs.
 type Target = { name: string; env: Record<string, string>; connect: () => Redis | Cluster }

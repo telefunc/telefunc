@@ -11,8 +11,8 @@ import {
   SSE_POST_MAX_BYTES,
 } from '../../constants.js'
 import { ClientConnection } from './connection.js'
-import { muxChannelStub } from '../../test/mux-channel-stub.js'
-import { reconciled } from '../../test/channel-specs.js'
+import { muxChannelStub } from '../../test/muxChannelStub.js'
+import { reconciled } from '../../test/channelSpecs.js'
 import { encodeSseRequest } from '../sseRequest.js'
 import { encodeLengthPrefixedFrames } from '../../wire/frame.js'
 import { TAG, decode, encode } from '../../wire/connectionFrame.js'

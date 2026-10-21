@@ -27,8 +27,8 @@ import { Room } from '../room/server/statics.js'
 import type { ServerLocalParticipant, ServerRoom } from '../room/server/room.js'
 import { ResponseRoomGrants, RoomParticipantStubChannel } from '../room/server/stub.js'
 import { ClientRoom, ClientStandaloneParticipant } from '../room/client/room.js'
-import { Pipe } from '../test/pipe.js'
-import { flowOf, produce, run } from '../test/channel-specs.js'
+import { Pipe } from '../test/Pipe.js'
+import { flowOf, produce, run } from '../test/channelSpecs.js'
 
 const LATENCY_MS = 5
 
