@@ -22,6 +22,7 @@ export {
   onCloseRoomWithMember,
   onBackgroundErrors,
   onRoomWhileAway,
+  onRoomLeaveWhileJoining,
   onRoomOverflow,
   onGetRoomOverflow,
   onRoomBurst,
@@ -278,6 +279,16 @@ async function onRoomWhileAway(roomId: string, memberId: string) {
     await Room.removeParticipant(roomId, { id: memberId, reason: 'while-away' })
     await Room.close(roomId)
     cleanupState[`roomAway_${roomId}`] = 'done'
+  })
+}
+
+/** A member the test removes, with `runServerAction()`, while the page is away. */
+async function onRoomLeaveWhileJoining(roomId: string) {
+  const other = await (await Room.get(roomId)).join({ meta: { name: 'Other' } })
+  awayMembers.set(roomId, [other])
+  onServerAction(`roomLeaveWhileJoining_${roomId}`, async () => {
+    await Room.removeParticipant(roomId, { id: other.id, reason: 'while-joining' })
+    cleanupState[`roomLeaveWhileJoining_${roomId}`] = 'done'
   })
 }
 

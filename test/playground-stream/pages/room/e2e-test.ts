@@ -539,6 +539,31 @@ function testRoom() {
       })
     })
   })
+  test('room: a page that reconnects while its join is pending gets the leave, with its cause, of a member removed while it was away', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-away-join')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-away-join:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await page.click('#test-room-away-join-now')
+    await runServerAction(`roomLeaveWhileJoining_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`roomLeaveWhileJoining_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        roomId,
+        joined: true,
+        leaves: [['Other', { type: 'removed', reason: 'while-joining' }]],
+        count: 1,
+      })
+    })
+  })
 }
 
 /** Tests that wait out Room's fixed timeouts, run in one lane. */

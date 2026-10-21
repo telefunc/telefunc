@@ -26,6 +26,7 @@ import {
   onCloseRoomWithMember,
   onBackgroundErrors,
   onRoomWhileAway,
+  onRoomLeaveWhileJoining,
   onRoomOverflow,
   onGetRoomOverflow,
   onRoomBurst,
@@ -71,6 +72,9 @@ async function createRoom(label: string) {
 }
 
 type RoomView = Awaited<ReturnType<typeof onGetRoom>>
+
+/** The join the `away-join` card starts when its second button is clicked. */
+let startAwayJoin: (() => void) | null = null
 
 /** The documented React adapter: the room's methods passed as they are. */
 function LiveCount({ room }: { room: RoomView }) {
@@ -1030,6 +1034,24 @@ function Room() {
           }),
         )
       })}
+
+      {scenario('away-join', 'Joining while offline', 'Another member leaves meanwhile', async () => {
+        const [roomId, view] = await createRoom('away-join')
+        const leaves: unknown[] = []
+        view.onLeave((member, cause) => leaves.push([member.meta.name, cause]))
+        await onRoomLeaveWhileJoining(roomId)
+        await pollUntil(() => ({ done: view.count === 1 }))
+        const { promise: joinStarted, resolve } = Promise.withResolvers<void>()
+        startAwayJoin = resolve
+        setResult(JSON.stringify({ roomId }))
+        await joinStarted
+        const me = await view.join({ meta: { name: 'Me' } })
+        for (let poll = 0; poll < 100 && leaves.length === 0; poll++) await new Promise((r) => setTimeout(r, 100))
+        setResult(JSON.stringify({ roomId, joined: me.id !== undefined, leaves, count: view.count }))
+      })}
+      <button id="test-room-away-join-now" onClick={() => startAwayJoin?.()}>
+        Join now
+      </button>
     </div>
   )
 }
