@@ -31,6 +31,7 @@ import {
   onChannelHeldBinary,
   onChannelUnattachedFlood,
   onChannelEndedValues,
+  onChannelSlowLink,
 } from './Channel.telefunc'
 
 /**
@@ -145,6 +146,7 @@ type ChannelState = {
   durationLimits: { withContext: string; close: string; ack: string } | null
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
+  slowLinkReceived: number | null
 }
 
 const initialState: ChannelState = {
@@ -209,6 +211,7 @@ const initialState: ChannelState = {
   durationLimits: null,
   endedValuesReady: false,
   endedValuesCollected: null,
+  slowLinkReceived: null,
 }
 
 function timestamp() {
@@ -938,6 +941,15 @@ function ChannelDemo() {
     setChannelState((s) => ({ ...s, endedValuesCollected }))
   }, [])
 
+  const testSlowLink = useCallback(async () => {
+    const { channel } = await openChannel(onChannelSlowLink)
+    channel.listenBinary((data) => {
+      setChannelState((s) => ({ ...s, slowLinkReceived: data.byteLength }))
+      channel.close()
+    })
+    await channel.send(1_000_000)
+  }, [])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -1234,6 +1246,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-white hover:bg-neutral-800"
           >
             Check They Were Collected
+          </button>
+          <button
+            id="channel-test-slow-link"
+            type="button"
+            onClick={testSlowLink}
+            className="px-3 py-1.5 text-sm rounded bg-sky-800 text-white hover:bg-sky-900"
+          >
+            1 MB Download
           </button>
           <button
             id="channel-test-unattached-flood"

@@ -27,6 +27,7 @@ export {
   onChannelHeldBinary,
   onChannelUnattachedFlood,
   onChannelEndedValues,
+  onChannelSlowLink,
 }
 
 import { Channel, Abort, BroadcastChannel } from 'telefunc'
@@ -623,4 +624,13 @@ async function onChannelEndedValues() {
     broadcast: new BroadcastChannel({ key: `ended-values:${crypto.randomUUID()}` }),
     generator: numbers(),
   }
+}
+
+/** Sends the page as many bytes as its message asks for. */
+async function onChannelSlowLink() {
+  const ch = new Channel<(bytes: number) => Promise<void>, never>()
+  ch.listen(async (bytes) => {
+    await ch.sendBinary(new Uint8Array(bytes))
+  })
+  return { channel: ch.client }
 }

@@ -1,7 +1,7 @@
 export { testChannel }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { Request } from 'playwright-chromium'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, restartProxy, stopProxy, startProxy } from '../../e2e-utils'
 
 type ChannelState = {
@@ -66,6 +66,7 @@ type ChannelState = {
   durationLimits: { withContext: string; close: string; ack: string } | null
   endedValuesReady: boolean
   endedValuesCollected: boolean[] | null
+  slowLinkReceived: number | null
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -815,6 +816,24 @@ function testChannel(isDev: boolean, inDocker = false) {
     await cdp.detach()
   })
 
+  test('channel: a 1 MB message to the page, 8 s at 1 Mbit/s, arrives over the connection it left on', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    const connections = countConnections()
+    const link = await throttleLink(125_000)
+    try {
+      await page.click('#channel-test-slow-link')
+      await autoRetry(
+        async () => {
+          expect((await getResult<ChannelState>('#channel-state')).slowLinkReceived).toBe(1_000_000)
+        },
+        { timeout: 40_000 },
+      )
+    } finally {
+      await link.restore()
+    }
+    expect(connections.stop()).toBe(1)
+  })
+
   if (channelTransport === 'sse') {
     test("channel: Chrome reports none of the page's SSE POSTs canceled", async () => {
       await navigate(`${getServerUrl()}/channel`)
@@ -835,6 +854,47 @@ function testChannel(isDev: boolean, inDocker = false) {
       page.off('requestfailed', onRequestFailed)
       expect(canceled).deep.equal([])
     })
+  }
+}
+
+/** Counts the WebSockets and SSE streams the page opens to Telefunc from now until `stop()`. */
+function countConnections() {
+  let opened = 0
+  const onWebSocket = (ws: WebSocket) => {
+    if (ws.url().includes('/_telefunc')) opened++
+  }
+  const onResponse = (response: Response) => {
+    if (response.headers()['content-type']?.startsWith('text/event-stream')) opened++
+  }
+  page.on('websocket', onWebSocket)
+  page.on('response', onResponse)
+  return {
+    stop() {
+      page.off('websocket', onWebSocket)
+      page.off('response', onResponse)
+      return opened
+    },
+  }
+}
+
+/** Slows the page's link to `bytesPerSecond` each way, as Chrome's network throttling does, WebSockets included. */
+async function throttleLink(bytesPerSecond: number) {
+  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
+  const cdp = await page.context().newCDPSession(page.mainFrame().page())
+  await cdp.send('Network.enable')
+  const emulate = (throughput: number) =>
+    cdp.send('Network.emulateNetworkConditions', {
+      offline: false,
+      latency: 0,
+      downloadThroughput: throughput,
+      uploadThroughput: throughput,
+    })
+  await emulate(bytesPerSecond)
+  return {
+    async restore() {
+      await emulate(-1)
+      await cdp.detach()
+    },
   }
 }
 
