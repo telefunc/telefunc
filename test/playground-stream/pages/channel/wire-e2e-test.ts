@@ -1,11 +1,12 @@
-export { testWire }
+export { testWire, testWireSmallReplay }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, runServerAction, cutWire } from '../../e2e-utils'
 
 type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
   resume: { channelId: string; received: Tally } | null
+  overrun: { channelId: string; received: Tally; onClose: string | null } | null
 }
 
 // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
@@ -26,4 +27,37 @@ function testWire(isDev: boolean) {
       expect(cuts.every((cut) => cut > 0)).toBe(true)
     })
   })
+}
+
+// Run by the lanes whose server keeps 64 KiB of each end's text for a reconnect.
+function testWireSmallReplay() {
+  for (const from of ['server', 'page'] as const) {
+    test(`channel: 256 KiB the ${from} sends without awaiting while the page is offline is more than the replay keeps: the channel closes with NetworkError on both ends, and no message after the gap arrives`, async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#wire-overrun-open')
+      let channelId = ''
+      await autoRetry(async () => {
+        const { overrun } = await getResult<WireState>('#wire-state')
+        expect(overrun).not.toBe(null)
+        channelId = overrun!.channelId
+      })
+      await page.context().setOffline(true)
+      if (from === 'server') {
+        await runServerAction(`wireOverrun_${channelId}`)
+      } else {
+        await page.click('#wire-overrun-send')
+        await cutWire()
+      }
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        const { overrun } = await getResult<WireState>('#wire-state')
+        expect(overrun!.onClose).toBe('NetworkError')
+        const ss = await getCleanupState()
+        expect(ss[`wireOverrun_${channelId}_onClose`]).toBe('NetworkError')
+        const received: Tally = from === 'server' ? overrun!.received : JSON.parse(ss[`wireOverrun_${channelId}`]!)
+        expect(received.inOrder).toBe(true)
+        expect(received.text).lessThan(16)
+      })
+    })
+  }
 }

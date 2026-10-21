@@ -1,8 +1,9 @@
-export { onWireResume }
+export { onWireResume, onWireOverrun }
 
 import { Channel } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
+import { onServerAction } from '../../server-actions'
 import { Tally, textMessage, binaryMessage } from './wire-messages'
 
 /**
@@ -37,6 +38,33 @@ async function onWireResume(count: number) {
       await ch.sendBinary(binaryMessage(n))
       if (n === count / 2) cut()
     }
+  })
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/**
+ * `count` numbered messages the page sends, or the server sends at server action wireOverrun_<id>, without awaiting them;
+ * the server drops the page's connections right after its own.
+ *
+ * cleanupState: wireOverrun_<id> = the server's tally of what the page sent; wireOverrun_<id>_onClose = its onClose error's name.
+ */
+async function onWireOverrun(count: number) {
+  const ch = new Channel<(message: string) => void, (message: string) => void>()
+  const tally = new Tally()
+  const report = () => {
+    cleanupState[`wireOverrun_${ch.id}`] = JSON.stringify(tally.state)
+  }
+  report()
+  ch.onClose((err) => {
+    cleanupState[`wireOverrun_${ch.id}_onClose`] = err ? err.name : 'none'
+  })
+  ch.listen((message) => {
+    tally.text(message)
+    report()
+  })
+  onServerAction(`wireOverrun_${ch.id}`, () => {
+    for (let n = 0; n < count; n++) void ch.send(textMessage(n))
+    cutWireSockets()
   })
   return { channel: ch.client, channelId: ch.id }
 }
