@@ -18,7 +18,7 @@ export {
 
 import { assert } from '../../../utils/assert.js'
 import { getRoomBackend } from '../../backend/install.js'
-import { Slice } from '../slice.js'
+import { Slice } from '../Slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
 import { isOpenIncarnation } from '../../backend/room/semantics.js'
 import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'

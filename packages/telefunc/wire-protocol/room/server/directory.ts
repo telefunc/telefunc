@@ -5,7 +5,7 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
-import { Slice } from '../slice.js'
+import { Slice } from '../Slice.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SESSION_TTL_MS } from './constants.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { configFromHead, openConfig } from './lanes.js'

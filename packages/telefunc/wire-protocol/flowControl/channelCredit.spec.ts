@@ -26,7 +26,7 @@ import { config, getServerConfig, setAdapterMaxFrameBytes } from '../../node/ser
 import { Room } from '../room/server/statics.js'
 import type { ServerLocalParticipant, ServerRoom } from '../room/server/room.js'
 import { ResponseRoomGrants, RoomParticipantStubChannel } from '../room/server/stub.js'
-import { ClientRoom, ClientStandaloneParticipant } from '../room/client.js'
+import { ClientRoom, ClientStandaloneParticipant } from '../room/client/room.js'
 import { Pipe } from '../test/pipe.js'
 import { flowOf, produce, run } from '../test/channel-specs.js'
 

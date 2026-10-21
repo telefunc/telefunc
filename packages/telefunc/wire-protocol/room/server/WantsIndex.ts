@@ -4,7 +4,7 @@ export type { Affected }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { ALL, DEFAULT_TRACK, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
-import type { BinaryWants, TrackWants } from './binary-wants.js'
+import type { BinaryWants, TrackWants } from './binaryWants.js'
 import type { LaneHolder } from './replay.js'
 import { hasEntry, toggle, toggleEntry } from './sets.js'
 assertIsNotBrowser()

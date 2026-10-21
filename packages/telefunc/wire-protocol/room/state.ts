@@ -6,7 +6,7 @@ import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel/channel.js'
 import { untether } from '../../utils/wrapProxy.js'
 import { makeDisposer } from './disposer.js'
-import { Slice } from './slice.js'
+import { Slice } from './Slice.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 import {
@@ -20,8 +20,8 @@ import {
   type TrackKey,
 } from './binary.js'
 import { assertKnownOptions, ownLeaveCause, removedCause, senderOf } from './model.js'
-import { RoomMetaState } from './meta-state.js'
-import { MemberMeta, type MetaRewinds } from './member-meta.js'
+import { RoomMetaState } from './metaState.js'
+import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import type {
   MemberMetaUpdate,
   MemberSnapshot,

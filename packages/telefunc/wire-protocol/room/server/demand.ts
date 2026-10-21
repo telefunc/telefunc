@@ -5,7 +5,7 @@ import { ALL, DEFAULT_TRACK, type All } from '../binary.js'
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
 import type { DemandEntry, RoomDemandPage } from './protocol.js'
 import { hasEntry, runAll, toggle, toggleEntry } from './sets.js'
-import { Slice } from '../slice.js'
+import { Slice } from '../Slice.js'
 
 /** The reporters of an entry, each with the telling of everything (`Reporter.telling`) it last told the entry in. */
 type Leases = Map<string, number>

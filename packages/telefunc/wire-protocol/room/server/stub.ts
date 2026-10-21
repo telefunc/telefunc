@@ -35,7 +35,7 @@ import {
 import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
-import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binary-wants.js'
+import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
 import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
 import {
   leaveCauseToWire,

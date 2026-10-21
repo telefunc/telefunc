@@ -30,7 +30,7 @@ import {
   memberMetaCellPrefix,
 } from './cells.js'
 import type { Sender } from '../types.js'
-import { ClientRoom } from '../client.js'
+import { ClientRoom } from '../client/room.js'
 import { RoomModel, remoteBacking } from '../state.js'
 import { Room } from './statics.js'
 import { cancelClose } from './lifecycle.js'
@@ -40,7 +40,7 @@ import { config, getServerConfig, reconnectWindow } from '../../../node/server/s
 import { reportRoomError } from './errors.js'
 import { heldSendWeight } from '../../backend/heldSendWeight.js'
 import { MemberMessageTexts, ResponseRoomGrants, RoomParticipantStubChannel, RoomStubChannel } from './stub.js'
-import { WantsIndex } from './wants-index.js'
+import { WantsIndex } from './WantsIndex.js'
 import { roomParticipantReplacer, roomRemoteReplacer, roomReplacer } from '../response-server.js'
 import type { ServerChannel } from '../../channel/server/channel.js'
 import { disposeBackend, getBroadcastBackend, getRoomBackend, installBackend } from '../../backend/install.js'

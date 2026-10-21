@@ -1,14 +1,14 @@
 export { ClientRoom, ClientStandaloneParticipant }
 
-import { createDeferred } from '../../utils/createDeferred.js'
-import { assert, assertUsage } from '../../utils/assert.js'
-import { markHandled } from '../../utils/markHandled.js'
-import { getOrCreate } from '../../utils/getOrCreate.js'
-import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
-import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../channel/channel.js'
-import { ClientBroadcast, type ClientChannel } from '../channel/client/channel.js'
-import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from './binary.js'
-import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from './model.js'
+import { createDeferred } from '../../../utils/createDeferred.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
+import { markHandled } from '../../../utils/markHandled.js'
+import { getOrCreate } from '../../../utils/getOrCreate.js'
+import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
+import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../../channel/channel.js'
+import { ClientBroadcast, type ClientChannel } from '../../channel/client/channel.js'
+import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../binary.js'
+import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../model.js'
 import {
   hasRoomTag,
   inboxMessageFromWire,
@@ -29,12 +29,12 @@ import {
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
-} from './protocol.js'
-import { RoomModel, RoomState, RoomStateView, type MembershipEvent } from './state.js'
-import { ROOM_TRACK_WANTS_MAX } from './constants.js'
-import { CLIENT_ROOM_BUG_MESSAGE } from './errors.js'
-import { ParticipantBase } from './participant.js'
-import type { MetaRewinds } from './member-meta.js'
+} from '../protocol.js'
+import { RoomModel, RoomState, RoomStateView, type MembershipEvent } from '../state.js'
+import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
+import { CLIENT_ROOM_BUG_MESSAGE } from '../errors.js'
+import { ParticipantBase } from '../participant.js'
+import type { MetaRewinds } from '../MemberMeta.js'
 import type {
   BinaryPublishOptions,
   JoinOptions,
@@ -46,7 +46,7 @@ import type {
   Room,
   RoomSnapshotView,
   Sender,
-} from './types.js'
+} from '../types.js'
 
 /** What a room's stub relays to its client on the text lane. */
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent

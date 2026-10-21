@@ -12,7 +12,7 @@ import { maintainHold, type RoomIncarnation } from './lifecycle.js'
 import { CONTROL_LANE } from './lanes.js'
 import { reapAndReadRoster, reapLapsedSessions } from './membership.js'
 import { dropReplacedMetaGenerations, readRoomMeta, readRoomMetaSeq, type StoredRoomMeta } from './meta.js'
-import type { RosterStream } from './roster-stream.js'
+import type { RosterStream } from './RosterStream.js'
 import type { RoomSubscriptions } from './subscriptions.js'
 assertIsNotBrowser()
 

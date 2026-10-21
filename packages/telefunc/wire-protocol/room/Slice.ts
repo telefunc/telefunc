@@ -6,7 +6,7 @@ import { nextTurn } from '../flowControl/macrotaskYield.js'
 import { ROOM_PLAN_SLICE_MS } from './constants.js'
 
 /** The slices waiting in the process, and how many turns resumed one. */
-const waiting = getGlobalObject('wire-protocol/room/slice.ts', () => ({ resumed: 0, slices: new Fifo<() => void>() }))
+const waiting = getGlobalObject('wire-protocol/room/Slice.ts', () => ({ resumed: 0, slices: new Fifo<() => void>() }))
 
 /** Work's time on the event loop: `ROOM_PLAN_SLICE_MS` from when it starts, and as much in each later turn it waits
  *  for. A turn resumes one waiting slice, the first to wait, so slices waiting together don't run in one turn. */

@@ -9,7 +9,7 @@ import { utf8ByteLength } from '../../utils/utf8ByteLength.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
-import { MemberMeta, type MetaRewinds } from './member-meta.js'
+import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { publicTrack, type TrackKey } from './binary.js'
 import type { AcceptedMeta, DmReply, InboxMessage } from './protocol.js'
 import type {

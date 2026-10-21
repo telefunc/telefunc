@@ -1,7 +1,7 @@
 export { roomRemoteReviver, roomTypes }
 
 import type { InternalClientReviverContext, ReviverType, TypeContract } from '../values/types.js'
-import { ClientRoom, ClientStandaloneParticipant } from './client.js'
+import { ClientRoom, ClientStandaloneParticipant } from './client/room.js'
 import type { LocalParticipant, RemoteParticipant } from './types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from './protocol.js'
 import { assert } from '../../utils/assert.js'

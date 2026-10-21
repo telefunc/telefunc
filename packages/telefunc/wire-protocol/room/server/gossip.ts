@@ -8,7 +8,7 @@ import type { RoomDemandPage } from './protocol.js'
 import { reportRoomError } from './errors.js'
 import { DEMAND_LANE, encodeDemandPage } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
-import { Slice } from '../slice.js'
+import { Slice } from '../Slice.js'
 assertIsNotBrowser()
 
 type Want = RoomDemandPage['wants'][number]

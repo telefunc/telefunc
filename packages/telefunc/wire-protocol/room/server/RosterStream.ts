@@ -3,7 +3,7 @@ export { RosterStream }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ROOM_ROSTER_PART_MEMBERS } from './constants.js'
 import type { MemberSnapshot, RoomRosterEvent } from '../protocol.js'
-import { Slice } from '../slice.js'
+import { Slice } from '../Slice.js'
 import type { MembershipEvent, RoomModel } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { type RoomStubChannel, unorderedEventText } from './stub.js'

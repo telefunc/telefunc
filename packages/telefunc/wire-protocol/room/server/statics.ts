@@ -47,7 +47,7 @@ import { SEMANTIC_LANE, commitToInbox, commitRoomLaneOrThrow, openConfig, encode
 import { ServerRoom } from './room.js'
 import { RoomReplica } from './replica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
-import { metaEntriesAt, metaObjectOf } from '../meta-state.js'
+import { metaEntriesAt, metaObjectOf } from '../metaState.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { cleanupFinalizedIncarnation, closeIncarnation, takeOverClose } from './close.js'
 import { cancelClose, createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
