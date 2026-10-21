@@ -31,7 +31,7 @@ function consecutive(first: number): number[] {
   return [first, first + 1, first + 2]
 }
 
-function testPublish() {
+function testPublish(inDocker = false) {
   test('broadcast: paired text publish/subscribe roundtrip', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-text-broadcast')
@@ -125,18 +125,22 @@ function testPublish() {
     })
   })
 
-  test("broadcast: a listener's answer arrives after the message it answers; a listener answering every message lets timers fire; an awaited publish is delivered when it resolves", async () => {
+  test("broadcast: a listener's answer arrives after the message it answers; a listener answering every message lets timers fire; an awaited publish is delivered when it resolves on the in-memory backend, and every one is delivered on Redis", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-answers')
 
     await autoRetry(async () => {
-      const result = await getResult<{ received: string[]; timerFired: boolean; deliveredAtLastReceipt: number }>(
-        '#publish-result',
-      )
+      const result = await getResult<{
+        received: string[]
+        timerFired: boolean
+        deliveredAtLastReceipt: number
+        delivered: number
+      }>('#publish-result')
       expect(result.received[0]).toBe('ping')
       expect([...result.received].sort()).deep.equal(['async-pong', 'ping', 'pong'])
       expect(result.timerFired).toBe(true)
-      expect(result.deliveredAtLastReceipt).toBe(3000)
+      if (inDocker) expect(result.delivered).toBe(3000)
+      else expect(result.deliveredAtLastReceipt).toBe(3000)
     })
   })
 

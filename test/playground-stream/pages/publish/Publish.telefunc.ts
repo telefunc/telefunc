@@ -175,8 +175,10 @@ async function onBroadcastAnsweringLoop() {
   counter.subscribe(() => delivered++)
   for (let i = 0; i < 3000; i++) await counter.publish(i)
   const deliveredAtLastReceipt = delivered
+  // On Redis a local delivery comes back through the store after the publish's receipt.
+  for (let poll = 0; poll < 50 && delivered < 3000; poll++) await new Promise((resolve) => setTimeout(resolve, 200))
   await Promise.all([loop.close(), counter.close()])
-  return { timerFired: true, deliveredAtLastReceipt }
+  return { timerFired: true, deliveredAtLastReceipt, delivered }
 }
 
 /** While another key's publishes are delivered, an instance subscribes and publishes three 1,500-byte messages at once,

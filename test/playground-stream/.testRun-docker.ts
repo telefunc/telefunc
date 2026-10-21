@@ -106,7 +106,7 @@ function testRunDocker() {
   testStreamToServer()
   testLiveQuery()
   testRxjs(true)
-  testPublish()
+  testPublish(true)
   testRedisReconnect()
   testRefIdentity()
 }
