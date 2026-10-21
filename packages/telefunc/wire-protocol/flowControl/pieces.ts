@@ -12,6 +12,7 @@ import {
 } from '../constants.js'
 import type { Link } from './Link.js'
 import { TAG, assertProtocol, encode, isSequencedTag, passesData, type PiecesAck } from '../wire/connectionFrame.js'
+import { concatAll } from '../wire/frame.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
@@ -459,7 +460,7 @@ class SocketMessages {
   flush(): void {
     const n = this.frames.length
     if (n === 0 || this.closed) return
-    const message = n === 1 ? this.frames[0]! : encode.message(this.frames, this.bytes)
+    const message = n === 1 ? this.frames[0]! : concatAll(this.frames)
     this.frames.length = 0
     this.bytes = 0
     if (message.byteLength > this.largest) this.largest = message.byteLength
