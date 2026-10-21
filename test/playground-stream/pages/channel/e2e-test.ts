@@ -57,6 +57,11 @@ type ChannelState = {
   shieldClientSendAckInvalidError: string | null
   shieldServerAckValid: { ok: boolean; value?: string; error?: string } | null
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
+  selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
+  unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
+  oversize: { channelId: string; thrown: string[]; followUp: string; isClosed: boolean } | null
+  heldBinary: number[][] | null
+  unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -705,6 +710,76 @@ function testChannel(isDev: boolean, inDocker = false) {
       // C2: server-sent message acked by client's wrong-typed return → server's send rejects.
       expect(state.shieldServerAckInvalid?.ok).toBe(false)
       expect(state.shieldServerAckInvalid?.error).toBeTruthy()
+    })
+  })
+
+  test("channel: a listener that stops listening itself doesn't make the next one miss a message, on either end", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-self-removing-listener')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      expect(state.selfRemovingListener?.pageSeen).deep.equal(['once:one', 'other:one', 'other:two'])
+      expect(state.selfRemovingListener?.serverSeen).deep.equal(['once:one', 'other:one', 'other:two'])
+    })
+  })
+
+  test("channel: an ack answer that can't be serialized rejects the other end's send, and the channel stays open", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-unserializable-answer')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      const result = state.unserializableAnswer!
+      expect(result.pageSend).match(/^error:/)
+      expect(result.pageFollowUp).toBe('ok:ack:ok')
+      expect(result.isClosed).toBe(false)
+      const ss = await getCleanupState()
+      expect(ss[`unserializable_${result.channelId}_serverSend`]).match(/^error:/)
+      expect(ss[`unserializable_${result.channelId}_serverFollowUp`]).toBe('ok:client-ack:ok')
+    })
+  })
+
+  test('channel: a send over 64 MiB throws at once and an answer that large rejects the send it answers, the channel staying open', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-oversize')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      const result = state.oversize!
+      expect(result.thrown).to.have.length(2)
+      expect(result.thrown).not.to.include('none')
+      expect(result.followUp).toBe('ack:ok')
+      expect(result.isClosed).toBe(false)
+      const ss = await getCleanupState()
+      expect(ss[`oversize_${result.channelId}_serverSend`]).match(/^error:/)
+      expect(ss[`oversize_${result.channelId}_serverFollowUp`]).toBe('ok:client-ack:ok')
+    })
+  })
+
+  test('channel: binary the server sends before the page attaches arrives as sent, though the server reuses the buffer', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-held-binary')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      expect(state.heldBinary).deep.equal([
+        [1, 1, 1],
+        [2, 2, 2],
+        [3, 3, 3],
+        [4, 4, 4],
+      ])
+    })
+  })
+
+  test('channel: a flood of empty sends to a channel no page attached to rejects the oldest with ChannelOverflowError', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-unattached-flood')
+
+    await autoRetry(async () => {
+      const state = await getResult<ChannelState>('#channel-state')
+      expect(state.unattachedFlood?.text.ChannelOverflowError).greaterThan(0)
+      expect(state.unattachedFlood?.binary.ChannelOverflowError).greaterThan(0)
     })
   })
 }

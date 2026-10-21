@@ -25,6 +25,11 @@ import {
   onChannelNoListenerAckClient,
   onChannelShieldClient,
   onChannelShieldServerAck,
+  onChannelSelfRemovingListener,
+  onChannelUnserializableAnswer,
+  onChannelOversize,
+  onChannelHeldBinary,
+  onChannelUnattachedFlood,
 } from './Channel.telefunc'
 
 /**
@@ -131,6 +136,11 @@ type ChannelState = {
   shieldServerAckValid: { ok: boolean; value?: string; error?: string } | null
   /** C2: server.send(valid, {ack:true}), client listener returns invalid → rejects. */
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
+  selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
+  unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
+  oversize: { channelId: string; thrown: string[]; followUp: string; isClosed: boolean } | null
+  heldBinary: number[][] | null
+  unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
 }
 
 const initialState: ChannelState = {
@@ -187,6 +197,11 @@ const initialState: ChannelState = {
   shieldClientSendAckInvalidError: null,
   shieldServerAckValid: null,
   shieldServerAckInvalid: null,
+  selfRemovingListener: null,
+  unserializableAnswer: null,
+  oversize: null,
+  heldBinary: null,
+  unattachedFlood: null,
 }
 
 function timestamp() {
@@ -804,6 +819,85 @@ function ChannelDemo() {
     addLog('system', 'Shield tests complete.')
   }, [addLog])
 
+  const testSelfRemovingListener = useCallback(async () => {
+    const { channel, getServerSeen } = await openChannel(onChannelSelfRemovingListener)
+    const pageSeen: string[] = []
+    const unlisten = channel.listen((msg) => {
+      pageSeen.push(`once:${msg}`)
+      unlisten()
+    })
+    channel.listen((msg) => {
+      pageSeen.push(`other:${msg}`)
+    })
+    await new Promise<void>((resolve) => channel.onOpen(resolve))
+    await channel.send('one')
+    await channel.send('two')
+    for (let poll = 0; poll < 50; poll++) {
+      const serverSeen = await getServerSeen()
+      setChannelState((s) => ({ ...s, selfRemovingListener: { pageSeen: [...pageSeen], serverSeen } }))
+      if (pageSeen.length >= 3 && serverSeen.length >= 3) break
+      await new Promise((r) => setTimeout(r, 200))
+    }
+    channel.close()
+  }, [])
+
+  const testUnserializableAnswer = useCallback(async () => {
+    const { channel, channelId } = await openChannel(onChannelUnserializableAnswer)
+    channel.listen((msg) => {
+      if (msg !== 'cyclic') return `client-ack:${msg}`
+      const cyclic: { self?: unknown } = {}
+      cyclic.self = cyclic
+      return cyclic
+    })
+    const settle = (promise: Promise<unknown>) =>
+      promise.then(
+        (value) => `ok:${String(value)}`,
+        (err: any) => `error:${err?.message}`,
+      )
+    const pageSend = await settle(channel.send('cyclic', { ack: true }))
+    const pageFollowUp = await settle(channel.send('ok', { ack: true }))
+    setChannelState((s) => ({
+      ...s,
+      unserializableAnswer: { channelId, pageSend, pageFollowUp, isClosed: channel.isClosed },
+    }))
+  }, [])
+
+  const testOversize = useCallback(async () => {
+    const { channel, channelId, limit } = await openChannel(onChannelOversize)
+    channel.listen((msg) => (msg === 'big' ? 'x'.repeat(limit + 1) : `client-ack:${msg}`))
+    const thrown: string[] = []
+    for (const send of [
+      () => channel.sendBinary(new Uint8Array(limit + 1)),
+      () => channel.send('x'.repeat(limit + 1)),
+    ]) {
+      try {
+        void send()
+        thrown.push('none')
+      } catch (err: any) {
+        thrown.push(err?.message ?? 'unknown')
+      }
+    }
+    const followUp = String(await channel.send('ok', { ack: true }))
+    setChannelState((s) => ({ ...s, oversize: { channelId, thrown, followUp, isClosed: channel.isClosed } }))
+  }, [])
+
+  const testHeldBinary = useCallback(async () => {
+    const { channel } = await openChannel(onChannelHeldBinary)
+    const received: number[][] = []
+    channel.listenBinary((data) => {
+      received.push([...data])
+      if (received.length === 4) {
+        setChannelState((s) => ({ ...s, heldBinary: received }))
+        channel.close()
+      }
+    })
+  }, [])
+
+  const testUnattachedFlood = useCallback(async () => {
+    const unattachedFlood = await onChannelUnattachedFlood()
+    setChannelState((s) => ({ ...s, unattachedFlood }))
+  }, [])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -1044,6 +1138,46 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-amber-700 text-white hover:bg-amber-800"
           >
             Shield Validation
+          </button>
+          <button
+            id="channel-test-self-removing-listener"
+            type="button"
+            onClick={testSelfRemovingListener}
+            className="px-3 py-1.5 text-sm rounded bg-emerald-700 text-white hover:bg-emerald-800"
+          >
+            Self-removing Listener
+          </button>
+          <button
+            id="channel-test-unserializable-answer"
+            type="button"
+            onClick={testUnserializableAnswer}
+            className="px-3 py-1.5 text-sm rounded bg-red-700 text-white hover:bg-red-800"
+          >
+            Unserializable Ack Answer
+          </button>
+          <button
+            id="channel-test-oversize"
+            type="button"
+            onClick={testOversize}
+            className="px-3 py-1.5 text-sm rounded bg-orange-700 text-white hover:bg-orange-800"
+          >
+            Send Over 64 MiB
+          </button>
+          <button
+            id="channel-test-held-binary"
+            type="button"
+            onClick={testHeldBinary}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-800 text-white hover:bg-cyan-900"
+          >
+            Binary Sent Before Attach
+          </button>
+          <button
+            id="channel-test-unattached-flood"
+            type="button"
+            onClick={testUnattachedFlood}
+            className="px-3 py-1.5 text-sm rounded bg-stone-600 text-white hover:bg-stone-700"
+          >
+            Flood Unattached Channel
           </button>
         </div>
       </div>

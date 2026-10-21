@@ -21,6 +21,11 @@ export {
   onChannelNoListenerAckClient,
   onChannelShieldClient,
   onChannelShieldServerAck,
+  onChannelSelfRemovingListener,
+  onChannelUnserializableAnswer,
+  onChannelOversize,
+  onChannelHeldBinary,
+  onChannelUnattachedFlood,
 }
 
 import { Channel, Abort } from 'telefunc'
@@ -509,4 +514,99 @@ async function onChannelShieldServerAck() {
     },
     getOutcome: async (): Promise<{ ok: boolean; value?: string; error?: string } | null> => outcome,
   }
+}
+
+const WIRE_LIMIT_BYTES = 64 * 1024 * 1024
+
+function settle(promise: Promise<unknown>): Promise<string> {
+  return promise.then(
+    (value) => `ok:${String(value)}`,
+    (err: any) => `error:${err?.message}`,
+  )
+}
+
+/** Each end listens twice, and its first listener stops listening on its first message. */
+async function onChannelSelfRemovingListener() {
+  const ch = new Channel<(msg: string) => void, (msg: string) => void>()
+  const serverSeen: string[] = []
+  const unlisten = ch.listen((msg) => {
+    serverSeen.push(`once:${msg}`)
+    unlisten()
+  })
+  ch.listen((msg) => {
+    serverSeen.push(`other:${msg}`)
+  })
+  ch.onOpen(async () => {
+    await ch.send('one')
+    await ch.send('two')
+  })
+  return { channel: ch.client, getServerSeen: async () => serverSeen }
+}
+
+/** Each end answers 'cyclic' with an object that can't be serialized. */
+async function onChannelUnserializableAnswer() {
+  const ch = new Channel<(msg: string) => unknown, (msg: string) => unknown>()
+  const id = ch.id
+  ch.listen((msg) => {
+    if (msg !== 'cyclic') return `ack:${msg}`
+    const cyclic: { self?: unknown } = {}
+    cyclic.self = cyclic
+    return cyclic
+  })
+  ch.onOpen(async () => {
+    cleanupState[`unserializable_${id}_serverSend`] = await settle(ch.send('cyclic', { ack: true }))
+    cleanupState[`unserializable_${id}_serverFollowUp`] = await settle(ch.send('ok', { ack: true }))
+  })
+  return { channel: ch.client, channelId: id }
+}
+
+/** The server asks for an answer the page makes larger than the server takes. */
+async function onChannelOversize() {
+  const ch = new Channel<(msg: string) => string, (msg: string) => string>()
+  const id = ch.id
+  ch.listen((msg) => `ack:${msg}`)
+  ch.onOpen(async () => {
+    cleanupState[`oversize_${id}_serverSend`] = await settle(ch.send('big', { ack: true }))
+    cleanupState[`oversize_${id}_serverFollowUp`] = await settle(ch.send('ok', { ack: true }))
+  })
+  return { channel: ch.client, channelId: id, limit: WIRE_LIMIT_BYTES }
+}
+
+/** Sends binary before the page attaches, reusing each buffer for the next send. */
+async function onChannelHeldBinary() {
+  const ch = new Channel()
+  const bytes = new Uint8Array(3)
+  const buffer = Buffer.alloc(3)
+  const sends: Array<[Uint8Array, number, boolean]> = [
+    [bytes, 1, false],
+    [bytes, 2, true],
+    [buffer, 3, false],
+    [buffer, 4, true],
+  ]
+  for (const [data, value, ack] of sends) {
+    data.fill(value)
+    void (ack ? ch.sendBinary(data, { ack: true }) : ch.sendBinary(data))
+  }
+  bytes.fill(9)
+  buffer.fill(9)
+  return { channel: ch.client }
+}
+
+/** Sends 100,000 empty messages of each kind to a channel no page attaches to, and counts the rejected ones by error name. */
+async function onChannelUnattachedFlood() {
+  const rejected: Record<'text' | 'binary', Record<string, number>> = { text: {}, binary: {} }
+  for (const kind of ['text', 'binary'] as const) {
+    const ch = new Channel<never, string>()
+    const counts: Record<string, number> = {}
+    for (let i = 0; i < 100_000; i++) {
+      const send = kind === 'text' ? ch.send('') : ch.sendBinary(new Uint8Array(0))
+      send.catch((err: Error) => {
+        counts[err.name] = (counts[err.name] ?? 0) + 1
+      })
+    }
+    await new Promise((resolve) => setImmediate(resolve))
+    rejected[kind] = { ...counts }
+    ch.abort()
+  }
+  return rejected
 }
