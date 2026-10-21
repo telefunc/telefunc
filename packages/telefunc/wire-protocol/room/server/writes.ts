@@ -4,7 +4,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { createDeferred } from '../../../utils/createDeferred.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { CommitAccepted } from '../../backend/room/contract.js'
-import { inProcessBinaryLaneKey } from '../../backend/room/laneKey.js'
+import { encodeLaneKey } from '../../backend/room/laneKey.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import { reportServerChannelError } from '../../channel/server/channel.js'
 import type { BinaryFrame } from '../binary.js'
@@ -53,7 +53,7 @@ type WritesOf = {
  *  event in one exchange, then runs its after-hook. */
 class RoomWrites {
   /** The last publish in call order, by key: a member's id for its text, `meta:<id>` for its meta writes, and
-   *  `inProcessBinaryLaneKey` for a binary lane. */
+   *  its lane key for a binary lane. */
   private readonly _publishTurns = new Map<string, Promise<void>>()
 
   constructor(
@@ -108,7 +108,7 @@ class RoomWrites {
     const host = this._host
     const { from } = frame
     const lane = { kind: 'binary', member: from, track: frame.track } as const
-    const { sender, commit } = await this._inCallOrder(inProcessBinaryLaneKey(from, lane.track), async (sent) => {
+    const { sender, commit } = await this._inCallOrder(encodeLaneKey(lane), async (sent) => {
       const { sender } = await this._admitPublish(from, frame.payload)
       const planned = host._replica.plan.lanePlanned(from, lane.track)
       if (planned !== null) await planned

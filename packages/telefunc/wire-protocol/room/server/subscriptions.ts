@@ -5,7 +5,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { RoomSubscriptionSource } from '../../backend/room/contract.js'
-import { inProcessBinaryLaneKey } from '../../backend/room/laneKey.js'
+import { encodeLaneKey } from '../../backend/room/laneKey.js'
 import { reportSubscriptionEnd } from '../../backend/SubscriptionManager.js'
 import type { BackendReceiver, BackendSubscription } from '../../backend/subscription.js'
 import { reportServerChannelError } from '../../channel/server/channel.js'
@@ -264,7 +264,8 @@ class RoomSubscriptions {
   lanePlanned(member: string, track: string): Promise<void> | null {
     if (this._planning === null || !this._wants.wantsBinary || this._everyTrack.has(member)) return null
     if (this._everyMember.has(track)) return null
-    if (this._binary.has(inProcessBinaryLaneKey(member, track)) || !this._wants.receives(member, track)) return null
+    if (this._binary.has(encodeLaneKey({ kind: 'binary', member, track }))) return null
+    if (!this._wants.receives(member, track)) return null
     return this._planning
   }
 
@@ -273,7 +274,10 @@ class RoomSubscriptions {
   async pairsReady(member: string, track: TrackKey | All): Promise<void> {
     await this._planning
     const lanes = [this._everyTrack.get(member)]
-    if (track !== ALL) lanes.push(this._binary.get(inProcessBinaryLaneKey(member, track)), this._everyMember.get(track))
+    if (track !== ALL) {
+      lanes.push(this._binary.get(encodeLaneKey({ kind: 'binary', member, track })))
+      lanes.push(this._everyMember.get(track))
+    }
     const pending: Promise<void>[] = []
     for (const lane of lanes) if (lane !== undefined && this._binaryPending.has(lane)) pending.push(lane.ready)
     if (pending.length > 0) await withinRoomHorizon(Promise.all(pending))
@@ -533,7 +537,7 @@ class RoomSubscriptions {
     const everyMember = this._wants.namesEveryMember(track)
     const allDelivers = this._everyTrack.get(member)?.delivering === true
     const trackDelivers = everyMember && this._everyMember.get(track)?.delivering === true
-    const key = inProcessBinaryLaneKey(member, track)
+    const key = encodeLaneKey({ kind: 'binary', member, track })
     let lane = this._binary.get(key)
     let keep = named
     if (servedByAll) keep = lane !== undefined && !allDelivers
@@ -575,7 +579,7 @@ class RoomSubscriptions {
     const lane = this._everyMember.get(track)
     if (lane === undefined && named === this._byMemberTracks.has(track)) return
     for (const member of this._trackMembers.get(track) ?? []) {
-      if (!this._binary.get(inProcessBinaryLaneKey(member, track))!.delivering) return
+      if (!this._binary.get(encodeLaneKey({ kind: 'binary', member, track }))!.delivering) return
     }
     if (this._waitsFor(this._establishingEveryTrack, track)) return
     if (lane !== undefined) {
@@ -681,7 +685,7 @@ class RoomSubscriptions {
       else this._queuePair(member, track)
       if (this._everyMember.has(track)) this._queued.tracks.add(track)
     })
-    this._binary.set(inProcessBinaryLaneKey(member, track), lane)
+    this._binary.set(encodeLaneKey({ kind: 'binary', member, track }), lane)
     toggleEntry(this._binaryTracks, member, track, true)
     toggleEntry(this._trackMembers, track, member, true)
     lane.sync(
@@ -695,7 +699,7 @@ class RoomSubscriptions {
    *  deliver; until then, each one's readiness replans the member. */
   private _releaseEveryTrack(member: string, all: LaneSubscription): void {
     for (const track of this._binaryTracks.get(member) ?? []) {
-      if (!this._binary.get(inProcessBinaryLaneKey(member, track))!.delivering) return
+      if (!this._binary.get(encodeLaneKey({ kind: 'binary', member, track }))!.delivering) return
     }
     if (this._waitsFor(this._establishingEveryMember, member)) return
     this._everyTrack.delete(member)
