@@ -30,7 +30,7 @@ const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 
 class ServerBroadcast<T = unknown> extends ServerChannel {
   readonly [SERVER_BROADCAST_BRAND] = true
-  /** @see ChannelShield in ../channel.ts — broadcast only validates incoming
+  /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
    *  receipts are server-generated, not client-supplied. */
   declare readonly [TELEFUNC_SHIELDS]: {

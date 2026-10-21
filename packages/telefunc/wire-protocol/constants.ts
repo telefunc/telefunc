@@ -196,7 +196,7 @@ export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
-/** The same where its peer holds data back by what it acknowledges (see `client/send-budget.ts`). */
+/** The same where its peer holds data back by what it acknowledges (see `flowControl/client/SendBudget.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
 /** Where its peer holds data back, a receiver acks data this soon once `WIRE_SEND_ACK_MIN_BYTES` wait, not 16 KiB. */
 export const WIRE_SEND_ACK_MS = 25
@@ -234,7 +234,7 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 // it must wait one round-trip for the receiver's credit refresh. Sizing `W` to the
 // link's BDP is the only way to avoid this stall (no algorithm beats W/RTT). Rather
 // than picking a single fixed `W`, the receiver maintains a gRPC-style BDP estimator
-// (see `bdp-estimator.ts`) that probes the in-flight byte count once per RTT and
+// (see `flowControl/BdpEstimator.ts`) that probes the in-flight byte count once per RTT and
 // doubles `W` whenever the sample saturates ≥ 2/3 of the current window, unless a queue
 // the probe's ack waited behind accounts for it. Idle channels stay at the small initial
 // cost; fat-pipe channels climb to the cap within a handful of RTTs.
