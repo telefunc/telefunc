@@ -78,16 +78,6 @@ type PollResult = { done: boolean; result?: unknown }
 /** 80 s of polls: past the 60 s reconnectTimeout the server waits for a closed tab on SSE. */
 const CLOSED_TAB_POLLS = 400
 
-async function getParticipantWhenJoined(room: Awaited<ReturnType<typeof onGetRoom>>, id: string) {
-  let participant = await room.getParticipant(id)
-  for (let i = 0; i < 50 && !participant; i++) {
-    await new Promise((r) => setTimeout(r, 200))
-    participant = await room.getParticipant(id)
-  }
-  if (!participant) throw new Error(`Participant did not join within the test horizon: ${id}`)
-  return participant
-}
-
 async function createRoomId(label: string): Promise<string> {
   const roomId = `e2e-${label}:${crypto.randomUUID()}`
   await onCreateRoom(roomId)
@@ -125,6 +115,13 @@ function Room() {
       if (done) break
       await new Promise((resolve) => setTimeout(resolve, 200))
     }
+  }
+
+  const getParticipantWhenJoined = async (room: RoomView, id: string) => {
+    await pollUntil(async () => ({ done: (await room.getParticipant(id)) !== null }))
+    const participant = await room.getParticipant(id)
+    if (!participant) throw new Error(`Participant did not join within the test horizon: ${id}`)
+    return participant
   }
 
   const scenario = (id: string, heading: string | null, label: string, run: () => Promise<void>) => (
@@ -1366,7 +1363,7 @@ function Room() {
         await onRoomWhileAway(roomId, me.id)
         await pollUntil(() => ({ done: view.count === 3 }))
         setResult(JSON.stringify({ roomId }))
-        for (let poll = 0; poll < 300 && !(closed && myCause); poll++) await new Promise((r) => setTimeout(r, 100))
+        await pollUntil(() => ({ done: closed && myCause !== null }), 150)
         setResult(
           JSON.stringify({
             roomId,
@@ -1391,7 +1388,7 @@ function Room() {
         await onRoomOverflow(roomId)
         await pollUntil(() => ({ done: seen.includes('before') }))
         setResult(JSON.stringify({ roomId }))
-        for (let poll = 0; poll < 300 && !(closed && myCause); poll++) await new Promise((r) => setTimeout(r, 100))
+        await pollUntil(() => ({ done: closed && myCause !== null }), 150)
         const leaves = await onGetRoomOverflow(roomId)
         setResult(JSON.stringify({ roomId, seen, myCause, closed, isClosed: view.isClosed, leaves }))
       })}
@@ -1407,10 +1404,10 @@ function Room() {
         await Promise.all(Array.from({ length: 40 }, (_, n) => me.publish(String(n).padEnd(16_000))))
         // The server's view hears the speaker's 40 and the page's 40.
         let watched = 0
-        for (let poll = 0; poll < 100 && watched < 80; poll++) {
+        await pollUntil(async () => {
           watched = await onGetWatchedCount(roomId)
-          if (watched < 80) await new Promise((r) => setTimeout(r, 200))
-        }
+          return { done: watched >= 80 }
+        }, 100)
         setResult(JSON.stringify({ received, watched }))
       })}
 
@@ -1537,10 +1534,10 @@ function Room() {
         const view = await onGetRoom(roomId)
         await onSeedChurn(roomId)
         let names: string[] = []
-        for (let poll = 0; poll < 600 && !names.includes('late'); poll++) {
-          await new Promise((r) => setTimeout(r, 100))
+        await pollUntil(async () => {
           names = (await view.getParticipants()).map((member) => member.meta.name as string)
-        }
+          return { done: names.includes('late') }
+        }, 300)
         const roster = {
           count: view.count,
           listed: new Set(names).size,
@@ -1577,7 +1574,7 @@ function Room() {
         setResult(JSON.stringify({ roomId }))
         await joinStarted
         const me = await view.join({ meta: { name: 'Me' } })
-        for (let poll = 0; poll < 100 && leaves.length === 0; poll++) await new Promise((r) => setTimeout(r, 100))
+        await pollUntil(() => ({ done: leaves.length > 0 }))
         setResult(JSON.stringify({ roomId, joined: me.id !== undefined, leaves, count: view.count }))
       })}
       <button id="test-room-away-join-now" onClick={() => startAwayJoin?.()}>
