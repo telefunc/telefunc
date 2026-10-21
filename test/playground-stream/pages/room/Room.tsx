@@ -16,6 +16,8 @@ import {
   onGetRoomWithMember,
   onWatchRoom,
   onGetWatched,
+  onWatchRoomTrack,
+  onGetWatchedTrack,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -601,6 +603,49 @@ function Room() {
         await joinAndWait(6)
         setResult(JSON.stringify({ calls }))
       })}
+
+      {scenario(
+        'retain-late',
+        'Retained replay, once and in order',
+        'Late subscribers get what is retained',
+        async () => {
+          const [roomId, pubView] = await createRoom('retain-late')
+          // A GC pass would close `pubView`, and its members leaving with it delete what they retained.
+          const releasePubView = keepReachable(pubView)
+          const a = await pubView.join({ meta: { name: 'A' } })
+          const b = await pubView.join({ meta: { name: 'B' } })
+          await a.publishBinary(new Uint8Array([1]), { track: 'cam', retain: true })
+          await b.publishBinary(new Uint8Array([2]), { track: 'cam', retain: true })
+          await b.publishBinary(new Uint8Array([3]), { track: 'mic', retain: true })
+          await a.publish('pinned', { retain: true })
+          await b.leave()
+
+          await onWatchRoomTrack(roomId, 'cam')
+          const late = await onGetRoom(roomId)
+          const text: string[] = []
+          const frames: Array<[string | null, number, unknown]> = []
+          late.subscribe((data) => text.push(data as string))
+          late.subscribeBinary((data, info, from) => frames.push([info.track, data[0]!, from.meta.name]))
+          await a.publish('live')
+          await a.publishBinary(new Uint8Array([4]), { track: 'cam' })
+          await pollUntil(async () => {
+            const server = await onGetWatchedTrack(roomId)
+            return { done: text.includes('live') && frames.length >= 2 && server.frames.includes(4) }
+          })
+
+          const later: string[] = []
+          late.subscribe((data) => later.push(data as string))
+          await a.publish('live-2')
+          await pollUntil(async () => {
+            const server = await onGetWatchedTrack(roomId)
+            return {
+              result: { text, frames, later, server },
+              done: later.includes('live-2') && server.text.includes('live-2'),
+            }
+          })
+          releasePubView()
+        },
+      )}
     </div>
   )
 }

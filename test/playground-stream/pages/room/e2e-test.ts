@@ -268,4 +268,22 @@ function testRoom() {
       expect(r.calls).deep.equal(['a', 'b', 'a', 'b', 'a', 'b'])
     },
   )
+  testRoomScenario<{
+    text: string[]
+    frames: Array<[string | null, number, string]>
+    later: string[]
+    server: { text: string[]; frames: number[] }
+  }>(
+    'retain-late',
+    'room: a late subscriber, on the page or the server, gets each retained message once before the live ones, and none of a member who left',
+    (r) => {
+      expect(r.text).deep.equal(['pinned', 'live', 'live-2'])
+      expect(r.frames).deep.equal([
+        ['cam', 1, 'A'],
+        ['cam', 4, 'A'],
+      ])
+      expect(r.later).deep.equal(['live-2'])
+      expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4] })
+    },
+  )
 }

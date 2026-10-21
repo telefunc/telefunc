@@ -12,6 +12,8 @@ export {
   onGetRoomWithMember,
   onWatchRoom,
   onGetWatched,
+  onWatchRoomTrack,
+  onGetWatchedTrack,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -121,6 +123,24 @@ async function onWatchRoom(roomId: string) {
 
 async function onGetWatched(roomId: string) {
   return watched.get(roomId) ?? []
+}
+
+const watchedTracks = new Map<string, number[]>()
+
+/** A server-side view's subscribers, text and one binary track, kept like `onWatchRoom()`'s. */
+async function onWatchRoomTrack(roomId: string, track: string) {
+  const room = await Room.get(roomId)
+  const list: unknown[] = []
+  const frames: number[] = []
+  watched.set(roomId, list)
+  watchedTracks.set(roomId, frames)
+  watchedRooms.set(roomId, room)
+  room.subscribe((data) => list.push(data))
+  room.subscribeBinary((data) => frames.push(data[0]!), { track })
+}
+
+async function onGetWatchedTrack(roomId: string) {
+  return { text: watched.get(roomId) ?? [], frames: watchedTracks.get(roomId) ?? [] }
 }
 
 async function onAnnounce(roomId: string, data: unknown) {
