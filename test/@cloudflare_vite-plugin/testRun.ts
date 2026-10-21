@@ -16,6 +16,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   })
   testTodolist()
   testChannel()
+  testChannelOversized()
   testChat()
 }
 
@@ -123,6 +124,29 @@ function testChannel() {
       },
       { timeout: 5000 },
     )
+  })
+}
+
+function testChannelOversized() {
+  test('Channel: a 32 MiB message is refused, and the channel keeps working', async () => {
+    await page.goto(getServerUrl() + '/channel')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#connect-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain('{"type":"welcome"}')
+    })
+    await page.click('#send-oversized-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain('Channel message too large')
+    })
+    const echoText = `echo-${Math.random()}`
+    await page.fill('#echo-input', echoText)
+    await page.click('#send-echo-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain(`{"type":"echo","text":"${echoText}"}`)
+    })
   })
 }
 
