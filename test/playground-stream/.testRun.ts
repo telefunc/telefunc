@@ -20,6 +20,8 @@ import { testWire } from './pages/channel/wire-e2e-test'
 
 function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
   run(cmd, {
+    // A room test waits out a 60 s timeout: the acknowledgement timeout, or the reconnectTimeout a closed tab gets on SSE.
+    additionalTimeout: 40_000,
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
     // "Server running at" / "Accepting connections at" matcher, so the framework times

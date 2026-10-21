@@ -23,9 +23,37 @@ import {
   onKick,
   onKickByIdentity,
   onCloseRoom,
+  onWatchRoomBinary,
+  onGetWatchedBinary,
+  onPublishBufferAsServer,
+  onSendReusingObjects,
+  onPublishRightAfterSubscribe,
+  onOpenSlowGuardRoom,
+  onConcurrentMetaWrites,
+  onReplaceMetaInLoop,
+  onStopReplacingMeta,
+  onOpenRecordingGuardRoom,
+  onGetGuardCalls,
+  onOpenSlowJoinRoom,
+  onGetSlowJoins,
+  onGetSlowJoinRoom,
+  onCloseWhenEmpty,
+  onCreateRoomWith,
+  onCreateRoomHeld,
+  onJoinAndLeaveAsServer,
+  onIsOpen,
+  onListAsListed,
+  onListWhileClosing,
+  onRecreate,
+  onJoinAnswering,
+  onSeedAndChurn,
+  onStopChurn,
+  onPublishWhileEstablishing,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
+/** 80 s of polls: past the 60 s reconnectTimeout the server waits for a closed tab on SSE. */
+const CLOSED_TAB_POLLS = 400
 
 async function getParticipantWhenJoined(room: Awaited<ReturnType<typeof onGetRoom>>, id: string) {
   let participant = await room.getParticipant(id)
@@ -48,13 +76,15 @@ async function createRoom(label: string) {
   return [roomId, await onGetRoom(roomId)] as const
 }
 
+let selfCloseBase = ''
+
 function Room() {
   const [result, setResult] = useState<string>('')
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
   /** Render every poll so e2e autoRetry sees fresh data; some reads are asynchronous. */
-  const pollUntil = async (render: () => PollResult | Promise<PollResult>) => {
-    for (let poll = 0; poll < 50; poll++) {
+  const pollUntil = async (render: () => PollResult | Promise<PollResult>, polls = 50) => {
+    for (let poll = 0; poll < polls; poll++) {
       const { done, result } = await render()
       if (result !== undefined) setResult(JSON.stringify(result))
       if (done) break
@@ -275,6 +305,506 @@ function Room() {
         )
 
         await pollUntil(() => ({ result: { okAck, badError, received }, done: received.length >= 1 }))
+      })}
+
+      {scenario('own-bytes', 'Bytes of its own', 'Listeners that write into or transfer their bytes', async () => {
+        const roomId = await createRoomId('own-bytes')
+        const room = await onWatchRoomBinary(roomId)
+        const me = await room.join({ meta: { name: 'Pub' } })
+        // The first listener detaches its buffer, as handing it to a worker does.
+        room.subscribeBinary((data) => structuredClone(data.buffer, { transfer: [data.buffer] }))
+        const seen: number[][] = []
+        room.subscribeBinary((data) => seen.push([...data]))
+
+        await me.publishBinary(new Uint8Array([1, 2, 3, 4]))
+        await onPublishBufferAsServer(roomId, [5, 6, 7, 8])
+        const late = await onGetRoom(roomId)
+        const lateSeen: number[][] = []
+        late.subscribeBinary((data) => lateSeen.push([...data]))
+
+        await pollUntil(async () => {
+          const serverSeen = await onGetWatchedBinary(roomId)
+          return {
+            result: { seen, serverSeen, lateSeen },
+            done: seen.length >= 2 && serverSeen.length >= 2 && lateSeen.length >= 1,
+          }
+        })
+      })}
+
+      {scenario('at-call', 'Taken at the call', 'Writes whose caller reuses its object', async () => {
+        const [roomId, room] = await createRoom('at-call')
+        const me = await room.join({ meta: { name: 'Me' } })
+        const messages: Array<{ data: unknown; from: string }> = []
+        room.subscribe((data, _info, from) => messages.push({ data, from: from.meta.name as string }))
+        const frames: number[][] = []
+        room.subscribeBinary((data) => frames.push([...data]))
+        const announcements: unknown[] = []
+        room.onAnnounce((data) => announcements.push(data))
+        const dms: unknown[] = []
+        me.listen((data) => dms.push(data))
+        await me.setAttributes({}) // same-channel ack orders the declarations before the server's writes
+
+        // The second publish waits behind the first on its coalesce key.
+        const first = { n: 10 }
+        const second = { n: 11 }
+        const coalesced = Promise.all([me.publish(first, { coalesce: 'c' }), me.publish(second, { coalesce: 'c' })])
+        second.n = 12
+        await coalesced
+        const reuser = await getParticipantWhenJoined(room, await onSendReusingObjects(roomId, me.id))
+
+        await pollUntil(() => {
+          const state = {
+            messages,
+            frames,
+            announcements,
+            dms,
+            reuserTags: (reuser.meta.tags as string[] | undefined) ?? null,
+            roomTags: (room.meta.tags as string[] | undefined) ?? null,
+          }
+          return {
+            result: state,
+            done:
+              messages.length >= 3 &&
+              frames.length >= 1 &&
+              announcements.length >= 1 &&
+              dms.length >= 2 &&
+              state.reuserTags?.[0] === 'b' &&
+              state.roomTags !== null,
+          }
+        })
+      })}
+
+      {scenario('right-after', 'Publish right after subscribe', 'Subscribe, then publish at once', async () => {
+        const roomId = await createRoomId('right-after')
+        await onPublishRightAfterSubscribe(roomId)
+        const room = await onGetRoom(roomId)
+        const me = await room.join({ meta: { name: 'Page' } })
+        const seen: unknown[] = []
+        room.subscribe((data, _info, from) => {
+          if (from.id === me.id) seen.push(data)
+        })
+        room.subscribeBinary((data, _info, from) => {
+          if (from.id === me.id) seen.push([...data])
+        })
+        await Promise.all([me.publish('p1'), me.publishBinary(new Uint8Array([2])), me.publish('p2')])
+
+        await pollUntil(async () => {
+          const serverSeen = await onGetWatched(roomId)
+          return { result: { seen, serverSeen }, done: seen.length >= 3 && serverSeen.length >= 4 }
+        })
+      })}
+
+      {scenario('call-order', 'Publishes in call order', 'Publish behind a slow guard', async () => {
+        const roomId = await createRoomId('call-order')
+        const room = await onOpenSlowGuardRoom(roomId)
+        const texts: number[] = []
+        room.subscribe((data) => texts.push(data as number))
+        const frames: number[] = []
+        room.subscribeBinary((data) => frames.push(data[0]!))
+        const me = await room.join({ meta: { name: 'Fast' } })
+
+        const numbers = Array.from({ length: 20 }, (_, i) => i)
+        await Promise.all(numbers.flatMap((n) => [me.publish(n), me.publishBinary(new Uint8Array([n]))]))
+
+        await pollUntil(() => ({ result: { texts, frames }, done: texts.length >= 20 && frames.length >= 20 }))
+      })}
+
+      {scenario('meta-race', 'Concurrent meta writes', 'Many writers at once', async () => {
+        const [roomId, room] = await createRoom('meta-race')
+        const other = await onGetRoom(roomId)
+        const stored = await onConcurrentMetaWrites(roomId)
+        const member = await getParticipantWhenJoined(room, stored.memberId)
+        const otherMember = await getParticipantWhenJoined(other, stored.memberId)
+
+        await pollUntil(() => {
+          const views = {
+            roomMeta: Object.entries(room.meta),
+            otherRoomMeta: Object.entries(other.meta),
+            memberMeta: Object.entries(member.meta),
+            otherMemberMeta: Object.entries(otherMember.meta),
+          }
+          const settled =
+            JSON.stringify(views.roomMeta) === JSON.stringify(stored.roomMeta) &&
+            JSON.stringify(views.otherRoomMeta) === JSON.stringify(stored.roomMeta) &&
+            JSON.stringify(views.memberMeta) === JSON.stringify(stored.memberMeta) &&
+            JSON.stringify(views.otherMemberMeta) === JSON.stringify(stored.memberMeta)
+          return { result: { stored, ...views }, done: settled }
+        })
+      })}
+
+      {scenario('meta-replace', 'Reads while meta is replaced', 'Read a big meta while it is replaced', async () => {
+        const roomId = await createRoomId('meta-replace')
+        const memberId = await onReplaceMetaInLoop(roomId)
+        // Which meta a read got: `a…` or `b…` whole, or what it saw otherwise.
+        const which = (meta: Record<string, unknown>) => {
+          const keys = Object.keys(meta).filter((key) => key !== 'name')
+          const prefix = keys[0]?.[0]
+          const whole = keys.length === 1500 && keys.every((key, i) => key === `${prefix}${i}` && meta[key] === i)
+          return whole ? prefix : `${keys.length} keys from ${keys[0]} to ${keys.at(-1)}`
+        }
+        const reads: Array<string | undefined> = []
+        for (let i = 0; i < 6; i++) {
+          const room = await onGetRoom(roomId)
+          const member = await room.getParticipant(memberId)
+          reads.push(which(room.meta), which(member?.meta ?? {}))
+          setResult(JSON.stringify({ reads }))
+        }
+        await onStopReplacingMeta(roomId)
+      })}
+
+      {scenario('sender', 'Rename during a guard', 'Rename while a publish waits on its guard', async () => {
+        const roomId = await createRoomId('sender')
+        const room = await onOpenSlowGuardRoom(roomId)
+        const names: unknown[] = []
+        room.subscribe((_data, _info, from) => names.push(from.meta.name))
+        const me = await room.join({ meta: { name: 'A' } })
+        // A view whose roster may still be on its way.
+        const other = await onGetRoom(roomId)
+        const otherNames: unknown[] = []
+        other.subscribe((_data, _info, from) => otherNames.push(from.meta.name))
+
+        const published = me.publish(0) // its guard waits 50 ms
+        await me.setMeta({ name: 'B' })
+        await published
+        const view = await getParticipantWhenJoined(room, me.id)
+        const otherView = await getParticipantWhenJoined(other, me.id)
+
+        await pollUntil(() => {
+          const state = { names, otherNames, viewName: view.meta.name, otherViewName: otherView.meta.name }
+          return {
+            result: state,
+            done: names.length >= 1 && otherNames.length >= 1 && state.viewName === 'B' && state.otherViewName === 'B',
+          }
+        })
+      })}
+
+      {scenario('guard-calls', 'What guards are handed', 'Guarded join, send, publish and leave', async () => {
+        const roomId = await createRoomId('guard-calls')
+        const room = await onOpenRecordingGuardRoom(roomId)
+        const me = await room.join({ meta: { name: 'G' } })
+        const peer = await room.join({ meta: { name: 'P' } })
+        await me.send(peer.id, 'hi')
+        const binaryError = await me.publishBinary(new Uint8Array([1])).then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const afterHookAck = await me.publish('after').then(
+          (ack) => ack.seq > 0,
+          (err: Error) => err.message,
+        )
+        // The second publish waits behind the first's guard while its member leaves.
+        const slow = me.publish('slow')
+        const queued = me.publish('queued')
+        await me.leave()
+        await Promise.allSettled([slow, queued])
+        setResult(JSON.stringify({ binaryError, afterHookAck, calls: await onGetGuardCalls(roomId) }))
+      })}
+
+      {scenario(
+        'leave-causes',
+        'Leave causes',
+        'Leave with acknowledged DMs pending, and a tab that closes',
+        async () => {
+          const [roomId, room] = await createRoom('leave-causes')
+          const causes: Array<{ name: unknown; type: string }> = []
+          room.onLeave((member, cause) => causes.push({ name: member.meta.name, type: cause.type }))
+          const a = await room.join({ meta: { name: 'A' } })
+          const b = await room.join({ meta: { name: 'B' } })
+          const c = await room.join({ meta: { name: 'C' } })
+          // A and C take each DM and never answer.
+          a.listen(() => new Promise(() => {}))
+          c.listen(() => new Promise(() => {}))
+          const outcome = (sent: Promise<unknown>) =>
+            sent.then(
+              () => 'resolved',
+              () => 'rejected',
+            )
+
+          const start = Date.now()
+          const toLeaving = b.send(a.id, 'ping', { ack: true })
+          await a.leave()
+          const recipientLeft = await outcome(toLeaving)
+          const fromLeaving = b.send(c.id, 'ping', { ack: true })
+          await b.leave()
+          const senderLeft = await outcome(fromLeaving)
+          const seconds = (Date.now() - start) / 1000
+
+          // The test joins `Closer` from another tab, then closes it; on SSE the server waits out reconnectTimeout (60 s).
+          await pollUntil(
+            () => ({
+              result: { roomId, recipientLeft, senderLeft, seconds, causes },
+              done: causes.some((cause) => cause.name === 'Closer'),
+            }),
+            CLOSED_TAB_POLLS,
+          )
+        },
+      )}
+
+      {scenario('join-only', null, 'Join the room named in the URL', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const room = await onGetRoom(roomId)
+        keepReachable(room)
+        await room.join({ meta: { name: 'Closer' } })
+        setResult(JSON.stringify('joined'))
+      })}
+
+      {scenario(
+        'own-meta-race',
+        'Own meta under concurrent writes',
+        'Unawaited setMeta() and setAttributes()',
+        async () => {
+          const [roomId, room] = await createRoom('own-meta-race')
+          const me = await room.join({ meta: { name: 'Mine', round: -1 } })
+          const other = await onGetRoom(roomId)
+          const remote = await getParticipantWhenJoined(other, me.id)
+          await Promise.all(
+            Array.from({ length: 20 }, (_, i) =>
+              i % 5 === 0 ? me.setMeta({ name: 'Mine', round: i }) : me.setAttributes({ [`m${i}`]: i }),
+            ),
+          )
+          await pollUntil(() => {
+            const state = { mine: Object.entries(me.meta), remote: Object.entries(remote.meta) }
+            return { result: state, done: JSON.stringify(state.mine) === JSON.stringify(state.remote) }
+          })
+        },
+      )}
+
+      {scenario('join-races', 'Join races', 'A closed tab during a slow join', async () => {
+        const roomId = await createRoomId('join-races')
+        const room = await onOpenSlowJoinRoom(roomId)
+        const events: string[] = []
+        room.onJoin((member) => events.push(`join:${member.meta.name}`))
+        room.onLeave((member, cause) => events.push(`leave:${member.meta.name}:${cause.type}`))
+
+        // The test joins `Closer` slowly from another tab and closes the tab during the wait.
+        // On SSE the server holds the closed tab for reconnectTimeout (60 s), so `Closer` may join, then leave.
+        let settledAt: number | null = null
+        await pollUntil(async () => {
+          const joins = await onGetSlowJoins(roomId)
+          if (settledAt === null && joins.done.includes('Closer')) settledAt = Date.now()
+          const serverCount = (await onGetRoom(roomId)).count
+          return {
+            result: {
+              roomId,
+              closerJoining: joins.entered.includes('Closer'),
+              events,
+              count: room.count,
+              serverCount,
+              settled: settledAt !== null,
+            },
+            // A member admitted after its tab closed would show within a second of the guard's end.
+            done: settledAt !== null && Date.now() - settledAt > 1000 && room.count === 0 && serverCount === 0,
+          }
+        }, CLOSED_TAB_POLLS)
+      })}
+
+      {scenario('join-slowly', null, 'Join the room named in the URL, slowly', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const room = await onGetSlowJoinRoom(roomId)
+        keepReachable(room)
+        await room.join({ meta: { name: 'Closer', slow: true } })
+      })}
+
+      {scenario(
+        'close-handles',
+        'Close ends every handle',
+        'Leave and kick into onEmpty, then Room.close()',
+        async () => {
+          const outcome = (done: Promise<unknown>) =>
+            done.then(
+              () => 'resolved',
+              (err: Error) => err.name,
+            )
+
+          // The last member's leave() empties the room, and onEmpty closes it.
+          const [leftId, left] = await createRoom('close-left')
+          await onCloseWhenEmpty(leftId)
+          const leaver = await left.join({ meta: { name: 'Leaver' } })
+          const leave = await outcome(leaver.leave())
+
+          // The last member's kick empties the room, and onEmpty closes it.
+          const [kickedId, kicked] = await createRoom('close-kicked')
+          await onCloseWhenEmpty(kickedId)
+          const kickedMember = await kicked.join({ meta: { name: 'Kicked' } })
+          const kick = await outcome(onKick(kickedId, kickedMember.id))
+
+          // Room.close() with a member in: what its leave callback sees, an unsubscribe in onClose, an onClose added after.
+          const [closedId, closed] = await createRoom('close-closed')
+          const member = await closed.join({ meta: { name: 'Member' } })
+          let atLeave: { cause: string; isClosed: boolean; count: number } | null = null
+          member.onLeave((cause) => (atLeave = { cause: cause.type, isClosed: closed.isClosed, count: closed.count }))
+          const unsubscribe = closed.subscribe(() => {})
+          let unsubscribeInOnClose: string | null = null
+          closed.onClose(() => {
+            try {
+              unsubscribe()
+              unsubscribeInOnClose = 'returned'
+            } catch (err) {
+              unsubscribeInOnClose = (err as Error).name
+            }
+          })
+          const close = await outcome(onCloseRoom(closedId))
+          await pollUntil(() => ({ done: closed.isClosed }))
+          let lateOnClose = false
+          closed.onClose(() => (lateOnClose = true))
+
+          await pollUntil(() => ({
+            result: {
+              leave,
+              kick,
+              close,
+              atLeave,
+              unsubscribeInOnClose,
+              lateOnClose,
+              isClosed: [left.isClosed, kicked.isClosed],
+            },
+            done: atLeave !== null && unsubscribeInOnClose !== null && lateOnClose && left.isClosed && kicked.isClosed,
+          }))
+        },
+      )}
+
+      {scenario('self-close', 'Rooms that close by themselves', 'Short timeouts', async () => {
+        const base = `e2e-self-close:${crypto.randomUUID()}`
+        selfCloseBase = base
+        const ids = {
+          empty: `${base}:empty`,
+          departed: `${base}:departed`,
+          held: `${base}:held`,
+          never: `${base}:never`,
+        }
+        await onCreateRoomWith(ids.empty, { emptyTimeout: 1000 })
+        await onCreateRoomWith(ids.departed, { emptyTimeout: 60_000, departureTimeout: 1000 })
+        await onCreateRoomWith(ids.never, { emptyTimeout: Infinity, departureTimeout: Infinity })
+        await onJoinAndLeaveAsServer(ids.departed)
+        const isOpen = async () => ({
+          empty: await onIsOpen(ids.empty),
+          departed: await onIsOpen(ids.departed),
+          held: await onIsOpen(ids.held),
+          never: await onIsOpen(ids.never),
+        })
+
+        // The test creates `held` from another tab, which keeps the view it was returned.
+        // Once the two closed, the held one and the one that never closes have outlived their 1 s by 1.5 s more.
+        let closedAt: number | null = null
+        await pollUntil(async () => {
+          const open = await isOpen()
+          if (closedAt === null && open.held && !open.empty && !open.departed) closedAt = Date.now()
+          const outlived = closedAt !== null && Date.now() - closedAt > 1500
+          return { result: { base, open, outlived }, done: outlived }
+        })
+      })}
+
+      {scenario('hold-room', null, 'Create the room named in the URL and keep its view', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId')!
+        keepReachable(await onCreateRoomHeld(roomId))
+        setResult(JSON.stringify('holding'))
+      })}
+
+      {scenario('self-close-released', null, 'After the holding tab closed', async () => {
+        const held = `${selfCloseBase}:held`
+        // On SSE the server holds the closed tab for reconnectTimeout (60 s).
+        await pollUntil(async () => {
+          const heldOpen = await onIsOpen(held)
+          return { result: { heldOpen }, done: !heldOpen }
+        }, CLOSED_TAB_POLLS)
+      })}
+
+      {scenario('list-races', 'Room.list(), close and recreate', 'List while closing, recreate', async () => {
+        const base = `e2e-list:${crypto.randomUUID()}`
+        for (const suffix of ['b', 'é', 'B', 'a', 'Z']) await onCreateRoom(`${base}:${suffix}`)
+        const order = (await onListAsListed(base)).map((id) => id.slice(base.length + 1))
+        const whileClosing = await onListWhileClosing(`${base}:c`)
+        const recreatedId = `${base}:again`
+        const recreated = await onRecreate(recreatedId)
+        await pollUntil(async () => {
+          const recreatedOpen = await onIsOpen(recreatedId)
+          return { result: { order, whileClosing, recreated, recreatedOpen }, done: !recreatedOpen }
+        })
+      })}
+
+      {scenario('ack-dm', 'Acknowledged DMs', 'DMs that wait for their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const peer = await room.join({ meta: { name: 'Peer' } })
+        peer.listen((data) => ({ echo: data }))
+        const serverMember = await onJoinAnswering(roomId)
+        const reply = (sent: Promise<{ response: unknown }>) =>
+          sent.then(
+            (receipt) => receipt.response,
+            (err: Error) => err.message,
+          )
+        setResult(
+          JSON.stringify({
+            fromPage: await reply(me.send(peer.id, 'hi', { ack: true })),
+            fromServer: await reply(me.send(serverMember, 'hi', { ack: true })),
+            refused: await reply(me.send(serverMember, 'refuse', { ack: true })),
+          }),
+        )
+      })}
+
+      {scenario('ack-timeout', null, 'An acknowledged DM nobody answers', async () => {
+        const [, room] = await createRoom('ack-timeout')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const silent = await room.join({ meta: { name: 'Silent' } })
+        silent.listen(() => new Promise(() => {}))
+        const start = Date.now()
+        const error = await me.send(silent.id, 'hello?', { ack: true }).then(
+          () => null,
+          () => 'rejected',
+        )
+        setResult(JSON.stringify({ error, seconds: Math.round((Date.now() - start) / 1000) }))
+      })}
+
+      {scenario(
+        'roster-churn',
+        'Roster under churn',
+        'Open a big room while members come, go and write meta',
+        async () => {
+          const roomId = await createRoomId('roster-churn')
+          await onSeedAndChurn(roomId)
+          const room = await onGetRoom(roomId)
+          let emptied = false
+          room.onEmpty(() => (emptied = true))
+          const listed = await room.getParticipants().then(
+            (members) => members.length,
+            (err: Error) => err.message,
+          )
+          const me = await room.join({ meta: { name: 'Page' } })
+          const serverCount = await onStopChurn(roomId)
+          await pollUntil(() => ({
+            result: { listed, serverCount, count: room.count, emptied, joined: me.id !== '' },
+            done: room.count === serverCount,
+          }))
+        },
+      )}
+
+      {scenario('dm-overflow', 'DM hold overflow', 'Three acknowledged DMs before listen()', async () => {
+        const [, room] = await createRoom('dm-overflow')
+        const late = await room.join({ meta: { name: 'Late' } })
+        const sender = await room.join({ meta: { name: 'Sender' } })
+        // Three 1,500-byte DMs: two fit the 4,096-byte bufferLimit of the lane that runs this, three don't.
+        const sends = ['1', '2', '3'].map((n) =>
+          sender.send(late.id, n.padEnd(1500, '.'), { ack: true }).then(
+            () => 'answered',
+            () => 'rejected',
+          ),
+        )
+        // The third's arrival drops the oldest, whose acknowledged send rejects.
+        const first = await Promise.race([sends[0]!, new Promise((resolve) => setTimeout(() => resolve('held'), 5000))])
+        const got: string[] = []
+        late.listen((data) => {
+          got.push((data as string)[0]!)
+        })
+        setResult(JSON.stringify({ first, outcomes: await Promise.all(sends), got }))
+      })}
+
+      {scenario('hold-overflow', null, 'Publishes held past bufferLimit', async () => {
+        const roomId = await createRoomId('hold-overflow')
+        const serverOutcomes = await onPublishWhileEstablishing(roomId)
+        await pollUntil(async () => {
+          const seen = await onGetWatched(roomId)
+          return { result: { serverOutcomes, seen }, done: seen.length >= 2 }
+        })
       })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {

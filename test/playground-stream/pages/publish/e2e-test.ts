@@ -1,4 +1,4 @@
-export { testPublish }
+export { testPublish, testPublishSmallBuffer }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
@@ -87,6 +87,59 @@ function testPublish() {
     })
   })
 
+  test("broadcast: each binary listener gets bytes of its own, so one that writes into them or transfers them leaves the next one's and the page's intact", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-binary-broadcast-own-bytes')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: number[][]; seen: number[][]; keySeen: number[][] }>('#publish-result')
+      expect(result.received).deep.equal([[1, 2, 3, 4]])
+      expect(result.seen).deep.equal([[1, 2, 3, 4]])
+      expect(result.keySeen).deep.equal([[1, 2, 3, 4]])
+    })
+  })
+
+  test('broadcast: binary publishes go out as they were at the call, though the server refills one buffer for each while a subscription establishes', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-binary-broadcast-reused-buffer')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: number[][]; seen: number[][] }>('#publish-result')
+      const frames = [
+        [1, 1, 1, 1],
+        [2, 2, 2, 2],
+        [3, 3, 3, 3],
+      ]
+      expect(result.received).deep.equal(frames)
+      expect(result.seen).deep.equal(frames)
+    })
+  })
+
+  test('broadcast: publishes right after a subscribe reach it, text and binary in call order', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-right-after')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ seen: unknown[] }>('#publish-result')
+      expect(result.seen).deep.equal(['t1', [1], 't2'])
+    })
+  })
+
+  test("broadcast: a listener's answer arrives after the message it answers; a listener answering every message lets timers fire; an awaited publish is delivered when it resolves", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-answers')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: string[]; timerFired: boolean; deliveredAtLastReceipt: number }>(
+        '#publish-result',
+      )
+      expect(result.received[0]).toBe('ping')
+      expect([...result.received].sort()).deep.equal(['async-pong', 'ping', 'pong'])
+      expect(result.timerFired).toBe(true)
+      expect(result.deliveredAtLastReceipt).toBe(3000)
+    })
+  })
+
   test('broadcast: shield validates client→server publishes', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-shield')
@@ -102,6 +155,20 @@ function testPublish() {
       expect(state.invalidThrew).toBe(true)
       expect(state.invalidErrorMessage).not.toBe(null)
       expect(state.receivedAfterInvalid).deep.equal([{ text: 'hi' }])
+    })
+  })
+}
+
+/** Runs in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+function testPublishSmallBuffer() {
+  test('broadcast: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-hold-overflow')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        outcomes: ['sent', 'sent', 'ChannelOverflowError'],
+        seen: ['1', '2'],
+      })
     })
   })
 }

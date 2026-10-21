@@ -1,6 +1,9 @@
-export { testRoom }
+export { testRoom, testRoomAckTimeout, testRoomSmallBuffer }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
+
+/** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
+const CLOSED_TAB_WAIT = { timeout: 90_000 }
 
 type ChatResult = {
   events: string[]
@@ -114,6 +117,196 @@ function testRoom() {
     expect(result.defaultOnly).deep.equal([1, 2, 3])
     expect(result.camReceivers).greaterThanOrEqual(1)
   })
+  testRoomScenario<{ seen: number[][]; serverSeen: number[][]; lateSeen: number[][] }>(
+    'own-bytes',
+    "room: each binary listener gets bytes of its own, so one that writes into them or transfers them leaves the next one's, a late subscriber's and the page's intact",
+    (r) => {
+      expect(r.seen).deep.equal([
+        [1, 2, 3, 4],
+        [5, 6, 7, 8],
+      ])
+      expect(r.serverSeen).deep.equal([
+        [1, 2, 3, 4],
+        [5, 6, 7, 8],
+      ])
+      expect(r.lateSeen).deep.equal([[5, 6, 7, 8]]) // the retained frame, as published
+    },
+  )
+  testRoomScenario<{
+    messages: Array<{ data: unknown; from: string }>
+    frames: number[][]
+    announcements: unknown[]
+    dms: unknown[]
+    reuserTags: string[] | null
+    roomTags: string[] | null
+  }>(
+    'at-call',
+    'room: a write goes out as it was at the call, though its caller changes the object or buffer right after',
+    (r) => {
+      expect(r.messages).deep.equal([
+        { data: { n: 10 }, from: 'Me' },
+        { data: { n: 11 }, from: 'Me' },
+        { data: { n: 1 }, from: 'Reuser' },
+      ])
+      expect(r.frames).deep.equal([[1, 2, 3]])
+      expect(r.announcements).deep.equal([{ n: 3 }])
+      expect(r.dms).to.have.deep.members([{ n: 2 }, { n: 4 }])
+      expect(r.reuserTags).deep.equal(['b'])
+      expect(r.roomTags).deep.equal(['x'])
+    },
+  )
+  testRoomScenario<{ seen: unknown[]; serverSeen: unknown[] }>(
+    'right-after',
+    'room: a publish right after subscribing, and a DM right after its recipient joined, arrive, each kind in call order',
+    (r) => {
+      // Text and binary travel apart: only each kind's own order is kept.
+      const texts = (list: unknown[]) => list.filter((data) => typeof data === 'string')
+      expect(texts(r.serverSeen)).deep.equal(['t1', 't2', 'dm'])
+      expect(r.serverSeen.filter(Array.isArray)).deep.equal([[1]])
+      expect(texts(r.seen)).deep.equal(['p1', 'p2'])
+      expect(r.seen.filter(Array.isArray)).deep.equal([[2]])
+    },
+  )
+  testRoomScenario<{ texts: number[]; frames: number[] }>(
+    'call-order',
+    "room: a member's publishes arrive in the order it called them, though the guard takes longer for the earlier ones",
+    (r) => {
+      const numbers = Array.from({ length: 20 }, (_, i) => i)
+      expect(r.texts).deep.equal(numbers)
+      expect(r.frames).deep.equal(numbers)
+    },
+  )
+  testRoomScenario<{
+    stored: { afterAttributes: string[]; roomMeta: [string, unknown][]; memberMeta: [string, unknown][] }
+    roomMeta: [string, unknown][]
+    otherRoomMeta: [string, unknown][]
+    memberMeta: [string, unknown][]
+    otherMemberMeta: [string, unknown][]
+  }>(
+    'meta-race',
+    'room: concurrent meta writes from many callers each apply, and every view ends on the stored meta in its key order',
+    (r) => {
+      const { afterAttributes, roomMeta, memberMeta } = r.stored
+      expect(afterAttributes.length).toBe(201) // the created `topic`, then all 200 keys
+      expect(afterAttributes[0]).toBe('topic')
+      // One Room.setMeta() won whole: its own two keys, in its order.
+      const winner = roomMeta[0]![1] as number
+      expect(roomMeta).deep.equal([
+        ['winner', winner],
+        [`w${winner}`, true],
+      ])
+      // A member's writes apply in call order: its last setMeta(), then the setAttributes() calls after it.
+      expect(memberMeta).deep.equal([
+        ['name', 'Writer'],
+        ['round', 90],
+        ...Array.from({ length: 9 }, (_, i) => [`a${91 + i}`, 91 + i]),
+      ])
+      expect(r.roomMeta).deep.equal(roomMeta)
+      expect(r.otherRoomMeta).deep.equal(roomMeta)
+      expect(r.memberMeta).deep.equal(memberMeta)
+      expect(r.otherMemberMeta).deep.equal(memberMeta)
+    },
+  )
+  testRoomScenario<{ reads: string[] }>(
+    'meta-replace',
+    "room: a read of a room's or member's meta of more than a page, while it is replaced, gets the meta before or after the replace, never a mix or none",
+    (r) => {
+      expect(r.reads.length).toBe(12)
+      for (const read of r.reads) expect(['a', 'b']).toContain(read)
+    },
+  )
+  testRoomScenario<{ names: unknown[]; otherNames: unknown[]; viewName: unknown; otherViewName: unknown }>(
+    'sender',
+    'room: a meta write made while a publish waits on its guard applies on every view, and the publish arrives once',
+    (r) => {
+      expect(r.names.length).toBe(1)
+      expect(r.otherNames.length).toBe(1)
+      expect(r.viewName).toBe('B')
+      expect(r.otherViewName).toBe('B')
+    },
+  )
+  testRoomScenario<{
+    binaryError: string | null
+    afterHookAck: boolean | string
+    calls: Array<{ hook: string; name: unknown; frozen: boolean }>
+  }>(
+    'guard-calls',
+    "room: guards get a frozen sender and never a stand-in for a member that left; a binary publish a guard refuses rejects with the guard's Abort; an after-hook that throws keeps the publish",
+    (r) => {
+      expect(r.binaryError).toBe('no frames')
+      expect(r.afterHookAck).toBe(true)
+      expect(r.calls.filter((call) => call.hook === 'join').map((call) => call.name)).deep.equal(['G', 'P'])
+      expect(r.calls.filter((call) => call.hook === 'send').map((call) => call.name)).deep.equal(['G'])
+      for (const call of r.calls) expect(call).deep.include({ frozen: true })
+      for (const call of r.calls.filter((call) => call.hook === 'publish')) expect(call.name).toBe('G')
+    },
+  )
+  testRoomScenario<{ mine: [string, unknown][]; remote: [string, unknown][] }>(
+    'own-meta-race',
+    "room: a page's own member ends on the meta its unawaited writes stored, in call order, as other views do",
+    (r) => {
+      const stored = [['name', 'Mine'], ['round', 15], ...Array.from({ length: 4 }, (_, i) => [`m${16 + i}`, 16 + i])]
+      expect(r.mine).deep.equal(stored)
+      expect(r.remote).deep.equal(stored)
+    },
+  )
+  testRoomScenario<{
+    leave: string
+    kick: string
+    close: string
+    atLeave: { cause: string; isClosed: boolean; count: number } | null
+    unsubscribeInOnClose: string | null
+    lateOnClose: boolean
+    isClosed: boolean[]
+  }>(
+    'close-handles',
+    'room: a leave or kick that empties a room onEmpty closes resolves, and Room.close() ends every handle: the leave callback sees the room closed and empty, an unsubscribe in onClose returns, and an onClose added after fires',
+    (r) => {
+      expect(r.leave).toBe('resolved')
+      expect(r.kick).toBe('resolved')
+      expect(r.close).toBe('resolved')
+      expect(r.isClosed).deep.equal([true, true])
+      expect(r.atLeave).deep.equal({ cause: 'closed', isClosed: true, count: 0 })
+      expect(r.unsubscribeInOnClose).toBe('returned')
+      expect(r.lateOnClose).toBe(true)
+    },
+  )
+  testRoomScenario<{
+    order: string[]
+    whileClosing: { listed: string[] | string; after: string[] }
+    recreated: { meta: unknown; count: number }
+    recreatedOpen: boolean
+  }>(
+    'list-races',
+    'room: Room.list() lists in code point order and skips rooms that close during it; a room created again after its close starts fresh and still closes by itself',
+    (r) => {
+      expect(r.order).deep.equal(['B', 'Z', 'a', 'b', 'é'])
+      expect(Array.isArray(r.whileClosing.listed)).toBe(true) // a list, not an error
+      expect(r.whileClosing.after).deep.equal([])
+      expect(r.recreated).deep.equal({ meta: { incarnation: 2 }, count: 0 })
+      expect(r.recreatedOpen).toBe(false)
+    },
+  )
+  testRoomScenario<{ fromPage: unknown; fromServer: unknown; refused: unknown }>(
+    'ack-dm',
+    "room: an acknowledged DM resolves with its recipient's reply, from a page or a server member, and rejects with the recipient's Abort",
+    (r) => {
+      expect(r.fromPage).deep.equal({ echo: 'hi' })
+      expect(r.fromServer).deep.equal({ echo: 'hi' })
+      expect(r.refused).toBe('refused')
+    },
+  )
+  testRoomScenario<{ listed: number | string; serverCount: number; count: number; emptied: boolean }>(
+    'roster-churn',
+    'room: a page opening a room of 2,000 members while members join, leave and change meta loads its roster, counts only visible members, and sees no empty room',
+    (r) => {
+      expect(typeof r.listed).toBe('number') // the roster loaded, not an error
+      expect(r.listed).greaterThanOrEqual(2000)
+      expect(r.serverCount).toBe(2001) // 2,000 members and the page's; not the hidden one
+      expect(r.count).toBe(r.serverCount)
+      expect(r.emptied).toBe(false)
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',
@@ -259,6 +452,118 @@ function testRoom() {
       expect(r.cause).deep.equal({ type: 'removed', reason: 'multi-tab' })
       expect(r.count).toBe(0)
       expect(r.empty).toBe(true)
+    },
+  )
+  test('room: a member who leaves, or whose tab closes, leaves once with its cause, and an acknowledged DM to or from it fails at the leave', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-leave-causes')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
+    const context = await page.context().browser()!.newContext()
+    const other = await context.newPage()
+    await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+    await other.click('#test-room-join-only')
+    await autoRetry(async () => expect(await other.textContent('#room-result')).toBe('"joined"'))
+    await context.close()
+    await autoRetry(async () => {
+      const r = await getResult<{
+        recipientLeft: string
+        senderLeft: string
+        seconds: number
+        causes: Array<{ name: unknown; type: string }>
+      }>('#room-result')
+      expect(r.recipientLeft).toBe('rejected')
+      expect(r.senderLeft).toBe('rejected')
+      expect(r.seconds).lessThan(10) // not the 60 s acknowledgement timeout
+      expect(r.causes).deep.equal([
+        { name: 'A', type: 'left' },
+        { name: 'B', type: 'left' },
+        { name: 'Closer', type: 'disconnected' },
+      ])
+    }, CLOSED_TAB_WAIT)
+  })
+  test('room: a join whose tab closes while its guard waits leaves no member behind', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-join-races')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'), { timeout: 10_000 })
+    const context = await page.context().browser()!.newContext()
+    const other = await context.newPage()
+    await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+    await other.click('#test-room-join-slowly')
+    await autoRetry(async () => expect(await getResult('#room-result')).deep.include({ closerJoining: true }))
+    await context.close()
+    await autoRetry(async () => {
+      const r = await getResult<{
+        events: string[]
+        count: number
+        serverCount: number
+        settled: boolean
+      }>('#room-result')
+      expect(r).deep.include({ settled: true, count: 0, serverCount: 0 })
+      // Shown joining at most once, then leaving once.
+      expect(r.events).to.be.deep.oneOf([[], ['join:Closer', 'leave:Closer:disconnected']])
+    }, CLOSED_TAB_WAIT)
+  })
+  test('room: a room nothing holds closes by itself, departureTimeout after its last member left or emptyTimeout after it was created, while the page it was returned to holds it open until that page closes, and Infinity never closes', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-self-close')
+    const { base } = await autoRetry(() => getResult<{ base: string }>('#room-result'), { timeout: 10_000 })
+    const context = await page.context().browser()!.newContext()
+    const other = await context.newPage()
+    await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(`${base}:held`)}`, undefined, other)
+    await other.click('#test-room-hold-room')
+    await autoRetry(async () => expect(await other.textContent('#room-result')).toBe('"holding"'))
+    await autoRetry(
+      async () => {
+        expect(await getResult('#room-result')).deep.equal({
+          base,
+          open: { empty: false, departed: false, held: true, never: true },
+          outlived: true,
+        })
+      },
+      { timeout: 15_000 },
+    )
+    await context.close()
+    await page.click('#test-room-self-close-released')
+    await autoRetry(
+      async () => expect(await getResult('#room-result')).deep.equal({ heldOpen: false }),
+      CLOSED_TAB_WAIT,
+    )
+  })
+}
+
+/** Waits out the 60 s acknowledgement timeout: one lane runs it. */
+function testRoomAckTimeout() {
+  test('room: an acknowledged DM its recipient never answers rejects at the 60 s acknowledgement timeout', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-ack-timeout')
+    await autoRetry(
+      async () => {
+        const r = await getResult<{ error: string | null; seconds: number }>('#room-result')
+        expect(r.error).toBe('rejected')
+        expect(r.seconds).within(59, 65)
+      },
+      { timeout: 75_000 },
+    )
+  })
+}
+
+/** Runs in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+function testRoomSmallBuffer() {
+  testRoomScenario<{ first: string; outcomes: string[]; got: string[] }>(
+    'dm-overflow',
+    'room: DMs to a page before its first listen() are held within bufferLimit and delivered on listen(); past it the oldest is dropped and its acknowledged send rejects',
+    (r) => {
+      expect(r.first).toBe('rejected')
+      expect(r.outcomes).deep.equal(['rejected', 'answered', 'answered'])
+      expect(r.got).deep.equal(['2', '3'])
+    },
+  )
+  testRoomScenario<{ serverOutcomes: string[]; seen: string[] }>(
+    'hold-overflow',
+    'room: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError',
+    (r) => {
+      expect(r.serverOutcomes).deep.equal(['sent', 'sent', 'ChannelOverflowError'])
+      expect(r.seen).deep.equal(['1', '2'])
     },
   )
 }
