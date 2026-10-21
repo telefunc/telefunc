@@ -1,5 +1,5 @@
-import { chargedBytes, replayLaneOf, type ReplayLaneKind } from './wire/connectionFrame.js'
-import { assert } from '../utils/assert.js'
+import { chargedBytes, replayLaneOf, type ReplayLaneKind } from '../wire/connectionFrame.js'
+import { assert } from '../../utils/assert.js'
 
 type ReplayBufferOptions = {
   maxBytes: number

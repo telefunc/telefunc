@@ -5,7 +5,7 @@ import {
   CHANNEL_TRANSPORT,
   RECONCILE_TIMEOUT_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
-} from '../constants.js'
+} from '../../constants.js'
 import { ClientConnection } from './connection.js'
 
 /** Minimal `MuxChannel` — registering one is enough to make the connection open a wire. */

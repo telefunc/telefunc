@@ -1,7 +1,7 @@
 export { getTelefuncChannelHooks }
 
 import { defineHooks, type Peer } from 'crossws'
-import { enableChannelTransports } from '../../node/server/serverConfig.js'
+import { enableChannelTransports } from '../../../node/server/serverConfig.js'
 import { getChannelMux } from './mux.js'
 import type { ServerTransport } from './mux.js'
 

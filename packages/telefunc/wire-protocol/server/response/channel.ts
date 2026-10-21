@@ -3,7 +3,7 @@ export { channelReplacer }
 import type { ChannelContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_CHANNEL } from '../../constants.js'
 
-import { ServerChannel } from '../channel.js'
+import { ServerChannel } from '../../channel/server/channel.js'
 import { getAdapterMaxFrameBytes } from '../../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()

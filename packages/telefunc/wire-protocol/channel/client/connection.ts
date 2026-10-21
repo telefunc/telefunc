@@ -11,10 +11,10 @@ export type {
 }
 
 import { parse } from '@brillout/json-serializer/parse'
-import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
-import { assert, assertUsage } from '../../utils/assert.js'
-import { ChannelOverflowError, replayLossError } from '../channel-errors.js'
-import { NetworkError } from '../../shared/NetworkError.js'
+import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
+import { ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { NetworkError } from '../../../shared/NetworkError.js'
 import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
@@ -35,9 +35,9 @@ import {
   type ChannelTransports,
   TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
-} from '../constants.js'
-import { replayWindow, type ByteWindowKind } from '../flowControl/FlowControl.js'
-import { ReplayBuffer } from '../replay-buffer.js'
+} from '../../constants.js'
+import { replayWindow, type ByteWindowKind } from '../../flowControl/FlowControl.js'
+import { ReplayBuffer } from '../ReplayBuffer.js'
 import {
   ACK_STATUS,
   ERROR_REASON,
@@ -47,7 +47,7 @@ import {
   chargedBytes,
   seqNear,
   seqThrough,
-} from '../wire/connectionFrame.js'
+} from '../../wire/connectionFrame.js'
 import type {
   AckResultStatus,
   BdpPingAck,
@@ -60,13 +60,13 @@ import type {
   ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
-} from '../wire/connectionFrame.js'
-import { randomUuid } from '../../utils/randomUuid.js'
-import { Fifo } from '../../utils/Fifo.js'
-import { settledOrAborted } from '../../utils/settledOrAborted.js'
-import { Heartbeat } from './heartbeat.js'
-import type { Uplink } from '../flowControl/client/Uplink.js'
-import type { Downlink } from '../flowControl/client/Downlink.js'
+} from '../../wire/connectionFrame.js'
+import { randomUuid } from '../../../utils/randomUuid.js'
+import { Fifo } from '../../../utils/Fifo.js'
+import { settledOrAborted } from '../../../utils/settledOrAborted.js'
+import { Heartbeat } from './Heartbeat.js'
+import type { Uplink } from '../../flowControl/client/Uplink.js'
+import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WsTransport } from './ws.js'
 import { SseTransport } from './sse.js'
 

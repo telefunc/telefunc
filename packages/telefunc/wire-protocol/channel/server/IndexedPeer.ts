@@ -1,11 +1,11 @@
 export { IndexedPeer }
 export type { PeerSender }
 
-import { ACK_STATUS, encode, chargedBytes } from '../wire/connectionFrame.js'
-import type { AckResultStatus, ErrorReason } from '../wire/connectionFrame.js'
-import { ReplayBuffer } from '../replay-buffer.js'
-import type { SendWait } from '../flowControl/Link.js'
-import type { ByteWindowKind } from '../flowControl/FlowControl.js'
+import { ACK_STATUS, encode, chargedBytes } from '../../wire/connectionFrame.js'
+import type { AckResultStatus, ErrorReason } from '../../wire/connectionFrame.js'
+import { ReplayBuffer } from '../ReplayBuffer.js'
+import type { SendWait } from '../../flowControl/Link.js'
+import type { ByteWindowKind } from '../../flowControl/FlowControl.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void

@@ -10,7 +10,7 @@ import { throwAbortError, throwBugError } from './errors.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
-import { getSessionUrl } from '../../wire-protocol/client/session-registry.js'
+import { getSessionUrl } from '../../wire-protocol/channel/client/sessionRegistry.js'
 import type { ChannelTransports } from '../../wire-protocol/constants.js'
 import {
   STATUS_CODE_SUCCESS,

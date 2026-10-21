@@ -1,11 +1,11 @@
 export { ChannelMux, getChannelMux }
 export type { ConnectionEntry, ReconcileOutcome, ServerTransport, Wire, WirePieces }
 
-import { assert } from '../../utils/assert.js'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../node/server/serverConfig.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
-import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
+import { assert } from '../../../utils/assert.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
   CREDIT_MSG_WINDOW_MAX,
@@ -21,7 +21,7 @@ import {
   WIRE_RECV_BACKLOG_BASE_BYTES,
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
-} from '../constants.js'
+} from '../../constants.js'
 import {
   TAG,
   ProtocolViolationError,
@@ -37,7 +37,7 @@ import {
   peekTag,
   seqThrough,
   withTook,
-} from '../wire/connectionFrame.js'
+} from '../../wire/connectionFrame.js'
 import type {
   BarrierPayload,
   ChannelFrame,
@@ -46,14 +46,14 @@ import type {
   PreparePayload,
   ReconcileOpenEntry,
   ReconcilePayload,
-} from '../wire/connectionFrame.js'
+} from '../../wire/connectionFrame.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PathRoom } from '../flowControl/server/PathRoom.js'
-import { ServerPieceReceiver } from '../flowControl/server/ServerPieceReceiver.js'
-import { Deliveries } from '../flowControl/Deliveries.js'
-import { SocketWait } from '../flowControl/server/SocketWait.js'
-import { WireSender } from './wire-sender.js'
-import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './awaited-channels.js'
+import { PathRoom } from '../../flowControl/server/PathRoom.js'
+import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
+import { Deliveries } from '../../flowControl/Deliveries.js'
+import { SocketWait } from '../../flowControl/server/SocketWait.js'
+import { WireSender } from './WireSender.js'
+import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -1180,5 +1180,5 @@ function resolveMuxServerOptions(): MuxServerOptions {
 // Lazy because `getGlobalObject` evaluates its factory eagerly — the factory needs
 // `ChannelMux` fully initialized, so defer until first access.
 function getGlobals(): { mux: ChannelMux } {
-  return getGlobalObject('wire-protocol/server/mux.ts', () => ({ mux: new ChannelMux() }))
+  return getGlobalObject('wire-protocol/channel/server/mux.ts', () => ({ mux: new ChannelMux() }))
 }

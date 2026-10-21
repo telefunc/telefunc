@@ -18,7 +18,7 @@ export type {
   BroadcastBinaryListener,
 }
 
-import type { TELEFUNC_SHIELDS } from '../node/shared/transformer/generateShield/shield-key.js'
+import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
 
 type ChannelData<T> = [T] extends [never] ? never : T extends (data: infer D) => any ? D : T
 type ChannelAck<T> = [T] extends [never] ? never : T extends (data: any) => infer R ? Awaited<R> : unknown

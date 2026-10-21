@@ -14,12 +14,12 @@ import type {
   BroadcastBinaryListener,
   BroadcastListener,
 } from '../channel.js'
-import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
+import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
 import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
-import { resolveClientConfig } from '../../client/clientConfig.js'
-import { createAbortError, isAbort } from '../../shared/Abort.js'
+import { resolveClientConfig } from '../../../client/clientConfig.js'
+import { createAbortError, isAbort } from '../../../shared/Abort.js'
 import {
   ACK_STATUS,
   TAG,
@@ -31,22 +31,22 @@ import {
   type ChannelFrame,
   type ReattachState,
   type WirePublishInfo,
-} from '../wire/connectionFrame.js'
-import { assert } from '../../utils/assert.js'
-import { Listeners } from '../../utils/Listeners.js'
-import { makeAbortError, makeBugError } from '../../client/remoteTelefunctionCall/errors.js'
-import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
+} from '../../wire/connectionFrame.js'
+import { assert } from '../../../utils/assert.js'
+import { Listeners } from '../../../utils/Listeners.js'
+import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
+import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
-import { getSessionUrl } from './session-registry.js'
-import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../constants.js'
-import { FlowControl } from '../flowControl/FlowControl.js'
+import { getSessionUrl } from './sessionRegistry.js'
+import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
+import { FlowControl } from '../../flowControl/FlowControl.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
-import type { Uplink } from '../flowControl/client/Uplink.js'
-import type { Downlink } from '../flowControl/client/Downlink.js'
+import type { Uplink } from '../../flowControl/client/Uplink.js'
+import type { Downlink } from '../../flowControl/client/Downlink.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
-import { ChannelClosedError } from '../channel-errors.js'
-import { isPromise } from '../../utils/isPromise.js'
-import { hasProp } from '../../utils/hasProp.js'
+import { ChannelClosedError } from '../channelErrors.js'
+import { isPromise } from '../../../utils/isPromise.js'
+import { hasProp } from '../../../utils/hasProp.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 

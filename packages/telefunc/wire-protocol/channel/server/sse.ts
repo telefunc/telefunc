@@ -2,22 +2,22 @@ export { getTelefuncSseChannelHooks, handleSseChannelRequest }
 export type { SseChannelHttpResponse, SseConnection }
 
 import type { Readable } from 'node:stream'
-import { assert } from '../../utils/assert.js'
-import { Fifo } from '../../utils/Fifo.js'
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
-import { getServerConfig } from '../../node/server/serverConfig.js'
-import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
-import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../constants.js'
-import { createPushReadableStream, type PushReadableStream } from '../../utils/pushReadableStream.js'
-import { createPushReadable, type PushReadable } from '../../utils/pushReadable.js'
-import { uint8ArrayToBase64url } from '../wire/base64url.js'
-import { textEncoder } from '../wire/frame.js'
-import { parseSseRequestMetadata, type SseRequestMetadata } from '../sse-request.js'
-import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../wire/StreamReader.js'
+import { assert } from '../../../utils/assert.js'
+import { Fifo } from '../../../utils/Fifo.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { getServerConfig } from '../../../node/server/serverConfig.js'
+import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
+import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
+import { createPushReadable, type PushReadable } from '../../../utils/pushReadable.js'
+import { uint8ArrayToBase64url } from '../../wire/base64url.js'
+import { textEncoder } from '../../wire/frame.js'
+import { parseSseRequestMetadata, type SseRequestMetadata } from '../sseRequest.js'
+import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../../wire/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, passesData, ProtocolViolationError } from '../wire/connectionFrame.js'
+import { encode, passesData, ProtocolViolationError } from '../../wire/connectionFrame.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -100,7 +100,7 @@ class EventStream {
   }
 }
 
-const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
+const globalObject = getGlobalObject('wire-protocol/channel/server/sse.ts', {
   defaultHooks: null as ReturnType<typeof getTelefuncSseChannelHooks> | null,
 })
 

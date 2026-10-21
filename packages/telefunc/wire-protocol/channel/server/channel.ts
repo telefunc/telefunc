@@ -1,6 +1,6 @@
 export { Channel, ServerChannel, SERVER_CHANNEL_BRAND }
-export { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
-export { NetworkError } from '../../shared/NetworkError.js'
+export { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
+export { NetworkError } from '../../../shared/NetworkError.js'
 
 const SERVER_CHANNEL_BRAND = Symbol.for('telefunc.ServerChannel')
 
@@ -16,30 +16,30 @@ import type {
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
-import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
+import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shield-key.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
-import { hasProp } from '../../utils/hasProp.js'
-import { unrefTimer } from '../../utils/unrefTimer.js'
-import { isAbort } from '../../node/server/Abort.js'
-import type { ShieldValidator, ShieldValidators } from '../../node/server/shield.js'
-import { createAbortError, type AbortError } from '../../shared/Abort.js'
-import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
-import { handleTelefunctionBug } from '../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channel-errors.js'
-import { NetworkError } from '../../shared/NetworkError.js'
-import { isPromise } from '../../utils/isPromise.js'
-import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
+import { hasProp } from '../../../utils/hasProp.js'
+import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { isAbort } from '../../../node/server/Abort.js'
+import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
+import { createAbortError, type AbortError } from '../../../shared/Abort.js'
+import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
+import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
+import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { NetworkError } from '../../../shared/NetworkError.js'
+import { isPromise } from '../../../utils/isPromise.js'
+import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
-import { FlowControl, replayWindow } from '../flowControl/FlowControl.js'
-import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
+import { FlowControl, replayWindow } from '../../flowControl/FlowControl.js'
+import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { ServerChannelBuffer } from './ServerChannelBuffer.js'
-import { ReplayBuffer } from '../replay-buffer.js'
-import { getServerConfig } from '../../node/server/serverConfig.js'
-import { assert } from '../../utils/assert.js'
-import { Listeners } from '../../utils/Listeners.js'
+import { ReplayBuffer } from '../ReplayBuffer.js'
+import { getServerConfig } from '../../../node/server/serverConfig.js'
+import { assert } from '../../../utils/assert.js'
+import { Listeners } from '../../../utils/Listeners.js'
 import {
   ACK_STATUS,
   ERROR_REASON,
@@ -51,7 +51,7 @@ import {
   isSequencedFrame,
   seqNear,
   seqThrough,
-} from '../wire/connectionFrame.js'
+} from '../../wire/connectionFrame.js'
 import type {
   AckResultStatus,
   ChannelCtrlFrame,
@@ -59,7 +59,7 @@ import type {
   ChannelFrame,
   ErrorReason,
   ReattachState,
-} from '../wire/connectionFrame.js'
+} from '../../wire/connectionFrame.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */
 function parsePeerText(text: string): unknown {

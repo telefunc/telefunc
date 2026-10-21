@@ -8,10 +8,10 @@ import type {
   ChannelCloseCallback,
   ChannelCloseOptions,
   ChannelCloseResult,
-} from '../channel.js'
+} from '../channel/channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shield-key.js'
-import { makePublishInfo } from '../channel.js'
-import { ServerChannel } from './channel.js'
+import { makePublishInfo } from '../channel/channel.js'
+import { ServerChannel } from '../channel/server/channel.js'
 import { getBroadcastAdapter } from './broadcast.js'
 import type { BroadcastPublishResult, BroadcastAdapter, BroadcastUnsubscribe } from './broadcast.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -19,7 +19,7 @@ import { parse } from '@brillout/json-serializer/parse'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { Listeners } from '../../utils/Listeners.js'
-import { ChannelClosedError, ChannelOverflowError } from '../channel-errors.js'
+import { ChannelClosedError, ChannelOverflowError } from '../channel/channelErrors.js'
 import { ACK_STATUS, ERROR_REASON, encodePublishText, encodePublishBinary, TAG } from '../wire/connectionFrame.js'
 import type { ChannelDataFrame, WirePublishInfo } from '../wire/connectionFrame.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'

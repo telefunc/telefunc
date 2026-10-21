@@ -10,7 +10,7 @@ import {
   pumpClientProducerToChannel,
   type PumpChannelOptions,
 } from '../../wire-protocol/client/request/pumpToChannel.js'
-import { ClientChannel } from '../../wire-protocol/client/channel.js'
+import { ClientChannel } from '../../wire-protocol/channel/client/channel.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'

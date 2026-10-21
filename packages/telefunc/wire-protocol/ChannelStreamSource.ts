@@ -8,7 +8,7 @@ import { isObject } from '../utils/isObject.js'
 import { assert } from '../utils/assert.js'
 import { createReadableChunkStream } from './createReadableChunkStream.js'
 import { readChunksToBytes } from './readChunksToBytes.js'
-import type { Channel } from './server/channel.js'
+import type { Channel } from './channel/server/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { StreamSource } from './types.js'
 

@@ -1,6 +1,6 @@
 export { SseTransport }
 
-import { assert } from '../../utils/assert.js'
+import { assert } from '../../../utils/assert.js'
 import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
@@ -14,19 +14,19 @@ import {
   SSE_RECONCILE_DEADLINE_MS,
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
-} from '../constants.js'
-import { encodeU32, encodeLengthPrefixedFrames } from '../wire/frame.js'
-import { createPushReadableStream, type PushReadableStream } from '../../utils/pushReadableStream.js'
-import { Uplink } from '../flowControl/client/Uplink.js'
-import { Downlink } from '../flowControl/client/Downlink.js'
-import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../wire/requestKind.js'
-import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../wire/connectionFrame.js'
-import { encodeLengthPrefixedBlob, encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sse-request.js'
-import { DeadlineScheduler } from './deadlineScheduler.js'
+} from '../../constants.js'
+import { encodeU32, encodeLengthPrefixedFrames } from '../../wire/frame.js'
+import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
+import { Uplink } from '../../flowControl/client/Uplink.js'
+import { Downlink } from '../../flowControl/client/Downlink.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
+import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../../wire/connectionFrame.js'
+import { encodeLengthPrefixedBlob, encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sseRequest.js'
+import { DeadlineScheduler } from './DeadlineScheduler.js'
 import { SSEEvents } from './SSEEvents.js'
-import { Fifo } from '../../utils/Fifo.js'
-import { randomUuid } from '../../utils/randomUuid.js'
-import { settledOrAborted } from '../../utils/settledOrAborted.js'
+import { Fifo } from '../../../utils/Fifo.js'
+import { randomUuid } from '../../../utils/randomUuid.js'
+import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 import type {
   BarrierEmission,
   ClientConnection,
@@ -34,7 +34,7 @@ import type {
   OutboundFrameKind,
   UpgradeSource,
 } from './connection.js'
-import type { Heartbeat } from './heartbeat.js'
+import type { Heartbeat } from './Heartbeat.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number }
 

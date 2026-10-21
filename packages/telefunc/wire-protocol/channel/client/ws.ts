@@ -1,12 +1,12 @@
 export { WsTransport }
 
-import { assert } from '../../utils/assert.js'
-import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_TRANSPORT, WS_PROBE_TIMEOUT_MS } from '../constants.js'
-import { PieceSender } from '../flowControl/pieces.js'
-import { PagePieceReceiver } from '../flowControl/client/PagePieceReceiver.js'
-import { SendBudget } from '../flowControl/client/SendBudget.js'
-import { Uplink } from '../flowControl/client/Uplink.js'
-import { Downlink } from '../flowControl/client/Downlink.js'
+import { assert } from '../../../utils/assert.js'
+import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_TRANSPORT, WS_PROBE_TIMEOUT_MS } from '../../constants.js'
+import { PieceSender } from '../../flowControl/pieces.js'
+import { PagePieceReceiver } from '../../flowControl/client/PagePieceReceiver.js'
+import { SendBudget } from '../../flowControl/client/SendBudget.js'
+import { Uplink } from '../../flowControl/client/Uplink.js'
+import { Downlink } from '../../flowControl/client/Downlink.js'
 import {
   LENGTH_BYTES,
   TAG,
@@ -19,9 +19,9 @@ import {
   withTook,
   type DecodedFrame,
   type ReconciledPayload,
-} from '../wire/connectionFrame.js'
+} from '../../wire/connectionFrame.js'
 import type { ClientConnection, OutboundFrame, ProbeWire, UpgradeTarget } from './connection.js'
-import type { Heartbeat } from './heartbeat.js'
+import type { Heartbeat } from './Heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */
 type WsEnds = { uplink: Uplink; downlink: Downlink; budget: SendBudget; sender: PieceSender; pieces: PagePieceReceiver }

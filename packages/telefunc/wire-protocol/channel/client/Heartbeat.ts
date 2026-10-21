@@ -1,6 +1,6 @@
 export { Heartbeat }
 
-import { Deliveries } from '../flowControl/Deliveries.js'
+import { Deliveries } from '../../flowControl/Deliveries.js'
 
 type HeartbeatOptions = {
   intervalMs: number

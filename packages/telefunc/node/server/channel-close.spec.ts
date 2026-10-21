@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'vitest'
 
-import { ReplayBuffer } from '../../wire-protocol/replay-buffer.js'
+import { ReplayBuffer } from '../../wire-protocol/channel/ReplayBuffer.js'
 import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../../wire-protocol/wire/connectionFrame.js'
-import { IndexedPeer } from '../../wire-protocol/server/IndexedPeer.js'
-import { ServerChannel } from '../../wire-protocol/server/channel.js'
+import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
+import { ServerChannel } from '../../wire-protocol/channel/server/channel.js'
 
 function createPeer(frames: Uint8Array[]) {
   return new IndexedPeer({

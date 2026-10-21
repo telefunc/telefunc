@@ -72,7 +72,7 @@ vi.mock('crossws/adapters/cloudflare', () => ({
   default: mocks.crosswsFactory,
 }))
 
-vi.mock('../../ws.js', () => ({
+vi.mock('../../../channel/server/ws.js', () => ({
   getTelefuncChannelHooks: vi.fn(() => ({ message: vi.fn() })),
 }))
 

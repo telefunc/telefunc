@@ -1,6 +1,6 @@
 export { ChannelClosedError, ChannelOverflowError, replayLossError }
 
-import { NetworkError } from '../shared/NetworkError.js'
+import { NetworkError } from '../../shared/NetworkError.js'
 
 /** Thrown synchronously by `send()` when the channel is already closed.
  *  Also used to reject pending ack promises when the channel shuts down. */

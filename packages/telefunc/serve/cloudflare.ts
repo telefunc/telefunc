@@ -5,7 +5,7 @@ export type { CloudflareOptions }
 
 import { DurableObject, env } from 'cloudflare:workers'
 import crossws from 'crossws/adapters/cloudflare'
-import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
+import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { getServerConfig, enableChannelTransports, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import { installBroadcastAdapter } from '../wire-protocol/server/broadcast.js'

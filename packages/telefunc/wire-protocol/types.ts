@@ -40,9 +40,9 @@ export type {
   DownloadProgress,
 }
 
-import type { ServerChannel } from './server/channel.js'
+import type { ServerChannel } from './channel/server/channel.js'
 import type { ServerBroadcast } from './server/server-broadcast.js'
-import type { ClientChannel, ClientBroadcast } from './client/channel.js'
+import type { ClientChannel, ClientBroadcast } from './channel/client/channel.js'
 import type { AbortError } from '../shared/Abort.js'
 import type { ShieldValidators } from '../node/server/shield.js'
 import type { FileDownload, BlobDownload } from './client/response/DownloadClasses.js'

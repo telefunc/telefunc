@@ -1,7 +1,7 @@
 export { SSEStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { SSEEvents } from '../SSEEvents.js'
+import { SSEEvents } from '../../channel/client/SSEEvents.js'
 import { concatAll } from '../../wire/frame.js'
 import { throwAbortError } from '../../../client/remoteTelefunctionCall/errors.js'
 

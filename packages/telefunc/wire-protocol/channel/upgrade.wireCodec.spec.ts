@@ -12,13 +12,13 @@ import {
   type BarrierPayload,
   type ReconcilePayload,
   type ReconciledPayload,
-} from './wire/connectionFrame.js'
+} from '../wire/connectionFrame.js'
 import {
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
   UPGRADE_MAX_ID_BYTES,
   WIRE_MAX_CONN_CTRL_FRAME_BYTES,
-} from './constants.js'
+} from '../constants.js'
 
 const clientFrame = (raw: Uint8Array<ArrayBuffer>) => decodeClientFrame(raw, 64 * 1024)
 const hostile = (build: (payload: never) => Uint8Array<ArrayBuffer>, payload: unknown) => build(payload as never)

@@ -1,7 +1,7 @@
 export { getSessionUrl }
 
-import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { randomUuid } from '../../utils/randomUuid.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { randomUuid } from '../../../utils/randomUuid.js'
 
 /**
  * Client-side session registry.
@@ -10,7 +10,7 @@ import { randomUuid } from '../../utils/randomUuid.js'
  * so its requests stay routed to the same server-side session shard.
  */
 
-const globalObject = getGlobalObject<{ registry: Map<string, string> }>('session-registry.ts', {
+const globalObject = getGlobalObject<{ registry: Map<string, string> }>('sessionRegistry.ts', {
   registry: new Map<string, string>(),
 })
 

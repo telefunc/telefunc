@@ -10,7 +10,7 @@ export { ShieldValidationError, isShieldValidationError } from '../shared/Shield
 export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'
 export { NetworkError } from '../shared/NetworkError.js'
-export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
+export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel/channelErrors.js'
 
 export type { TelefuncClientExtension } from './extensions.js'
 export type {
