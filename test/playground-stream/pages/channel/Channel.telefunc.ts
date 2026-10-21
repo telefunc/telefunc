@@ -31,6 +31,9 @@ export {
   onChannelUnawaitedBurst,
   onChannelSmallPush,
   onChannelManyListeners,
+  onChannelLinkShare,
+  onChannelSlowUplink,
+  onChannelOpenAnswer,
 }
 
 import { Channel, Abort, BroadcastChannel } from 'telefunc'
@@ -672,5 +675,41 @@ async function onChannelManyListeners() {
     for (const remove of removes) remove()
     return Math.round(performance.now() - start)
   })
+  return { channel: ch.client }
+}
+
+/** A download channel that sends the bytes the page asks for, awaiting each 64 KiB, and a channel that answers pings. */
+async function onChannelLinkShare() {
+  const download = new Channel<(bytes: number) => void, never>()
+  download.listen(async (bytes) => {
+    for (let sent = 0; sent < bytes && !download.isClosed; sent += 64 * 1024)
+      await download.sendBinary(new Uint8Array(64 * 1024))
+  })
+  const ping = new Channel<(msg: string) => string, never>()
+  ping.listen(() => 'pong')
+  return { download: download.client, ping: ping.client }
+}
+
+/** An upload channel that answers with the bytes it received, and a channel that ticks every 100 ms until the page closes it. */
+async function onChannelSlowUplink() {
+  const upload = new Channel<(msg: 'received') => number, never>()
+  let received = 0
+  upload.listenBinary((data) => {
+    received += data.byteLength
+  })
+  upload.listen(() => received)
+  const ticks = new Channel<never, (tick: number) => void>()
+  let tick = 0
+  const timer = setInterval(() => {
+    if (ticks.isClosed) return clearInterval(timer)
+    void ticks.send(tick++).catch(() => {})
+  }, 100)
+  return { upload: upload.client, ticks: ticks.client }
+}
+
+/** A channel that answers. */
+async function onChannelOpenAnswer() {
+  const ch = new Channel<(msg: string) => string, never>()
+  ch.listen(() => 'answer')
   return { channel: ch.client }
 }

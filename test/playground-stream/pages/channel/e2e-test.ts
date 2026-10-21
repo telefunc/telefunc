@@ -2,7 +2,15 @@ export { testChannel }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Request, Response, WebSocket } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, restartProxy, stopProxy, startProxy } from '../../e2e-utils'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  restartProxy,
+  stopProxy,
+  startProxy,
+  countConnections,
+} from '../../e2e-utils'
 
 type ChannelState = {
   connected: boolean
@@ -923,26 +931,6 @@ function testChannel(isDev: boolean, inDocker = false) {
       page.off('requestfailed', onRequestFailed)
       expect(canceled).deep.equal([])
     })
-  }
-}
-
-/** Counts the WebSockets and SSE streams the page opens to Telefunc from now until `stop()`. */
-function countConnections() {
-  let opened = 0
-  const onWebSocket = (ws: WebSocket) => {
-    if (ws.url().includes('/_telefunc')) opened++
-  }
-  const onResponse = (response: Response) => {
-    if (response.headers()['content-type']?.startsWith('text/event-stream')) opened++
-  }
-  page.on('websocket', onWebSocket)
-  page.on('response', onResponse)
-  return {
-    stop() {
-      page.off('websocket', onWebSocket)
-      page.off('response', onResponse)
-      return opened
-    },
   }
 }
 

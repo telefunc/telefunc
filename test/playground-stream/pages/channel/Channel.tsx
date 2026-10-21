@@ -35,6 +35,9 @@ import {
   onChannelUnawaitedBurst,
   onChannelSmallPush,
   onChannelManyListeners,
+  onChannelLinkShare,
+  onChannelSlowUplink,
+  onChannelOpenAnswer,
 } from './Channel.telefunc'
 
 /**
@@ -153,6 +156,8 @@ type ChannelState = {
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
   smallPushReceived: number[] | null
   manyListenersMs: { page: number; server: number | null } | null
+  linkShare: { pingMs: number[]; downloaded: number } | null
+  slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
 }
 
 const initialState: ChannelState = {
@@ -221,6 +226,8 @@ const initialState: ChannelState = {
   unawaitedBurst: null,
   smallPushReceived: null,
   manyListenersMs: null,
+  linkShare: null,
+  slowUplink: null,
 }
 
 function timestamp() {
@@ -1000,6 +1007,55 @@ function ChannelDemo() {
     channel.close()
   }, [])
 
+  const testLinkShare = useCallback(async () => {
+    setChannelState((s) => ({ ...s, linkShare: null }))
+    const { download, ping } = await openChannel(onChannelLinkShare)
+    let downloaded = 0
+    let resolveStarted!: () => void
+    const started = new Promise<void>((resolve) => (resolveStarted = resolve))
+    download.listenBinary((data) => {
+      downloaded += data.byteLength
+      if (downloaded >= 2_000_000) resolveStarted()
+    })
+    void download.send(100_000_000)
+    await started
+    const pingMs: number[] = []
+    for (let i = 0; i < 3; i++) {
+      const start = performance.now()
+      await ping.send('ping', { ack: true })
+      pingMs.push(Math.round(performance.now() - start))
+    }
+    setChannelState((s) => ({ ...s, linkShare: { pingMs, downloaded } }))
+    download.close()
+    ping.close()
+  }, [])
+
+  const testSlowUplink = useCallback(async () => {
+    setChannelState((s) => ({ ...s, slowUplink: null }))
+    const { upload, ticks } = await openChannel(onChannelSlowUplink)
+    let lastTick = performance.now()
+    let longestTickGapMs = 0
+    ticks.listen(() => {
+      const now = performance.now()
+      longestTickGapMs = Math.max(longestTickGapMs, now - lastTick)
+      lastTick = now
+    })
+    const answered = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+      const { channel } = await openChannel(onChannelOpenAnswer)
+      const answer = await channel.send('hi', { ack: true })
+      channel.close()
+      return answer
+    })()
+    const chunk = new Uint8Array(16 * 1024)
+    for (let sent = 0; sent < 2 * 1024 * 1024; sent += chunk.byteLength) await upload.sendBinary(chunk)
+    const uploaded = await upload.send('received', { ack: true })
+    const slowUplink = { uploaded, opened: await answered, longestTickGapMs: Math.round(longestTickGapMs) }
+    setChannelState((s) => ({ ...s, slowUplink }))
+    upload.close()
+    ticks.close()
+  }, [])
+
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
@@ -1323,6 +1379,22 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Server Pushes 60 Small Messages
+          </button>
+          <button
+            id="channel-test-link-share"
+            type="button"
+            onClick={testLinkShare}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Ping Beside a Download
+          </button>
+          <button
+            id="channel-test-slow-uplink"
+            type="button"
+            onClick={testSlowUplink}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Upload 2 MiB Beside Ticks
           </button>
           <button
             id="channel-test-many-listeners"
