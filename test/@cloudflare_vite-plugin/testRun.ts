@@ -18,7 +18,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
       // workerd logs a response it wrote to a connection the browser closed as it navigated away,
       // before the request's signal could report it.
-      (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')),
+      (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')) ||
+      // testRefusedPresence()'s KV refuses a presence write.
+      log.logText.includes("A Broadcast presence couldn't be written"),
   })
   testTodolist()
   testChannel()
@@ -28,6 +30,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testChatMembers()
   testUnsubscribeTwice()
   testResubscribe()
+  testRefusedPresence()
 }
 
 function testCloudflareBindings() {
@@ -319,6 +322,28 @@ function testResubscribe() {
     await autoRetry(
       async () => {
         expect(JSON.parse((await page.textContent('#resubscribe-state'))!).received).deep.equal(['hello'])
+      },
+      { timeout: 5000 },
+    )
+  })
+}
+
+function testRefusedPresence() {
+  test("Broadcast: a publish made while KV refuses its subscriber's presence write settles, and the presence's next refresh writes it", async () => {
+    await page.goto(getServerUrl() + '/refused-presence')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#subscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
+    })
+    // A presence is refreshed every 30 s.
+    await page.waitForTimeout(35_000)
+    await page.click('#publish')
+    await autoRetry(
+      async () => {
+        expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
       },
       { timeout: 5000 },
     )

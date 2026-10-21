@@ -4,7 +4,7 @@ export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncBroadcas
 
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
-import { assert, assertUsage } from '../../../utils/assert.js'
+import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import type {
   BroadcastBinaryOnMessage,
@@ -60,6 +60,15 @@ type BufferedPublish = {
   send: () => Promise<BroadcastPublishResult>
   bytes: number
   pending: PendingBucketPublish
+}
+
+/** KV takes one write a second per key, so a write it refuses is expected. */
+async function warnRefusedWrite(write: Promise<void>, outcome: string): Promise<void> {
+  try {
+    await write
+  } catch (err) {
+    assertWarning(false, `A Broadcast presence couldn't be ${outcome}: ${String(err)}`, { onlyOnce: false })
+  }
 }
 
 /**
@@ -343,13 +352,20 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   }
 
   private async putPresence(key: string, owner: string): Promise<void> {
-    await this.requireKV().put(this.getPresenceKey(key, owner), owner, {
+    const written = this.requireKV().put(this.getPresenceKey(key, owner), owner, {
       expirationTtl: PRESENCE_TTL_SECONDS,
     })
+    await warnRefusedWrite(
+      written,
+      `written, and is written again at its next refresh, within ${PRESENCE_REFRESH_INTERVAL_MS / 1000} s`,
+    )
   }
 
   private async deletePresence(key: string, owner: string): Promise<void> {
-    await this.requireKV().delete(this.getPresenceKey(key, owner))
+    await warnRefusedWrite(
+      this.requireKV().delete(this.getPresenceKey(key, owner)),
+      `deleted, and expires within ${PRESENCE_TTL_SECONDS} s`,
+    )
   }
 
   private async listPresenceByBucket(key: string): Promise<Map<LocationBucket, string[]>> {
