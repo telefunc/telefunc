@@ -10,9 +10,12 @@ export {
   onStaticPublishReceipts,
   onBroadcastSelfUnsubscribe,
   onBroadcastReconnect,
+  onBroadcastWhileOffline,
 }
 
 import { Broadcast, BroadcastChannel } from 'telefunc'
+import { cleanupState } from '../../cleanup-state'
+import { onServerAction } from '../../server-actions'
 
 type TextMsg = { text: string; from: string }
 
@@ -178,4 +181,17 @@ async function onBroadcastReconnect() {
       await room.publish(text)
     },
   }
+}
+
+/** At server action `publish_<key>`, publishes `count` messages of 128 KiB to the key. */
+async function onBroadcastWhileOffline(count: number) {
+  const key = `room:while-offline:${crypto.randomUUID()}`
+  const room = new BroadcastChannel<string>({ key })
+  room.onClose((err) => {
+    cleanupState[`whileOffline_${key}_serverClose`] = err?.name ?? 'none'
+  })
+  onServerAction(`publish_${key}`, () => {
+    for (let n = 0; n < count; n++) void Broadcast.publish(key, String(n).padEnd(128 * 1024))
+  })
+  return { key, room }
 }

@@ -1,7 +1,7 @@
 export { testPublish }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, cutWire, runServerAction } from '../../e2e-utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -182,5 +182,33 @@ function testPublish(isDev: boolean, inDocker = false) {
         expect(result.received).deep.equal(['after-reconnect'])
       })
     })
+
+    for (const { count, received, closed } of [
+      { count: 2, received: ['before', '0', '1'], closed: null },
+      { count: 8, received: ['before'], closed: 'ChannelOverflowError' },
+    ]) {
+      test(`broadcast: a page offline while ${count * 128} KiB is published ${closed ? 'leaves with ChannelOverflowError on both ends' : 'gets all of it once back'}`, async () => {
+        await navigate(`${getServerUrl()}/publish`)
+        await page.click(`#test-broadcast-while-offline-${count}`)
+        let key: string | null = null
+        await autoRetry(async () => {
+          const result = await getResult<{ key: string; received: string[] }>('#publish-result')
+          expect(result.received).deep.equal(['before'])
+          key = result.key
+        })
+
+        await page.context().setOffline(true)
+        await cutWire()
+        await runServerAction(`publish_${key}`)
+        await page.context().setOffline(false)
+
+        await autoRetry(async () => {
+          const result = await getResult<{ received: string[]; closed: string | null }>('#publish-result')
+          expect(result.received).deep.equal(received)
+          expect(result.closed).toBe(closed)
+          if (closed) expect((await getCleanupState())[`whileOffline_${key}_serverClose`]).toBe(closed)
+        })
+      })
+    }
   }
 }

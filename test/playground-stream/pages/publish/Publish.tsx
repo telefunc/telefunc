@@ -13,6 +13,7 @@ import {
   onStaticPublishReceipts,
   onBroadcastSelfUnsubscribe,
   onBroadcastReconnect,
+  onBroadcastWhileOffline,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -291,6 +292,33 @@ function Publish() {
       <button id="test-broadcast-reconnect-publish" onClick={() => reconnectRef.current!.publish('after-reconnect')}>
         Server publishes
       </button>
+
+      <h2>Published While Offline</h2>
+
+      {[2, 8].map((count) => (
+        <button
+          key={count}
+          id={`test-broadcast-while-offline-${count}`}
+          onClick={async () => {
+            setResult('')
+            const { key, room } = await onBroadcastWhileOffline(count)
+            const received: string[] = []
+            let closed: string | null = null
+            const render = () => setResult(JSON.stringify({ key, received, closed }))
+            room.subscribe((msg) => {
+              received.push(msg.trim())
+              render()
+            })
+            room.onClose((err) => {
+              closed = err?.name ?? 'none'
+              render()
+            })
+            await room.publish('before')
+          }}
+        >
+          {count} × 128 KiB published while offline
+        </button>
+      ))}
     </div>
   )
 }
