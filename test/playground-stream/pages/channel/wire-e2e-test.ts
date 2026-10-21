@@ -1,6 +1,7 @@
 export { testWire, testWireSmallReplay }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
@@ -114,6 +115,33 @@ function testWire(isDev: boolean) {
   })
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
+    test('channel: a channel a call returns while the WebSocket is dead without a word opens on both ends once the page notices', async () => {
+      // Port in this machine's range for e2e runs; the proxy lives in the test process.
+      const proxy = await startBlackHoleProxy(getServerUrl(), 21150)
+      try {
+        await navigate(`${proxy.url}/channel`)
+        await page.click('#wire-end-open')
+        let firstId = ''
+        await autoRetry(async () => {
+          const { end } = await getResult<WireState>('#wire-state')
+          expect((await getCleanupState())[`wireEnd_${end!.channelId}_onOpen`]).toBe('true')
+          firstId = end!.channelId
+        })
+        expect(proxy.blackHoleWebSockets()).toBe(1)
+        await page.click('#wire-end-open')
+        await autoRetry(async () => {
+          const { end } = await getResult<WireState>('#wire-state')
+          expect(end!.channelId).not.toBe(firstId)
+          const ss = await getCleanupState()
+          expect(ss[`wireEnd_${end!.channelId}_onOpen`]).toBe('true')
+          expect(ss[`wireEnd_${end!.channelId}_onClose`]).toBe(undefined)
+          expect(end!.received).deep.equal([])
+        })
+      } finally {
+        await proxy.close()
+      }
+    })
+
     test('channel: a channel whose first WebSocket a network drop stops opens on the next', async () => {
       await navigate(`${getServerUrl()}/channel`)
       await dropNextWebSocket()
