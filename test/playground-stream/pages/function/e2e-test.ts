@@ -149,7 +149,8 @@ function testFunction(isDev: boolean, inDocker = false) {
     })
   })
 
-  for (const method of ['GET', 'HEAD']) {
+  // Preview only: in development, telefunc logs a GET or HEAD as a malformed request.
+  for (const method of isDev ? [] : ['GET', 'HEAD']) {
     test(`function: a ${method} request to /_telefunc gets an answer`, async () => {
       const response = await fetch(`${getServerUrl()}/_telefunc`, { method })
       expect(response.status).toBe(400)
