@@ -12,6 +12,7 @@ import {
   onGetTypedAdder,
   onCallBack,
   onSearch,
+  onCallBackUnawaited,
 } from './Function.telefunc'
 
 type FunctionState = {
@@ -29,6 +30,7 @@ type FunctionState = {
   /** ms: how long the second keystroke's call took. */
   searchResult: { result: string; ms: number } | null
   idleTimeoutResult: number[] | null
+  unawaitedResult: string | null
 }
 
 function FunctionDemo() {
@@ -46,6 +48,7 @@ function FunctionDemo() {
     shieldCallbackError: null,
     searchResult: null,
     idleTimeoutResult: null,
+    unawaitedResult: null,
   })
   const [log, setLog] = useState<string[]>([])
 
@@ -98,6 +101,14 @@ function FunctionDemo() {
     const map = withContext(onMap, { channel: { idleTimeout: 0, connectionKey: 'idle-timeout' } })
     const idleTimeoutResult = await map([1, 2], async (n) => n * 2)
     setState((s) => ({ ...s, idleTimeoutResult }))
+  }
+
+  async function runUnawaited() {
+    const unawaitedResult = await onCallBackUnawaited(async (fail) => {
+      if (fail) throw new Error('callback-failure')
+      return 'answered'
+    })
+    setState((s) => ({ ...s, unawaitedResult }))
   }
 
   async function runMap() {
@@ -225,6 +236,17 @@ function FunctionDemo() {
         </button>
         <pre id="idle-timeout-result" className="text-sm bg-zinc-50 p-2 rounded">
           {JSON.stringify(state.idleTimeoutResult)}
+        </pre>
+      </section>
+
+      {/* Unawaited callback */}
+      <section className="space-y-2">
+        <h2 className="font-medium">The server calls a failing callback without awaiting it</h2>
+        <button id="unawaited-run" onClick={runUnawaited} className="px-3 py-1 border rounded text-sm">
+          Run
+        </button>
+        <pre id="unawaited-result" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.unawaitedResult)}
         </pre>
       </section>
 

@@ -149,6 +149,14 @@ function testFunction(isDev: boolean, inDocker = false) {
     })
   })
 
+  test('function: a callback the server calls without awaiting it, which fails, leaves the server clean', async () => {
+    await navigate(`${getServerUrl()}/function`)
+    await page.click('#unawaited-run')
+    await autoRetry(async () => {
+      expect(await getResult<string>('#unawaited-result')).toBe('answered')
+    })
+  })
+
   // A browser gives crypto.randomUUID() only to secure origins: HTTPS or localhost.
   const lanAddress = Object.values(os.networkInterfaces())
     .flat()
