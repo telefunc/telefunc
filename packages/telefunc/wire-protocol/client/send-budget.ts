@@ -93,6 +93,13 @@ class SendBudget implements SendRoom {
     return this.roomPast(this.sender.sentBytes)
   }
 
+  /** Its socket closed: it hands it nothing more. */
+  close(): void {
+    if (this.paceTimer !== null) clearTimeout(this.paceTimer)
+    this.paceTimer = null
+    this.sender.close()
+  }
+
   /** A message arrived: where the timer is late to look again, looks now. A hidden tab throttles timers, not messages. */
   received(): void {
     if (this.paceTimer === null || performance.now() < this.paceDue) return
