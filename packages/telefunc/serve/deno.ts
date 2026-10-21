@@ -34,15 +34,16 @@ function telefunc(): TelefuncServe {
   const hooks = getTelefuncChannelHooks({ terminate: (peer) => peer.close() })
   const ws = crossws({
     hooks: {
-      ...hooks,
       open(peer) {
-        // crossws's Deno adapter reports a close without its code, which tells a page that left from a dropped one.
+        // crossws's Deno adapter reports a close without its code, and the code tells a page that left from a dropped one.
         peer.websocket.addEventListener!('close', (event) =>
           hooks.close(peer, { code: event.code, reason: event.reason }),
         )
         return hooks.open(peer)
       },
+      message: hooks.message,
       close() {},
+      error: hooks.error,
     },
   })
 
