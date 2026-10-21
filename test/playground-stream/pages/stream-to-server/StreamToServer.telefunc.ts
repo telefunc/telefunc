@@ -14,6 +14,7 @@ export {
 import { Abort } from 'telefunc'
 import { sleep } from '../../sleep'
 import { cleanupState } from '../../cleanup-state'
+import { cutWireSockets } from '../../wire-sockets'
 
 /** Read all chunks, return as string array. */
 async function onEcho(stream: ReadableStream<Uint8Array>) {
@@ -128,8 +129,9 @@ async function* onLiveLoopback(stream: ReadableStream<Uint8Array>): AsyncGenerat
   }
 }
 
-/** Records how the upload ends under `ingest_<key>`: 'completed:<bytes>' or 'errored:<error name>', 'reading:<bytes>' meanwhile. */
-async function onIngest(stream: ReadableStream<Uint8Array>, key: string) {
+/** Records how the upload ends under `ingest_<key>`: 'completed:<bytes>' or 'errored:<error name>', 'reading:<bytes>' meanwhile.
+ *  Drops the page's connections once `cutWireAtBytes` arrived. */
+async function onIngest(stream: ReadableStream<Uint8Array>, key: string, cutWireAtBytes = Number.POSITIVE_INFINITY) {
   let bytes = 0
   cleanupState[`ingest_${key}`] = 'reading:0'
   const reader = stream.getReader()
@@ -137,6 +139,7 @@ async function onIngest(stream: ReadableStream<Uint8Array>, key: string) {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
+      if (bytes < cutWireAtBytes && bytes + value.byteLength >= cutWireAtBytes) cutWireSockets()
       bytes += value.byteLength
       cleanupState[`ingest_${key}`] = `reading:${bytes}`
     }

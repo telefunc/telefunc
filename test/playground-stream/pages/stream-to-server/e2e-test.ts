@@ -150,6 +150,18 @@ function testStreamToServer(isDev: boolean, inDocker = false) {
     })
   }
 
+  // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
+  if (!isDev && !inDocker && process.env.PUBLIC_ENV__STREAM_TRANSPORT === 'channel') {
+    test('stream-to-server: an upload of small chunks whose connection drops halfway, its window grown, resumes and arrives whole', async () => {
+      await navigate(`${getServerUrl()}/stream-to-server`)
+      await page.click('#test-ingest-many-small')
+      const { key } = await getResult('#stream-result')
+      await autoRetry(async () => {
+        expect((await getCleanupState())[`ingest_${key}`]).toBe(`completed:${20_000 * 1024}`)
+      })
+    })
+  }
+
   // Preview only: Vite HMR reloads an offline page.
   if (!isDev && !inDocker) {
     test('stream-to-server: an upload that ends while the page is offline longer than a close waits arrives whole once the page is back', async () => {

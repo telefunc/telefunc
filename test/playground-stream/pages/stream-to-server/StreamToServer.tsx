@@ -21,9 +21,9 @@ function StreamToServer() {
   useEffect(() => setHydrated(true), [])
   const finishUploadRef = useRef<(() => void) | null>(null)
 
-  function ingest(source: UnderlyingDefaultSource<Uint8Array>) {
+  function ingest(source: UnderlyingDefaultSource<Uint8Array>, cutWireAtBytes?: number) {
     const key = crypto.randomUUID()
-    void onIngest(new ReadableStream(source), key).catch(() => {})
+    void onIngest(new ReadableStream(source), key, cutWireAtBytes).catch(() => {})
     setResult(JSON.stringify({ key }))
   }
 
@@ -287,6 +287,23 @@ function StreamToServer() {
         }}
       >
         Upload until Finish
+      </button>
+      <button
+        id="test-ingest-many-small"
+        onClick={() => {
+          let pulls = 0
+          ingest(
+            {
+              pull(controller) {
+                if (pulls++ === 20_000) controller.close()
+                else controller.enqueue(new Uint8Array(1024))
+              },
+            },
+            10_000 * 1024,
+          )
+        }}
+      >
+        Upload 20,000 chunks of 1 KiB, the server dropping the connection halfway
       </button>
       <button id="test-ingest-finish" onClick={() => finishUploadRef.current!()}>
         Finish upload
