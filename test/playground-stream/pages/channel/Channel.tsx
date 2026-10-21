@@ -33,6 +33,7 @@ import {
   onChannelEndedValues,
   onChannelSlowLink,
   onChannelUnawaitedBurst,
+  onChannelOpenBurst,
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
@@ -153,6 +154,7 @@ type ChannelState = {
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
+  openBurstReceived: number | null
   manyListenersMs: { page: number; server: number | null } | null
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
@@ -222,6 +224,7 @@ const initialState: ChannelState = {
   endedValuesCollected: null,
   slowLinkReceived: null,
   unawaitedBurst: null,
+  openBurstReceived: null,
   manyListenersMs: null,
   linkShare: null,
   slowUplink: null,
@@ -985,6 +988,17 @@ function ChannelDemo() {
     channel.close()
   }, [])
 
+  const testOpenBurst = useCallback(async () => {
+    setChannelState((s) => ({ ...s, openBurstReceived: null }))
+    const { channel } = await openChannel(onChannelOpenBurst)
+    let received = 0
+    channel.listen(() => {
+      if (++received < 500) return
+      setChannelState((s) => ({ ...s, openBurstReceived: received }))
+      channel.close()
+    })
+  }, [])
+
   const testManyListeners = useCallback(async () => {
     setChannelState((s) => ({ ...s, manyListenersMs: null }))
     const { channel } = await openChannel(onChannelManyListeners)
@@ -1363,6 +1377,14 @@ function ChannelDemo() {
               Server Bursts {count} MiB Unawaited
             </button>
           ))}
+          <button
+            id="channel-test-open-burst"
+            type="button"
+            onClick={testOpenBurst}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Server Sends 500 Small Messages as It Opens
+          </button>
           <button
             id="channel-test-link-share"
             type="button"

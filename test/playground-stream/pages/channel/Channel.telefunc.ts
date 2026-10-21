@@ -29,6 +29,7 @@ export {
   onChannelEndedValues,
   onChannelSlowLink,
   onChannelUnawaitedBurst,
+  onChannelOpenBurst,
   onChannelManyListeners,
   onChannelLinkShare,
   onChannelSlowUplink,
@@ -652,6 +653,15 @@ async function onChannelUnawaitedBurst() {
     )
     await Promise.race([Promise.all(sends), new Promise((resolve) => setImmediate(resolve))])
     return rejected
+  })
+  return { channel: ch.client }
+}
+
+/** As it opens, sends 500 small messages without awaiting them. */
+async function onChannelOpenBurst() {
+  const ch = new Channel<never, number>()
+  ch.onOpen(() => {
+    for (let seq = 0; seq < 500; seq++) void ch.send(seq).catch(() => {})
   })
   return { channel: ch.client }
 }

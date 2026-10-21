@@ -120,8 +120,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.key = key
     this._maxFrameBytes = maxFrameBytes
     this._flow = new FlowControl({
-      byteWindowUpdate: (limit, kind) => this._connection.sendByteWindowUpdate(this, limit, kind),
-      msgWindowUpdate: (limit, urgent) => this._connection.sendMsgWindowUpdate(this, limit, urgent),
+      // A closed channel's server ends its sends with the close, so the channel grants it no more credit.
+      byteWindowUpdate: (limit, kind) => {
+        if (!this._isClosed) this._connection.sendByteWindowUpdate(this, limit, kind)
+      },
+      msgWindowUpdate: (limit, urgent) => {
+        if (!this._isClosed) this._connection.sendMsgWindowUpdate(this, limit, urgent)
+      },
       bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
       backlog: () => this._connection.bufferedAmount(),
       yieldBytes: FC_PAGE_YIELD_BYTES,
