@@ -12,22 +12,19 @@ import { installBroadcastAdapter } from '../wire-protocol/broadcast/broadcastAda
 import {
   CloudflareBroadcastAuthorityState,
   CloudflareBroadcastTransport,
-} from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
-import type {
-  BroadcastDeliverRequest,
-  BroadcastPublishRequest,
-} from '../wire-protocol/server/adapter/cloudflare/broadcast.js'
+} from '../wire-protocol/adapter/cloudflare/broadcast.js'
+import type { BroadcastDeliverRequest, BroadcastPublishRequest } from '../wire-protocol/adapter/cloudflare/broadcast.js'
 import {
   TELEFUNC_BROADCAST_BUCKET_HEADER,
   TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
   resolveSessionRoutingTarget,
-} from '../wire-protocol/server/adapter/cloudflare/routing.js'
-import { SessionPins, readSessionPin } from '../wire-protocol/server/adapter/cloudflare/session-pin.js'
+} from '../wire-protocol/adapter/cloudflare/routing.js'
+import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/sessionPin.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
-import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
+import type { CloudflareScale, LocationBucket } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest } from './shared.js'
 

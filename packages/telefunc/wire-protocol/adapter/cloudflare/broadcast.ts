@@ -2,18 +2,18 @@
 export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
 export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncBroadcastStub }
 
-import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../../constants.js'
+import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
 import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
-import { assert, assertUsage } from '../../../../utils/assert.js'
-import { utf8ByteLength } from '../../../../utils/utf8ByteLength.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
+import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import type {
   BroadcastBinaryOnMessage,
   BroadcastOnMessage,
   BroadcastPublishResult,
   BroadcastAdapter,
   BroadcastUnsubscribe,
-} from '../../../broadcast/broadcastAdapter.js'
-import type { WirePublishInfo } from '../../../wire/connectionFrame.js'
+} from '../../broadcast/broadcastAdapter.js'
+import type { WirePublishInfo } from '../../wire/connectionFrame.js'
 import type { CloudflareScale, LocationBucket } from './routing.js'
 
 const PRESENCE_TTL_SECONDS = 90

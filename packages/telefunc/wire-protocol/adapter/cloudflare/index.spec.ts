@@ -72,21 +72,21 @@ vi.mock('crossws/adapters/cloudflare', () => ({
   default: mocks.crosswsFactory,
 }))
 
-vi.mock('../../../channel/server/ws.js', () => ({
+vi.mock('../../channel/server/ws.js', () => ({
   getTelefuncChannelHooks: vi.fn(() => ({ message: vi.fn() })),
 }))
 
-vi.mock('../../../../node/server/serverConfig.js', () => ({
+vi.mock('../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
   enableChannelTransports: mocks.enableChannelTransports,
   setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
 }))
 
-vi.mock('../../../../node/server/telefunc.js', () => ({
+vi.mock('../../../node/server/telefunc.js', () => ({
   serve: mocks.telefuncMock,
 }))
 
-vi.mock('../../../broadcast/broadcastAdapter.js', () => ({
+vi.mock('../../broadcast/broadcastAdapter.js', () => ({
   installBroadcastAdapter: mocks.installBroadcastAdapter,
 }))
 
@@ -114,7 +114,7 @@ vi.mock('./routing.js', () => ({
   ),
 }))
 
-import { Telefunc } from '../../../../serve/cloudflare.js'
+import { Telefunc } from '../../../serve/cloudflare.js'
 import { resolveSessionRoutingTarget } from './routing.js'
 
 function createMockKV(): KVNamespace {

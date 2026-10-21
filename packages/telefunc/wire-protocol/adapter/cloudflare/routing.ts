@@ -14,7 +14,7 @@ export {
 export type { CloudflareScale, LocationBucket, SessionRoutingTarget }
 
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
-import { assert, assertUsage } from '../../../../utils/assert.js'
+import { assert, assertUsage } from '../../../utils/assert.js'
 
 /**
  * Cloudflare routing primitives for Telefunc's session and broadcast Durable Objects.

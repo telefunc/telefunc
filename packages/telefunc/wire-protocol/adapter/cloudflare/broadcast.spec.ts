@@ -7,11 +7,11 @@ import {
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
 } from './routing.js'
-import '../../../../node/server/async_hooks.js'
+import '../../../node/server/async_hooks.js'
 import { CloudflareBroadcastAuthorityState, CloudflareBroadcastTransport } from './broadcast.js'
 import { CLOUDFLARE_COLO_LOCATION_HINT_MAP } from './coloLocationHintMap.js'
-import { ServerBroadcast } from '../../../broadcast/ServerBroadcast.js'
-import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../../broadcast/broadcastAdapter.js'
+import { ServerBroadcast } from '../../broadcast/ServerBroadcast.js'
+import { getBroadcastAdapter, _resetBroadcastAdapterForTesting } from '../../broadcast/broadcastAdapter.js'
 
 type CloudflareRequest = Request & { cf?: { colo?: string; continent?: string } }
 

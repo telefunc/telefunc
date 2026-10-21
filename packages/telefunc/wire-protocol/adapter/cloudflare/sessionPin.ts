@@ -2,7 +2,7 @@
 export { SessionPins, readSessionPin }
 
 import { TELEFUNC_BROADCAST_BUCKET_HEADER, TELEFUNC_SESSION_HEADER, TELEFUNC_SHARD_HEADER } from './routing.js'
-import { assertWarning } from '../../../../utils/assert.js'
+import { assertWarning } from '../../../utils/assert.js'
 import type { LocationBucket, SessionRoutingTarget } from './routing.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
