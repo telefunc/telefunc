@@ -1,6 +1,7 @@
 export { MemberMeta }
 export type { MetaRewinds }
 
+import { assignAttributes } from './model.js'
 import type { MemberMetaUpdate } from './protocol.js'
 import type { ParticipantMeta } from './types.js'
 
@@ -50,18 +51,7 @@ class MemberMeta {
   private _fold(merges: ParticipantMeta[]): void {
     const next: ParticipantMeta = { ...this._object }
     let keys = this._keys
-    for (const attrs of merges) {
-      for (const [key, value] of Object.entries(attrs)) {
-        const had = Object.hasOwn(next, key)
-        if (value === undefined) {
-          if (had) keys--
-          delete next[key]
-          continue
-        }
-        if (!had) keys++
-        Object.defineProperty(next, key, { value, enumerable: true, configurable: true, writable: true })
-      }
-    }
+    for (const attrs of merges) keys += assignAttributes(next, attrs)
     this._object = Object.freeze(next)
     this._keys = keys
     this._merges = null

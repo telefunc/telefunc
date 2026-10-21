@@ -4,6 +4,7 @@ export {
   ownMessage,
   ownMetadata,
   ownLeaveCause,
+  assignAttributes,
   mergeAttributes,
   normalizeJoinOptions,
   assertParticipantIdentity,
@@ -55,14 +56,26 @@ function recipientId(to: string | Sender): string {
   return id
 }
 
-/** Merge `attrs` into `meta` per key, returning a new object (the `setAttributes()` semantics). A value of
- *  `undefined` deletes its key (the serializer preserves `undefined` on the wire). */
+/** Assign `attrs` onto `target` per key, returning the change in its key count. A value of `undefined` deletes its
+ *  key (the serializer preserves `undefined` on the wire). */
+function assignAttributes(target: ParticipantMeta, attrs: ParticipantMeta): number {
+  let keys = 0
+  for (const [key, value] of Object.entries(attrs)) {
+    const had = Object.hasOwn(target, key)
+    if (value === undefined) {
+      if (had) keys--
+      delete target[key]
+      continue
+    }
+    if (!had) keys++
+    Object.defineProperty(target, key, { value, enumerable: true, configurable: true, writable: true })
+  }
+  return keys
+}
+/** Merge `attrs` into `meta`, returning a new object (the `setAttributes()` semantics). */
 function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): ParticipantMeta {
   const next: ParticipantMeta = { ...meta }
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value === undefined) delete next[key]
-    else Object.defineProperty(next, key, { value, enumerable: true, configurable: true, writable: true })
-  }
+  assignAttributes(next, attrs)
   return Object.freeze(next)
 }
 function assertParticipantIdentity(identity: unknown, where: string): asserts identity is string {
