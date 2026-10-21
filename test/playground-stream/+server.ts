@@ -10,7 +10,7 @@ import { Telefunc } from 'telefunc/node'
 import { Telefunc as TelefuncBun } from 'telefunc/bun'
 import { Telefunc as TelefuncDeno } from 'telefunc/deno'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
-import { trackWireSocket, cutWireSockets } from './wire-sockets'
+import { trackWireSocket, untrackWireSocket, cutWireSockets } from './wire-sockets'
 import { runServerAction } from './server-actions'
 import { redis } from './redis'
 import { installFailingBackend, addBackendFault } from './failing-backend'
@@ -497,7 +497,10 @@ app.post('/api/wire/release', (c) => {
 app.all('/_telefunc', async (c) => {
   const isSse = c.req.query('_telefunc') === 'sse'
   const node = (c.req.raw as unknown as { runtime?: { node?: { req: IncomingMessage } } }).runtime?.node
-  if (isSse && node) trackWireSocket(node.req.socket)
+  if (node) {
+    if (isSse) trackWireSocket(node.req.socket)
+    else untrackWireSocket(node.req.socket)
+  }
   // A batch POST has a length; the long-lived upload streams without one.
   if (isSse && nextSsePost && c.req.header('content-length')) {
     const body = new Uint8Array(await c.req.arrayBuffer())
