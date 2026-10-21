@@ -7,6 +7,8 @@ import IORedis from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 import { config } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
+import { Telefunc as TelefuncBun } from 'telefunc/bun'
+import { Telefunc as TelefuncDeno } from 'telefunc/deno'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 import { trackWireSocket, cutWireSockets } from './wire-sockets'
 import { runServerAction } from './server-actions'
@@ -32,7 +34,11 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
 
 const SERVER_CLOSE_RECONNECT_STORE_KEY = Symbol.for('telefunc__serverCloseReconnectStore')
 
-const tf = new Telefunc()
+// `pnpm preview:bun` and `pnpm preview:deno` serve the same build through Telefunc's Bun and Deno adapters.
+const tfBun = 'Bun' in globalThis ? new TelefuncBun() : undefined
+const tfDeno = 'Deno' in globalThis ? new TelefuncDeno() : undefined
+// On Bun and Deno, fetch() answers /_telefunc before the app's route.
+const tf = tfBun || tfDeno ? undefined : new Telefunc()
 const app = new Hono()
 
 // Bench toggle: when `TELEFUNC_NATIVE=1` the `/_telefunc` route feeds the raw
@@ -132,7 +138,7 @@ app.all('/_telefunc', async (c) => {
       await new Promise<void>((resolve) => heldSsePosts.push(resolve))
     }
     const request = new Request(c.req.url, { method: 'POST', headers: c.req.raw.headers, body })
-    const response = await tf.serve({ request })
+    const response = await tf!.serve({ request })
     return response ?? c.text('Not found', 404)
   }
   if (USE_NATIVE) {
@@ -143,11 +149,11 @@ app.all('/_telefunc', async (c) => {
     // request body parsing and response writing.
     const { req, res } = (c.req.raw as unknown as { runtime: { node: { req: IncomingMessage; res: ServerResponse } } })
       .runtime.node
-    await tf.serve({ req, res })
+    await tf!.serve({ req, res })
     return new Response(null)
   }
   console.log(`[INST=${INST}] Handling /_telefunc via web request adapter`)
-  const response = await tf.serve({ request: c.req.raw })
+  const response = await tf!.serve({ request: c.req.raw })
   return response ?? c.text('Not found', 404)
 })
 
@@ -165,11 +171,33 @@ const keyPath = path.join(certDir, 'localhost-key.pem')
 const httpsAvailable = !process.env.NO_HTTPS && fs.existsSync(certPath) && fs.existsSync(keyPath)
 const tls = httpsAvailable ? { cert: certPath, key: keyPath } : undefined
 
+type RuntimeRequest = Request & {
+  runtime?: {
+    bun?: { server: Parameters<TelefuncBun['serve']>[0]['server'] }
+    deno?: { info: Parameters<TelefuncDeno['serve']>[0]['info'] }
+  }
+}
+
+async function fetch(request: RuntimeRequest): Promise<Response | undefined> {
+  const { runtime } = request
+  if (tfBun && runtime?.bun) {
+    const response = await tfBun.serve({ request, server: runtime.bun.server })
+    // An upgraded request is answered by Bun.
+    if (response || request.headers.get('upgrade') === 'websocket') return response
+  }
+  if (tfDeno && runtime?.deno) {
+    const response = await tfDeno.serve({ request, info: runtime.deno.info })
+    if (response) return response
+  }
+  return app.fetch(request)
+}
+
 export default {
-  fetch: app.fetch,
+  fetch,
   prod: {
     port: Number(process.env.PORT) || (httpsAvailable ? 8443 : 3000),
     ...(tls ? { tls } : {}),
+    ...(tfBun ? { bun: { websocket: tfBun.websocket } } : {}),
     onCreate(server: { node?: { server?: HttpServer } }) {
       // srvx wraps the raw `http.Server` as `{ node: { server } }`. Unwrap to
       // the underlying Node server so the WebSocket upgrade listener can be
@@ -188,7 +216,7 @@ export default {
         }
         trackWireSocket(socket)
       })
-      tf.installWebSocket(httpServer)
+      tf!.installWebSocket(httpServer)
     },
   },
 }
