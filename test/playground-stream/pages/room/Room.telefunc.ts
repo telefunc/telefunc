@@ -24,6 +24,8 @@ export {
   onRoomWhileAway,
   onRoomOverflow,
   onGetRoomOverflow,
+  onRoomBurst,
+  onGetWatchedCount,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -289,6 +291,18 @@ async function onRoomOverflow(roomId: string) {
 
 async function onGetRoomOverflow(roomId: string) {
   return overflows.get(roomId)!.leaves
+}
+
+/** A server member publishes `count` messages of `size` bytes, each awaited. */
+async function onRoomBurst(roomId: string, count: number, size: number) {
+  const room = await Room.get(roomId)
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  for (let n = 0; n < count; n++) await speaker.publish(String(n).padEnd(size))
+  await speaker.leave()
+}
+
+async function onGetWatchedCount(roomId: string) {
+  return watched.get(roomId)?.length ?? 0
 }
 
 async function onAnnounce(roomId: string, data: unknown) {

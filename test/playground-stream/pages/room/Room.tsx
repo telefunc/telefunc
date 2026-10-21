@@ -28,6 +28,8 @@ import {
   onRoomWhileAway,
   onRoomOverflow,
   onGetRoomOverflow,
+  onRoomBurst,
+  onGetWatchedCount,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -850,6 +852,24 @@ function Room() {
         for (let poll = 0; poll < 300 && !(closed && myCause); poll++) await new Promise((r) => setTimeout(r, 100))
         const leaves = await onGetRoomOverflow(roomId)
         setResult(JSON.stringify({ roomId, seen, myCause, closed, isClosed: view.isClosed, leaves }))
+      })}
+
+      {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
+        const [roomId, view] = await createRoom('slow-link')
+        await onWatchRoom(roomId)
+        const received: number[] = []
+        view.subscribe((data) => received.push(Number.parseInt(data as string)))
+        const me = await view.join({ meta: { name: 'Me' }, selfDelivery: false })
+        await onRoomBurst(roomId, 40, 16_000)
+        await pollUntil(() => ({ done: received.length >= 40 }))
+        await Promise.all(Array.from({ length: 40 }, (_, n) => me.publish(String(n).padEnd(16_000))))
+        // The server's view hears the speaker's 40 and the page's 40.
+        let watched = 0
+        for (let poll = 0; poll < 100 && watched < 80; poll++) {
+          watched = await onGetWatchedCount(roomId)
+          if (watched < 80) await new Promise((r) => setTimeout(r, 200))
+        }
+        setResult(JSON.stringify({ received, watched }))
       })}
     </div>
   )

@@ -1,5 +1,6 @@
 export { testRoom }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import type { Response, WebSocket } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, runServerAction, cutWire } from '../../e2e-utils'
 
 type ChatResult = {
@@ -437,5 +438,60 @@ function testRoom() {
         leaves: ['Me:disconnected'],
       })
     })
+  })
+  test("room: on a 1 Mbit/s link, a page gets 640 KB of its room's messages and publishes 640 KB without reconnecting", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    let sseStreams = 0
+    const onResponse = (response: Response) => {
+      if (response.headers()['content-type']?.startsWith('text/event-stream')) sseStreams++
+    }
+    let webSockets = 0
+    const onWebSocket = (ws: WebSocket) => {
+      if (ws.url().includes('/_telefunc')) webSockets++
+    }
+    page.on('response', onResponse)
+    page.on('websocket', onWebSocket)
+    // test-e2e's `page` is a proxy, which newCDPSession() doesn't take.
+    const cdp = await page.context().newCDPSession(
+      page
+        .context()
+        .pages()
+        .find((p) => p.url() === page.url())!,
+    )
+    try {
+      await cdp.send('Network.enable')
+      await cdp.send('Network.emulateNetworkConditions', {
+        offline: false,
+        latency: 0,
+        downloadThroughput: 125_000,
+        uploadThroughput: 125_000,
+      })
+      await page.click('#test-room-slow-link')
+      await autoRetry(
+        async () => {
+          expect(await getResult('#room-result')).deep.equal({
+            received: Array.from({ length: 40 }, (_, n) => n),
+            watched: 80,
+          })
+        },
+        { timeout: 40_000 },
+      )
+      // `['sse', 'ws']` starts on SSE and upgrades to a WebSocket.
+      const transports: string[] = JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!)
+      expect({ sseStreams, webSockets }).deep.equal({
+        sseStreams: transports.includes('sse') ? 1 : 0,
+        webSockets: transports.includes('ws') ? 1 : 0,
+      })
+    } finally {
+      await cdp.send('Network.emulateNetworkConditions', {
+        offline: false,
+        latency: 0,
+        downloadThroughput: -1,
+        uploadThroughput: -1,
+      })
+      await cdp.detach()
+      page.off('response', onResponse)
+      page.off('websocket', onWebSocket)
+    }
   })
 }
