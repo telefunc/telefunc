@@ -32,6 +32,8 @@ import {
   onConcurrentMetaWrites,
   onReplaceMetaInLoop,
   onStopReplacingMeta,
+  onOpenRecordingGuardRoom,
+  onGetGuardCalls,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -455,6 +457,28 @@ function Room() {
             done: names.length >= 1 && otherNames.length >= 1 && state.viewName === 'B' && state.otherViewName === 'B',
           }
         })
+      })}
+
+      {scenario('guard-calls', 'What guards are handed', 'Guarded join, send, publish and leave', async () => {
+        const roomId = await createRoomId('guard-calls')
+        const room = await onOpenRecordingGuardRoom(roomId)
+        const me = await room.join({ meta: { name: 'G' } })
+        const peer = await room.join({ meta: { name: 'P' } })
+        await me.send(peer.id, 'hi')
+        const binaryError = await me.publishBinary(new Uint8Array([1])).then(
+          () => null,
+          (err: Error) => err.message,
+        )
+        const afterHookAck = await me.publish('after').then(
+          (ack) => ack.seq > 0,
+          (err: Error) => err.message,
+        )
+        // The second publish waits behind the first's guard while its member leaves.
+        const slow = me.publish('slow')
+        const queued = me.publish('queued')
+        await me.leave()
+        await Promise.allSettled([slow, queued])
+        setResult(JSON.stringify({ binaryError, afterHookAck, calls: await onGetGuardCalls(roomId) }))
       })}
 
       {scenario(

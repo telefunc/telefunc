@@ -28,6 +28,8 @@ export {
   onConcurrentMetaWrites,
   onReplaceMetaInLoop,
   onStopReplacingMeta,
+  onOpenRecordingGuardRoom,
+  onGetGuardCalls,
 }
 
 import { Buffer } from 'node:buffer'
@@ -288,4 +290,35 @@ async function onReplaceMetaInLoop(roomId: string) {
 async function onStopReplacingMeta(roomId: string) {
   clearInterval(replacing.get(roomId))
   replacing.delete(roomId)
+}
+
+const guardCalls = new Map<string, Array<{ hook: string; name: unknown; frozen: boolean }>>()
+
+/** Guards that record what they were handed: a `slow` publish waits 100 ms, a binary one is refused, and
+ *  `onAfterPublish` throws for an `after` publish. */
+async function onOpenRecordingGuardRoom(roomId: string) {
+  const room = await Room.get(roomId)
+  const calls: Array<{ hook: string; name: unknown; frozen: boolean }> = []
+  guardCalls.set(roomId, calls)
+  Room.guard(room, {
+    onBeforeJoin: (member) => {
+      calls.push({ hook: 'join', name: member.meta.name, frozen: Object.isFrozen(member.meta) })
+    },
+    onBeforePublish: async (from, data) => {
+      calls.push({ hook: 'publish', name: from.meta.name, frozen: Object.isFrozen(from) && Object.isFrozen(from.meta) })
+      if (data === 'slow') await new Promise((resolve) => setTimeout(resolve, 100))
+      if (data instanceof Uint8Array) throw Abort('no frames')
+    },
+    onBeforeSend: (from, to) => {
+      calls.push({ hook: 'send', name: from.meta.name, frozen: Object.isFrozen(from) && Object.isFrozen(to) })
+    },
+    onAfterPublish: (_from, data) => {
+      if (data === 'after') throw new Error('server-listener-bug')
+    },
+  })
+  return room
+}
+
+async function onGetGuardCalls(roomId: string) {
+  return guardCalls.get(roomId) ?? []
 }

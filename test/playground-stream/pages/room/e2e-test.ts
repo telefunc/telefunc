@@ -222,6 +222,22 @@ function testRoom() {
       expect(r.otherViewName).toBe('B')
     },
   )
+  testRoomScenario<{
+    binaryError: string | null
+    afterHookAck: boolean | string
+    calls: Array<{ hook: string; name: unknown; frozen: boolean }>
+  }>(
+    'guard-calls',
+    "room: guards get a frozen sender and never a stand-in for a member that left; a binary publish a guard refuses rejects with the guard's Abort; an after-hook that throws keeps the publish",
+    (r) => {
+      expect(r.binaryError).toBe('no frames')
+      expect(r.afterHookAck).toBe(true)
+      expect(r.calls.filter((call) => call.hook === 'join').map((call) => call.name)).deep.equal(['G', 'P'])
+      expect(r.calls.filter((call) => call.hook === 'send').map((call) => call.name)).deep.equal(['G'])
+      for (const call of r.calls) expect(call).deep.include({ frozen: true })
+      for (const call of r.calls.filter((call) => call.hook === 'publish')) expect(call.name).toBe('G')
+    },
+  )
   testRoomScenario<{ mine: [string, unknown][]; remote: [string, unknown][] }>(
     'own-meta-race',
     "room: a page's own member ends on the meta its unawaited writes stored, in call order, as other views do",
