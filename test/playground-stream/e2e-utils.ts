@@ -3,6 +3,7 @@ export {
   getCleanupState,
   forceServerGc,
   cutWire,
+  runServerAction,
   holdNextSsePost,
   refuseNextSsePost,
   releaseHeldSsePosts,
@@ -59,6 +60,12 @@ async function forceServerGc() {
   // Fail loudly on `gc not exposed` (server missing `--expose-gc`): silently ignoring it
   // degrades GC tests into waiting for natural GC, which times out with a misleading assertion.
   if (!resp.ok) throw new Error(`forceServerGc() failed: ${await resp.text()}`)
+}
+
+/** Runs what a telefunction left under `key` with `onServerAction()` (server-actions.ts), also while the page is offline. */
+async function runServerAction(key: string) {
+  const resp = await fetch(`${getServerUrl()}/api/server-action?key=${encodeURIComponent(key)}`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`runServerAction() failed: ${await resp.text()}`)
 }
 
 /** Drops the page's WebSocket and SSE connections at the server, as a failing network would. */

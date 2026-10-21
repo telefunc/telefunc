@@ -9,6 +9,7 @@ import { config } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
 import { trackWireSocket, cutWireSockets } from './wire-sockets'
+import { runServerAction } from './server-actions'
 
 config.channel.pingInterval = 1000
 config.shield = true
@@ -93,6 +94,10 @@ app.post('/api/server-close-trigger', async (c) => {
 let nextSsePost: 'hold' | 'refuse' | null = null
 const heldSsePosts: (() => void)[] = []
 
+app.post('/api/server-action', (c) => {
+  const key = c.req.query('key') ?? ''
+  return runServerAction(key) ? c.json({ ok: true }) : c.json({ ok: false, reason: `no action ${key}` }, 404)
+})
 app.post('/api/wire/cut', (c) => c.json({ cut: cutWireSockets() }))
 app.post('/api/wire/next-sse-post', (c) => {
   const action = c.req.query('action')
