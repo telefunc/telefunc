@@ -4,6 +4,7 @@ export {
   testRedisOutages,
   testRedisAcrossServers,
   testServerCrash,
+  testRedisClusterReshard,
 }
 
 import { autoRetry, expect, expectLog, getServerUrl, test } from '@brillout/test-e2e'
@@ -12,6 +13,7 @@ import {
   getRedisChannels,
   getRedisKeys,
   killInstance,
+  moveRedisSlot,
   restartRedis,
   rewindRedis,
   snapshotRedis,
@@ -290,6 +292,44 @@ function testRedisAcrossServers() {
       const keys = await getRedisKeys(`*{${encodeURIComponent(roomId)}}*`)
       expect(keys.length).greaterThan(0)
       expect(keys.filter(({ ttl }) => ttl < 0).map(({ key }) => key)).deep.equal([])
+    } finally {
+      await leaveRoom(['a', 'b'], roomId)
+    }
+  })
+}
+
+function testRedisClusterReshard() {
+  test("room: a member's messages and frames reach another server in the order it published them while the room moves to another Cluster node", async () => {
+    const roomId = newId('redis-reshard')
+    try {
+      await joinRoom('a', roomId, 'Alice')
+      await joinRoom('b', roomId, 'Bob')
+      await request('b', '/api/room-cross-instance/watch?track=cam', roomId, 'POST')
+      await retry(30_000, async () => {
+        expect((await view('a', roomId)).events).contains('demand:cam:true')
+      })
+      let moved = false
+      // Every key of a room shares its id's hash tag, so this moves the whole room.
+      const moving = moveRedisSlot(`{${encodeURIComponent(roomId)}}`).finally(() => {
+        moved = true
+      })
+      let published = 0
+      do {
+        await request(
+          'a',
+          `/api/room-cross-instance/publish-many?from=${published + 1}&count=20&track=cam`,
+          roomId,
+          'POST',
+        )
+        published += 20
+      } while (!moved)
+      expect((await moving).moved).greaterThan(0)
+
+      const calls = Array.from({ length: published }, (_, i) => i + 1)
+      await retry(30_000, async () => {
+        expect(await received('b', roomId)).deep.equal(calls)
+        expect((await view('b', roomId)).frames).deep.equal(calls.map((n) => `cam:Alice:${n % 256}`))
+      })
     } finally {
       await leaveRoom(['a', 'b'], roomId)
     }
