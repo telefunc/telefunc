@@ -1,4 +1,4 @@
-export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen }
+export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireRelease }
 
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -114,4 +114,25 @@ async function onWireLarge(bytes: number) {
 
 async function onWireOpen() {
   return new Channel<never, never>().client
+}
+
+/**
+ * A channel the server sends `count` messages on as it opens, and holds by a WeakRef only.
+ *
+ * Server action wireRelease_<id> sets cleanupState wireRelease_<id> to 'released' once the server let it go, else 'held'.
+ */
+async function onWireRelease(count: number) {
+  const ch = new Channel<never, (message: string) => void>()
+  ch.onOpen(() => {
+    for (let n = 0; n < count; n++) void ch.send(`m${n}`)
+  })
+  reportRelease(ch.id, new WeakRef(ch))
+  return { channel: ch.client, channelId: ch.id }
+}
+
+// Apart from onWireRelease: a closure made there would share the scope that holds the channel.
+function reportRelease(id: string, channel: WeakRef<object>) {
+  onServerAction(`wireRelease_${id}`, () => {
+    cleanupState[`wireRelease_${id}`] = channel.deref() ? 'held' : 'released'
+  })
 }

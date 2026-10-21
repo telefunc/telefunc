@@ -9,6 +9,7 @@ import {
   runServerAction,
   cutWire,
   dropNextWebSocket,
+  forceServerGc,
   holdNextSsePost,
   refuseNextSsePost,
   releaseHeldSsePosts,
@@ -21,6 +22,7 @@ type WireState = {
   end: { channelId: string; received: string[]; close: string | null } | null
   large: number | null
   many: { closed: number; next: string } | null
+  release: { channelId: string; close: string } | null
 }
 
 // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
@@ -174,6 +176,31 @@ function testWire(isDev: boolean) {
         page.off('response', onResponse)
         page.off('websocket', onWebSocket)
       }
+    })
+  }
+
+  for (const { button, when } of [
+    { button: 'wire-release', when: 'once the page has all the server sent' },
+    { button: 'wire-release-early', when: 'as it opened, with what the server sent on its way' },
+  ]) {
+    test(`channel: the server lets go of a channel the page closed ${when}`, async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click(`#${button}`)
+      let channelId = ''
+      await autoRetry(async () => {
+        const { release } = await getResult<WireState>('#wire-state')
+        expect(release!.close).toBe('0')
+        channelId = release!.channelId
+      })
+      // Well within reconnectTimeout (60 s), which the server waits for a page that is away.
+      await autoRetry(
+        async () => {
+          await forceServerGc()
+          await runServerAction(`wireRelease_${channelId}`)
+          expect((await getCleanupState())[`wireRelease_${channelId}`]).toBe('released')
+        },
+        { timeout: 10_000 },
+      )
     })
   }
 

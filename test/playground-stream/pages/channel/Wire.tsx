@@ -2,7 +2,7 @@ export { WireDemo }
 
 import React, { useCallback, useRef, useState } from 'react'
 import { Abort, withContext } from 'telefunc/client'
-import { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen } from './Wire.telefunc'
+import { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireRelease } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
 
 type WireState = {
@@ -14,6 +14,8 @@ type WireState = {
   large: number | null
   /** How the channel opened after the page opened and closed `closed` others went: 'open' or the error's name. */
   many: { closed: number; next: string } | null
+  /** close: what the page's close() resolved to, once the channel opened and the server's messages arrived. */
+  release: { channelId: string; close: string } | null
 }
 
 const RESUME_COUNT = 256
@@ -23,9 +25,17 @@ const END_CLOSE_TIMEOUT = 500
 const LARGE_BYTES = 1_000_000
 /** Past the 4,096 channels a connection holds at once. */
 const MANY_CHANNELS = 4_200
+const RELEASE_COUNT = 3
 
 function WireDemo() {
-  const [state, setState] = useState<WireState>({ resume: null, overrun: null, end: null, large: null, many: null })
+  const [state, setState] = useState<WireState>({
+    resume: null,
+    overrun: null,
+    end: null,
+    large: null,
+    many: null,
+    release: null,
+  })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
 
@@ -109,6 +119,19 @@ function WireDemo() {
     kept.close()
   }, [])
 
+  const release = useCallback(async (when: 'arrived' | 'opened') => {
+    const { channel, channelId } = await onWireRelease(RELEASE_COUNT)
+    let received = 0
+    const arrived = new Promise<void>((resolve) =>
+      channel.listen(() => {
+        if (++received === RELEASE_COUNT) resolve()
+      }),
+    )
+    await (when === 'arrived' ? arrived : new Promise<void>((resolve) => channel.onOpen(resolve)))
+    const close = String(await channel.close())
+    setState((s) => ({ ...s, release: { channelId, close } }))
+  }, [])
+
   return (
     <div className="mt-6 p-4 border rounded">
       <h2 className="text-lg font-semibold mb-2">Wire</h2>
@@ -152,6 +175,22 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Open and close {MANY_CHANNELS} channels, then open one more
+        </button>
+        <button
+          id="wire-release"
+          type="button"
+          onClick={() => release('arrived')}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Close a channel once the server's {RELEASE_COUNT} messages arrived
+        </button>
+        <button
+          id="wire-release-early"
+          type="button"
+          onClick={() => release('opened')}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Close a channel as it opens, the server's {RELEASE_COUNT} messages on their way
         </button>
         <button
           id="wire-end-open"
