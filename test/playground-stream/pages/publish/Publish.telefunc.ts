@@ -263,15 +263,22 @@ async function onServerBroadcastChecks() {
     (await Broadcast.publishBinary(key, new Uint8Array([1]))).receivers,
   ]
 
+  // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
+  const leavingSeen = Promise.withResolvers<void>()
+  const joiningSeen = Promise.withResolvers<void>()
+  const firstSeen = Promise.withResolvers<void>()
+
   const received: string[] = []
   const unsubscribeLeaving = Broadcast.subscribe<string>(`${key}:leaving`, (msg) => {
     received.push(msg)
     unsubscribeLeaving()
+    leavingSeen.resolve()
   })
   const unsubscribeJoining = Broadcast.subscribe<string>(`${key}:joining`, (msg) => {
     received.push(msg)
     unsubscribeJoining()
     Broadcast.subscribe(`${key}:joining`, () => {})
+    joiningSeen.resolve()
   })
   const duringDelivery = [
     (await Broadcast.publish(`${key}:leaving`, 'leaving')).receivers,
@@ -279,8 +286,15 @@ async function onServerBroadcastChecks() {
   ]
 
   const statically: string[] = []
-  const unsubscribe = Broadcast.subscribe<string>(`${key}:static`, (msg) => statically.push(msg))
+  const unsubscribe = Broadcast.subscribe<string>(`${key}:static`, (msg) => {
+    statically.push(msg)
+    firstSeen.resolve()
+  })
   await Broadcast.publish(`${key}:static`, 'first')
+  const deadline = Promise.withResolvers<void>()
+  const timer = setTimeout(deadline.resolve, 10_000)
+  await Promise.race([Promise.all([leavingSeen.promise, joiningSeen.promise, firstSeen.promise]), deadline.promise])
+  clearTimeout(timer)
   unsubscribe()
   await Broadcast.publish(`${key}:static`, 'second')
 
