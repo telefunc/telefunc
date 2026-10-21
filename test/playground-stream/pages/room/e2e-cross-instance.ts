@@ -1,12 +1,20 @@
-export { testRedisRoomCrossInstance, testRedisBroadcastCrossInstance, testRedisOutages }
+export { testRedisRoomCrossInstance, testRedisBroadcastCrossInstance, testRedisOutages, testRedisAcrossServers }
 
 import { autoRetry, expect, expectLog, getServerUrl, test } from '@brillout/test-e2e'
-import { dropRedisConnections, getRedisChannels, restartRedis, rewindRedis, snapshotRedis } from '../../e2e-utils'
+import {
+  dropRedisConnections,
+  getRedisChannels,
+  getRedisKeys,
+  restartRedis,
+  rewindRedis,
+  snapshotRedis,
+} from '../../e2e-utils'
 
 type Instance = 'a' | 'b' | 'c' | 'd'
 type RoomView = {
   count: number
   members: Record<string, Record<string, unknown>>
+  stored: Record<string, Record<string, unknown>>
   meta: Record<string, unknown>
   frames: string[]
   events: string[]
@@ -172,6 +180,110 @@ function testRedisOutages() {
     } finally {
       await leaveRoom(['a', 'b'], roomId)
       await broadcastRequest('b', '/api/broadcast-cross-instance/unsubscribe', key, 'DELETE').catch(() => {})
+    }
+  })
+}
+
+function testRedisAcrossServers() {
+  test("broadcast: a key's binary frames reach another server at once after a text publish on it", async () => {
+    const key = newId('redis-kinds')
+    try {
+      await broadcastRequest('b', '/api/broadcast-cross-instance/subscribe', key, 'POST')
+      const start = Date.now()
+      await broadcastRequest('a', '/api/broadcast-cross-instance/publish', key, 'POST', 'text')
+      for (const n of [1, 2, 3, 4, 5]) {
+        await broadcastRequest('a', '/api/broadcast-cross-instance/publish?kind=binary', key, 'POST', n)
+      }
+      await retry(10_000, async () => {
+        expect(await broadcastReceived('b', key)).deep.equal(['text', ...[1, 2, 3, 4, 5].map((n) => `binary:${n}`)])
+      })
+      // A frame held for a missing predecessor waits one second.
+      expect(Date.now() - start).lessThan(800)
+    } finally {
+      await broadcastRequest('b', '/api/broadcast-cross-instance/unsubscribe', key, 'DELETE').catch(() => {})
+    }
+  })
+
+  test('room: 1,000 members joining at once through four servers all get in, and every server counts them', async () => {
+    const roomId = newId('redis-joins')
+    const instances = ['a', 'b', 'c', 'd'] as const
+    try {
+      for (const instance of instances) await joinRoom(instance, roomId, instance.toUpperCase())
+      const joined = await Promise.all(
+        instances.map((instance) =>
+          request(instance, `/api/room-cross-instance/join-many?count=249&name=${instance}`, roomId, 'POST'),
+        ),
+      )
+      expect(joined.map((result) => result.joined)).deep.equal([249, 249, 249, 249])
+      await retry(30_000, async () => {
+        for (const instance of instances) expect((await view(instance, roomId)).count).toBe(1000)
+      })
+    } finally {
+      await leaveRoom([...instances], roomId)
+    }
+  })
+
+  test("room: members on two servers see each other's meta, the room's meta, frames and wants alike", async () => {
+    const roomId = newId('redis-agree')
+    try {
+      await joinRoom('a', roomId, 'Alice')
+      await joinRoom('b', roomId, 'Bob')
+      // Both servers write the room's meta and their member's at once.
+      await Promise.all([
+        ...Array.from({ length: 20 }, (_, i) => setMeta(i % 2 ? 'a' : 'b', roomId, { [`k${i}`]: i }, 'room')),
+        ...Array.from({ length: 10 }, (_, i) => setMeta('a', roomId, { step: i })),
+        ...Array.from({ length: 10 }, (_, i) => setMeta('b', roomId, { step: i })),
+      ])
+      await retry(30_000, async () => {
+        const [onA, onB] = await Promise.all([view('a', roomId), view('b', roomId)])
+        expect(Object.entries(onB.meta)).deep.equal(Object.entries(onA.meta))
+        for (let i = 0; i < 20; i++) expect(onA.meta[`k${i}`]).toBe(i)
+        expect(onB.members).deep.equal(onA.members)
+        expect(onA.members).deep.equal(onA.stored)
+      })
+
+      // Bob's server watches the cam track of every member: Alice's server learns it is wanted.
+      await request('b', '/api/room-cross-instance/watch?track=cam', roomId, 'POST')
+      await retry(30_000, async () => {
+        expect((await view('a', roomId)).events).contains('demand:cam:true')
+      })
+      await request('a', '/api/room-cross-instance/watch?track=cam', roomId, 'POST')
+      for (const [instance, n] of [
+        ['a', 1],
+        ['b', 2],
+        ['a', 3],
+        ['b', 4],
+      ] as const) {
+        await request(instance, '/api/room-cross-instance/publish-binary?track=cam', roomId, 'POST', n)
+      }
+      await retry(10_000, async () => {
+        for (const instance of ['a', 'b'] as const) {
+          const { frames } = await view(instance, roomId)
+          expect(frames).deep.equal(['cam:Alice:1', 'cam:Bob:2', 'cam:Alice:3', 'cam:Bob:4'])
+        }
+      })
+    } finally {
+      await leaveRoom(['a', 'b'], roomId)
+    }
+  })
+
+  test('room: once a room closes, every key it kept in Redis expires', async () => {
+    const roomId = newId('redis-close')
+    try {
+      await joinRoom('a', roomId, 'Alice')
+      await joinRoom('b', roomId, 'Bob')
+      await publish('a', roomId, 'kept', true)
+      await request('b', '/api/room-cross-instance/watch?track=cam', roomId, 'POST')
+      await request('a', '/api/room-cross-instance/publish-binary?track=cam&retain=true', roomId, 'POST', 1)
+      await request('b', '/api/room-cross-instance/join-many?count=20&name=guest', roomId, 'POST')
+      await setMeta('a', roomId, { topic: 'closing' }, 'room')
+      await leaveRoom(['b'], roomId)
+      await request('a', '/api/room-cross-instance/close', roomId, 'POST')
+      const keys = await getRedisKeys(`*{${encodeURIComponent(roomId)}}*`)
+      expect(keys.length).greaterThan(0)
+      expect(keys.filter(({ ttl }) => ttl < 0).map(({ key }) => key)).deep.equal([])
+    } finally {
+      await leaveRoom(['a', 'b'], roomId)
     }
   })
 }

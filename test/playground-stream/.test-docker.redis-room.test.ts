@@ -1,7 +1,8 @@
 import { setupDockerRun } from './.testRun-docker'
-import { testRedisOutages, testRedisRoomCrossInstance } from './pages/room/e2e-cross-instance'
+import { testRedisAcrossServers, testRedisOutages, testRedisRoomCrossInstance } from './pages/room/e2e-cross-instance'
 
 if (setupDockerRun()) {
   testRedisRoomCrossInstance()
+  testRedisAcrossServers()
   testRedisOutages()
 }
