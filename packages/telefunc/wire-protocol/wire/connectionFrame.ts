@@ -541,17 +541,6 @@ const encode = {
     writeU32(frame, HEADER, bytes)
     return frame
   },
-  /** `frames`, of `bytes` in all, every one before the last of a size its tag fixes, in one message. */
-  message(frames: readonly Uint8Array[], bytes: number): Uint8Array<ArrayBuffer> {
-    const message = new Uint8Array(bytes)
-    let at = 0
-    for (const frame of frames) {
-      message.set(frame, at)
-      at += frame.byteLength
-    }
-    assert(at === bytes)
-    return message
-  },
 
   // ── Per-channel ctrls ──
   close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {

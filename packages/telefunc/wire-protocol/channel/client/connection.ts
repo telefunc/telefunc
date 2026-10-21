@@ -77,6 +77,11 @@ type BufferedFrame = {
 }
 type HeldFrame = BufferedFrame & { seq: number }
 
+/** Its channel and tag, for a WINDOW or MSG_WINDOW; null for any other frame. */
+function limitKey({ frame, channelIx }: BufferedFrame): number | null {
+  return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW ? channelIx * 256 + frame[0] : null
+}
+
 /** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
  *  until the swap commits — typically driven via a transient Heartbeat. */
 type ProbeWire = {
@@ -1680,6 +1685,12 @@ class ClientConnection implements MuxConnection {
   private drainBufferedFrames(releasable: (ix: number) => boolean): OutboundFrame[] {
     const frames: OutboundFrame[] = []
     const sendBuffer = this.settleQueue()
+    // A limit replaces the one before it, so of a channel's queued limits only its newest WINDOW and MSG_WINDOW go.
+    const newestLimit = new Map<number, number>()
+    for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
+      const key = limitKey(sendBuffer[readIx]!)
+      if (key !== null) newestLimit.set(key, readIx)
+    }
     let room = this.transport.sendRoom()
     let writeIx = 0
     for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
@@ -1689,6 +1700,8 @@ class ClientConnection implements MuxConnection {
         sendBuffer[writeIx++] = entry
         continue
       }
+      const key = limitKey(entry)
+      if (key !== null && newestLimit.get(key) !== readIx) continue
       if (seq !== undefined) {
         if (room <= 0 || this.heldForRoom.length > 0) {
           this.holdForRoom({ frame, channelIx, seq })

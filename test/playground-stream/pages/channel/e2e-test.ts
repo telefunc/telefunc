@@ -1,7 +1,7 @@
 export { testChannel }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { Request, Response } from 'playwright-chromium'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
   getResult,
@@ -77,6 +77,7 @@ type ChannelState = {
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
+  openBurstReceived: number | null
   manyListenersMs: { page: number; server: number | null } | null
 }
 
@@ -867,6 +868,36 @@ function testChannel(isDev: boolean, inDocker = false) {
       expect(burst.isClosed).toBe(false)
     })
   })
+
+  if (channelTransport === 'ws') {
+    test('channel: the page answers 500 small messages its server sends as the channel opens in at most 4 WebSocket messages, as on main', async () => {
+      let sent = 0
+      let counting = false
+      const onWebSocket = (ws: WebSocket) => {
+        if (!ws.url().includes('/_telefunc')) return
+        ws.on('framesent', () => {
+          if (counting) sent++
+        })
+      }
+      page.on('websocket', onWebSocket)
+      try {
+        await navigate(`${getServerUrl()}/channel`)
+        const run = async () => {
+          await page.click('#channel-test-open-burst')
+          await autoRetry(async () => {
+            expect((await getResult<ChannelState>('#channel-state')).openBurstReceived).toBe(500)
+          })
+        }
+        // The first run opens the WebSocket, so only the second's messages count.
+        await run()
+        counting = true
+        await run()
+      } finally {
+        page.off('websocket', onWebSocket)
+      }
+      expect(sent).lessThanOrEqual(4)
+    })
+  }
 
   test('channel: 100,000 listeners added to a channel and removed take under a second, on the page and on the server', async () => {
     await navigate(`${getServerUrl()}/channel`)

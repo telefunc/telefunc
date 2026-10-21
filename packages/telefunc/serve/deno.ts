@@ -30,6 +30,7 @@ class Telefunc {
 
 function telefunc(): TelefuncServe {
   enableChannelTransports([CHANNEL_TRANSPORT.WS])
+  // TODO: remove once https://github.com/h3js/crossws/pull/216 is released.
   // Deno's WebSocket has no terminate(), which crossws's Deno peer calls: close it instead.
   const hooks = getTelefuncChannelHooks({ terminate: (peer) => peer.close() })
   const ws = crossws({
