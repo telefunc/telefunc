@@ -1,19 +1,23 @@
 export { WireDemo }
 
 import React, { useCallback, useRef, useState } from 'react'
-import { onWireResume, onWireOverrun } from './Wire.telefunc'
+import { Abort } from 'telefunc/client'
+import { onWireResume, onWireOverrun, onWireEnd } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
 
 type WireState = {
   resume: { channelId: string; received: TallyState } | null
   overrun: { channelId: string; received: TallyState; onClose: string | null } | null
+  /** onClose: 'none', 'abort:<value as JSON>' or the error's name; close: what close() resolved to. */
+  end: { channelId: string; onClose: string | null; close: string | null } | null
 }
 
 const RESUME_COUNT = 256
 const OVERRUN_COUNT = 16
 
 function WireDemo() {
-  const [state, setState] = useState<WireState>({ resume: null, overrun: null })
+  const [state, setState] = useState<WireState>({ resume: null, overrun: null, end: null })
+  const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
 
   const resume = useCallback(async () => {
@@ -55,6 +59,21 @@ function WireDemo() {
     for (let n = 0; n < OVERRUN_COUNT; n++) void overrunChannel.current!.send(textMessage(n))
   }, [])
 
+  const endOpen = useCallback(async () => {
+    const { channel, channelId } = await onWireEnd()
+    endChannel.current = channel
+    setState((s) => ({ ...s, end: { channelId, onClose: null, close: null } }))
+    channel.onClose((err) => {
+      const onClose = !err ? 'none' : err instanceof Abort ? `abort:${JSON.stringify(err.abortValue)}` : err.name
+      setState((s) => ({ ...s, end: { ...s.end!, onClose } }))
+    })
+  }, [])
+  const endClose = useCallback(async () => {
+    const close = String(await endChannel.current!.close())
+    setState((s) => ({ ...s, end: { ...s.end!, close } }))
+  }, [])
+  const endAbort = useCallback(() => endChannel.current!.abort({ by: 'page' }), [])
+
   return (
     <div className="mt-6 p-4 border rounded">
       <h2 className="text-lg font-semibold mb-2">Wire</h2>
@@ -82,6 +101,30 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Send {OVERRUN_COUNT} messages unawaited
+        </button>
+        <button
+          id="wire-end-open"
+          type="button"
+          onClick={endOpen}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open a channel to end
+        </button>
+        <button
+          id="wire-end-close"
+          type="button"
+          onClick={endClose}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Close it
+        </button>
+        <button
+          id="wire-end-abort"
+          type="button"
+          onClick={endAbort}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Abort it
         </button>
       </div>
       <pre id="wire-state" className="text-xs">

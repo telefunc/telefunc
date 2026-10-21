@@ -1,6 +1,6 @@
-export { onWireResume, onWireOverrun }
+export { onWireResume, onWireOverrun, onWireEnd }
 
-import { Channel } from 'telefunc'
+import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
 import { onServerAction } from '../../server-actions'
@@ -67,4 +67,27 @@ async function onWireOverrun(count: number) {
     cutWireSockets()
   })
   return { channel: ch.client, channelId: ch.id }
+}
+
+/**
+ * A channel the server closes or aborts at server action wireEnd_<id>_close or wireEnd_<id>_abort, or the page ends.
+ *
+ * cleanupState: wireEnd_<id>_onClose = 'none', 'abort:<value as JSON>' or the error's name; wireEnd_<id>_close = what the server's close() resolved to.
+ */
+async function onWireEnd() {
+  const ch = new Channel<never, never>()
+  ch.onClose((err) => {
+    cleanupState[`wireEnd_${ch.id}_onClose`] = describeEnd(err)
+  })
+  onServerAction(`wireEnd_${ch.id}_close`, async () => {
+    cleanupState[`wireEnd_${ch.id}_close`] = String(await ch.close())
+  })
+  onServerAction(`wireEnd_${ch.id}_abort`, () => ch.abort({ by: 'server' }))
+  return { channel: ch.client, channelId: ch.id }
+}
+
+function describeEnd(err: Error | undefined): string {
+  if (!err) return 'none'
+  if (err instanceof Abort) return `abort:${JSON.stringify(err.abortValue)}`
+  return err.name
 }

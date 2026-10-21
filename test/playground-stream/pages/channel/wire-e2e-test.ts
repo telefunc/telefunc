@@ -7,6 +7,7 @@ type Tally = { text: number; binary: number; inOrder: boolean }
 type WireState = {
   resume: { channelId: string; received: Tally } | null
   overrun: { channelId: string; received: Tally; onClose: string | null } | null
+  end: { channelId: string; onClose: string | null; close: string | null } | null
 }
 
 // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
@@ -27,6 +28,52 @@ function testWire(isDev: boolean) {
       expect(cuts.every((cut) => cut > 0)).toBe(true)
     })
   })
+
+  for (const by of ['server', 'page'] as const) {
+    test(`channel: a close() the ${by} makes while the page is offline, on a connection that then drops, ends the channel gracefully on both ends`, async () => {
+      const channelId = await openEnd()
+      await page.context().setOffline(true)
+      if (by === 'server') await runServerAction(`wireEnd_${channelId}_close`)
+      else await page.click('#wire-end-close')
+      await cutWire()
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        const { end } = await getResult<WireState>('#wire-state')
+        expect(end!.onClose).toBe('none')
+        const ss = await getCleanupState()
+        expect(ss[`wireEnd_${channelId}_onClose`]).toBe('none')
+        expect(by === 'server' ? ss[`wireEnd_${channelId}_close`] : end!.close).toBe('0')
+      })
+    })
+
+    test(`channel: an abort(value) the ${by} makes while the page is offline, on a connection that then drops, reaches the other end as Abort with that value`, async () => {
+      const channelId = await openEnd()
+      await page.context().setOffline(true)
+      if (by === 'server') await runServerAction(`wireEnd_${channelId}_abort`)
+      else await page.click('#wire-end-abort')
+      await cutWire()
+      await page.context().setOffline(false)
+      const ended = `abort:${JSON.stringify({ by })}`
+      await autoRetry(async () => {
+        const { end } = await getResult<WireState>('#wire-state')
+        expect(end!.onClose).toBe(ended)
+        const ss = await getCleanupState()
+        expect(ss[`wireEnd_${channelId}_onClose`]).toBe(ended)
+      })
+    })
+  }
+}
+
+async function openEnd(): Promise<string> {
+  await navigate(`${getServerUrl()}/channel`)
+  await page.click('#wire-end-open')
+  let channelId = ''
+  await autoRetry(async () => {
+    const { end } = await getResult<WireState>('#wire-state')
+    expect(end).not.toBe(null)
+    channelId = end!.channelId
+  })
+  return channelId
 }
 
 // Run by the lanes whose server keeps 64 KiB of each end's text for a reconnect.
