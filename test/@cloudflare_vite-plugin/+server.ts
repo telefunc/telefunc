@@ -1,7 +1,15 @@
 import vike from 'vike/fetch'
+import { config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
 
 const tf = new Telefunc({ scale: 5 })
+
+// The Cloudflare page's Hibernation snippet, assigned after the adapter.
+config.channel = {
+  reconnectTimeout: 5_000,
+  idleTimeout: 5_000,
+  pingInterval: 2_000,
+}
 
 // Cloudflare requires Durable Object classes to be named exports of the worker entry.
 // `wrangler.jsonc`'s `main: "vike:server-entry"` re-exports everything from this file,
