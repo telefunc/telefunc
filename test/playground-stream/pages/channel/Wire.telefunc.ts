@@ -1,4 +1,4 @@
-export { onWireResume, onWireOverrun, onWireEnd, onWireLarge }
+export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen }
 
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -110,4 +110,8 @@ async function onWireLarge(bytes: number) {
     void ch.send('x'.repeat(bytes))
   })
   return { channel: ch.client }
+}
+
+async function onWireOpen() {
+  return new Channel<never, never>().client
 }

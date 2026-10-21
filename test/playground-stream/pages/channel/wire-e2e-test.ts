@@ -20,6 +20,7 @@ type WireState = {
   overrun: { channelId: string; received: Tally; onClose: string | null } | null
   end: { channelId: string; received: string[]; close: string | null } | null
   large: number | null
+  many: { closed: number; next: string } | null
 }
 
 // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
@@ -175,6 +176,15 @@ function testWire(isDev: boolean) {
       }
     })
   }
+
+  test('channel: a page that opened and closed 4,200 channels on one connection opens the next', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#wire-many')
+    await autoRetry(async () => {
+      const { many } = await getResult<WireState>('#wire-state')
+      expect(many).deep.equal({ closed: 4_200, next: 'open' })
+    })
+  })
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse'])) {
     for (const post of ['refuses', 'reads late'] as const) {

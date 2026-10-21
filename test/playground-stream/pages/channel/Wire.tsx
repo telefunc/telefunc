@@ -2,7 +2,7 @@ export { WireDemo }
 
 import React, { useCallback, useRef, useState } from 'react'
 import { Abort, withContext } from 'telefunc/client'
-import { onWireResume, onWireOverrun, onWireEnd, onWireLarge } from './Wire.telefunc'
+import { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
 
 type WireState = {
@@ -12,6 +12,8 @@ type WireState = {
   end: { channelId: string; received: string[]; close: string | null } | null
   /** The length of the large message, once it arrived. */
   large: number | null
+  /** How the channel opened after the page opened and closed `closed` others went: 'open' or the error's name. */
+  many: { closed: number; next: string } | null
 }
 
 const RESUME_COUNT = 256
@@ -19,9 +21,11 @@ const OVERRUN_COUNT = 16
 const END_BEFORE = 3
 const END_CLOSE_TIMEOUT = 500
 const LARGE_BYTES = 1_000_000
+/** Past the 4,096 channels a connection holds at once. */
+const MANY_CHANNELS = 4_200
 
 function WireDemo() {
-  const [state, setState] = useState<WireState>({ resume: null, overrun: null, end: null, large: null })
+  const [state, setState] = useState<WireState>({ resume: null, overrun: null, end: null, large: null, many: null })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
 
@@ -87,6 +91,24 @@ function WireDemo() {
     channel.listen((message) => setState((s) => ({ ...s, large: message.length })))
   }, [])
 
+  // One channel stays open throughout, so the page keeps its connection.
+  const many = useCallback(async () => {
+    const kept = await onWireOpen()
+    for (let opened = 0; opened < MANY_CHANNELS; opened += 100) {
+      await Promise.all(Array.from({ length: 100 }, async () => (await onWireOpen()).close()))
+    }
+    const next = await onWireOpen()
+    const opens = new Promise<string>((resolve) => {
+      next.onOpen(() => resolve('open'))
+      next.onClose((err) => resolve(err?.name ?? 'closed'))
+    })
+    setState((s) => ({ ...s, many: { closed: MANY_CHANNELS, next: '' } }))
+    const outcome = await opens
+    setState((s) => ({ ...s, many: { closed: MANY_CHANNELS, next: outcome } }))
+    next.close()
+    kept.close()
+  }, [])
+
   return (
     <div className="mt-6 p-4 border rounded">
       <h2 className="text-lg font-semibold mb-2">Wire</h2>
@@ -122,6 +144,14 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Receive a {LARGE_BYTES} byte message as the channel opens
+        </button>
+        <button
+          id="wire-many"
+          type="button"
+          onClick={many}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open and close {MANY_CHANNELS} channels, then open one more
         </button>
         <button
           id="wire-end-open"
