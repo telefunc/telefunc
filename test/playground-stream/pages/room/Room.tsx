@@ -409,6 +409,27 @@ function Room() {
         })
       })}
 
+      {scenario(
+        'own-meta-race',
+        'Own meta under concurrent writes',
+        'Unawaited setMeta() and setAttributes()',
+        async () => {
+          const [roomId, room] = await createRoom('own-meta-race')
+          const me = await room.join({ meta: { name: 'Mine', round: -1 } })
+          const other = await onGetRoom(roomId)
+          const remote = await getParticipantWhenJoined(other, me.id)
+          await Promise.all(
+            Array.from({ length: 20 }, (_, i) =>
+              i % 5 === 0 ? me.setMeta({ name: 'Mine', round: i }) : me.setAttributes({ [`m${i}`]: i }),
+            ),
+          )
+          await pollUntil(() => {
+            const state = { mine: Object.entries(me.meta), remote: Object.entries(remote.meta) }
+            return { result: state, done: JSON.stringify(state.mine) === JSON.stringify(state.remote) }
+          })
+        },
+      )}
+
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {
         const [roomId, lobby] = await createRoom('member')
         const me = await lobby.join({ meta: { name: 'Viewed' } })

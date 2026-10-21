@@ -204,6 +204,15 @@ function testRoom() {
       expect(r.otherMemberMeta).deep.equal(memberMeta)
     },
   )
+  testRoomScenario<{ mine: [string, unknown][]; remote: [string, unknown][] }>(
+    'own-meta-race',
+    "room: a page's own member ends on the meta its unawaited writes stored, in call order, as other views do",
+    (r) => {
+      const stored = [['name', 'Mine'], ['round', 15], ...Array.from({ length: 4 }, (_, i) => [`m${16 + i}`, 16 + i])]
+      expect(r.mine).deep.equal(stored)
+      expect(r.remote).deep.equal(stored)
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',
