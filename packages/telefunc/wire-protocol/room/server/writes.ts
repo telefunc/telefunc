@@ -83,7 +83,7 @@ class RoomWrites {
       const publishing = commitControlOrThrow(host.id, host._incarnation.inc, accepted)
       sent()
       await publishing
-      if (replaced !== null) await dropMemberMetaGeneration(host._incarnation, id, replaced)
+      if (replaced !== null) await dropMemberMetaGeneration(host._incarnation, id, replaced, update.seq)
       return update
     })
   }

@@ -156,6 +156,41 @@ describe.each(targets)('Room on $name', ({ env, connect }) => {
     },
   )
 
+  it.each(['replace with no keys', 'merge that removes a key and adds one'] as const)(
+    "reads a member's meta of more than a page as written before or after a %s that commits between its pages",
+    async (write) => {
+      installRedis(ownClient(connect()), { prefix: uniquePrefix('meta-straddle') })
+      onTestFinished(() => disposeBackend())
+      const before = Object.fromEntries(Array.from({ length: 1100 }, (_, i) => [`k${i}`, 'before']))
+      const { k0: _removed, ...kept } = before
+      const room = await Room.create('meta-straddle')
+      onTestFinished(() => Room.close(room.id))
+      const member = await room.join({ meta: before })
+      const backend = getRoomBackend()
+      const readCellPages = backend.readCellPages.bind(backend)
+      const reached = createDeferred()
+      const release = createDeferred()
+      let held = false
+      vi.spyOn(backend, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+        for await (const page of readCellPages(roomId, inc, prefix)) {
+          yield page
+          if (!held && prefix.startsWith(MEMBER_META_CELL_PREFIX)) {
+            held = true
+            reached.resolve()
+            await release.promise
+          }
+        }
+      })
+      const reading = Room.getParticipants(room.id)
+      await reached.promise
+      if (write === 'replace with no keys') await member.setMeta({})
+      else await member.setAttributes({ k0: undefined, zz: 'new' })
+      release.resolve()
+      const [read] = await reading
+      expect([before, write === 'replace with no keys' ? {} : { ...kept, zz: 'new' }]).toContainEqual(read!.meta)
+    },
+  )
+
   it('reads the roster of 100,000 members in a heartbeat tick with no Redis command over 20 ms and the event loop turning', async () => {
     const prefix = uniquePrefix('roster-pages')
     const redis = ownClient(connect())

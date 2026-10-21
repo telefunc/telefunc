@@ -153,11 +153,39 @@ function cellKeysWithPrefix(gen: Generation, prefix: string): Iterable<string> {
   return prefix.endsWith(':') ? keys : [...keys].filter((key) => key.startsWith(prefix))
 }
 
-/** Up to a page of `keys` under `prefix` not yet `seen`, which it adds to `seen`. */
-function takePage(keys: Iterator<string>, prefix: string, seen: Set<string>): string[] {
+/** The keys under `prefix`, live, so a key added during the iteration comes, those sharing the prefix's next
+ *  separator-ended segment as one run, as key order keeps them on Redis and Cloudflare. */
+function* liveKeysWithPrefix(gen: Generation, prefix: string): Generator<string> {
+  const runs = new Set<string>()
+  for (const key of liveEntryKeys(() => cellKeyIndex(gen, prefix))) {
+    if (!key.startsWith(prefix)) continue
+    const end = key.indexOf(':', prefix.length)
+    if (end === -1) {
+      yield key
+      continue
+    }
+    const run = key.slice(0, end + 1)
+    if (runs.has(run)) continue
+    runs.add(run)
+    yield* liveEntryKeys(() => gen.cellsByPrefix.get(run))
+  }
+}
+
+/** The keys of the index entry `entry()` returns, live; once they run out, those of an entry made since, as removing
+ *  an entry's last key drops it. */
+function* liveEntryKeys(entry: () => Map<string, StoredCell> | Set<string> | undefined): Generator<string> {
+  let last: ReturnType<typeof entry>
+  for (let at = entry(); at !== last; at = entry()) {
+    last = at
+    yield* at?.keys() ?? []
+  }
+}
+
+/** Up to a page of `keys` not yet `seen`, which it adds to `seen`. */
+function takePage(keys: Iterator<string>, seen: Set<string>): string[] {
   const page: string[] = []
   for (let next = keys.next(); !next.done; next = keys.next()) {
-    if (!next.value.startsWith(prefix) || seen.has(next.value)) continue
+    if (seen.has(next.value)) continue
     seen.add(next.value)
     if (page.push(next.value) === CELL_PAGE_SIZE) break
   }
@@ -317,12 +345,9 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix), this._state.now())
   }
 
-  /** Iterates the prefix's index entry live, which visits a key added during the read, and skips a key it returned
-   *  that was removed and added again; an entry made since the read began, its last key removed in between, holds only
-   *  keys written during the read. */
+  /** Skips a key it returned that was removed and added again (see `liveKeysWithPrefix`). */
   async *readCellPages(roomId: string, inc: string, prefix: string): AsyncGenerator<CellsRead> {
-    let index: Map<string, StoredCell> | Set<string> | undefined
-    let keys: Iterator<string> = [].values()
+    let keys: Generator<string> | null = null
     const seen = new Set<string>()
     let page: string[]
     do {
@@ -331,12 +356,8 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         yield { staleInc: true }
         return
       }
-      const current = cellKeyIndex(gen, prefix)
-      if (current !== index) {
-        index = current
-        keys = current?.keys() ?? [].values()
-      }
-      page = takePage(keys, prefix, seen)
+      keys ??= liveKeysWithPrefix(gen, prefix)
+      page = takePage(keys, seen)
       yield readCellsOf(gen, page, this._state.now())
     } while (page.length === CELL_PAGE_SIZE)
   }

@@ -392,7 +392,7 @@ async function readRoster(room: RoomIncarnation): Promise<Roster> {
   const departing = new Set(Array.from(cleanups.keys(), memberIdOfCleanupKey))
   // After the member read, so each member's cells are as new as its record or newer, and the updates after the record's
   // seq bring a view to them.
-  const metaCells = await readMembersMetaCells(room)
+  const metaCells = await readMembersMetaCells(room, cells)
   const members = await liveMembers(stayingMembers(cells, departing), metaCells)
   return { members, departing }
 }
@@ -424,7 +424,7 @@ async function readMembersById(room: RoomIncarnation, ids: string[]): Promise<Me
     return raw === undefined ? [] : [[id, raw] as const]
   })
   await eachInFlight(entries, async ([id]) => {
-    metaCells.set(id, (await readMembersMetaCells(room, id)).get(id) ?? [])
+    metaCells.set(id, (await readMembersMetaCells(room, cells, id)).get(id) ?? [])
   })
   return await liveMembers(entries, metaCells)
 }

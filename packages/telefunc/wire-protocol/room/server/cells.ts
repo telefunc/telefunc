@@ -97,8 +97,9 @@ function roomMetaGenPrefix(gen: number): string {
   return `meta:k:${gen}:`
 }
 
-/** A member's meta, a cell per top-level key in the generation its record names (`RoomMemberRecord.metaGen`). Member
- *  ids hold no `:`. A generation's digit count goes ahead of it as a letter, so key order is generation order. */
+/** A member's meta, a cell per top-level key in the generation its record names (`RoomMemberRecord.metaGen`), and a
+ *  replace's mark, its generation's prefix, until the generation it replaced is dropped. Member ids hold no `:`. A
+ *  generation's digit count goes ahead of it as a letter, so key order is generation order. */
 const MEMBER_META_CELL_PREFIX = 'pm:'
 function memberMetaCellPrefix(memberId: string): string {
   return `${MEMBER_META_CELL_PREFIX}${memberId}:`
@@ -119,9 +120,12 @@ function memberIdOfMetaCellKey(cellKey: string): string {
 function metaKeyCellKey(genPrefix: string, key: string): string {
   return genPrefix + JSON.stringify(key)
 }
-/** The key of a cell under `genPrefix`, or null for another generation's. */
+/** The key of a cell under `genPrefix`, or null for another generation's and for the generation's mark, `genPrefix`
+ *  itself. */
 function metaKeyOfCellKey(genPrefix: string, cellKey: string): string | null {
-  return cellKey.startsWith(genPrefix) ? (JSON.parse(cellKey.slice(genPrefix.length)) as string) : null
+  return cellKey.startsWith(genPrefix) && cellKey !== genPrefix
+    ? (JSON.parse(cellKey.slice(genPrefix.length)) as string)
+    : null
 }
 
 /** A recipient's reply to an acknowledged DM, under its sender's prefix until the sender settles it. */

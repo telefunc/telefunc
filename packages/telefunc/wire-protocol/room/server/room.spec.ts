@@ -27,6 +27,7 @@ import {
   MEMBER_META_CELL_PREFIX,
   SESSION_CELL_PREFIX,
   memberCellKey,
+  memberMetaCellPrefix,
 } from './cells.js'
 import type { Sender } from '../types.js'
 import { ClientRoom } from '../client.js'
@@ -462,6 +463,110 @@ describe('Room public behavior', () => {
       expect([metaOf('before'), metaOf('after')]).toContainEqual(read!.meta)
     },
   )
+  it.each([
+    ['replace with no keys', 'roster', undefined],
+    ['replace with no keys', 'identity', { identity: 'alice' }],
+    ['merge that removes a key and adds one', 'roster', undefined],
+    ['merge that removes a key and adds one', 'identity', { identity: 'alice' }],
+  ] as const)(
+    "reads a member's meta of more than a page as written before or after a %s that its %s read waits on between pages",
+    async (write, kind, target) => {
+      const before = Object.fromEntries(Array.from({ length: 1100 }, (_, i) => [`k${i}`, 'before']))
+      const { k0: _removed, ...kept } = before
+      const merged = { ...kept, zz: 'new' }
+      const room = await Room.create(`written-between-${kind}-pages`)
+      const member = await room.join({ meta: before, identity: 'alice' })
+      const reached = createDeferred()
+      const release = createDeferred()
+      const readCellPages = driver.readCellPages.bind(driver)
+      let held = false
+      vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+        for await (const page of readCellPages(roomId, inc, prefix)) {
+          yield page
+          if (!held && prefix.startsWith(MEMBER_META_CELL_PREFIX)) {
+            held = true
+            reached.resolve()
+            await release.promise
+          }
+        }
+      })
+      const reading = Room.getParticipants(room.id, target)
+      await reached.promise
+      if (write === 'replace with no keys') await member.setMeta({})
+      else await member.setAttributes({ k0: undefined, zz: 'new' })
+      release.resolve()
+      const [read, ...more] = await reading
+      expect(more).toEqual([])
+      expect([before, write === 'replace with no keys' ? {} : merged]).toContainEqual(read!.meta)
+    },
+  )
+  it.each([
+    ['roster', undefined],
+    ['identity', { identity: 'alice' }],
+  ] as const)(
+    "reads a member's meta as written before or after a replace with no keys whose drop of more than a page its %s read lands in",
+    async (kind, target) => {
+      const before = Object.fromEntries(Array.from({ length: 1100 }, (_, i) => [`k${i}`, 'before']))
+      const room = await Room.create(`dropping-during-${kind}-read`)
+      const member = await room.join({ meta: before, identity: 'alice' })
+      const generations = memberMetaCellPrefix(member.id)
+      const reading = createDeferred()
+      const dropping = createDeferred()
+      const read = createDeferred()
+      const readCellPages = driver.readCellPages.bind(driver)
+      let held = false
+      vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+        const drop = prefix.startsWith(generations) && prefix !== generations
+        if (!drop && !held && prefix.startsWith(MEMBER_META_CELL_PREFIX)) {
+          held = true
+          reading.resolve()
+          await dropping.promise
+        }
+        for await (const page of readCellPages(roomId, inc, prefix)) {
+          yield page
+          const left = drop ? await driver.readCells(roomId, inc, { prefix }) : null
+          if (left !== null && 'cells' in left && left.cells.size > 0 && left.cells.size < 1100) {
+            dropping.resolve()
+            await read.promise
+          }
+        }
+      })
+      const participants = Room.getParticipants(room.id, target)
+      await reading.promise
+      const replacing = member.setMeta({})
+      const [participant, ...more] = await participants
+      read.resolve()
+      await replacing
+      expect(more).toEqual([])
+      expect([before, {}]).toContainEqual(participant!.meta)
+      const { inc } = (room as unknown as ServerRoom)._incarnation
+      expect(await driver.readCells(room.id, inc, { prefix: generations })).toMatchObject({ cells: new Map() })
+    },
+  )
+  it("reads a member's meta of more than a page as one write left it in one call once a write lands in each of its paged reads", async () => {
+    const states = [Object.fromEntries(Array.from({ length: 1100 }, (_, i) => [`k${i}`, 'before']))]
+    for (let i = 1; i <= 3; i++) {
+      const { [`k${i}`]: _removed, ...kept } = states[i - 1]!
+      states.push({ ...kept, [`zz${i}`]: 'new' })
+    }
+    const room = await Room.create('written-during-every-read')
+    const member = await room.join({ meta: states[0] })
+    const readCellPages = driver.readCellPages.bind(driver)
+    let writes = 0
+    vi.spyOn(driver, 'readCellPages').mockImplementation(async function* (roomId, inc, prefix) {
+      let first = true
+      for await (const page of readCellPages(roomId, inc, prefix)) {
+        yield page
+        if (!first || !prefix.startsWith(MEMBER_META_CELL_PREFIX) || writes === 3) continue
+        first = false
+        writes++
+        await member.setAttributes({ [`k${writes}`]: undefined, [`zz${writes}`]: 'new' })
+      }
+    })
+    const [read] = await Room.getParticipants(room.id)
+    expect(writes).toBe(3)
+    expect(states).toContainEqual(read!.meta)
+  })
   it('lists without a room that closes between its head read and its roster read', async () => {
     await Room.create('list-open')
     const closing = (await Room.create('list-closing')) as ServerRoom

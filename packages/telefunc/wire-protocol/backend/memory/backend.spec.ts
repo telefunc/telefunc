@@ -478,6 +478,28 @@ describe('memory backend behind the supervised consumer', () => {
     }
     expect(read).toEqual([...keys, 'p:x'])
   })
+  it("reads the keys sharing a prefix's next segment together, as key order keeps them, though written apart", async () => {
+    const backend = getRoomBackend()
+    await backend.compareExchangeHead(
+      'runs',
+      { form: 'absent' },
+      { head: { state: 'open', currentInc: 'inc-1', config: encoder.encode('config') } },
+    )
+    const keys = Array.from({ length: 1_500 }, (_, i) => `p:${i % 2 === 0 ? 'a' : 'b'}:${i}`)
+    await backend.compareExchangeCells('runs', 'inc-1', {
+      expect: [],
+      mutations: keys.map((key) => ({ key, bytes: encoder.encode('v') })),
+    })
+    const read: string[] = []
+    for await (const page of backend.readCellPages('runs', 'inc-1', 'p:')) {
+      if ('staleInc' in page) throw new Error('cell read fenced unexpectedly')
+      read.push(...page.cells.keys())
+    }
+    expect(read).toEqual([
+      ...keys.filter((key) => key.startsWith('p:a:')),
+      ...keys.filter((key) => key.startsWith('p:b:')),
+    ])
+  })
   it('reads a prefix without scanning the other cells, and drops its index entries with its cells', async () => {
     const backend = getRoomBackend()
     await backend.compareExchangeHead(

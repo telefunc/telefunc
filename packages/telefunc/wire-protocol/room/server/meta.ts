@@ -277,9 +277,9 @@ function memberMetaMutations(id: string, meta: ParticipantMeta): CellMutation[] 
 }
 
 /** One exchange that expects the member's record, which counts each meta write in `metaSeq`.
- *  A merge writes its keys, a key already there keeping its place; a replace writes its keys into a new generation and
- *  returns the one it `replaced`, for `dropMemberMetaGeneration`. New keys are placed at the write's own `metaSeq`.
- *  Each costs the keys it was given. */
+ *  A merge writes its keys, a key already there keeping its place; a replace writes its keys and its mark into a new
+ *  generation and returns the one it `replaced`, for `dropMemberMetaGeneration`. New keys are placed at the write's own
+ *  `metaSeq`. Each costs the keys it was given. */
 async function writeMemberMeta(
   room: RoomIncarnation,
   id: string,
@@ -298,6 +298,7 @@ async function writeMemberMeta(
     let mutations: CellMutation[]
     if ('replace' in write) {
       mutations = metaEntriesAt(write.replace, seq).map((entry) => metaKeyMutation(prefix, entry))
+      mutations.push({ key: prefix, bytes: new Uint8Array() })
     } else {
       const keys = Object.keys(write.merge).map((key) => metaKeyCellKey(prefix, key))
       const merging = keys.length === 0 ? new Map() : (await readOpenCells(room.id, room.inc, keys)).cells
@@ -314,9 +315,19 @@ async function writeMemberMeta(
   })
 }
 
-/** A generation a replace left, which stopped being the record's `metaGen` in its exchange. */
-async function dropMemberMetaGeneration(room: RoomIncarnation, id: string, gen: number): Promise<void> {
-  await dropCells(room.id, room.inc, memberMetaGenPrefix(id, gen))
+/** A generation a replace left, which stopped being the record's `metaGen` in its exchange, a page per exchange and a
+ *  `ROOM_PLAN_SLICE_MS` slice per turn; its last page goes with the mark the replace wrote under its own generation
+ *  `next`, so a read finding part of it finds a newer generation too. */
+async function dropMemberMetaGeneration(room: RoomIncarnation, id: string, gen: number, next: number): Promise<void> {
+  let held: string[] = []
+  const slice = new Slice()
+  for await (const page of getRoomBackend().readCellPages(room.id, room.inc, memberMetaGenPrefix(id, gen))) {
+    if ('staleInc' in page || (held.length > 0 && !(await deleteCells(room.id, room.inc, held)))) return
+    held = [...page.cells.keys()]
+    if (slice.over) await slice.next()
+  }
+  held.push(memberMetaGenPrefix(id, next))
+  await deleteCells(room.id, room.inc, held)
 }
 
 /** Every generation of a member's meta, once its eviction removed the record. */
@@ -339,17 +350,72 @@ async function deleteCells(roomId: string, inc: string, keys: Iterable<string>):
   return (await getRoomBackend().compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
 }
 
-/** The meta cells of every member, or of member `id`, by member, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
-async function readMembersMetaCells(room: RoomIncarnation, id?: string): Promise<Map<string, MemberMetaCells>> {
+/** The meta cells of every member, or of member `id`, by member, read after their `records` (by cell key). A page is
+ *  one read that holds a member's cells together, so a member's cells within a page are as one write left them; the
+ *  member a page boundary cuts is settled by `settleMemberMetaCells`. */
+async function readMembersMetaCells(
+  room: RoomIncarnation,
+  records: ReadonlyMap<string, Uint8Array>,
+  id?: string,
+): Promise<Map<string, MemberMetaCells>> {
+  const { byMember, cut } = await readMetaCellPages(
+    room,
+    id === undefined ? MEMBER_META_CELL_PREFIX : memberMetaCellPrefix(id),
+  )
+  for (const member of cut) {
+    const seq = metaSeqOf(records.get(memberCellKey(member)))
+    byMember.set(member, await settleMemberMetaCells(room, member, seq, byMember.get(member)!))
+  }
+  return byMember
+}
+
+/** The meta cells under `prefix` by member, a page and a `ROOM_PLAN_SLICE_MS` slice at a time, and the members that
+ *  held a page's last cell with a page after it. */
+async function readMetaCellPages(
+  room: RoomIncarnation,
+  prefix: string,
+): Promise<{ byMember: Map<string, MemberMetaCells>; cut: Set<string> }> {
   const byMember = new Map<string, MemberMetaCells>()
-  const prefix = id === undefined ? MEMBER_META_CELL_PREFIX : memberMetaCellPrefix(id)
+  const cut = new Set<string>()
+  let last: string | undefined
   const slice = new Slice()
   for await (const page of getRoomBackend().readCellPages(room.id, room.inc, prefix)) {
     if ('staleInc' in page) throw roomClosedError(room.id)
-    for (const cell of page.cells) getOrCreate(byMember, memberIdOfMetaCellKey(cell[0]), () => []).push(cell)
+    if (last !== undefined) cut.add(last)
+    for (const cell of page.cells) {
+      last = memberIdOfMetaCellKey(cell[0])
+      getOrCreate(byMember, last, () => []).push(cell)
+    }
     if (slice.over) await slice.next()
   }
-  return byMember
+  return { byMember, cut }
+}
+
+/** Member `id`'s `cells`, which a page boundary cut, read after its record was at `seq`: kept while the record is still
+ *  at it, as every meta write moves it, else read again, up to `META_PAGED_READS` times, then in one call. */
+async function settleMemberMetaCells(
+  room: RoomIncarnation,
+  id: string,
+  seq: number | undefined,
+  cells: MemberMetaCells,
+): Promise<MemberMetaCells> {
+  const memberKey = memberCellKey(id)
+  for (let reads = 0; ; reads++) {
+    const now = metaSeqOf((await readOpenCells(room.id, room.inc, [memberKey])).cells.get(memberKey))
+    if (now === seq) return cells
+    if (reads === META_PAGED_READS) break
+    seq = now
+    const read = await readMetaCellPages(room, memberMetaCellPrefix(id))
+    cells = read.byMember.get(id) ?? []
+    if (read.cut.size === 0) return cells
+  }
+  const read = await getRoomBackend().readCells(room.id, room.inc, { prefix: memberMetaCellPrefix(id) })
+  if ('staleInc' in read) throw roomClosedError(room.id)
+  return Array.from(read.cells)
+}
+
+function metaSeqOf(record: Uint8Array | undefined): number | undefined {
+  return record === undefined ? undefined : decodeRoomRecord<RoomMemberRecord>(record).metaSeq
 }
 
 /** The member's meta from its generation's cells, sorted a run at a time, then merged and built a slice per turn. A
