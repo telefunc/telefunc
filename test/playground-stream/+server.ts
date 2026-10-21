@@ -8,6 +8,7 @@ import { installRedis } from '@telefunc/redis'
 import { config } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { cleanupState, resetCleanupState, getCleanupStateSnapshot } from './cleanup-state'
+import { trackWireSocket, cutWireSockets } from './wire-sockets'
 
 config.channel.pingInterval = 1000
 config.shield = true
@@ -86,7 +87,42 @@ app.post('/api/server-close-trigger', async (c) => {
   return c.json({ ok: true })
 })
 
+// Test-only: lets an e2e test drop the page's connections, or hold or refuse its next SSE batch POST.
+let nextSsePost: 'hold' | 'refuse' | null = null
+const heldSsePosts: (() => void)[] = []
+
+app.post('/api/wire/cut', (c) => c.json({ cut: cutWireSockets() }))
+app.post('/api/wire/next-sse-post', (c) => {
+  const action = c.req.query('action')
+  if (action !== 'hold' && action !== 'refuse') return c.json({ ok: false, reason: 'action is hold or refuse' }, 400)
+  nextSsePost = action
+  return c.json({ ok: true })
+})
+app.post('/api/wire/release', (c) => {
+  const released = heldSsePosts.length
+  for (const release of heldSsePosts.splice(0)) release()
+  return c.json({ released })
+})
+
 app.all('/_telefunc', async (c) => {
+  const isSse = c.req.query('_telefunc') === 'sse'
+  const node = (c.req.raw as unknown as { runtime?: { node?: { req: IncomingMessage } } }).runtime?.node
+  if (isSse && node) trackWireSocket(node.req.socket)
+  // A batch POST has a length; the long-lived upload streams without one.
+  if (isSse && nextSsePost && c.req.header('content-length')) {
+    const body = new Uint8Array(await c.req.arrayBuffer())
+    const metadataLength = new DataView(body.buffer).getUint32(0)
+    const metadata = JSON.parse(new TextDecoder().decode(body.subarray(4, 4 + metadataLength)))
+    if (!metadata.streamResponse) {
+      const action = nextSsePost
+      nextSsePost = null
+      if (action === 'refuse') return c.text('', 400)
+      await new Promise<void>((resolve) => heldSsePosts.push(resolve))
+    }
+    const request = new Request(c.req.url, { method: 'POST', headers: c.req.raw.headers, body })
+    const response = await tf.serve({ request })
+    return response ?? c.text('Not found', 404)
+  }
   if (USE_NATIVE) {
     console.log(`[INST=${INST}] Handling /_telefunc via node-native adapter`)
     // srvx attaches `runtime.node = { req, res }` to the Request it constructs
@@ -129,7 +165,11 @@ export default {
       // normally — the `/_telefunc` route reads `c.env.incoming`/`outgoing`
       // to reach the Node primitives when `TELEFUNC_NATIVE=1`.
       const httpServer = server?.node?.server
-      if (httpServer) tf.installWebSocket(httpServer)
+      if (!httpServer) return
+      httpServer.on('upgrade', (req, socket) => {
+        if (req.url?.startsWith('/_telefunc')) trackWireSocket(socket)
+      })
+      tf.installWebSocket(httpServer)
     },
   },
 }
