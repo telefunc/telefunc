@@ -128,21 +128,31 @@ async function onBroadcastAnswerOrder() {
   return seen
 }
 
-/** Listeners that answer every message on their own key, one at once and one after an await, until stop(). */
+/** Listeners that answer every message on their own key, one at once and one after an await, until stop(); it returns
+ *  once each answered, or 10 s pass. */
 async function onBroadcastSelfAnswer() {
   const key = `room:self-answer:${crypto.randomUUID()}`
   let answers = 0
+  // A store like Redis delivers a message to local subscribers once it comes back through the store.
+  const syncAnswered = Promise.withResolvers<void>()
+  const asyncAnswered = Promise.withResolvers<void>()
   const offSync = Broadcast.subscribe<number>(`${key}:sync`, (n) => {
     answers++
+    syncAnswered.resolve()
     void Broadcast.publish(`${key}:sync`, n + 1)
   })
   const offAsync = Broadcast.subscribe<number>(`${key}:async`, async (n) => {
     await Promise.resolve()
     answers++
+    asyncAnswered.resolve()
     void Broadcast.publish(`${key}:async`, n + 1)
   })
   void Broadcast.publish(`${key}:sync`, 0)
   void Broadcast.publish(`${key}:async`, 0)
+  const deadline = Promise.withResolvers<void>()
+  const timer = setTimeout(deadline.resolve, 10_000)
+  await Promise.race([Promise.all([syncAnswered.promise, asyncAnswered.promise]), deadline.promise])
+  clearTimeout(timer)
   return {
     stop: async () => {
       offSync()
