@@ -3,10 +3,10 @@
 
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 
-import { ClientBroadcast, ClientChannel } from './channel/client/channel.js'
-import { ServerChannel } from './channel/server/channel.js'
-import { Broadcast, ServerBroadcast } from './broadcast/ServerBroadcast.js'
-import { ChannelMux, type ServerTransport } from './channel/server/mux.js'
+import { ClientBroadcast, ClientChannel } from '../channel/client/channel.js'
+import { ServerChannel } from '../channel/server/channel.js'
+import { Broadcast, ServerBroadcast } from '../broadcast/ServerBroadcast.js'
+import { ChannelMux, type ServerTransport } from '../channel/server/mux.js'
 import {
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_TRANSPORT,
@@ -16,19 +16,19 @@ import {
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   MAX_CHANNELS_PER_CONNECTION,
   RECONCILE_TIMEOUT_MS,
-} from './constants.js'
-import { ChannelOverflowError } from './channel/channelErrors.js'
-import { Fifo } from '../utils/Fifo.js'
-import { TAG, encode, isOneFrame, messageFrames } from './wire/connectionFrame.js'
-import { SendBudget } from './flowControl/client/SendBudget.js'
-import { NetworkError } from '../shared/NetworkError.js'
-import { config, getServerConfig, setAdapterMaxFrameBytes } from '../node/server/serverConfig.js'
-import { Room } from './room/server/statics.js'
-import type { ServerLocalParticipant, ServerRoom } from './room/server/room.js'
-import { ResponseRoomGrants, RoomParticipantStubChannel } from './room/server/stub.js'
-import { ClientRoom, ClientStandaloneParticipant } from './room/client.js'
-import { Pipe } from './test/pipe.js'
-import { flowOf, produce, run } from './test/channel-specs.js'
+} from '../constants.js'
+import { ChannelOverflowError } from '../channel/channelErrors.js'
+import { Fifo } from '../../utils/Fifo.js'
+import { TAG, encode, isOneFrame, messageFrames } from '../wire/connectionFrame.js'
+import { SendBudget } from './client/SendBudget.js'
+import { NetworkError } from '../../shared/NetworkError.js'
+import { config, getServerConfig, setAdapterMaxFrameBytes } from '../../node/server/serverConfig.js'
+import { Room } from '../room/server/statics.js'
+import type { ServerLocalParticipant, ServerRoom } from '../room/server/room.js'
+import { ResponseRoomGrants, RoomParticipantStubChannel } from '../room/server/stub.js'
+import { ClientRoom, ClientStandaloneParticipant } from '../room/client.js'
+import { Pipe } from '../test/pipe.js'
+import { flowOf, produce, run } from '../test/channel-specs.js'
 
 const LATENCY_MS = 5
 
