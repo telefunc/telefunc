@@ -1,6 +1,6 @@
 export { SocketWait }
 
-import { DRAIN_SPAN_MS, Waits, newestFastest, type SendWait } from '../Link.js'
+import { DRAIN_SPAN_MS, DrainRate, Waits, type SendWait } from '../Link.js'
 
 type SocketWaitOptions = {
   /** All the wire holds, which drains as the frames it is handed arrive. */
@@ -13,8 +13,7 @@ type SocketWaitOptions = {
 class SocketWait implements SendWait {
   private readonly held: () => number | undefined
   private readonly ahead: () => number | undefined
-  private drainRate = 0
-  private readonly drainRates: number[] = []
+  private readonly drain = new DrainRate()
   /** The span being measured: when it started, what it held then, and the bytes sent since. */
   private spanFrom = 0
   private spanHeld = 0
@@ -36,7 +35,7 @@ class SocketWait implements SendWait {
 
   waitNow(): number {
     const ahead = this.ahead()
-    return ahead === undefined || this.drainRate === 0 ? 0 : ahead / this.drainRate
+    return ahead === undefined || this.drain.rate === 0 ? 0 : ahead / this.drain.rate
   }
 
   longestWaitSince(at: number): number {
@@ -46,9 +45,8 @@ class SocketWait implements SendWait {
   /** Ends the span: a rate where the socket held data at both its ends. */
   private measure(now: number): void {
     const held = this.held() ?? 0
-    if (this.spanHeld > 0 && held > 0) {
-      this.drainRate = newestFastest(this.drainRates, (this.spanHeld + this.spanHanded - held) / (now - this.spanFrom))
-    }
+    if (this.spanHeld > 0 && held > 0)
+      this.drain.measured((this.spanHeld + this.spanHanded - held) / (now - this.spanFrom))
     this.spanFrom = now
     this.spanHeld = held
     this.spanHanded = 0

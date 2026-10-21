@@ -442,9 +442,11 @@ describe('client Room lifecycle', () => {
     const stub = new ClientBroadcast({
       channelId: crypto.randomUUID(),
       key: 'publish-refused',
-      transports: [CHANNEL_TRANSPORT.SSE],
-      telefuncUrl: 'http://publish-refused.test/_telefunc',
-      connectionKey: crypto.randomUUID(),
+      connection: {
+        transports: [CHANNEL_TRANSPORT.SSE],
+        telefuncUrl: 'http://publish-refused.test/_telefunc',
+        connectionKey: crypto.randomUUID(),
+      },
     })
     vi.spyOn(stub, 'send').mockImplementation((async (message: { __r?: string }) =>
       message.__r === 'req-join' ? { id: crypto.randomUUID(), joinedAt: 1 } : undefined) as never)

@@ -24,8 +24,11 @@ type AwaitedChannel = {
 /** The channels a wire awaits, by index; what it holds for them counts in its recv backlog. */
 class AwaitedChannels {
   private readonly byIx = new Map<number, AwaitedChannel>()
+  private readonly backlog: RecvBacklog
 
-  constructor(private readonly backlog: RecvBacklog) {}
+  constructor(backlog: RecvBacklog) {
+    this.backlog = backlog
+  }
 
   get(ix: number): AwaitedChannel | undefined {
     return this.byIx.get(ix)

@@ -1,4 +1,4 @@
-export { Link, Waits, newestFastest, DRAIN_SPAN_MS }
+export { Link, Waits, DrainRate, DRAIN_SPAN_MS }
 export type { SendWait }
 
 import { WIRE_PIECE_RATE_WINDOW_MS } from '../constants.js'
@@ -10,13 +10,42 @@ const DRAIN_RATES = 8
 /** How long a wait stays in the history a download's window reads (see `SendWait`). */
 const WAITS_KEPT_MS = 60_000
 
-/** Adds `rate` to `rates`, the newest `DRAIN_RATES`, and returns the fastest of them. */
-function newestFastest(rates: number[], rate: number): number {
-  rates.push(rate)
-  if (rates.length > DRAIN_RATES) rates.shift()
-  let fastest = rate
-  for (const each of rates) if (each > fastest) fastest = each
-  return fastest
+/** A rate a wire drains at, in bytes per ms: the fastest of the newest `DRAIN_RATES` measured. */
+class DrainRate {
+  /** 0 before any rate. */
+  rate = 0
+  private readonly rates: number[] = []
+  /** The bytes and ms of a span not yet measured. */
+  private spanBytes = 0
+  private spanMs = 0
+
+  /** The newest rate measured, 0 before any. */
+  get newest(): number {
+    return this.rates.at(-1) ?? 0
+  }
+
+  /** Takes a rate measured over at least `DRAIN_SPAN_MS`. */
+  measured(rate: number): void {
+    this.rates.push(rate)
+    if (this.rates.length > DRAIN_RATES) this.rates.shift()
+    let fastest = rate
+    for (const each of this.rates) if (each > fastest) fastest = each
+    this.rate = fastest
+  }
+
+  /** Takes `bytes` drained over `ms`, and measures a rate once the span reaches `DRAIN_SPAN_MS`. */
+  spanned(bytes: number, ms: number): void {
+    this.spanBytes += bytes
+    this.spanMs += ms
+    if (this.spanMs < DRAIN_SPAN_MS) return
+    this.measured(this.spanBytes / this.spanMs)
+    this.dropSpan()
+  }
+
+  /** Drops the span not yet measured. */
+  dropSpan(): void {
+    this.spanBytes = this.spanMs = 0
+  }
 }
 
 /** How long the frames this side sends at once wait behind its own data on its wire, where it can tell. */

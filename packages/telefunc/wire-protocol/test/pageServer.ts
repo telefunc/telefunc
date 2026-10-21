@@ -174,9 +174,11 @@ function page(wire: Wire, { upgrade = false } = {}) {
       return new ClientChannel<ClientToServer, ServerToClient>({
         channelId,
         ack: true,
-        transports: wire === 'ws' ? ['ws'] : upgrade ? ['sse', 'ws'] : ['sse'],
-        telefuncUrl,
-        connectionKey,
+        connection: {
+          transports: wire === 'ws' ? ['ws'] : upgrade ? ['sse', 'ws'] : ['sse'],
+          telefuncUrl,
+          connectionKey,
+        },
       })
     },
   }

@@ -51,9 +51,7 @@ test("a session Durable Object's SSE clients reach its own channels, whichever D
   server.onOpen(opened)
   const client = new ClientChannel({
     channelId: server.id,
-    transports: ['sse'],
-    telefuncUrl: 'http://sse.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
+    connection: { transports: ['sse'], telefuncUrl: 'http://sse.test/_telefunc', connectionKey: crypto.randomUUID() },
   })
   await vi.waitFor(() => expect(opened).toHaveBeenCalled())
   client.abort()

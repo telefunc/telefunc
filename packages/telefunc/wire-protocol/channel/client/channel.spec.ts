@@ -32,9 +32,11 @@ function stalledChannel(): ClientChannel<never, string> {
   config.fetch = async () => new Response(new ReadableStream({ start() {} }), { status: 200 })
   const channel = new ClientChannel<never, string>({
     channelId: crypto.randomUUID(),
-    transports: [CHANNEL_TRANSPORT.SSE],
-    telefuncUrl: 'http://client-channel.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
+    connection: {
+      transports: [CHANNEL_TRANSPORT.SSE],
+      telefuncUrl: 'http://client-channel.test/_telefunc',
+      connectionKey: crypto.randomUUID(),
+    },
   })
   channels.push(channel)
   return channel
@@ -172,9 +174,7 @@ test('a channel made before the page has a session token names one, which the ca
   channels.push(
     new ClientChannel({
       channelId: crypto.randomUUID(),
-      transports: [CHANNEL_TRANSPORT.SSE],
-      telefuncUrl,
-      connectionKey: crypto.randomUUID(),
+      connection: { transports: [CHANNEL_TRANSPORT.SSE], telefuncUrl, connectionKey: crypto.randomUUID() },
     }),
   )
   await vi.waitFor(() => expect(requested).not.toEqual([]))
@@ -203,7 +203,8 @@ test('a channel opens on a page served over plain http, which has no crypto.rand
   })
   const telefuncUrl = 'http://192.168.1.2:3000/_telefunc'
   expect(
-    () => new ClientChannel({ channelId, transports: [CHANNEL_TRANSPORT.SSE], telefuncUrl, connectionKey }),
+    () =>
+      new ClientChannel({ channelId, connection: { transports: [CHANNEL_TRANSPORT.SSE], telefuncUrl, connectionKey } }),
   ).not.toThrow()
 })
 
@@ -213,9 +214,11 @@ function stalledBroadcast(): ClientBroadcast {
   const broadcast = new ClientBroadcast({
     channelId: crypto.randomUUID(),
     key: 'client-broadcast',
-    transports: [CHANNEL_TRANSPORT.SSE],
-    telefuncUrl: 'http://client-broadcast.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
+    connection: {
+      transports: [CHANNEL_TRANSPORT.SSE],
+      telefuncUrl: 'http://client-broadcast.test/_telefunc',
+      connectionKey: crypto.randomUUID(),
+    },
   })
   broadcasts.push(broadcast)
   return broadcast

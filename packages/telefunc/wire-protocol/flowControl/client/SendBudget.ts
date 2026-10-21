@@ -78,7 +78,7 @@ class SendBudget implements SendRoom {
     return this.movedAllowance ?? this.least
   }
 
-  /** `SendRoom`: the room less what the sender handed. */
+  /** `SendRoom`: the room past what the sender handed the socket. */
   dataRoom(): number {
     return this.roomPast(this.sender.transmittedBytes)
   }
@@ -88,8 +88,8 @@ class SendBudget implements SendRoom {
     this.uplink.sentFrame(tag, bytes)
   }
 
-  /** The bytes of data it takes now: none, once the room is used or data waits for it. */
-  get sendRoom(): number {
+  /** The room past all the sender was sent, what it holds included: none once the room is used or data waits for it. */
+  roomPastSent(): number {
     return this.roomPast(this.sender.sentBytes)
   }
 
@@ -143,8 +143,8 @@ class SendBudget implements SendRoom {
 
   /** With no room and data in the uplink, looks again once it carried what the server acks at once, or all it holds. */
   private pace(): void {
-    const { drainRate } = this.uplink
-    if (drainRate === 0 || this.sendRoom > 0 || this.paceTimer !== null) return
+    const drainRate = this.uplink.drain.rate
+    if (drainRate === 0 || this.roomPastSent() > 0 || this.paceTimer !== null) return
     const queued = this.uplink.inUplink()
     if (queued === 0) return
     const ms = Math.max(1, Math.min(queued, WIRE_PIECES_ACK_BYTES) / drainRate)
@@ -174,7 +174,7 @@ class SendBudget implements SendRoom {
   /** Moves the allowance by the delay of `newest`, the newest data an acknowledgement of `newly` bytes covered. */
   private measure(newest: SentData, newly: number, spanMs: number): void {
     const delay = this.arrivedAt - newest.at
-    const { drainRate } = this.uplink
+    const drainRate = this.uplink.drain.rate
     const path = drainRate > 0 ? delay - (newest.ahead + newest.bytes) / drainRate : delay
     // A path that stays over the target with the least allowance rose.
     const least = this.least
@@ -194,7 +194,7 @@ class SendBudget implements SendRoom {
 
   /** The least allowance: what the server takes in `WIRE_QUEUE_DELAY_MS`, more than it takes before it acknowledges. */
   private get least(): number {
-    const { drainRate } = this.uplink
+    const drainRate = this.uplink.drain.rate
     if (drainRate === 0) return WIRE_SEND_AHEAD_MIN_BYTES
     return Math.min(
       WIRE_SEND_AHEAD_MIN_BYTES,
@@ -204,7 +204,7 @@ class SendBudget implements SendRoom {
 
   /** What the server may have taken before it acknowledges: `WIRE_PIECES_ACK_BYTES` at most. */
   private get slack(): number {
-    const { drainRate } = this.uplink
+    const drainRate = this.uplink.drain.rate
     if (drainRate === 0) return WIRE_PIECES_ACK_BYTES
     return Math.min(WIRE_PIECES_ACK_BYTES, WIRE_SEND_ACK_MIN_BYTES + drainRate * WIRE_SEND_ACK_MS)
   }

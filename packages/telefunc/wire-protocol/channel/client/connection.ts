@@ -44,7 +44,6 @@ import {
   TAG,
   encode,
   isSequencedFrame,
-  chargedBytes,
   seqNear,
   seqThrough,
 } from '../../wire/connectionFrame.js'
@@ -627,12 +626,12 @@ class ClientConnection implements MuxConnection {
 
   send(channel: MuxChannel, data: string): number {
     const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.text(ix, data, seq))
-    return frame ? chargedBytes(frame) : 0
+    return frame?.byteLength ?? 0
   }
 
   sendBinary(channel: MuxChannel, data: Uint8Array): number {
     const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.binary(ix, data, seq))
-    return frame ? chargedBytes(frame) : 0
+    return frame?.byteLength ?? 0
   }
 
   sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
@@ -1759,7 +1758,7 @@ const TRANSPORT_REGISTRY: Record<
   ChannelTransport,
   (telefuncUrl: string, options: ClientConnectionOptions, owner: ClientConnection) => ClientChannelTransport
 > = {
-  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport(telefuncUrl, owner),
+  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport({ telefuncUrl, owner }),
   [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
     new SseTransport({ telefuncUrl, fetchImpl: options.fetchImpl, userHeaders: options.headers, owner }),
 }
@@ -1775,7 +1774,7 @@ const UPGRADE_TARGET_REGISTRY: Record<
   UpgradeTargetTransport,
   (telefuncUrl: string, owner: ClientConnection) => UpgradeTarget
 > = {
-  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport(telefuncUrl, owner),
+  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport({ telefuncUrl, owner }),
 }
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */

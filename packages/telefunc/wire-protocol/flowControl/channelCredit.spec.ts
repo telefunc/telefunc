@@ -156,9 +156,11 @@ class Loopback {
     if (opts.registered !== false) this.mux.registerChannel(server)
     const page = new ClientChannel<ClientToServer, ServerToClient>({
       channelId: server.id,
-      transports: [CHANNEL_TRANSPORT.WS],
-      telefuncUrl: 'http://loopback.test/_telefunc',
-      connectionKey: this.connectionKey,
+      connection: {
+        transports: [CHANNEL_TRANSPORT.WS],
+        telefuncUrl: 'http://loopback.test/_telefunc',
+        connectionKey: this.connectionKey,
+      },
     })
     this.pages.push(page as ClientChannel)
     return { server, page, register: () => this.mux.registerChannel(server) }
@@ -170,9 +172,11 @@ class Loopback {
     const page = new ClientBroadcast<T>({
       channelId: server.id,
       key,
-      transports: [CHANNEL_TRANSPORT.WS],
-      telefuncUrl: 'http://loopback.test/_telefunc',
-      connectionKey: this.connectionKey,
+      connection: {
+        transports: [CHANNEL_TRANSPORT.WS],
+        telefuncUrl: 'http://loopback.test/_telefunc',
+        connectionKey: this.connectionKey,
+      },
     })
     this.pages.push(page as ClientChannel)
     return { server, page }
@@ -191,9 +195,11 @@ class Loopback {
       const page = new ClientBroadcast({
         channelId: stub.id,
         key: room.id,
-        transports: [CHANNEL_TRANSPORT.WS],
-        telefuncUrl: 'http://loopback.test/_telefunc',
-        connectionKey: this.connectionKey,
+        connection: {
+          transports: [CHANNEL_TRANSPORT.WS],
+          telefuncUrl: 'http://loopback.test/_telefunc',
+          connectionKey: this.connectionKey,
+        },
       })
       this.pages.push(page as ClientChannel)
       return { page, view: new ClientRoom(page, metadata) }
@@ -216,9 +222,11 @@ class Loopback {
     const openPage = () => {
       const page = new ClientChannel({
         channelId: stub.id,
-        transports: [CHANNEL_TRANSPORT.WS],
-        telefuncUrl: 'http://loopback.test/_telefunc',
-        connectionKey: this.connectionKey,
+        connection: {
+          transports: [CHANNEL_TRANSPORT.WS],
+          telefuncUrl: 'http://loopback.test/_telefunc',
+          connectionKey: this.connectionKey,
+        },
       })
       this.pages.push(page as ClientChannel)
       return new ClientStandaloneParticipant(page, {

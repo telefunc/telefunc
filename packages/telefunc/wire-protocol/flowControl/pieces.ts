@@ -1,5 +1,5 @@
 export { PieceSender, PieceReceiver, acknowledges }
-export type { PieceReceiverOptions, PieceSenderOptions, SendRoom }
+export type { FrameArrival, PieceArrival, PieceReceiverOptions, PieceSenderOptions, SendRoom }
 
 import {
   WIRE_ANNOUNCED_MIN_BYTES,
@@ -571,6 +571,12 @@ class TurnMessage {
   }
 }
 
+/** A whole frame of `bytes` that arrived at `at`, a data frame if `data`, as an announced message if `announced`. */
+type FrameArrival = { bytes: number; data: boolean; announced: boolean; at: number }
+
+/** A piece that arrived and made its frame `whole`, a data frame if `data`, as an announced message if `announced`. */
+type PieceArrival = { whole: boolean; data: boolean; announced: boolean }
+
 type PieceReceiverOptions = {
   send: (frame: Uint8Array<ArrayBuffer>) => void
   /** Its side's `PieceSender.carry`. */
@@ -618,19 +624,20 @@ abstract class PieceReceiver {
     this.carry = carry
   }
 
-  /** A whole frame of `bytes` arrived at `at`, as an announced message if `announced`. */
-  protected abstract tookFrame(bytes: number, data: boolean, announced: boolean, at: number): void
-  /** A piece arrived and made its frame `whole`, a data frame if `data`, as an announced message if `announced`. */
-  protected abstract tookPiece(whole: boolean, data: boolean, announced: boolean): void
+  protected abstract tookFrame(frame: FrameArrival): void
+  protected abstract tookPiece(piece: PieceArrival): void
   /** An ANNOUNCE that arrived at `at` closed an announcement. */
   protected abstract tookClose(at: number): void
   /** How long an acknowledgement waits from now. */
   protected abstract ackWait(): number
 
-  /** A whole frame of `bytes` arrived at `at`, `'riding'` ahead of its message's last frame, which alone dates it. */
-  arrived(bytes: number, data: boolean, at: number, arrival: 'alone' | 'riding'): void {
+  /** A whole frame of `tag` and `bytes` arrived at `at`, `'riding'` ahead of its message's last frame, which alone
+   *  dates it; a riding frame whose bytes vary came after its LENGTH, taken with it. */
+  arrived(tag: number, bytes: number, at: number, arrival: 'alone' | 'riding'): void {
     this.took += bytes
-    this.tookFrame(bytes, data, arrival === 'alone' && this.paced(bytes, at), at)
+    const announced = arrival === 'alone' && this.paced(bytes, at)
+    this.tookFrame({ bytes, data: isSequencedTag(tag), announced, at })
+    if (arrival === 'riding' && fixedBytes(tag) === 0) this.took += LENGTH_BYTES
   }
 
   /** Takes an ANNOUNCE that arrived at `at`: one of no bytes opens an announcement, one of its `bytes` closes it. */
@@ -668,11 +675,6 @@ abstract class PieceReceiver {
     return true
   }
 
-  /** Takes a LENGTH of `bytes`, after the frame it measures: taken, as an ANNOUNCE is, not dated. */
-  tookLength(bytes: number): void {
-    this.took += bytes
-  }
-
   /** Bytes it holds of a frame not yet whole. */
   get held(): number {
     return this.received
@@ -705,7 +707,7 @@ abstract class PieceReceiver {
     if (this.probing > 0) {
       this.probing--
       this.acknowledge()
-    } else this.tookPiece(whole, this.data, announced)
+    } else this.tookPiece({ whole, data: this.data, announced })
     if (!whole) return null
     const frame = this.frame
     this.frame = new Uint8Array(0)

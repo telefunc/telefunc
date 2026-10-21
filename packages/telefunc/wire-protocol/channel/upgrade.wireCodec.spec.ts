@@ -66,15 +66,15 @@ describe('upgrade wire vocabulary', () => {
     expect([TAG.PREPARE, TAG.READY, TAG.BARRIER]).toEqual([0x07, 0x08, 0x09])
   })
 
-  test('the new tags are connection ctrl and 0x0a stays reserved', () => {
+  test('the new tags are connection ctrl, and 0x0e, the first connection ctrl tag no frame has, does not decode', () => {
     for (const tag of [TAG.PREPARE, TAG.READY, TAG.BARRIER]) {
       expect(isConnCtrlTag(tag)).toBe(true)
       expect(isChannelCtrlTag(tag)).toBe(false)
     }
     expect([TAG.PREPARE, TAG.READY, TAG.BARRIER]).toEqual([0x07, 0x08, 0x09])
-    const reserved = new Uint8Array(7)
-    reserved[0] = 0x0a
-    expect(() => decode(reserved)).toThrow()
+    const unassigned = new Uint8Array(7)
+    unassigned[0] = 0x0e
+    expect(() => decode(unassigned)).toThrow('unknown wire frame tag 14')
   })
 
   test('every tag names one frame', () => {

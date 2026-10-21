@@ -1,5 +1,5 @@
 export { ClientChannel, ClientBroadcast }
-export type { ClientChannelOptions }
+export type { ClientChannelOptions, ConnectionOptions }
 
 import type {
   ChannelAck,
@@ -54,16 +54,21 @@ import { classifyTelefuncError } from '../errorClassification.js'
 
 const CLIENT_BROADCAST_BRAND = Symbol.for('telefunc.ClientBroadcast')
 
-type ClientChannelOptions = {
-  channelId: string
-  ack?: boolean
-  key?: string
-  maxFrameBytes?: number
+/** The connection a channel rides (see `ClientConnection.getOrCreate`). */
+type ConnectionOptions = {
   transports: ChannelTransports
   connectionKey?: string
   headers?: Record<string, string>
   telefuncUrl: string
   idleTimeout?: number
+}
+
+type ClientChannelOptions = {
+  channelId: string
+  ack?: boolean
+  key?: string
+  maxFrameBytes?: number
+  connection: ConnectionOptions
 }
 
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
@@ -112,11 +117,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     ack = false,
     key,
     maxFrameBytes = WIRE_MAX_RAW_FRAME_BYTES,
-    transports,
-    connectionKey,
-    headers,
-    telefuncUrl,
-    idleTimeout,
+    connection,
   }: ClientChannelOptions) {
     this.id = channelId
     this.ack = ack
@@ -130,12 +131,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       yieldBytes: FC_PAGE_YIELD_BYTES,
     })
     const config = resolveClientConfig()
-    this._connection = ClientConnection.getOrCreate(getSessionUrl(telefuncUrl), this, {
-      transports,
+    this._connection = ClientConnection.getOrCreate(getSessionUrl(connection.telefuncUrl), this, {
+      transports: connection.transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
-      connectionKey,
-      headers,
-      idleTimeout,
+      connectionKey: connection.connectionKey,
+      headers: connection.headers,
+      idleTimeout: connection.idleTimeout,
     })
   }
 

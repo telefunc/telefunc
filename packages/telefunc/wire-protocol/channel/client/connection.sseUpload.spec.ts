@@ -232,9 +232,11 @@ describe('an upload POST a proxy holds until its body ends', () => {
     const page = new ClientBroadcast<string>({
       channelId: server.id,
       key,
-      transports: ['sse'],
-      telefuncUrl: `http://${name}.test/_telefunc`,
-      connectionKey: crypto.randomUUID(),
+      connection: {
+        transports: ['sse'],
+        telefuncUrl: `http://${name}.test/_telefunc`,
+        connectionKey: crypto.randomUUID(),
+      },
     })
     const transport = () => (page as any)._connection.transport
     await advanceUntil(() => upload !== null, 1_000)
@@ -339,9 +341,7 @@ test("a batch POST still in flight for a dead wire can't unsubscribe the listene
   const page = new ClientBroadcast<string>({
     channelId: server.id,
     key,
-    transports: ['sse'],
-    telefuncUrl: 'http://swap.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
+    connection: { transports: ['sse'], telefuncUrl: 'http://swap.test/_telefunc', connectionKey: crypto.randomUUID() },
   })
   const first: string[] = []
   const offFirst = page.subscribe((message) => void first.push(message))
@@ -397,9 +397,11 @@ test("a server close that reaches the page before its upload request settles get
   config.fetch = server.fetch
   const channel = new ClientChannel({
     channelId: crypto.randomUUID(),
-    transports: ['sse'],
-    telefuncUrl: 'http://close-ack.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
+    connection: {
+      transports: ['sse'],
+      telefuncUrl: 'http://close-ack.test/_telefunc',
+      connectionKey: crypto.randomUUID(),
+    },
   })
   const closed = new Promise((resolve) => channel.onClose(resolve))
   await delay(20)
@@ -426,10 +428,12 @@ test("a page's last channel gets its close acknowledgement out on SSE batch POST
   }) as typeof fetch
   const channel = new ClientChannel({
     channelId: crypto.randomUUID(),
-    transports: ['sse'],
-    telefuncUrl: 'http://idle-zero.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
-    idleTimeout: 0,
+    connection: {
+      transports: ['sse'],
+      telefuncUrl: 'http://idle-zero.test/_telefunc',
+      connectionKey: crypto.randomUUID(),
+      idleTimeout: 0,
+    },
   })
   const closed = new Promise((resolve) => channel.onClose(resolve))
   await delay(20)
@@ -453,7 +457,10 @@ test("a server close that reaches the page before its upload request settles, wh
   config.fetch = server.fetch
   const telefuncUrl = 'http://close-ack-register.test/_telefunc'
   const connectionKey = crypto.randomUUID()
-  const channel = new ClientChannel({ channelId: crypto.randomUUID(), transports: ['sse'], telefuncUrl, connectionKey })
+  const channel = new ClientChannel({
+    channelId: crypto.randomUUID(),
+    connection: { transports: ['sse'], telefuncUrl, connectionKey },
+  })
   const closed = new Promise((resolve) => channel.onClose(resolve))
   await delay(20)
   server.reconcile()
@@ -462,7 +469,7 @@ test("a server close that reaches the page before its upload request settles, wh
   server.send(encode.close(ix, 5_000, 1)) // the server's close()
   expect(await closed).toBeUndefined()
   // Another channel, such as the stream page's onUpload(file, onProgress) callback
-  new ClientChannel({ channelId: crypto.randomUUID(), transports: ['sse'], telefuncUrl, connectionKey })
+  new ClientChannel({ channelId: crypto.randomUUID(), connection: { transports: ['sse'], telefuncUrl, connectionKey } })
   await delay(20)
   server.refuseUpload()
   await delay(100)
@@ -482,9 +489,11 @@ test('a channel the page aborted while the frame saying so waits gets no more me
   config.fetch = server.fetch
   const channel = new ClientChannel<never, number>({
     channelId: crypto.randomUUID(),
-    transports: ['sse'],
-    telefuncUrl: 'http://abort-draining.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
+    connection: {
+      transports: ['sse'],
+      telefuncUrl: 'http://abort-draining.test/_telefunc',
+      connectionKey: crypto.randomUUID(),
+    },
   })
   const received: number[] = []
   channel.listen((n) => void received.push(n))
@@ -502,9 +511,11 @@ test('a channel the page aborted before the server confirmed it gets none of wha
   config.fetch = server.fetch
   const channel = new ClientChannel<never, number>({
     channelId: crypto.randomUUID(),
-    transports: ['sse'],
-    telefuncUrl: 'http://abort-releasing.test/_telefunc',
-    connectionKey: crypto.randomUUID(),
+    connection: {
+      transports: ['sse'],
+      telefuncUrl: 'http://abort-releasing.test/_telefunc',
+      connectionKey: crypto.randomUUID(),
+    },
   })
   const received: number[] = []
   channel.listen((n) => void received.push(n))

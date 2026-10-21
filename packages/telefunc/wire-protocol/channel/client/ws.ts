@@ -8,14 +8,11 @@ import { SendBudget } from '../../flowControl/client/SendBudget.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import {
-  LENGTH_BYTES,
   TAG,
   decode,
   encode,
-  fixedBytes,
   isOneFrame,
   messageFrames,
-  isSequencedTag,
   withTook,
   type DecodedFrame,
   type ReconciledPayload,
@@ -25,6 +22,11 @@ import type { Heartbeat } from './Heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */
 type WsEnds = { uplink: Uplink; downlink: Downlink; budget: SendBudget; sender: PieceSender; pieces: PagePieceReceiver }
+
+type WsTransportOptions = {
+  telefuncUrl: string
+  owner: ClientConnection
+}
 
 class WsTransport implements UpgradeTarget {
   readonly type = CHANNEL_TRANSPORT.WS
@@ -45,11 +47,10 @@ class WsTransport implements UpgradeTarget {
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
   private readonly wsUrl: string
+  private readonly owner: ClientConnection
 
-  constructor(
-    telefuncUrl: string,
-    private readonly owner: ClientConnection,
-  ) {
+  constructor({ telefuncUrl, owner }: WsTransportOptions) {
+    this.owner = owner
     const base = typeof window === 'undefined' ? undefined : window.location.href
     const url = new URL(telefuncUrl, base)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -292,7 +293,7 @@ class WsTransport implements UpgradeTarget {
 
   sendRoom(): number {
     assert(this.ends)
-    return this.ends.budget.sendRoom
+    return this.ends.budget.roomPastSent()
   }
 
   get uplink(): Uplink {
@@ -393,8 +394,7 @@ function receiveMessage(
     const own = frames.pop()!
     for (const each of frames) {
       const frame = decode(each)
-      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, 'riding')
-      if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
+      pieces.arrived(frame.tag, each.byteLength, at, 'riding')
       riding.push({ frame, bytes: each.byteLength })
     }
     const frame = decode(own)
@@ -406,7 +406,7 @@ function receiveMessage(
         lastBytes = whole.byteLength
       }
     } else {
-      pieces.arrived(own.byteLength, isSequencedTag(frame.tag), at, 'alone')
+      pieces.arrived(frame.tag, own.byteLength, at, 'alone')
       last = frame
       lastBytes = own.byteLength
     }

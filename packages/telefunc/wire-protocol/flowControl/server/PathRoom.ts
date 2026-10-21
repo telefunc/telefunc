@@ -1,7 +1,7 @@
 export { PathRoom }
 
 import { WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../../constants.js'
-import { DRAIN_SPAN_MS, Link, newestFastest } from '../Link.js'
+import { DrainRate, Link } from '../Link.js'
 import { PieceSender, acknowledges, type PieceSenderOptions, type SendRoom } from '../pieces.js'
 import type { PiecesAck } from '../../wire/connectionFrame.js'
 import { Fifo } from '../../../utils/Fifo.js'
@@ -15,11 +15,8 @@ class PathRoom implements SendRoom {
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
   private readonly queued: () => number
-  /** In bytes per ms: the fastest of the newest drain rates, 0 before any; `spanBytes` and `spanMs` gather the next. */
-  private drainRate = 0
-  private readonly drainRates: number[] = []
-  private spanBytes = 0
-  private spanMs = 0
+  /** The rate the page takes data at. */
+  private readonly drain = new DrainRate()
   /** In ms, the page's clock from the first data an acknowledgement covered. */
   private arrivedAt = 0
   /** In ms, the least time an acknowledgement took back, up to the clocks' offset. */
@@ -52,8 +49,8 @@ class PathRoom implements SendRoom {
 
   /** `SendRoom`: what the path takes past what it holds. */
   dataRoom(): number {
-    if (this.drainRate === 0 || this.leastRtt === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY
-    const room = Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * this.drainRate * this.leastRtt)
+    if (this.drain.rate === 0 || this.leastRtt === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY
+    const room = Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * this.drain.rate * this.leastRtt)
     return room - this.pathHolds(performance.now())
   }
 
@@ -89,18 +86,13 @@ class PathRoom implements SendRoom {
     while (this.sent.length > 0 && this.sent.peek()!.end <= acknowledged) newest = this.sent.shift()
     if (newest !== undefined) this.leastRtt = Math.min(this.leastRtt, arrived - newest.at)
     // Arrivals of data handed while nothing waited came at the app's rate: they neither set the rate nor lower it.
-    if (before < this.appLimitedTo) {
-      this.spanBytes = this.spanMs = 0
-    } else {
-      this.spanBytes += acknowledged - before
-      this.spanMs += spanMs
-      if (this.spanMs >= DRAIN_SPAN_MS) {
-        this.drainRate = newestFastest(this.drainRates, this.spanBytes / this.spanMs)
-        this.spanBytes = this.spanMs = 0
-      }
-    }
+    if (before < this.appLimitedTo) this.drain.dropSpan()
+    else this.drain.spanned(acknowledged - before, spanMs)
     // The path holds what the page hasn't acknowledged, less what the rate drained since that data arrived.
-    this.inPath = Math.max(0, this.sender.transmittedBytes - acknowledged - this.drainRate * Math.max(0, now - arrived))
+    this.inPath = Math.max(
+      0,
+      this.sender.transmittedBytes - acknowledged - this.drain.rate * Math.max(0, now - arrived),
+    )
     this.inPathAt = now
     this.sendHeld()
     return true
@@ -123,13 +115,13 @@ class PathRoom implements SendRoom {
 
   /** What the path holds at `now`, as the rate drained it since `inPathAt`. */
   private pathHolds(now: number): number {
-    return Math.max(0, this.inPath - this.drainRate * (now - this.inPathAt))
+    return Math.max(0, this.inPath - this.drain.rate * (now - this.inPathAt))
   }
 
   /** While data waits for room, looks again once the rate drained what the path holds past it. */
   private pace(): void {
     if (this.paceTimer !== null || this.sender.heldBytes === 0) return
-    const ms = Math.max(1, -this.dataRoom() / this.drainRate)
+    const ms = Math.max(1, -this.dataRoom() / this.drain.rate)
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
 

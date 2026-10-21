@@ -6,7 +6,7 @@ import {
   WIRE_SEND_ACK_MIN_BYTES,
   WIRE_SEND_ACK_MS,
 } from '../../constants.js'
-import { PieceReceiver } from '../pieces.js'
+import { PieceReceiver, type FrameArrival, type PieceArrival } from '../pieces.js'
 
 /** The server's `PieceReceiver`, which puts a WebSocket frame sent in pieces back together. Once it took
  *  `WIRE_SEND_ACK_MIN_BYTES` since it last acknowledged, headers and control frames included, it acknowledges them
@@ -17,12 +17,12 @@ class ServerPieceReceiver extends PieceReceiver {
     if (this.took - this.acknowledgedTook >= WIRE_SEND_ACK_MIN_BYTES) this.acknowledgeWithNext()
   }
 
-  protected tookFrame(_bytes: number, data: boolean, announced: boolean, at: number): void {
+  protected tookFrame({ data, announced, at }: FrameArrival): void {
     this.date(data, at)
     this.acknowledgeTaken(data, announced)
   }
 
-  protected tookPiece(_whole: boolean, data: boolean, announced: boolean): void {
+  protected tookPiece({ data, announced }: PieceArrival): void {
     this.acknowledgeTaken(data, announced)
   }
 

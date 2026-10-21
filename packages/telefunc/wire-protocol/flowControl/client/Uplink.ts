@@ -1,19 +1,15 @@
 export { Uplink }
 
 import { WIRE_ACK_SHARE, WIRE_REFRESH_SHARE } from '../../constants.js'
-import { DRAIN_SPAN_MS, Link, Waits, newestFastest, type SendWait } from '../Link.js'
+import { DrainRate, Link, Waits, type SendWait } from '../Link.js'
 import { TAG } from '../../wire/connectionFrame.js'
 
 /** A page's uplink: the rate the server takes data at, what the uplink holds, and the shares its control frames take. */
 class Uplink implements SendWait {
-  /** In bytes per ms: the fastest of the newest rates the peer took data at, 0 before any. */
-  drainRate = 0
-  private readonly drainRates: number[] = []
+  /** The rate the peer takes data at. */
+  readonly drain = new DrainRate()
   /** In bytes per ms, what the newest acknowledgement that spanned any time says data arrived at. */
   private arrivalRate = 0
-  /** The bytes and ms of arrivals not yet in a rate. */
-  private spanBytes = 0
-  private spanMs = 0
   /** What the uplink holds of the bytes handed to the socket, as of `queuedAt`. */
   private queued = 0
   private queuedAt = 0
@@ -26,30 +22,26 @@ class Uplink implements SendWait {
 
   /** In bytes per ms, the slower of the drain rate and the rate the newest acknowledgement says data arrived at. */
   uplinkRate(): number {
-    return this.arrivalRate > 0 ? Math.min(this.drainRate, this.arrivalRate) : this.drainRate
+    return this.arrivalRate > 0 ? Math.min(this.drain.rate, this.arrivalRate) : this.drain.rate
   }
 
   /** Takes `bytes` that arrived over `spanMs`, the newest, and takes a rate once they span `DRAIN_SPAN_MS`. */
   arrived(bytes: number, spanMs: number): void {
     if (spanMs > 0) this.arrivalRate = bytes / spanMs
-    this.spanBytes += bytes
-    this.spanMs += spanMs
-    if (this.spanMs < DRAIN_SPAN_MS) return
-    this.drainRate = newestFastest(this.drainRates, this.spanBytes / this.spanMs)
-    this.spanBytes = this.spanMs = 0
+    this.drain.spanned(bytes, spanMs)
   }
 
   /** What the uplink holds of the bytes handed to the socket. */
   inUplink(): number {
     const now = performance.now()
-    this.queued = Math.max(0, this.queued - this.drainRate * (now - this.queuedAt))
+    this.queued = Math.max(0, this.queued - this.drain.rate * (now - this.queuedAt))
     this.queuedAt = now
     return this.queued
   }
 
   /** Notes `bytes` handed to the socket, and returns what the uplink held ahead of them. */
   handed(bytes: number): number {
-    if (this.drainRate === 0) return 0
+    if (this.drain.rate === 0) return 0
     const ahead = this.inUplink()
     this.queued = ahead + bytes
     return ahead
@@ -61,7 +53,7 @@ class Uplink implements SendWait {
   }
 
   waitNow(): number {
-    return this.drainRate > 0 ? this.inUplink() / this.drainRate : 0
+    return this.drain.rate > 0 ? this.inUplink() / this.drain.rate : 0
   }
 
   longestWaitSince(at: number): number {
