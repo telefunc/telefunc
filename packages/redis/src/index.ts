@@ -57,7 +57,7 @@ class RedisTransport implements BroadcastTransport {
   private readonly textCallbacks = new Map<string, TextOnMessage>()
   private readonly binaryCallbacks = new Map<string, BinaryOnMessage>()
   /** Settles once every SUBSCRIBE sent so far is acknowledged: Redis delivers a publish only to the subscriptions it has. */
-  private subscribesAcked: Promise<unknown> = Promise.resolve()
+  private subscribesAcked: Promise<void> = Promise.resolve()
   /** SUBSCRIBEs unacknowledged, and the publishes waiting for them. */
   private waiting = 0
 
@@ -109,7 +109,7 @@ class RedisTransport implements BroadcastTransport {
         resolve()
       })
     })
-    this.subscribesAcked = Promise.all([this.subscribesAcked, acked])
+    this.subscribesAcked = this.subscribesAcked.then(() => acked)
   }
 
   private readonly _onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
