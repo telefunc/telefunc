@@ -3,6 +3,7 @@ export {
   getCleanupState,
   forceServerGc,
   cutWire,
+  dropNextWebSocket,
   runServerAction,
   holdNextSsePost,
   refuseNextSsePost,
@@ -73,6 +74,11 @@ async function cutWire() {
   const resp = await fetch(`${getServerUrl()}/api/wire/cut`, { method: 'POST' })
   const { cut } = (await resp.json()) as { cut: number }
   if (cut === 0) throw new Error('cutWire() found no connection to cut')
+}
+
+/** The server drops the page's next WebSocket before it opens, as a brief network drop would. */
+async function dropNextWebSocket() {
+  await fetch(`${getServerUrl()}/api/wire/next-websocket`, { method: 'POST' })
 }
 
 /** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`, and answers it then. */

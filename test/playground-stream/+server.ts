@@ -92,6 +92,7 @@ app.post('/api/server-close-trigger', async (c) => {
 
 // Test-only: lets an e2e test drop the page's connections, or hold or refuse its next SSE batch POST.
 let nextSsePost: 'hold' | 'refuse' | null = null
+let dropNextWebSocket = false
 const heldSsePosts: (() => void)[] = []
 
 app.post('/api/server-action', (c) => {
@@ -99,6 +100,10 @@ app.post('/api/server-action', (c) => {
   return runServerAction(key) ? c.json({ ok: true }) : c.json({ ok: false, reason: `no action ${key}` }, 404)
 })
 app.post('/api/wire/cut', (c) => c.json({ cut: cutWireSockets() }))
+app.post('/api/wire/next-websocket', (c) => {
+  dropNextWebSocket = true
+  return c.json({ ok: true })
+})
 app.post('/api/wire/next-sse-post', (c) => {
   const action = c.req.query('action')
   if (action !== 'hold' && action !== 'refuse') return c.json({ ok: false, reason: 'action is hold or refuse' }, 400)
@@ -173,8 +178,15 @@ export default {
       // to reach the Node primitives when `TELEFUNC_NATIVE=1`.
       const httpServer = server?.node?.server
       if (!httpServer) return
+      // Registered first: a socket it destroys is one Telefunc's upgrade listener then leaves alone.
       httpServer.on('upgrade', (req, socket) => {
-        if (req.url?.startsWith('/_telefunc')) trackWireSocket(socket)
+        if (!req.url?.startsWith('/_telefunc')) return
+        if (dropNextWebSocket) {
+          dropNextWebSocket = false
+          socket.destroy()
+          return
+        }
+        trackWireSocket(socket)
       })
       tf.installWebSocket(httpServer)
     },
