@@ -1504,6 +1504,8 @@ function Room() {
         const viewRoomId = `e2e-hiccup-view:${crypto.randomUUID()}`
         // Past the 30 s heartbeat, which restores what the store failed to keep.
         await onCreateRoomClosingAfter(viewRoomId, 35_000)
+        // The room closes then unless the heartbeat restored its view's hold; 5 s for that close to land.
+        const closedUnlessHealedAt = performance.now() + 40_000
         // The write of this page's view, which holds the room.
         await onFailBackend({ op: 'compareExchangeCells', roomId: viewRoomId, key: 'v:' })
         const view = await onGetRoom(viewRoomId)
@@ -1517,7 +1519,10 @@ function Room() {
         await joinView.join({ meta: { name: 'Second' } })
         setResult(JSON.stringify({ waiting: true }))
 
-        await new Promise((resolve) => setTimeout(resolve, 40_000))
+        await pollUntil(async () => {
+          const listed = await onListParticipantNames(joinRoomId)
+          return { done: listed.length === 1 && performance.now() >= closedUnlessHealedAt }
+        }, CLOSED_TAB_POLLS)
         setResult(
           JSON.stringify({
             viewRoom: { listed: await onListRooms(viewRoomId), isClosed: view.isClosed },
