@@ -42,6 +42,9 @@ import {
   onCreateRoomHeld,
   onJoinAndLeaveAsServer,
   onIsOpen,
+  onListAsListed,
+  onListWhileClosing,
+  onRecreate,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -700,6 +703,19 @@ function Room() {
           const heldOpen = await onIsOpen(held)
           return { result: { heldOpen }, done: !heldOpen }
         }, CLOSED_TAB_POLLS)
+      })}
+
+      {scenario('list-races', 'Room.list(), close and recreate', 'List while closing, recreate', async () => {
+        const base = `e2e-list:${crypto.randomUUID()}`
+        for (const suffix of ['b', 'é', 'B', 'a', 'Z']) await onCreateRoom(`${base}:${suffix}`)
+        const order = (await onListAsListed(base)).map((id) => id.slice(base.length + 1))
+        const whileClosing = await onListWhileClosing(`${base}:c`)
+        const recreatedId = `${base}:again`
+        const recreated = await onRecreate(recreatedId)
+        await pollUntil(async () => {
+          const recreatedOpen = await onIsOpen(recreatedId)
+          return { result: { order, whileClosing, recreated, recreatedOpen }, done: !recreatedOpen }
+        })
       })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {

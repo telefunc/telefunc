@@ -271,6 +271,22 @@ function testRoom() {
       expect(r.lateOnClose).toBe(true)
     },
   )
+  testRoomScenario<{
+    order: string[]
+    whileClosing: { listed: string[] | string; after: string[] }
+    recreated: { meta: unknown; count: number }
+    recreatedOpen: boolean
+  }>(
+    'list-races',
+    'room: Room.list() lists in code point order and skips rooms that close during it; a room created again after its close starts fresh and still closes by itself',
+    (r) => {
+      expect(r.order).deep.equal(['B', 'Z', 'a', 'b', 'é'])
+      expect(Array.isArray(r.whileClosing.listed)).toBe(true) // a list, not an error
+      expect(r.whileClosing.after).deep.equal([])
+      expect(r.recreated).deep.equal({ meta: { incarnation: 2 }, count: 0 })
+      expect(r.recreatedOpen).toBe(false)
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',

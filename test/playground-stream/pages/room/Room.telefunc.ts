@@ -38,6 +38,9 @@ export {
   onCreateRoomHeld,
   onJoinAndLeaveAsServer,
   onIsOpen,
+  onListAsListed,
+  onListWhileClosing,
+  onRecreate,
 }
 
 import { Buffer } from 'node:buffer'
@@ -384,4 +387,32 @@ async function onJoinAndLeaveAsServer(roomId: string) {
 
 async function onIsOpen(roomId: string) {
   return (await Room.list({ prefix: roomId })).some((room) => room.id === roomId)
+}
+
+async function onListAsListed(prefix: string) {
+  return (await Room.list({ prefix })).map((room) => room.id)
+}
+
+/** Lists the prefix while 20 rooms under it close. */
+async function onListWhileClosing(prefix: string) {
+  const ids = Array.from({ length: 20 }, (_, i) => `${prefix}:closing${i}`)
+  await Promise.all(ids.map((id) => Room.create(id)))
+  const [listed] = await Promise.all([
+    Room.list({ prefix }).then(
+      (rooms) => rooms.map((room) => room.id),
+      (err: Error) => err.name,
+    ),
+    ...ids.map((id) => Room.close(id)),
+  ])
+  return { listed, after: await onListAsListed(prefix) }
+}
+
+/** Creates the room with a member and closes it, then creates it again, empty, closing 1 s after. */
+async function onRecreate(roomId: string) {
+  await Room.create(roomId, { meta: { incarnation: 1 } })
+  await Room.join(roomId, { meta: { name: 'Earlier' } })
+  await Room.close(roomId)
+  await Room.create(roomId, { meta: { incarnation: 2 }, emptyTimeout: 1000 })
+  const room = await Room.get(roomId)
+  return { meta: room.meta, count: room.count }
 }
