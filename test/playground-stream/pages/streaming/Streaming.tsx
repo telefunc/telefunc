@@ -23,6 +23,7 @@ import {
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
   onReturnTwoLargeStreams,
+  onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
   onReturnFailingStream,
   onGeneratorFinallyThrows,
@@ -707,6 +708,18 @@ function Streaming() {
         }}
       >
         Two large streams, read in turn
+      </button>
+
+      <button
+        id="test-one-large-returned-chunk"
+        onClick={async () => {
+          setResult('')
+          const start = performance.now()
+          const bytes = await byteCount(await onReturnOneLargeChunk())
+          setResult(JSON.stringify({ bytes, ms: Math.round(performance.now() - start) }))
+        }}
+      >
+        One 256 MiB chunk
       </button>
 
       {(['finish-first', 'cancel-first'] as const).map((order) => (

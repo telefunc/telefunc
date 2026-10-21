@@ -341,6 +341,22 @@ function testStreaming() {
     })
   })
 
+  if (process.env.PUBLIC_ENV__STREAM_TRANSPORT !== 'channel') {
+    test('streaming: a returned stream of one 256 MiB chunk reaches the page within 8 s', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-one-large-returned-chunk')
+      let result: { bytes: number; ms: number } | undefined
+      await autoRetry(
+        async () => {
+          result = await getResult('#streaming-result')
+        },
+        { timeout: 50_000 },
+      )
+      expect(result!.bytes).toBe(256 * 1024 * 1024)
+      expect(result!.ms).lessThan(8000)
+    })
+  }
+
   for (const order of ['finish-first', 'cancel-first'] as const) {
     test(`streaming: the server stops producing a returned stream the page cancels while it reads another to its end (${order})`, async () => {
       await navigate(`${getServerUrl()}/streaming`)
