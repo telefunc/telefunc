@@ -559,13 +559,13 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   private releasePresence(key: string, owner: string): void {
     const memberState = this.memberStates.get(key)
-    if (memberState) {
-      const count = memberState.owners.get(owner)! - 1
-      if (count > 0) memberState.owners.set(owner, count)
-      else {
-        memberState.owners.delete(owner)
-        void this.deletePresence(key, owner)
-      }
+    // Its subscriber was still there, so the key's state is too.
+    assert(memberState)
+    const count = memberState.owners.get(owner)! - 1
+    if (count > 0) memberState.owners.set(owner, count)
+    else {
+      memberState.owners.delete(owner)
+      void this.deletePresence(key, owner)
     }
     this.teardownPresenceIfEmpty(key)
   }
