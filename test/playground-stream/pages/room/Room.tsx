@@ -878,6 +878,43 @@ function Room() {
         await onRoomRelease(roomId)
         setResult(JSON.stringify({ roomId }))
       })}
+
+      {scenario('tail-order', 'Tail: order and cap', 'Held text flushed in order', async () => {
+        const [roomId, owner] = await createRoom('tail-order')
+        const me = await owner.join({ meta: { name: 'Src' } })
+        const tailed = await onGetRoomTail(roomId)
+        const announcements: string[] = []
+        tailed.onAnnounce((data) => announcements.push(data as string))
+        await me.publish('a')
+        await onAnnounce(roomId, 'ann')
+        await pollUntil(() => ({ done: announcements.length > 0 }))
+        await me.publish('b')
+        const received: string[] = []
+        tailed.subscribe((data) => received.push(data as string))
+        await pollUntil(() => ({ done: received.includes('b') }))
+        const flushed = [...received]
+
+        const capped = await onGetRoomTail(roomId)
+        await Promise.all(Array.from({ length: 300 }, (_, n) => me.publish(`n${n}`)))
+        const kept: string[] = []
+        capped.subscribe((data) => kept.push(data as string))
+        await pollUntil(() => ({ done: kept.includes('n299') }))
+        setResult(JSON.stringify({ received: flushed, announcements, kept }))
+      })}
+
+      {scenario('tail-lease', null, 'Subscribe to a tail after its lease', async () => {
+        const [roomId, owner] = await createRoom('tail-lease')
+        const me = await owner.join({ meta: { name: 'Src' } })
+        const tailed = await onGetRoomTail(roomId)
+        await me.publish('held')
+        setResult(JSON.stringify({ waiting: true }))
+        await new Promise((resolve) => setTimeout(resolve, 61_000))
+        const received: string[] = []
+        tailed.subscribe((data) => received.push(data as string))
+        await me.setAttributes({}) // same-channel ack orders the subscription before the live publish
+        await me.publish('live')
+        await pollUntil(() => ({ result: { received }, done: received.includes('live') }))
+      })}
     </div>
   )
 }

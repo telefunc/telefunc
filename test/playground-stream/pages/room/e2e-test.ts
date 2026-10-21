@@ -1,4 +1,4 @@
-export { testRoom }
+export { testRoom, testRoomLongWaits }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc } from '../../e2e-utils'
@@ -511,6 +511,29 @@ function testRoom() {
         )
       },
       { timeout: 10_000 },
+    )
+  })
+  testRoomScenario<{ received: string[]; announcements: string[]; kept: string[] }>(
+    'tail-order',
+    'room: a tail hands its first subscriber what it held in order, though an announcement came first, and only the latest 256',
+    (r) => {
+      expect(r.announcements).deep.equal(['ann'])
+      expect(r.received).deep.equal(['a', 'b'])
+      expect(r.kept).deep.equal(Array.from({ length: 256 }, (_, i) => `n${i + 44}`))
+    },
+  )
+}
+
+/** Tests that wait out Room's fixed timeouts, run in one lane. */
+function testRoomLongWaits() {
+  test('room: a tail nobody subscribes to within 60 seconds drops what it held', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-tail-lease')
+    await autoRetry(
+      async () => {
+        expect(await getResult('#room-result')).deep.equal({ received: ['live'] })
+      },
+      { timeout: 75_000 },
     )
   })
 }

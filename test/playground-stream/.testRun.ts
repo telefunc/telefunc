@@ -18,8 +18,13 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
 import { testWire } from './pages/channel/wire-e2e-test'
 
-function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
+/** `additionalTimeout`: how much longer than test-e2e's default a test of the lane may take. */
+function runPlayground(
+  cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno',
+  additionalTimeout = 0,
+) {
   run(cmd, {
+    additionalTimeout,
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
     // "Server running at" / "Accepting connections at" matcher, so the framework times
