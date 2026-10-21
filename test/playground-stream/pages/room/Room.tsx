@@ -1,6 +1,6 @@
 export { Room }
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useState, useSyncExternalStore } from 'react'
 import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
@@ -23,6 +23,7 @@ import {
   onHiddenLeave,
   onHiddenAfterPlayers,
   onGetHiddenAfterPlayers,
+  onCloseRoomWithMember,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -55,8 +56,17 @@ async function createRoom(label: string) {
   return [roomId, await onGetRoom(roomId)] as const
 }
 
+type RoomView = Awaited<ReturnType<typeof onGetRoom>>
+
+/** The documented React adapter: the room's methods passed as they are. */
+function LiveCount({ room }: { room: RoomView }) {
+  const snapshot = useSyncExternalStore(room.onChange, room.snapshot)
+  return <pre id="room-live-count">{snapshot.count}</pre>
+}
+
 function Room() {
   const [result, setResult] = useState<string>('')
+  const [liveRoom, setLiveRoom] = useState<RoomView | null>(null)
   const [hydrated, setHydrated] = useState(false)
   useEffect(() => setHydrated(true), [])
   /** Render every poll so e2e autoRetry sees fresh data; some reads are asynchronous. */
@@ -87,6 +97,7 @@ function Room() {
   return (
     <div id={hydrated ? 'hydrated' : undefined}>
       <pre id="room-result">{result}</pre>
+      {liveRoom && <LiveCount room={liveRoom} />}
 
       {scenario('chat', 'Presence & Chat', 'Join, publish, setMeta, leave', async () => {
         const [roomId, lobby] = await createRoom('chat')
@@ -690,6 +701,28 @@ function Room() {
             done: alone.closed && alone.cause !== null,
           }
         })
+      })}
+
+      {scenario('proxy', 'Room methods as React reads them', 'Stable and detached methods', async () => {
+        const [roomId, room] = await createRoom('proxy')
+        const sameMethods = room.onChange === room.onChange && room.snapshot === room.snapshot
+        const { join, snapshot } = room
+        await join({ meta: { name: 'Detached' } })
+        await pollUntil(() => ({ done: snapshot().count === 1 }))
+        setLiveRoom(room)
+        await onJoinAsServer(roomId, 'Bob')
+
+        const closed = await onCloseRoomWithMember(`e2e-proxy-closed:${crypto.randomUUID()}`)
+        const causes: unknown[] = []
+        closed.member!.onLeave((cause) => causes.push(cause))
+        setResult(
+          JSON.stringify({
+            sameMethods,
+            detachedCount: snapshot().count,
+            causes,
+            closedIsClosed: closed.room.isClosed,
+          }),
+        )
       })}
     </div>
   )

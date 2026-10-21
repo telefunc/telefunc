@@ -305,4 +305,21 @@ function testRoom() {
       expect(r.alone).deep.equal({ cause: { type: 'closed' }, closed: true })
     },
   )
+  test('room: React reads a room through useSyncExternalStore with its methods as they are; a member returned with a closed room has left', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-proxy')
+    await autoRetry(async () => {
+      const r = await getResult<{
+        sameMethods: boolean
+        detachedCount: number
+        causes: unknown[]
+        closedIsClosed: boolean
+      }>('#room-result')
+      expect(r.sameMethods).toBe(true)
+      expect(r.detachedCount).greaterThanOrEqual(1)
+      expect(r.causes).deep.equal([{ type: 'closed' }])
+      expect(r.closedIsClosed).toBe(true)
+      expect(await page.textContent('#room-live-count')).toBe('2')
+    })
+  })
 }

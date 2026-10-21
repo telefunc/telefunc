@@ -19,6 +19,7 @@ export {
   onHiddenLeave,
   onHiddenAfterPlayers,
   onGetHiddenAfterPlayers,
+  onCloseRoomWithMember,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -183,6 +184,17 @@ async function onHiddenAfterPlayers(roomId: string) {
 async function onGetHiddenAfterPlayers(roomId: string) {
   const state = hiddenAfterPlayers.get(roomId)!
   return { cause: state.cause, closed: state.closed }
+}
+
+/** Returns a room closed under its member, as a page gets one that closed while the call ran. */
+async function onCloseRoomWithMember(roomId: string) {
+  const room = await Room.create(roomId)
+  const member = await room.getParticipant((await room.join({ meta: { name: 'Gone' } })).id)
+  const { promise: closed, resolve } = Promise.withResolvers<void>()
+  room.onClose(resolve)
+  await Room.close(roomId)
+  await closed
+  return { room, member }
 }
 
 async function onAnnounce(roomId: string, data: unknown) {
