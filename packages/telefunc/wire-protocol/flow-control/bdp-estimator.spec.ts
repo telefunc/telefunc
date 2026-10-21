@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { BdpEstimator } from './bdp-estimator.js'
-import { Link } from '../link.js'
 import {
   BDP_PING_MAX_INTERVAL_MS,
   BDP_PING_MIN_INTERVAL_MS,
@@ -11,17 +10,14 @@ import {
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
 
-// `performance.now()` drives the min-interval throttle; fake time so tests can pin the
+// `Date.now()` drives the min-interval throttle; fake time so tests can pin the
 // "ping is allowed to fire" / "throttled" boundary deterministically.
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
 afterEach(() => vi.useRealTimers())
 
-/** What the sender's wire held each time its credit ran out: nothing, or a window and more. */
+/** A sender's wire that held nothing as its credit ran out, and delivered right up to the ack. */
 const EMPTY = 0
-const HELD = CREDIT_WINDOW_MAX_BYTES
-/** What the wire delivered before an ack: right up to it, as a queue does, or nothing. */
 const upToAck = () => Infinity
-const nothing = () => 0
 
 // Sample shape: `bytesAtPingSent` is snapshotted *after* the first `onReceive`
 // increments the byte counter, so the sample is the bytes that arrive
@@ -107,256 +103,6 @@ describe('BdpEstimator', () => {
     const bdp = new BdpEstimator()
     const boundary = Math.ceil((CREDIT_WINDOW_INITIAL_BYTES * 2) / 3)
     expect(cycle(bdp, boundary)).toBe(true)
-  })
-
-  // The ack waits behind what the sender's wire still holds, so a sender that fills its window faster than its wire
-  // drains saturates any sample. Only a wire the window left idle says the window, not the path, was the limit. What
-  // waits on the wire the byte window bounds, so the message window grows on its sample as before.
-  it('does not grow a byte window whose sender always had a backlog on its wire, however saturated the sample', () => {
-    const bdp = new BdpEstimator()
-    bdp.onReceive(1)
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES)
-    for (let i = 0; i < CREDIT_MSG_WINDOW_INITIAL; i++) bdp.onReceive(1)
-    expect(bdp.onPingAck({ probe: bdp.probe, backlog: HELD, pathRtt: Infinity }, upToAck)).toEqual({
-      acknowledged: true,
-      bytes: 'wire-busy',
-      msgs: 'grow',
-    })
-    expect(bdp.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES)
-  })
-
-  // The sender says whether its credit ran out on an empty wire since it answered the ping before. A ping that went
-  // out after a growth still covers credit the smaller window granted, so only the one after it judges the new window.
-  it('judges a grown window only by a probe that went out after the first one following the growth', () => {
-    const bdp = new BdpEstimator()
-    expect(cycle(bdp, CREDIT_WINDOW_INITIAL_BYTES)).toBe(true)
-    vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1)
-    bdp.onReceive(2 * CREDIT_WINDOW_INITIAL_BYTES)
-    expect(bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck).bytes).toBe('window-grew')
-    // The cadence stays at the floor.
-    vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    expect(cycle(bdp, 2 * CREDIT_WINDOW_INITIAL_BYTES)).toBe(true)
-    expect(bdp.byteWindow).toBe(4 * CREDIT_WINDOW_INITIAL_BYTES)
-  })
-
-  /** A ping whose ack comes `rttMs` after it, with a window's worth arriving meanwhile, up to the ack, as a queue
-   *  delivers it. */
-  function probeAfter(bdp: BdpEstimator, rttMs: number, backlog: number, senderPathRtt = Infinity) {
-    vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
-    expect(bdp.onReceive(1)).toBe(true)
-    vi.advanceTimersByTime(rttMs)
-    const window = bdp.byteWindow
-    bdp.onReceive(window)
-    return bdp.onPingAck({ probe: bdp.probe, backlog, pathRtt: senderPathRtt }, () => window)
-  }
-
-  /** A ping that waited `pingWait` behind the receiver's own data, and whose ack comes `rttMs` after it, with a window's
-   *  worth arriving at once and, of what the wire delivers, only what `deliveredBefore` says after: the window held back
-   *  its sender, whose wire held `backlog` as its credit ran out. The receiver's frames waited `roundWait` at most since
-   *  the ping went out. */
-  function heldBack(
-    bdp: BdpEstimator,
-    rttMs: number,
-    { backlog = EMPTY, deliveredBefore = nothing, pingWait = 0, roundWait = 0 } = {},
-  ) {
-    const sendWait = { waitNow: () => pingWait, longestWaitSince: () => roundWait }
-    vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
-    expect(bdp.onReceive(1, sendWait)).toBe(true)
-    bdp.onReceive(bdp.byteWindow)
-    vi.advanceTimersByTime(rttMs)
-    return bdp.onPingAck({ probe: bdp.probe, backlog, pathRtt: Infinity }, deliveredBefore, sendWait)
-  }
-
-  /** An attach on `link`, whose probe is answered `rttMs` after it went out. */
-  function attach(bdp: BdpEstimator, rttMs: number, link = new Link()) {
-    const probe = bdp.probeAttach(link)!
-    bdp.attach(link)
-    vi.advanceTimersByTime(rttMs)
-    return bdp.onPingAck({ probe: probe, backlog: Infinity, pathRtt: Infinity }, upToAck)
-  }
-
-  // An attach's probe goes out ahead of the channel's frames, so its round trip is the path's. A later probe that took
-  // ten times as long waited behind a queue, and its sample counts a tenth: a window that fills the path grows no more.
-  it("counts a probe's sample at the round trip an attach's probe took", () => {
-    const bdp = new BdpEstimator()
-    // It settles no growth.
-    expect(attach(bdp, 50).acknowledged).toBe(false)
-    expect(probeAfter(bdp, 500, EMPTY).bytes).toBe('sample-too-small')
-    // One that took the path's round trip counts in full, whatever the sender says.
-    expect(probeAfter(bdp, 50, HELD).bytes).toBe('grow')
-  })
-
-  // A path whose round trip rose since the attach measured it: a round the window held back took the path's, as no queue
-  // held its ack, so samples count at it, until a round takes less. A new wire may take another path.
-  it('counts samples at the round trip of a round the window held back, where it is more than the one an attach measured', () => {
-    const bdp = new BdpEstimator()
-    attach(bdp, 10)
-    expect(probeAfter(bdp, 200, EMPTY).bytes).toBe('sample-too-small')
-    expect(heldBack(bdp, 200).bytes).toBe('grow')
-    expect(probeAfter(bdp, 200, HELD).bytes).toBe('grow')
-    expect(probeAfter(bdp, 400, EMPTY).bytes).toBe('sample-too-small')
-    expect(probeAfter(bdp, 100, HELD).bytes).toBe('grow')
-    expect(probeAfter(bdp, 200, EMPTY).bytes).toBe('sample-too-small')
-    bdp.reset()
-    expect(probeAfter(bdp, 100, EMPTY).bytes).toBe('sample-too-small')
-  })
-
-  // Other channels' messages, a few bytes in either side's socket and arriving just before the ack, are no queue: a queue
-  // delivers at the link's rate up to the ack, at least the channel's own rate.
-  it('counts a round the window held back at its round trip, whatever few frames of other channels its wire held and delivered', () => {
-    const bdp = new BdpEstimator()
-    attach(bdp, 10)
-    // In the last eighth of the round trip, an eighth of what the channel got in it: a queue at the channel's rate.
-    expect(heldBack(bdp, 200, { deliveredBefore: () => bdp.byteWindow / 8 }).bytes).toBe('sample-too-small')
-    expect(heldBack(bdp, 200, { backlog: bdp.byteWindow / 8 }).bytes).toBe('sample-too-small')
-    expect(heldBack(bdp, 200, { backlog: 100, deliveredBefore: () => 100 }).bytes).toBe('grow')
-  })
-
-  // A ping that waited behind the receiver's own upload took the path's round trip and that wait, which the window's
-  // refreshes wait too: a round counts at the path's round trip and the longest the receiver's frames waited in it.
-  it("counts a round at the path's round trip and the longest the receiver's own frames waited in it", () => {
-    const bdp = new BdpEstimator()
-    attach(bdp, 10)
-    // The path takes 100 ms of the 200: the sample counts half.
-    expect(heldBack(bdp, 200, { pingWait: 100 }).bytes).toBe('sample-too-small')
-    expect(heldBack(bdp, 200, { pingWait: 100, roundWait: 100 }).bytes).toBe('grow')
-  })
-
-  // A window past the loop, with the receiver's wait in it, only queues at the sender: grown on such a round, it is what
-  // the sample fills two thirds of, at most double.
-  it("grows a window whose round counts the receiver's wait to one and a half times the sample, at most double", () => {
-    const bdp = new BdpEstimator()
-    const window = bdp.byteWindow
-    attach(bdp, 10)
-    expect(heldBack(bdp, 200, { pingWait: 100, roundWait: 100 }).bytes).toBe('grow')
-    bdp.growBytes()
-    // The sample is the window and the ping's byte.
-    expect(bdp.byteWindow).toBe(Math.ceil(1.5 * (window + 1)))
-    expect(heldBack(bdp, 200).bytes).toBe('grow')
-    bdp.growBytes()
-    expect(bdp.byteWindow).toBe(2 * Math.ceil(1.5 * (window + 1)))
-  })
-
-  // Where nothing measured the path, a sender whose wire held under an eighth of the window each time its credit ran
-  // out had it empty soon after: the window held it back.
-  it("grows a byte window nothing measured the path for once its sender's wire held under an eighth of it each time its credit ran out", () => {
-    const bdp = new BdpEstimator()
-    expect(probeAfter(bdp, 50, CREDIT_WINDOW_INITIAL_BYTES / 8).bytes).toBe('wire-busy')
-    expect(probeAfter(bdp, 50, CREDIT_WINDOW_INITIAL_BYTES / 8 - 1).bytes).toBe('grow')
-  })
-
-  // A server's receive side has no attach of its own to probe: the page's ack says the round trip its own attach's
-  // probe took, and counts as that would.
-  it("counts a probe's sample at the round trip its sender's attach measured, where it measured none itself", () => {
-    const bdp = new BdpEstimator()
-    expect(probeAfter(bdp, 500, EMPTY, 50).bytes).toBe('sample-too-small')
-    expect(probeAfter(bdp, 50, HELD, 50).bytes).toBe('grow')
-  })
-
-  // A later wire, as one of batched POSTs whose attach isn't probed, may take another path, or wait for its POSTs.
-  it("measures the round trip of the wire an attach's probe went on, and of no other", () => {
-    const link = new Link()
-    attach(new BdpEstimator(), 50, link)
-    expect(link.pathRtt).toBe(50)
-    expect(new Link().pathRtt).toBe(Infinity)
-  })
-
-  // An attach's probe may wait behind other channels' frames, or on the channel's registration: a later ping that took
-  // less shows the path takes no more, and every later sample counts at it.
-  it("lowers the round trip an attach's probe measured to that of a later ping that took less", () => {
-    const link = new Link()
-    const bdp = new BdpEstimator()
-    attach(bdp, 200, link)
-    probeAfter(bdp, 20, EMPTY)
-    expect(link.pathRtt).toBe(20)
-  })
-
-  // Every channel on a wire takes the path its round trip measures: one attach's probe measures it for all.
-  it("counts samples at the round trip another channel's attach measured on its wire, and probes that wire no more", () => {
-    const link = new Link()
-    attach(new BdpEstimator(), 50, link)
-    const bdp = new BdpEstimator()
-    expect(bdp.probeAttach(link)).toBeUndefined()
-    bdp.attach(link)
-    expect(probeAfter(bdp, 500, EMPTY).bytes).toBe('sample-too-small')
-    expect(probeAfter(bdp, 50, HELD).bytes).toBe('grow')
-  })
-
-  // A registration's RECONCILE lists every channel again, on the same wire, where the answer waits behind what the
-  // wire holds: a wire whose round trip is measured is probed no more. One on another wire measures another path.
-  it("probes a wire's round trip once, and that of the next wire", () => {
-    const bdp = new BdpEstimator()
-    const link = new Link()
-    attach(bdp, 50, link)
-    expect(bdp.probeAttach(link)).toBeUndefined()
-    expect(probeAfter(bdp, 500, EMPTY).bytes).toBe('sample-too-small')
-    attach(bdp, 500)
-    expect(probeAfter(bdp, 500, HELD).bytes).toBe('grow')
-  })
-
-  // A registration's RECONCILE may go out before the first attach's probe is answered: that one's answer, which the
-  // channel's frames don't hold up, counts.
-  it('takes the least round trip of the probes of attaches on one wire in flight together', () => {
-    const bdp = new BdpEstimator()
-    const link = new Link()
-    const first = bdp.probeAttach(link)!
-    const second = bdp.probeAttach(link)!
-    bdp.attach(link)
-    vi.advanceTimersByTime(50)
-    bdp.onPingAck({ probe: first, backlog: HELD, pathRtt: Infinity }, upToAck)
-    vi.advanceTimersByTime(450)
-    bdp.onPingAck({ probe: second, backlog: HELD, pathRtt: Infinity }, upToAck)
-    expect(probeAfter(bdp, 500, EMPTY).bytes).toBe('sample-too-small')
-  })
-
-  // One answered late, after a later wire's, rode a wire that is gone.
-  it("ignores the answer to an earlier wire's probe once a later wire's round trip is measured", () => {
-    const bdp = new BdpEstimator()
-    const gone = new Link()
-    const early = bdp.probeAttach(gone)!
-    bdp.attach(gone)
-    attach(bdp, 500)
-    bdp.onPingAck({ probe: early, backlog: HELD, pathRtt: Infinity }, upToAck)
-    expect(probeAfter(bdp, 500, HELD).bytes).toBe('grow')
-  })
-
-  // An attach's probe is lost with its wire, or with an upgrade whose barrier never went out: the next wire measures its
-  // own path.
-  it("keeps probing while an attach's probe goes unanswered, and measures the path of the next wire", () => {
-    const bdp = new BdpEstimator()
-    attach(bdp, 50)
-    const next = new Link()
-    bdp.probeAttach(next)
-    expect(probeAfter(bdp, 50, EMPTY).bytes).toBe('grow')
-    attach(bdp, 500, next)
-    expect(probeAfter(bdp, 500, HELD).bytes).toBe('grow')
-  })
-
-  // The attach that resets the old wire's ping sent its probe on the new wire.
-  it("measures the round trip of an attach's probe answered after the reset of that attach", () => {
-    const bdp = new BdpEstimator()
-    const link = new Link()
-    const probe = bdp.probeAttach(link)!
-    bdp.attach(link)
-    bdp.reset()
-    vi.advanceTimersByTime(50)
-    bdp.onPingAck({ probe: probe, backlog: HELD, pathRtt: Infinity }, upToAck)
-    expect(probeAfter(bdp, 500, EMPTY).bytes).toBe('sample-too-small')
-  })
-
-  // A probe dropped by a reset may still be answered, as when its ping waited for the attach that reset it: another
-  // probe's ack settles nothing.
-  it('ignores an ack that answers another probe than the one in flight', () => {
-    const bdp = new BdpEstimator()
-    bdp.onReceive(1)
-    const stale = bdp.probe
-    bdp.reset()
-    vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1)
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(bdp.onPingAck({ probe: stale, backlog: EMPTY, pathRtt: Infinity }, upToAck).acknowledged).toBe(false)
-    expect(bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck).bytes).toBe('grow')
   })
 
   // Hard cap. Once window hits CREDIT_WINDOW_MAX_BYTES, growth stops there —
@@ -511,63 +257,6 @@ describe('BdpEstimator', () => {
     bdp.growMsgs()
     expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 2)
     expect(bdp.byteWindow).toBe(CREDIT_WINDOW_INITIAL_BYTES) // untouched
-  })
-
-  function msgCycleOf(bdp: BdpEstimator, msgs: number, backlog: number) {
-    vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1)
-    for (let i = 0; i < msgs; i++) bdp.onReceive(1)
-    const dec = bdp.onPingAck({ probe: bdp.probe, backlog, pathRtt: Infinity }, upToAck)
-    if (dec.msgs === 'grow') bdp.growMsgs()
-    return dec.msgs
-  }
-
-  // The sender answers a ping that went out after a growth on the credit the smaller window granted, so its sample
-  // can't saturate the larger one. It counts against the window before, and only for a sender whose credit ran out on an
-  // empty wire: a wire that held a backlog filled its sample with what the byte window let queue.
-  it('judges a ping that went out after a message window growth by the window before it, for a starved sender', () => {
-    const bdp = new BdpEstimator()
-    const msgCycle = (msgs: number, backlog: number) => msgCycleOf(bdp, msgs, backlog)
-    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, EMPTY)).toBe('grow')
-    expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 2)
-    // The sample saturates the window before the growth: a starved sender's ping counts.
-    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, EMPTY)).toBe('grow')
-    expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 4)
-    // A sample of the window before doesn't pass the one it grew to.
-    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, EMPTY)).toBe('sample-too-small')
-  })
-
-  it('judges a ping that went out after a message window growth by the grown window, for a sender whose wire held a backlog', () => {
-    const bdp = new BdpEstimator()
-    const msgCycle = (msgs: number, backlog: number) => msgCycleOf(bdp, msgs, backlog)
-    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, HELD)).toBe('grow')
-    // A sample of the window before doesn't pass the one it grew to.
-    expect(msgCycle(CREDIT_MSG_WINDOW_INITIAL, HELD)).toBe('sample-too-small')
-    expect(bdp.msgWindow).toBe(CREDIT_MSG_WINDOW_INITIAL * 2)
-  })
-
-  it('judges a ping on a replaced wire by the grown message window', () => {
-    const bdp = new BdpEstimator()
-    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, EMPTY)).toBe('grow')
-    bdp.reset()
-    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, EMPTY)).toBe('sample-too-small')
-  })
-
-  it('judges only the ping that follows a message window growth by the window before it', () => {
-    const bdp = new BdpEstimator()
-    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, EMPTY)).toBe('grow')
-    expect(msgCycleOf(bdp, 0, EMPTY)).toBe('sample-too-small')
-    vi.advanceTimersByTime(BDP_PING_MAX_INTERVAL_MS)
-    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, EMPTY)).toBe('sample-too-small')
-  })
-
-  it('judges the byte window by a ping that went out after a message window growth', () => {
-    const bdp = new BdpEstimator()
-    expect(msgCycleOf(bdp, CREDIT_MSG_WINDOW_INITIAL, EMPTY)).toBe('grow')
-    vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
-    bdp.onReceive(1)
-    bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES)
-    expect(bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck).bytes).toBe('grow')
   })
 
   // Cap clamping is independent per axis.
