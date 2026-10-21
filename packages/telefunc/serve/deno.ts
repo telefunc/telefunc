@@ -35,6 +35,7 @@ function telefunc(): TelefuncServe {
   const ws = crossws({
     hooks: {
       open(peer) {
+        // TODO: remove once https://github.com/h3js/crossws/pull/213 is released.
         // crossws's Deno adapter reports a close without its code, and the code tells a page that left from a dropped one.
         peer.websocket.addEventListener!('close', (event) =>
           hooks.close(peer, { code: event.code, reason: event.reason }),
