@@ -229,16 +229,20 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   private _subscribeBroadcast(): void {
     if (this._unsubBroadcast) return
     assert(this._adapter)
-    this._unsubBroadcast = this._adapter.subscribe(this.key, (serialized, rawInfo) =>
-      this._deliverBroadcastMessage(serialized, rawInfo),
+    this._unsubBroadcast = this._adapter.subscribe(
+      this.key,
+      (serialized, rawInfo) => this._deliverBroadcastMessage(serialized, rawInfo),
+      this._wireRequest,
     )
   }
 
   private _subscribeBinaryBroadcast(): void {
     if (this._unsubBinaryBroadcast) return
     assert(this._adapter)
-    this._unsubBinaryBroadcast = this._adapter.subscribeBinary(this.key, (data, rawInfo) =>
-      this._deliverBroadcastBinaryMessage(data, rawInfo),
+    this._unsubBinaryBroadcast = this._adapter.subscribeBinary(
+      this.key,
+      (data, rawInfo) => this._deliverBroadcastBinaryMessage(data, rawInfo),
+      this._wireRequest,
     )
   }
 

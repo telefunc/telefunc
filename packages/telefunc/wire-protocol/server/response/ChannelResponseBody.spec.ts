@@ -48,7 +48,12 @@ test('a returned stream that ends while its page is away is still closing when i
     const frames: Uint8Array[] = []
     // The page is back within its reconnect window, with the stream's chunk.
     const attachChannel = getChannelMux()['attachChannel'].bind(getChannelMux())
-    attachChannel(channel, { id: channel.id, ix: 7, lastSeq: 1 }, createSender(frames), true)
+    attachChannel(
+      channel,
+      { id: channel.id, ix: 7, lastSeq: 1 },
+      { sender: createSender(frames), request: undefined } as Parameters<typeof attachChannel>[2],
+      true,
+    )
     expect(frames.map((frame) => decode(frame).tag)).toEqual([TAG.BINARY, TAG.CLOSE])
   } finally {
     vi.useRealTimers()

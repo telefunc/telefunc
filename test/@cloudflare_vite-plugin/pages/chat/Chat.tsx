@@ -83,7 +83,7 @@ function ChatDemo() {
         <h1 style={{ fontSize: 18, fontWeight: 600 }}>Chat (pub/sub demo) &mdash; {username}</h1>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', fontSize: 14 }}>
+      <div id="messages" style={{ flex: 1, overflowY: 'auto', fontSize: 14 }}>
         {messages.map((msg, i) => (
           <div key={i} style={{ marginBottom: 6 }}>
             {msg.user === 'system' ? (

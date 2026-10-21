@@ -26,10 +26,11 @@ type BroadcastBinaryOnMessage = (data: Uint8Array, info: WirePublishInfo) => voi
 
 type BroadcastUnsubscribe = () => void
 
+/** `wireRequest`: the request that opened the wire a subscribing page's messages go out on, where one did. */
 type BroadcastAdapter = {
-  subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe
+  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe
   publish(key: string, serialized: string): BroadcastPublishResult | Promise<BroadcastPublishResult>
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe
   publishBinary(key: string, data: Uint8Array): BroadcastPublishResult | Promise<BroadcastPublishResult>
 }
 

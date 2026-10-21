@@ -162,6 +162,8 @@ type ConnectionEntry = {
   transport: ServerTransport<unknown>
   /** One per wire: the peers of every reconcile on this wire share it. */
   sender: PeerSender
+  /** The request that opened the wire, where one did. */
+  request: Request | undefined
 }
 
 function getChannelMux(): ChannelMux {
@@ -251,7 +253,11 @@ class ChannelMux {
 
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
-  onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
+  onConnectionOpen<TConnection>(
+    connection: TConnection,
+    transport: ServerTransport<TConnection>,
+    request?: Request,
+  ): void {
     const wait = new SocketWait({
       held: () => this.bufferedAmount(connection),
       ahead: () => this.queuedAhead(connection),
@@ -310,6 +316,7 @@ class ChannelMux {
           return state ? state.deliveries.before(state.frameDelivery, ms) : 0
         },
       },
+      request,
     }
     this.connectionEntries.set(connection, entry)
     const connId = transport.getConnId(connection)
@@ -844,7 +851,7 @@ class ChannelMux {
     const existing = this.channels.get(open.id)
     if (existing) {
       entry.state.attaching.add(existing)
-      return this.attachChannel(existing, open, entry.sender, replay)
+      return this.attachChannel(existing, open, entry, replay)
     }
     if (open.initial && !awaited) this.awaitChannel(open, entry, connection)
     return null
@@ -872,7 +879,7 @@ class ChannelMux {
     const sessionId = entry.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
     entry.state.attaching.add(channel)
-    const handle = this.attachChannel(channel, awaited.open, entry.sender, false)
+    const handle = this.attachChannel(channel, awaited.open, entry, false)
     entry.state.attaching.delete(channel)
     if (!handle) {
       this.expireAwaited(awaited)
@@ -930,12 +937,13 @@ class ChannelMux {
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
-    sender: PeerSender,
+    { sender, request }: ConnectionEntry,
     replay: boolean,
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
     channel._onPageHas(open.lastSeq)
+    channel._wireRequest = request
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     const missed = replay ? buffer.getAfter(open.lastSeq) : []
     if (missed === null) {

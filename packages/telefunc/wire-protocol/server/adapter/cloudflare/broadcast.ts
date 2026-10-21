@@ -39,6 +39,8 @@ type BroadcastPublishRequest = {
 
 type BroadcastDeliverRequest = {
   key: string
+  /** The Durable Object it goes to: it delivers to its own subscribers only. */
+  doName: string
   info: WirePublishInfo
   serialized?: string
   binaryData?: Uint8Array
@@ -161,14 +163,18 @@ class CloudflareBucketPublishBuffer {
 
 class MemberBucketState {
   readonly pendingPublishes: CloudflareBucketPublishBuffer
-  setupInFlight = true
+  /** Presences being written: publishes from here wait for them, so their own subscribers get them. */
+  setupsInFlight = 0
   teardownRequested = false
+  /** Each Durable Object with subscribers on the key here, with how many: each has a presence of its own. */
+  readonly owners = new Map<string, number>()
   refreshTimer: ReturnType<typeof setInterval> | null = null
-  private readonly authority: TelefuncBroadcastStub
+  /** A stub can only be used by the Durable Object that got it, so each publish gets its own. */
+  private readonly authority: () => TelefuncBroadcastStub
   private readonly key: string
   private readonly locationBucket: LocationBucket
 
-  constructor(key: string, locationBucket: LocationBucket, authority: TelefuncBroadcastStub) {
+  constructor(key: string, locationBucket: LocationBucket, authority: () => TelefuncBroadcastStub) {
     this.key = key
     this.locationBucket = locationBucket
     this.authority = authority
@@ -177,7 +183,7 @@ class MemberBucketState {
 
   publish(serialized: string): Promise<BroadcastPublishResult> {
     return unwrapRpcResult(
-      this.authority.telefuncBroadcastPublish({
+      this.authority().telefuncBroadcastPublish({
         key: this.key,
         locationBucket: this.locationBucket,
         serialized,
@@ -187,7 +193,7 @@ class MemberBucketState {
 
   publishBinary(data: Uint8Array): Promise<BroadcastPublishResult> {
     return unwrapRpcResult(
-      this.authority.telefuncBroadcastPublish({
+      this.authority().telefuncBroadcastPublish({
         key: this.key,
         locationBucket: this.locationBucket,
         binaryData: data,
@@ -275,8 +281,11 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   private locationBucket: LocationBucket | null = null
   private representativeDOName: string | null = null
   private readonly memberStates = new Map<string, MemberBucketState>()
-  private readonly textSubs = new Map<string, Set<BroadcastOnMessage>>()
-  private readonly binarySubs = new Map<string, Set<BroadcastBinaryOnMessage>>()
+  /** Each subscriber with the Durable Object whose context may write to its page. */
+  private readonly textSubs = new Map<string, Map<BroadcastOnMessage, string>>()
+  private readonly binarySubs = new Map<string, Map<BroadcastBinaryOnMessage, string>>()
+  /** Each request a Durable Object received, with its name: a wire it opens is that Durable Object's. */
+  private readonly requestOwners = new WeakMap<Request, string>()
 
   constructor({ baseInstanceName, scale }: { baseInstanceName: string; scale?: CloudflareScale }) {
     this.baseInstanceName = baseInstanceName
@@ -290,6 +299,10 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   attachKV(kv: KVNamespace): void {
     this.kv = kv
+  }
+
+  attachRequest(request: Request, doName: string): void {
+    this.requestOwners.set(request, doName)
   }
 
   attachIsolateInfo(doName: string, locationBucket: LocationBucket): void {
@@ -320,23 +333,22 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return this.representativeDOName
   }
 
-  private getPresenceKey(key: string): string {
-    return `tfps:${encodeURIComponent(key)}:${this.locationBucket}:${this.representativeDOName}`
+  private getPresenceKey(key: string, owner: string): string {
+    return `tfps:${encodeURIComponent(key)}:${this.locationBucket}:${owner}`
   }
 
   private getPresencePrefix(key: string): string {
     return `tfps:${encodeURIComponent(key)}:`
   }
 
-  private async putPresence(key: string): Promise<void> {
-    const doName = this.requireRepresentativeDOName()
-    await this.requireKV().put(this.getPresenceKey(key), doName, {
+  private async putPresence(key: string, owner: string): Promise<void> {
+    await this.requireKV().put(this.getPresenceKey(key, owner), owner, {
       expirationTtl: PRESENCE_TTL_SECONDS,
     })
   }
 
-  private async deletePresence(key: string): Promise<void> {
-    await this.requireKV().delete(this.getPresenceKey(key))
+  private async deletePresence(key: string, owner: string): Promise<void> {
+    await this.requireKV().delete(this.getPresenceKey(key, owner))
   }
 
   private async listPresenceByBucket(key: string): Promise<Map<LocationBucket, string[]>> {
@@ -375,54 +387,64 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return binary !== undefined && binary.size > 0
   }
 
-  private deliverLocal({ key, serialized, binaryData, info }: BroadcastDeliverRequest): void {
+  private deliverLocal({ key, doName, serialized, binaryData, info }: BroadcastDeliverRequest): void {
     if (serialized !== undefined) {
       const subs = this.textSubs.get(key)
-      if (subs) for (const cb of subs) cb(serialized, info)
+      if (subs) for (const [cb, owner] of subs) if (owner === doName) cb(serialized, info)
     }
     if (binaryData !== undefined) {
       const subs = this.binarySubs.get(key)
-      if (subs) for (const cb of subs) cb(binaryData, info)
+      if (subs) for (const [cb, owner] of subs) if (owner === doName) cb(binaryData, info)
     }
+  }
+
+  /** The Durable Object that may write to a subscriber's page; the server's own subscribers go with the isolate's first. */
+  private ownerOf(wireRequest: Request | undefined): string {
+    if (!wireRequest) return this.requireRepresentativeDOName()
+    const owner = this.requestOwners.get(wireRequest)
+    assert(owner, 'a wire opened by a request no Durable Object received')
+    return owner
   }
 
   // --- BroadcastAdapter interface ---
 
-  subscribe(key: string, onMessage: BroadcastOnMessage): BroadcastUnsubscribe {
+  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
     const locationBucket = this.requireLocationBucket()
+    const owner = this.ownerOf(wireRequest)
     let subs = this.textSubs.get(key)
     if (!subs) {
-      subs = new Set()
+      subs = new Map()
       this.textSubs.set(key, subs)
     }
-    subs.add(onMessage)
-    this.ensurePresence(key, locationBucket)
+    subs.set(onMessage, owner)
+    this.ensurePresence(key, locationBucket, owner)
     return () => {
       const s = this.textSubs.get(key)
       if (s) {
         s.delete(onMessage)
         if (s.size === 0) this.textSubs.delete(key)
       }
-      this.teardownPresenceIfEmpty(key)
+      this.releasePresence(key, owner)
     }
   }
 
-  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
+  subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
     const locationBucket = this.requireLocationBucket()
+    const owner = this.ownerOf(wireRequest)
     let subs = this.binarySubs.get(key)
     if (!subs) {
-      subs = new Set()
+      subs = new Map()
       this.binarySubs.set(key, subs)
     }
-    subs.add(onMessage)
-    this.ensurePresence(key, locationBucket)
+    subs.set(onMessage, owner)
+    this.ensurePresence(key, locationBucket, owner)
     return () => {
       const s = this.binarySubs.get(key)
       if (s) {
         s.delete(onMessage)
         if (s.size === 0) this.binarySubs.delete(key)
       }
-      this.teardownPresenceIfEmpty(key)
+      this.releasePresence(key, owner)
     }
   }
 
@@ -430,7 +452,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const memberState = this.memberStates.get(key)
 
     if (memberState) {
-      if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
+      if (memberState.setupsInFlight > 0 || memberState.pendingPublishes.flushing) {
         return new Promise<BroadcastPublishResult>((resolve, reject) => {
           memberState.pendingPublishes.push({
             send: () => memberState.publish(serialized),
@@ -451,7 +473,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const memberState = this.memberStates.get(key)
 
     if (memberState) {
-      if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
+      if (memberState.setupsInFlight > 0 || memberState.pendingPublishes.flushing) {
         // The caller may reuse or transfer its buffer once the publish returns.
         return new Promise<BroadcastPublishResult>((resolve, reject) => {
           memberState.pendingPublishes.pushCopy(data, (queuedData) => memberState.publishBinary(queuedData), {
@@ -486,7 +508,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
       const doNames = request.doNames ?? []
       await Promise.all(
         doNames.map((doName) =>
-          this.getBoundStub(doName).telefuncBroadcastDeliver({ key, serialized, binaryData, info }),
+          this.getBoundStub(doName).telefuncBroadcastDeliver({ key, doName, serialized, binaryData, info }),
         ),
       )
       return { seq: info.seq, timestamp: info.timestamp }
@@ -526,11 +548,28 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
 
   // --- Private ---
 
-  private ensurePresence(key: string, locationBucket: LocationBucket): void {
-    if (this.memberStates.has(key)) return
-    const memberState = new MemberBucketState(key, locationBucket, this.getAuthorityStub(key, locationBucket))
-    this.memberStates.set(key, memberState)
-    void this.initializePresence(key, memberState)
+  private ensurePresence(key: string, locationBucket: LocationBucket, owner: string): void {
+    let memberState = this.memberStates.get(key)
+    if (!memberState) {
+      memberState = new MemberBucketState(key, locationBucket, () => this.getAuthorityStub(key, locationBucket))
+      this.memberStates.set(key, memberState)
+    }
+    const count = memberState.owners.get(owner) ?? 0
+    memberState.owners.set(owner, count + 1)
+    if (count === 0) void this.initializePresence(key, memberState, owner)
+  }
+
+  private releasePresence(key: string, owner: string): void {
+    const memberState = this.memberStates.get(key)
+    if (memberState) {
+      const count = memberState.owners.get(owner)! - 1
+      if (count > 0) memberState.owners.set(owner, count)
+      else {
+        memberState.owners.delete(owner)
+        void this.deletePresence(key, owner)
+      }
+    }
+    this.teardownPresenceIfEmpty(key)
   }
 
   private teardownPresenceIfEmpty(key: string): void {
@@ -538,32 +577,34 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     const memberState = this.memberStates.get(key)
     if (!memberState) return
 
-    if (memberState.setupInFlight || memberState.pendingPublishes.flushing) {
+    if (memberState.setupsInFlight > 0 || memberState.pendingPublishes.flushing) {
       memberState.teardownRequested = true
       return
     }
 
     memberState.stopRefresh()
     this.memberStates.delete(key)
-    void this.deletePresence(key)
   }
 
-  private async initializePresence(key: string, memberState: MemberBucketState): Promise<void> {
+  private async initializePresence(key: string, memberState: MemberBucketState, owner: string): Promise<void> {
+    memberState.setupsInFlight++
     try {
-      await this.putPresence(key)
+      await this.putPresence(key, owner)
     } finally {
-      memberState.setupInFlight = false
+      memberState.setupsInFlight--
     }
+    // Its release may have deleted the presence before the put above wrote it.
+    if (!memberState.owners.has(owner)) await this.deletePresence(key, owner)
+    if (memberState.setupsInFlight > 0) return
 
-    memberState.refreshTimer = setInterval(() => {
-      void this.putPresence(key)
+    memberState.refreshTimer ??= setInterval(() => {
+      for (const current of memberState.owners.keys()) void this.putPresence(key, current)
     }, PRESENCE_REFRESH_INTERVAL_MS)
 
     await memberState.pendingPublishes.flush()
 
     if (memberState.teardownRequested) {
       memberState.stopRefresh()
-      await this.deletePresence(key)
       this.memberStates.delete(key)
     }
   }

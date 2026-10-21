@@ -19,6 +19,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testChannelOversized()
   testBacklog()
   testChat()
+  testChatMembers()
 }
 
 function testCloudflareBindings() {
@@ -224,6 +225,39 @@ function testBacklog() {
       { timeout: 30_000 },
     )
     await cdp.detach()
+  })
+}
+
+function testChatMembers() {
+  test('Chat: members in separate browsers each get every message published after they joined, once', async () => {
+    const browser = page.context().browser()!
+    const names = ['member-1', 'member-2', 'member-3'].map((name) => `${name}-${Math.floor(Math.random() * 1e6)}`)
+    const members: (typeof page)[] = []
+    for (const name of names) {
+      const member = await (await browser.newContext()).newPage()
+      members.push(member)
+      await member.goto(getServerUrl() + '/chat')
+      await autoRetry(async () => {
+        expect(await member.locator('#hydrated').count()).toBe(1)
+      })
+      await member.fill('input[placeholder="Pick a username..."]', name)
+      await member.locator('button', { hasText: 'Join' }).click()
+      await autoRetry(async () => {
+        expect(await member.locator('#messages').textContent()).toContain(`${name} joined`)
+      })
+    }
+    // Each member's onOpen publishes `<name> joined` and two binary greetings.
+    await autoRetry(async () => {
+      for (const [i, member] of members.entries()) {
+        const messages = await member.locator('#messages > div').allTextContents()
+        const later = names.slice(i)
+        expect(messages.filter((text) => text.endsWith(' joined'))).deep.equal(later.map((name) => `${name} joined`))
+        expect(messages.filter((text) => text.startsWith('welcome ')).sort()).deep.equal(
+          later.map((name) => `welcome ${name}`).sort(),
+        )
+      }
+    })
+    for (const member of members) await member.context().close()
   })
 }
 
