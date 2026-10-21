@@ -26,6 +26,8 @@ import {
   onCloseRoomWithMember,
   onBackgroundErrors,
   onRoomWhileAway,
+  onRoomOverflow,
+  onGetRoomOverflow,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -831,6 +833,23 @@ function Room() {
             closed,
           }),
         )
+      })}
+
+      {scenario('overflow', 'Offline past bufferLimit', 'Let go with ChannelOverflowError', async () => {
+        const [roomId, view] = await createRoom('overflow')
+        const seen: string[] = []
+        view.subscribe((data) => seen.push((data as string).trim()))
+        let closed = false
+        view.onClose(() => (closed = true))
+        const me = await view.join({ meta: { name: 'Me' } })
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onRoomOverflow(roomId)
+        await pollUntil(() => ({ done: seen.includes('before') }))
+        setResult(JSON.stringify({ roomId }))
+        for (let poll = 0; poll < 300 && !(closed && myCause); poll++) await new Promise((r) => setTimeout(r, 100))
+        const leaves = await onGetRoomOverflow(roomId)
+        setResult(JSON.stringify({ roomId, seen, myCause, closed, isClosed: view.isClosed, leaves }))
       })}
     </div>
   )

@@ -22,6 +22,8 @@ export {
   onCloseRoomWithMember,
   onBackgroundErrors,
   onRoomWhileAway,
+  onRoomOverflow,
+  onGetRoomOverflow,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -266,6 +268,27 @@ async function onRoomWhileAway(roomId: string, memberId: string) {
     await Room.close(roomId)
     cleanupState[`roomAway_${roomId}`] = 'done'
   })
+}
+
+const overflows = new Map<string, { leaves: string[]; refs: unknown[] }>()
+
+/** A speaker says 'before', then, run by the test while the page is offline, 1 MiB: more than the page's 512 KiB
+ *  bufferLimit for text holds. */
+async function onRoomOverflow(roomId: string) {
+  const room = await Room.get(roomId)
+  const speaker = await room.join({ meta: { name: 'Speaker' } })
+  const leaves: string[] = []
+  room.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
+  overflows.set(roomId, { leaves, refs: [room, speaker] })
+  onServerAction(`roomOverflow_${roomId}`, async () => {
+    for (let n = 0; n < 8; n++) await speaker.publish(String(n).padEnd(128 * 1024))
+    cleanupState[`roomOverflow_${roomId}`] = 'done'
+  })
+  await speaker.publish('before')
+}
+
+async function onGetRoomOverflow(roomId: string) {
+  return overflows.get(roomId)!.leaves
 }
 
 async function onAnnounce(roomId: string, data: unknown) {
