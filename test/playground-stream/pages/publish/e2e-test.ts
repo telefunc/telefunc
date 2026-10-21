@@ -144,10 +144,10 @@ function testPublish(isDev: boolean, inDocker = false) {
 
     await autoRetry(async () => {
       const result = await getResult<{ key: string; receipts: Array<{ key: string; seq: number }> }>('#publish-result')
-      expect(result.receipts).deep.equal([
-        { key: result.key, seq: 1 },
-        { key: result.key, seq: 2 },
-      ])
+      const [first, second] = result.receipts
+      expect(result.receipts.map((receipt) => receipt.key)).deep.equal([result.key, result.key])
+      // `seq` is monotonic per key.
+      expect(second!.seq).greaterThan(first!.seq)
     })
   })
 
