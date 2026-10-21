@@ -26,6 +26,8 @@ export {
   onPublishRightAfterSubscribe,
   onOpenSlowGuardRoom,
   onConcurrentMetaWrites,
+  onReplaceMetaInLoop,
+  onStopReplacingMeta,
 }
 
 import { Buffer } from 'node:buffer'
@@ -261,4 +263,29 @@ async function onConcurrentMetaWrites(roomId: string) {
     memberId: me.id,
     memberMeta: Object.entries(member!.meta),
   }
+}
+
+/** A meta of 1,500 keys, `a0`… or `b0`…: more than one page of cells. */
+const bigMeta = (prefix: string) => Object.fromEntries(Array.from({ length: 1500 }, (_, i) => [`${prefix}${i}`, i]))
+
+const replacing = new Map<string, ReturnType<typeof setInterval>>()
+
+/** Sets a member's and the room's meta to the `a` meta, then replaces both with the `b` and `a` metas in turn every
+ *  10 ms, each replace overlapping the ones before it, until `onStopReplacingMeta()`. */
+async function onReplaceMetaInLoop(roomId: string) {
+  const me = await Room.join(roomId, { meta: { name: 'Big', ...bigMeta('a') } })
+  await Room.setMeta(roomId, bigMeta('a'))
+  let round = 0
+  const timer = setInterval(() => {
+    const prefix = round++ % 2 === 0 ? 'b' : 'a'
+    void me.setMeta({ name: 'Big', ...bigMeta(prefix) })
+    void Room.setMeta(roomId, bigMeta(prefix))
+  }, 10)
+  replacing.set(roomId, timer)
+  return me.id
+}
+
+async function onStopReplacingMeta(roomId: string) {
+  clearInterval(replacing.get(roomId))
+  replacing.delete(roomId)
 }

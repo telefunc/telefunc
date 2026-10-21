@@ -204,6 +204,14 @@ function testRoom() {
       expect(r.otherMemberMeta).deep.equal(memberMeta)
     },
   )
+  testRoomScenario<{ reads: string[] }>(
+    'meta-replace',
+    "room: a read of a room's or member's meta of more than a page, while it is replaced, gets the meta before or after the replace, never a mix or none",
+    (r) => {
+      expect(r.reads.length).toBe(12)
+      for (const read of r.reads) expect(['a', 'b']).toContain(read)
+    },
+  )
   testRoomScenario<{ mine: [string, unknown][]; remote: [string, unknown][] }>(
     'own-meta-race',
     "room: a page's own member ends on the meta its unawaited writes stored, in call order, as other views do",

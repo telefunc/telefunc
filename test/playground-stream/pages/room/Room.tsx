@@ -30,6 +30,8 @@ import {
   onPublishRightAfterSubscribe,
   onOpenSlowGuardRoom,
   onConcurrentMetaWrites,
+  onReplaceMetaInLoop,
+  onStopReplacingMeta,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -407,6 +409,26 @@ function Room() {
             JSON.stringify(views.otherMemberMeta) === JSON.stringify(stored.memberMeta)
           return { result: { stored, ...views }, done: settled }
         })
+      })}
+
+      {scenario('meta-replace', 'Reads while meta is replaced', 'Read a big meta while it is replaced', async () => {
+        const roomId = await createRoomId('meta-replace')
+        const memberId = await onReplaceMetaInLoop(roomId)
+        // Which meta a read got: `a…` or `b…` whole, or what it saw otherwise.
+        const which = (meta: Record<string, unknown>) => {
+          const keys = Object.keys(meta).filter((key) => key !== 'name')
+          const prefix = keys[0]?.[0]
+          const whole = keys.length === 1500 && keys.every((key, i) => key === `${prefix}${i}` && meta[key] === i)
+          return whole ? prefix : `${keys.length} keys from ${keys[0]} to ${keys.at(-1)}`
+        }
+        const reads: Array<string | undefined> = []
+        for (let i = 0; i < 6; i++) {
+          const room = await onGetRoom(roomId)
+          const member = await room.getParticipant(memberId)
+          reads.push(which(room.meta), which(member?.meta ?? {}))
+          setResult(JSON.stringify({ reads }))
+        }
+        await onStopReplacingMeta(roomId)
       })}
 
       {scenario(
