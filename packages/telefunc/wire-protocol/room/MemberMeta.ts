@@ -9,8 +9,8 @@ import type { ParticipantMeta } from './types.js'
  *  within a constant factor of the meta. */
 const MEMBER_META_MERGES_HELD_MIN = 64
 
-/** How many times a failover rewound a room's meta seqs. Each member's meta sharing it forgets its seq when it next
- *  reads it after one, so a rewind costs the same at any member count. */
+/** How many times a failover rewound a room's meta seqs. Each member's meta sharing it reads its seq as forgotten after
+ *  one, so a rewind costs the same at any member count. */
 type MetaRewinds = { count: number }
 const NEVER_REWOUND: MetaRewinds = Object.freeze({ count: 0 })
 
@@ -36,11 +36,7 @@ class MemberMeta {
 
   /** -1 after a rewind until the next whole meta. */
   get seq(): number {
-    if (this._rewindsSeen !== this._rewinds.count) {
-      this._rewindsSeen = this._rewinds.count
-      this._seq = -1
-    }
-    return this._seq
+    return this._rewindsSeen === this._rewinds.count ? this._seq : -1
   }
 
   get object(): ParticipantMeta {
@@ -72,21 +68,27 @@ class MemberMeta {
 
   /** `gap` for a merge past the next seq: an update before it never arrived. */
   apply(update: MemberMetaUpdate): 'applied' | 'stale' | 'gap' {
-    if (update.seq <= this.seq) return 'stale'
+    const seq = this.seq
+    if (update.seq <= seq) return 'stale'
     if ('meta' in update) {
       this._object = Object.freeze(update.meta)
       this._keys = Object.keys(this._object).length
       this._merges = null
       this._mergedKeys = 0
-      this._seq = update.seq
+      this._setSeq(update.seq)
       return 'applied'
     }
-    if (update.seq > this._seq + 1) return 'gap'
+    if (update.seq > seq + 1) return 'gap'
     this._merges ??= []
     this._merges.push(update.attrs)
     this._mergedKeys += Object.keys(update.attrs).length
-    this._seq = update.seq
+    this._setSeq(update.seq)
     if (this._mergedKeys > Math.max(MEMBER_META_MERGES_HELD_MIN, this._keys)) this._fold(this._merges)
     return 'applied'
+  }
+
+  private _setSeq(seq: number): void {
+    this._seq = seq
+    this._rewindsSeen = this._rewinds.count
   }
 }
