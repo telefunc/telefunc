@@ -522,6 +522,23 @@ function testRoom() {
       expect(r.kept).deep.equal(Array.from({ length: 256 }, (_, i) => `n${i + 44}`))
     },
   )
+  test('room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, and a lane the store ends is replaced', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-hiccups')
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        leave: {
+          firstLeave: 'Internal Server Error — see server logs',
+          publishAfter: 'ok',
+          secondLeave: 'ok',
+          leaves: ['Me:left'],
+          count: 0,
+        },
+        join: { firstJoin: 'Internal Server Error — see server logs', count: 1, listed: ['Second'] },
+        lane: { ended: true, got: ['before', 'after'] },
+      })
+    })
+  })
 }
 
 /** Tests that wait out Room's fixed timeouts, run in one lane. */
@@ -535,5 +552,23 @@ function testRoomLongWaits() {
       },
       { timeout: 75_000 },
     )
+  })
+
+  test("room: a store write that fails once heals at the next heartbeat: a page's view keeps its room open, and a failed join leaves no member", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-hiccups-heartbeat')
+    let viewRoomId = ''
+    await autoRetry(
+      async () => {
+        const r = await getResult<{ viewRoom: { listed: string[] } }>('#room-result')
+        viewRoomId = r.viewRoom.listed[0] ?? ''
+        expect(r).deep.equal({
+          viewRoom: { listed: [viewRoomId], isClosed: false },
+          joinRoom: { firstJoin: 'Internal Server Error — see server logs', listed: ['Second'], count: 1 },
+        })
+      },
+      { timeout: 60_000 },
+    )
+    expect(viewRoomId).match(/^e2e-hiccup-view:/)
   })
 }

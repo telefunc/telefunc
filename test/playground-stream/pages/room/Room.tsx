@@ -31,6 +31,10 @@ import {
   onRoomBurst,
   onGetWatchedCount,
   onRoomRelease,
+  onFailBackend,
+  onEndBackendSubscriptions,
+  onListParticipantNames,
+  onCreateRoomClosingAfter,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -914,6 +918,77 @@ function Room() {
         await me.setAttributes({}) // same-channel ack orders the subscription before the live publish
         await me.publish('live')
         await pollUntil(() => ({ result: { received }, done: received.includes('live') }))
+      })}
+
+      {scenario('hiccups', 'Store hiccups', 'A store write fails once', async () => {
+        const settle = (promise: Promise<unknown>) =>
+          promise.then(
+            () => 'ok',
+            (err: Error) => err.message,
+          )
+
+        const [leaveRoomId, leaveView] = await createRoom('hiccup-leave')
+        const leaves: string[] = []
+        leaveView.onLeave((member, cause) => leaves.push(`${member.meta.name}:${cause.type}`))
+        const me = await leaveView.join({ meta: { name: 'Me' } })
+        // The leave's write of the member record.
+        await onFailBackend({ op: 'compareExchangeCells', roomId: leaveRoomId, key: 'm:' })
+        const firstLeave = await settle(me.leave())
+        const publishAfter = await settle(me.publish('still-here'))
+        const secondLeave = await settle(me.leave())
+        await pollUntil(() => ({ done: leaveView.count === 0 }))
+
+        const [joinRoomId, joinView] = await createRoom('hiccup-join')
+        // The join's announcement, after its member record committed.
+        await onFailBackend({ op: 'commitLane', roomId: joinRoomId, key: 'm:' })
+        const firstJoin = await settle(joinView.join({ meta: { name: 'First' } }))
+        await joinView.join({ meta: { name: 'Second' } })
+        await pollUntil(() => ({ done: joinView.count === 1 }))
+        const listed = await onListParticipantNames(joinRoomId)
+
+        const [laneRoomId, laneView] = await createRoom('hiccup-lane')
+        const got: string[] = []
+        laneView.subscribe((data) => got.push(data as string))
+        const speaker = await laneView.join({ meta: { name: 'Speaker' } })
+        await speaker.publish('before')
+        await pollUntil(() => ({ done: got.includes('before') }))
+        const ended = await onEndBackendSubscriptions(laneRoomId)
+        await speaker.publish('after')
+        await pollUntil(() => ({ done: got.includes('after') }))
+
+        setResult(
+          JSON.stringify({
+            leave: { firstLeave, publishAfter, secondLeave, leaves, count: leaveView.count },
+            join: { firstJoin, count: joinView.count, listed },
+            lane: { ended: ended > 0, got },
+          }),
+        )
+      })}
+
+      {scenario('hiccups-heartbeat', null, 'A failed write healed by the heartbeat', async () => {
+        const viewRoomId = `e2e-hiccup-view:${crypto.randomUUID()}`
+        // Past the 30 s heartbeat, which restores what the store failed to keep.
+        await onCreateRoomClosingAfter(viewRoomId, 35_000)
+        // The write of this page's view, which holds the room.
+        await onFailBackend({ op: 'compareExchangeCells', roomId: viewRoomId, key: 'v:' })
+        const view = await onGetRoom(viewRoomId)
+
+        const [joinRoomId, joinView] = await createRoom('hiccup-join')
+        await onFailBackend({ op: 'commitLane', roomId: joinRoomId, key: 'm:' })
+        const firstJoin = await joinView.join({ meta: { name: 'First' } }).then(
+          () => 'ok',
+          (err: Error) => err.message,
+        )
+        await joinView.join({ meta: { name: 'Second' } })
+        setResult(JSON.stringify({ waiting: true }))
+
+        await new Promise((resolve) => setTimeout(resolve, 40_000))
+        setResult(
+          JSON.stringify({
+            viewRoom: { listed: await onListRooms(viewRoomId), isClosed: view.isClosed },
+            joinRoom: { firstJoin, listed: await onListParticipantNames(joinRoomId), count: joinView.count },
+          }),
+        )
       })}
     </div>
   )

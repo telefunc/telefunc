@@ -14,8 +14,8 @@ import {
 
 /** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
  *  (the next matching subscription refuses to open) or 'deliver' (the next message a matching subscription gets is
- *  dropped). `roomId`, or `key` (a Broadcast key,
- *  or the start of a Room cell key the call reads or writes), narrows what matches. */
+ *  dropped). `roomId`, or `key` (a Broadcast key, the start of a Room cell key the call reads or writes, or a commit's
+ *  lane kind or required cell), narrows what matches. */
 type BackendFault = { op: string; roomId?: string; key?: string; times?: number }
 
 type Source = BroadcastRoute | RoomSubscriptionSource
@@ -127,6 +127,10 @@ function callOf(source: Source): Call {
 function callOfArgs(op: string, args: unknown[]): Call {
   if (op === 'publish') return { keys: [(args[0] as BroadcastRoute).key] }
   const [roomId, , selector] = args as [string, string, unknown]
+  if (op === 'commitLane') {
+    const required = (args[4] as { requiredCellKeys?: string[] } | undefined)?.requiredCellKeys ?? []
+    return { roomId, keys: [(selector as { kind: string }).kind, ...required] }
+  }
   if (op === 'readCellPages') return { roomId, keys: [selector as string] }
   if (op === 'readCells') {
     const sel = selector as { keys: string[] } | { prefix: string }

@@ -27,6 +27,10 @@ export {
   onRoomBurst,
   onGetWatchedCount,
   onRoomRelease,
+  onFailBackend,
+  onEndBackendSubscriptions,
+  onListParticipantNames,
+  onCreateRoomClosingAfter,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -39,6 +43,7 @@ export {
 import { Room, Abort, onBug, type LeaveCause, type LocalParticipant } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
+import { addBackendFault, endBackendSubscriptions, type BackendFault } from '../../failing-backend'
 
 async function onCreateRoom(roomId: string) {
   return await Room.create(roomId, { meta: { topic: 'e2e' } })
@@ -347,6 +352,25 @@ async function releaseRefs(roomId: string) {
   await Room.close(closedId)
 
   return { view: new WeakRef(view), left: new WeakRef(left), closed: new WeakRef(closed), member: new WeakRef(member) }
+}
+
+/** The store fails what `fault` names (failing-backend.ts). */
+async function onFailBackend(fault: BackendFault) {
+  addBackendFault(fault)
+}
+
+async function onEndBackendSubscriptions(roomId: string) {
+  return endBackendSubscriptions({ roomId })
+}
+
+async function onListParticipantNames(roomId: string) {
+  const room = await Room.get(roomId)
+  return (await room.getParticipants()).map((member) => member.meta.name).sort()
+}
+
+/** A room that closes `emptyTimeout` ms after nothing holds it, if nobody joined it. */
+async function onCreateRoomClosingAfter(roomId: string, emptyTimeout: number) {
+  await Room.create(roomId, { emptyTimeout })
 }
 
 async function onAnnounce(roomId: string, data: unknown) {

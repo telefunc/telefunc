@@ -42,6 +42,9 @@ function runPlayground(
         log.logText.includes('[telefunc:channel-error]') ||
         log.logText.includes('Error: server-listener-bug') ||
         log.logText.includes('room-listener-bug') ||
+        // The failing backend's failures, which the server reports (failing-backend.ts).
+        log.logText.includes('failing-backend:') ||
+        (log.logText.includes('Backend subscription closed:') && log.logText.includes('hiccup')) ||
         log.logText.includes('Unexpected generator error') ||
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||
