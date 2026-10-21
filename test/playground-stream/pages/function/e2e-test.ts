@@ -149,6 +149,14 @@ function testFunction(isDev: boolean, inDocker = false) {
     })
   })
 
+  for (const method of ['GET', 'HEAD']) {
+    test(`function: a ${method} request to /_telefunc gets an answer`, async () => {
+      const response = await fetch(`${getServerUrl()}/_telefunc`, { method })
+      expect(response.status).toBe(400)
+      expect(await response.text()).toBe(method === 'GET' ? 'Malformed Telefunc Request' : '')
+    })
+  }
+
   test('function: a callback the server calls without awaiting it, which fails, leaves the server clean', async () => {
     await navigate(`${getServerUrl()}/function`)
     await page.click('#unawaited-run')
