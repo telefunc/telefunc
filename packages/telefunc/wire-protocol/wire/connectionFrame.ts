@@ -23,7 +23,6 @@ export {
   isConnCtrlTag,
   encodePublishText,
   encodePublishBinary,
-  chargedBytes,
   seqNear,
   seqThrough,
 }
@@ -86,8 +85,6 @@ const PONG_ENTRY_BYTES = 7
 const ACK_RES_PREFIX = 9
 /** The most a frame adds to a channel message or its ack answer: an ACK_RES's header and prefix. */
 const MESSAGE_FRAME_OVERHEAD_MAX_BYTES = HEADER + ACK_RES_PREFIX
-/** What a frame counts against flow control and the replay buffer: all of it, so an empty message counts too. */
-const chargedBytes = (frame: Uint8Array): number => frame.byteLength
 const DATA_TAG_MIN = 0x10
 
 const CHANNEL_CTRL_TAG_MIN = 0x30
@@ -311,7 +308,7 @@ type WirePublishInfo = { seq: number; timestamp: number }
 
 // ===== Decoded frame =====
 
-/** `bytes`: what flow control counts (see `chargedBytes`). */
+/** `bytes`: the whole frame, what flow control counts, so an empty message counts too. */
 type ChannelDataFrame = { index: number; seq: number; bytes: number } & (
   | { tag: typeof TAG.TEXT; text: string }
   | { tag: typeof TAG.BINARY; data: Uint8Array }
@@ -717,7 +714,7 @@ function decode(frame: Uint8Array): DecodedFrame {
   const seq = isSequencedTag(tag) ? readU32(frame, SEQ_OFFSET) : 0
   const payload = frame.subarray(HEADER)
 
-  const bytes = chargedBytes(frame)
+  const bytes = frame.byteLength
 
   switch (tag) {
     case TAG.TEXT:

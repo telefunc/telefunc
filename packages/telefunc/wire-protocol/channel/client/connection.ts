@@ -44,7 +44,6 @@ import {
   TAG,
   encode,
   isSequencedFrame,
-  chargedBytes,
   seqNear,
   seqThrough,
 } from '../../wire/connectionFrame.js'
@@ -627,12 +626,12 @@ class ClientConnection implements MuxConnection {
 
   send(channel: MuxChannel, data: string): number {
     const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.text(ix, data, seq))
-    return frame ? chargedBytes(frame) : 0
+    return frame?.byteLength ?? 0
   }
 
   sendBinary(channel: MuxChannel, data: Uint8Array): number {
     const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.binary(ix, data, seq))
-    return frame ? chargedBytes(frame) : 0
+    return frame?.byteLength ?? 0
   }
 
   sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {

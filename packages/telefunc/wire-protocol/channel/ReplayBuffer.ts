@@ -1,4 +1,4 @@
-import { chargedBytes, replayLaneOf, type ReplayLaneKind } from '../wire/connectionFrame.js'
+import { replayLaneOf, type ReplayLaneKind } from '../wire/connectionFrame.js'
 import { assert } from '../../utils/assert.js'
 
 type ReplayBufferOptions = {
@@ -155,7 +155,7 @@ class ReplayLane {
 
   /** Stores an encoded frame; none larger than the budget. */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
-    const bytes = chargedBytes(frame)
+    const bytes = frame.byteLength
     if (bytes > this.maxBytes) return
     this.seqs.push(seq)
     this.frames.push(frame)
@@ -200,7 +200,7 @@ class ReplayLane {
 
   /** Drops the oldest entry, leaving its slot for `compact`. */
   private dropHead(): void {
-    this.totalBytes -= chargedBytes(this.frames[this.head]!)
+    this.totalBytes -= this.frames[this.head]!.byteLength
     this.head++
   }
 
