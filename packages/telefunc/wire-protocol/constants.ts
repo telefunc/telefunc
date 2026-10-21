@@ -186,8 +186,6 @@ export const WIRE_PROBE_FIRST_BYTES = 64
 export const WIRE_PROBE_CLOCK_MS = 1
 /** A frame goes whole only if it would cross within a ping interval at the fastest measured rate divided by this. */
 export const WIRE_PIECE_RATE_MARGIN = 8
-/** The most bytes a message of the whole frames sent in one turn carries (see `PieceSender`), each copied into it once. */
-export const WIRE_GATHER_BYTES = 64 * 1024
 /** An announced message may carry twice the one before it, or this many bytes whatever that carried. */
 export const WIRE_ANNOUNCED_MIN_BYTES = 8 * 1024
 /** A receiver waits this many times as long for the next announced message as it takes at the last one's rate. */

@@ -29,7 +29,7 @@ class PathRoom implements SendRoom {
   private appLimitedTo = 0
   /** Whether the sender is sending what it held for room. */
   private releasing = false
-  /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is gathered. */
+  /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is carried. */
   private handedSinceData = 0
   /** What the path holds of what the sender handed, as of `inPathAt`: the rate drains it, as `Uplink.inUplink`. */
   private inPath = 0

@@ -1,7 +1,7 @@
 export { testChannel }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { Request, Response, WebSocket } from 'playwright-chromium'
+import type { Request, Response } from 'playwright-chromium'
 import {
   navigate,
   getResult,
@@ -77,7 +77,6 @@ type ChannelState = {
   endedValuesCollected: boolean[] | null
   slowLinkReceived: number | null
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
-  smallPushReceived: number[] | null
   manyListenersMs: { page: number; server: number | null } | null
 }
 
@@ -887,28 +886,6 @@ function testChannel(isDev: boolean, inDocker = false) {
     expect(await waitFor('page')).lessThan(1000)
     expect(await waitFor('server')).lessThan(1000)
   })
-
-  if (channelTransport === 'ws') {
-    test('channel: a push of 60 small messages the server sends without awaiting reaches the page in a few WebSocket messages', async () => {
-      let messages = 0
-      const onWebSocket = (ws: WebSocket) => {
-        if (ws.url().includes('/_telefunc')) ws.on('framereceived', () => messages++)
-      }
-      page.on('websocket', onWebSocket)
-      try {
-        await navigate(`${getServerUrl()}/channel`)
-        await page.click('#channel-test-small-push')
-        await autoRetry(async () => {
-          expect((await getResult<ChannelState>('#channel-state')).smallPushReceived).deep.equal(
-            Array.from({ length: 60 }, (_, seq) => seq),
-          )
-        })
-      } finally {
-        page.off('websocket', onWebSocket)
-      }
-      expect(messages).lessThan(10)
-    })
-  }
 
   if (channelTransport === 'sse') {
     test("channel: Chrome reports none of the page's SSE POSTs canceled", async () => {
