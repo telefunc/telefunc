@@ -3,7 +3,7 @@ import * as path from 'node:path'
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node:http'
 import { Hono } from 'hono'
 import vike from '@vikejs/hono'
-import { Cluster, type Redis } from 'ioredis'
+import IORedis, { Cluster, type Redis } from 'ioredis'
 import { installRedis } from '@telefunc/redis'
 import { Broadcast, BroadcastChannel, config, Room, type LocalParticipant } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
@@ -136,6 +136,19 @@ app.post('/api/redis/move-slot', async (c) => {
   }
   for (const node of masters) await node.call('CLUSTER', 'SETSLOT', slot, 'NODE', targetId)
   return c.json({ moved })
+})
+
+// Calls installRedis() again with a client for database `db`, as a module evaluated again does; answers its error.
+app.post('/api/redis/install-again', async (c) => {
+  const client = new IORedis(`${process.env.REDIS_URL}/${c.req.query('db')}`)
+  try {
+    installRedis(client)
+    return c.json({ error: null })
+  } catch (error) {
+    return c.json({ error: String(error) })
+  } finally {
+    client.disconnect()
+  }
 })
 
 type RedisSnapshot = { node: number; key: string; ttl: number; value: string }[]

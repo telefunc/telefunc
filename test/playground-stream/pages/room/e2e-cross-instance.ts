@@ -5,6 +5,7 @@ export {
   testRedisAcrossServers,
   testServerCrash,
   testRedisClusterReshard,
+  testRedisInstallAgain,
 }
 
 import { autoRetry, expect, expectLog, getServerUrl, test } from '@brillout/test-e2e'
@@ -332,6 +333,30 @@ function testRedisClusterReshard() {
       })
     } finally {
       await leaveRoom(['a', 'b'], roomId)
+    }
+  })
+}
+
+function testRedisInstallAgain() {
+  test('broadcast: installRedis() called again for the same Redis keeps the servers delivering, and for another database throws', async () => {
+    const installAgain = async (db: number) =>
+      (await (
+        await fetch(`${getServerUrl()}/api/redis/install-again?bench_instance=a&db=${db}`, { method: 'POST' })
+      ).json()) as {
+        error: string | null
+      }
+    expect(await installAgain(0)).deep.equal({ error: null })
+    expect((await installAgain(1)).error).contains('Install one backend per process')
+
+    const key = newId('redis-install-again')
+    try {
+      await broadcastRequest('b', '/api/broadcast-cross-instance/subscribe', key, 'POST')
+      await broadcastRequest('a', '/api/broadcast-cross-instance/publish', key, 'POST', 'after')
+      await retry(10_000, async () => {
+        expect(await broadcastReceived('b', key)).deep.equal(['after'])
+      })
+    } finally {
+      await broadcastRequest('b', '/api/broadcast-cross-instance/unsubscribe', key, 'DELETE').catch(() => {})
     }
   })
 }

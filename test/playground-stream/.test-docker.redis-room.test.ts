@@ -1,6 +1,7 @@
 import { setupDockerRun } from './.testRun-docker'
 import {
   testRedisAcrossServers,
+  testRedisInstallAgain,
   testRedisOutages,
   testRedisRoomCrossInstance,
   testServerCrash,
@@ -10,6 +11,7 @@ import {
 if (setupDockerRun('pnpm test:docker', 3 * 60_000)) {
   testRedisRoomCrossInstance()
   testRedisAcrossServers()
+  testRedisInstallAgain()
   testRedisOutages()
   testServerCrash()
 }
