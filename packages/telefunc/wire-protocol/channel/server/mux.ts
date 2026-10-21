@@ -25,15 +25,12 @@ import {
 import {
   TAG,
   ProtocolViolationError,
-  LENGTH_BYTES,
   assertProtocol,
   decodeClientFrame,
   encode,
-  fixedBytes,
   isOneFrame,
   messageFrames,
   isConnCtrlTag,
-  isSequencedTag,
   peekTag,
   seqThrough,
   withTook,
@@ -404,9 +401,8 @@ class ChannelMux {
     let outcome: Promise<ReconcileOutcome | null> = Promise.resolve(null)
     try {
       if (isOneFrame(rawFrame)) return this.dispatchFrame(entry, connection, rawFrame, 'alone')
-      // Every frame but the last arrives riding; a LENGTH is taken after the frame it measures.
+      // Every frame but the last arrives riding.
       assertProtocol(entry.state.pieces, 'frames in one message on a wire that takes no pieces')
-      const { receiver } = entry.state.pieces
       const frames = messageFrames(rawFrame)
       let next = frames.next()
       while (!next.done && entry.state.closed === null) {
@@ -414,7 +410,6 @@ class ChannelMux {
         next = frames.next()
         const dispatched = this.dispatchFrame(entry, connection, frame, next.done ? 'alone' : 'riding')
         if (frame[0] === TAG.RECONCILE) outcome = dispatched
-        if (!next.done && fixedBytes(frame[0]!) === 0) receiver.tookLength(LENGTH_BYTES)
       }
     } catch (err) {
       if (!(err instanceof ProtocolViolationError)) throw err
@@ -441,7 +436,7 @@ class ChannelMux {
     if (tag === TAG.ANNOUNCE) return this.receiveAnnounce(entry, rawFrame)
     const now = performance.now()
     if (arrival !== 'pieced') {
-      state.pieces?.receiver.arrived(byteLength, isSequencedTag(tag as number), now, arrival)
+      state.pieces?.receiver.arrived(tag as number, byteLength, now, arrival)
       state.deliveries.note(now, byteLength)
     }
     state.recvBacklog.bytes += byteLength

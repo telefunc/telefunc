@@ -627,10 +627,12 @@ abstract class PieceReceiver {
   /** How long an acknowledgement waits from now. */
   protected abstract ackWait(): number
 
-  /** A whole frame of `bytes` arrived at `at`, `'riding'` ahead of its message's last frame, which alone dates it. */
-  arrived(bytes: number, data: boolean, at: number, arrival: 'alone' | 'riding'): void {
+  /** A whole frame of `tag` and `bytes` arrived at `at`, `'riding'` ahead of its message's last frame, which alone
+   *  dates it; a riding frame whose bytes vary came after its LENGTH, taken with it. */
+  arrived(tag: number, bytes: number, at: number, arrival: 'alone' | 'riding'): void {
     this.took += bytes
-    this.tookFrame(bytes, data, arrival === 'alone' && this.paced(bytes, at), at)
+    this.tookFrame(bytes, isSequencedTag(tag), arrival === 'alone' && this.paced(bytes, at), at)
+    if (arrival === 'riding' && fixedBytes(tag) === 0) this.took += LENGTH_BYTES
   }
 
   /** Takes an ANNOUNCE that arrived at `at`: one of no bytes opens an announcement, one of its `bytes` closes it. */
@@ -666,11 +668,6 @@ abstract class PieceReceiver {
     this.lastAnnounced = bytes
     this.announced += bytes
     return true
-  }
-
-  /** Takes a LENGTH of `bytes`, after the frame it measures: taken, as an ANNOUNCE is, not dated. */
-  tookLength(bytes: number): void {
-    this.took += bytes
   }
 
   /** Bytes it holds of a frame not yet whole. */

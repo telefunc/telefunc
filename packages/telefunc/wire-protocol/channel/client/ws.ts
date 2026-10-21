@@ -8,14 +8,11 @@ import { SendBudget } from '../../flowControl/client/SendBudget.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import {
-  LENGTH_BYTES,
   TAG,
   decode,
   encode,
-  fixedBytes,
   isOneFrame,
   messageFrames,
-  isSequencedTag,
   withTook,
   type DecodedFrame,
   type ReconciledPayload,
@@ -393,8 +390,7 @@ function receiveMessage(
     const own = frames.pop()!
     for (const each of frames) {
       const frame = decode(each)
-      pieces.arrived(each.byteLength, isSequencedTag(frame.tag), at, 'riding')
-      if (fixedBytes(frame.tag) === 0) pieces.tookLength(LENGTH_BYTES)
+      pieces.arrived(frame.tag, each.byteLength, at, 'riding')
       riding.push({ frame, bytes: each.byteLength })
     }
     const frame = decode(own)
@@ -406,7 +402,7 @@ function receiveMessage(
         lastBytes = whole.byteLength
       }
     } else {
-      pieces.arrived(own.byteLength, isSequencedTag(frame.tag), at, 'alone')
+      pieces.arrived(frame.tag, own.byteLength, at, 'alone')
       last = frame
       lastBytes = own.byteLength
     }
