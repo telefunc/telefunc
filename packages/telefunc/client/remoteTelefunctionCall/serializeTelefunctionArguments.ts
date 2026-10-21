@@ -6,11 +6,8 @@ import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/values/client/request/registry.js'
 import { encodeRequestEnvelope } from '../../wire-protocol/wire/frame.js'
-import {
-  pumpClientProducerToChannel,
-  type PumpChannelOptions,
-} from '../../wire-protocol/values/client/request/pumpToChannel.js'
-import { ClientChannel } from '../../wire-protocol/channel/client/channel.js'
+import { pumpClientProducerToChannel } from '../../wire-protocol/values/client/request/pumpToChannel.js'
+import { ClientChannel, type ConnectionOptions } from '../../wire-protocol/channel/client/channel.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
@@ -60,7 +57,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     dataMain.extensions = callContext.extensions
   }
 
-  const channelOptions: PumpChannelOptions = {
+  const connection: ConnectionOptions = {
     transports: callContext.channel.transports,
     connectionKey: callContext.connectionKey,
     headers: callContext.headers ?? undefined,
@@ -79,10 +76,10 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
         return index
       },
       createChannel(opts) {
-        return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, ...channelOptions })
+        return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, connection })
       },
       sendStream(createProducer) {
-        return pumpClientProducerToChannel(createProducer, channelOptions)
+        return pumpClientProducerToChannel(createProducer, connection)
       },
     },
     function onReplaced(replaced) {

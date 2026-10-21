@@ -15,7 +15,7 @@ import { BaseStreamReader } from './BaseStreamReader.js'
 import { PendingValue, resolvePendingValues } from './PendingValue.js'
 import { StreamReader } from './StreamReader.js'
 import { SSEStreamReader } from './SSEStreamReader.js'
-import { ClientChannel, ClientBroadcast } from '../../../channel/client/channel.js'
+import { ClientChannel, ClientBroadcast, type ConnectionOptions } from '../../../channel/client/channel.js'
 import { wrapProxy } from '../../../../utils/wrapProxy.js'
 import { GcRegistry } from '../../../../utils/GcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
@@ -59,7 +59,13 @@ async function parseResponse(
   connectionKey: string | undefined,
   idleTimeout?: number,
 ): Promise<unknown> {
-  const transports = callContext.channel.transports
+  const connection: ConnectionOptions = {
+    transports: callContext.channel.transports,
+    connectionKey,
+    headers: callContext.headers ?? undefined,
+    telefuncUrl: callContext.telefuncUrl,
+    idleTimeout,
+  }
   const contentType = response.headers.get('content-type') ?? ''
   const isStreaming = contentType.includes('application/octet-stream') || contentType.includes('text/event-stream')
 
@@ -75,12 +81,12 @@ async function parseResponse(
     const metaLen = await streamReader.readU32()
     const metaBytes = await streamReader.readExact(metaLen)
     const metaText = new TextDecoder().decode(metaBytes)
-    return reviveResponse(metaText, callContext, transports, connectionKey, streamReader, idleTimeout)
+    return reviveResponse(metaText, callContext, connection, streamReader)
   }
 
   // Text response: plain or channel-pump streaming (each streaming value owns its own channel).
   const body = await response.text()
-  return reviveResponse(body, callContext, transports, connectionKey, null, idleTimeout)
+  return reviveResponse(body, callContext, connection, null)
 }
 
 // ===== Response revival =====
@@ -88,10 +94,8 @@ async function parseResponse(
 async function reviveResponse(
   body: string,
   callContext: CallContext,
-  transports: ChannelTransports,
-  connectionKey: string | undefined,
+  connection: ConnectionOptions,
   bodyStreamReader: BaseStreamReader | null,
-  idleTimeout?: number,
 ): Promise<unknown> {
   const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
@@ -103,8 +107,6 @@ async function reviveResponse(
     throwBugError()
   }
 
-  const headers = callContext.headers ?? undefined
-  const telefuncUrl = callContext.telefuncUrl
   const pendingValues: PendingValue<unknown>[] = []
   const context: ClientReviverContext = {
     createChannel(opts) {
@@ -112,11 +114,7 @@ async function reviveResponse(
         channelId: opts.channelId,
         ack: opts.ack,
         maxFrameBytes: opts.maxFrameBytes,
-        transports,
-        connectionKey,
-        headers,
-        telefuncUrl,
-        idleTimeout,
+        connection,
       })
     },
     createBroadcast(opts) {
@@ -124,23 +122,12 @@ async function reviveResponse(
         channelId: opts.channelId,
         key: opts.key,
         maxFrameBytes: opts.maxFrameBytes,
-        transports,
-        connectionKey,
-        headers,
-        telefuncUrl,
-        idleTimeout,
+        connection,
       })
     },
     receiveStream(metadata) {
       if ('channelId' in metadata) {
-        const channel = new ClientChannel({
-          channelId: metadata.channelId,
-          transports,
-          connectionKey,
-          headers,
-          telefuncUrl,
-          idleTimeout,
-        })
+        const channel = new ClientChannel({ channelId: metadata.channelId, connection })
         return ChannelStreamSource.create(channel, throwStreamError)
       }
       assert(bodyStreamReader, 'Unexpected receiveStream call in non-streaming response')

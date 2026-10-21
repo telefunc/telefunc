@@ -1,15 +1,11 @@
 export { pumpClientProducerToChannel }
-export type { PumpChannelOptions }
 
 import { CHANNEL_PUMP_TAG_DATA, CHANNEL_PUMP_TAG_END, CHANNEL_PUMP_TAG_ERROR } from '../../../constants.js'
 import { concat, textEncoder } from '../../../wire/frame.js'
 import { ChannelClosedError } from '../../../channel/channelErrors.js'
-import { ClientChannel, type ClientChannelOptions } from '../../../channel/client/channel.js'
+import { ClientChannel, type ConnectionOptions } from '../../../channel/client/channel.js'
 import type { StreamingProducer } from '../../types.js'
 import { randomUuid } from '../../../../utils/randomUuid.js'
-
-/** What the pump's channel shares with the call's other channels. */
-type PumpChannelOptions = Omit<ClientChannelOptions, 'channelId' | 'ack' | 'key'>
 
 const TAG_DATA = new Uint8Array([CHANNEL_PUMP_TAG_DATA])
 const TAG_ERROR = new Uint8Array([CHANNEL_PUMP_TAG_ERROR])
@@ -29,8 +25,8 @@ const CHUNK_PART_BYTES = 8 * 1024 * 1024
  * On abort: the abort error propagates through the race (reject, not resolve),
  * so the catch block sees it. On clean close: resolves with `{ done: true }`.
  */
-function pumpClientProducerToChannel(createProducer: () => StreamingProducer, opts: PumpChannelOptions) {
-  const channel = new ClientChannel({ channelId: randomUuid(), ...opts })
+function pumpClientProducerToChannel(createProducer: () => StreamingProducer, connection: ConnectionOptions) {
+  const channel = new ClientChannel({ channelId: randomUuid(), connection })
 
   const producer = createProducer()
 
