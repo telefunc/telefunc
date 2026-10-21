@@ -6,6 +6,8 @@ export {
   onBinaryBroadcastOwnBytes,
   onBinaryBroadcastReusedBuffer,
   onBroadcastRightAfterSubscribe,
+  onBroadcastAnswers,
+  onBroadcastAnsweringLoop,
 }
 
 import { Buffer } from 'node:buffer'
@@ -130,4 +132,42 @@ async function onBroadcastRightAfterSubscribe() {
   await Promise.all([room.publish('t1'), room.publishBinary(new Uint8Array([1])), room.publish('t2')])
   await Promise.all([busy.close(), room.close()])
   return seen
+}
+
+/** One listener answers `ping` at once, another after an await. */
+async function onBroadcastAnswers() {
+  const key = `room:answers-test:${crypto.randomUUID()}`
+  const room = new BroadcastChannel<string>({ key })
+  const answerer = new BroadcastChannel<string>({ key })
+  answerer.subscribe((data) => {
+    if (data === 'ping') void answerer.publish('pong')
+  })
+  answerer.subscribe(async (data) => {
+    await Promise.resolve()
+    if (data === 'ping') await answerer.publish('async-pong')
+  })
+  room.onClose(() => {
+    void answerer.close()
+  })
+  return room
+}
+
+/** A listener answers every message on its key while the server waits for a 0 ms timer; then it awaits 3,000 publishes. */
+async function onBroadcastAnsweringLoop() {
+  const loop = new BroadcastChannel<number>({ key: `room:loop-test:${crypto.randomUUID()}` })
+  let answering = true
+  loop.subscribe(async (n) => {
+    await Promise.resolve()
+    if (answering) void loop.publish(n + 1)
+  })
+  void loop.publish(0)
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  answering = false
+  const counter = new BroadcastChannel<number>({ key: `room:awaited-test:${crypto.randomUUID()}` })
+  let delivered = 0
+  counter.subscribe(() => delivered++)
+  for (let i = 0; i < 3000; i++) await counter.publish(i)
+  const deliveredAtLastReceipt = delivered
+  await Promise.all([loop.close(), counter.close()])
+  return { timerFired: true, deliveredAtLastReceipt }
 }

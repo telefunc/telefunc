@@ -10,6 +10,8 @@ import {
   onBinaryBroadcastOwnBytes,
   onBinaryBroadcastReusedBuffer,
   onBroadcastRightAfterSubscribe,
+  onBroadcastAnswers,
+  onBroadcastAnsweringLoop,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -176,6 +178,26 @@ function Publish() {
         }}
       >
         Subscribe, then publish at once
+      </button>
+
+      <h2>Answers</h2>
+
+      <button
+        id="test-broadcast-answers"
+        onClick={async () => {
+          setResult('')
+          const room = await onBroadcastAnswers()
+          const releaseRoom = keepReachable(room)
+          const received: string[] = []
+          room.subscribe((data) => received.push(data))
+          await room.publish('ping')
+          const loop = await onBroadcastAnsweringLoop()
+          for (let poll = 0; poll < 50 && received.length < 3; poll++) await new Promise((r) => setTimeout(r, 200))
+          setResult(JSON.stringify({ received, ...loop }))
+          releaseRoom()
+        }}
+      >
+        Listeners that answer
       </button>
 
       <h2>Broadcast Shield Validation</h2>

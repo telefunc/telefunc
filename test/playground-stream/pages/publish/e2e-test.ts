@@ -125,6 +125,21 @@ function testPublish() {
     })
   })
 
+  test("broadcast: a listener's answer arrives after the message it answers; a listener answering every message lets timers fire; an awaited publish is delivered when it resolves", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-answers')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: string[]; timerFired: boolean; deliveredAtLastReceipt: number }>(
+        '#publish-result',
+      )
+      expect(result.received[0]).toBe('ping')
+      expect([...result.received].sort()).deep.equal(['async-pong', 'ping', 'pong'])
+      expect(result.timerFired).toBe(true)
+      expect(result.deliveredAtLastReceipt).toBe(3000)
+    })
+  })
+
   test('broadcast: shield validates client→server publishes', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-shield')
