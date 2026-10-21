@@ -405,46 +405,38 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
     return owner
   }
 
-  // --- BroadcastAdapter interface ---
-
-  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
+  /** Adds `onMessage` to `subsByKey` under `key`, with its owner's presence; the returned function removes both. */
+  private addSubscriber<OnMessage>(
+    subsByKey: Map<string, Map<OnMessage, string>>,
+    key: string,
+    onMessage: OnMessage,
+    wireRequest: Request | undefined,
+  ): BroadcastUnsubscribe {
     const locationBucket = this.requireLocationBucket()
     const owner = this.ownerOf(wireRequest)
-    let subs = this.textSubs.get(key)
+    let subs = subsByKey.get(key)
     if (!subs) {
       subs = new Map()
-      this.textSubs.set(key, subs)
+      subsByKey.set(key, subs)
     }
     subs.set(onMessage, owner)
     this.ensurePresence(key, locationBucket, owner)
     return () => {
-      const s = this.textSubs.get(key)
-      if (s) {
-        s.delete(onMessage)
-        if (s.size === 0) this.textSubs.delete(key)
-      }
+      const current = subsByKey.get(key)
+      current?.delete(onMessage)
+      if (current?.size === 0) subsByKey.delete(key)
       this.releasePresence(key, owner)
     }
   }
 
+  // --- BroadcastAdapter interface ---
+
+  subscribe(key: string, onMessage: BroadcastOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
+    return this.addSubscriber(this.textSubs, key, onMessage, wireRequest)
+  }
+
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage, wireRequest?: Request): BroadcastUnsubscribe {
-    const locationBucket = this.requireLocationBucket()
-    const owner = this.ownerOf(wireRequest)
-    let subs = this.binarySubs.get(key)
-    if (!subs) {
-      subs = new Map()
-      this.binarySubs.set(key, subs)
-    }
-    subs.set(onMessage, owner)
-    this.ensurePresence(key, locationBucket, owner)
-    return () => {
-      const s = this.binarySubs.get(key)
-      if (s) {
-        s.delete(onMessage)
-        if (s.size === 0) this.binarySubs.delete(key)
-      }
-      this.releasePresence(key, owner)
-    }
+    return this.addSubscriber(this.binarySubs, key, onMessage, wireRequest)
   }
 
   publish(key: string, serialized: string): Promise<BroadcastPublishResult> {
