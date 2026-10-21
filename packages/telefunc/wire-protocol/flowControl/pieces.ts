@@ -23,6 +23,7 @@ import {
   type PiecesAck,
 } from '../wire/connectionFrame.js'
 import { assert } from '../../utils/assert.js'
+import { pingDeadline } from '../channel/pingDeadline.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 
@@ -377,10 +378,10 @@ class PieceSender {
             // Only a sender that cuts data to its room needs the rate before a frame the floor carries in time.
             this.room.cuts ? 0 : (this.link.floor * this.pingInterval) / WIRE_PIECE_RATE_MARGIN,
           )
-    // What crosses within its ping deadline, twice the interval: on any link a PING crosses, or at the floor.
+    // What crosses within its ping deadline: on any link a PING crosses, or at the floor.
     this.unannouncedUpTo = Math.min(
       this.wholeUpTo,
-      Math.max(WIRE_PROBE_FIRST_BYTES, this.link.floor * 2 * this.pingInterval),
+      Math.max(WIRE_PROBE_FIRST_BYTES, this.link.floor * pingDeadline(this.pingInterval)),
     )
     this.gatherUpTo = Math.min(WIRE_GATHER_BYTES, this.link.fastest > 0 ? this.wholeUpTo : this.unannouncedUpTo)
   }
