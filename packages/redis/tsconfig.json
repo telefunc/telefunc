@@ -12,5 +12,5 @@
     "noUncheckedIndexedAccess": true,
     "lib": ["DOM", "ESNext"]
   },
-  "include": ["src/**/*.ts", "vitest.cluster.config.ts"]
+  "include": ["src/**/*.ts"]
 }

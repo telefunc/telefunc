@@ -35,7 +35,7 @@ describe('prepare()', () => {
           "jobName": "Released API",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
           ],
@@ -128,7 +128,7 @@ describe('prepare()', () => {
           "jobName": "Playground Stream",
           "jobSetups": [
             {
-              "node_version": "23",
+              "node_version": "26",
               "os": "ubuntu-latest",
             },
           ],
@@ -235,6 +235,62 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-preview.channel-slow-ping.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer.sse.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.sse.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-replay.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel.bun.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel.deno.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-preview.channel.sse.test.ts",
             },
             {
@@ -244,6 +300,14 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/playground-stream/.test-preview.channel.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.room-timeouts.ws.test.ts",
             },
             {
               "localConfig": {
@@ -340,30 +404,6 @@ describe('prepare()', () => {
               "testFilePath": "test/@cloudflare_vite-plugin/test-preview.test.ts",
             },
           ],
-          "splitFiles": false,
-        },
-        {
-          "jobCmd": "pnpm exec vitest run --config vitest.cloudflare-room.config.ts",
-          "jobName": "Cloudflare Room",
-          "jobSetups": [
-            {
-              "node_version": "23",
-              "os": "ubuntu-latest",
-            },
-          ],
-          "jobTests": null,
-          "splitFiles": false,
-        },
-        {
-          "jobCmd": "bash packages/redis/scripts/certification.sh",
-          "jobName": "Redis",
-          "jobSetups": [
-            {
-              "node_version": "23",
-              "os": "ubuntu-latest",
-            },
-          ],
-          "jobTests": null,
           "splitFiles": false,
         },
         {
