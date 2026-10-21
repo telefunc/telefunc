@@ -3,13 +3,6 @@ export { getSessionUrl }
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 
-/**
- * Client-side session registry.
- *
- * Keeps the page's session token in memory for each `telefuncUrl`,
- * so its requests stay routed to the same server-side session shard.
- */
-
 const globalObject = getGlobalObject<{ registry: Map<string, string> }>('sessionRegistry.ts', {
   registry: new Map<string, string>(),
 })
