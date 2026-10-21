@@ -26,6 +26,7 @@ import {
   onWatchRoomBinary,
   onGetWatchedBinary,
   onPublishBufferAsServer,
+  onSendReusingObjects,
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
@@ -300,6 +301,49 @@ function Room() {
           return {
             result: { seen, serverSeen, lateSeen },
             done: seen.length >= 2 && serverSeen.length >= 2 && lateSeen.length >= 1,
+          }
+        })
+      })}
+
+      {scenario('at-call', 'Taken at the call', 'Writes whose caller reuses its object', async () => {
+        const [roomId, room] = await createRoom('at-call')
+        const me = await room.join({ meta: { name: 'Me' } })
+        const messages: Array<{ data: unknown; from: string }> = []
+        room.subscribe((data, _info, from) => messages.push({ data, from: from.meta.name as string }))
+        const frames: number[][] = []
+        room.subscribeBinary((data) => frames.push([...data]))
+        const announcements: unknown[] = []
+        room.onAnnounce((data) => announcements.push(data))
+        const dms: unknown[] = []
+        me.listen((data) => dms.push(data))
+        await me.setAttributes({}) // same-channel ack orders the declarations before the server's writes
+
+        // The second publish waits behind the first on its coalesce key.
+        const first = { n: 10 }
+        const second = { n: 11 }
+        const coalesced = Promise.all([me.publish(first, { coalesce: 'c' }), me.publish(second, { coalesce: 'c' })])
+        second.n = 12
+        await coalesced
+        const reuser = await getParticipantWhenJoined(room, await onSendReusingObjects(roomId, me.id))
+
+        await pollUntil(() => {
+          const state = {
+            messages,
+            frames,
+            announcements,
+            dms,
+            reuserTags: (reuser.meta.tags as string[] | undefined) ?? null,
+            roomTags: (room.meta.tags as string[] | undefined) ?? null,
+          }
+          return {
+            result: state,
+            done:
+              messages.length >= 3 &&
+              frames.length >= 1 &&
+              announcements.length >= 1 &&
+              dms.length >= 2 &&
+              state.reuserTags?.[0] === 'b' &&
+              state.roomTags !== null,
           }
         })
       })}

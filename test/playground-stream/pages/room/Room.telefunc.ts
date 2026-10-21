@@ -22,6 +22,7 @@ export {
   onWatchRoomBinary,
   onGetWatchedBinary,
   onPublishBufferAsServer,
+  onSendReusingObjects,
 }
 
 import { Buffer } from 'node:buffer'
@@ -175,4 +176,29 @@ async function onGetWatchedBinary(roomId: string) {
 async function onPublishBufferAsServer(roomId: string, bytes: number[]) {
   const me = await Room.join(roomId, { meta: { name: 'Server' } })
   await me.publishBinary(Buffer.from(bytes), { retain: true })
+}
+
+/** Each write's caller changes its object or buffer right after the call, before the write settles. */
+async function onSendReusingObjects(roomId: string, memberId: string) {
+  const me = await Room.join(roomId, { meta: { name: 'Reuser', tags: ['a'] } })
+  const message = { n: 1 }
+  const published = me.publish(message)
+  message.n = 2
+  const sent = me.send(memberId, message)
+  message.n = 3
+  const announced = Room.announce(roomId, message)
+  message.n = 4
+  const systemSent = Room.send(roomId, { id: memberId }, message)
+  message.n = 5
+  const meta = { name: 'Reuser', tags: ['b'] }
+  const metaSet = me.setMeta(meta)
+  meta.tags.push('later')
+  const roomMeta = { topic: 'at-call', tags: ['x'] }
+  const roomMetaSet = Room.setMeta(roomId, roomMeta)
+  roomMeta.tags.push('later')
+  const bytes = new Uint8Array([1, 2, 3])
+  const binary = me.publishBinary(bytes)
+  bytes.fill(0)
+  await Promise.all([published, sent, announced, systemSent, metaSet, roomMetaSet, binary])
+  return me.id
 }

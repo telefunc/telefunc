@@ -1,4 +1,11 @@
-export { onTextBroadcast, onBinaryBroadcastPair, onBinaryBroadcast, onBroadcastShieldClient, onBinaryBroadcastOwnBytes }
+export {
+  onTextBroadcast,
+  onBinaryBroadcastPair,
+  onBinaryBroadcast,
+  onBroadcastShieldClient,
+  onBinaryBroadcastOwnBytes,
+  onBinaryBroadcastReusedBuffer,
+}
 
 import { Buffer } from 'node:buffer'
 import { Broadcast, BroadcastChannel } from 'telefunc'
@@ -89,4 +96,22 @@ async function onBinaryBroadcastOwnBytes() {
     for (const unsubscribe of unsubscribes) unsubscribe()
   })
   return { room, getSeen: async () => ({ seen, keySeen }) }
+}
+
+/** On the page's `start`, a second instance subscribes on the key, and the server publishes 3 binary frames from one
+ *  reused Node Buffer at once, so they wait for that subscription. */
+async function onBinaryBroadcastReusedBuffer() {
+  const key = `room:reused-buffer-test:${crypto.randomUUID()}`
+  const room = new BroadcastChannel<{ start: true }>({ key })
+  const sibling = new BroadcastChannel({ key })
+  const seen: number[][] = []
+  room.subscribe(() => {
+    sibling.subscribeBinary((data) => seen.push([...data]))
+    const bytes = Buffer.alloc(4)
+    for (let i = 1; i <= 3; i++) void room.publishBinary(bytes.fill(i))
+  })
+  room.onClose(() => {
+    void sibling.close()
+  })
+  return { room, getSeen: async () => seen }
 }

@@ -8,6 +8,7 @@ import {
   onBinaryBroadcast,
   onBroadcastShieldClient,
   onBinaryBroadcastOwnBytes,
+  onBinaryBroadcastReusedBuffer,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -139,6 +140,29 @@ function Publish() {
         }}
       >
         Listeners that write into or transfer their bytes
+      </button>
+
+      <h2>Reused Buffer</h2>
+
+      <button
+        id="test-binary-broadcast-reused-buffer"
+        onClick={async () => {
+          setResult('')
+          const { room, getSeen } = await onBinaryBroadcastReusedBuffer()
+          const releaseRoom = keepReachable(room)
+          const received: number[][] = []
+          room.subscribeBinary((data) => received.push([...data]))
+          await room.publish({ start: true })
+          for (let poll = 0; poll < 50; poll++) {
+            const seen = await getSeen()
+            setResult(JSON.stringify({ received, seen }))
+            if (received.length >= 3 && seen.length >= 3) break
+            await new Promise((r) => setTimeout(r, 200))
+          }
+          releaseRoom()
+        }}
+      >
+        Server publishes from one reused buffer
       </button>
 
       <h2>Broadcast Shield Validation</h2>

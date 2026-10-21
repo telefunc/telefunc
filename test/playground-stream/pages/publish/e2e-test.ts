@@ -99,6 +99,22 @@ function testPublish() {
     })
   })
 
+  test('broadcast: binary publishes go out as they were at the call, though the server refills one buffer for each while a subscription establishes', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-binary-broadcast-reused-buffer')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: number[][]; seen: number[][] }>('#publish-result')
+      const frames = [
+        [1, 1, 1, 1],
+        [2, 2, 2, 2],
+        [3, 3, 3, 3],
+      ]
+      expect(result.received).deep.equal(frames)
+      expect(result.seen).deep.equal(frames)
+    })
+  })
+
   test('broadcast: shield validates client→server publishes', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-shield')

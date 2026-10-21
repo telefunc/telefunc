@@ -129,6 +129,29 @@ function testRoom() {
       expect(r.lateSeen).deep.equal([[5, 6, 7, 8]]) // the retained frame, as published
     },
   )
+  testRoomScenario<{
+    messages: Array<{ data: unknown; from: string }>
+    frames: number[][]
+    announcements: unknown[]
+    dms: unknown[]
+    reuserTags: string[] | null
+    roomTags: string[] | null
+  }>(
+    'at-call',
+    'room: a write goes out as it was at the call, though its caller changes the object or buffer right after',
+    (r) => {
+      expect(r.messages).deep.equal([
+        { data: { n: 10 }, from: 'Me' },
+        { data: { n: 11 }, from: 'Me' },
+        { data: { n: 1 }, from: 'Reuser' },
+      ])
+      expect(r.frames).deep.equal([[1, 2, 3]])
+      expect(r.announcements).deep.equal([{ n: 3 }])
+      expect(r.dms).to.have.deep.members([{ n: 2 }, { n: 4 }])
+      expect(r.reuserTags).deep.equal(['b'])
+      expect(r.roomTags).deep.equal(['x'])
+    },
+  )
   testRoomScenario<MemberResult>(
     'member',
     'room: a returned RemoteParticipant is the same object as the room view',
