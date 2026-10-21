@@ -18,6 +18,11 @@ import {
   onGetWatched,
   onWatchRoomTrack,
   onGetWatchedTrack,
+  onJoinHiddenAndHand,
+  onHiddenSetMeta,
+  onHiddenLeave,
+  onHiddenAfterPlayers,
+  onGetHiddenAfterPlayers,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -646,6 +651,46 @@ function Room() {
           releasePubView()
         },
       )}
+
+      {scenario('hidden', 'Hidden participants', 'Hidden member handed to one page', async () => {
+        const [roomId, view] = await createRoom('hidden')
+        const events: string[] = []
+        view.onJoin((m) => events.push(`join:${m.meta.name}`))
+        view.onLeave((m) => events.push(`leave:${m.meta.name}`))
+        view.onParticipantUpdate((m) => events.push(`update:${m.meta.name}`))
+        let empty = false
+        view.onEmpty(() => (empty = true))
+        const player = await view.join({ meta: { name: 'P' } })
+
+        const handed = await onJoinHiddenAndHand(roomId)
+        const handedEvents: string[] = []
+        handed.room.onJoin((m) => handedEvents.push(`join:${m.meta.name}`))
+        handed.room.onLeave((m) => handedEvents.push(`leave:${m.meta.name}`))
+        const memberEvents: string[] = []
+        handed.member!.onUpdate((meta) => memberEvents.push(`update:${meta.name}`))
+        handed.member!.onLeave((cause) => memberEvents.push(`leave:${cause.type}`))
+        const counts = [view.count, handed.room.count]
+
+        await onHiddenSetMeta(roomId, 'Bot2')
+        await pollUntil(() => ({ done: memberEvents.includes('update:Bot2') }))
+        await player.leave()
+        await pollUntil(() => ({ done: empty }))
+        await onHiddenLeave(roomId)
+        await pollUntil(() => ({ done: memberEvents.includes('leave:left') }))
+        // Delivered after the hidden member's events, so they had their chance to reach `view`.
+        await view.join({ meta: { name: 'Q' } })
+        await pollUntil(() => ({ done: events.includes('join:Q') && handedEvents.includes('join:Q') }))
+
+        const aloneId = `e2e-hidden-alone:${crypto.randomUUID()}`
+        await onHiddenAfterPlayers(aloneId)
+        await pollUntil(async () => {
+          const alone = await onGetHiddenAfterPlayers(aloneId)
+          return {
+            result: { events, handedEvents, memberEvents, counts, empty, alone },
+            done: alone.closed && alone.cause !== null,
+          }
+        })
+      })}
     </div>
   )
 }

@@ -286,4 +286,23 @@ function testRoom() {
       expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4] })
     },
   )
+  testRoomScenario<{
+    events: string[]
+    handedEvents: string[]
+    memberEvents: string[]
+    counts: number[]
+    empty: boolean
+    alone: { cause: { type: string } | null; closed: boolean }
+  }>(
+    'hidden',
+    'room: a hidden member is not counted, its meta and leave reach only the page handed it, and it holds no room open',
+    (r) => {
+      expect(r.counts).deep.equal([1, 1])
+      expect(r.events).deep.equal(['join:P', 'leave:P', 'join:Q'])
+      expect(r.handedEvents.filter((e) => e.includes('Bot'))).deep.equal([])
+      expect(r.memberEvents).deep.equal(['update:Bot2', 'leave:left'])
+      expect(r.empty).toBe(true)
+      expect(r.alone).deep.equal({ cause: { type: 'closed' }, closed: true })
+    },
+  )
 }

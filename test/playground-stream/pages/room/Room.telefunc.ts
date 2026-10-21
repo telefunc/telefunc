@@ -14,6 +14,11 @@ export {
   onGetWatched,
   onWatchRoomTrack,
   onGetWatchedTrack,
+  onJoinHiddenAndHand,
+  onHiddenSetMeta,
+  onHiddenLeave,
+  onHiddenAfterPlayers,
+  onGetHiddenAfterPlayers,
   onAnnounce,
   onSystemSend,
   onUpdateRoom,
@@ -23,7 +28,7 @@ export {
   onCloseRoom,
 }
 
-import { Room, Abort } from 'telefunc'
+import { Room, Abort, type LeaveCause, type LocalParticipant } from 'telefunc'
 
 async function onCreateRoom(roomId: string) {
   return await Room.create(roomId, { meta: { topic: 'e2e' } })
@@ -141,6 +146,43 @@ async function onWatchRoomTrack(roomId: string, track: string) {
 
 async function onGetWatchedTrack(roomId: string) {
   return { text: watched.get(roomId) ?? [], frames: watchedTracks.get(roomId) ?? [] }
+}
+
+const hiddenBots = new Map<string, LocalParticipant>()
+
+/** A hidden member, handed to this call's page only. */
+async function onJoinHiddenAndHand(roomId: string) {
+  const room = await Room.get(roomId)
+  const bot = await room.join({ hidden: true, meta: { name: 'Bot' } })
+  hiddenBots.set(roomId, bot)
+  return { room, member: await room.getParticipant(bot.id) }
+}
+
+async function onHiddenSetMeta(roomId: string, name: string) {
+  await hiddenBots.get(roomId)!.setMeta({ name })
+}
+
+async function onHiddenLeave(roomId: string) {
+  await hiddenBots.get(roomId)!.leave()
+}
+
+const hiddenAfterPlayers = new Map<string, { cause: LeaveCause | null; closed: boolean; refs: unknown[] }>()
+
+/** A hidden member stays after the room's only player left; nothing else holds the room. */
+async function onHiddenAfterPlayers(roomId: string) {
+  const room = await Room.create(roomId, { departureTimeout: 500 })
+  const bot = await room.join({ hidden: true, meta: { name: 'Bot' } })
+  const state = { cause: null as LeaveCause | null, closed: false, refs: [room, bot] as unknown[] }
+  hiddenAfterPlayers.set(roomId, state)
+  bot.onLeave((cause) => (state.cause = cause))
+  room.onClose(() => (state.closed = true))
+  const player = await room.join({ meta: { name: 'P' } })
+  await player.leave()
+}
+
+async function onGetHiddenAfterPlayers(roomId: string) {
+  const state = hiddenAfterPlayers.get(roomId)!
+  return { cause: state.cause, closed: state.closed }
 }
 
 async function onAnnounce(roomId: string, data: unknown) {
