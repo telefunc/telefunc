@@ -38,6 +38,8 @@ import {
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
+/** 80 s of polls: past the 60 s reconnectTimeout the server waits for a closed tab on SSE. */
+const CLOSED_TAB_POLLS = 400
 
 async function getParticipantWhenJoined(room: Awaited<ReturnType<typeof onGetRoom>>, id: string) {
   let participant = await room.getParticipant(id)
@@ -480,6 +482,54 @@ function Room() {
         await me.leave()
         await Promise.allSettled([slow, queued])
         setResult(JSON.stringify({ binaryError, afterHookAck, calls: await onGetGuardCalls(roomId) }))
+      })}
+
+      {scenario(
+        'leave-causes',
+        'Leave causes',
+        'Leave with acknowledged DMs pending, and a tab that closes',
+        async () => {
+          const [roomId, room] = await createRoom('leave-causes')
+          const causes: Array<{ name: unknown; type: string }> = []
+          room.onLeave((member, cause) => causes.push({ name: member.meta.name, type: cause.type }))
+          const a = await room.join({ meta: { name: 'A' } })
+          const b = await room.join({ meta: { name: 'B' } })
+          const c = await room.join({ meta: { name: 'C' } })
+          // A and C take each DM and never answer.
+          a.listen(() => new Promise(() => {}))
+          c.listen(() => new Promise(() => {}))
+          const outcome = (sent: Promise<unknown>) =>
+            sent.then(
+              () => 'resolved',
+              () => 'rejected',
+            )
+
+          const start = Date.now()
+          const toLeaving = b.send(a.id, 'ping', { ack: true })
+          await a.leave()
+          const recipientLeft = await outcome(toLeaving)
+          const fromLeaving = b.send(c.id, 'ping', { ack: true })
+          await b.leave()
+          const senderLeft = await outcome(fromLeaving)
+          const seconds = (Date.now() - start) / 1000
+
+          // The test joins `Closer` from another tab, then closes it; on SSE the server waits out reconnectTimeout (60 s).
+          await pollUntil(
+            () => ({
+              result: { roomId, recipientLeft, senderLeft, seconds, causes },
+              done: causes.some((cause) => cause.name === 'Closer'),
+            }),
+            CLOSED_TAB_POLLS,
+          )
+        },
+      )}
+
+      {scenario('join-only', null, 'Join the room named in the URL', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId')!
+        const room = await onGetRoom(roomId)
+        keepReachable(room)
+        await room.join({ meta: { name: 'Closer' } })
+        setResult(JSON.stringify('joined'))
       })}
 
       {scenario(

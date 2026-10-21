@@ -2,6 +2,9 @@ export { testRoom }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { navigate, getResult } from '../../e2e-utils'
 
+/** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
+const CLOSED_TAB_WAIT = { timeout: 90_000 }
+
 type ChatResult = {
   events: string[]
   received: Array<{ text: string; from: string }>
@@ -415,4 +418,31 @@ function testRoom() {
       expect(r.empty).toBe(true)
     },
   )
+  test('room: a member who leaves, or whose tab closes, leaves once with its cause, and an acknowledged DM to or from it fails at the leave', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-leave-causes')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
+    const context = await page.context().browser()!.newContext()
+    const other = await context.newPage()
+    await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+    await other.click('#test-room-join-only')
+    await autoRetry(async () => expect(await other.textContent('#room-result')).toBe('"joined"'))
+    await context.close()
+    await autoRetry(async () => {
+      const r = await getResult<{
+        recipientLeft: string
+        senderLeft: string
+        seconds: number
+        causes: Array<{ name: unknown; type: string }>
+      }>('#room-result')
+      expect(r.recipientLeft).toBe('rejected')
+      expect(r.senderLeft).toBe('rejected')
+      expect(r.seconds).lessThan(10) // not the 60 s acknowledgement timeout
+      expect(r.causes).deep.equal([
+        { name: 'A', type: 'left' },
+        { name: 'B', type: 'left' },
+        { name: 'Closer', type: 'disconnected' },
+      ])
+    }, CLOSED_TAB_WAIT)
+  })
 }
