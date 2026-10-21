@@ -20,6 +20,7 @@ import {
   type ParticipantStubNotice,
   type ParticipantStubRequest,
   type MemberMetaUpdate,
+  type MemberMutationRequest,
   type RoomDemandEvent,
   type RoomDataPublish,
   type RoomDmEnvelope,
@@ -88,8 +89,6 @@ type RosterStream = {
   applying: number
   applied: Promise<void>
 }
-
-type ParticipantMutationRequest = Extract<ParticipantStubRequest, { __r: 'req-dm' | 'req-set-meta' | 'req-set-attrs' }>
 
 /** A server room through one Broadcast stub: its frames carry events and data, its acked messages requests. */
 class ClientRoom extends RoomStateView implements Room {
@@ -447,7 +446,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
   constructor(
     participant: Pick<ParticipantStubMetadata, 'id' | 'meta' | 'selfDelivery' | 'identity' | 'bufferLimit'>,
     rewinds: MetaRewinds,
-    private readonly _requestParticipant: (request: ParticipantMutationRequest) => Promise<unknown>,
+    private readonly _requestParticipant: (request: MemberMutationRequest) => Promise<unknown>,
   ) {
     super(participant, rewinds)
     this._bufferLimit = participant.bufferLimit
@@ -514,7 +513,7 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
-    const request: ParticipantMutationRequest = { __r: 'req-dm', to, data }
+    const request: MemberMutationRequest = { __r: 'req-dm', to, data }
     if (ack) request.ack = true
     return await this._requestParticipant(request)
   }
@@ -568,7 +567,7 @@ class ClientRoomParticipant extends ClientParticipantBase {
   constructor(clientRoom: ClientRoom, id: string, meta: ParticipantMeta, selfDelivery: boolean, rewinds: MetaRewinds) {
     // Client-side joins carry no identity: it's server-assigned (see JoinOptions.identity).
     super({ id, meta, selfDelivery, identity: null, bufferLimit: clientRoom._bufferLimit }, rewinds, (request) =>
-      clientRoom._request({ ...request, id } as RoomStubRequest),
+      clientRoom._request({ ...request, id }),
     )
     this._room = clientRoom
   }

@@ -21,6 +21,7 @@ export type {
   RoomFailure,
   RoomStubRequest,
   ParticipantStubRequest,
+  MemberMutationRequest,
   ParticipantStubNotice,
   MemberWants,
   InboxMessage,
@@ -142,14 +143,18 @@ type MemberMetaUpdate = { seq: number; meta: ParticipantMeta } | { seq: number; 
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
 
+/** A member's meta, attributes and DM requests, as a participant stub carries them. */
+type MemberMutationRequest =
+  | { __r: 'req-set-meta'; meta: ParticipantMeta }
+  | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
+  | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
+
 /** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast
  *  subscription, which reattaches before `onOpen`. */
 type RoomStubRequest =
   | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
-  | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
-  | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
-  | { __r: 'req-dm'; id: string; to: string; data: unknown; ack?: boolean }
+  | (MemberMutationRequest & { id: string })
   | { __r: 'dm-reply'; ackId: string; reply: DmReply }
   /** A `BinaryWantChange`, with `null` for `ALL`. */
   | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
@@ -160,9 +165,7 @@ type RoomStubRequest =
  *  `dm-reply`. */
 type ParticipantStubRequest =
   | { __r: 'req-publish'; data: unknown; retain?: boolean }
-  | { __r: 'req-set-meta'; meta: ParticipantMeta }
-  | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
-  | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
+  | MemberMutationRequest
   | { __r: 'req-leave' }
 
 /** Server→client notices on a participant stub. `rewound`: a failover rewound the participant's meta seq, so its next

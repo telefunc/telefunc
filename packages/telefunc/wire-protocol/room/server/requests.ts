@@ -14,7 +14,13 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ProtocolViolationError } from '../../wire/connectionFrame.js'
 import { ALL, decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { isRecord } from '../model.js'
-import type { DmReply, ParticipantStubRequest, RoomDataPublish, RoomStubRequest } from '../protocol.js'
+import type {
+  DmReply,
+  MemberMutationRequest,
+  ParticipantStubRequest,
+  RoomDataPublish,
+  RoomStubRequest,
+} from '../protocol.js'
 assertIsNotBrowser()
 
 type RoomRequest = Extract<
@@ -28,7 +34,6 @@ type RoomDeclaration =
 
 /** A member's meta, attributes and DM requests, by the API call each serves. */
 const MEMBER_MUTATIONS = { 'req-set-meta': 'setMeta', 'req-set-attrs': 'setAttributes', 'req-dm': 'send' } as const
-type MemberMutation = Extract<ParticipantStubRequest, { __r: keyof typeof MEMBER_MUTATIONS }>
 
 /** A stub's client library sends only these shapes, so anything else comes from a broken or hostile peer
  *  and ends its connection. */
@@ -173,14 +178,17 @@ function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
 }
 
 /** A member's meta, attributes or DM request, as both stubs decode it; a Room stub's also names the acting member. */
-function decodeMemberMutation(kind: MemberMutation['__r'], req: Record<string, unknown>): MemberMutation {
+function decodeMemberMutation(
+  kind: keyof typeof MEMBER_MUTATIONS,
+  req: Record<string, unknown>,
+): MemberMutationRequest {
   switch (kind) {
     case 'req-set-meta':
       return { __r: 'req-set-meta', meta: record(req.meta, 'setMeta meta') }
     case 'req-set-attrs':
       return { __r: 'req-set-attrs', attrs: record(req.attrs, 'attributes') }
     case 'req-dm': {
-      const dm: Extract<MemberMutation, { __r: 'req-dm' }> = {
+      const dm: Extract<MemberMutationRequest, { __r: 'req-dm' }> = {
         __r: 'req-dm',
         to: text(req.to, 'send recipient'),
         data: req.data,
