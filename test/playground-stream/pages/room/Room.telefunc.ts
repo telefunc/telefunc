@@ -34,6 +34,9 @@ export {
   onGetSlowJoins,
   onGetSlowJoinRoom,
   onCloseWhenEmpty,
+  onCreateRoomWith,
+  onCreateRoomHeld,
+  onJoinAndLeaveAsServer,
   onIsOpen,
 }
 
@@ -363,6 +366,20 @@ async function onCloseWhenEmpty(roomId: string) {
   room.onEmpty(() => {
     void Room.close(roomId)
   })
+}
+
+async function onCreateRoomWith(roomId: string, options: { emptyTimeout?: number; departureTimeout?: number }) {
+  await Room.create(roomId, options)
+}
+
+/** The page this returns the room to holds it open. */
+async function onCreateRoomHeld(roomId: string) {
+  return await Room.create(roomId, { emptyTimeout: 1000 })
+}
+
+async function onJoinAndLeaveAsServer(roomId: string) {
+  const me = await Room.join(roomId, { meta: { name: 'Passing' } })
+  await me.leave()
 }
 
 async function onIsOpen(roomId: string) {

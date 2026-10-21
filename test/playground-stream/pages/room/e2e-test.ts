@@ -467,4 +467,30 @@ function testRoom() {
       expect(r.events).to.be.deep.oneOf([[], ['join:Closer', 'leave:Closer:disconnected']])
     }, CLOSED_TAB_WAIT)
   })
+  test('room: a room nothing holds closes by itself, departureTimeout after its last member left or emptyTimeout after it was created, while the page it was returned to holds it open until that page closes, and Infinity never closes', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-self-close')
+    const { base } = await autoRetry(() => getResult<{ base: string }>('#room-result'), { timeout: 10_000 })
+    const context = await page.context().browser()!.newContext()
+    const other = await context.newPage()
+    await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(`${base}:held`)}`, undefined, other)
+    await other.click('#test-room-hold-room')
+    await autoRetry(async () => expect(await other.textContent('#room-result')).toBe('"holding"'))
+    await autoRetry(
+      async () => {
+        expect(await getResult('#room-result')).deep.equal({
+          base,
+          open: { empty: false, departed: false, held: true, never: true },
+          outlived: true,
+        })
+      },
+      { timeout: 15_000 },
+    )
+    await context.close()
+    await page.click('#test-room-self-close-released')
+    await autoRetry(
+      async () => expect(await getResult('#room-result')).deep.equal({ heldOpen: false }),
+      CLOSED_TAB_WAIT,
+    )
+  })
 }

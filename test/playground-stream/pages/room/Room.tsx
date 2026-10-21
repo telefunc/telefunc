@@ -38,6 +38,9 @@ import {
   onGetSlowJoins,
   onGetSlowJoinRoom,
   onCloseWhenEmpty,
+  onCreateRoomWith,
+  onCreateRoomHeld,
+  onJoinAndLeaveAsServer,
   onIsOpen,
 } from './Room.telefunc'
 
@@ -65,6 +68,8 @@ async function createRoom(label: string) {
   const roomId = await createRoomId(label)
   return [roomId, await onGetRoom(roomId)] as const
 }
+
+let selfCloseBase = ''
 
 function Room() {
   const [result, setResult] = useState<string>('')
@@ -650,6 +655,52 @@ function Room() {
           }))
         },
       )}
+
+      {scenario('self-close', 'Rooms that close by themselves', 'Short timeouts', async () => {
+        const base = `e2e-self-close:${crypto.randomUUID()}`
+        selfCloseBase = base
+        const ids = {
+          empty: `${base}:empty`,
+          departed: `${base}:departed`,
+          held: `${base}:held`,
+          never: `${base}:never`,
+        }
+        await onCreateRoomWith(ids.empty, { emptyTimeout: 1000 })
+        await onCreateRoomWith(ids.departed, { emptyTimeout: 60_000, departureTimeout: 1000 })
+        await onCreateRoomWith(ids.never, { emptyTimeout: Infinity, departureTimeout: Infinity })
+        await onJoinAndLeaveAsServer(ids.departed)
+        const isOpen = async () => ({
+          empty: await onIsOpen(ids.empty),
+          departed: await onIsOpen(ids.departed),
+          held: await onIsOpen(ids.held),
+          never: await onIsOpen(ids.never),
+        })
+
+        // The test creates `held` from another tab, which keeps the view it was returned.
+        // Once the two closed, the held one and the one that never closes have outlived their 1 s by 1.5 s more.
+        let closedAt: number | null = null
+        await pollUntil(async () => {
+          const open = await isOpen()
+          if (closedAt === null && open.held && !open.empty && !open.departed) closedAt = Date.now()
+          const outlived = closedAt !== null && Date.now() - closedAt > 1500
+          return { result: { base, open, outlived }, done: outlived }
+        })
+      })}
+
+      {scenario('hold-room', null, 'Create the room named in the URL and keep its view', async () => {
+        const roomId = new URLSearchParams(location.search).get('roomId')!
+        keepReachable(await onCreateRoomHeld(roomId))
+        setResult(JSON.stringify('holding'))
+      })}
+
+      {scenario('self-close-released', null, 'After the holding tab closed', async () => {
+        const held = `${selfCloseBase}:held`
+        // On SSE the server holds the closed tab for reconnectTimeout (60 s).
+        await pollUntil(async () => {
+          const heldOpen = await onIsOpen(held)
+          return { result: { heldOpen }, done: !heldOpen }
+        }, CLOSED_TAB_POLLS)
+      })}
 
       {scenario('member', 'Returnable member view', 'Return room + member view', async () => {
         const [roomId, lobby] = await createRoom('member')
