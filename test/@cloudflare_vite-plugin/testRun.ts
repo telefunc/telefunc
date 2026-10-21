@@ -338,14 +338,13 @@ function testRefusedPresence() {
     await autoRetry(async () => {
       expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
     })
-    // A presence is refreshed every 30 s.
-    await page.waitForTimeout(35_000)
-    await page.click('#publish')
+    // Each try publishes again: the presence is written at its next refresh, within 30 s.
     await autoRetry(
       async () => {
+        await page.click('#publish')
         expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
       },
-      { timeout: 5000 },
+      { timeout: 40_000 },
     )
   })
 }
