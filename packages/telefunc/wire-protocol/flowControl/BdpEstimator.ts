@@ -9,7 +9,7 @@ import {
   CREDIT_WINDOW_INITIAL_BYTES,
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
-import type { Link, SendWait } from '../link.js'
+import type { Link, SendWait } from './Link.js'
 import type { BdpPingAck } from '../wire/connectionFrame.js'
 
 /** Per-axis verdict on a settled probe; `grow` needs the sample to saturate ≥ 2/3 of a window not at cap. */

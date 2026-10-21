@@ -10,8 +10,8 @@ import {
   WIRE_PROBE_CLOCK_MS,
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
-} from './constants.js'
-import type { Link } from './link.js'
+} from '../constants.js'
+import type { Link } from './Link.js'
 import {
   LENGTH_BYTES,
   TAG,
@@ -21,10 +21,10 @@ import {
   isSequencedTag,
   passesData,
   type PiecesAck,
-} from './wire/connectionFrame.js'
-import { assert } from '../utils/assert.js'
-import { Fifo } from '../utils/Fifo.js'
-import { unrefTimer } from '../utils/unrefTimer.js'
+} from '../wire/connectionFrame.js'
+import { assert } from '../../utils/assert.js'
+import { Fifo } from '../../utils/Fifo.js'
+import { unrefTimer } from '../../utils/unrefTimer.js'
 
 /** Whether its receiver acknowledges a frame of this size. */
 function acknowledges(bytes: number): boolean {

@@ -36,7 +36,7 @@ import {
   TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../constants.js'
-import { replayWindow, type ByteWindowKind } from '../flow-control/flow-control.js'
+import { replayWindow, type ByteWindowKind } from '../flowControl/FlowControl.js'
 import { ReplayBuffer } from '../replay-buffer.js'
 import {
   ACK_STATUS,
@@ -65,8 +65,8 @@ import { randomUuid } from '../../utils/randomUuid.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { settledOrAborted } from '../../utils/settledOrAborted.js'
 import { Heartbeat } from './heartbeat.js'
-import type { Uplink } from './uplink.js'
-import type { Downlink } from './downlink.js'
+import type { Uplink } from '../flowControl/client/Uplink.js'
+import type { Downlink } from '../flowControl/client/Downlink.js'
 import { WsTransport } from './ws.js'
 import { SseTransport } from './sse.js'
 

@@ -58,6 +58,6 @@ class MacrotaskYield {
   }
 }
 
-const macrotaskYield = getGlobalObject<{ instance: MacrotaskYield }>('flow-control/macrotask-yield.ts', () => ({
+const macrotaskYield = getGlobalObject<{ instance: MacrotaskYield }>('flowControl/macrotaskYield.ts', () => ({
   instance: new MacrotaskYield(),
 })).instance

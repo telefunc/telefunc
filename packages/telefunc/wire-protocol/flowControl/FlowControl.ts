@@ -1,9 +1,9 @@
 export { FlowControl, replayWindow }
 export type { AttachedDownlink, AttachedUplink, ByteWindowKind, FlowControlOptions }
 
-import { BdpEstimator } from './bdp-estimator.js'
-import type { Link, SendWait } from '../link.js'
-import { macrotaskYield } from './macrotask-yield.js'
+import { BdpEstimator } from './BdpEstimator.js'
+import type { Link, SendWait } from './Link.js'
+import { macrotaskYield } from './macrotaskYield.js'
 import {
   CREDIT_MSG_WINDOW_INITIAL,
   CREDIT_WINDOW_INITIAL_BYTES,

@@ -1,8 +1,8 @@
 export { Downlink }
 
-import { DRAIN_SPAN_MS, newestFastest } from '../link.js'
-import { Fifo } from '../../utils/Fifo.js'
-import type { Uplink } from './uplink.js'
+import { DRAIN_SPAN_MS, newestFastest } from '../Link.js'
+import { Fifo } from '../../../utils/Fifo.js'
+import type { Uplink } from './Uplink.js'
 
 /** A page's downlink: the credit its channels granted the server, and the rate the server's messages arrive at. */
 class Downlink {

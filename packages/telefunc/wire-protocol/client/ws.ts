@@ -2,11 +2,11 @@ export { WsTransport }
 
 import { assert } from '../../utils/assert.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_TRANSPORT, WS_PROBE_TIMEOUT_MS } from '../constants.js'
-import { PieceSender } from '../pieces.js'
-import { PagePieceReceiver } from './page-piece-receiver.js'
-import { SendBudget } from './send-budget.js'
-import { Uplink } from './uplink.js'
-import { Downlink } from './downlink.js'
+import { PieceSender } from '../flowControl/pieces.js'
+import { PagePieceReceiver } from '../flowControl/client/PagePieceReceiver.js'
+import { SendBudget } from '../flowControl/client/SendBudget.js'
+import { Uplink } from '../flowControl/client/Uplink.js'
+import { Downlink } from '../flowControl/client/Downlink.js'
 import {
   LENGTH_BYTES,
   TAG,

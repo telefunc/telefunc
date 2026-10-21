@@ -1,6 +1,11 @@
 export { ServerPieceReceiver }
 
-import { WIRE_PIECES_ACK_BYTES, WIRE_SEND_ACK_GAP_MS, WIRE_SEND_ACK_MIN_BYTES, WIRE_SEND_ACK_MS } from '../constants.js'
+import {
+  WIRE_PIECES_ACK_BYTES,
+  WIRE_SEND_ACK_GAP_MS,
+  WIRE_SEND_ACK_MIN_BYTES,
+  WIRE_SEND_ACK_MS,
+} from '../../constants.js'
 import { PieceReceiver } from '../pieces.js'
 
 /** The server's `PieceReceiver`, which puts a WebSocket frame sent in pieces back together. Once it took

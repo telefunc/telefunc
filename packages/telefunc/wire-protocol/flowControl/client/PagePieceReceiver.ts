@@ -1,8 +1,8 @@
 export { PagePieceReceiver }
 
-import { WIRE_PIECES_ACK_GAP_MS } from '../constants.js'
+import { WIRE_PIECES_ACK_GAP_MS } from '../../constants.js'
 import { PieceReceiver, acknowledges, type PieceReceiverOptions } from '../pieces.js'
-import type { Uplink } from './uplink.js'
+import type { Uplink } from './Uplink.js'
 
 type PagePieceReceiverOptions = PieceReceiverOptions & {
   uplink: Uplink

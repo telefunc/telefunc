@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { FlowControl } from './flow-control.js'
-import type { FlowControlOptions } from './flow-control.js'
+import { FlowControl } from './FlowControl.js'
+import type { FlowControlOptions } from './FlowControl.js'
 import {
   BDP_PING_MIN_INTERVAL_MS,
   CREDIT_MSG_WINDOW_INITIAL,

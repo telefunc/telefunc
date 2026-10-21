@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { BdpEstimator } from './bdp-estimator.js'
+import { BdpEstimator } from './BdpEstimator.js'
 import {
   BDP_PING_MAX_INTERVAL_MS,
   BDP_PING_MIN_INTERVAL_MS,

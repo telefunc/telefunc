@@ -1,6 +1,6 @@
 export { SocketWait }
 
-import { DRAIN_SPAN_MS, Waits, newestFastest, type SendWait } from '../link.js'
+import { DRAIN_SPAN_MS, Waits, newestFastest, type SendWait } from '../Link.js'
 
 type SocketWaitOptions = {
   /** All the wire holds, which drains as the frames it is handed arrive. */

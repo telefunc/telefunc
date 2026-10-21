@@ -4,7 +4,7 @@ import { WIRE_SEND_BACKLOG_BASE_BYTES } from '../constants.js'
 import { TAG, encode, passesData } from '../wire/connectionFrame.js'
 import type { ServerChannel } from './channel.js'
 import type { ServerTransport, Wire, WirePieces } from './mux.js'
-import type { SocketWait } from './socket-wait.js'
+import type { SocketWait } from '../flowControl/server/SocketWait.js'
 
 type WireSenderOptions = {
   wire: Wire

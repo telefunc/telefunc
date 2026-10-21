@@ -1,7 +1,7 @@
 export { Link, Waits, newestFastest, DRAIN_SPAN_MS }
 export type { SendWait }
 
-import { WIRE_PIECE_RATE_WINDOW_MS } from './constants.js'
+import { WIRE_PIECE_RATE_WINDOW_MS } from '../constants.js'
 
 /** The least span a rate is measured over: a frame arrives whole, so a shorter span can count one that took longer. */
 const DRAIN_SPAN_MS = 100
