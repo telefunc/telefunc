@@ -34,12 +34,10 @@ class Uplink implements SendWait {
     return this.queued
   }
 
-  /** Notes `bytes` handed to the socket, and returns what the uplink held ahead of them. */
-  handed(bytes: number): number {
-    if (this.drain.rate === 0) return 0
-    const ahead = this.inUplink()
-    this.queued = ahead + bytes
-    return ahead
+  /** Notes `bytes` handed to the socket. */
+  handed(bytes: number): void {
+    if (this.drain.rate === 0) return
+    this.queued = this.inUplink() + bytes
   }
 
   /** The peer acknowledged all but `unacknowledged` bytes: those left the uplink, whatever the rate says. */
