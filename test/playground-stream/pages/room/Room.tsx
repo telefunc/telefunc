@@ -745,6 +745,65 @@ function Room() {
         const server = await onBackgroundErrors(`e2e-errors-server:${crypto.randomUUID()}`)
         setResult(JSON.stringify({ awaited, server }))
       })}
+
+      {scenario('tracks', 'Named tracks and demand', 'Tracks reach who asked', async () => {
+        const [roomId, pubView] = await createRoom('tracks')
+        // A GC pass would close `pubView`, and its members leaving with it end the demand this reads.
+        const releasePubView = keepReachable(pubView)
+        const pub = await pubView.join({ meta: { name: 'Pub' }, selfDelivery: false })
+        const other = await pubView.join({ meta: { name: 'Other' } })
+        const demand: Array<[string | null, boolean]> = []
+        pub.onDemand((track, wanted) => demand.push([track, wanted]))
+        const otherDemand: Array<[string | null, boolean]> = []
+        other.onDemand((track, wanted) => otherDemand.push([track, wanted]))
+        // Pub's own side: its frames never come back to this view, so it wants nothing of Pub.
+        pubView.subscribeBinary(() => {}, { track: 'own' })
+
+        const tracks = Array.from({ length: 1_000 }, (_, i) => `t${i}`)
+        const viewer = await onGetRoom(roomId)
+        const remote = await getParticipantWhenJoined(viewer, pub.id)
+        const frames: Record<string, number[]> = {}
+        const offs = tracks.map((track) =>
+          remote.subscribeBinary((data, info) => (frames[info.track!] ??= []).push(data[0]!), { track }),
+        )
+        const defaultTrack: number[] = []
+        viewer.subscribeBinary((data) => defaultTrack.push(data[0]!), { track: null })
+        await pollUntil(() => ({
+          done: demand.some(([track]) => track === 't999') && demand.some(([t]) => t === null),
+        }))
+
+        await Promise.all([
+          ...tracks.flatMap((track) => [1, 2].map((n) => pub.publishBinary(new Uint8Array([n]), { track }))),
+          pub.publishBinary(new Uint8Array([7])),
+        ])
+        await pollUntil(() => ({
+          done: tracks.every((track) => frames[track]?.length === 2) && defaultTrack.length > 0,
+        }))
+        offs[0]!()
+        await pollUntil(() => ({ done: demand.some(([track, wanted]) => track === 't0' && !wanted) }))
+
+        const many = await onGetRoom(roomId)
+        for (let i = 0; i < 4_096; i++) many.subscribeBinary(() => {}, { track: `x${i}` })
+        const tooMany = (() => {
+          try {
+            many.subscribeBinary(() => {}, { track: 'past' })
+            return null
+          } catch (err) {
+            return (err as Error).message
+          }
+        })()
+        setResult(
+          JSON.stringify({
+            inOrder: tracks.filter((track) => frames[track]!.join() === '1,2').length,
+            defaultTrack,
+            demand: demand.filter(([track]) => track === null || track === 'own' || track === 't0' || track === 't999'),
+            wanted: new Set(demand.filter(([, wanted]) => wanted).map(([track]) => track)).size,
+            otherOwn: otherDemand.filter(([track]) => track === 'own'),
+            tooMany,
+          }),
+        )
+        releasePubView()
+      })}
     </div>
   )
 }

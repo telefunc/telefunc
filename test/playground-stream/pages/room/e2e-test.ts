@@ -362,4 +362,28 @@ function testRoom() {
       page.off('pageerror', onPageError)
     }
   })
+  testRoomScenario<{
+    inOrder: number
+    defaultTrack: number[]
+    demand: Array<[string | null, boolean]>
+    wanted: number
+    otherOwn: Array<[string, boolean]>
+    tooMany: string | null
+  }>(
+    'tracks',
+    "room: each of 1,000 named tracks reaches its subscriber in order, onDemand follows the wants, and a selfDelivery:false member's own side is no demand",
+    (r) => {
+      expect(r.inOrder).toBe(1_000)
+      expect(r.defaultTrack).deep.equal([7])
+      expect(r.demand.filter(([track]) => track !== null)).deep.equal([
+        ['t0', true],
+        ['t999', true],
+        ['t0', false],
+      ])
+      expect(r.demand.filter(([track]) => track === null)).deep.equal([[null, true]])
+      expect(r.wanted).toBe(1_001)
+      expect(r.otherOwn).deep.equal([['own', true]])
+      expect(r.tooMany).include('[Wrong Usage] Too many binary tracks subscribed on one room (4096 max)')
+    },
+  )
 }
