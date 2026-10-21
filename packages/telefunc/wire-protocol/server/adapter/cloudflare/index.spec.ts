@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => {
     readonly attachBinding = vi.fn()
     readonly attachKV = vi.fn()
     readonly attachIsolateInfo = vi.fn()
+    readonly attachRequest = vi.fn()
     readonly publishToSubscribers = vi.fn()
     readonly deliverToLocal = vi.fn()
 
@@ -224,7 +225,10 @@ describe('cloudflare adapter entrypoint', () => {
     })
     const forwardedRequest = fetch.mock.calls[0]![0] as Request
     expect(forwardedRequest.headers.has('x-telefunc-session')).toBe(false)
-    const instance = new tf.TelefuncDurableObject({} as DurableObjectState, env) as unknown as {
+    const instance = new tf.TelefuncDurableObject(
+      { id: { name: 'telefunc-shard-weur-0' } } as DurableObjectState,
+      env,
+    ) as unknown as {
       fetch(request: Request): Promise<Response>
     }
     await instance.fetch(forwardedRequest)
