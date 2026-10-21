@@ -20,7 +20,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // before the request's signal could report it.
       (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')) ||
       // testRefusedPresence()'s KV refuses a presence write.
-      log.logText.includes("A Broadcast presence couldn't be written"),
+      log.logText.includes('KV refused to record that this Durable Object has subscribers to the Broadcast key'),
   })
   testTodolist()
   testChannel()

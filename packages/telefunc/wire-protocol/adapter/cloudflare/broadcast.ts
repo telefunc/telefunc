@@ -63,11 +63,11 @@ type BufferedPublish = {
 }
 
 /** KV takes one write a second per key, so a write it refuses is expected. */
-async function warnRefusedWrite(write: Promise<void>, outcome: string): Promise<void> {
+async function warnRefusedWrite(write: Promise<void>, warning: string): Promise<void> {
   try {
     await write
   } catch (err) {
-    assertWarning(false, `A Broadcast presence couldn't be ${outcome}: ${String(err)}`, { onlyOnce: false })
+    assertWarning(false, `${warning} (${String(err)})`, { onlyOnce: false })
   }
 }
 
@@ -352,19 +352,16 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   }
 
   private async putPresence(key: string, owner: string): Promise<void> {
-    const written = this.requireKV().put(this.getPresenceKey(key, owner), owner, {
-      expirationTtl: PRESENCE_TTL_SECONDS,
-    })
     await warnRefusedWrite(
-      written,
-      `written, and is written again at its next refresh, within ${PRESENCE_REFRESH_INTERVAL_MS / 1000} s`,
+      this.requireKV().put(this.getPresenceKey(key, owner), owner, { expirationTtl: PRESENCE_TTL_SECONDS }),
+      `KV refused to record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so they may miss publishes made on other Durable Objects until Telefunc's next try, within ${PRESENCE_REFRESH_INTERVAL_MS / 1000} s`,
     )
   }
 
   private async deletePresence(key: string, owner: string): Promise<void> {
     await warnRefusedWrite(
       this.requireKV().delete(this.getPresenceKey(key, owner)),
-      `deleted, and expires within ${PRESENCE_TTL_SECONDS} s`,
+      `KV refused to remove the record that this Durable Object has subscribers to the Broadcast key ${JSON.stringify(key)}, so publishes to that key keep reaching this Durable Object, which no longer needs them, for up to ${PRESENCE_TTL_SECONDS} s`,
     )
   }
 
