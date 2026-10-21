@@ -375,15 +375,8 @@ class FlowControl {
   }
 
   private _refresh(): void {
-    const bytes = this._consumedBytes - this._advertisedBytes >= this._bdp.byteWindow >> 2
-    const messages = this._consumedMessages - this._advertisedMessages >= this._bdp.msgWindow >> 2
-    if (bytes || messages) this._advertiseDue(bytes, messages)
-  }
-
-  /** Sends the limits due. */
-  private _advertiseDue(bytes: boolean, messages: boolean): void {
-    if (bytes) this._advertiseBytes('flow-control')
-    if (messages) this._advertiseMessages()
+    if (this._consumedBytes - this._advertisedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes('flow-control')
+    if (this._consumedMessages - this._advertisedMessages >= this._bdp.msgWindow >> 2) this._advertiseMessages()
   }
 
   private _advertiseBytes(kind: 'acknowledgement' | 'flow-control'): void {
