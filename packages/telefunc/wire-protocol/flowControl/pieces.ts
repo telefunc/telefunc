@@ -12,7 +12,7 @@ import {
 } from '../constants.js'
 import type { Link } from './Link.js'
 import { TAG, assertProtocol, encode, isSequencedTag, passesData, type PiecesAck } from '../wire/connectionFrame.js'
-import { pingDeadline } from '../channel/pingDeadline.js'
+import { pingDeadline } from '../wire/pingDeadline.js'
 import { Fifo } from '../../utils/Fifo.js'
 import { unrefTimer } from '../../utils/unrefTimer.js'
 

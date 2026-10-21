@@ -50,7 +50,7 @@ import {
   type StreamTransport,
   TIMER_DELAY_MAX_MS,
 } from '../../wire-protocol/constants.js'
-import { pingDeadline } from '../../wire-protocol/channel/pingDeadline.js'
+import { pingDeadline } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
   /**
