@@ -7,7 +7,8 @@ import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
 import { createRequestReplacer } from '../../wire-protocol/values/client/request/registry.js'
 import { encodeRequestEnvelope } from '../../wire-protocol/wire/frame.js'
 import { pumpClientProducerToChannel } from '../../wire-protocol/values/client/request/pumpToChannel.js'
-import { ClientChannel, type ConnectionOptions } from '../../wire-protocol/channel/client/channel.js'
+import { ClientChannel } from '../../wire-protocol/channel/client/channel.js'
+import { getConnectionOptions } from './getConnectionOptions.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
@@ -57,13 +58,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     dataMain.extensions = callContext.extensions
   }
 
-  const connection: ConnectionOptions = {
-    transports: callContext.channel.transports,
-    connectionKey: callContext.connectionKey,
-    headers: callContext.headers ?? undefined,
-    telefuncUrl: callContext.telefuncUrl,
-    idleTimeout: callContext.channelIdleTimeout,
-  }
+  const connection = getConnectionOptions(callContext)
   const abortSignal = callContext.abortController.signal
   const files: Blob[] = []
   const requestCloseHandlers: CloseHandler[] = []

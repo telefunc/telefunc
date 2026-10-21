@@ -28,7 +28,6 @@ import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
 import { SERIALIZER_PREFIX_ROOM_STEM, STREAMING_ERROR_TYPE } from '../../../constants.js'
-import type { ChannelTransports } from '../../../constants.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
@@ -41,11 +40,8 @@ type CallContext = {
   telefunctionName: string
   telefuncFilePath: string
   abortController: AbortController
-  channel: { transports: ChannelTransports }
   requestCloseHandlers: CloseHandler[]
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
-  headers?: Record<string, string> | null
-  telefuncUrl: string
 }
 
 // ===== Public entry point =====
@@ -62,16 +58,8 @@ type CallContext = {
 async function parseResponse(
   response: Response,
   callContext: CallContext,
-  connectionKey: string | undefined,
-  idleTimeout?: number,
+  connection: ConnectionOptions,
 ): Promise<unknown> {
-  const connection: ConnectionOptions = {
-    transports: callContext.channel.transports,
-    connectionKey,
-    headers: callContext.headers ?? undefined,
-    telefuncUrl: callContext.telefuncUrl,
-    idleTimeout,
-  }
   const contentType = response.headers.get('content-type') ?? ''
   const isStreaming = contentType.includes('application/octet-stream') || contentType.includes('text/event-stream')
 

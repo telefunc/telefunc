@@ -474,13 +474,10 @@ async function roundTrip(
         telefunctionName: 'testFn',
         telefuncFilePath: '/pages/spec/ref-identity.telefunc.ts',
         abortController,
-        channel: { transports: opts.transports ?? ['sse'] },
         requestCloseHandlers: [],
         extensionResponseTypes: opts.clientExtensions ?? [],
-        headers: null,
-        telefuncUrl: 'http://localhost/_telefunc',
       },
-      undefined,
+      { transports: opts.transports ?? ['sse'], telefuncUrl: 'http://localhost/_telefunc' },
     )) as { ret: unknown }
     return { ret: parsed.ret, abortController }
   } finally {

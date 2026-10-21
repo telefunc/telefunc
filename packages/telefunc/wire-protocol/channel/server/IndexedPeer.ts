@@ -39,7 +39,7 @@ class IndexedPeer {
 
   /** Returns the bytes the frame counts against flow control. */
   sendText(data: string): number {
-    return this.sendSequenced((seq) => encode.text(this.index, data, seq)).byteLength
+    return this.sendSequenced((seq) => encode.text(this.index, data, seq)).bytes
   }
 
   /** Send a text frame that requests an ack response from the receiver. `onQueued` gets its seq and charged bytes. */
@@ -49,7 +49,7 @@ class IndexedPeer {
 
   /** Returns the bytes the frame counts against flow control. */
   sendBinary(data: Uint8Array): number {
-    return this.sendSequenced((seq) => encode.binary(this.index, data, seq)).byteLength
+    return this.sendSequenced((seq) => encode.binary(this.index, data, seq)).bytes
   }
 
   /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and charged bytes. */
@@ -65,14 +65,7 @@ class IndexedPeer {
 
   /** Returns its seq. */
   sendCloseRequest(timeoutMs: number): number {
-    let closeSeq = 0
-    this.sendSequenced(
-      (seq) => encode.close(this.index, timeoutMs, seq),
-      (seq) => {
-        closeSeq = seq
-      },
-    )
-    return closeSeq
+    return this.sendSequenced((seq) => encode.close(this.index, timeoutMs, seq)).seq
   }
 
   sendCloseAck(): void {
@@ -108,23 +101,23 @@ class IndexedPeer {
 
   /** Returns the bytes the frame counts against flow control. */
   sendPublish(data: string): number {
-    return this.sendSequenced((seq) => encode.publish(this.index, data, seq)).byteLength
+    return this.sendSequenced((seq) => encode.publish(this.index, data, seq)).bytes
   }
 
   /** Returns the bytes the frame counts against flow control. */
   sendPublishBinary(data: Uint8Array): number {
-    return this.sendSequenced((seq) => encode.publishBinary(this.index, data, seq)).byteLength
+    return this.sendSequenced((seq) => encode.publishBinary(this.index, data, seq)).bytes
   }
 
   /** Encodes at the next seq; `onQueued` runs before the wire has it. Replayed once committed, so a frame a dead wire lost goes again. */
   private sendSequenced(
     buildFrame: (seq: number) => Uint8Array<ArrayBuffer>,
     onQueued?: (seq: number, bytes: number) => void,
-  ): Uint8Array<ArrayBuffer> {
+  ): { seq: number; bytes: number } {
     const seq = this.replay.nextSeq()
     const frame = buildFrame(seq)
     onQueued?.(seq, frame.byteLength)
     this.sender.send(frame, () => this.replay.push(seq, frame))
-    return frame
+    return { seq, bytes: frame.byteLength }
   }
 }

@@ -7,6 +7,7 @@ import { parseResponse } from '../../wire-protocol/values/client/response/parse.
 import type { ReviverType, TypeContract, ClientReviverContext } from '../../wire-protocol/values/types.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire-protocol/wire/requestKind.js'
 import { throwAbortError, throwBugError } from './errors.js'
+import { getConnectionOptions } from './getConnectionOptions.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { CloseHandler } from '../close.js'
 import { ConnectionError } from '../ConnectionError.js'
@@ -68,7 +69,7 @@ async function makeHttpRequest(callContext: {
   const statusCode = response.status
 
   if (statusCode === STATUS_CODE_SUCCESS) {
-    const parsed = await parseResponse(response, callContext, callContext.connectionKey, callContext.channelIdleTimeout)
+    const parsed = await parseResponse(response, callContext, getConnectionOptions(callContext))
     assertUsage(isObject(parsed) && 'ret' in parsed, wrongInstallation({ method, callContext }))
     return parsed.ret
   } else if (statusCode === STATUS_CODE_THROW_ABORT) {
