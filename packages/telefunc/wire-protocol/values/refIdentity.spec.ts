@@ -974,7 +974,7 @@ test("a channel, a broadcast and an async generator leave the page's GC registry
     type Revived = { channel: ClientChannel; broadcast: ClientBroadcast; gen: AsyncGenerator<number> }
     const { channel, broadcast, gen } = (await roundTrip(returned)).ret as Revived
     const registry = getGlobalObject<{ gcRegistry: { entries: Set<{ ref: WeakRef<object> }> } }>(
-      'wire-protocol/client/response/parse.ts',
+      'wire-protocol/values/client/response/parse.ts',
       () => {
         throw new Error('parseResponse made no registry')
       },
