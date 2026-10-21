@@ -123,7 +123,7 @@ function testRedisOutages() {
         }
       })
       // Each server reports the outage of its subscriber connection.
-      expectLog('Redis subscriber connection closed', { filter: isServerLog })
+      expectServerLog('Redis subscriber connection closed')
     } finally {
       await leaveRoom(['a', 'b', 'c', 'd'], roomId)
     }
@@ -140,7 +140,7 @@ function testRedisOutages() {
         for (const instance of ['a', 'b'] as const) expect((await view(instance, roomId)).events).contains('close')
       })
       // Each server reports the room's subscriptions ending with its data.
-      expectLog('Backend subscription closed', { filter: isServerLog })
+      expectServerLog('Backend subscription closed')
 
       await leaveRoom(['a', 'b'], roomId)
       await joinRoom('a', roomId, 'Alice')
@@ -150,7 +150,7 @@ function testRedisOutages() {
         expect(await received('b', roomId)).deep.equal(['after'])
       })
       // Each server reports the outage of its subscriber connection.
-      expectLog('Redis subscriber connection closed', { filter: isServerLog })
+      expectServerLog('Redis subscriber connection closed')
     } finally {
       await leaveRoom(['a', 'b'], roomId)
     }
@@ -187,7 +187,7 @@ function testRedisOutages() {
         expect(await getRedisChannels(`*${encodeURIComponent(key)}*`)).deep.equal([])
       })
       // Each server reports the outage of its subscriber connection.
-      expectLog('Redis subscriber connection closed', { filter: isServerLog })
+      expectServerLog('Redis subscriber connection closed')
     } finally {
       await leaveRoom(['a', 'b'], roomId)
       await broadcastRequest('b', '/api/broadcast-cross-instance/unsubscribe', key, 'DELETE').catch(() => {})
@@ -382,9 +382,13 @@ function testServerCrash() {
   })
 }
 
-// docker compose prints a server's stderr on its stdout, prefixed with the service's container name.
-function isServerLog(log: { logSource: string; logText: string }) {
-  return log.logSource === 'stdout' && /^playground-[a-z]-\d+ +\| /.test(log.logText)
+// docker compose prints a server's stderr on its stdout, each line prefixed with the container's name, and one log can hold several containers' lines.
+function expectServerLog(text: string) {
+  expectLog(text, {
+    filter: (log) =>
+      log.logSource === 'stdout' &&
+      log.logText.split('\n').some((line) => line.includes(text) && /^playground-[a-z]-\d+ +\| /.test(line)),
+  })
 }
 
 /** Once Redis is back, a member's publishes reach the other server again, then arrive there in order, once.
