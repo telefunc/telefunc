@@ -175,7 +175,7 @@ async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: St
     const { Readable, pipeline, finished } = getStreamNodeModule()
     if (typeof responseBody === 'string') {
       // Unlike `end()`'s callback, settles when the client disconnects, and observes the destination's `error` event.
-      const done = finished(writable)
+      const done = finished(writable, { readable: false })
       writable.end(responseBody)
       await done
       return
