@@ -59,6 +59,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   Req,
   Res
 > {
+  // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
   // Each upgrade's socket, by the request its upgrade hook gets.
   const sockets = new WeakMap<Request, Duplex>()
   const ws = crossws({

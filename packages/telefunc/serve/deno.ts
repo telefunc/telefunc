@@ -30,11 +30,13 @@ class Telefunc {
 
 function telefunc(): TelefuncServe {
   enableChannelTransports([CHANNEL_TRANSPORT.WS])
+  // TODO: remove once Telefunc's own WebSocket adapter replaces crossws (https://github.com/h3js/crossws/pull/216, closed unmerged).
   // Deno's WebSocket has no terminate(), which crossws's Deno peer calls: close it instead.
   const hooks = getTelefuncChannelHooks({ terminate: (peer) => peer.close() })
   const ws = crossws({
     hooks: {
       open(peer) {
+        // TODO: remove once Telefunc's own WebSocket adapter replaces crossws (https://github.com/h3js/crossws/pull/213, closed unmerged).
         // crossws's Deno adapter reports a close without its code, and the code tells a page that left from a dropped one.
         peer.websocket.addEventListener!('close', (event) =>
           hooks.close(peer, { code: event.code, reason: event.reason }),

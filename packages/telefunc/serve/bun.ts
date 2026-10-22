@@ -33,6 +33,7 @@ class Telefunc {
 
 function telefunc(): TelefuncServe {
   enableChannelTransports([CHANNEL_TRANSPORT.WS])
+  // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
   // A peer's `websocket` is a Proxy, and Bun's methods refuse one as `this`: the socket itself answers.
   const sockets = new WeakMap<Peer, BunSocket>()
   const ws = crossws({
