@@ -86,11 +86,9 @@ function createHttpResponse({
   body: ResponseBody
   err?: unknown
 }): HttpResponse {
-  headers.push(['Content-Type', contentType])
-
   return {
     statusCode,
-    headers,
+    headers: [...headers, ['Content-Type', contentType]],
     get contentType() {
       // TO-DO/next-major-release: remove
       assertWarning(
