@@ -8,6 +8,7 @@ import { encodeLaneKey } from '../../backend/room/laneKey.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import { reportServerChannelError } from '../../channel/server/channel.js'
 import type { BinaryFrame } from '../binary.js'
+import { ROOM_MEMBER_TRACKS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import {
   DM_FAILURE,
@@ -15,6 +16,7 @@ import {
   participantLeftError,
   roomClosedError,
   roomFailureError,
+  RoomError,
   toRoomFailure,
   ROOM_BUG_MESSAGE,
 } from '../errors.js'
@@ -112,7 +114,11 @@ class RoomWrites {
       const { sender } = await this._admitPublish(from, frame.payload)
       const planned = host._replica.plan.lanePlanned(from, lane.track)
       if (planned !== null) await planned
-      host._replica.demand.published(from, lane.track)
+      const demand = host._replica.demand
+      if (!demand.admitsTrack(from, lane.track)) {
+        throw new RoomError(`A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
+      }
+      demand.published(from, lane.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitRoomLaneOrThrow({ roomId: host.id, inc: host._incarnation.inc, lane }, framed, opts)
       sent()

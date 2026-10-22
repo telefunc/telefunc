@@ -2,6 +2,7 @@ export { RoomDemand, DemandReport }
 
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { ALL, DEFAULT_TRACK, type All } from '../binary.js'
+import { ROOM_MEMBER_TRACKS_MAX } from '../constants.js'
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
 import type { DemandEntry, RoomDemandPage } from './protocol.js'
 import { hasEntry, runAll, toggle, toggleEntry } from './sets.js'
@@ -360,6 +361,13 @@ class RoomDemand {
   owned(member: string): void {
     for (const track of this._tracks.keys()) this._queue(track, member)
     this._settle()
+  }
+
+  /** Whether the member may publish on `track`: the default track, one it publishes on, or a new one while it publishes
+   *  on fewer than `ROOM_MEMBER_TRACKS_MAX` named tracks. */
+  admitsTrack(member: string, track: string): boolean {
+    const tracks = this._published.get(member)
+    return track === DEFAULT_TRACK || tracks === undefined || tracks.size < ROOM_MEMBER_TRACKS_MAX || tracks.has(track)
   }
 
   /** The member publishes on `track`, which a report of its every track covers from now on. */

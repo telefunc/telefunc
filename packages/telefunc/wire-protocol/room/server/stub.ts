@@ -3,7 +3,7 @@ export { RoomStubChannel, RoomParticipantStubChannel, ResponseRoomGrants, Member
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../../utils/assert.js'
-import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
+import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { ServerChannel, parsePeerText } from '../../channel/server/channel.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
@@ -304,8 +304,12 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     return id
   }
 
-  /** Takes the member its client's `req-join` (`reqId`) admitted, and tells the client before any event naming it. */
+  /** Takes the member its client's `req-join` (`reqId`) admitted, and tells the client before any event naming it; past
+   *  `ROOM_VIEW_MEMBERS_MAX`, throws instead, before the join commits. */
   _addMember(reqId: number, id: string, selfDelivery: boolean): void {
+    if (this._members.size === ROOM_VIEW_MEMBERS_MAX) {
+      throw new RoomError(`A room view joins at most ${ROOM_VIEW_MEMBERS_MAX} participants`)
+    }
     this._members.add(id)
     if (!selfDelivery) this._selfSuppressed.add(id)
     this._sendPublish(unorderedEventText({ __r: 'joined', reqId, id }))
