@@ -96,6 +96,13 @@ function testRoomMetaReads() {
       expect(['before', 'after']).toContain(r.read)
     },
   )
+  testRoomScenario<{ read: string }>(
+    'split-meta-across-merge',
+    "room: a read of a member's meta whose keys another member's meta of more than a page split gets it before or after a merge that commits between the read's pages",
+    (r) => {
+      expect(['before', 'after']).toContain(r.read)
+    },
+  )
 }
 
 function testRoom() {

@@ -53,6 +53,7 @@ export {
   onStopReplacingMeta,
   onReadMetaAcrossWrite,
   onReadMetaAcrossDrop,
+  onReadSplitMetaAcrossMerge,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
@@ -637,6 +638,21 @@ async function onReadMetaAcrossDrop(roomId: string) {
   dropping.release()
   await replacing
   return metaName(read!.meta, { before: bigMeta('a'), after: {} })
+}
+
+/** Member A's meta, whose last key it wrote after member B joined with the `b` meta, read by the room's roster while a
+ *  merge of A's commits between the read's first and second page: 'before', 'after', or the keys the read got. */
+async function onReadSplitMetaAcrossMerge(roomId: string) {
+  const member = await Room.join<Record<string, string>>(roomId, { meta: { k0: 'a', k1: 'a' } })
+  await Room.join(roomId, { meta: bigMeta('b') })
+  await member.setAttributes({ k2: 'a' })
+  const held = holdCellPages(roomId, 'pm:', 1)
+  const reading = Room.getParticipants(roomId)
+  await held.reached
+  await member.setAttributes({ k0: undefined, k2: undefined, zz: 'new' })
+  held.release()
+  const read = (await reading).find((participant) => participant.id === member.id)!
+  return metaName(read.meta, { before: { k0: 'a', k1: 'a', k2: 'a' }, after: { k1: 'a', zz: 'new' } })
 }
 
 /** The name of the meta in `named` that `meta` is, keys in order, or the keys it holds. */

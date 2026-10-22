@@ -57,6 +57,7 @@ import {
   onStopReplacingMeta,
   onReadMetaAcrossWrite,
   onReadMetaAcrossDrop,
+  onReadSplitMetaAcrossMerge,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
@@ -506,6 +507,11 @@ function Room() {
 
       {scenario('meta-across-drop', null, "Read a member's big meta across its drop", async () => {
         setResult(JSON.stringify({ read: await onReadMetaAcrossDrop(await createRoomId('meta-across-drop')) }))
+      })}
+
+      {scenario('split-meta-across-merge', null, "Read a member's split meta across a merge", async () => {
+        const roomId = await createRoomId('split-meta-across-merge')
+        setResult(JSON.stringify({ read: await onReadSplitMetaAcrossMerge(roomId) }))
       })}
 
       {scenario('sender', 'Rename during a guard', 'Rename while a publish waits on its guard', async () => {
