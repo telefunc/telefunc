@@ -635,7 +635,11 @@ describe('extension wire types registered while a telefunc module loads', () => 
         },
       },
     )
-    const request = new Request('http://localhost/_telefunc', { method: 'POST', body })
+    const request = new Request('http://localhost/_telefunc', {
+      method: 'POST',
+      body,
+      headers: { 'x-telefunc-request': 'txt' },
+    })
     const requestContext = createRequestContext(request)
 
     const parsed = await parseHttpRequest({

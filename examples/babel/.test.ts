@@ -55,6 +55,7 @@ function testRun(
 async function makeTelefuncHttpRequest(name: string | number) {
   const resp = await fetch(`${getServerUrl()}/_telefunc`, {
     method: 'POST',
+    headers: { 'x-telefunc-request': 'txt' },
     body: JSON.stringify({
       file: '/hello.telefunc.ts',
       name: 'hello',
