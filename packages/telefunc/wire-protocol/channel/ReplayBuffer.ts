@@ -57,7 +57,9 @@ export class ReplayBuffer {
 
   /** The peer has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
-    if (lastSeq > this.acknowledgedSeq) this.acknowledgedSeq = lastSeq
+    // Nothing new: its lanes dropped through it, and a lowered budget waits for a later seq.
+    if (lastSeq <= this.acknowledgedSeq) return
+    this.acknowledgedSeq = lastSeq
     for (const kind of LANE_KINDS) this.lanes[kind]?.acknowledge(lastSeq)
     if (this.lowered === null || lastSeq < this.lowered.throughSeq) return
     const { budgets } = this.lowered
