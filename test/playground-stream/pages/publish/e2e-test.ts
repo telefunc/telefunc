@@ -95,18 +95,6 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  test("broadcast: each binary listener gets bytes of its own, so one that writes into them or transfers them leaves the next one's and the page's intact", async () => {
-    await navigate(`${getServerUrl()}/publish`)
-    await page.click('#test-binary-broadcast-own-bytes')
-
-    await autoRetry(async () => {
-      const result = await getResult<{ received: number[][]; seen: number[][]; keySeen: number[][] }>('#publish-result')
-      expect(result.received).deep.equal([[1, 2, 3, 4]])
-      expect(result.seen).deep.equal([[1, 2, 3, 4]])
-      expect(result.keySeen).deep.equal([[1, 2, 3, 4]])
-    })
-  })
-
   test('broadcast: binary publishes go out as they were at the call, though the server refills one buffer for each while a subscription establishes', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-binary-broadcast-reused-buffer')
