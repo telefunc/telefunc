@@ -279,7 +279,7 @@ class CloudflareBroadcastAuthorityState {
 //   - memberStates: per key, the presences of the DOs with subscribers here and the publishes waiting on them
 //   - requestOwners: each request a DO received, with its name
 //   - locationBucket: set once on first attachIsolateInfo call
-//   - representativeDOName: the first shard DO name, used for RPC delivery
+//   - representativeDOName: the isolate's first DO, the owner of the server's own subscribers
 // ---------------------------------------------------------------------------
 
 class CloudflareBroadcastTransport implements BroadcastAdapter {
@@ -551,7 +551,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   }
 
   /**
-   * Delivers a publish to local subscribers. Called via RPC on the representative DO for this isolate.
+   * Delivers a publish to the subscribers here of the Durable Object `request.doName`, which the RPC went to.
    */
   deliverToLocal(request: BroadcastDeliverRequest): void {
     this.deliverLocal(request)

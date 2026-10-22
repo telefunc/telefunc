@@ -291,8 +291,8 @@ class SseConnectionTransport {
     return Promise.allSettled([...connection.pendingDispatches])
   }
 
-  /** Read length-prefixed frames from `reader` and dispatch each through the deferred-reconcile path, the next
-   *  waiting for `onReconciled` of the `ReconcileOutcome` a frame produces. */
+  /** Reads `reader`'s frames and dispatches each through the deferred-reconcile path; a RECONCILE's outcome goes to
+   *  `onReconciled` before the next frame is read. */
   private async drain(
     connection: SseConnection,
     reader: StreamReader,

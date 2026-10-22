@@ -305,7 +305,8 @@ function isJoinLimb(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
-/** `closed`: unregistered, and still listed till released, as a RECONCILE leaving it out ends it on the server. */
+/** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
+ *  it on the server. */
 type ChannelState =
   | { tag: 'pending'; initial: boolean }
   | { tag: 'open' }

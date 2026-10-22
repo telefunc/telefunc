@@ -1019,7 +1019,8 @@ class ChannelMux {
   }
 
   private detachHandle(h: ChannelHandle, reason: DetachReason): void {
-    // An ended channel waits out a lost wire for its page, which lets it go by leaving it out or leaving for good.
+    // An ended channel waits out a lost wire for its page, which lets it go by releasing it, leaving it out of a new
+    // wire's RECONCILE, or leaving for good.
     if (this.endedChannels.has(h.channel)) {
       if (reason === DETACH_REASON.TRANSIENT) this.keepEnded(h.channel, false)
       else this.releaseEnded(h.channel)
@@ -1153,7 +1154,7 @@ class SessionRegistry {
     bindings.set(sessionId, h.ix)
   }
 
-  /** Stores no empty session, as `removeChannel`. */
+  /** Takes the channel at `ix` out of the session and returns it; a session left empty goes, as in `removeChannel`. */
   remove(sessionId: string, ix: number): ChannelHandle | undefined {
     const session = this.bySession.get(sessionId)
     const handle = session?.get(ix)
