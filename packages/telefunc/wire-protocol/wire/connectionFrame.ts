@@ -178,9 +178,10 @@ function isSequencedTag(tag: number): boolean {
   return (tag >= DATA_TAG_MIN && tag < CHANNEL_CTRL_TAG_MIN) || isClosingTag(tag)
 }
 
-/** Whether a frame of `tag` passes the data waiting ahead of it: not sequenced, nor FIN, which ends its wire's data. */
+/** Whether a frame of `tag` passes the data waiting ahead of it: not sequenced, nor FIN or RECONCILED, which the page reads
+ *  as coming behind it. */
 function passesData(tag: number): boolean {
-  return !isSequencedTag(tag) && tag !== TAG.FIN
+  return !isSequencedTag(tag) && tag !== TAG.FIN && tag !== TAG.RECONCILED
 }
 
 function isClosingTag(tag: number): boolean {
