@@ -144,9 +144,19 @@ async function onBroadcastRightAfterSubscribe() {
   for (let i = 0; i < 2000; i++) void busy.publish(i)
   const room = new BroadcastChannel<string>({ key: `room:right-after-test:${crypto.randomUUID()}` })
   const seen: unknown[] = []
-  room.subscribe((data) => seen.push(data))
-  room.subscribeBinary((data) => seen.push([...data]))
+  // publish() resolves once the message is accepted: a store like Redis delivers it to local subscribers after that.
+  const sawAll = Promise.withResolvers<void>()
+  const see = (entry: unknown) => {
+    seen.push(entry)
+    if (seen.length === 3) sawAll.resolve()
+  }
+  room.subscribe(see)
+  room.subscribeBinary((data) => see([...data]))
   await Promise.all([room.publish('t1'), room.publishBinary(new Uint8Array([1])), room.publish('t2')])
+  const deadline = Promise.withResolvers<void>()
+  const timer = setTimeout(deadline.resolve, 10_000)
+  await Promise.race([sawAll.promise, deadline.promise])
+  clearTimeout(timer)
   await Promise.all([busy.close(), room.close()])
   return seen
 }
