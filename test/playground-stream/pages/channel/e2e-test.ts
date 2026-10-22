@@ -79,6 +79,7 @@ type ChannelState = {
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
+  helloBesideBurst: boolean
   manyListenersMs: { page: number; server: number | null } | null
 }
 
@@ -844,6 +845,22 @@ function testChannel(isDev: boolean, inDocker = false) {
         )
       })
       expect(connections.stop()).toBe(1)
+    })
+  }
+
+  // Over SSE, a channel's registration and the message the page queued with it go in one request.
+  if (channelTransports.length === 1 && channelTransport === 'sse') {
+    test("channel: at 1 Mbit/s, a channel the page opens beside another's 4 MiB burst gets the message its server sends as it opens", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await withNetworkConditions({ downloadThroughput: 125_000, uploadThroughput: 125_000 }, async () => {
+        await page.click('#channel-test-hello-beside-burst')
+        await autoRetry(
+          async () => {
+            expect((await getResult<ChannelState>('#channel-state')).helloBesideBurst).toBe(true)
+          },
+          { timeout: 50_000 },
+        )
+      })
     })
   }
 
