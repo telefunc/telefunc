@@ -569,7 +569,7 @@ async function onChannelUnserializableAnswer() {
   return { channel: ch.client, channelId: id }
 }
 
-/** The server asks for an answer the page makes larger than the server takes. */
+/** The server asks for an answer the page makes larger than the server takes; the page publishes as large on `broadcast`. */
 async function onChannelOversize() {
   const ch = new Channel<(msg: string) => string, (msg: string) => string>()
   const id = ch.id
@@ -578,7 +578,12 @@ async function onChannelOversize() {
     cleanupState[`oversize_${id}_serverSend`] = await settle(ch.send('big', { ack: true }))
     cleanupState[`oversize_${id}_serverFollowUp`] = await settle(ch.send('ok', { ack: true }))
   })
-  return { channel: ch.client, channelId: id, limit: WIRE_LIMIT_BYTES }
+  return {
+    channel: ch.client,
+    channelId: id,
+    limit: WIRE_LIMIT_BYTES,
+    broadcast: new BroadcastChannel({ key: `oversize:${crypto.randomUUID()}` }),
+  }
 }
 
 /** Sends binary before the page attaches, reusing each buffer for the next send. */

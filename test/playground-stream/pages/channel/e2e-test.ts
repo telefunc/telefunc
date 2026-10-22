@@ -69,7 +69,13 @@ type ChannelState = {
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
-  oversize: { channelId: string; thrown: string[]; followUp: string; isClosed: boolean } | null
+  oversize: {
+    channelId: string
+    thrown: string[]
+    followUp: string
+    isClosed: boolean
+    broadcastIsClosed: boolean
+  } | null
   heldBinary: number[][] | null
   unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
   durationLimits: { withContext: string; close: string; ack: string } | null
@@ -759,17 +765,18 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('channel: a send over 64 MiB throws at once and an answer that large rejects the send it answers, the channel staying open', async () => {
+  test('channel: a send or publish over 64 MiB throws at once and an answer that large rejects the send it answers, the channel staying open', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#channel-test-oversize')
 
     await autoRetry(async () => {
       const state = await getResult<ChannelState>('#channel-state')
       const result = state.oversize!
-      expect(result.thrown).to.have.length(2)
+      expect(result.thrown).to.have.length(4)
       expect(result.thrown).not.to.include('none')
       expect(result.followUp).toBe('ack:ok')
       expect(result.isClosed).toBe(false)
+      expect(result.broadcastIsClosed).toBe(false)
       const ss = await getCleanupState()
       expect(ss[`oversize_${result.channelId}_serverSend`]).match(/^error:/)
       expect(ss[`oversize_${result.channelId}_serverFollowUp`]).toBe('ok:client-ack:ok')
