@@ -570,7 +570,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     return getOrCreate(this._rooms, roomId, () => ({ head: null, gens: new Map() }))
   }
 
-  /** A room with no incarnation left is forgotten once its tombstone lapses (revs are process-global, never reused). */
+  /** A room with no incarnation left is forgotten once its tombstone lapses (this backend's revs are never reused). */
   private _releaseWhenLapsed(roomId: string, room: RoomRecord): void {
     if (this._rooms.get(roomId) !== room || room.gens.size > 0) return
     const head = this._liveHead(room)
