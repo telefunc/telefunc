@@ -8,6 +8,7 @@ export {
   assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
+  readForwardedTarget,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
 }
@@ -102,6 +103,15 @@ function resolveSessionRoutingTarget(
   const sessionInstanceName = getSessionShardName(baseInstanceName, locationBucket, shardOrdinal)
 
   return { sessionInstanceName, locationBucket, shardOrdinal }
+}
+
+/** The session Durable Object and region the Worker forwarded `request` to, as its routing headers name them. */
+function readForwardedTarget(
+  request: Request,
+): Pick<SessionRoutingTarget, 'sessionInstanceName' | 'locationBucket'> | null {
+  const sessionInstanceName = request.headers.get(TELEFUNC_SHARD_HEADER)
+  const locationBucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
+  return sessionInstanceName && locationBucket ? { sessionInstanceName, locationBucket } : null
 }
 
 /** Deterministically maps a key, a broadcast's channel key or a session's token, into one bucket index. */

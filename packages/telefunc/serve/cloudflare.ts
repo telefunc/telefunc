@@ -19,12 +19,13 @@ import {
   TELEFUNC_SESSION_HEADER,
   TELEFUNC_SHARD_HEADER,
   assertLocationFallbackIsScaled,
+  readForwardedTarget,
   resolveSessionRoutingTarget,
 } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/sessionPin.js'
 import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
-import type { CloudflareScale, LocationBucket } from '../wire-protocol/adapter/cloudflare/routing.js'
+import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest } from './shared.js'
 
@@ -114,9 +115,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
 
     async fetch(request: Request) {
       broadcast.attachRequest(request, this.instanceName)
-      const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-      const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-      if (shard && bucket) broadcast.attachIsolateInfo(shard, bucket)
+      const target = readForwardedTarget(request)
+      if (target) broadcast.attachIsolateInfo(target.sessionInstanceName, target.locationBucket)
       sessionPins.pin(request)
       if (request.headers.get('upgrade') === 'websocket') {
         return crosswsAdapter.handleDurableUpgrade(this, request)

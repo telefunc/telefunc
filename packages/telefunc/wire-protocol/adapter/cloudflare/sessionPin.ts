@@ -1,7 +1,7 @@
 /// <reference types="@cloudflare/workers-types" />
 export { SessionPins, readSessionPin }
 
-import { TELEFUNC_BROADCAST_BUCKET_HEADER, TELEFUNC_SESSION_HEADER, TELEFUNC_SHARD_HEADER } from './routing.js'
+import { TELEFUNC_SESSION_HEADER, readForwardedTarget } from './routing.js'
 import { assertWarning } from '../../../utils/assert.js'
 import type { LocationBucket, SessionRoutingTarget } from './routing.js'
 
@@ -50,11 +50,10 @@ class SessionPins {
       this.recordDue(token, due)
       return
     }
-    const shard = request.headers.get(TELEFUNC_SHARD_HEADER)
-    const bucket = request.headers.get(TELEFUNC_BROADCAST_BUCKET_HEADER) as LocationBucket | null
-    if (!shard || !bucket) return
+    const target = readForwardedTarget(request)
+    if (!target) return
     this.recordDue(token, now + SHARD_TOKEN_REPIN_MS)
-    const pin: StoredShardToken = { s: shard, b: bucket }
+    const pin: StoredShardToken = { s: target.sessionInstanceName, b: target.locationBucket }
     // A Durable Object lives on while the write is pending.
     const written = kv.put(`session:${token}`, JSON.stringify(pin), { expirationTtl: SHARD_TOKEN_TTL_SECONDS })
     written.catch((err: unknown) => {
