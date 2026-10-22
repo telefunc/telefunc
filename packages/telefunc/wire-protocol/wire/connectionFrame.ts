@@ -905,23 +905,23 @@ function parsePreparePayload(value: unknown): PreparePayload {
 }
 
 function parseOpenList(payload: Record<string, unknown>): void {
-  assertProtocol(Array.isArray(payload.open), 'RECONCILE open')
-  assertProtocol(payload.open.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over entry cap')
+  assertProtocol(Array.isArray(payload.open), 'open list')
+  assertProtocol(payload.open.length <= MAX_CHANNELS_PER_CONNECTION, 'open list over entry cap')
   const indexes = new Set<number>()
   for (const rawEntry of payload.open) {
     const entry = asObject(rawEntry)
-    assertProtocol(typeof entry.id === 'string', 'RECONCILE entry id')
+    assertProtocol(typeof entry.id === 'string', 'open entry id')
     // `ix` is truncated to u16 by the header writer, so a wider one would alias onto another channel.
-    assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix), 'RECONCILE entry ix')
+    assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix), 'open entry ix')
     indexes.add(entry.ix)
-    assertProtocol(isUint(entry.lastSeq, Number.MAX_SAFE_INTEGER), 'RECONCILE entry lastSeq')
-    assertProtocol(entry.initial === undefined || entry.initial === true, 'RECONCILE entry initial')
-    assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'RECONCILE entry probe')
+    assertProtocol(isUint(entry.lastSeq, Number.MAX_SAFE_INTEGER), 'open entry lastSeq')
+    assertProtocol(entry.initial === undefined || entry.initial === true, 'open entry initial')
+    assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'open entry probe')
     if (entry.broadcast !== undefined) {
       const broadcast = asObject(entry.broadcast)
       assertProtocol(
         typeof broadcast.text === 'boolean' && typeof broadcast.binary === 'boolean',
-        'RECONCILE entry broadcast',
+        'open entry broadcast',
       )
     }
   }

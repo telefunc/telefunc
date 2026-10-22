@@ -157,7 +157,7 @@
     }
   },
   "engines": {
-    "node": ">=26"
+    "node": ">=22"
   },
   "files": [
     "dist/",
