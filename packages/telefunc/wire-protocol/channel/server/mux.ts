@@ -803,10 +803,6 @@ class ChannelMux {
       throw new ProtocolViolationError('connection closed mid-reconcile')
     }
 
-    // What the wire awaits is forgotten once the page lets it go.
-    if (released === undefined) state.awaited.forgetUnnamed(ctrl.open)
-    else state.awaited.forget(released)
-
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
     state.attaching.clear()
@@ -834,6 +830,7 @@ class ChannelMux {
           if (!keptIxes.has(ix)) this.detachHandle(prevHandle, DETACH_REASON.RECOVERY_FAILED)
       }
     }
+    entry.state.awaited.forgetUnnamed(open)
     this.sessions.setSession(newSessionId, handles)
     return handles
   }
@@ -857,6 +854,7 @@ class ChannelMux {
       const handle = this.sessions.remove(sessionId, ix)
       if (handle) this.detachHandle(handle, DETACH_REASON.RECOVERY_FAILED)
     }
+    entry.state.awaited.forget(released)
     return handles
   }
 
