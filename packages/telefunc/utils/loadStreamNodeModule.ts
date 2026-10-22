@@ -7,8 +7,8 @@ import { getGlobalObject } from './getGlobalObject.js'
 async function loadStreamNodeModule() {
   const streamModule = (await import_('node:stream')).default as Awaited<typeof import('node:stream')>
   const { Readable, Writable } = streamModule
-  const { pipeline } = streamModule.promises
-  return { Readable, Writable, pipeline }
+  const { pipeline, finished } = streamModule.promises
+  return { Readable, Writable, pipeline, finished }
 }
 
 type StreamModule = Awaited<ReturnType<typeof loadStreamNodeModule>>

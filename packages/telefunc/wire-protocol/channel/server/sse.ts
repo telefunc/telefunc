@@ -40,8 +40,6 @@ type SseConnection = {
   pendingDispatches: Set<Promise<unknown>>
 }
 
-const sseOpenComment = textEncoder.encode(': open\n\n')
-
 type EventStreamOptions = {
   useNodeStream: boolean
   onCancel: () => void
@@ -60,7 +58,7 @@ class EventStream {
     this.stream = useNodeStream
       ? createPushReadable(onCancel, onTake)
       : createPushReadableStream<Uint8Array<ArrayBuffer>>(onCancel, onTake)
-    this.takes = this.stream.push(sseOpenComment)
+    this.takes = this.stream.push(textEncoder.encode(': open\n\n'))
   }
 
   /** The encoded bytes the stream holds, and those waiting for it to ask. */
