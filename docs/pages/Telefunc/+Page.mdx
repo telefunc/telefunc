@@ -135,7 +135,7 @@ Deno.serve({ port: 3000 }, async (request, info) => {
 })
 ```
 
-> On Deno, add `"unstable": ["no-legacy-abort"]` to your `deno.json`: Telefunc listens to `request.signal` to know when a client disconnects, and without it Deno also aborts `request.signal` after every successful response and warns about it, see [Deno's docs](https://docs.deno.com/runtime/reference/deno_serve_legacy_abort/).
+> On Deno, add `"unstable": ["no-legacy-abort"]` to your `deno.json`, otherwise Deno logs a warning after every successful response — see [Deno's docs](https://docs.deno.com/runtime/reference/deno_serve_legacy_abort/).
 :::
 
 :::Choice{#Cloudflare}
