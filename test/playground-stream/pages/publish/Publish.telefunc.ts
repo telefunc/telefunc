@@ -4,6 +4,7 @@ export {
   onBinaryBroadcast,
   onBroadcastShieldClient,
   onBroadcastServerListener,
+  onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
@@ -92,6 +93,22 @@ async function onBroadcastServerListener() {
   })
   room.subscribeBinary((data) => {
     received.push(data.byteLength)
+  })
+  return { room, getReceived: async () => received }
+}
+
+/** Two binary listeners of a broadcast and two of its key's static subscribers; the first of each transfers its bytes. */
+async function onBroadcastOwnBytes() {
+  const key = `room:own-bytes:${crypto.randomUUID()}`
+  const room = new BroadcastChannel({ key })
+  const received: Array<number[] | 'detached'> = []
+  const transfer = (data: Uint8Array) => void structuredClone(data.buffer, { transfer: [data.buffer] })
+  const record = (data: Uint8Array) => void received.push(data.byteLength === 0 ? 'detached' : [...data])
+  room.subscribeBinary(transfer)
+  room.subscribeBinary(record)
+  const unsubscribe = [Broadcast.subscribeBinary(key, transfer), Broadcast.subscribeBinary(key, record)]
+  room.onClose(() => {
+    for (const off of unsubscribe) off()
   })
   return { room, getReceived: async () => received }
 }

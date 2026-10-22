@@ -146,7 +146,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners.list()) {
       try {
-        cb(data, info)
+        // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
+        cb(new Uint8Array(data), info)
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
@@ -349,7 +350,8 @@ const Broadcast = {
   subscribeBinary(key: string, callback: BroadcastBinaryListener): BroadcastUnsubscribe {
     const adapter = getBroadcastAdapter()
     return adapter.subscribeBinary(key, (data, info) => {
-      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
+      // A copy of its own, as a `BroadcastChannel` listener gets.
+      callback(new Uint8Array(data), { key, seq: info.seq, timestamp: info.timestamp })
     })
   },
 }

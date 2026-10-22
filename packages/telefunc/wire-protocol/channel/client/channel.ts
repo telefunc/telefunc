@@ -728,7 +728,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners.list()) {
       try {
-        cb(data, info)
+        // Bytes of its own: a listener may write into them or transfer their buffer.
+        cb(data.slice(), info)
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
