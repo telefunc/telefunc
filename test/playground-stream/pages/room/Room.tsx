@@ -78,6 +78,8 @@ import {
 } from './Room.telefunc'
 
 type PollResult = { done: boolean; result?: unknown }
+/** The members one room view joins, and the named tracks one member publishes on (docs/pages/room, Reference). */
+const ROOM_VIEW_LIMIT = 4096
 /** 80 s of polls: past the 60 s reconnectTimeout the server waits for a closed tab on SSE. */
 const CLOSED_TAB_POLLS = 400
 
@@ -512,6 +514,50 @@ function Room() {
       {scenario('split-meta-across-merge', null, "Read a member's split meta across a merge", async () => {
         const roomId = await createRoomId('split-meta-across-merge')
         setResult(JSON.stringify({ read: await onReadSplitMetaAcrossMerge(roomId) }))
+      })}
+
+      {scenario('members-cap', 'Limits', 'Join past the members one view joins', async () => {
+        const roomId = await createRoomId('members-cap')
+        const view = await onGetRoom(roomId)
+        const releaseView = keepReachable(view)
+        const joins = await Promise.allSettled(
+          Array.from({ length: ROOM_VIEW_LIMIT + 1 }, (_, i) => view.join({ meta: { name: `m${i}` } })),
+        )
+        const joined = joins.flatMap((join) => (join.status === 'fulfilled' ? [join.value] : []))
+        const errors = joins.flatMap((join) => (join.status === 'rejected' ? [(join.reason as Error).message] : []))
+        // The members it joined keep working.
+        await joined[0]!.setAttributes({ still: true })
+        const count = (await onListParticipantNames(roomId)).length
+        setResult(JSON.stringify({ joined: joined.length, errors, count, still: joined[0]!.meta.still }))
+        releaseView()
+      })}
+
+      {scenario('tracks-cap', null, 'Publish past the named tracks one member publishes on', async () => {
+        const roomId = await createRoomId('tracks-cap')
+        const view = await onGetRoom(roomId)
+        const releaseView = keepReachable(view)
+        const me = await view.join({ meta: { name: 'Tracks' } })
+        const publishes = await Promise.allSettled(
+          Array.from({ length: ROOM_VIEW_LIMIT + 1 }, (_, i) =>
+            me.publishBinary(new Uint8Array([1]), { track: `t${i}`, retain: true }),
+          ),
+        )
+        const errors = publishes.flatMap((publish) =>
+          publish.status === 'rejected' ? [(publish.reason as Error).message] : [],
+        )
+        // A track it publishes on keeps working, and a late view gets each one's retained frame.
+        const kept = publishes.findIndex((publish) => publish.status === 'fulfilled')
+        await me.publishBinary(new Uint8Array([2]), { track: `t${kept}` })
+        const late = await onGetRoom(roomId)
+        const releaseLate = keepReachable(late)
+        const retained = new Set<string | null>()
+        late.subscribeBinary((_data, info) => retained.add(info.track))
+        await pollUntil(() => ({
+          result: { accepted: publishes.length - errors.length, errors, retained: retained.size },
+          done: retained.size >= ROOM_VIEW_LIMIT,
+        }))
+        releaseLate()
+        releaseView()
       })}
 
       {scenario('sender', 'Rename during a guard', 'Rename while a publish waits on its guard', async () => {

@@ -1,4 +1,4 @@
-export { testRoom, testRoomMetaReads, testRoomAckTimeout, testRoomSmallBuffer, testRoomLongWaits }
+export { testRoom, testRoomMetaReads, testRoomLimits, testRoomAckTimeout, testRoomSmallBuffer, testRoomLongWaits }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc } from '../../e2e-utils'
@@ -101,6 +101,33 @@ function testRoomMetaReads() {
     "room: a read of a member's meta whose keys another member's meta of more than a page split gets it before or after a merge that commits between the read's pages",
     (r) => {
       expect(['before', 'after']).toContain(r.read)
+    },
+  )
+}
+
+/** What one client holds through one room view: the participants it joins and the named tracks each publishes on. */
+function testRoomLimits() {
+  testRoomScenario<{ joined: number; errors: string[]; count: number; still: boolean }>(
+    'members-cap',
+    'room: one room view joins at most 4,096 participants: the join past them rejects, and the ones it joined keep working',
+    (r) => {
+      expect(r).deep.equal({
+        joined: 4096,
+        errors: ['A room view joins at most 4096 participants'],
+        count: 4096,
+        still: true,
+      })
+    },
+  )
+  testRoomScenario<{ accepted: number; errors: string[]; retained: number }>(
+    'tracks-cap',
+    'room: a participant publishes on at most 4,096 named tracks: the publish on one past them rejects, and its tracks keep working',
+    (r) => {
+      expect(r).deep.equal({
+        accepted: 4096,
+        errors: ['A participant publishes on at most 4096 named tracks'],
+        retained: 4096,
+      })
     },
   )
 }
@@ -249,6 +276,7 @@ function testRoom() {
     },
   )
   testRoomMetaReads()
+  testRoomLimits()
   testRoomScenario<{ names: unknown[]; otherNames: unknown[]; viewName: unknown; otherViewName: unknown }>(
     'sender',
     'room: a meta write made while a publish waits on its guard applies on every view, and the publish arrives once',
