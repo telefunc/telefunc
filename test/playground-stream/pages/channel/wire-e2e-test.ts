@@ -151,6 +151,36 @@ function testWire(isDev: boolean) {
       }
     })
 
+    test('channel: a RECONCILE naming more channels than a connection may hold closes the WebSocket before any RECONCILED', async () => {
+      // MAX_CHANNELS_PER_CONNECTION
+      const maxChannels = 4_096
+      const answer = (entries: number) =>
+        new Promise<'reconciled' | 'closed'>((resolve) => {
+          const url = new URL('/_telefunc', getServerUrl())
+          url.protocol = 'ws:'
+          const ws = new globalThis.WebSocket(url)
+          ws.binaryType = 'arraybuffer'
+          ws.onopen = () => {
+            const open = Array.from({ length: entries }, (_, ix) => ({ id: `unknown-${ix}`, ix, lastSeq: 0 }))
+            const payload = new TextEncoder().encode(JSON.stringify({ open }))
+            // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
+            const frame = new Uint8Array(7 + payload.byteLength)
+            frame[0] = 0x04
+            frame.set(payload, 7)
+            ws.send(frame)
+          }
+          ws.onmessage = (event) => {
+            // RECONCILED
+            if (new Uint8Array(event.data as ArrayBuffer)[0] !== 0x05) return
+            resolve('reconciled')
+            ws.close()
+          }
+          ws.onclose = () => resolve('closed')
+        })
+      expect(await answer(maxChannels)).toBe('reconciled')
+      expect(await answer(maxChannels + 1)).toBe('closed')
+    })
+
     test('channel: a channel whose first WebSocket a network drop stops opens on the next', async () => {
       await navigate(`${getServerUrl()}/channel`)
       await dropNextWebSocket()
