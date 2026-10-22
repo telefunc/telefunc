@@ -1074,15 +1074,22 @@ function ChannelDemo() {
       longestTickGapMs = Math.max(longestTickGapMs, now - lastTick)
       lastTick = now
     })
+    let midUpload!: () => void
     const answered = (async () => {
-      await new Promise((resolve) => setTimeout(resolve, 1000))
+      await new Promise<void>((resolve) => {
+        midUpload = resolve
+      })
       const { channel } = await openChannel(onChannelOpenAnswer)
       const answer = await channel.send('hi', { ack: true })
       channel.close()
       return answer
     })()
     const chunk = new Uint8Array(16 * 1024)
-    for (let sent = 0; sent < 2 * 1024 * 1024; sent += chunk.byteLength) await upload.sendBinary(chunk)
+    for (let sent = 0; sent < 2 * 1024 * 1024; sent += chunk.byteLength) {
+      // The second channel opens while 1.75 MiB is still to send.
+      if (sent === 256 * 1024) midUpload()
+      await upload.sendBinary(chunk)
+    }
     const uploaded = await upload.send('received', { ack: true })
     const slowUplink = { uploaded, opened: await answered, longestTickGapMs: Math.round(longestTickGapMs) }
     setChannelState((s) => ({ ...s, slowUplink }))
