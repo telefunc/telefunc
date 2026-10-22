@@ -55,6 +55,7 @@ import {
   onConcurrentMetaWrites,
   onReplaceMetaInLoop,
   onStopReplacingMeta,
+  onReadMetaAcrossWrite,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
@@ -483,6 +484,23 @@ function Room() {
           setResult(JSON.stringify({ reads }))
         }
         await onStopReplacingMeta(roomId)
+      })}
+
+      {scenario('meta-across-write', null, "Read a member's big meta across a write", async () => {
+        const reads: Record<string, string> = {}
+        for (const [write, gen] of [
+          ['replace with no keys', 1],
+          ['merge', 1],
+          ['replace', 9],
+          ['replace', 99],
+        ] as const) {
+          reads[`${write} from ${gen}`] = await onReadMetaAcrossWrite(
+            await createRoomId('meta-across-write'),
+            write,
+            gen,
+          )
+          setResult(JSON.stringify(reads))
+        }
       })}
 
       {scenario('sender', 'Rename during a guard', 'Rename while a publish waits on its guard', async () => {

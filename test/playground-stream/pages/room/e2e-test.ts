@@ -1,4 +1,4 @@
-export { testRoom, testRoomAckTimeout, testRoomSmallBuffer, testRoomLongWaits }
+export { testRoom, testRoomMetaReads, testRoomAckTimeout, testRoomSmallBuffer, testRoomLongWaits }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc } from '../../e2e-utils'
@@ -71,6 +71,24 @@ function testRoomScenario<Result>(id: string, name: string, validate: (result: R
     await page.click(`#test-room-${id}`)
     await autoRetry(async () => validate(await getResult<Result>('#room-result')))
   })
+}
+
+/** Reads of a member's meta of more than a page that a write overlaps, on any backend: the Redis
+ *  lanes run them too. */
+function testRoomMetaReads() {
+  testRoomScenario<Record<string, string>>(
+    'meta-across-write',
+    "room: a read of a member's meta of more than a page gets it before or after a replace, a replace with no keys or a merge that commits between its pages, a replace from generation 9 or 99 included",
+    (reads) => {
+      expect(Object.keys(reads)).deep.equal([
+        'replace with no keys from 1',
+        'merge from 1',
+        'replace from 9',
+        'replace from 99',
+      ])
+      expect(Object.entries(reads).filter(([, read]) => read !== 'before' && read !== 'after')).deep.equal([])
+    },
+  )
 }
 
 function testRoom() {
@@ -216,6 +234,7 @@ function testRoom() {
       for (const read of r.reads) expect(['a', 'b']).toContain(read)
     },
   )
+  testRoomMetaReads()
   testRoomScenario<{ names: unknown[]; otherNames: unknown[]; viewName: unknown; otherViewName: unknown }>(
     'sender',
     'room: a meta write made while a publish waits on its guard applies on every view, and the publish arrives once',

@@ -51,6 +51,7 @@ export {
   onConcurrentMetaWrites,
   onReplaceMetaInLoop,
   onStopReplacingMeta,
+  onReadMetaAcrossWrite,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
@@ -74,7 +75,7 @@ import { Buffer } from 'node:buffer'
 import { Room, Abort, BroadcastChannel, onBug, type LeaveCause, type LocalParticipant } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
-import { addBackendFault, endBackendSubscriptions, type BackendFault } from '../../failing-backend'
+import { addBackendFault, endBackendSubscriptions, holdCellPages, type BackendFault } from '../../failing-backend'
 
 async function onCreateRoom(roomId: string) {
   return await Room.create(roomId, { meta: { topic: 'e2e' } })
@@ -596,6 +597,36 @@ async function onReplaceMetaInLoop(roomId: string) {
 async function onStopReplacingMeta(roomId: string) {
   clearInterval(replacing.get(roomId))
   replacing.delete(roomId)
+}
+
+/** A member's `a` meta, set as its write `gen` (a replace from 9 or 99 writes keys one digit longer), read by the room's
+ *  roster while `write` commits between the read's first and second page: 'before', 'after', or the keys the read got. */
+async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace with no keys' | 'merge', gen: number) {
+  const member = await Room.join(roomId, { meta: {} })
+  for (let seq = 1; seq < gen; seq++) await member.setAttributes({ seq })
+  await member.setMeta(bigMeta('a'))
+  const held = holdCellPages(roomId, 'pm:', 1)
+  const reading = Room.getParticipants(roomId)
+  await held.reached
+  const after: Record<string, unknown> = write === 'replace' ? bigMeta('b') : write === 'merge' ? bigMeta('a') : {}
+  if (write === 'merge') {
+    delete after.a0
+    after.zz = 'new'
+    await member.setAttributes({ a0: undefined, zz: 'new' })
+  } else {
+    await member.setMeta(after)
+  }
+  held.release()
+  const [read] = await reading
+  return metaName(read!.meta, { before: bigMeta('a'), after })
+}
+
+/** The name of the meta in `named` that `meta` is, keys in order, or the keys it holds. */
+function metaName(meta: Record<string, unknown>, named: Record<string, Record<string, unknown>>): string {
+  const entries = JSON.stringify(Object.entries(meta))
+  for (const name in named) if (JSON.stringify(Object.entries(named[name]!)) === entries) return name
+  const keys = Object.keys(meta)
+  return `${keys.length} keys from ${keys[0]} to ${keys.at(-1)}`
 }
 
 const guardCalls = new Map<string, Array<{ hook: string; name: unknown; frozen: boolean }>>()

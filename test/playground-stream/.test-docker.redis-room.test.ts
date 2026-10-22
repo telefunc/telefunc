@@ -6,6 +6,7 @@ import {
   testRedisRoomCrossInstance,
   testServerCrash,
 } from './pages/room/e2e-cross-instance'
+import { testRoomMetaReads } from './pages/room/e2e-test'
 
 // testServerCrash() waits up to three minutes for a crashed server's member to leave.
 if (setupDockerRun('pnpm test:docker', 3 * 60_000)) {
@@ -14,4 +15,5 @@ if (setupDockerRun('pnpm test:docker', 3 * 60_000)) {
   testRedisInstallAgain()
   testRedisOutages()
   testServerCrash()
+  testRoomMetaReads()
 }

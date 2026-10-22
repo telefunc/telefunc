@@ -1,10 +1,14 @@
-export { installFailingBackend, addBackendFault, pendingBackendFaults, endBackendSubscriptions }
+export { installFailingBackend, addBackendFault, pendingBackendFaults, endBackendSubscriptions, holdCellPages }
 export type { BackendFault }
 
 import {
   installBackend,
+  getRoomBackend,
+  createDeferred,
   DriverAttempt,
   MemoryBackend,
+  type CellsRead,
+  type RoomBackend,
   type BackendPayload,
   type BackendReceiver,
   type BroadcastRoute,
@@ -20,13 +24,21 @@ type BackendFault = { op: string; roomId?: string; key?: string; times?: number 
 
 type Source = BroadcastRoute | RoomSubscriptionSource
 type Call = { roomId?: string; keys: string[] }
+type CellPagesHold = { roomId: string; key: string; pages: number; wait: () => Promise<void> }
 
-const { faults, attempts } = ((globalThis as Record<symbol, unknown>)[
+const { faults, attempts, holds, holding } = ((globalThis as Record<symbol, unknown>)[
   Symbol.for('playground-stream:failingBackend')
 ] ??= {
   faults: [],
   attempts: new Set(),
-}) as { faults: (BackendFault & { times: number })[]; attempts: Set<FailingAttempt> }
+  holds: [],
+  holding: new WeakSet(),
+}) as {
+  faults: (BackendFault & { times: number })[]
+  attempts: Set<FailingAttempt>
+  holds: CellPagesHold[]
+  holding: WeakSet<RoomBackend>
+}
 
 class FailingAttempt extends DriverAttempt {
   constructor(
@@ -106,6 +118,39 @@ function endBackendSubscriptions(match: { roomId?: string; key?: string }): numb
   const ended = [...attempts].filter((attempt) => matches(match, callOf(attempt.source)))
   for (const attempt of ended) attempt.end()
   return ended.length
+}
+
+/** Holds the next `readCellPages` call of `roomId` whose prefix starts with `key`, once it yielded `pages` pages, until
+ *  `release()`; `reached` resolves when it holds. Works on any installed backend, Redis included. */
+function holdCellPages(roomId: string, key: string, pages: number): { reached: Promise<void>; release: () => void } {
+  const reached = createDeferred()
+  const released = createDeferred()
+  const wait = () => {
+    reached.resolve()
+    return released.promise
+  }
+  holds.push({ roomId, key, pages, wait })
+  const backend = getRoomBackend()
+  if (!holding.has(backend)) {
+    holding.add(backend)
+    const read = backend.readCellPages
+    backend.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
+  }
+  return { reached: reached.promise, release: released.resolve }
+}
+
+function takeHold(roomId: string, prefix: string): CellPagesHold | undefined {
+  const index = holds.findIndex((hold) => hold.roomId === roomId && prefix.startsWith(hold.key))
+  return index === -1 ? undefined : holds.splice(index, 1)[0]
+}
+
+async function* heldCellPages(pages: AsyncIterable<CellsRead>, hold: CellPagesHold | undefined) {
+  let yielded = 0
+  if (hold?.pages === 0) await hold.wait()
+  for await (const page of pages) {
+    yield page
+    if (++yielded === hold?.pages) await hold.wait()
+  }
 }
 
 function takeFault(op: string, call: Call): boolean {
