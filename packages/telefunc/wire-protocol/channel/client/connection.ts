@@ -1563,12 +1563,18 @@ class ClientConnection implements MuxConnection {
     this.maxFrameBytes = ctrl.maxFrameBytes
     // A per-call `idleTimeout` (withContext) is kept over the server's.
     if (this.connectionOptions.idleTimeout === undefined) this.idleTimeoutMs = ctrl.idleTimeout
+    const window = replayWindow(ctrl.serverReplayBuffer, ctrl.serverReplayBufferBinary)
+    // Each replay already fits the sizes a RECONCILED said before: `register` sizes and fits a channel with them.
+    if (
+      this.replayWindows?.window === window &&
+      this.clientReplayBufferBytes === ctrl.clientReplayBuffer &&
+      this.clientReplayBufferBinaryBytes === ctrl.clientReplayBufferBinary
+    ) {
+      return
+    }
     this.clientReplayBufferBytes = ctrl.clientReplayBuffer
     this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
-    this.replayWindows = {
-      window: replayWindow(ctrl.serverReplayBuffer, ctrl.serverReplayBufferBinary),
-      peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary),
-    }
+    this.replayWindows = { window, peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary) }
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
     for (const replay of this.replayBuffers.values()) {
       replay.setLimits(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes)
