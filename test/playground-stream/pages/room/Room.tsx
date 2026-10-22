@@ -545,9 +545,10 @@ function Room() {
         const errors = publishes.flatMap((publish) =>
           publish.status === 'rejected' ? [(publish.reason as Error).message] : [],
         )
-        // A track it publishes on keeps working, and a late view gets each one's retained frame.
+        // A track it publishes on and the default track keep working, and a late view gets each one's retained frame.
         const kept = publishes.findIndex((publish) => publish.status === 'fulfilled')
         await me.publishBinary(new Uint8Array([2]), { track: `t${kept}` })
+        await me.publishBinary(new Uint8Array([3]))
         const late = await onGetRoom(roomId)
         const releaseLate = keepReachable(late)
         const retained = new Set<string | null>()
