@@ -697,7 +697,6 @@ class ChannelMux {
     try {
       // Admission policy — `decodeClientFrame` has already established the frame's shape.
       assertProtocol(rawByteLength <= WIRE_MAX_CONN_CTRL_FRAME_BYTES, 'barrier frame over byte cap')
-      assertProtocol(ctrl.open.length <= MAX_CHANNELS_PER_CONNECTION, 'barrier over entry cap')
       for (const channel of ctrl.open) {
         assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
       }
