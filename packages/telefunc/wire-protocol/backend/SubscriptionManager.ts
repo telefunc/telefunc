@@ -115,11 +115,16 @@ class SubscriptionManager<Source> {
     return cleanup
   }
 
+  /** Whether a send can be held now: some subscription establishes or some send is held. */
+  get holding(): boolean {
+    return this._establishing > 0 || this._holds.size > 0
+  }
+
   /** Runs `send` once none of its caller's subscriptions on the hold's `sources` is establishing, waiting at most the
    *  hold time; while the caller holds the hold's `key`, its later sends on it queue behind, in call order.
-   *  `describeHold` runs only while some subscription establishes or some send is held. */
+   *  `describeHold` runs only while `holding`. */
   afterEstablished<T>(send: () => T | Promise<T>, describeHold: () => SendHold<Source>): T | Promise<T> {
-    if (this._establishing === 0 && this._holds.size === 0) return send()
+    if (!this.holding) return send()
     const { key, sources, weight, onHeld } = describeHold()
     // Another partition's subscription (another Cloudflare session's) is not ordered before this send.
     const partition = this._driver.partitionHere(sources[0])

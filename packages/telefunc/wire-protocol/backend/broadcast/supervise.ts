@@ -44,7 +44,7 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
     return isPromise(result) ? result.then((receipt) => toAck(route.key, receipt)) : toAck(route.key, result)
   }
 
-  const publish = (
+  const publishAfterEstablished = (
     route: BroadcastRoute,
     payload: BroadcastPayload,
   ): ChannelPublishAck | Promise<ChannelPublishAck> => {
@@ -73,7 +73,8 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
   }
 
   return {
-    publish,
+    publish: (route, payload) =>
+      subscriptions.holding ? publishAfterEstablished(route, payload) : publishNow(route, payload),
     // The manager hands a route's consumers only the deliveries checkDelivery passed.
     subscribe: (route, receiver) => {
       const published = driver.published?.(route.key) ?? 0
