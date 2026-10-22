@@ -33,7 +33,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
     await testCounter()
   })
 
-  test('error responses each carry their own headers', async () => {
+  test("error responses don't accumulate Content-Type headers", async () => {
     for (let i = 0; i < 3; i++) {
       const resp = await fetch(`${getServerUrl()}/_telefunc`, {
         method: 'POST',
