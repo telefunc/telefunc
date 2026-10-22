@@ -34,25 +34,27 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   })
 
   test('a form POST without the `x-telefunc-request` header is rejected', async () => {
-    await page.goto(`${getServerUrl()}/`)
-    const responsePromise = page.waitForResponse((resp) => resp.url().includes('/_telefunc'))
-    await page.evaluate(() => {
-      const form = document.createElement('form')
-      form.method = 'POST'
-      form.enctype = 'text/plain'
-      form.action = '/_telefunc?_telefunc=txt'
-      const input = document.createElement('input')
-      input.type = 'hidden'
-      input.name = '{"file":"/pages/index/Hello.telefunc.ts","name":"onLoad","args":[{"name":"Jon"}],"ignored":"'
-      input.value = '"}'
-      form.appendChild(input)
-      document.body.appendChild(form)
-      form.submit()
-    })
-    const resp = await responsePromise
-    expect(resp.request().headers()['x-telefunc-request']).toBe(undefined)
-    expect(resp.status()).toBe(400)
-    expect(await resp.text()).toBe('Malformed Telefunc Request')
+    for (const action of ['/_telefunc', '/_telefunc?_telefunc=txt']) {
+      await page.goto(`${getServerUrl()}/`)
+      const responsePromise = page.waitForResponse((resp) => resp.url() === `${getServerUrl()}${action}`)
+      await page.evaluate((action) => {
+        const form = document.createElement('form')
+        form.method = 'POST'
+        form.enctype = 'text/plain'
+        form.action = action
+        const input = document.createElement('input')
+        input.type = 'hidden'
+        input.name = '{"file":"/pages/index/Hello.telefunc.ts","name":"onLoad","args":[{"name":"Jon"}],"ignored":"'
+        input.value = '"}'
+        form.appendChild(input)
+        document.body.appendChild(form)
+        form.submit()
+      }, action)
+      const resp = await responsePromise
+      expect(resp.request().headers()['x-telefunc-request']).toBe(undefined)
+      expect(resp.status()).toBe(400)
+      expect(await resp.text()).toBe('Malformed Telefunc Request')
+    }
     expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
     if (isDev) {
       expectLog('The HTTP request is missing the `x-telefunc-request` header.', {
