@@ -82,15 +82,11 @@ class IndexedPeer {
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
   sendByteWindowUpdate(limit: number, lastSeq: number, kind: WindowKind): void {
-    const frame = encode.window(this.index, limit, lastSeq)
-    if (kind === 'acknowledgement') this.sender.carry(frame)
-    else this.sender.send(frame)
+    this.sendLimit(encode.window(this.index, limit, lastSeq), kind)
   }
 
   sendMsgWindowUpdate(limit: number, kind: WindowKind): void {
-    const frame = encode.msgWindow(this.index, limit)
-    if (kind === 'acknowledgement') this.sender.carry(frame)
-    else this.sender.send(frame)
+    this.sendLimit(encode.msgWindow(this.index, limit), kind)
   }
 
   sendBdpPing(probe: number): void {
@@ -109,6 +105,11 @@ class IndexedPeer {
   /** Returns the bytes the frame counts against flow control. */
   sendPublishBinary(data: Uint8Array): number {
     return this.sendSequenced((seq) => encode.publishBinary(this.index, data, seq)).bytes
+  }
+
+  private sendLimit(frame: Uint8Array, kind: WindowKind): void {
+    if (kind === 'acknowledgement') this.sender.carry(frame)
+    else this.sender.send(frame)
   }
 
   /** Encodes at the next seq; `onQueued` runs before the wire has it. Replayed once committed, so a frame a dead wire lost goes again. */
