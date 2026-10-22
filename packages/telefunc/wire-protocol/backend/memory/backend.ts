@@ -552,18 +552,16 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   async directoryDue(): Promise<DirectoryPage['entries']> {
-    const directory = this._directory
-    const checks = this._directoryChecks
     const now = Date.now()
     // A put twice at the same time scheduled two checks, both current.
     const due = new Map<string, DirectoryCheck>()
-    while (due.size < DIRECTORY_PAGE_SIZE && checks.length > 0 && checks[0]!.at <= now) {
-      const check = popCheck(checks)
-      if (directory.get(check.roomId)?.checkAt === check.at) due.set(check.roomId, check)
+    while (due.size < DIRECTORY_PAGE_SIZE && this._directoryChecks.length > 0 && this._directoryChecks[0]!.at <= now) {
+      const check = popCheck(this._directoryChecks)
+      if (this._directory.get(check.roomId)?.checkAt === check.at) due.set(check.roomId, check)
     }
     // Still due until put again or deleted.
-    for (const check of due.values()) pushCheck(checks, check)
-    return Array.from(due.keys(), (roomId) => ({ roomId, incTag: directory.get(roomId)!.incTag }))
+    for (const check of due.values()) pushCheck(this._directoryChecks, check)
+    return Array.from(due.keys(), (roomId) => ({ roomId, incTag: this._directory.get(roomId)!.incTag }))
   }
 
   // ── internals ──
