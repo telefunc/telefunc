@@ -44,7 +44,7 @@ const ANNOUNCE_BYTES = encode.announce(0, 0).byteLength
 type SendRoom = {
   /** Whether it cuts data to its room; else data goes whole while it has room, and waits whole once it has none. */
   readonly cuts: boolean
-  /** With a rate measured, the most bytes of data it hands the socket now. */
+  /** The most bytes of data it hands the socket now. */
   dataRoom(): number
   /** It handed the socket `bytes`, of data or not, or carries them into the next message. */
   handed(bytes: number, data: boolean): void

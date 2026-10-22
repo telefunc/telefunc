@@ -396,7 +396,7 @@ class FlowControl {
       this._urgentBytes = this._consumedBytes
       sent = 'urgent-flow-control'
     }
-    // A message limit behind rides the message of a byte limit that goes at once.
+    // A message limit behind rides with a byte limit that doesn't ride itself.
     if (sent !== 'acknowledgement' && this._consumedMessages > this._advertisedMessages) {
       this._advertiseMessages('acknowledgement')
     }
