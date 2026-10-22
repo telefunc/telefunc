@@ -42,8 +42,6 @@ type SseConnection = {
   pendingDispatches: Set<Promise<unknown>>
 }
 
-const sseOpenComment = textEncoder.encode(': open\n\n')
-
 const globalObject = getGlobalObject('wire-protocol/server/sse.ts', {
   defaultHooks: null as ReturnType<typeof getTelefuncSseChannelHooks> | null,
 })
@@ -131,7 +129,7 @@ class SseConnectionTransport {
     }
     this.mux.onConnectionOpen(connection, this.transport)
     this.resolvePendingConnections(connId, connection)
-    stream.push(sseOpenComment)
+    stream.push(textEncoder.encode(': open\n\n'))
     void this.runStreamResponse(connection, reader)
 
     return {

@@ -33,6 +33,21 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
     await testCounter()
   })
 
+  test("error responses don't accumulate Content-Type headers", async () => {
+    for (let i = 0; i < 3; i++) {
+      const resp = await fetch(`${getServerUrl()}/_telefunc`, {
+        method: 'POST',
+        headers: { 'x-telefunc-request': 'txt' },
+        body: 'not-json',
+      })
+      expect(resp.status).toBe(400)
+      expect(resp.headers.get('content-type')).toBe('text/plain')
+    }
+    if (isDev) {
+      expectLog("Telefunc request body couldn't be parsed", { filter: (log) => log.logSource === 'stderr' })
+    }
+  })
+
   test('a form POST without the `x-telefunc-request` header is rejected', async () => {
     for (const action of ['/_telefunc', '/_telefunc?_telefunc=txt']) {
       await page.goto(`${getServerUrl()}/`)
