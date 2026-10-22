@@ -5,7 +5,7 @@ import { ACK_STATUS, encode } from '../../wire/connectionFrame.js'
 import type { AckResultStatus, ErrorReason } from '../../wire/connectionFrame.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import type { SendWait } from '../../flowControl/Link.js'
-import type { ByteWindowKind } from '../../flowControl/FlowControl.js'
+import type { WindowKind } from '../../flowControl/FlowControl.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
@@ -81,14 +81,16 @@ class IndexedPeer {
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
-  sendByteWindowUpdate(limit: number, lastSeq: number, kind: ByteWindowKind): void {
+  sendByteWindowUpdate(limit: number, lastSeq: number, kind: WindowKind): void {
     const frame = encode.window(this.index, limit, lastSeq)
     if (kind === 'acknowledgement') this.sender.carry(frame)
     else this.sender.send(frame)
   }
 
-  sendMsgWindowUpdate(limit: number): void {
-    this.sender.send(encode.msgWindow(this.index, limit))
+  sendMsgWindowUpdate(limit: number, kind: WindowKind): void {
+    const frame = encode.msgWindow(this.index, limit)
+    if (kind === 'acknowledgement') this.sender.carry(frame)
+    else this.sender.send(frame)
   }
 
   sendBdpPing(probe: number): void {
