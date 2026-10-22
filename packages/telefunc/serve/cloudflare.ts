@@ -28,6 +28,8 @@ import { assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale, LocationBucket } from '../wire-protocol/server/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
+import { REQUEST_KIND, getRequestKind } from '../wire-protocol/request-kind.js'
+import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 
 const SHARD_TOKEN_TTL_SECONDS = 86400
 
@@ -153,6 +155,16 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const isWebSocketRequest = request.headers.get('upgrade') === 'websocket'
       if (isWebSocketRequest && !config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
         return new Response(null, { status: 400 })
+      }
+      // Reject before forwarding: a Durable Object that answers without reading the forwarded body fails the request.
+      if (!isWebSocketRequest) {
+        const requestKind = getRequestKind(request, config.telefuncUrl)
+        if (requestKind === null || requestKind === REQUEST_KIND.MISMATCH) {
+          return new Response(STATUS_BODY_MALFORMED_REQUEST, {
+            status: STATUS_CODE_MALFORMED_REQUEST,
+            headers: { 'Content-Type': 'text/plain' },
+          })
+        }
       }
 
       const kv = getKVBinding(env)
