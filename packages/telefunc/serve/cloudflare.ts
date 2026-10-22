@@ -157,14 +157,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         return new Response(null, { status: 400 })
       }
       // Reject before forwarding: a Durable Object that answers without reading the forwarded body fails the request.
-      if (!isWebSocketRequest) {
-        const requestKind = getRequestKind(request, config.telefuncUrl)
-        if (requestKind === null || requestKind === REQUEST_KIND.MISMATCH) {
-          return new Response(STATUS_BODY_MALFORMED_REQUEST, {
-            status: STATUS_CODE_MALFORMED_REQUEST,
-            headers: { 'Content-Type': 'text/plain' },
-          })
-        }
+      if (!isWebSocketRequest && getRequestKind(request, config.telefuncUrl) === REQUEST_KIND.INVALID) {
+        return new Response(STATUS_BODY_MALFORMED_REQUEST, {
+          status: STATUS_CODE_MALFORMED_REQUEST,
+          headers: { 'Content-Type': 'text/plain' },
+        })
       }
 
       const kv = getKVBinding(env)

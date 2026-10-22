@@ -78,11 +78,13 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const { request, readable, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
-  if (requestKind === null) {
-    logParseError(`The HTTP request is missing the \`${REQUEST_KIND_HEADER}\` header.`, runContext)
+  if (requestKind === REQUEST_KIND.INVALID) {
+    logParseError(
+      `The \`${REQUEST_KIND_HEADER}\` header of the HTTP request is missing, invalid, or contradicts the \`_telefunc\` URL parameter.`,
+      runContext,
+    )
     return { isMalformedRequest: true }
   }
-  if (requestKind === REQUEST_KIND.MISMATCH) return { isMalformedRequest: true }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
     return sseResponse ? { isMalformedRequest: false, isSseRequest: true, sseResponse } : { isMalformedRequest: true }

@@ -57,7 +57,7 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
     }
     expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
     if (isDev) {
-      expectLog('The HTTP request is missing the `x-telefunc-request` header.', {
+      expectLog('The `x-telefunc-request` header of the HTTP request is missing', {
         filter: (log) => log.logSource === 'stderr',
       })
     }
