@@ -169,6 +169,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.#runInSession(() => crosswsAdapter.handleDurableClose(this, ws, code, reason, wasClean))
     }
 
+    // TODO: remove once Telefunc's own WebSocket adapter replaces crossws.
     /** crossws has no handler for a socket's error, so its wire ends here. */
     webSocketError(ws: WebSocket) {
       return this.#runInSession(() => crosswsAdapter.handleDurableClose(this, ws, 1006, 'error', false))

@@ -38,6 +38,7 @@ import {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelOpenAnswer,
+  onChannelOpenHello,
 } from './Channel.telefunc'
 
 /**
@@ -156,6 +157,7 @@ type ChannelState = {
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
   openBurstReceived: number | null
   freshBinaryEchoed: number | null
+  helloBesideBurst: boolean
   manyListenersMs: { page: number; server: number | null } | null
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
@@ -227,6 +229,7 @@ const initialState: ChannelState = {
   unawaitedBurst: null,
   openBurstReceived: null,
   freshBinaryEchoed: null,
+  helloBesideBurst: false,
   manyListenersMs: null,
   linkShare: null,
   slowUplink: null,
@@ -1011,6 +1014,20 @@ function ChannelDemo() {
     channel.sendBinary(new Uint8Array(32 * 1024))
   }, [])
 
+  const testHelloBesideBurst = useCallback(async () => {
+    setChannelState((s) => ({ ...s, helloBesideBurst: false }))
+    const { channel: burst } = await openChannel(onChannelUnawaitedBurst)
+    const firstChunk = new Promise<void>((resolve) => burst.listenBinary(() => resolve()))
+    void burst.send(4, { ack: true }).catch(() => {})
+    await firstChunk
+    const { channel } = await openChannel(onChannelOpenHello)
+    channel.listen(() => {
+      setChannelState((s) => ({ ...s, helloBesideBurst: true }))
+      channel.close()
+      burst.close()
+    })
+  }, [])
+
   const testManyListeners = useCallback(async () => {
     setChannelState((s) => ({ ...s, manyListenersMs: null }))
     const { channel } = await openChannel(onChannelManyListeners)
@@ -1404,6 +1421,14 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Page Sends 32 KiB First
+          </button>
+          <button
+            id="channel-test-hello-beside-burst"
+            type="button"
+            onClick={testHelloBesideBurst}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Server Says Hello as a Channel Opens Beside a 4 MiB Burst
           </button>
           <button
             id="channel-test-link-share"

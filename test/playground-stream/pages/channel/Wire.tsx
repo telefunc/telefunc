@@ -8,6 +8,7 @@ import {
   onWireEnd,
   onWireLarge,
   onWireOpen,
+  onWireHeld,
   onWireRelease,
   onWireUpload,
 } from './Wire.telefunc'
@@ -22,6 +23,8 @@ type WireState = {
   large: number | null
   /** How the channel opened after the page opened and closed `closed` others went: 'open' or the error's name. */
   many: { closed: number; next: string } | null
+  /** Of the channels opened while `HELD_OPEN` others stayed open: how many got their first message, and whose close() the server acknowledged. */
+  held: { run: string; first: number; closed: number } | null
   /** close: what the page's close() resolved to, once the channel opened and the server's messages arrived. */
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
@@ -35,6 +38,8 @@ const LARGE_BYTES = 1_000_000
 /** Past the 4,096 channels a connection holds at once. */
 const MANY_CHANNELS = 4_200
 const RELEASE_COUNT = 3
+const HELD_OPEN = 1_000
+const HELD_NEXT = 100
 
 function WireDemo() {
   const [state, setState] = useState<WireState>({
@@ -43,6 +48,7 @@ function WireDemo() {
     end: null,
     large: null,
     many: null,
+    held: null,
     release: null,
     upload: null,
   })
@@ -137,6 +143,32 @@ function WireDemo() {
     kept.close()
   }, [])
 
+  const held = useCallback(async () => {
+    const run = crypto.randomUUID()
+    const open = async (n: number) => {
+      const channel = await onWireHeld(run, n)
+      const first = await new Promise<string>((resolve) => {
+        channel.listen(resolve)
+        channel.onClose((err) => resolve(`onClose:${err?.name ?? 'none'}`))
+      })
+      return { channel, first: first === `first ${n}` }
+    }
+    const kept: Awaited<ReturnType<typeof open>>[] = []
+    for (let n = 0; n < HELD_OPEN; n += 100) {
+      kept.push(...(await Promise.all(Array.from({ length: 100 }, (_, k) => open(n + k)))))
+    }
+    let first = kept.filter((each) => each.first).length
+    let closed = 0
+    // One at a time, each closed before the next opens, all while the kept ones stay open.
+    for (let n = HELD_OPEN; n < HELD_OPEN + HELD_NEXT; n++) {
+      const next = await open(n)
+      if (next.first) first++
+      if ((await next.channel.close()) === 0) closed++
+    }
+    for (const close of await Promise.all(kept.map(({ channel }) => channel.close()))) if (close === 0) closed++
+    setState((s) => ({ ...s, held: { run, first, closed } }))
+  }, [])
+
   const uploadChannel = useRef<Awaited<ReturnType<typeof onWireUpload>>['channel'] | null>(null)
   const uploadSent = useRef(0)
   // Sends its first message in the turn the call returns, so it rides on the wire's first batch.
@@ -209,6 +241,14 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Open and close {MANY_CHANNELS} channels, then open one more
+        </button>
+        <button
+          id="wire-held"
+          type="button"
+          onClick={held}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open {HELD_NEXT} channels one at a time while {HELD_OPEN} stay open, then close them all
         </button>
         <button
           id="wire-release"

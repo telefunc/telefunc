@@ -60,10 +60,24 @@ class AwaitedChannels {
     awaited.held = []
   }
 
-  /** Awaits no more, and drops what it held for, each channel but those `named`. */
-  forgetUnnamed(named: Set<number>): void {
+  /** Awaits no more, and drops what it held for, each channel but those `open` names. */
+  forgetUnnamed(open: ReconcileOpenEntry[]): void {
+    if (this.byIx.size === 0) return
+    const named = new Set(open.map((each) => each.ix))
     for (const [ix, awaited] of this.byIx) {
       if (named.has(ix)) continue
+      awaited.stopWaiting()
+      this.drop(awaited)
+      this.byIx.delete(ix)
+    }
+  }
+
+  /** Awaits no more, and drops what it held for, each channel of `ixes`. */
+  forget(ixes: number[]): void {
+    if (this.byIx.size === 0) return
+    for (const ix of ixes) {
+      const awaited = this.byIx.get(ix)
+      if (awaited === undefined) continue
       awaited.stopWaiting()
       this.drop(awaited)
       this.byIx.delete(ix)

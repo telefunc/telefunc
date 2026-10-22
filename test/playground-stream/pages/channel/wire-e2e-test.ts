@@ -28,6 +28,7 @@ type WireState = {
   end: { channelId: string; received: string[]; close: string | null } | null
   large: number | null
   many: { closed: number; next: string } | null
+  held: { run: string; first: number; closed: number } | null
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
 }
@@ -228,6 +229,19 @@ function testWire(isDev: boolean) {
       const { many } = await getResult<WireState>('#wire-state')
       expect(many).deep.equal({ closed: 4_200, next: 'open' })
     })
+  })
+
+  test('channel: 100 channels a page opens one at a time while 1,000 stay open each get their first message, and every close is acknowledged on both ends', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#wire-held')
+    await autoRetry(
+      async () => {
+        const { held } = await getResult<WireState>('#wire-state')
+        expect(held && { first: held.first, closed: held.closed }).deep.equal({ first: 1_100, closed: 1_100 })
+        expect((await getCleanupState())[`wireHeld_${held!.run}`]).toBe('1100')
+      },
+      { timeout: 30_000 },
+    )
   })
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse'])) {

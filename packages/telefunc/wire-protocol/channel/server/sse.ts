@@ -234,35 +234,36 @@ class SseConnectionTransport {
     return okResponse()
   }
 
-  /** Short-lived outbox batch POST. Body ends quickly, so we collect the reconcile that
-   *  may fire during the body and emit `reconciled` at body end — that way all dispatched
-   *  frames have lifted `_lastClientSeq` before the seq is reported. Tracked in
-   *  `pendingDispatches` so `runStreamResponse` won't send its own reconciled mid-batch. */
+  /** Short-lived outbox batch POST. A RECONCILE's RECONCILED goes as it is answered, ahead of what the frames behind it
+   *  send: those are what the page carries with it, which it doesn't replay. Tracked in `pendingDispatches` so
+   *  `runStreamResponse` won't send its own reconciled mid-batch. */
   private async handleBatchPost(connId: string, reader: StreamReader): Promise<SseChannelHttpResponse> {
     const connection = await this.resolveConnection(connId)
     if (!connection) return badRequest()
     reader.onChunk = () => this.mux.onConnectionBytes(connection)
     if (!(await this.waitReady(connection))) return badRequest()
-    const drain = this.drainDeferred(connection, reader)
+    const drain = this.drain(connection, reader, (outcome) => {
+      if (shouldSendReconciled(outcome, connection)) this.mux.sendReconciled(outcome)
+    })
     connection.pendingDispatches.add(drain)
     try {
-      const outcome = await drain
-      if (shouldSendReconciled(outcome, connection)) this.mux.sendReconciled(outcome)
+      await drain
     } finally {
       connection.pendingDispatches.delete(drain)
     }
     return okResponse()
   }
 
-  /** Stream-response POST lifecycle: consume the initial reconcile batch, drain the batch POSTs
-   *  in flight so their `_lastClientSeq` mutations land first, emit `reconciled`, then release the
-   *  `ready` gate the other POSTs are parked on. */
+  /** Stream-response POST lifecycle: consume the initial reconcile batch; once its RECONCILE is answered, drain the
+   *  batch POSTs in flight so their `_lastClientSeq` mutations land first and emit `reconciled`, ahead of what the
+   *  frames carried behind it send; then release the `ready` gate the other POSTs are parked on. */
   private async runStreamResponse(connection: SseConnection, reader: StreamReader): Promise<void> {
     try {
-      const outcome = await this.drainDeferred(connection, reader)
-      if (!shouldSendReconciled(outcome, connection)) return
-      await this.settlePendingDispatches(connection)
-      this.mux.sendReconciled(outcome)
+      await this.drain(connection, reader, async (outcome) => {
+        if (!shouldSendReconciled(outcome, connection)) return
+        await this.settlePendingDispatches(connection)
+        this.mux.sendReconciled(outcome)
+      })
     } catch (err) {
       // The body ended mid-frame; this promise is fire-and-forget, so a rethrow would be unhandled.
       // A truncation is the client hanging up (channels keep their grace); an oversize frame leaves
@@ -292,17 +293,19 @@ class SseConnectionTransport {
     return Promise.allSettled([...connection.pendingDispatches])
   }
 
-  /** Read length-prefixed frames from `reader`, dispatch each through the deferred-reconcile
-   *  path. Returns the last `ReconcileOutcome` produced in this body, or null if none did. */
-  private async drainDeferred(connection: SseConnection, reader: StreamReader): Promise<ReconcileOutcome | null> {
-    let outcome: ReconcileOutcome | null = null
+  /** Read length-prefixed frames from `reader` and dispatch each through the deferred-reconcile path, the next
+   *  waiting for `onReconciled` of the `ReconcileOutcome` a frame produces. */
+  private async drain(
+    connection: SseConnection,
+    reader: StreamReader,
+    onReconciled: (outcome: ReconcileOutcome) => void | Promise<void>,
+  ): Promise<void> {
     while (true) {
       const raw = await reader.readLengthPrefixedBytesOrNull(WIRE_MAX_RAW_FRAME_BYTES)
       if (!raw || connection.closed) break
-      const next = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
-      if (next !== null) outcome = next
+      const outcome = await this.mux.onConnectionRawMessageDeferredReconciled(connection, raw)
+      if (outcome !== null) await onReconciled(outcome)
     }
-    return outcome
   }
 
   private async resolveConnection(connId: string): Promise<SseConnection | null> {

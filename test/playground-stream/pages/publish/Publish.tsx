@@ -19,6 +19,7 @@ import {
   onServerBroadcastChecks,
   onBroadcastErrors,
   onBroadcastServerListener,
+  onBroadcastOwnBytes,
   onBroadcastOnOpenPublish,
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
@@ -327,6 +328,33 @@ function Publish() {
         }}
       >
         Subscribers throw, the store fails
+      </button>
+
+      <h2>Binary Listeners Get Bytes of Their Own</h2>
+
+      <button
+        id="test-broadcast-own-bytes"
+        onClick={async () => {
+          setResult('')
+          const { room, getReceived } = await onBroadcastOwnBytes()
+          const received: Array<number[] | 'detached'> = []
+          room.subscribeBinary((data) => void structuredClone(data.buffer, { transfer: [data.buffer] }))
+          room.subscribeBinary((data) => void received.push(data.byteLength === 0 ? 'detached' : [...data]))
+          try {
+            await room.publishBinary(new Uint8Array([1, 2, 3]))
+            for (let poll = 0; poll < 50; poll++) {
+              const server = await getReceived()
+              setResult(JSON.stringify({ page: received, server }))
+              if (received.length >= 1 && server.length >= 2) break
+              await new Promise((r) => setTimeout(r, 200))
+            }
+          } catch (err) {
+            setResult(JSON.stringify({ error: String(err) }))
+          }
+          room.close()
+        }}
+      >
+        Binary listeners get bytes of their own
       </button>
       <h2>Server Listener After Page Unsubscribe</h2>
 

@@ -34,6 +34,7 @@ export {
   onChannelLinkShare,
   onChannelSlowUplink,
   onChannelOpenAnswer,
+  onChannelOpenHello,
 }
 
 import { Channel, Abort, BroadcastChannel } from 'telefunc'
@@ -711,5 +712,11 @@ async function onChannelSlowUplink() {
 async function onChannelOpenAnswer() {
   const ch = new Channel<(msg: string) => string, never>()
   ch.listen(() => 'answer')
+  return { channel: ch.client }
+}
+
+async function onChannelOpenHello() {
+  const ch = new Channel<never, string>()
+  ch.onOpen(() => void ch.send('hello').catch(() => {}))
   return { channel: ch.client }
 }

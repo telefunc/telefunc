@@ -190,6 +190,23 @@ function testPublish(isDev: boolean, inDocker = false) {
       })
     })
   })
+
+  test("broadcast: each binary listener gets bytes of its own, so one that transfers their buffer leaves the next one's and the page's intact", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-own-bytes')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ page: unknown[]; server: unknown[] }>('#publish-result')
+      expect(result).deep.equal({
+        page: [[1, 2, 3]],
+        server: [
+          [1, 2, 3],
+          [1, 2, 3],
+        ],
+      })
+    })
+  })
+
   test("broadcast: the server's own listeners keep getting a key's messages after the page unsubscribes", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-server-listener')
