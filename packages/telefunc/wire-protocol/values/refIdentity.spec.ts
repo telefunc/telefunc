@@ -91,9 +91,9 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const reviver = createStreamingReviver(
     context,
     (revived) => {
-      // Mirror reviveResponse: the value handed out (and cached) is the GC wrapper.
-      revived.value = wrapProxy(revived.value as object)
       lifecycles.push(revived)
+      // Mirror reviveResponse: the value handed out (and cached) is the GC wrapper.
+      return wrapProxy(revived.value as object)
     },
     extensionTypes,
   )

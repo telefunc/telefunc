@@ -144,7 +144,7 @@ async function reviveResponse(
         // Suppress unhandled-rejection noise if `parse()` throws before the pending values are awaited.
         value.promise.catch(() => {})
         pendingValues.push(value)
-        return
+        return value
       }
 
       assert(isObjectOrFunction(value))
@@ -154,7 +154,7 @@ async function reviveResponse(
       onEnd?.(forget)
       closeHandlers.set(wrapper, close)
       // This is what the user gets
-      revived.value = wrapper
+      return wrapper
     },
     extensionResponseTypes,
   )

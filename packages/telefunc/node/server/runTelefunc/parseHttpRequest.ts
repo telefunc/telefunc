@@ -132,25 +132,16 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           ...baseContext,
           validators: buildShieldValidators(shields[toPathKey(segments)] ?? {}, shieldCtx),
         }),
-        (revived) => {
-          {
-            // Destructure into locals so nothing here closes over `revived` — a closure over it
-            // would pin `revived.value` (the wrapper) and defeat the GC-close. Same discipline as
-            // the client response path.
-            const { value, close } = revived
-            assert(isObjectOrFunction(value))
-            // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
-            // underlying channel/stream closes and the client releases the original.
-            const wrapper = wrapProxy(value)
-            // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
-            requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
-            revived.value = wrapper
-          }
-          {
-            const { close, abort } = revived
-            requestContext.onTopLevelError(close)
-            requestContext.responseAbort.onAbort(abort)
-          }
+        ({ value, close, abort }) => {
+          assert(isObjectOrFunction(value))
+          // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
+          // underlying channel/stream closes and the client releases the original.
+          const wrapper = wrapProxy(value)
+          // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
+          requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
+          requestContext.onTopLevelError(close)
+          requestContext.responseAbort.onAbort(abort)
+          return wrapper
         },
       )
       return {
