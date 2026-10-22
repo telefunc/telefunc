@@ -104,11 +104,9 @@ async function commitToInbox(
   envelope: RoomDmEnvelope | RoomDmAckEnvelope,
   requiring: string[] = [],
 ): Promise<CommitAccepted | { gone: string }> {
-  const lane = { kind: 'inbox', member: envelope.to } as const
+  const target = { roomId, inc, lane: { kind: 'inbox', member: envelope.to } } as const
   const requiredCellKeys = [...requiring, envelope.to].map(memberCellKey)
-  const result = await getRoomBackend().commitLane({ roomId, inc, lane }, encodeRoomRecord(envelope), {
-    requiredCellKeys,
-  })
+  const result = await getRoomBackend().commitLane(target, encodeRoomRecord(envelope), { requiredCellKeys })
   if ('stale' in result && result.stale === 'cell') return { gone: memberIdOfCellKey(result.key) }
   if ('stale' in result) throw roomClosedError(roomId)
   await handedOff(roomId, result)
