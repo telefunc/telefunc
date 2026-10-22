@@ -145,8 +145,9 @@ function WireDemo() {
 
   const held = useCallback(async () => {
     const run = crypto.randomUUID()
-    const open = async (n: number) => {
+    const open = async (n: number, onRegistered?: () => void) => {
       const channel = await onWireHeld(run, n)
+      onRegistered?.()
       const first = await new Promise<string>((resolve) => {
         channel.listen(resolve)
         channel.onClose((err) => resolve(`onClose:${err?.name ?? 'none'}`))
@@ -159,9 +160,9 @@ function WireDemo() {
     }
     let first = kept.filter((each) => each.first).length
     let closed = 0
-    // One at a time, each closed before the next opens, all while the kept ones stay open.
+    // One at a time, each closed before the next opens, all while the kept ones stay open and one of them sends.
     for (let n = HELD_OPEN; n < HELD_OPEN + HELD_NEXT; n++) {
-      const next = await open(n)
+      const next = await open(n, () => void kept[0]!.channel.send(`kept ${n}`))
       if (next.first) first++
       if ((await next.channel.close()) === 0) closed++
     }

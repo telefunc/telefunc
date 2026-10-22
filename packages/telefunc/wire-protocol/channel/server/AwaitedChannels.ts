@@ -64,24 +64,22 @@ class AwaitedChannels {
   forgetUnnamed(open: ReconcileOpenEntry[]): void {
     if (this.byIx.size === 0) return
     const named = new Set(open.map((each) => each.ix))
-    for (const [ix, awaited] of this.byIx) {
-      if (named.has(ix)) continue
-      awaited.stopWaiting()
-      this.drop(awaited)
-      this.byIx.delete(ix)
-    }
+    for (const [ix, awaited] of this.byIx) if (!named.has(ix)) this.forgetOne(ix, awaited)
   }
 
   /** Awaits no more, and drops what it held for, each channel of `ixes`. */
   forget(ixes: number[]): void {
-    if (this.byIx.size === 0) return
     for (const ix of ixes) {
       const awaited = this.byIx.get(ix)
-      if (awaited === undefined) continue
-      awaited.stopWaiting()
-      this.drop(awaited)
-      this.byIx.delete(ix)
+      if (awaited) this.forgetOne(ix, awaited)
     }
+  }
+
+  /** Awaits it no more, and drops what it held. */
+  private forgetOne(ix: number, awaited: AwaitedChannel): void {
+    awaited.stopWaiting()
+    this.drop(awaited)
+    this.byIx.delete(ix)
   }
 
   /** The wire `wire` awaits it from now on, with what it held. */

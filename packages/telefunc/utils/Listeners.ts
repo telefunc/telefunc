@@ -4,7 +4,7 @@ export { Listeners }
  *  mutated, so a dispatch iterates the ones it started with. */
 class Listeners<T> {
   private byRegistration: Map<object, T> | null = null
-  private snapshot: readonly T[] | undefined = none
+  private snapshot: readonly T[] | undefined = NO_LISTENERS
 
   get size(): number {
     return this.byRegistration?.size ?? 0
@@ -28,4 +28,4 @@ class Listeners<T> {
   }
 }
 
-const none: readonly never[] = []
+const NO_LISTENERS: readonly never[] = []

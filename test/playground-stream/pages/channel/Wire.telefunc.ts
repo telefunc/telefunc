@@ -116,9 +116,13 @@ async function onWireOpen() {
   return new Channel<never, never>().client
 }
 
-/** A channel the server sends `first <n>` on as it opens. cleanupState: wireHeld_<run> = how many closed without an error. */
+/** A channel the server sends `first <n>` on as it opens. cleanupState: wireHeld_<run> = how many closed without an error,
+ *  wireHeldKept_<run> = how many messages the run's channels got. */
 async function onWireHeld(run: string, n: number) {
-  const ch = new Channel<never, (message: string) => void>()
+  const ch = new Channel<(message: string) => void, (message: string) => void>()
+  ch.listen(() => {
+    cleanupState[`wireHeldKept_${run}`] = String(Number(cleanupState[`wireHeldKept_${run}`] ?? 0) + 1)
+  })
   ch.onOpen(() => {
     void ch.send(`first ${n}`)
   })

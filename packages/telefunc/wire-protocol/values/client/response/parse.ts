@@ -149,7 +149,7 @@ async function reviveResponse(
   }
   const reviver = createStreamingReviver(
     context,
-    function onRevived(revived) {
+    function handOut(revived) {
       const { value, abort, close, onEnd } = revived
       // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
       if (isObjectOrFunction(value) && closeHandlers.has(value)) return value

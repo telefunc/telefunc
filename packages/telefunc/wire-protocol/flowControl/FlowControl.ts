@@ -437,12 +437,13 @@ class FlowControl {
   /** The oldest waiter's turn. One that hasn't sent by the next macrotask, as one that is done sending, passes it on. */
   private _releaseOne(): void {
     const waiters = this._waiters
-    const resolve = waiters?.shift()
+    if (waiters === null) return
+    const resolve = waiters.shift()
     if (!resolve) return
     this._released = true
     const release = ++this._releases
     resolve()
-    if (waiters!.length === 0) return
+    if (waiters.length === 0) return
     void macrotaskYield.yield().then(() => {
       if (!this._released || this._releases !== release) return
       this._released = false

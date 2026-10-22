@@ -88,9 +88,7 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
         socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         return
       }
-      const request = new Request(`http://${req.headers.host ?? 'localhost'}${req.url}`, {
-        headers: req.headers as HeadersInit,
-      })
+      const request = new Request('http://localhost' + req.url)
       sockets.set(request, socket)
       ws.handleUpgrade(req, socket, head, request)
     })

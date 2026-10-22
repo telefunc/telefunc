@@ -293,8 +293,8 @@ class SseConnectionTransport {
     return Promise.allSettled([...connection.pendingDispatches])
   }
 
-  /** Read length-prefixed frames from `reader` and dispatch each through the deferred-reconcile path, the next
-   *  waiting for `onReconciled` of the `ReconcileOutcome` a frame produces. */
+  /** Reads `reader`'s frames and dispatches each through the deferred-reconcile path; a RECONCILE's outcome goes to
+   *  `onReconciled` before the next frame is read. */
   private async drain(
     connection: SseConnection,
     reader: StreamReader,
@@ -410,11 +410,7 @@ function reportDispatchBug(err: unknown): void {
 
 /** A closed SSE wire has nothing to say — except on a barrier commit, where the RECONCILED is
  *  bound for the WS and this wire's own retirement is exactly what the upgrade just did. */
-function shouldSendReconciled(
-  outcome: ReconcileOutcome | null,
-  connection: SseConnection,
-): outcome is ReconcileOutcome {
-  if (outcome === null) return false
+function shouldSendReconciled(outcome: ReconcileOutcome, connection: SseConnection): boolean {
   return outcome.deliverTo !== connection || !connection.closed
 }
 

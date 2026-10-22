@@ -804,10 +804,6 @@ class ChannelMux {
       throw new ProtocolViolationError('connection closed mid-reconcile')
     }
 
-    // What the wire awaits is forgotten once the page lets it go.
-    if (released === undefined) state.awaited.forgetUnnamed(ctrl.open)
-    else state.awaited.forget(released)
-
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
     state.attaching.clear()
@@ -836,6 +832,7 @@ class ChannelMux {
         }
       }
     }
+    entry.state.awaited.forgetUnnamed(open)
     this.sessions.setSession(newSessionId, handles)
     return handles
   }
@@ -859,6 +856,7 @@ class ChannelMux {
       const handle = this.sessions.remove(sessionId, ix)
       if (handle) this.detachHandle(handle, DETACH_REASON.RECOVERY_FAILED)
     }
+    entry.state.awaited.forget(released)
     return handles
   }
 
@@ -1022,7 +1020,8 @@ class ChannelMux {
   }
 
   private detachHandle(h: ChannelHandle, reason: DetachReason): void {
-    // An ended channel waits out a lost wire for its page, which lets it go by leaving it out or leaving for good.
+    // An ended channel waits out a lost wire for its page, which lets it go by releasing it, leaving it out of a new
+    // wire's RECONCILE, or leaving for good.
     if (this.endedChannels.has(h.channel)) {
       if (reason === DETACH_REASON.TRANSIENT) this.keepEnded(h.channel, false)
       else this.releaseEnded(h.channel)
@@ -1156,7 +1155,7 @@ class SessionRegistry {
     bindings.set(sessionId, h.ix)
   }
 
-  /** Stores no empty session, as `removeChannel`. */
+  /** Takes the channel at `ix` out of the session and returns it; a session left empty goes, as in `removeChannel`. */
   remove(sessionId: string, ix: number): ChannelHandle | undefined {
     const session = this.bySession.get(sessionId)
     const handle = session?.get(ix)
