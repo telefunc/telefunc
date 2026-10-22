@@ -870,7 +870,7 @@ function testChannel(isDev: boolean, inDocker = false) {
   })
 
   if (channelTransport === 'ws') {
-    test('channel: the page answers 500 small messages its server sends as the channel opens in at most 4 WebSocket messages, as on main', async () => {
+    test('channel: the page answers 500 small messages its server sends as the channel opens in at most 4 WebSocket messages', async () => {
       let sent = 0
       let counting = false
       const onWebSocket = (ws: WebSocket) => {
