@@ -131,10 +131,7 @@ async function onBroadcastRightAfterSubscribe() {
   room.subscribe(see)
   room.subscribeBinary((data) => see([...data]))
   await Promise.all([room.publish('t1'), room.publishBinary(new Uint8Array([1])), room.publish('t2')])
-  const deadline = Promise.withResolvers<void>()
-  const timer = setTimeout(deadline.resolve, 10_000)
-  await Promise.race([sawAll.promise, deadline.promise])
-  clearTimeout(timer)
+  await within10s(sawAll.promise)
   await Promise.all([busy.close(), room.close()])
   return seen
 }
@@ -279,10 +276,7 @@ async function onServerBroadcastChecks() {
     firstSeen.resolve()
   })
   await Broadcast.publish(`${key}:static`, 'first')
-  const deadline = Promise.withResolvers<void>()
-  const timer = setTimeout(deadline.resolve, 10_000)
-  await Promise.race([Promise.all([leavingSeen.promise, joiningSeen.promise, firstSeen.promise]), deadline.promise])
-  clearTimeout(timer)
+  await within10s(Promise.all([leavingSeen.promise, joiningSeen.promise, firstSeen.promise]))
   unsubscribe()
   await Broadcast.publish(`${key}:static`, 'second')
 
