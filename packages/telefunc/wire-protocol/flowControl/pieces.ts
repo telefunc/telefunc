@@ -9,6 +9,7 @@ import {
   WIRE_PROBE_CLOCK_MS,
   WIRE_PROBE_FIRST_BYTES,
   WIRE_PROBE_PAIR_BYTES,
+  WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../constants.js'
 import type { Link } from './Link.js'
 import { TAG, assertProtocol, encode, isSequencedTag, passesData, type PiecesAck } from '../wire/connectionFrame.js'
@@ -142,6 +143,7 @@ class PieceSender {
     if (tag === TAG.PIECES_ACK && this.open === null) return this.pass(frame)
     if (this.rest === null) {
       if (this.open === null && !this.announces(frame)) return this.pass(frame)
+      if (this.open === null && this.goesWhole(frame)) return this.sendWhole(frame)
       return this.sendBehindAnnouncement(frame)
     }
     if (this.passesRest(frame)) return this.pass(frame)
@@ -156,6 +158,22 @@ class PieceSender {
       this.probe !== null ||
       (this.link.fastest === 0 && bytes > this.unannouncedUpTo && (bytes > this.wholeUpTo || isSequencedTag(frame[0]!)))
     )
+  }
+
+  /** No rate yet: a data frame up to what any sender hands ahead goes whole, as pieces cost a cold TCP window a round trip. */
+  private goesWhole(frame: Uint8Array<ArrayBuffer>): boolean {
+    return (
+      this.link.fastest === 0 &&
+      this.probe === null &&
+      isSequencedTag(frame[0]!) &&
+      frame.byteLength <= Math.min(WIRE_SEND_AHEAD_MIN_BYTES, this.room.dataRoom())
+    )
+  }
+
+  /** Hands the socket data `frame` in one message, as no rate sample: TCP's slow start would read low. */
+  private sendWhole(frame: Uint8Array<ArrayBuffer>): void {
+    this.countHanded(frame.byteLength, true)
+    this.messages.hand(frame)
   }
 
   /** While the rest of a data frame waits for room, a frame that `passesData` and goes whole goes first. */

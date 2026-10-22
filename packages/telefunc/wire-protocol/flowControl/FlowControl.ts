@@ -1,5 +1,5 @@
 export { FlowControl, replayWindow }
-export type { AttachedDownlink, AttachedUplink, ByteWindowKind, FlowControlOptions }
+export type { AttachedDownlink, AttachedUplink, FlowControlOptions, WindowKind }
 
 import { BdpEstimator } from './BdpEstimator.js'
 import type { Link, SendWait } from './Link.js'
@@ -16,13 +16,13 @@ import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type BdpPingAck } from '../wire/conne
 import { Fifo } from '../../utils/Fifo.js'
 
 /** A batching wire sends `urgent-flow-control` at once; an `acknowledgement` may ride the next message it sends. */
-type ByteWindowKind = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
+type WindowKind = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
 
 /** What a channel's flow control sends and reads. */
 interface FlowControlOptions {
   // Limits go out mod 2^32; a byte limit carries the last seq this side has, which acknowledges what arrived.
-  byteWindowUpdate(limit: number, kind: ByteWindowKind): void
-  msgWindowUpdate(limit: number, urgent: boolean): void
+  byteWindowUpdate(limit: number, kind: WindowKind): void
+  msgWindowUpdate(limit: number, kind: WindowKind): void
   bdpPing(probe: number): void
   /** Bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell. */
   backlog(): number | undefined
@@ -264,7 +264,7 @@ class FlowControl {
     }
     if (wantMsgs) {
       this._bdp.growMsgs()
-      this._advertiseMessages()
+      this._advertiseMessages('flow-control')
     }
   }
 
@@ -325,8 +325,8 @@ class FlowControl {
       }
       return
     }
+    this._advertiseMessages('flow-control')
     this._advertiseBytes('flow-control')
-    this._advertiseMessages()
   }
 
   /** Receiver-side: the largest byte window its peer's replay allows, advertised with the next limit. */
@@ -376,7 +376,9 @@ class FlowControl {
 
   private _refresh(): void {
     if (this._consumedBytes - this._advertisedBytes >= this._bdp.byteWindow >> 2) this._advertiseBytes('flow-control')
-    if (this._consumedMessages - this._advertisedMessages >= this._bdp.msgWindow >> 2) this._advertiseMessages()
+    if (this._consumedMessages - this._advertisedMessages >= this._bdp.msgWindow >> 2) {
+      this._advertiseMessages('flow-control')
+    }
   }
 
   private _advertiseBytes(kind: 'acknowledgement' | 'flow-control'): void {
@@ -389,19 +391,27 @@ class FlowControl {
     }
     this._uncountedBytes = 0
     this._arrived = false
-    let sent: ByteWindowKind = kind
+    let sent: WindowKind = kind
     if ((this._consumedBytes - this._urgentBytes) * 2 > this.byteWindow) {
       this._urgentBytes = this._consumedBytes
       sent = 'urgent-flow-control'
     }
+    // A message limit behind rides the message of a byte limit that goes at once.
+    if (sent !== 'acknowledgement' && this._consumedMessages > this._advertisedMessages) {
+      this._advertiseMessages('acknowledgement')
+    }
     this._byteWindowUpdate(limit >>> 0, sent)
   }
 
-  private _advertiseMessages(): void {
+  /** An `acknowledgement` rides the next message, so it is never urgent. */
+  private _advertiseMessages(kind: 'acknowledgement' | 'flow-control'): void {
     this._advertisedMessages = this._consumedMessages
-    const urgent = (this._consumedMessages - this._urgentMessages) * 2 > this._bdp.msgWindow
-    if (urgent) this._urgentMessages = this._consumedMessages
-    this._msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, urgent)
+    let sent: WindowKind = kind
+    if (kind === 'flow-control' && (this._consumedMessages - this._urgentMessages) * 2 > this._bdp.msgWindow) {
+      this._urgentMessages = this._consumedMessages
+      sent = 'urgent-flow-control'
+    }
+    this._msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, sent)
   }
 
   private _noteBacklog(): void {

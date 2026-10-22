@@ -36,7 +36,7 @@ import {
   TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
-import { replayWindow, type ByteWindowKind } from '../../flowControl/FlowControl.js'
+import { replayWindow, type WindowKind } from '../../flowControl/FlowControl.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import {
   ACK_STATUS,
@@ -107,7 +107,7 @@ type ProbeSession = {
 /** Kept apart, as recovery differs: `emitted` may have reached the server, `not-emitted` leaves the wire usable. */
 type BarrierEmission = 'emitted' | 'not-emitted'
 
-type OutboundFrameKind = 'reconcile' | 'released' | 'control' | ByteWindowKind | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'released' | 'control' | WindowKind | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind
@@ -152,8 +152,8 @@ interface MuxConnection {
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void
-  sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void
+  sendMsgWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
   /** Bytes the wire holds that haven't gone out. */
@@ -760,12 +760,12 @@ class ClientConnection implements MuxConnection {
     this.sendOrQueue(ix, seq, buildFrame(ix, seq), 'control')
   }
 
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: ByteWindowKind): void {
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void {
     this.sendUnsequenced(channel, kind, (ix) => encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0))
   }
 
-  sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgent: boolean): void {
-    this.sendUnsequenced(channel, urgent ? 'urgent-flow-control' : 'flow-control', (ix) => encode.msgWindow(ix, limit))
+  sendMsgWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void {
+    this.sendUnsequenced(channel, kind, (ix) => encode.msgWindow(ix, limit))
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {

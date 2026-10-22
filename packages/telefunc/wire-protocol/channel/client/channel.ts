@@ -128,8 +128,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       byteWindowUpdate: (limit, kind) => {
         if (!this._isClosed) this._connection.sendByteWindowUpdate(this, limit, kind)
       },
-      msgWindowUpdate: (limit, urgent) => {
-        if (!this._isClosed) this._connection.sendMsgWindowUpdate(this, limit, urgent)
+      msgWindowUpdate: (limit, kind) => {
+        if (!this._isClosed) this._connection.sendMsgWindowUpdate(this, limit, kind)
       },
       bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
       backlog: () => this._connection.bufferedAmount(),
