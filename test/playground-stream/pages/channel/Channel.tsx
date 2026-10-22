@@ -147,7 +147,13 @@ type ChannelState = {
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
   selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
   unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
-  oversize: { channelId: string; thrown: string[]; followUp: string; isClosed: boolean } | null
+  oversize: {
+    channelId: string
+    thrown: string[]
+    followUp: string
+    isClosed: boolean
+    broadcastIsClosed: boolean
+  } | null
   heldBinary: number[][] | null
   unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
   durationLimits: { withContext: string; close: string; ack: string } | null
@@ -902,12 +908,14 @@ function ChannelDemo() {
   }, [])
 
   const testOversize = useCallback(async () => {
-    const { channel, channelId, limit } = await openChannel(onChannelOversize)
+    const { channel, channelId, limit, broadcast } = await openChannel(onChannelOversize)
     channel.listen((msg) => (msg === 'big' ? 'x'.repeat(limit + 1) : `client-ack:${msg}`))
     const thrown: string[] = []
     for (const send of [
       () => channel.sendBinary(new Uint8Array(limit + 1)),
       () => channel.send('x'.repeat(limit + 1)),
+      () => broadcast.publishBinary(new Uint8Array(limit + 1)),
+      () => broadcast.publish('x'.repeat(limit + 1)),
     ]) {
       try {
         void send()
@@ -917,7 +925,8 @@ function ChannelDemo() {
       }
     }
     const followUp = String(await channel.send('ok', { ack: true }))
-    setChannelState((s) => ({ ...s, oversize: { channelId, thrown, followUp, isClosed: channel.isClosed } }))
+    const oversize = { channelId, thrown, followUp, isClosed: channel.isClosed, broadcastIsClosed: broadcast.isClosed }
+    setChannelState((s) => ({ ...s, oversize }))
   }, [])
 
   const testHeldBinary = useCallback(async () => {
