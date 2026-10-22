@@ -5,7 +5,7 @@ import { Telefunc } from './context/getContext.js'
 import { assertUsage, assertWarning } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
-import { nodeReadableToWebRequest } from '../../utils/nodeReadableToWebRequest.js'
+import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
 import type { Readable, Writable } from 'node:stream'
 
 type HttpRequestResolved = {
@@ -26,6 +26,8 @@ type HttpRequest =
       method: string
       /** The body of HTTP Request. */
       body: string
+      /** The HTTP request headers */
+      headers: Record<string, string | string[] | undefined> | [string, string][]
       /** The context object, see https://telefunc.com/getContext  */
       context?: Telefunc.Context
     }
@@ -103,7 +105,7 @@ async function resolveHttpRequest(
   const request = new Request('http://localhost' + httpRequest.url, {
     method: httpRequest.method,
     body: httpRequest.body,
-    headers: { 'content-type': 'text/plain' },
+    headers: normalizeHeaders(httpRequest.headers),
   })
   return { request, context: httpRequest.context }
 }
@@ -131,6 +133,7 @@ function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {
     assertUsage(hasProp(httpRequest, 'method'), '`serve({ method })`: argument `method` is missing.')
     assertUsage(hasProp(httpRequest, 'method', 'string'), '`serve({ method })`: argument `method` should be a string.')
     assertUsage(hasProp(httpRequest, 'body'), '`serve({ body })`: argument `body` is missing.')
+    assertUsage(hasProp(httpRequest, 'headers'), '`serve({ headers })`: argument `headers` is missing.')
     assertUsage(
       hasProp(httpRequest, 'body', 'string'),
       '`serve({ body })`: argument `body` should be a string. Make sure `body` is the HTTP body string of the request. Note that with some server frameworks, such as Express.js, a server middleware is needed to parse the HTTP body of `Content-Type: text/plain` requests.',
@@ -144,7 +147,7 @@ function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {
     ? ['request', 'context']
     : hasReadable
       ? ['url', 'method', 'readable', 'headers', 'context']
-      : ['url', 'method', 'body', 'context']
+      : ['url', 'method', 'body', 'headers', 'context']
   Object.keys(httpRequest).forEach((key) => {
     assertUsage(allowedKeys.includes(key), '`serve({ ' + key + ' })`: Unknown argument `' + key + '`.')
   })

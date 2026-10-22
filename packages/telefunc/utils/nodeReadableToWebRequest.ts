@@ -1,4 +1,4 @@
-export { nodeReadableToWebRequest }
+export { nodeReadableToWebRequest, normalizeHeaders }
 
 import type { EventEmitter } from 'node:events'
 import type { Readable, Writable } from 'node:stream'

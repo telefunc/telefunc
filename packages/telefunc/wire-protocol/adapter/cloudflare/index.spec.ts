@@ -178,7 +178,9 @@ describe('cloudflare adapter entrypoint', () => {
     const tf = new Telefunc()
     const kv = createMockKV()
     await kv.put('session:my-token', JSON.stringify({ s: 'telefunc-shard-weur-1', b: 'weur' }))
-    const request = new Request('https://telefunc.test/_telefunc?session=my-token')
+    const request = new Request('https://telefunc.test/_telefunc?session=my-token', {
+      headers: { 'x-telefunc-request': 'txt' },
+    })
 
     await tf.serve({
       request,
