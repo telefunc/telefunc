@@ -320,8 +320,12 @@ function receiptOf(
   key: string,
   result: BroadcastPublishResult | Promise<BroadcastPublishResult>,
 ): ChannelPublishAck | Promise<ChannelPublishAck> {
-  const toAck = (r: BroadcastPublishResult): ChannelPublishAck =>
-    Object.assign(makePublishInfo(key, r.seq, r.timestamp), { meta: r.meta })
+  const toAck = (r: BroadcastPublishResult): ChannelPublishAck => ({
+    key,
+    seq: r.seq,
+    timestamp: r.timestamp,
+    meta: r.meta,
+  })
   return isPromise(result) ? result.then(toAck) : toAck(result)
 }
 
