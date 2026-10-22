@@ -400,6 +400,8 @@ class ClientConnection implements MuxConnection {
   private unnamedIxes = new Set<number>()
   /** Channels let go since the last RECONCILE: the next one on the same wire releases them on the server. */
   private releasedIxes: number[] = []
+  /** Closed channels not let go: a RECONCILE names them, as the server's answer tells when it has all they sent. */
+  private closedIxes = new Set<number>()
   private channels = new Map<number, ChannelEntry>()
   /** The channels not closed: `unregister` takes one out while `channels` still lists it. */
   private channelIndex = new Map<MuxChannel, number>()
@@ -549,6 +551,7 @@ class ClientConnection implements MuxConnection {
     assert(entry && entry.state.tag !== 'closed')
     const initial = entry.state.tag === 'pending' && entry.state.initial
     entry.state = { tag: 'closed', initial, delivered: false, reported: false }
+    this.closedIxes.add(ix)
   }
 
   private register(channel: MuxChannel): void {
@@ -1410,6 +1413,7 @@ class ClientConnection implements MuxConnection {
     this.replayBuffers.clear()
     this.unnamedIxes.clear()
     this.releasedIxes = []
+    this.closedIxes.clear()
     this.forgetWire()
     // A fresh connection replaces this one once its indexes run out.
     if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
@@ -1421,7 +1425,8 @@ class ClientConnection implements MuxConnection {
     const { uplink, batched } = this.transport
     // The wire that has the session holds what the RECONCILEs before named: one there names what changed since.
     const changes = this.sessionId !== null && this.reconciledWire === this.wire
-    const open = this.declareOpenEntries(changes ? this.unnamedIxes : this.channels.keys(), {
+    const ixes = changes ? new Set([...this.unnamedIxes, ...this.closedIxes]) : this.channels.keys()
+    const open = this.declareOpenEntries(ixes, {
       skipUnnamed: false,
       uplink,
       batched,
@@ -1744,6 +1749,7 @@ class ClientConnection implements MuxConnection {
    *  out, ends that on the server. */
   private releaseChannel(ix: number, channel: MuxChannel): void {
     if (!this.unnamedIxes.delete(ix)) this.releasedIxes.push(ix)
+    this.closedIxes.delete(ix)
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
     this.awaitedIxes.delete(ix)
