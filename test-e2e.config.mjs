@@ -21,6 +21,11 @@ function getCiJobs() {
     os: 'windows-latest',
     node_version: '26',
   }
+  // The oldest Node.js Telefunc supports.
+  const ubuntuOldest = {
+    os: 'ubuntu-latest',
+    node_version: '22',
+  }
   const setups = [ubuntu, win]
   const setupModern = [ubuntu]
 
@@ -29,7 +34,7 @@ function getCiJobs() {
     {
       name: 'Vitest',
       command: 'pnpm run test:units',
-      setups: [ubuntu],
+      setups: [ubuntu, ubuntuOldest],
     },
 
     // TypeScript

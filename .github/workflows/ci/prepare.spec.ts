@@ -14,6 +14,10 @@ describe('prepare()', () => {
               "node_version": "26",
               "os": "ubuntu-latest",
             },
+            {
+              "node_version": "22",
+              "os": "ubuntu-latest",
+            },
           ],
           "jobTests": null,
         },
