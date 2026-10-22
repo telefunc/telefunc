@@ -798,7 +798,7 @@ class ChannelMux {
     }
 
     // What the wire awaits is forgotten once a RECONCILE no longer names it: the page has let it go.
-    state.awaited.forgetUnnamed(new Set(ctrl.open.map((open) => open.ix)))
+    state.awaited.forgetUnnamed(ctrl.open)
 
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
