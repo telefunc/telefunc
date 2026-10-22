@@ -11,19 +11,21 @@ declare module 'crossws' {
   }
 }
 
-/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. `onMessage` runs as each
- *  message arrives, before the mux takes it. */
+/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. `wireRequest` is the request
+ *  that opened the peer's wire. `onMessage` runs as each message arrives, before the mux takes it. */
 function getTelefuncChannelHooks({
   upgrade,
   send = (peer, frame) => peer.send(frame),
   terminate = (peer) => peer.terminate(),
   bufferedAmount = (peer) => peer.websocket.bufferedAmount,
+  wireRequest = (peer) => peer.request,
   onMessage = () => {},
 }: {
   upgrade?: Hooks['upgrade']
   send?: (peer: Peer, frame: Uint8Array<ArrayBuffer>) => void
   terminate?: (peer: Peer) => void
   bufferedAmount?: (peer: Peer) => number | undefined
+  wireRequest?: (peer: Peer) => Request
   onMessage?: (peer: Peer) => void
 } = {}) {
   enableChannelTransports(['ws'])
@@ -49,7 +51,7 @@ function getTelefuncChannelHooks({
 
   return defineHooks({
     upgrade,
-    open: (peer) => mux.onConnectionOpen(peer, transport, peer.request),
+    open: (peer) => mux.onConnectionOpen(peer, transport, wireRequest(peer)),
     message: (peer, message) => {
       onMessage(peer)
       return mux.onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>)
