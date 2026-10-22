@@ -11,6 +11,14 @@ import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRequestPathname } from '../utils/getUrlPathname.js'
 import type { IncomingMessage, ServerResponse, Server } from 'node:http'
 import type { Http2SecureServer } from 'node:http2'
+import type { Duplex } from 'node:stream'
+import type { Peer } from 'crossws'
+
+declare module 'crossws' {
+  interface PeerContext {
+    socket?: Duplex
+  }
+}
 
 type HttpServer = Server | Http2SecureServer
 type HttpServerOrWrapper = HttpServer | { node?: { server?: HttpServer } }
@@ -51,7 +59,14 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   Req,
   Res
 > {
-  const ws = crossws({ hooks: getTelefuncChannelHooks() })
+  // Each upgrade's socket, by the request its upgrade hook gets.
+  const sockets = new WeakMap<Request, Duplex>()
+  const ws = crossws({
+    hooks: getTelefuncChannelHooks({
+      upgrade: (request) => ({ context: { socket: sockets.get(request) } }),
+      send: sendInTaskWrite,
+    }),
+  })
 
   function installWebSocket(server: HttpServerOrWrapper): void {
     enableChannelTransports([CHANNEL_TRANSPORT.WS])
@@ -72,7 +87,11 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
         socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         return
       }
-      ws.handleUpgrade(req, socket, head)
+      const request = new Request(`http://${req.headers.host ?? 'localhost'}${req.url}`, {
+        headers: req.headers as HeadersInit,
+      })
+      sockets.set(request, socket)
+      ws.handleUpgrade(req, socket, head, request)
     })
   }
 
@@ -122,4 +141,14 @@ function telefunc<Req extends NodeRequest = NodeRequest, Res extends ServerRespo
   }
 
   return { installWebSocket, serve }
+}
+
+/** Sends `frame` in its socket's one write for the task: written alone, each frame costs a syscall while the socket has room. */
+function sendInTaskWrite(peer: Peer, frame: Uint8Array<ArrayBuffer>): void {
+  const socket = peer.context.socket!
+  if (!socket.writableCorked) {
+    socket.cork()
+    process.nextTick(() => socket.uncork())
+  }
+  peer.send(frame)
 }

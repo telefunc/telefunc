@@ -1,6 +1,6 @@
 export { getTelefuncChannelHooks }
 
-import { defineHooks, type Peer } from 'crossws'
+import { defineHooks, type Hooks, type Peer } from 'crossws'
 import { enableChannelTransports } from '../../../node/server/serverConfig.js'
 import { getChannelMux } from './mux.js'
 import type { ServerTransport } from './mux.js'
@@ -14,10 +14,14 @@ declare module 'crossws' {
 /** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. `onMessage` runs as each
  *  message arrives, before the mux takes it. */
 function getTelefuncChannelHooks({
+  upgrade,
+  send = (peer, frame) => peer.send(frame),
   terminate = (peer) => peer.terminate(),
   bufferedAmount = (peer) => peer.websocket.bufferedAmount,
   onMessage = () => {},
 }: {
+  upgrade?: Hooks['upgrade']
+  send?: (peer: Peer, frame: Uint8Array<ArrayBuffer>) => void
   terminate?: (peer: Peer) => void
   bufferedAmount?: (peer: Peer) => number | undefined
   onMessage?: (peer: Peer) => void
@@ -32,9 +36,7 @@ function getTelefuncChannelHooks({
     /** Persistent bidirectional WebSocket: no out-of-band POSTs to route, so no need for a
      *  connId-based reverse lookup. */
     getConnId: () => null,
-    sendNow: (peer, frame) => {
-      peer.send(frame)
-    },
+    sendNow: send,
     wholeMessages: true,
     bufferedAmount,
     // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
@@ -46,6 +48,7 @@ function getTelefuncChannelHooks({
   }
 
   return defineHooks({
+    upgrade,
     open: (peer) => mux.onConnectionOpen(peer, transport, peer.request),
     message: (peer, message) => {
       onMessage(peer)
