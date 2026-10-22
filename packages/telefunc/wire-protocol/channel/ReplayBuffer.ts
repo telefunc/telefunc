@@ -8,8 +8,9 @@ type ReplayBufferOptions = {
 
 /** Sent sequenced frames till their peer acks them, in lanes by tag; a data lane evicts its oldest past its budget. */
 export class ReplayBuffer {
-  private readonly lanes: Record<ReplayLaneKind, ReplayLane>
-  private readonly allLanes: readonly ReplayLane[]
+  /** Each lane, from its first frame on. */
+  private readonly lanes: Partial<Record<ReplayLaneKind, ReplayLane>> = {}
+  private readonly budgets: Record<ReplayLaneKind, number>
   private _seq = 0
   /** The highest seq pushed. */
   private pushedSeq = 0
@@ -24,13 +25,7 @@ export class ReplayBuffer {
   }
 
   constructor({ maxBytes, binaryMaxBytes }: ReplayBufferOptions) {
-    const budgets = laneBudgets(maxBytes, binaryMaxBytes)
-    this.lanes = {
-      text: new ReplayLane(budgets.text),
-      binary: new ReplayLane(budgets.binary),
-      closing: new ReplayLane(budgets.closing),
-    }
-    this.allLanes = Object.values(this.lanes)
+    this.budgets = laneBudgets(maxBytes, binaryMaxBytes)
   }
 
   /** A budget lower than a lane's applies once the peer has every seq issued before: they flew under the higher one. */
@@ -39,9 +34,8 @@ export class ReplayBuffer {
     const unacknowledged = this.acknowledgedSeq < this._seq
     let lowered = false
     for (const kind of LANE_KINDS) {
-      const lane = this.lanes[kind]
-      if (unacknowledged && budgets[kind] < lane.budget) lowered = true
-      lane.setBudget(unacknowledged ? Math.max(budgets[kind], lane.budget) : budgets[kind])
+      if (unacknowledged && budgets[kind] < this.budgets[kind]) lowered = true
+      this.setBudget(kind, unacknowledged ? Math.max(budgets[kind], this.budgets[kind]) : budgets[kind])
     }
     this.lowered = lowered ? { budgets, throughSeq: this.lowered?.throughSeq ?? this._seq } : null
   }
@@ -56,45 +50,55 @@ export class ReplayBuffer {
     assert(seq <= this._seq)
     assert(seq >= this.pushedSeq)
     this.pushedSeq = seq
-    this.lanes[replayLaneOf(frame[0]!)].push(seq, frame)
+    const kind = replayLaneOf(frame[0]!)
+    const lane = (this.lanes[kind] ??= new ReplayLane(this.budgets[kind]))
+    lane.push(seq, frame)
   }
 
   /** The peer has every frame through `lastSeq`, which a reconnect never asks for again: they go. */
   acknowledge(lastSeq: number): void {
     if (lastSeq > this.acknowledgedSeq) this.acknowledgedSeq = lastSeq
-    for (const lane of this.allLanes) lane.acknowledge(lastSeq)
+    for (const kind of LANE_KINDS) this.lanes[kind]?.acknowledge(lastSeq)
     if (this.lowered === null || lastSeq < this.lowered.throughSeq) return
     const { budgets } = this.lowered
     this.lowered = null
-    for (const kind of LANE_KINDS) this.lanes[kind].setBudget(budgets[kind])
+    for (const kind of LANE_KINDS) this.setBudget(kind, budgets[kind])
   }
 
   /** The frames with afterSeq < seq <= throughSeq, by seq, or null if it dropped one of them. */
   getAfter(afterSeq: number, throughSeq = Infinity): Uint8Array<ArrayBuffer>[] | null {
     let run: Run = { seqs: [], frames: [] }
-    for (const lane of this.allLanes) run = mergeBySeq(run, lane.getAfter(afterSeq, throughSeq))
+    for (const kind of LANE_KINDS) {
+      const lane = this.lanes[kind]
+      if (lane) run = mergeBySeq(run, lane.getAfter(afterSeq, throughSeq))
+    }
     // Every seq through the highest pushed was pushed, each to one lane, so one missing was dropped.
     return run.frames.length >= Math.min(throughSeq, this.pushedSeq) - afterSeq ? run.frames : null
   }
 
   get length(): number {
     let length = 0
-    for (const lane of this.allLanes) length += lane.length
+    for (const kind of LANE_KINDS) length += this.lanes[kind]?.length ?? 0
     return length
   }
 
   get byteLength(): number {
     let byteLength = 0
-    for (const lane of this.allLanes) byteLength += lane.byteLength
+    for (const kind of LANE_KINDS) byteLength += this.lanes[kind]?.byteLength ?? 0
     return byteLength
   }
 
   dispose(): void {
-    for (const lane of this.allLanes) lane.dispose()
+    for (const kind of LANE_KINDS) this.lanes[kind]?.dispose()
     this._seq = 0
     this.pushedSeq = 0
     this.acknowledgedSeq = 0
     this.lowered = null
+  }
+
+  private setBudget(kind: ReplayLaneKind, budget: number): void {
+    this.budgets[kind] = budget
+    this.lanes[kind]?.setBudget(budget)
   }
 }
 
@@ -147,10 +151,6 @@ class ReplayLane {
 
   get byteLength(): number {
     return this.totalBytes
-  }
-
-  get budget(): number {
-    return this.maxBytes
   }
 
   /** Stores an encoded frame; none larger than the budget. */

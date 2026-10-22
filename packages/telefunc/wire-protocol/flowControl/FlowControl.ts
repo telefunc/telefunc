@@ -91,8 +91,8 @@ class FlowControl {
   private _widened = false
   /** It attached on a wire. */
   private _wired = false
-  /** Senders waiting on credit, oldest first. */
-  private readonly _waiters = new Fifo<() => void>()
+  /** Senders waiting on credit, oldest first, from the first that waited on. */
+  private _waiters: Fifo<() => void> | null = null
   /** A waiter was handed the credit and no send was counted since. */
   private _released = false
   private _releases = 0
@@ -161,7 +161,7 @@ class FlowControl {
     this.countSent(bytes)
     this._released = false
     if (this._isOutOfCredit()) return this._waitForCredit()
-    if (this._waiters.length > 0) {
+    if (this._waiters !== null && this._waiters.length > 0) {
       this._releaseOne()
       return this._waitForCredit()
     }
@@ -396,7 +396,7 @@ class FlowControl {
       this._urgentBytes = this._consumedBytes
       sent = 'urgent-flow-control'
     }
-    // A message limit behind rides the message of a byte limit that goes at once.
+    // A message limit behind rides with a byte limit that doesn't ride itself.
     if (sent !== 'acknowledgement' && this._consumedMessages > this._advertisedMessages) {
       this._advertiseMessages('acknowledgement')
     }
@@ -424,8 +424,10 @@ class FlowControl {
   }
 
   private _tryWakeCreditWaiters(): void {
+    const waiters = this._waiters
+    if (waiters === null) return
     if (this._shutdown) {
-      for (let resolve = this._waiters.shift(); resolve; resolve = this._waiters.shift()) resolve()
+      for (let resolve = waiters.shift(); resolve; resolve = waiters.shift()) resolve()
       return
     }
     if (this._released || this._isOutOfCredit()) return
@@ -434,12 +436,13 @@ class FlowControl {
 
   /** The oldest waiter's turn. One that hasn't sent by the next macrotask, as one that is done sending, passes it on. */
   private _releaseOne(): void {
-    const resolve = this._waiters.shift()
+    const waiters = this._waiters
+    const resolve = waiters?.shift()
     if (!resolve) return
     this._released = true
     const release = ++this._releases
     resolve()
-    if (this._waiters.length === 0) return
+    if (waiters!.length === 0) return
     void macrotaskYield.yield().then(() => {
       if (!this._released || this._releases !== release) return
       this._released = false
@@ -450,7 +453,8 @@ class FlowControl {
   private _waitForCredit(): Promise<void> {
     if (this._shutdown) return resolvedPromise
     this._unyieldedBytes = 0
-    return new Promise<void>((resolve) => this._waiters.push(resolve))
+    const waiters = (this._waiters ??= new Fifo())
+    return new Promise<void>((resolve) => waiters.push(resolve))
   }
 }
 

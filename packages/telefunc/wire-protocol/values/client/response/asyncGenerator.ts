@@ -32,12 +32,11 @@ const asyncGeneratorReviver: ReviverType<AsyncGeneratorContract, ClientReviverCo
     }
     return {
       value: gen,
-      // Not methods: on Bun (JavaScriptCore) a method keeps this object alive, and the proxy is put on it (parse.ts).
-      close: async () => {
+      async close() {
         await gen.return()
       },
       abort,
-      onEnd: (callback) => {
+      onEnd(callback) {
         onEnd = callback
       },
     }

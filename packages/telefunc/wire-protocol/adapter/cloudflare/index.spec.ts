@@ -88,7 +88,8 @@ vi.mock('./broadcast.js', () => ({
   CloudflareBroadcast: mocks.MockCloudflareBroadcast,
 }))
 
-vi.mock('./routing.js', () => ({
+vi.mock('./routing.js', async (importOriginal) => ({
+  readForwardedTarget: (await importOriginal<typeof import('./routing.js')>()).readForwardedTarget,
   TELEFUNC_BROADCAST_BUCKET_HEADER: 'x-telefunc-broadcast-bucket',
   TELEFUNC_SESSION_HEADER: 'x-telefunc-session',
   TELEFUNC_SHARD_HEADER: 'x-telefunc-shard',

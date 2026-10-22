@@ -25,11 +25,10 @@ const functionReviver: ReviverType<FunctionContract, ServerReviverContext> = {
     }
     return {
       value: (...args: unknown[]) => markHandled(fn(...args)),
-      // Not methods: on Bun a method keeps this object alive, and the stub's wrapper is put on it (parseHttpRequest).
-      close: async () => {
+      async close() {
         await channel.close()
       },
-      abort: (abortError) => {
+      abort(abortError) {
         channel.abort(abortError.abortValue)
       },
     }

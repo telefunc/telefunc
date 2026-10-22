@@ -30,11 +30,10 @@ const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext
     })
     return {
       value: new ClientRoom(stub, metadata),
-      // Not methods: on Bun (JavaScriptCore) a method keeps this object alive, and the proxy is put on it (parse.ts).
-      close: async () => {
+      async close() {
         await stub.close()
       },
-      abort: (abortError) => {
+      abort(abortError) {
         stub.abort(abortError.abortValue, abortError.message)
       },
     }
@@ -47,11 +46,10 @@ const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, Intern
     const channel = context.createChannel({ channelId: metadata.channelId, maxFrameBytes: metadata.maxFrameBytes })
     return {
       value: new ClientStandaloneParticipant(channel, metadata),
-      // Not methods: on Bun (JavaScriptCore) a method keeps this object alive, and the proxy is put on it (parse.ts).
-      close: async () => {
+      async close() {
         await channel.close()
       },
-      abort: (abortError) => {
+      abort(abortError) {
         channel.abort(abortError.abortValue, abortError.message)
       },
     }

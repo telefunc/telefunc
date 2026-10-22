@@ -20,6 +20,10 @@ type GrowDecision = { acknowledged: boolean; bytes: AxisDecision; msgs: AxisDeci
 
 const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-small', msgs: 'sample-too-small' }
 
+type AttachProbe = { probe: number; sentAt: number; link: Link }
+
+const NO_ATTACH_PROBES: readonly AttachProbe[] = []
+
 /** A channel's receive window: it grows, as gRPC's does, while what crosses in a round trip fills two thirds of it. */
 class BdpEstimator {
   // Byte axis
@@ -41,7 +45,7 @@ class BdpEstimator {
   private _ping = 0
   private _pingInFlight = false
   /** Attach probes not answered yet: each settles no growth, so none holds up a ping. */
-  private _attachProbes: { probe: number; sentAt: number; link: Link }[] = []
+  private _attachProbes: readonly AttachProbe[] = NO_ATTACH_PROBES
   /** The wire it attached on last, whose round trip a sample counts at. */
   private _link: Link | null = null
   /** A round trip the window held back, which no queue lengthened, since the wire was replaced; `Infinity` before. */
@@ -94,9 +98,10 @@ class BdpEstimator {
   /** Starts a probe that goes out with an attach on `link`; `undefined` where that wire's round trip is measured. */
   probeAttach(link: Link): number | undefined {
     if (link.pathRtt < Infinity) return undefined
-    this._attachProbes = this._attachProbes.filter((attach) => attach.link === link || attach.link === this._link)
+    const attachProbes = this._attachProbes.filter((attach) => attach.link === link || attach.link === this._link)
     this._probes = (this._probes + 1) >>> 0
-    this._attachProbes.push({ probe: this._probes, sentAt: performance.now(), link })
+    attachProbes.push({ probe: this._probes, sentAt: performance.now(), link })
+    this._attachProbes = attachProbes
     return this._probes
   }
 

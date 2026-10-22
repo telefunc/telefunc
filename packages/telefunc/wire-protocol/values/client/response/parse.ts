@@ -152,7 +152,7 @@ async function reviveResponse(
     function onRevived(revived) {
       const { value, abort, close, onEnd } = revived
       // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
-      if (isObjectOrFunction(value) && closeHandlers.has(value)) return
+      if (isObjectOrFunction(value) && closeHandlers.has(value)) return value
       allCloseHandlers.push(close)
       callContext.abortController.signal.addEventListener(
         'abort',
@@ -166,7 +166,7 @@ async function reviveResponse(
         // Suppress unhandled-rejection noise if `parse()` throws before the pending values are awaited.
         value.promise.catch(() => {})
         pendingValues.push(value)
-        return
+        return value
       }
 
       assert(isObjectOrFunction(value))
@@ -176,7 +176,7 @@ async function reviveResponse(
       onEnd?.(forget)
       closeHandlers.set(wrapper, close)
       // This is what the user gets
-      revived.value = wrapper
+      return wrapper
     },
     roomTypes,
     extensionResponseTypes,

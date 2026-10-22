@@ -134,7 +134,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
   private _shutdownCallback: ((keep: boolean, pageAttached: boolean) => void) | null = null
-  private readonly _pendingEnd: PendingEnd = { closeAck: false, closeRequest: false, abort: null, error: null }
+  private _pendingEnd: PendingEnd | null = null
   private _closeRequestSeq = 0
   /** How far the page is known to have what this channel sent it. */
   private _pageLastSeq = 0
@@ -370,7 +370,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._isClosed = true
     const serializedAbortValue = stringify(abortValue)
     if (this._peer) this._peer.sendAbort(serializedAbortValue)
-    else this._pendingEnd.abort = serializedAbortValue
+    else this._pendingEndRecord().abort = serializedAbortValue
     this._shutdown(createAbortError(abortValue, message))
   }
 
@@ -383,7 +383,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._awaitingCloseAck = this._didRegister
     this._startClose()
     if (this._peer) this._closeRequestSeq = this._peer.sendCloseRequest(timeout)
-    else this._pendingEnd.closeRequest = true
+    else this._pendingEndRecord().closeRequest = true
     this._closePromise = this._runFinalizationLoop()
     return this._closePromise
   }
@@ -668,7 +668,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const peerDeadline = Date.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
-    else this._pendingEnd.closeAck = true
+    else this._pendingEndRecord().closeAck = true
     if (this._isClosed) {
       this._notifyCloseProgress()
       return
@@ -745,19 +745,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._pageLastSeq >= this._replayBuffer.seq &&
       this._prePeerBuffer.size === 0 &&
       this._pendingAckRes.length === 0 &&
-      !this._hasPendingEnd()
+      this._pendingEnd === null
     )
   }
 
-  private _hasPendingEnd(): boolean {
-    const end = this._pendingEnd
-    return end.closeAck || end.closeRequest || end.abort !== null || end.error !== null
-  }
-
-  private _clearPendingEnd(): void {
-    const end = this._pendingEnd
-    end.closeAck = end.closeRequest = false
-    end.abort = end.error = null
+  private _pendingEndRecord(): PendingEnd {
+    return (this._pendingEnd ??= { closeAck: false, closeRequest: false, abort: null, error: null })
   }
 
   /** What was sent while no peer was attached goes to `peer`; an ack request rejected at the end takes no answer. */
@@ -784,12 +777,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private _sendPendingEnd(peer: IndexedPeer): void {
+    if (this._pendingEnd === null) return
     const { closeAck, closeRequest, abort, error } = this._pendingEnd
     if (closeAck) peer.sendCloseAck()
     if (closeRequest) this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
     if (abort !== null) peer.sendAbort(abort)
     if (error !== null) peer.sendError(error)
-    this._clearPendingEnd()
+    this._pendingEnd = null
   }
 
   /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
@@ -797,7 +791,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._prePeerBuffer.clear(err)
     if (this._peer) this._peer.sendError(reason)
-    else this._pendingEnd.error = reason
+    else this._pendingEndRecord().error = reason
     this._shutdown(err)
   }
 
@@ -995,7 +989,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _dropPending(err?: Error): void {
     this._prePeerBuffer.clear(err)
     this._pendingAckRes.length = 0
-    this._clearPendingEnd()
+    this._pendingEnd = null
   }
 
   private _fireClose(err?: Error): void {
