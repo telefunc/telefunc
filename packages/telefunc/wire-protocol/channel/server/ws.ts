@@ -11,8 +11,8 @@ declare module 'crossws' {
   }
 }
 
-/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. `wireRequest` is the request
- *  that opened the peer's wire. `onMessage` runs as each message arrives, before the mux takes it. */
+/** `bufferedAmount` reads the socket's: `undefined` on workerd, whose WebSocket has none. `onMessage` runs as each
+ *  message arrives, before the mux takes it. */
 function getTelefuncChannelHooks({
   upgrade,
   send = (peer, frame) => peer.send(frame),
