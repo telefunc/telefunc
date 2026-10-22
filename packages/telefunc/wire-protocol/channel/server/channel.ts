@@ -349,7 +349,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._isClosed = true
     const serializedAbortValue = stringify(abortValue)
     if (this._peer) this._peer.sendAbort(serializedAbortValue)
-    else this._pendingEndRecord().abort = serializedAbortValue
+    else this._ensurePendingEnd().abort = serializedAbortValue
     this._shutdown(createAbortError(abortValue, message))
   }
 
@@ -362,7 +362,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._awaitingCloseAck = this._didRegister
     this._startClose()
     if (this._peer) this._closeRequestSeq = this._peer.sendCloseRequest(timeout)
-    else this._pendingEndRecord().closeRequest = true
+    else this._ensurePendingEnd().closeRequest = true
     this._closePromise = this._runFinalizationLoop()
     return this._closePromise
   }
@@ -629,7 +629,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const peerDeadline = Date.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
-    else this._pendingEndRecord().closeAck = true
+    else this._ensurePendingEnd().closeAck = true
     if (this._isClosed) {
       this._notifyCloseProgress()
       return
@@ -710,7 +710,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
   }
 
-  private _pendingEndRecord(): PendingEnd {
+  private _ensurePendingEnd(): PendingEnd {
     return (this._pendingEnd ??= { closeAck: false, closeRequest: false, abort: null, error: null })
   }
 
@@ -752,7 +752,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._prePeerBuffer.clear(err)
     if (this._peer) this._peer.sendError(reason)
-    else this._pendingEndRecord().error = reason
+    else this._ensurePendingEnd().error = reason
     this._shutdown(err)
   }
 

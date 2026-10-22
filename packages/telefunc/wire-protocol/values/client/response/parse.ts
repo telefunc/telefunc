@@ -129,7 +129,7 @@ async function reviveResponse(
 
   const reviver = createStreamingReviver(
     context,
-    function onRevived(revived) {
+    function handOut(revived) {
       const { value, abort, close, onEnd } = revived
       allCloseHandlers.push(close)
       callContext.abortController.signal.addEventListener(

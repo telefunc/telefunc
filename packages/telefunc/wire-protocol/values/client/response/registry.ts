@@ -36,7 +36,7 @@ const clientTypes = [
  *  already-revived object, and server-side `===` holds on the client too. */
 function createStreamingReviver(
   context: ClientReviverContext,
-  onRevived: (revived: ReturnType<ReviverType['revive']>) => unknown,
+  handOut: (revived: ReturnType<ReviverType['revive']>) => unknown,
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
   const allTypes = [...clientTypes, ...extensionTypes]
@@ -49,7 +49,7 @@ function createStreamingReviver(
         assert(isObject(metadata))
         const revived = type.revive(metadata as never, context)
         // Duplicates resolve to the exact object the first occurrence handed out.
-        const handedOut = onRevived(revived)
+        const handedOut = handOut(revived)
         revivedByWireString.set(value, handedOut)
         return { replacement: handedOut }
       }

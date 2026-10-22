@@ -55,7 +55,7 @@ function resolveDeferredRevivals(
   args: unknown[],
   deferreds: DeferredRevival[],
   getContext: (segments: string[]) => ServerReviverContext,
-  onRevived: (revived: {
+  handOut: (revived: {
     value: unknown
     close: () => Promise<void> | void
     abort: (abortError: AbortError) => void
@@ -65,6 +65,6 @@ function resolveDeferredRevivals(
     assert(entry.path[0] === 'args', `deferred revival outside args tree: ${entry.path.join('.')}`)
     const subPath = entry.path.slice(1)
     const revived = entry.type.revive(entry.metadata as never, getContext(subPath))
-    set(args, subPath, onRevived(revived))
+    set(args, subPath, handOut(revived))
   }
 }
