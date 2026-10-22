@@ -155,8 +155,8 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
   try {
     if (typeof responseBody === 'string') {
       const writer = writable.getWriter()
-      writer.write(encodeForWebStream(responseBody))
-      writer.close()
+      await writer.write(encodeForWebStream(responseBody))
+      await writer.close()
       return
     }
     // Body is typically a Web `ReadableStream` here (Web-adapter producer);
@@ -173,8 +173,9 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
 async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: StreamWritableNode): Promise<void> {
   try {
     if (typeof responseBody === 'string') {
-      writable.write(responseBody)
-      writable.end()
+      await new Promise<void>((resolve, reject) => {
+        writable.end(responseBody, (err?: Error | null) => (err ? reject(err) : resolve()))
+      })
       return
     }
     const { Readable, pipeline } = getStreamNodeModule()
