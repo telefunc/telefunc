@@ -136,10 +136,7 @@ async function onBroadcastAnswerOrder() {
     if (n === 2) sawAnswer.resolve()
   })
   await Broadcast.publish(key, 1)
-  const deadline = Promise.withResolvers<void>()
-  const timer = setTimeout(deadline.resolve, 10_000)
-  await Promise.race([sawAnswer.promise, deadline.promise])
-  clearTimeout(timer)
+  await within10s(sawAnswer.promise)
   offFirst()
   offSecond()
   return seen
@@ -166,10 +163,7 @@ async function onBroadcastSelfAnswer() {
   })
   void Broadcast.publish(`${key}:sync`, 0)
   void Broadcast.publish(`${key}:async`, 0)
-  const deadline = Promise.withResolvers<void>()
-  const timer = setTimeout(deadline.resolve, 10_000)
-  await Promise.race([Promise.all([syncAnswered.promise, asyncAnswered.promise]), deadline.promise])
-  clearTimeout(timer)
+  await within10s(Promise.all([syncAnswered.promise, asyncAnswered.promise]))
   return {
     stop: async () => {
       offSync()
@@ -228,4 +222,12 @@ async function onBroadcastWhileOffline(count: number) {
     for (let n = 0; n < count; n++) void Broadcast.publish(key, String(n).padEnd(128 * 1024))
   })
   return { key, room }
+}
+
+/** Resolves once `seen` does, or after 10 s, so the page gets whatever arrived by then. */
+async function within10s(seen: Promise<unknown>): Promise<void> {
+  const deadline = Promise.withResolvers<void>()
+  const timer = setTimeout(deadline.resolve, 10_000)
+  await Promise.race([seen, deadline.promise])
+  clearTimeout(timer)
 }
