@@ -52,6 +52,7 @@ export {
   onReplaceMetaInLoop,
   onStopReplacingMeta,
   onReadMetaAcrossWrite,
+  onReadMetaAcrossDrop,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
@@ -619,6 +620,23 @@ async function onReadMetaAcrossWrite(roomId: string, write: 'replace' | 'replace
   held.release()
   const [read] = await reading
   return metaName(read!.meta, { before: bigMeta('a'), after })
+}
+
+/** A member's `a` meta read by the room's roster once a replace with no keys deleted the first of the two pages it
+ *  drops and before it deleted the second: 'before', 'after', or the keys the read got. */
+async function onReadMetaAcrossDrop(roomId: string) {
+  const member = await Room.join(roomId, { meta: bigMeta('a') })
+  const reading = holdCellPages(roomId, 'pm:', 0)
+  const participants = Room.getParticipants(roomId)
+  await reading.reached
+  const dropping = holdCellPages(roomId, `pm:${member.id}:0:`, 2)
+  const replacing = member.setMeta({})
+  await dropping.reached
+  reading.release()
+  const [read] = await participants
+  dropping.release()
+  await replacing
+  return metaName(read!.meta, { before: bigMeta('a'), after: {} })
 }
 
 /** The name of the meta in `named` that `meta` is, keys in order, or the keys it holds. */

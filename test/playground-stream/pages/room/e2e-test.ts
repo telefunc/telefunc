@@ -89,6 +89,13 @@ function testRoomMetaReads() {
       expect(Object.entries(reads).filter(([, read]) => read !== 'before' && read !== 'after')).deep.equal([])
     },
   )
+  testRoomScenario<{ read: string }>(
+    'meta-across-drop',
+    "room: a read of a member's meta of more than a page that lands in the drop of the meta a replace with no keys left gets it before or after the replace",
+    (r) => {
+      expect(['before', 'after']).toContain(r.read)
+    },
+  )
 }
 
 function testRoom() {

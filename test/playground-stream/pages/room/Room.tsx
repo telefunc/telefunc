@@ -56,6 +56,7 @@ import {
   onReplaceMetaInLoop,
   onStopReplacingMeta,
   onReadMetaAcrossWrite,
+  onReadMetaAcrossDrop,
   onOpenRecordingGuardRoom,
   onGetGuardCalls,
   onOpenSlowJoinRoom,
@@ -501,6 +502,10 @@ function Room() {
           )
           setResult(JSON.stringify(reads))
         }
+      })}
+
+      {scenario('meta-across-drop', null, "Read a member's big meta across its drop", async () => {
+        setResult(JSON.stringify({ read: await onReadMetaAcrossDrop(await createRoomId('meta-across-drop')) }))
       })}
 
       {scenario('sender', 'Rename during a guard', 'Rename while a publish waits on its guard', async () => {
