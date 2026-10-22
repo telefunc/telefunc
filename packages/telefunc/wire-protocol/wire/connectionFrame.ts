@@ -47,7 +47,7 @@ export type {
   WirePublishInfo,
 }
 
-import type { ChannelTransports } from '../constants.js'
+import { MAX_CHANNELS_PER_CONNECTION, type ChannelTransports } from '../constants.js'
 import { assert } from '../../utils/assert.js'
 
 // ===== Wire protocol =====
@@ -897,6 +897,7 @@ function parsePreparePayload(value: unknown): PreparePayload {
 
 function parseOpenList(payload: Record<string, unknown>): void {
   assertProtocol(Array.isArray(payload.open), 'RECONCILE open')
+  assertProtocol(payload.open.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over entry cap')
   const indexes = new Set<number>()
   for (const rawEntry of payload.open) {
     const entry = asObject(rawEntry)
@@ -923,6 +924,7 @@ function parseReconcilePayload(value: unknown): ReconcilePayload {
   assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
   if (payload.released !== undefined) {
     assertProtocol(isNonEmptyString(payload.sessionId) && Array.isArray(payload.released), 'RECONCILE released')
+    assertProtocol(payload.released.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE released over entry cap')
     for (const ix of payload.released) assertProtocol(isUint(ix, 0xffff), 'RECONCILE released ix')
   }
   return payload as ReconcilePayload
