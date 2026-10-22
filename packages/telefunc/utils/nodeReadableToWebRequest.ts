@@ -1,4 +1,4 @@
-export { nodeReadableToWebRequest }
+export { nodeReadableToWebRequest, normalizeHeaders }
 
 import type { Readable, Writable } from 'node:stream'
 import { loadStreamNodeModule } from './loadStreamNodeModule.js'

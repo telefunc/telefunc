@@ -28,11 +28,12 @@ function getRequestKind(
   const telefunc = new URL(telefuncUrl, url)
   if (url.pathname !== telefunc.pathname) return null
 
-  const urlKind = parseRequestKind(url.searchParams.get(REQUEST_KIND_PARAM))
+  // Required, never inferred from the URL: a cross-site page can't send a custom header without a CORS preflight.
   const headerKind = parseRequestKind(request.headers.get(REQUEST_KIND_HEADER))
-  if (urlKind === REQUEST_KIND.MISMATCH || headerKind === REQUEST_KIND.MISMATCH) return REQUEST_KIND.MISMATCH
-  if (urlKind && headerKind && urlKind !== headerKind) return REQUEST_KIND.MISMATCH
-  return urlKind ?? headerKind ?? null
+  if (headerKind === null) return null
+  const urlKind = parseRequestKind(url.searchParams.get(REQUEST_KIND_PARAM))
+  if (urlKind !== null && urlKind !== headerKind) return REQUEST_KIND.MISMATCH
+  return headerKind
 }
 
 function parseRequestKind(value: string | null): RequestKind | 'mismatch' | null {

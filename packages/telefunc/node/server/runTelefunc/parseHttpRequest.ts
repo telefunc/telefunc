@@ -9,7 +9,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/server/request/registry.js'
 import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
-import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/request-kind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/server/channel.js'
 import { getChannelMux } from '../../../wire-protocol/server/mux.js'
@@ -78,6 +78,10 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const { request, readable, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
+  if (requestKind === null) {
+    logParseError(`The HTTP request is missing the \`${REQUEST_KIND_HEADER}\` header.`, runContext)
+    return { isMalformedRequest: true }
+  }
   if (requestKind === REQUEST_KIND.MISMATCH) return { isMalformedRequest: true }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
@@ -167,7 +171,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 async function readBody(
   request: Request,
   readable: Readable | undefined,
-  requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT | null,
+  requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
 ): Promise<{
   text: string
   registerFile: ServerReviverContext['registerFile']
