@@ -78,6 +78,7 @@ type ChannelState = {
   slowLinkReceived: number | null
   unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
   openBurstReceived: number | null
+  freshBinaryEchoed: number | null
   manyListenersMs: { page: number; server: number | null } | null
 }
 
@@ -896,6 +897,31 @@ function testChannel(isDev: boolean, inDocker = false) {
         page.off('websocket', onWebSocket)
       }
       expect(sent).lessThanOrEqual(4)
+    })
+  }
+
+  // A page whose channels start on SSE sends the message over SSE.
+  if (channelTransports[0] === 'ws') {
+    test("channel: the page's first 32 KiB sendBinary on a fresh WebSocket goes as one WebSocket message", async () => {
+      const sizes: number[] = []
+      const onWebSocket = (ws: WebSocket) => {
+        if (!ws.url().includes('/_telefunc')) return
+        ws.on('framesent', ({ payload }) => {
+          sizes.push(payload.length)
+        })
+      }
+      page.on('websocket', onWebSocket)
+      try {
+        // A new page opens a new WebSocket.
+        await navigate(`${getServerUrl()}/channel`)
+        await page.click('#channel-test-fresh-binary')
+        await autoRetry(async () => {
+          expect((await getResult<ChannelState>('#channel-state')).freshBinaryEchoed).toBe(32 * 1024)
+        })
+      } finally {
+        page.off('websocket', onWebSocket)
+      }
+      expect(Math.max(...sizes)).greaterThanOrEqual(32 * 1024)
     })
   }
 
