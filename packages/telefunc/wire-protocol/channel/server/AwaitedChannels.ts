@@ -72,6 +72,18 @@ class AwaitedChannels {
     }
   }
 
+  /** Awaits no more, and drops what it held for, each channel of `ixes`. */
+  forget(ixes: number[]): void {
+    if (this.byIx.size === 0) return
+    for (const ix of ixes) {
+      const awaited = this.byIx.get(ix)
+      if (awaited === undefined) continue
+      awaited.stopWaiting()
+      this.drop(awaited)
+      this.byIx.delete(ix)
+    }
+  }
+
   /** The wire `wire` awaits it from now on, with what it held. */
   move(awaited: AwaitedChannel, entry: ConnectionEntry, wire: Wire): void {
     const held = this.take(awaited)

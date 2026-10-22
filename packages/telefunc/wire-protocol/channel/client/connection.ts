@@ -396,6 +396,10 @@ class ClientConnection implements MuxConnection {
   private inFlight = reconcileInFlight()
   /** Initial channels a RECONCILED left out, till their ATTACH_RESULT: what they queue waits, so replays go first. */
   private awaitedIxes = new Set<number>()
+  /** Channels no RECONCILE named on the wire yet: the next one there names them. */
+  private unnamedIxes = new Set<number>()
+  /** Channels let go since the last RECONCILE: the next one on the same wire releases them on the server. */
+  private releasedIxes: number[] = []
   private channels = new Map<number, ChannelEntry>()
   /** The channels not closed: `unregister` takes one out while `channels` still lists it. */
   private channelIndex = new Map<MuxChannel, number>()
@@ -548,7 +552,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private register(channel: MuxChannel): void {
-    // Every RECONCILE lists every channel, the closed ones too, so the oldest the server has all of makes way.
+    // A new wire's RECONCILE lists every channel, the closed ones too, so the oldest the server has all of makes way.
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
       for (const [ix, entry] of this.channels) {
         if (entry.state.tag !== 'closed' || !entry.state.delivered) continue
@@ -566,6 +570,7 @@ class ClientConnection implements MuxConnection {
     }
     const ix = this.nextIndex++
     this.enterChannelPending(ix, channel, true)
+    this.unnamedIxes.add(ix)
     this.replayBuffers.set(
       ix,
       new ReplayBuffer({ maxBytes: this.clientReplayBufferBytes, binaryMaxBytes: this.clientReplayBufferBinaryBytes }),
@@ -1403,6 +1408,8 @@ class ClientConnection implements MuxConnection {
     this.droppedQueues.clear()
     this.lastSeqByChannel.clear()
     this.replayBuffers.clear()
+    this.unnamedIxes.clear()
+    this.releasedIxes = []
     this.forgetWire()
     // A fresh connection replaces this one once its indexes run out.
     if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
@@ -1411,37 +1418,47 @@ class ClientConnection implements MuxConnection {
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    const open = this.declareOpenEntries({
+    const { uplink, batched } = this.transport
+    // The wire that has the session holds what the RECONCILEs before named: one there names what changed since.
+    const changes = this.sessionId !== null && this.reconciledWire === this.wire
+    const open = this.declareOpenEntries(changes ? this.unnamedIxes : this.channels.keys(), {
       skipUnnamed: false,
-      uplink: this.transport.uplink,
-      batched: this.transport.batched,
+      uplink,
+      batched,
     })
     const reconcile: ReconcilePayload = { open }
     if (this.sessionId) reconcile.sessionId = this.sessionId
+    if (changes) reconcile.released = this.releasedIxes
+    this.releasedIxes = []
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
   /** The old wire's last frame; a channel no RECONCILE named yet is left out, to reconcile after the handoff. */
   private buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
-    const open = this.declareOpenEntries({ skipUnnamed: true, uplink, batched: false })
+    const open = this.declareOpenEntries(this.channels.keys(), { skipUnnamed: true, uplink, batched: false })
+    this.releasedIxes = []
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
-  private declareOpenEntries({
-    skipUnnamed,
-    uplink,
-    batched,
-  }: {
-    skipUnnamed: boolean
-    uplink: Uplink
-    batched: boolean
-  }): ReconcileOpenEntry[] {
+  private declareOpenEntries(
+    ixes: Iterable<number>,
+    {
+      skipUnnamed,
+      uplink,
+      batched,
+    }: {
+      skipUnnamed: boolean
+      uplink: Uplink
+      batched: boolean
+    },
+  ): ReconcileOpenEntry[] {
     this.enterReconciling()
     this.inFlight = reconcileInFlight()
     const open: ReconcileOpenEntry[] = []
     const subscribing = new Set<number>()
-    for (const [ix, entry] of this.channels) {
+    for (const ix of ixes) {
+      const entry = this.channels.get(ix)!
       // The server has all a delivered one sent it, or ended it: leaving it out lets it go there too.
       if (entry.state.tag === 'closed' && entry.state.delivered) {
         this.releaseChannel(ix, entry.channel)
@@ -1449,6 +1466,7 @@ class ClientConnection implements MuxConnection {
       }
       const isInitial = entry.state.tag !== 'open' && entry.state.initial
       if (skipUnnamed && isInitial && !this.awaitedIxes.has(ix)) continue
+      this.unnamedIxes.delete(ix)
       this.inFlight.ixes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
         id: entry.channel.id,
@@ -1494,7 +1512,7 @@ class ClientConnection implements MuxConnection {
   private readonly isSendable = (ix: number): boolean => !this.awaitedIxes.has(ix)
 
   stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
-    // This batch includes every channel, so it already covers any pending registration.
+    // This batch names every channel registered since the last, so it already covers any pending registration.
     this.cancelRegisterReconcileTimer()
     const reconcileFrame = this.buildReconcileFrame()
     const movedBufferedFrames = this.drainBufferedFramesForReconcile(isInitialBatch)
@@ -1528,22 +1546,22 @@ class ClientConnection implements MuxConnection {
     }
     const releaseFrames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
-    let hasNewChannels = false
+    // Registered after the RECONCILE we just got back was built — wait for next round.
+    const hasNewChannels = this.unnamedIxes.size > 0
 
-    for (const [ix, entry] of this.channels) {
-      if (!ixes.has(ix)) {
-        // Registered after the RECONCILE we just got back was built — wait for next round.
-        if (!serverMap.has(ix)) hasNewChannels = true
-        continue
-      }
-      if (this.awaitedIxes.has(ix)) continue
+    for (const ix of ixes.keys()) {
+      const entry = this.channels.get(ix)
+      if (entry === undefined || this.awaitedIxes.has(ix)) continue
       const replay = this.reattach(ix, entry, serverMap.get(ix), (carriedFrom.get(ix) ?? Infinity) - 1, deferredOmitted)
       if (replay === null) continue
       for (const frame of replay) releaseFrames.push(frame)
       if (entry.state.tag !== 'closed') channelsToOpen.push(entry.channel)
     }
 
-    for (const frame of this.drainBufferedFrames((ix) => serverMap.has(ix))) releaseFrames.push(frame)
+    // What the server has: the channels this RECONCILE named that it attached, and those the ones before named.
+    const attached = (ix: number): boolean =>
+      ixes.has(ix) ? serverMap.has(ix) : this.channels.has(ix) && !this.unnamedIxes.has(ix) && this.isSendable(ix)
+    for (const frame of this.drainBufferedFrames(attached)) releaseFrames.push(frame)
 
     if (hasNewChannels && !this.upgradeReady) {
       const reconcileBatch = this.stageReconcileBatch(false)
@@ -1722,8 +1740,10 @@ class ClientConnection implements MuxConnection {
     return frames
   }
 
-  /** Drops all the channel holds, its ATTACH_RESULT wait too, as a RECONCILE leaving it out ends that on the server. */
+  /** Drops all the channel holds, its ATTACH_RESULT wait too, as the RECONCILE releasing it, or a new wire's leaving it
+   *  out, ends that on the server. */
   private releaseChannel(ix: number, channel: MuxChannel): void {
+    if (!this.unnamedIxes.delete(ix)) this.releasedIxes.push(ix)
     this.channels.delete(ix)
     this.channelIndex.delete(channel)
     this.awaitedIxes.delete(ix)

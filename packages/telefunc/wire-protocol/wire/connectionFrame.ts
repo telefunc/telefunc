@@ -99,7 +99,7 @@ const TAG = {
   PONG: 0x02 as const,
   /** Server → client on old transport after upgrade drain: signals last frame on this transport. */
   FIN: 0x03 as const,
-  /** Client → server on every (re)connect. JSON payload (`ReconcilePayload`). */
+  /** Client → server on every (re)connect, and as channels open. JSON payload (`ReconcilePayload`). */
   RECONCILE: 0x04 as const,
   /** Server → client after reconcile. JSON payload (`ReconciledPayload`). */
   RECONCILED: 0x05 as const,
@@ -223,9 +223,12 @@ type ReconcileOpenEntry = {
 /** What a channel adds to its own RECONCILE entry. */
 type ReattachState = Pick<ReconcileOpenEntry, 'broadcast' | 'probe'>
 
+/** On a new wire it names every channel the page holds; on the wire of the session it names, with `released`, it names
+ *  only the channels no RECONCILE named there yet, and `released` the ones the page let go since its last. */
 type ReconcilePayload = {
   sessionId?: string
   open: ReconcileOpenEntry[]
+  released?: number[]
 }
 
 /** A barrier names the session it retires and the upgrade it commits — both mandatory, where a
@@ -918,6 +921,10 @@ function parseReconcilePayload(value: unknown): ReconcilePayload {
   const payload = asObject(value)
   parseOpenList(payload)
   assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
+  if (payload.released !== undefined) {
+    assertProtocol(isNonEmptyString(payload.sessionId) && Array.isArray(payload.released), 'RECONCILE released')
+    for (const ix of payload.released) assertProtocol(isUint(ix, 0xffff), 'RECONCILE released ix')
+  }
   return payload as ReconcilePayload
 }
 

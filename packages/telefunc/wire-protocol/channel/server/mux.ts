@@ -783,7 +783,13 @@ class ChannelMux {
         : crypto.randomUUID()
     // Replayed only on a reconnect, as the session's own wire and a barrier's old one (read to its FIN) still deliver.
     const replay = !isBarrier && newSessionId !== ctrl.sessionId
-    const attached = this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection, replay)
+    const { released } = ctrl
+    // The page names what changed only on the wire that has its session: elsewhere it can't know what the server holds.
+    assertProtocol(released === undefined || newSessionId === ctrl.sessionId, 'RECONCILE released on another wire')
+    const attached =
+      released === undefined
+        ? this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection, replay)
+        : this.reconcileChanges(newSessionId, ctrl.open, released, entry, connection)
     // Its wire no longer has the session it names, which is gone with the handles it had.
     if (ctrl.sessionId) this.sessionWires.delete(ctrl.sessionId)
 
@@ -797,8 +803,9 @@ class ChannelMux {
       throw new ProtocolViolationError('connection closed mid-reconcile')
     }
 
-    // What the wire awaits is forgotten once a RECONCILE no longer names it: the page has let it go.
-    state.awaited.forgetUnnamed(ctrl.open)
+    // What the wire awaits is forgotten once the page lets it go.
+    if (released === undefined) state.awaited.forgetUnnamed(ctrl.open)
+    else state.awaited.forget(released)
 
     this.sessionWires.set(newSessionId, connection)
     transport.setSessionId(connection, newSessionId)
@@ -828,6 +835,28 @@ class ChannelMux {
       }
     }
     this.sessions.setSession(newSessionId, handles)
+    return handles
+  }
+
+  /** Attaches the channels the RECONCILE names to the session, and ends there each one the page released. */
+  private reconcileChanges(
+    sessionId: string,
+    open: ReconcileOpenEntry[],
+    released: number[],
+    entry: ConnectionEntry,
+    connection: Wire,
+  ): ChannelHandle[] {
+    const handles: ChannelHandle[] = []
+    for (const each of open) {
+      const handle = this.attach(each, entry, connection, false)
+      if (handle === null) continue
+      handles.push(handle)
+      this.sessions.add(sessionId, handle)
+    }
+    for (const ix of released) {
+      const handle = this.sessions.remove(sessionId, ix)
+      if (handle) this.detachHandle(handle, DETACH_REASON.RECOVERY_FAILED)
+    }
     return handles
   }
 
@@ -1124,6 +1153,19 @@ class SessionRegistry {
       this.byChannel.set(h.channel.id, bindings)
     }
     bindings.set(sessionId, h.ix)
+  }
+
+  /** Stores no empty session, as `removeChannel`. */
+  remove(sessionId: string, ix: number): ChannelHandle | undefined {
+    const session = this.bySession.get(sessionId)
+    const handle = session?.get(ix)
+    if (session === undefined || handle === undefined) return undefined
+    session.delete(ix)
+    if (session.size === 0) this.bySession.delete(sessionId)
+    const bindings = this.byChannel.get(handle.channel.id)!
+    bindings.delete(sessionId)
+    if (bindings.size === 0) this.byChannel.delete(handle.channel.id)
+    return handle
   }
 
   /** Returns the removed session so callers can drive per-handle lifecycle side effects. */

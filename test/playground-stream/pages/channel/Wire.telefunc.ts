@@ -1,4 +1,4 @@
-export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireRelease, onWireUpload }
+export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireHeld, onWireRelease, onWireUpload }
 
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -114,6 +114,18 @@ async function onWireLarge(bytes: number) {
 
 async function onWireOpen() {
   return new Channel<never, never>().client
+}
+
+/** A channel the server sends `first <n>` on as it opens. cleanupState: wireHeld_<run> = how many closed without an error. */
+async function onWireHeld(run: string, n: number) {
+  const ch = new Channel<never, (message: string) => void>()
+  ch.onOpen(() => {
+    void ch.send(`first ${n}`)
+  })
+  ch.onClose((err) => {
+    if (!err) cleanupState[`wireHeld_${run}`] = String(Number(cleanupState[`wireHeld_${run}`] ?? 0) + 1)
+  })
+  return ch.client
 }
 
 /**
