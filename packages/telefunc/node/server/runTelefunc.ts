@@ -172,13 +172,14 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
 
 async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: StreamWritableNode): Promise<void> {
   try {
+    const { Readable, pipeline, finished } = getStreamNodeModule()
     if (typeof responseBody === 'string') {
-      await new Promise<void>((resolve, reject) => {
-        writable.end(responseBody, (err?: Error | null) => (err ? reject(err) : resolve()))
-      })
+      // Unlike `end()`'s callback, settles when the client disconnects, and observes the destination's `error` event.
+      const done = finished(writable)
+      writable.end(responseBody)
+      await done
       return
     }
-    const { Readable, pipeline } = getStreamNodeModule()
     // Body is typically a Node `Readable` here (Node-adapter producer); fall
     // back to `Readable.fromWeb` for the cross-runtime case where a Web body
     // is piped to a Node `Writable`.
