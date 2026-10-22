@@ -231,14 +231,16 @@ function testWire(isDev: boolean) {
     })
   })
 
-  test('channel: 100 channels a page opens one at a time while 1,000 stay open each get their first message, and every close is acknowledged on both ends', async () => {
+  test('channel: 100 channels a page opens one at a time while 1,000 stay open each get their first message, every close is acknowledged on both ends, and what the page sends on a kept one as each opens arrives', async () => {
     await navigate(`${getServerUrl()}/channel`)
     await page.click('#wire-held')
     await autoRetry(
       async () => {
         const { held } = await getResult<WireState>('#wire-state')
         expect(held && { first: held.first, closed: held.closed }).deep.equal({ first: 1_100, closed: 1_100 })
-        expect((await getCleanupState())[`wireHeld_${held!.run}`]).toBe('1100')
+        const ss = await getCleanupState()
+        expect(ss[`wireHeld_${held!.run}`]).toBe('1100')
+        expect(ss[`wireHeldKept_${held!.run}`]).toBe('100')
       },
       { timeout: 30_000 },
     )
