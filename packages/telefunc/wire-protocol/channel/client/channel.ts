@@ -729,7 +729,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     for (const cb of this._broadcastBinaryListeners.list()) {
       try {
         // Bytes of its own: a listener may write into them or transfer their buffer.
-        cb(data.slice(), info)
+        cb(new Uint8Array(data), info)
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
