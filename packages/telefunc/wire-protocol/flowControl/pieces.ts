@@ -12,7 +12,15 @@ import {
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../constants.js'
 import type { Link } from './Link.js'
-import { TAG, assertProtocol, encode, isSequencedTag, passesData, type PiecesAck } from '../wire/connectionFrame.js'
+import {
+  MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
+  TAG,
+  assertProtocol,
+  encode,
+  isSequencedTag,
+  passesData,
+  type PiecesAck,
+} from '../wire/connectionFrame.js'
 import { concatAll } from '../wire/frame.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { Fifo } from '../../utils/Fifo.js'
@@ -160,13 +168,13 @@ class PieceSender {
     )
   }
 
-  /** No rate yet: a data frame up to what any sender hands ahead goes whole, as pieces cost a cold TCP window a round trip. */
+  /** No rate yet: a data frame carrying at most what any sender hands ahead goes whole, as pieces cost a round trip. */
   private goesWhole(frame: Uint8Array<ArrayBuffer>): boolean {
     return (
       this.link.fastest === 0 &&
       this.probe === null &&
       isSequencedTag(frame[0]!) &&
-      frame.byteLength <= Math.min(WIRE_SEND_AHEAD_MIN_BYTES, this.room.dataRoom())
+      frame.byteLength <= Math.min(WIRE_SEND_AHEAD_MIN_BYTES + MESSAGE_FRAME_OVERHEAD_MAX_BYTES, this.room.dataRoom())
     )
   }
 
