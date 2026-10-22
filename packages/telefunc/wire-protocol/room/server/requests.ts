@@ -178,10 +178,7 @@ function decodeParticipantRequest(value: unknown): ParticipantStubRequest {
 }
 
 /** A member's meta, attributes or DM request, as both stubs decode it; a Room stub's also names the acting member. */
-function decodeMemberMutation(
-  kind: keyof typeof MEMBER_MUTATIONS,
-  req: Record<string, unknown>,
-): MemberMutationRequest {
+function decodeMemberMutation(kind: MemberMutationRequest['__r'], req: Record<string, unknown>): MemberMutationRequest {
   switch (kind) {
     case 'req-set-meta':
       return { __r: 'req-set-meta', meta: record(req.meta, 'setMeta meta') }
