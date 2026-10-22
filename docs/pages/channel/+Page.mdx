@@ -229,10 +229,10 @@ for (const frame of frames) {
 }
 ```
 
-Fire-and-forget is also fine — data is sent immediately whether or not you await:
+Fire-and-forget is also fine — a send goes out as soon as the connection has room, whether or not you await it:
 
 ```ts
-channel.send({ type: 'ping' }) // sent immediately, no await needed
+channel.send({ type: 'ping' }) // no await needed
 ```
 
 If a client's connection can't keep up, a server channel holds what you send, and once it holds 64 MiB or more, a send can reject with `ChannelOverflowError`; `await` your sends to avoid it.
