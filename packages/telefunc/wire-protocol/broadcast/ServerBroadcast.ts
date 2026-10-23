@@ -228,6 +228,7 @@ type BroadcastChannel<T = unknown> = {
   readonly key: string
   readonly id: string
   readonly isClosed: boolean
+  readonly isConnected: boolean
   readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<T>
     ack: unknown
@@ -238,6 +239,8 @@ type BroadcastChannel<T = unknown> = {
   subscribeBinary(callback: BroadcastBinaryListener): () => void
   onClose(callback: ChannelCloseCallback): void
   onOpen(callback: () => void): void
+  onDisconnect(callback: () => void): void
+  onReconnect(callback: () => void): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void

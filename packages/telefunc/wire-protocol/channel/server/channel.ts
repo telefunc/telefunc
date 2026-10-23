@@ -111,9 +111,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected readonly _bufferLimitBinary: number
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _openCallbacks: Array<() => void> = []
+  private _disconnectCallbacks: Array<() => void> = []
+  private _reconnectCallbacks: Array<() => void> = []
   private _closeError: Error | undefined
   private _didFireClose = false
   private _didFireOpen = false
+  private _isConnected = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
   private _closeDeadline = 0
   private _closeWaiters: Array<() => void> = []
@@ -200,6 +203,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   get isClosed(): boolean {
     return this._isClosed
+  }
+
+  get isConnected(): boolean {
+    return this._isConnected
   }
 
   /** @internal Replaces the one-shot shutdown callback: `keep` if it keeps what its page may lack (see `_release`). */
@@ -359,6 +366,14 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._openCallbacks.push(callback)
   }
 
+  onDisconnect(callback: () => void): void {
+    if (!this._didFireClose) this._disconnectCallbacks.push(callback)
+  }
+
+  onReconnect(callback: () => void): void {
+    if (!this._didFireClose) this._reconnectCallbacks.push(callback)
+  }
+
   _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void {
     this._responseAbort = abortResponse
   }
@@ -440,7 +455,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._notifyCloseProgress()
       return
     }
-    this._fireOpen()
+    if (this._didFireOpen) this._fireReconnect()
+    else this._fireOpen()
   }
 
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
@@ -698,6 +714,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         })
       }, reconnectTimeout),
     )
+    if (!this._isConnected || this._isClosed) return
+    this._isConnected = false
+    this._invokeAll(this._disconnectCallbacks)
   }
 
   _onPeerRecoveryFailure(): void {
@@ -950,6 +969,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._didShutdown = true
     this._isClosed = true
+    this._isConnected = false
     this._closeError = err
     const pageAttached = this._peer !== null
     this._peer = null
@@ -1000,6 +1020,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
+    this._disconnectCallbacks.length = 0
+    this._reconnectCallbacks.length = 0
     this._notifyCloseProgress()
   }
 
@@ -1026,14 +1048,25 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _fireOpen(): void {
     if (this._didFireOpen) return
     this._didFireOpen = true
-    for (const cb of this._openCallbacks) {
+    this._isConnected = true
+    this._invokeAll(this._openCallbacks)
+    this._openCallbacks.length = 0
+  }
+
+  private _fireReconnect(): void {
+    if (this._isConnected) return
+    this._isConnected = true
+    this._invokeAll(this._reconnectCallbacks)
+  }
+
+  private _invokeAll(callbacks: Array<() => void>): void {
+    for (const cb of callbacks) {
       try {
         cb()
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
     }
-    this._openCallbacks.length = 0
   }
 
   protected _handleCallbackError(err: unknown): boolean {

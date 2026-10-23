@@ -87,12 +87,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly _listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
   private _openCallbacks: Array<() => void> = []
+  private _disconnectCallbacks: Array<() => void> = []
+  private _reconnectCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
   protected _isClosed = false
   private _didTerminate = false
   private _didFireClose = false
   private _didFireOpen = false
+  private _isConnected = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
   private _closeDeadline = 0
   private _closeWaiters: Array<() => void> = []
@@ -147,6 +150,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   get isClosed(): boolean {
     return this._isClosed
+  }
+
+  get isConnected(): boolean {
+    return this._isConnected
   }
 
   send(data: ChannelData<ClientToServer>): Promise<void>
@@ -240,6 +247,14 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._openCallbacks.push(callback)
   }
 
+  onDisconnect(callback: () => void): void {
+    if (!this._didFireClose) this._disconnectCallbacks.push(callback)
+  }
+
+  onReconnect(callback: () => void): void {
+    if (!this._didFireClose) this._reconnectCallbacks.push(callback)
+  }
+
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     if (this._closePromise) return this._closePromise
     if (this._didTerminate) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
@@ -304,7 +319,15 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
     this._flow.attach(uplink, downlink)
-    this._fireOpen()
+    if (this._didFireOpen) this._fireReconnect()
+    else this._fireOpen()
+  }
+
+  /** @internal Its wire went away, and the connection reconnects. */
+  _onTransportDisconnect(): void {
+    if (!this._isConnected || this._isClosed) return
+    this._isConnected = false
+    this._invokeAll(this._disconnectCallbacks)
   }
 
   _onTransportMessage(data: string, bytes: number): void {
@@ -492,14 +515,25 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _fireOpen(): void {
     if (this._didFireOpen) return
     this._didFireOpen = true
-    for (const cb of this._openCallbacks) {
+    this._isConnected = true
+    this._invokeAll(this._openCallbacks)
+    this._openCallbacks.length = 0
+  }
+
+  private _fireReconnect(): void {
+    if (this._isConnected) return
+    this._isConnected = true
+    this._invokeAll(this._reconnectCallbacks)
+  }
+
+  private _invokeAll(callbacks: Array<() => void>): void {
+    for (const cb of callbacks) {
       try {
         cb()
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
     }
-    this._openCallbacks.length = 0
   }
 
   private _fireClose(err?: Error): void {
@@ -510,6 +544,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
+    this._disconnectCallbacks.length = 0
+    this._reconnectCallbacks.length = 0
     this._notifyCloseProgress()
   }
 
@@ -598,6 +634,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _finalizeClose(err?: Error): void {
     if (this._didTerminate) return
     this._didTerminate = true
+    this._isConnected = false
     this._closeError = err
     this._flow.shutdown()
     const ackErr = err ?? new ChannelClosedError()

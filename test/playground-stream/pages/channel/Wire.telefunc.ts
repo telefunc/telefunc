@@ -1,4 +1,14 @@
-export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireHeld, onWireRelease, onWireUpload }
+export {
+  onWireResume,
+  onWireOverrun,
+  onWireEnd,
+  onWireLarge,
+  onWireOpen,
+  onWireHeld,
+  onWireRelease,
+  onWireUpload,
+  onWireConnection,
+}
 
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -164,5 +174,19 @@ async function onWireUpload() {
     tally.text(message)
     cleanupState[`wireUpload_${ch.id}`] = JSON.stringify(tally.state)
   })
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/** cleanupState: wireConnection_<id> = what the server end saw: 'open', 'disconnect', 'reconnect', each with isConnected. */
+async function onWireConnection() {
+  const ch = new Channel<never, never>()
+  const events: string[] = []
+  const report = (event: string) => {
+    events.push(`${event}:${ch.isConnected}`)
+    cleanupState[`wireConnection_${ch.id}`] = JSON.stringify(events)
+  }
+  ch.onOpen(() => report('open'))
+  ch.onDisconnect(() => report('disconnect'))
+  ch.onReconnect(() => report('reconnect'))
   return { channel: ch.client, channelId: ch.id }
 }
