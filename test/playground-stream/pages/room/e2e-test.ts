@@ -445,11 +445,14 @@ function testRoom() {
       expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again, back to unwanted
     },
   )
-  testRoomScenario<{ received: string[] }>(
+  testRoomScenario<{ received: string[]; existing: string[]; created: string[]; plain: string[] }>(
     'tail',
-    'room: Room.get({ tail }) holds a between-get-and-subscribe message',
+    'room: Room.get({ tail }) and Room.getOrCreate({ tail }) hold a between-get-and-subscribe message',
     (r) => {
       expect(r.received).toContain('between') // relay started at serialize, buffered until subscribe
+      expect(r.existing).toContain('between') // getOrCreate of an existing room
+      expect(r.created).toContain('between') // getOrCreate that created the room
+      expect(r.plain).deep.equal(['after']) // without a tail, the view gets only what came after its subscribe
     },
   )
   testRoomScenario<{

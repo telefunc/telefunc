@@ -3,6 +3,7 @@ export {
   onGetRoom,
   onGetRoomTail,
   onGetOrCreateRoom,
+  onGetOrCreateRoomTail,
   onCreateTypedRoom,
   onOpenGuardedRoom,
   onOpenAuditedRoom,
@@ -94,6 +95,10 @@ async function onGetRoomTail(roomId: string) {
 
 async function onGetOrCreateRoom(roomId: string) {
   return await Room.getOrCreate(roomId, { meta: { topic: 'e2e' } })
+}
+
+async function onGetOrCreateRoomTail(roomId: string) {
+  return await Room.getOrCreate(roomId, { meta: { topic: 'e2e' }, tail: true })
 }
 
 type ChatMsg = { kind: 'chat'; text: string }

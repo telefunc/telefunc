@@ -7,6 +7,7 @@ import {
   onGetRoom,
   onGetRoomTail,
   onGetOrCreateRoom,
+  onGetOrCreateRoomTail,
   onCreateTypedRoom,
   onOpenGuardedRoom,
   onOpenAuditedRoom,
@@ -1043,12 +1044,37 @@ function Room() {
         const me = await owner.join({ meta: { name: 'Src' } })
 
         const tailed = await onGetRoomTail(roomId)
+        const existing = await onGetOrCreateRoomTail(roomId)
+        const plain = await onGetRoom(roomId)
         await me.publish({ t: 'between' })
 
-        const received: string[] = []
-        tailed.subscribe((data) => received.push((data as { t: string }).t))
+        const createdId = `e2e-tail-created:${crypto.randomUUID()}`
+        const created = await onGetOrCreateRoomTail(createdId)
+        const createdSrc = await (await onGetRoom(createdId)).join({ meta: { name: 'Src' } })
+        await createdSrc.publish({ t: 'between' })
 
-        await pollUntil(() => ({ result: { received }, done: received.includes('between') }))
+        const subscribe = (view: RoomView) => {
+          const texts: string[] = []
+          view.subscribe((data) => texts.push((data as { t: string }).t))
+          return texts
+        }
+        const result = {
+          received: subscribe(tailed),
+          existing: subscribe(existing),
+          created: subscribe(created),
+          plain: subscribe(plain),
+        }
+        await me.setAttributes({}) // same-channel ack orders the subscriptions before the live publish
+        await me.publish({ t: 'after' })
+
+        await pollUntil(() => ({
+          result,
+          done:
+            result.received.includes('between') &&
+            result.existing.includes('between') &&
+            result.created.includes('between') &&
+            result.plain.includes('after'),
+        }))
       })}
 
       {scenario('hooks', 'After-hooks (persistence receipts)', 'After-join/publish/send receipts', async () => {
