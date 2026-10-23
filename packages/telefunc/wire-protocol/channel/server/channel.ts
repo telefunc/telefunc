@@ -332,7 +332,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   onOpen(callback: () => void): void {
     if (this._didFireOpen) {
-      callback()
+      const result = callback()
+      if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
       return
     }
     this._openCallbacks.push(callback)
@@ -939,7 +940,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._didFireOpen = true
     for (const cb of this._openCallbacks) {
       try {
-        cb()
+        const result = cb()
+        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
