@@ -21,7 +21,7 @@
     "react-dom": "17.0.1",
     "react-native": "0.64.3",
     "react-native-web": "0.17.1",
-    "telefunc": "0.2.24",
+    "telefunc": "0.3.0",
     "typescript": "^7.0.2"
   }
 }

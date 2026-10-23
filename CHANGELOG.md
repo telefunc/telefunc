@@ -1,3 +1,22 @@
+# [0.3.0](https://github.com/telefunc/telefunc/compare/v0.2.24...v0.3.0) (2026-10-23)
+
+
+### Bug Fixes
+
+* abort context.signal when the client disconnects from a Node adapter ([#478](https://github.com/telefunc/telefunc/issues/478)) ([f841b24](https://github.com/telefunc/telefunc/commit/f841b244b7731dbd4e39d6cad586bdadd3f3897b)), closes [#473](https://github.com/telefunc/telefunc/issues/473)
+* accept channel messages up to 64 MiB over WebSocket on Bun ([#490](https://github.com/telefunc/telefunc/issues/490)) ([d577356](https://github.com/telefunc/telefunc/commit/d5773561079327bc10cb6cddf667a411da90c852))
+* nested File/Blob in a telefunction result arrive as File/Blob, not Promise ([#474](https://github.com/telefunc/telefunc/issues/474)) ([686fb3e](https://github.com/telefunc/telefunc/commit/686fb3e21f4ee9c1c626265d4b9d2dbcb41a486f)), closes [#472](https://github.com/telefunc/telefunc/issues/472)
+* reject telefunction calls that lack the `x-telefunc-request` header ([#502](https://github.com/telefunc/telefunc/issues/502)) ([297db13](https://github.com/telefunc/telefunc/commit/297db134cef1a1fc8f742c7a23f24f636bf4a4c2))
+* release idle inline generators on cancellation ([#465](https://github.com/telefunc/telefunc/issues/465)) ([c088d24](https://github.com/telefunc/telefunc/commit/c088d24fbdd316a3a230697a75629aa69350f5fe))
+* stop error responses from accumulating `Content-Type` headers ([#501](https://github.com/telefunc/telefunc/issues/501)) ([9bbc8bb](https://github.com/telefunc/telefunc/commit/9bbc8bb0acdffd4d6514c48e90c78f106c1eb5a0))
+
+
+### BREAKING CHANGES
+
+* Telefunc now rejects any telefunction call that lacks the `x-telefunc-request` header, answering `400 Malformed Telefunc Request`. This protects telefunctions against cross-site request forgery (#500). The Telefunc client always sends this header, so most apps need no change. To migrate, apply each rule that matches your code: (1) If you call `serve({ url, method, body })`, pass the request headers as well: `serve({ url, method, body, headers: req.headers })`. Without them, `serve()` throws "`serve({ headers })`: argument `headers` is missing.". `serve({ request })` and `serve({ url, method, readable, headers })` need no change. (2) If you call telefunctions without the Telefunc client (a custom `fetch()`, curl, an end-to-end test), add the header `x-telefunc-request: txt` to the POST request. (3) If a proxy or middleware in front of your server forwards only some request headers, make it forward `x-telefunc-request` too.
+
+
+
 ## [0.2.24](https://github.com/telefunc/telefunc/compare/v0.2.23...v0.2.24) (2026-08-21)
 
 
