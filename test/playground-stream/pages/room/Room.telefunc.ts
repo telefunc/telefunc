@@ -23,6 +23,7 @@ export {
   onCloseRoomWithMember,
   onBackgroundErrors,
   onRoomWhileAway,
+  onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
   onRoomOverflow,
   onGetRoomOverflow,
@@ -314,6 +315,20 @@ async function onRoomWhileAway(roomId: string, memberId: string) {
     await Room.removeParticipant(roomId, { id: memberId, reason: 'while-away' })
     await Room.close(roomId)
     cleanupState[`roomAway_${roomId}`] = 'done'
+  })
+}
+
+/** Run by the test with `runServerAction()` while the page is away, once per absence: the room's meta changes, then a
+ *  member's meta changes past the page's 512 KiB bufferLimit for text, which drops the room's change from its buffer. */
+async function onRoomMetaWhileAway(roomId: string) {
+  const srv = await (await Room.get(roomId)).join({ meta: { name: 'Srv' } })
+  awayMembers.set(roomId, [srv])
+  let absence = 0
+  onServerAction(`roomMetaAway_${roomId}`, async () => {
+    absence++
+    await Room.setMeta(roomId, { topic: `away-${absence}` })
+    for (let n = 0; n < 6; n++) await srv.setMeta({ name: 'Srv', filler: `${absence}`.padEnd(128 * 1024) })
+    cleanupState[`roomMetaAway_${roomId}`] = `done-${absence}`
   })
 }
 

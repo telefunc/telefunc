@@ -27,6 +27,7 @@ import {
   onCloseRoomWithMember,
   onBackgroundErrors,
   onRoomWhileAway,
+  onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
   onRoomOverflow,
   onGetRoomOverflow,
@@ -1569,6 +1570,23 @@ function Room() {
             myCause,
             closed,
           }),
+        )
+      })}
+
+      {scenario('meta-away', 'Back from offline, twice', "The room's meta, each time", async () => {
+        const [roomId, view] = await createRoom('meta-away')
+        await view.join({ meta: { name: 'Me' } })
+        await onRoomMetaWhileAway(roomId)
+        await pollUntil(() => ({ done: view.count === 2 }))
+        const srvId = (await view.getParticipants()).find((member) => member.meta.name === 'Srv')!.id
+        const filler = async () =>
+          ((await view.getParticipant(srvId))?.meta.filler as string | undefined)?.trim() ?? null
+        await pollUntil(
+          async () => ({
+            done: false,
+            result: { roomId, topic: (view.meta as { topic?: string }).topic ?? null, filler: await filler() },
+          }),
+          600,
         )
       })}
 

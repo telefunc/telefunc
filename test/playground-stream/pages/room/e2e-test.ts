@@ -800,6 +800,27 @@ function testRoom() {
       })
     })
   })
+  test("room: a page back from offline, twice, gets its room's meta each time, though its room sent it more meanwhile than bufferLimit holds", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-meta-away')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-meta-away:/)
+    })
+    for (const absence of [1, 2]) {
+      await page.context().setOffline(true)
+      await cutWire()
+      await runServerAction(`roomMetaAway_${roomId}`)
+      await autoRetry(async () => {
+        expect((await getCleanupState())[`roomMetaAway_${roomId}`]).toBe(`done-${absence}`)
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ roomId, topic: `away-${absence}`, filler: `${absence}` })
+      })
+    }
+  })
   test('room: a page offline while its room sent it more than bufferLimit holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-overflow')
