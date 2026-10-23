@@ -263,6 +263,18 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
+  // The in-memory backend's: Redis delivers what reaches a key's subscription once it is there.
+  if (!inDocker) {
+    test('broadcast: a subscriber that comes while publishes queue gets only what is published after it, text and binary alike', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-join-while-queued')
+
+      await autoRetry(async () => {
+        expect((await getResult<{ received: Array<string | number> }>('#publish-result')).received).deep.equal(['t4'])
+      })
+    })
+  }
+
   // Preview on Node only: the margin is measured there. A leak of 100,000 keys' seq counters grows the heap by 7 MB or more.
   if (!isDev && !inDocker && serverRuntime() === 'node') {
     for (const subscribed of [false, true]) {

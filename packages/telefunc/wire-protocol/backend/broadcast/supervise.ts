@@ -75,7 +75,15 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
   return {
     publish,
     // The manager hands a route's consumers only the deliveries checkDelivery passed.
-    subscribe: (route, receiver) => subscriptions.subscribe(route, receiver as BackendReceiver<BackendPayload>),
+    subscribe: (route, receiver) => {
+      const published = driver.published?.(route.key) ?? 0
+      const receive = receiver as BackendReceiver<BackendPayload>
+      if (published === 0) return subscriptions.subscribe(route, receive)
+      // A subscriber gets only what is published after it subscribed, as the driver fixed each publish's recipients.
+      return subscriptions.subscribe(route, (payload, info) => {
+        if (info.seq > published) receive(payload, info)
+      })
+    },
     dispose: () => subscriptions.dispose(),
   }
 }

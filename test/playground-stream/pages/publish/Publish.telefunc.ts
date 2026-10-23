@@ -23,6 +23,7 @@ export {
   onBroadcastReconnect,
   onBroadcastWhileOffline,
   onBroadcastSeqAcrossSubscribers,
+  onBroadcastJoinWhileQueued,
   onBroadcastManyKeys,
 }
 
@@ -434,6 +435,28 @@ async function onBroadcastSeqAcrossSubscribers() {
   await publish()
   offAgain()
   return seqs
+}
+
+/** A text subscriber holds a key. Past the 1,024 in-memory deliveries of one turn, so they queue, the key gets text,
+ *  binary and text; a second subscriber then subscribes to both kinds, and the key gets text once more. What it got. */
+async function onBroadcastJoinWhileQueued() {
+  const key = `room:join-queued:${crypto.randomUUID()}`
+  const offs = [Broadcast.subscribe(key, () => {})]
+  // Resolves once the subscription is set up, so the publishes below go out at once.
+  await Broadcast.publish(key, 't0')
+  for (let i = 0; i < 1_100; i++) void Broadcast.publish(`room:busy:${crypto.randomUUID()}`, i)
+  const queued = [
+    Broadcast.publish(key, 't1'),
+    Broadcast.publishBinary(key, new Uint8Array([2])),
+    Broadcast.publish(key, 't3'),
+  ]
+  const received: Array<string | number> = []
+  offs.push(Broadcast.subscribe<string>(key, (message) => received.push(message)))
+  offs.push(Broadcast.subscribeBinary(key, (data) => received.push(data[0]!)))
+  await Promise.all(queued)
+  await Broadcast.publish(key, 't4')
+  for (const off of offs) off()
+  return received
 }
 
 /** Publishes once on each of `count` distinct keys, each without a subscriber, or each while one subscribes. */

@@ -299,6 +299,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     })
   }
 
+  published(key: string): number {
+    return this._broadcastOrder.get(key)?.seq ?? 0
+  }
+
   private _broadcastSubscribed(key: string): boolean {
     return this._broadcastSubs.text.has(key) || this._broadcastSubs.binary.has(key)
   }

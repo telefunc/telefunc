@@ -27,6 +27,7 @@ import {
   onBroadcastReconnect,
   onBroadcastWhileOffline,
   onBroadcastSeqAcrossSubscribers,
+  onBroadcastJoinWhileQueued,
   onBroadcastManyKeys,
 } from './Publish.telefunc'
 
@@ -420,6 +421,15 @@ function Publish() {
         }}
       >
         Seqs across subscribers
+      </button>
+      <button
+        id="test-broadcast-join-while-queued"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ received: await onBroadcastJoinWhileQueued() }))
+        }}
+      >
+        Subscribe while publishes queue
       </button>
       {([false, true] as const).map((subscribed) => (
         <button

@@ -25,6 +25,9 @@ type BroadcastDriver = {
     payload: BroadcastPayload<Kind>,
   ): PublishResult | Promise<PublishResult>
   readonly subscriptions: SubscriptionDriver<BroadcastRoute>
+  /** For a driver that fixes a publish's recipients as it publishes: a seq at or above every publish on `key` a
+   *  subscription made now could still be delivered, so a subscriber skips what was published before it. */
+  published?(key: string): number
 }
 
 /** What core consumes: the driver, supervised. */
