@@ -7,7 +7,7 @@ import type { IndexedPeer } from './IndexedPeer.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
-import { ACK_STATUS, ProtocolViolationError } from '../../wire/connectionFrame.js'
+import { ACK_STATUS, ERROR_REASON, ProtocolViolationError } from '../../wire/connectionFrame.js'
 import type { BroadcastKind, ReattachState } from '../../wire/connectionFrame.js'
 
 type BroadcastEndOptions = {
@@ -43,11 +43,31 @@ class ServerBroadcastEnd<ClientToServer = unknown, ServerToClient = unknown> ext
   /** A PUBLISH frame to its page, never refused: a page too far behind is let go. One `resentOnAttach`, which the owner
    *  sends again at each attach, may be dropped while the page is away without leaving it a gap. */
   deliver(frame: string, opts?: { resentOnAttach?: boolean }): void {
-    this._sendPublish(frame, opts)
+    this._deliver(frame, opts?.resentOnAttach !== true)
   }
 
   deliverBinary(frame: Uint8Array): void {
-    this._sendPublishBinary(frame)
+    this._deliver(frame, true)
+  }
+
+  /** Buffered while its page is away, where dropping a `gap` frame lets the page go. */
+  private _deliver(frame: string | Uint8Array, gap: boolean): void {
+    const binary = typeof frame !== 'string'
+    const peer = this._peer
+    if (peer === null) {
+      if (binary) this._prePeerBuffer.pushPublishBinary(frame, gap)
+      else this._prePeerBuffer.pushPublish(frame, gap)
+      this._closeIfDroppedOffline(binary)
+      return
+    }
+    if (this._flow.isPastByteCredit && this._isPeerBehind()) {
+      this._endWithError(
+        ERROR_REASON.OVERFLOW,
+        new ChannelOverflowError('Channel closed: its client fell further behind than the server holds for a client'),
+      )
+      return
+    }
+    this._flow.countPublishSent(binary ? peer.sendPublishBinary(frame) : peer.sendPublish(frame))
   }
 
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
