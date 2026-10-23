@@ -2,6 +2,7 @@ export {
   resetCleanupState,
   getCleanupState,
   forceServerGc,
+  serverHeapUsed,
   cutWire,
   dropNextWebSocket,
   runServerAction,
@@ -86,6 +87,12 @@ async function forceServerGc() {
   // Fail loudly on `gc not exposed` (server missing `--expose-gc`): silently ignoring it
   // degrades GC tests into waiting for natural GC, which times out with a misleading assertion.
   if (!resp.ok) throw new Error(`forceServerGc() failed: ${await resp.text()}`)
+}
+
+/** The server's `heapUsed`, in bytes. */
+async function serverHeapUsed(): Promise<number> {
+  const resp = await fetch(`${getServerUrl()}/api/heap-used`)
+  return ((await resp.json()) as { heapUsed: number }).heapUsed
 }
 
 /** Runs what a telefunction left under `key` with `onServerAction()` (server-actions.ts), also while the page is offline. */

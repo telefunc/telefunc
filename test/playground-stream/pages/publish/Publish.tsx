@@ -15,6 +15,9 @@ import {
   onBroadcastSelfUnsubscribe,
   onBroadcastReconnect,
   onBroadcastWhileOffline,
+  onBroadcastSeqAcrossSubscribers,
+  onBroadcastSeqWhileQueued,
+  onBroadcastManyKeys,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -269,6 +272,40 @@ function Publish() {
       >
         Broadcast.publish() receipts
       </button>
+
+      <h2>Seqs</h2>
+
+      <button
+        id="test-broadcast-seq-across-subscribers"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ seqs: await onBroadcastSeqAcrossSubscribers() }))
+        }}
+      >
+        Seqs across subscribers
+      </button>
+      <button
+        id="test-broadcast-seq-while-queued"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastSeqWhileQueued()))
+        }}
+      >
+        Seqs while publishes queue
+      </button>
+      {([false, true] as const).map((subscribed) => (
+        <button
+          key={String(subscribed)}
+          id={`test-broadcast-many-keys${subscribed ? '-subscribed' : ''}`}
+          onClick={async () => {
+            setResult('')
+            await onBroadcastManyKeys(100_000, subscribed)
+            setResult(JSON.stringify({ done: true }))
+          }}
+        >
+          100,000 keys{subscribed ? ', each subscribed' : ''}
+        </button>
+      ))}
 
       <h2>Subscriber Unsubscribes Itself</h2>
 

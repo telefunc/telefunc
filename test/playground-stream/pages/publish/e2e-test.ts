@@ -1,7 +1,17 @@
 export { testPublish }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult, getCleanupState, cutWire, canCutWire, runServerAction } from '../../e2e-utils'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  cutWire,
+  canCutWire,
+  runServerAction,
+  forceServerGc,
+  serverHeapUsed,
+  serverRuntime,
+} from '../../e2e-utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -168,6 +178,57 @@ function testPublish(isDev: boolean, inDocker = false) {
       expect(second!.seq).greaterThan(first!.seq)
     })
   })
+
+  test("broadcast: a key's seq goes on growing after its subscribers leave and another key publishes, and runs on by one while it has a subscriber", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-seq-across-subscribers')
+
+    await autoRetry(async () => {
+      const { seqs } = await getResult<{ seqs: number[] }>('#publish-result')
+      expect(seqs.length).toBe(5)
+      expect(seqs[1]).toBe(seqs[0]! + 1)
+      for (let i = 1; i < seqs.length; i++) expect(seqs[i]).greaterThan(seqs[i - 1]!)
+    })
+  })
+
+  test('broadcast: a subscriber that comes while publishes queue gets the next seq right after the one before it', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-seq-while-queued')
+
+    await autoRetry(async () => {
+      const { receipts, received } = await getResult<{ receipts: number[]; received: Array<[string, number]> }>(
+        '#publish-result',
+      )
+      const [first] = receipts
+      expect(receipts).deep.equal([first, first! + 1])
+      expect(received).deep.equal([
+        ['first', first],
+        ['second', first! + 1],
+      ])
+    })
+  })
+
+  // Preview on Node only: the margin is measured there. A leak of 100,000 keys' seq counters grows the heap by 7 MB or more.
+  if (!isDev && !inDocker && serverRuntime() === 'node') {
+    for (const subscribed of [false, true]) {
+      test(`broadcast: publishes to 100,000 distinct keys, ${subscribed ? 'each while a subscriber comes and goes' : 'none subscribed'}, leave the server's heap where it was`, async () => {
+        await navigate(`${getServerUrl()}/publish`)
+        const run = async () => {
+          await page.click(`#test-broadcast-many-keys${subscribed ? '-subscribed' : ''}`)
+          await autoRetry(async () =>
+            expect(await getResult<{ done: boolean }>('#publish-result')).deep.equal({ done: true }),
+          )
+        }
+        // A first run warms up what the code allocates once.
+        await run()
+        await forceServerGc()
+        const before = await serverHeapUsed()
+        await run()
+        await forceServerGc()
+        expect((await serverHeapUsed()) - before).lessThan(3_000_000)
+      })
+    }
+  }
 
   test("broadcast: a subscriber that unsubscribes itself doesn't make the next one miss a message", async () => {
     await navigate(`${getServerUrl()}/publish`)

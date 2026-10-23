@@ -74,6 +74,8 @@ app.post('/api/gc', async (c) => {
   return c.json({ ok: true })
 })
 
+app.get('/api/heap-used', (c) => c.json({ heapUsed: process.memoryUsage().heapUsed }))
+
 app.post('/api/server-close-trigger', async (c) => {
   const channelId = c.req.query('channelId')
   if (!channelId) return c.json({ ok: false, reason: 'missing channelId' }, 400)
