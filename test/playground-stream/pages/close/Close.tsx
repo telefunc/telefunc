@@ -17,6 +17,7 @@ import {
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
   onGcPassedFnOnClose,
+  onEditDocument,
 } from './Close.telefunc'
 
 function Close() {
@@ -168,6 +169,18 @@ function Close() {
         }}
       >
         Fn: close(fn)
+      </button>
+
+      <h2>Edit a document</h2>
+
+      <button
+        id="test-edit-document"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onEditDocument()))
+        }}
+      >
+        Edit the document
       </button>
 
       <h2>Channel onClose ordering</h2>

@@ -12,12 +12,17 @@ export {
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
   onGcPassedFnOnClose,
+  onEditDocument,
 }
 
 import { EventEmitter } from 'node:events'
-import { BroadcastChannel, Channel, getContext } from 'telefunc'
+import { BroadcastChannel, Channel, getContext, onBug } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
+
+onBug((err) => {
+  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
+})
 
 // ── Targeted single-type telefunctions ─────────────────────────────
 
@@ -271,4 +276,17 @@ async function onMixedForClose(callback: (msg: string) => void) {
   }
 
   return { generator, stream, channel: ch.client, fn }
+}
+
+/** Opens the document for editing, releasing its lock once the request is over. */
+async function onEditDocument() {
+  getContext().onClose(async () => {
+    await releaseLock()
+  })
+  return { text: 'Draft' }
+}
+
+/** The lock server is down. */
+async function releaseLock() {
+  throw new Error('Could not release the lock')
 }

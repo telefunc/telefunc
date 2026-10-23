@@ -1,9 +1,9 @@
 export { testClose }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { resetCleanupState, getCleanupState, forceServerGc, navigate, getResult, sleep } from '../../e2e-utils'
 
-function testClose() {
+function testClose(inDocker = false) {
   for (const wakeOn of ['onClose', 'signal', 'channel'] as const) {
     test(`close: idle generator releases its subscription via ${wakeOn}`, async () => {
       await navigate(`${getServerUrl()}/close`)
@@ -164,6 +164,33 @@ function testClose() {
       const state = await getCleanupState()
       // retFn() was called before close
       expect(state.closeFn_retFnCalled).toBe('true')
+    })
+  })
+
+  test("close: a document's lock that fails to release in context.onClose is reported, and the document opens again", async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await resetCleanupState()
+
+    await page.click('#test-edit-document')
+    await autoRetry(async () => {
+      expect(await getResult('#close-result')).deep.equal({ text: 'Draft' })
+    })
+    await autoRetry(async () => {
+      expect((await getCleanupState())['bug:Could not release the lock']).toBe('reported')
+    })
+    await page.click('#test-edit-document')
+    await autoRetry(async () => {
+      expect(await getResult('#close-result')).deep.equal({ text: 'Draft' })
+    })
+    expectLog('Could not release the lock', {
+      // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
+      filter: (log) =>
+        inDocker
+          ? log.logSource === 'stdout' &&
+            log.logText
+              .split('\n')
+              .some((line) => line.includes('Could not release the lock') && /^playground-[a-z]-\d+ +\| /.test(line))
+          : log.logSource === 'stderr',
     })
   })
 
