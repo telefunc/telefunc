@@ -6,6 +6,7 @@ import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
 import { ServerChannel } from '../channel/server/channel.js'
 import { ServerBroadcast } from '../broadcast/ServerBroadcast.js'
+import { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import { wrapProxy } from '../../utils/wrapProxy.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { parseHttpRequest } from '../../node/server/runTelefunc/parseHttpRequest.js'
@@ -53,6 +54,11 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
     },
     registerChannel(channel) {
       registeredChannels.push(channel)
+    },
+    createBroadcastChannel(opts) {
+      const end = new ServerBroadcastEnd(opts)
+      context.registerChannel(end)
+      return end
     },
     sendStream(createProducer) {
       const index = nextIndex++

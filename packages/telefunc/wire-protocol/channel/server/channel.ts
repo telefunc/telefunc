@@ -531,14 +531,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  // Broadcasts and Room stubs take publishes and subscriptions; a plain channel drops them.
+  // Only a page's ClientBroadcast publishes and subscribes, and its server end is a ServerBroadcastEnd.
   _onPeerPublishAckReqMessage(_text: string, _seq: number): Promise<void> {
-    return Promise.resolve()
+    throw new ProtocolViolationError('PUBLISH_ACK_REQ on a channel that is no broadcast')
   }
   _onPeerPublishBinaryAckReqMessage(_data: Uint8Array, _seq: number): Promise<void> {
-    return Promise.resolve()
+    throw new ProtocolViolationError('PUBLISH_BINARY_ACK_REQ on a channel that is no broadcast')
   }
-  _onPeerSubscription(_kind: BroadcastKind, _on: boolean): void {}
+  _onPeerSubscription(_kind: BroadcastKind, _on: boolean): void {
+    throw new ProtocolViolationError('BROADCAST_SUB on a channel that is no broadcast')
+  }
 
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()

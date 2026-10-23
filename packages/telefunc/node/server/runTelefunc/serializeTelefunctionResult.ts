@@ -7,6 +7,10 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
 import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
+import {
+  ServerBroadcastEnd,
+  type BroadcastEndOptions,
+} from '../../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
 import {
   buildShieldValidators,
@@ -119,6 +123,11 @@ function serializeTelefunctionResult(runContext: {
     registerChannel(channel)
     return channel
   }
+  function createBroadcastChannel(opts: BroadcastEndOptions) {
+    const end = new ServerBroadcastEnd(opts)
+    registerChannel(end)
+    return end
+  }
   const responseStates = new Map<symbol, unknown>()
   function responseState<T>(key: symbol, init: () => T): T {
     if (!responseStates.has(key)) responseStates.set(key, init())
@@ -129,6 +138,7 @@ function serializeTelefunctionResult(runContext: {
       return {
         createChannel,
         registerChannel,
+        createBroadcastChannel,
         sendStream,
         responseState,
         validators: makeValidators(value, valueShields, shieldCtx),
