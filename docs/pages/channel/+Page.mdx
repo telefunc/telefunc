@@ -264,7 +264,7 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 info.key        // 'room:lobby' — the broadcast key
 info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
-info.receivers  // publish() only: 0 when nobody is subscribed to the key
+info.receivers  // publish() only
 ```
 
 `seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt, and rejects if the publish fails.
