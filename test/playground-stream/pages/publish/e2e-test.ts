@@ -9,6 +9,9 @@ import {
   cutWire,
   canCutWire,
   runServerAction,
+  forceServerGc,
+  serverHeapUsed,
+  serverRuntime,
 } from '../../e2e-utils'
 
 type ShieldState = {
@@ -248,23 +251,38 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  // The in-memory backend's: Redis keeps each key's order in Redis.
-  if (!isDev && !inDocker) {
-    test("broadcast: the in-memory backend keeps no order for a key nobody subscribes to, and a key's seq still increases after its subscriber leaves", async () => {
-      await navigate(`${getServerUrl()}/publish`)
-      await page.click('#test-broadcast-key-orders')
+  test("broadcast: a key's seq goes on growing after its subscribers leave and another key publishes, and runs on by one while it has a subscriber", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-seq-across-subscribers')
 
-      await autoRetry(async () => {
-        const result = await getResult<{ heldMB: number; subscribedSeq: number; otherSeq: number; freedSeq: number }>(
-          '#publish-result',
-        )
-        // 100,000 orders of 1 KB keys would hold over 100 MB.
-        expect(result.heldMB).lessThan(10)
-        expect(result.freedSeq).greaterThan(result.subscribedSeq)
-        // A freed key starts above every seq given since.
-        expect(result.freedSeq).greaterThan(result.otherSeq)
-      })
+    await autoRetry(async () => {
+      const { seqs } = await getResult<{ seqs: number[] }>('#publish-result')
+      expect(seqs.length).toBe(5)
+      expect(seqs[1]).toBe(seqs[0]! + 1)
+      for (let i = 1; i < seqs.length; i++) expect(seqs[i]).greaterThan(seqs[i - 1]!)
     })
+  })
+
+  // Preview on Node only: the margin is measured there. A leak of 100,000 keys' seq counters grows the heap by 7 MB or more.
+  if (!isDev && !inDocker && serverRuntime() === 'node') {
+    for (const subscribed of [false, true]) {
+      test(`broadcast: publishes to 100,000 distinct keys, ${subscribed ? 'each while a subscriber comes and goes' : 'none subscribed'}, leave the server's heap where it was`, async () => {
+        await navigate(`${getServerUrl()}/publish`)
+        const run = async () => {
+          await page.click(`#test-broadcast-many-keys${subscribed ? '-subscribed' : ''}`)
+          await autoRetry(async () =>
+            expect(await getResult<{ done: boolean }>('#publish-result')).deep.equal({ done: true }),
+          )
+        }
+        // A first run warms up what the code allocates once.
+        await run()
+        await forceServerGc()
+        const before = await serverHeapUsed()
+        await run()
+        await forceServerGc()
+        expect((await serverHeapUsed()) - before).lessThan(3_000_000)
+      })
+    }
   }
 
   test("broadcast: a subscriber that unsubscribes itself doesn't make the next one miss a message", async () => {

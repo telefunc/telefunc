@@ -205,6 +205,7 @@ describe('keyed in-process broadcast', () => {
     expect(a2.key).toBe(k1)
     expect(b1.key).toBe(k2)
     expect(a2.seq).toBe(a1.seq + 1)
+    expect(b1.seq).toBeGreaterThan(0)
     expect(typeof a1.timestamp).toBe('number')
   })
 })

@@ -23,10 +23,11 @@ import {
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
-  onBroadcastKeyOrders,
   onBroadcastSelfUnsubscribe,
   onBroadcastReconnect,
   onBroadcastWhileOffline,
+  onBroadcastSeqAcrossSubscribers,
+  onBroadcastManyKeys,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -409,17 +410,30 @@ function Publish() {
         Broadcast.publish() receipts
       </button>
 
-      <h2>Key Orders</h2>
+      <h2>Seqs</h2>
 
       <button
-        id="test-broadcast-key-orders"
+        id="test-broadcast-seq-across-subscribers"
         onClick={async () => {
           setResult('')
-          setResult(JSON.stringify(await onBroadcastKeyOrders()))
+          setResult(JSON.stringify({ seqs: await onBroadcastSeqAcrossSubscribers() }))
         }}
       >
-        Orders of unsubscribed keys
+        Seqs across subscribers
       </button>
+      {([false, true] as const).map((subscribed) => (
+        <button
+          key={String(subscribed)}
+          id={`test-broadcast-many-keys${subscribed ? '-subscribed' : ''}`}
+          onClick={async () => {
+            setResult('')
+            await onBroadcastManyKeys(100_000, subscribed)
+            setResult(JSON.stringify({ done: true }))
+          }}
+        >
+          100,000 keys{subscribed ? ', each subscribed' : ''}
+        </button>
+      ))}
 
       <h2>Subscriber Unsubscribes Itself</h2>
 

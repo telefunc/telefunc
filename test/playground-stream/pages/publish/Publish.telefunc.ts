@@ -19,10 +19,11 @@ export {
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
-  onBroadcastKeyOrders,
   onBroadcastSelfUnsubscribe,
   onBroadcastReconnect,
   onBroadcastWhileOffline,
+  onBroadcastSeqAcrossSubscribers,
+  onBroadcastManyKeys,
 }
 
 import { Buffer } from 'node:buffer'
@@ -33,7 +34,8 @@ import { onServerAction } from '../../server-actions'
 
 type TextMsg = { text: string; from: string }
 
-/** Two broadcast instances sharing a key — publish from one, subscribe on the other. */
+/** Two broadcast instances sharing a key — publish from one, subscribe on the other.
+ *  The key is unique per call, so no other page load publishes on it. */
 async function onTextBroadcast() {
   const key = `room:text-test:${crypto.randomUUID()}`
   const publisher = new BroadcastChannel<TextMsg>({ key })
@@ -416,30 +418,34 @@ async function onStaticPublishReceipts() {
   return { key, receipts: [text, binary].map((receipt) => ({ key: receipt.key, seq: receipt.seq })) }
 }
 
-/** The server heap 100,000 publishes to keys nobody subscribes to keep, and the `seq`s of a key published to while
- *  subscribed, then again after its subscriber left and another key was published to. */
-async function onBroadcastKeyOrders() {
-  const prefix = `room:unsubscribed:${crypto.randomUUID()}:${'k'.repeat(1000)}:`
-  collectGarbage()
-  const heapBefore = process.memoryUsage().heapUsed
-  for (let i = 0; i < 100_000; i++) await Broadcast.publish(`${prefix}${i}`, i)
-  collectGarbage()
-  const heldMB = (process.memoryUsage().heapUsed - heapBefore) / 1e6
-  const key = `room:freed:${crypto.randomUUID()}`
-  const unsubscribe = Broadcast.subscribe(key, () => {})
-  const subscribedSeq = (await Broadcast.publish(key, 'subscribed')).seq
-  unsubscribe()
-  let otherSeq = 0
-  for (let i = 0; i < 3; i++) otherSeq = (await Broadcast.publish(`${key}:other`, i)).seq
-  const freedSeq = (await Broadcast.publish(key, 'freed')).seq
-  return { heldMB, subscribedSeq, otherSeq, freedSeq }
+/** A key's receipts: two publishes while it has a subscriber, two after it left and another key published, one with a new subscriber. */
+async function onBroadcastSeqAcrossSubscribers() {
+  const key = `room:seq:${crypto.randomUUID()}`
+  const seqs: number[] = []
+  const publish = async () => seqs.push((await Broadcast.publish(key, seqs.length)).seq)
+  const off = Broadcast.subscribe(key, () => {})
+  await publish()
+  await publish()
+  off()
+  await Broadcast.publish(`room:seq-other:${crypto.randomUUID()}`, 0)
+  await publish()
+  await publish()
+  const offAgain = Broadcast.subscribe(key, () => {})
+  await publish()
+  offAgain()
+  return seqs
 }
 
-function collectGarbage() {
-  // Bun has no --expose-gc: it collects with Bun.gc(true).
-  const { gc, Bun: bun } = globalThis as { gc?: () => void; Bun?: { gc(force: boolean): void } }
-  if (gc) gc()
-  else bun!.gc(true)
+/** Publishes once on each of `count` distinct keys, each without a subscriber, or each while one subscribes. */
+async function onBroadcastManyKeys(count: number, subscribed: boolean) {
+  const run = crypto.randomUUID()
+  const published: Promise<unknown>[] = []
+  for (let i = 0; i < count; i++) {
+    const key = `room:many:${run}:${i}`
+    const off = subscribed ? Broadcast.subscribe(key, () => {}) : null
+    published.push(Promise.resolve(Broadcast.publish(key, i)).finally(() => off?.()))
+  }
+  await Promise.all(published)
 }
 
 /** On the server and on the page, the first of two subscribers unsubscribes itself on its first message. */
