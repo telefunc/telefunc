@@ -1,7 +1,7 @@
 export { uint8ArrayToBase64url, base64urlToUint8Array }
 
 // `Uint8Array.toBase64` / `fromBase64` are 5–10× faster than the btoa/atob path.
-// Chrome 133+, Firefox 133+, Safari 18.2+, Node.js 26 (not 22 or 24). Older runtimes use the fallback.
+// Chrome 140+, Firefox 133+, Safari 18.2+, Node.js 25+ (not 22 or 24). Older runtimes use the fallback.
 const NATIVE_TO_BASE64 = typeof Uint8Array.prototype.toBase64 === 'function'
 const NATIVE_FROM_BASE64 = typeof Uint8Array.fromBase64 === 'function'
 

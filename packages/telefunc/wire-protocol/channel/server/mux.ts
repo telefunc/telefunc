@@ -581,7 +581,7 @@ class ChannelMux {
     assertProtocol(!entry.state.retiredByBarrier, 'frame on a wire retired by its barrier')
     assertProtocol(!this.stagedUpgrades.has(connection), 'frame on a staged probe')
     if (frame.tag === TAG.PREPARE) return this.handlePrepare(entry, connection, frame.payload, rawFrame.byteLength)
-    if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, connection, frame.payload, rawFrame.byteLength)
+    if (frame.tag === TAG.BARRIER) return this.handleBarrier(entry, connection, frame.payload)
     if (frame.tag === TAG.RECONCILE) {
       this.claimSessionForReconcile(frame.payload, entry, connection)
       return this.reconcile(entry, connection, frame.payload)
@@ -687,7 +687,6 @@ class ChannelMux {
     entry: ConnectionEntry,
     connection: Wire,
     ctrl: BarrierPayload,
-    rawByteLength: number,
   ): Promise<ReconcileOutcome> | null {
     const wsConnection = this.stagedByPrevSession.get(ctrl.sessionId)
     const stage = wsConnection === undefined ? undefined : this.stagedUpgrades.get(wsConnection)
@@ -697,7 +696,6 @@ class ChannelMux {
 
     try {
       // Admission policy — `decodeClientFrame` has already established the frame's shape.
-      assertProtocol(rawByteLength <= WIRE_MAX_CONN_CTRL_FRAME_BYTES, 'barrier frame over byte cap')
       for (const channel of ctrl.open) {
         assertProtocol(textEncoder.encode(channel.id).byteLength <= UPGRADE_MAX_ID_BYTES, 'channel id over byte cap')
       }

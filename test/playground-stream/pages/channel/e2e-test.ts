@@ -1,6 +1,6 @@
 export { testChannel }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Request, Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
@@ -987,6 +987,59 @@ function testChannel(isDev: boolean, inDocker = false) {
       })
       page.off('requestfailed', onRequestFailed)
       expect(canceled).deep.equal([])
+    })
+
+    // A cross-site page can send these as no-cors fetches with the victim's cookies, but without the header.
+    async function postSseWithoutHeader(metadata: { connId: string; streamResponse?: true; streamRequest?: true }) {
+      const url = `${getServerUrl()}/_telefunc?_telefunc=sse`
+      const responsePromise = page.waitForResponse(
+        (resp) => resp.url() === url && !resp.request().headers()['x-telefunc-request'],
+      )
+      await page.evaluate((metadata) => {
+        const json = new TextEncoder().encode(JSON.stringify(metadata))
+        const body = new Uint8Array(4 + json.byteLength)
+        new DataView(body.buffer).setUint32(0, json.byteLength)
+        body.set(json, 4)
+        void fetch('/_telefunc?_telefunc=sse', { method: 'POST', mode: 'no-cors', credentials: 'include', body }).catch(
+          () => {},
+        )
+      }, metadata)
+      const resp = await responsePromise
+      expect(resp.status()).toBe(400)
+      expect(await resp.text()).toBe('Malformed Telefunc Request')
+    }
+
+    test('channel: an SSE stream open without the `x-telefunc-request` header is rejected', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await postSseWithoutHeader({ connId: crypto.randomUUID(), streamResponse: true })
+      expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
+    })
+
+    test("channel: an SSE uplink POST without the `x-telefunc-request` header is rejected, on the page's own connection", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      // The connection, made on the click, takes `globalThis.fetch` then: this reads its connId from the stream open.
+      await page.evaluate(() => {
+        const fetch = globalThis.fetch
+        globalThis.fetch = (input, init) => {
+          if ((init?.headers as Record<string, string> | undefined)?.Accept === 'text/event-stream') {
+            void (init!.body as Blob).arrayBuffer().then((buffer) => {
+              const length = new DataView(buffer).getUint32(0)
+              const metadata = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)))
+              ;(window as unknown as { sseConnId: string }).sseConnId = metadata.connId
+            })
+          }
+          return fetch(input, init)
+        }
+      })
+      await page.click('#channel-connect')
+      await autoRetry(async () => {
+        expect((await getResult<ChannelState>('#channel-state')).pingAck).toBe('server-ack:ping')
+      })
+      const connId = await page.evaluate(() => (window as unknown as { sseConnId: string }).sseConnId)
+      expect(connId).toMatch(/^[0-9a-f-]{36}$/)
+      await postSseWithoutHeader({ connId })
+      await postSseWithoutHeader({ connId, streamRequest: true })
+      expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
     })
   }
 }

@@ -46,6 +46,8 @@ import { RoomAuthority } from '../wire-protocol/adapter/cloudflare/room/do.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
+import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
+import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 
 /** A Durable Object takes a WebSocket message of 32 MiB at most. */
 const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -210,6 +212,13 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const isWebSocketRequest = request.headers.get('upgrade') === 'websocket'
       if (isWebSocketRequest && !config.channel.transports.includes(CHANNEL_TRANSPORT.WS)) {
         return new Response(null, { status: 400 })
+      }
+      // Reject before forwarding: a Durable Object that answers without reading the forwarded body fails the request.
+      if (!isWebSocketRequest && getRequestKind(request, config.telefuncUrl) === REQUEST_KIND.INVALID) {
+        return new Response(STATUS_BODY_MALFORMED_REQUEST, {
+          status: STATUS_CODE_MALFORMED_REQUEST,
+          headers: { 'Content-Type': 'text/plain' },
+        })
       }
 
       const kv = requireBinding<KVNamespace>(env, kvBindingName, 'KV namespace')

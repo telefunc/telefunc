@@ -120,9 +120,8 @@ export const UPGRADE_MAX_STAGED_BYTES = 64 * 1024 * 1024
 /** Largest data-plane frame. Generous because it carries user payloads. */
 export const WIRE_MAX_RAW_FRAME_BYTES = 64 * 1024 * 1024
 
-/** The single channels-per-connection limit: the client refuses to open past it, a barrier may
- *  list no more, and the control-frame byte cap below is derived from it. A new wire's reconcile
- *  lists every channel, so this is also what a peer can make the server parse. (The wire could address
+/** The single channels-per-connection limit: the client refuses to open past it, a RECONCILE or barrier may
+ *  list no more, and the control-frame byte cap below is derived from it. (The wire could address
  *  65 536 — a u16 index — but that is exhaustion, not a working limit.) */
 export const MAX_CHANNELS_PER_CONNECTION = 4_096
 

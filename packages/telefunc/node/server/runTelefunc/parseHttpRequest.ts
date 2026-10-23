@@ -9,7 +9,7 @@ import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
 import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
 import { StreamReader } from '../../../wire-protocol/wire/StreamReader.js'
-import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
 import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
@@ -67,7 +67,13 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const { request, readable, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
-  if (requestKind === REQUEST_KIND.MISMATCH) return { isMalformedRequest: true }
+  if (requestKind === REQUEST_KIND.INVALID) {
+    logParseError(
+      `The \`${REQUEST_KIND_HEADER}\` header of the HTTP request is missing, invalid, or contradicts the \`_telefunc\` URL parameter.`,
+      runContext,
+    )
+    return { isMalformedRequest: true }
+  }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
     return sseResponse ? { isMalformedRequest: false, isSseRequest: true, sseResponse } : { isMalformedRequest: true }
@@ -148,7 +154,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 async function readBody(
   request: Request,
   readable: Readable | undefined,
-  requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT | null,
+  requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
 ): Promise<{
   text: string
   registerFile: ServerReviverContext['registerFile']

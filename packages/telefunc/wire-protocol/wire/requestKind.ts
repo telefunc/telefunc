@@ -8,10 +8,10 @@ const REQUEST_KIND = {
   TEXT: 'txt',
   SSE: 'sse',
   BINARY: 'bin',
-  MISMATCH: 'mismatch',
+  INVALID: 'invalid',
 } as const
 
-type RequestKind = Exclude<(typeof REQUEST_KIND)[keyof typeof REQUEST_KIND], 'mismatch'>
+type RequestKind = Exclude<(typeof REQUEST_KIND)[keyof typeof REQUEST_KIND], 'invalid'>
 
 function getMarkedRequestUrl(telefuncUrl: string, requestKind: RequestKind): string {
   const base = typeof window === 'undefined' ? undefined : window.location.href
@@ -23,20 +23,17 @@ function getMarkedRequestUrl(telefuncUrl: string, requestKind: RequestKind): str
 function getRequestKind(
   request: Pick<Request, 'url' | 'headers'>,
   telefuncUrl: string,
-): RequestKind | 'mismatch' | null {
+): RequestKind | typeof REQUEST_KIND.INVALID {
   const url = new URL(request.url)
   const telefunc = new URL(telefuncUrl, url)
-  if (url.pathname !== telefunc.pathname) return null
+  if (url.pathname !== telefunc.pathname) return REQUEST_KIND.INVALID
 
-  const urlKind = parseRequestKind(url.searchParams.get(REQUEST_KIND_PARAM))
-  const headerKind = parseRequestKind(request.headers.get(REQUEST_KIND_HEADER))
-  if (urlKind === REQUEST_KIND.MISMATCH || headerKind === REQUEST_KIND.MISMATCH) return REQUEST_KIND.MISMATCH
-  if (urlKind && headerKind && urlKind !== headerKind) return REQUEST_KIND.MISMATCH
-  return urlKind ?? headerKind ?? null
-}
-
-function parseRequestKind(value: string | null): RequestKind | 'mismatch' | null {
-  if (value === null) return null
-  if (value === REQUEST_KIND.TEXT || value === REQUEST_KIND.SSE || value === REQUEST_KIND.BINARY) return value
-  return REQUEST_KIND.MISMATCH
+  // Required, never inferred from the URL: a cross-site page can't send a custom header without a CORS preflight.
+  const headerKind = request.headers.get(REQUEST_KIND_HEADER)
+  if (headerKind !== REQUEST_KIND.TEXT && headerKind !== REQUEST_KIND.SSE && headerKind !== REQUEST_KIND.BINARY) {
+    return REQUEST_KIND.INVALID
+  }
+  const urlKind = url.searchParams.get(REQUEST_KIND_PARAM)
+  if (urlKind !== null && urlKind !== headerKind) return REQUEST_KIND.INVALID
+  return headerKind
 }
