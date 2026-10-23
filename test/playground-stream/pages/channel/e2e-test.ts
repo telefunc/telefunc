@@ -1013,6 +1013,11 @@ function testChannel(isDev: boolean, inDocker = false) {
       await navigate(`${getServerUrl()}/channel`)
       await postSseWithoutHeader({ connId: crypto.randomUUID(), streamResponse: true })
       expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
+      if (isDev) {
+        expectLog('The `x-telefunc-request` header of the HTTP request is missing', {
+          filter: (log) => log.logSource === 'stderr',
+        })
+      }
     })
 
     test("channel: an SSE uplink POST without the `x-telefunc-request` header is rejected, on the page's own connection", async () => {
@@ -1040,6 +1045,11 @@ function testChannel(isDev: boolean, inDocker = false) {
       await postSseWithoutHeader({ connId })
       await postSseWithoutHeader({ connId, streamRequest: true })
       expectLog('the server responded with a status of 400', { filter: (log) => log.logSource === 'Browser Error' })
+      if (isDev) {
+        expectLog('The `x-telefunc-request` header of the HTTP request is missing', {
+          filter: (log) => log.logSource === 'stderr',
+        })
+      }
     })
   }
 }
