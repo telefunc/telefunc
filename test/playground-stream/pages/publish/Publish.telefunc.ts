@@ -232,6 +232,12 @@ async function onBroadcastManyKeys(count: number, subscribed: boolean) {
 async function onBroadcastThrowingListener() {
   const key = `room:throwing:${crypto.randomUUID()}`
   const received: string[] = []
+  // A store like Redis delivers a message to local subscribers once it comes back through the store.
+  const delivered = Promise.withResolvers<void>()
+  const record = (message: string) => {
+    received.push(message)
+    if (received.length === 2) delivered.resolve()
+  }
   const unsubscribe = [
     Broadcast.subscribe(key, () => {
       throw new Error('broadcast-listener-throws')
@@ -239,15 +245,12 @@ async function onBroadcastThrowingListener() {
     Broadcast.subscribe(key, async () => {
       throw new Error('broadcast-listener-rejects')
     }),
-    Broadcast.subscribe<string>(key, (message) => {
-      received.push(`static:${message}`)
-    }),
+    Broadcast.subscribe<string>(key, (message) => record(`static:${message}`)),
   ]
   const room = new BroadcastChannel<string>({ key })
-  room.subscribe((message) => {
-    received.push(`channel:${message}`)
-  })
+  room.subscribe((message) => record(`channel:${message}`))
   const receipt = await Broadcast.publish(key, 'hello')
+  await within10s(delivered.promise)
   for (const off of unsubscribe) off()
   await room.close()
   return { received, receiptKey: receipt.key === key }
