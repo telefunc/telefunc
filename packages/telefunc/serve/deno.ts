@@ -4,9 +4,15 @@ import crossws from 'crossws/adapters/deno'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
-import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
+import { getTelefuncChannelHooks } from '../wire-protocol/channel/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
+
+declare module 'crossws' {
+  interface PeerContext {
+    wireRequest?: Request
+  }
+}
 
 type DenoWs = ReturnType<typeof crossws>
 type DenoInfo = Parameters<DenoWs['handleUpgrade']>[1]
@@ -30,7 +36,30 @@ class Telefunc {
 
 function telefunc(): TelefuncServe {
   enableChannelTransports([CHANNEL_TRANSPORT.WS])
-  const ws = crossws({ hooks: getTelefuncChannelHooks() })
+  const hooks = getTelefuncChannelHooks({
+    // TODO: remove once Telefunc's own WebSocket adapter replaces crossws (https://github.com/h3js/crossws/pull/216, closed unmerged).
+    // Deno's WebSocket has no terminate(), which crossws's Deno peer calls: close it instead.
+    terminate: (peer) => peer.close(),
+    // Deno frees an upgraded request's headers once the upgrade answers: a copy taken before the upgrade keeps them.
+    upgrade: (request) => ({ context: { wireRequest: new Request(request.url, { headers: request.headers }) } }),
+    wireRequest: (peer) => peer.context.wireRequest!,
+  })
+  const ws = crossws({
+    hooks: {
+      upgrade: hooks.upgrade,
+      open(peer) {
+        // TODO: remove once Telefunc's own WebSocket adapter replaces crossws (https://github.com/h3js/crossws/pull/213, closed unmerged).
+        // crossws's Deno adapter reports a close without its code, and the code tells a page that left from a dropped one.
+        peer.websocket.addEventListener!('close', (event) =>
+          hooks.close(peer, { code: event.code, reason: event.reason }),
+        )
+        return hooks.open(peer)
+      },
+      message: hooks.message,
+      close() {},
+      error: hooks.error,
+    },
+  })
 
   return {
     async serve({ request, info, context }: ServeInput): Promise<Response | undefined> {

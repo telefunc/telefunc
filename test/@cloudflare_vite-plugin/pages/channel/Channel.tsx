@@ -62,6 +62,16 @@ function ChannelDemo() {
     setEchoInput('')
   }, [echoInput, addLog])
 
+  const sendOversized = useCallback(() => {
+    if (channelRef.current?.isClosed !== false) return
+    try {
+      channelRef.current.sendBinary(new Uint8Array(32 * 1024 * 1024))
+      addLog('out', 'binary: 32 MiB')
+    } catch (err) {
+      addLog('system', `Refused: ${(err as Error).message}`)
+    }
+  }, [addLog])
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [logs])
@@ -112,6 +122,9 @@ function ChannelDemo() {
           />
           <button type="button" id="send-echo-btn" onClick={sendEcho} style={{ padding: '4px 12px' }}>
             Send Echo
+          </button>
+          <button type="button" id="send-oversized-btn" onClick={sendOversized} style={{ padding: '4px 12px' }}>
+            Send 32 MiB
           </button>
         </div>
       )}

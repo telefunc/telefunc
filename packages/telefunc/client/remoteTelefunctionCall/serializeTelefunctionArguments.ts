@@ -4,17 +4,19 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../utils/lowercaseFirstLetter.js'
-import { createRequestReplacer } from '../../wire-protocol/client/request/registry.js'
-import { encodeRequestEnvelope } from '../../wire-protocol/frame.js'
-import { pumpClientProducerToChannel } from '../../wire-protocol/client/request/pumpToChannel.js'
-import { ClientChannel } from '../../wire-protocol/client/channel.js'
+import { createRequestReplacer } from '../../wire-protocol/values/client/request/registry.js'
+import { encodeRequestEnvelope } from '../../wire-protocol/wire/frame.js'
+import { pumpClientProducerToChannel } from '../../wire-protocol/values/client/request/pumpToChannel.js'
+import { ClientChannel } from '../../wire-protocol/channel/client/channel.js'
+import { getConnectionOptions } from './getConnectionOptions.js'
 import { isObjectOrFunction } from '../../utils/isObjectOrFunction.js'
 import { makeAbortError } from './errors.js'
 import type { ChannelTransports, StreamTransport } from '../../wire-protocol/constants.js'
-import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/types.js'
+import type { ReplacerType, TypeContract, ClientReplacerContext } from '../../wire-protocol/values/types.js'
 import { CloseHandler } from '../close.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
-import { GcRegistry } from '../../wire-protocol/gcRegistry.js'
+import { GcRegistry } from '../../utils/GcRegistry.js'
+import { randomUuid } from '../../utils/randomUuid.js'
 
 const globalObject = getGlobalObject('client/remoteTelefunctionCall/serializeTelefunctionArguments.ts', {
   gcRegistry: new GcRegistry(),
@@ -30,6 +32,7 @@ type CallContext = {
   extensions?: Record<string, unknown>
   extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
   connectionKey?: string
+  channelIdleTimeout?: number
   headers?: Record<string, string> | null
   telefuncUrl: string
 }
@@ -55,10 +58,7 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
     dataMain.extensions = callContext.extensions
   }
 
-  const channelTransports = callContext.channel.transports
-  const connectionKey = callContext.connectionKey
-  const headers = callContext.headers ?? undefined
-  const telefuncUrl = callContext.telefuncUrl
+  const connection = getConnectionOptions(callContext)
   const abortSignal = callContext.abortController.signal
   const files: Blob[] = []
   const requestCloseHandlers: CloseHandler[] = []
@@ -71,17 +71,10 @@ function serializeTelefunctionArguments(callContext: CallContext): SerializeResu
         return index
       },
       createChannel(opts) {
-        return new ClientChannel({
-          channelId: crypto.randomUUID(),
-          ack: opts?.ack,
-          transports: channelTransports,
-          connectionKey,
-          headers,
-          telefuncUrl,
-        })
+        return new ClientChannel({ channelId: randomUuid(), ack: opts?.ack, connection })
       },
       sendStream(createProducer) {
-        return pumpClientProducerToChannel(createProducer, channelTransports, telefuncUrl, connectionKey, headers)
+        return pumpClientProducerToChannel(createProducer, connection)
       },
     },
     function onReplaced(replaced) {
