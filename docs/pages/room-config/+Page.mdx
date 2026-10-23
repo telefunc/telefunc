@@ -16,9 +16,11 @@ config.room = {
 }
 ```
 
-> These are the defaults of every <Link href="/room">`Room`</Link>; the options of the same names to `Room.create()` and `Room.getOrCreate()` override them for the room they create. A room keeps the timeouts it was created with: `Room.getOrCreate()` on an existing room ignores its options, as it does `meta`. What holds a room, and when it closes, is in <Link href="/room#when-a-room-closes">When a room closes</Link>.
+> These are the defaults of every <Link href="/room">`Room`</Link>. The options of the same names to `Room.create()` and `Room.getOrCreate()` override them for the room they create. A room keeps the timeouts it was created with.
 
-> Durations are in milliseconds, or `Infinity` to keep a room until `Room.close()`.
+> `Infinity` keeps a room open until `Room.close()`.
+
+> For what holds a room open, see <Link href="/room#when-a-room-closes" />.
 
 <ConfigWhereServer />
 
