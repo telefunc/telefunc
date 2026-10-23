@@ -2,7 +2,7 @@ export { testWire, testWireSmallReplay, testWireSlowPing }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
-import type { Response, WebSocket } from 'playwright-chromium'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
   getResult,
@@ -12,6 +12,7 @@ import {
   canCutWire,
   dropNextWebSocket,
   forceServerGc,
+  sleep,
   holdNextSsePost,
   holdNextSseWire,
   holdNextSseOpen,
@@ -80,6 +81,37 @@ function testWire(isDev: boolean) {
         const seen = ['open:true', 'disconnect:false', 'reconnect:true']
         expect(await events()).deep.equal({ page: seen, server: seen })
       })
+    })
+
+  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse', 'ws']))
+    test('channel: a page moving from SSE to a WebSocket fires neither onDisconnect nor onReconnect on either end', async () => {
+      // The page lets go of its SSE stream once the WebSocket carries the channel.
+      let sseRetired = false
+      const onRequestFailed = (request: Request) => {
+        if (request.url().includes('_telefunc=sse') && request.failure()?.errorText === 'net::ERR_ABORTED')
+          sseRetired = true
+      }
+      let webSockets = 0
+      const onWebSocket = (ws: WebSocket) => {
+        if (ws.url().includes('/_telefunc')) webSockets++
+      }
+      page.on('requestfailed', onRequestFailed)
+      page.on('websocket', onWebSocket)
+      try {
+        await navigate(`${getServerUrl()}/channel`)
+        await page.click('#wire-connection')
+        await autoRetry(async () => expect({ sseRetired, webSockets }).deep.equal({ sseRetired: true, webSockets: 1 }))
+        await sleep(1_000)
+        const { connection } = await getResult<WireState>('#wire-state')
+        const server = (await getCleanupState())[`wireConnection_${connection!.channelId}`]
+        expect({ page: connection!.events, server: JSON.parse(server!) }).deep.equal({
+          page: ['open:true'],
+          server: ['open:true'],
+        })
+      } finally {
+        page.off('requestfailed', onRequestFailed)
+        page.off('websocket', onWebSocket)
+      }
     })
 
   const ends = [
