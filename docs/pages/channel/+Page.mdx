@@ -264,14 +264,10 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 info.key        // 'room:lobby' — the broadcast key
 info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
-info.receivers  // publish() only: how many subscriptions it was sent to (see below)
+info.receivers  // publish() only: 0 when nobody is subscribed to the key
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt once the message has its `seq`, and rejects if the publish fails (on a Redis error, say).
-
-The first `subscribe()` to a key on a server, by `Broadcast.subscribe()` or by a `BroadcastChannel`, takes a moment to start receiving. A publish on that server meanwhile waits for it, up to a minute, so that subscriber gets it; its promise resolves after the wait. After a minute, the publish is sent anyway, and that subscriber can miss it. On <Link href="/stream/cloudflare">Cloudflare</Link>, a publish waits only for subscriptions made in its own Durable Object.
-
-`receivers` counts the subscriptions the message was sent to when it was published: each subscriber with the in-memory backend, each server with Redis, each Durable Object on Cloudflare. A client subscribed through `new BroadcastChannel()` counts too. So `0` means nobody anywhere was subscribed to the key. On Redis Cluster it's `undefined`.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt, and rejects if the publish fails.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -427,8 +423,6 @@ Channels and broadcasts signal failure through four errors:
 | `ChannelOverflowError` | The client fell too far behind, or `bufferLimit` filled while it was offline | **Open** (a `BroadcastChannel` closes) | Only the dropped `send()` rejects; `await` your sends to apply backpressure (a `BroadcastChannel`: call its telefunction again to rejoin) |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
-
-> A `Broadcast.publish()` made while a first `subscribe()` to its key starts receiving waits for it (see <Link href="#broadcast">`Broadcast`</Link>). The publishes waiting on one key share the server's `bufferLimit` (`bufferLimitBinary` for binary), and the one past it rejects with `ChannelOverflowError`: `await` each publish, or raise `bufferLimit`.
 
 See also:
 - <Link href="/stream#error-handling" />
