@@ -183,8 +183,7 @@ console.log(response) // 'ok'
 import { Room } from 'telefunc'
 
 await Room.announce('lobby', { type: 'maintenance', in: '5min' })   // to everyone
-const [first] = await Room.getParticipants('lobby')
-await Room.send('lobby', { id: first.id }, { badge: 'first in' }) // to one participant
+await Room.send('lobby', { identity: userId }, { badge: 'winner' }) // to every tab of one user
 ```
 ```js
 // Environment: client
@@ -194,6 +193,8 @@ me.listen((message, from) => {
   if (from === null) showSystemMessage(message) // sent by the server
 })
 ```
+
+`{ identity }` reaches the participants the server joined with that identity, as in <Link href="#control-who-can-join-and-post" />; to reach one participant, pass `{ id }`.
 
 
 ## Control who can join and post
@@ -346,6 +347,7 @@ Publish each source on its own track, and subscribe to the tracks you show:
 
 // The participant who films
 // encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder
+// not awaited: awaiting each frame would hold the next one back by a round trip
 encodeCamera((frame, isKeyframe) => me.publishBinary(frame, { track: 'camera', meta: { isKeyframe } }))
 
 // The participants who watch; showVideo(): your decoder, e.g. WebCodecs' VideoDecoder
@@ -364,6 +366,7 @@ let watched = false
 me.onDemand((track, wanted) => {
   if (track === 'camera') watched = wanted
 })
+// not awaited: awaiting each frame would hold the next one back by a round trip
 encodeCamera((frame, isKeyframe) => {
   if (watched) me.publishBinary(frame, { track: 'camera', meta: { isKeyframe } })
 })
