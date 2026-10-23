@@ -30,6 +30,7 @@ import {
   onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
   onRoomOverflow,
+  onParticipantOverflow,
   onGetRoomOverflow,
   onRoomBurst,
   onGetWatchedCount,
@@ -1605,6 +1606,20 @@ function Room() {
         await pollUntil(() => ({ done: closed && myCause !== null }), 150)
         const leaves = await onGetRoomOverflow(roomId)
         setResult(JSON.stringify({ roomId, seen, myCause, closed, isClosed: view.isClosed, leaves }))
+      })}
+
+      {scenario('participant-overflow', null, 'A server-joined participant offline past bufferLimit', async () => {
+        const [roomId] = await createRoom('participant-overflow')
+        const me = await onJoinAsServer(roomId, 'Bob')
+        const got: string[] = []
+        me.listen((data) => got.push((data as string).trim()))
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onParticipantOverflow(roomId, me.id)
+        await pollUntil(() => ({ done: got.includes('before') }))
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: myCause !== null }), 150)
+        setResult(JSON.stringify({ roomId, got, myCause }))
       })}
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {

@@ -26,6 +26,7 @@ export {
   onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
   onRoomOverflow,
+  onParticipantOverflow,
   onGetRoomOverflow,
   onRoomBurst,
   onGetWatchedCount,
@@ -357,6 +358,19 @@ async function onRoomOverflow(roomId: string) {
     cleanupState[`roomOverflow_${roomId}`] = 'done'
   })
   await speaker.publish('before')
+}
+
+/** A sender DMs 'before' to the page's server-joined participant `memberId`, then, run by the test while the page is
+ *  offline, 1 MiB: more than the page's 512 KiB bufferLimit for text holds. */
+async function onParticipantOverflow(roomId: string, memberId: string) {
+  const sender = await (await Room.get(roomId)).join({ meta: { name: 'Sender' } })
+  awayMembers.set(roomId, [sender])
+  onServerAction(`participantOverflow_${roomId}`, async () => {
+    // The participant leaves once its page's buffer drops a DM, so a later one finds it gone.
+    for (let n = 0; n < 8; n++) await sender.send(memberId, String(n).padEnd(128 * 1024)).catch(() => {})
+    cleanupState[`participantOverflow_${roomId}`] = 'done'
+  })
+  await sender.send(memberId, 'before')
 }
 
 async function onGetRoomOverflow(roomId: string) {

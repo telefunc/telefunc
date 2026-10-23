@@ -847,6 +847,25 @@ function testRoom() {
       })
     })
   })
+  test('room: a page offline while its server-joined participant was sent more than bufferLimit holds is let go at its reconnect: its participant leaves, with no gap delivered', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-participant-overflow')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-participant-overflow:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`participantOverflow_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`participantOverflow_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({ roomId, got: ['before'], myCause: { type: 'disconnected' } })
+    })
+  })
   test("room: on a 1 Mbit/s link, a page gets 640 KB of its room's messages and publishes 640 KB without reconnecting", async () => {
     await navigate(`${getServerUrl()}/room`)
     let sseStreams = 0
