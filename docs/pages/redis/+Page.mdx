@@ -27,7 +27,7 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That single call installs the Redis backend for both Broadcast and Room. Room state and events are then shared across server instances. Call `installRedis()` before your server first uses Broadcast or Room, for example in a module your server entry imports first. If Broadcast or Room is used before `installRedis()`, Telefunc starts its in-memory backend for that use, and the later `installRedis()` call throws.
+That single call installs the Redis backend for both Broadcast and Room. Room state and events are then shared across server instances. Call `installRedis()` before your server first uses Broadcast or Room, for example in a module your server entry imports first.
 
 ### Sharing an existing client
 
@@ -43,15 +43,11 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
-Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc. A subscriber misses the messages published while its connection to Redis is down (a Redis restart, a failover), as delivery is at-most-once. After a failover that lost the last writes, `seq` numbers can repeat. When you remove a Cluster node, shut it down too: subscribers connected to it receive nothing until it stops.
+Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc.
 
-On a Redis Cluster, a reshard or a failover can delay a message by up to one second, so that subscribers still receive messages in the order they were published.
+To prefix Telefunc's Redis keys, pass `installRedis(redis, { prefix })`.
 
-Pub/Sub channels ignore an ioredis `keyPrefix`, so `installRedis()` throws for a client that sets one: pass `installRedis(redis, { prefix })` instead. It also throws for a `prefix` that contains `{`.
-
-Room keeps its state (rooms, members, lane order) in Redis keys that Redis must never evict: use `maxmemory-policy noeviction`. Any other policy can silently close a room.
-
-Keep your Redis masters' clocks synchronized: message timestamps come from them, as does the moment a stopped server's rooms close and its members leave.
+Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other policy can close a room.
 
 ## Channels
 
