@@ -251,9 +251,8 @@ describe('binary in-process broadcast', () => {
 })
 
 // ───────────────────────────────────────────────────────────────────────────
-// Channel-method gating — Broadcast extends ServerChannel but the inherited
-// send/listen/sendBinary/listenBinary must throw at runtime since the type
-// hides them. Catches a regression where a subclass forgets to override one.
+// Channel-method gating — the type hides send/listen/sendBinary/listenBinary,
+// and calling one at runtime still throws a usage error.
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast disallows channel methods', () => {
