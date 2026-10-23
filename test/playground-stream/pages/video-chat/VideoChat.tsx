@@ -41,6 +41,14 @@ function Person({ call, name }: { call: Call; name: string }) {
   const localVideo = useRef<HTMLVideoElement>(null)
   const remoteVideo = useRef<HTMLCanvasElement>(null)
   const inOtherTab = !me && participants.some((p) => p.identity === name)
+  const others = participants.filter((p) => p.id !== me?.id)
+  const remoteNotice = !me
+    ? null
+    : others.length === 0
+      ? 'Waiting for someone to join…'
+      : others.every((p) => !p.isConnected)
+        ? `${others[0]!.meta.name} is reconnecting…`
+        : null
 
   async function join() {
     const camera = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, frameRate: 15 } })
@@ -79,7 +87,7 @@ function Person({ call, name }: { call: Call; name: string }) {
         <Video label="Local">
           <video ref={localVideo} width={320} height={240} autoPlay muted playsInline style={videoStyle} />
         </Video>
-        <Video label="Remote">
+        <Video label="Remote" notice={remoteNotice}>
           <canvas ref={remoteVideo} width={320} height={240} style={videoStyle} />
         </Video>
       </div>
@@ -109,33 +117,46 @@ function Person({ call, name }: { call: Call; name: string }) {
   )
 }
 
-function Video({ label, children }: { label: string; children: React.ReactNode }) {
+function Video({ label, notice, children }: { label: string; notice?: string | null; children: React.ReactNode }) {
   return (
     <div>
       <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>{label}</div>
-      {children}
+      <div style={{ position: 'relative' }}>
+        {children}
+        {notice && <div style={noticeStyle}>{notice}</div>}
+      </div>
     </div>
   )
 }
 
 const videoStyle = { background: '#111', borderRadius: 6, display: 'block' }
 const buttonStyle = { alignSelf: 'flex-start', padding: '8px 20px' }
+const noticeStyle = {
+  position: 'absolute',
+  inset: 0,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  color: '#e5e7eb',
+  background: 'rgba(17, 17, 17, 0.8)',
+  borderRadius: 6,
+} as const
 
-// Draws the other person's video, or your own while no one else in the call is connected.
+// Draws the other person's video.
 function showVideo(call: Call, myId: string, canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext('2d')!
-  const isAlone = () => !call.snapshot().participants.some((p) => p.id !== myId && p.isConnected)
   // One decoder per sender: VP8 frames of two senders through one decoder corrupt the picture
   const decoders = new Map<string, VideoDecoder>()
   const stopFrames = call.subscribeBinary(
     (frame, info, from) => {
+      if (from.id === myId) return
       const isKeyframe = info.meta?.isKeyframe === true
       let decoder = decoders.get(from.id)
       if (!decoder) {
         if (!isKeyframe) return
         decoder = new VideoDecoder({
           output(videoFrame) {
-            if (from.id !== myId || isAlone()) ctx.drawImage(videoFrame, 0, 0, 320, 240)
+            ctx.drawImage(videoFrame, 0, 0, 320, 240)
             videoFrame.close()
           },
           error(err) {

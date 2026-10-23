@@ -7,15 +7,14 @@ import { canCutWire, cutWire } from '../../e2e-utils'
 type Tally = { draws: Record<string, Record<string, number>>; decodeErrors: number }
 
 function testVideoChat() {
-  test('video chat: alone in the call, you see your own video come back', async () => {
+  test('video chat: alone in the call, Remote says it’s waiting for someone', async () => {
     await openPage(page, ['Alice'])
     await join(page, 'Alice', 'Join as Alice')
 
     await autoRetry(async () => {
-      const { draws, decodeErrors } = await tally(page)
-      expect(draws.Alice?.Alice).to.be.greaterThan(15)
-      expect(decodeErrors).to.equal(0)
+      expect(await column(page, 'Alice').textContent()).to.contain('Waiting for someone to join…')
     })
+    expect((await tally(page)).draws).deep.equal({})
     await leave(page, 'Alice')
   })
 
@@ -77,14 +76,14 @@ function testVideoChat() {
           (video.srcObject as MediaStream).getTracks().every((track) => track.readyState === 'ended'),
         )
       expect(cameraStopped).to.equal(true)
-      expect((await tally(otherTab)).draws.Alice?.Alice).to.be.greaterThan(15)
+      expect(await column(otherTab, 'Alice').textContent()).to.contain('Waiting for someone to join…')
     })
     await leave(otherTab, 'Alice')
     await otherTab.close()
   })
 
   if (canCutWire())
-    test('video chat: while the other side’s page can’t be reached, you see them reconnecting and your own video', async () => {
+    test('video chat: while the other side’s page can’t be reached, you see them reconnecting', async () => {
       await openPage(page, ['Alice'])
       await join(page, 'Alice', 'Join as Alice')
       const bobTab = await page.context().browser()!.newPage()
@@ -99,17 +98,15 @@ function testVideoChat() {
         await autoRetry(async () => expectDraws((await tally(page)).draws.Alice ?? {}))
       }
       const seesBob = (draws: Record<string, number>) => expect(draws.unknown).to.be.greaterThan(15)
-      const seesOwnOnly = (draws: Record<string, number>) => {
-        expect(Object.keys(draws)).deep.equal(['Alice'])
-        expect(draws.Alice).to.be.greaterThan(15)
-      }
       await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob'))
       await aliceDraws(seesBob)
 
       await bobTab.context().setOffline(true)
       await cutWire()
-      await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob (reconnecting…)'))
-      await aliceDraws(seesOwnOnly)
+      await autoRetry(async () => {
+        expect(await callText()).to.equal('In the call: Alice, Bob (reconnecting…)')
+        expect(await column(page, 'Alice').textContent()).to.contain('Bob is reconnecting…')
+      })
 
       await bobTab.context().setOffline(false)
       await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob'))
