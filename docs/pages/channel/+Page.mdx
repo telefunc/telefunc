@@ -219,7 +219,7 @@ channel.listenBinary((data) => {
 const ack = await channel.sendBinary(frame, { ack: true })
 ```
 
-A message the client sends must be under 64 MiB (32 MiB on Cloudflare with the `'ws'` transport). A larger `send()`, `sendBinary()`, `publish()` or `publishBinary()` throws, and the channel stays open. A listener's acknowledgement has the same limit: a larger one rejects the server's `send()` instead.
+A message the client sends must be under 64 MiB (32 MiB on Cloudflare with the `'ws'` transport). A larger `send()`, `sendBinary()`, `publish()` or `publishBinary()` throws, and the channel stays open.
 
 ### Backpressure
 
@@ -428,7 +428,7 @@ Channels and broadcasts signal failure through four errors:
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
-> A `BroadcastChannel` closes with `ChannelOverflowError` when its client falls more than 80 MiB behind, or when more than `bufferLimit` (`bufferLimitBinary` for binary) is published to it while its client is offline. The 80 MiB is with the default replay buffers; lowering `serverReplayBuffer` or `serverReplayBufferBinary` lowers it. Call its telefunction again to rejoin.
+> A `BroadcastChannel` closes with `ChannelOverflowError` when its client falls too far behind, or when more than `bufferLimit` (`bufferLimitBinary` for binary) is published to it while its client is offline. Call its telefunction again to rejoin.
 
 > A `Broadcast.publish()` made while a first `subscribe()` to its key starts receiving waits for it (see <Link href="#broadcast">`Broadcast`</Link>). The publishes waiting on one key share the server's `bufferLimit` (`bufferLimitBinary` for binary), and the one past it rejects with `ChannelOverflowError`: `await` each publish, or raise `bufferLimit`.
 
