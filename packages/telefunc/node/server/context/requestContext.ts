@@ -4,6 +4,8 @@ export type { RequestContext, ResponseAbortSource }
 
 import { Abort } from '../Abort.js'
 import type { AbortError } from '../Abort.js'
+import { reportServerChannelError } from '../../../wire-protocol/channel/server/channel.js'
+import { isPromise } from '../../../utils/isPromise.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
@@ -49,13 +51,7 @@ function createRequestContext(request: Request): RequestContext {
   const fireClose = () => {
     if (closed) return
     closed = true
-    for (const cb of closeCallbacks) {
-      try {
-        cb()
-      } catch {
-        // User callback errors are silently swallowed
-      }
-    }
+    for (const cb of closeCallbacks) invokeCloseCallback(cb)
     closeCallbacks.length = 0
   }
 
@@ -108,7 +104,7 @@ function createRequestContext(request: Request): RequestContext {
     markTopLevelError: fireError,
     onClose(cb) {
       if (closed) {
-        cb()
+        invokeCloseCallback(cb)
         return
       }
       closeCallbacks.push(cb)
@@ -163,5 +159,14 @@ function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
       abortCallbacks.push(cb)
     },
     errorPromise,
+  }
+}
+
+function invokeCloseCallback(cb: () => void): void {
+  try {
+    const result = cb()
+    if (isPromise(result)) result.catch(reportServerChannelError)
+  } catch (err) {
+    reportServerChannelError(err)
   }
 }
