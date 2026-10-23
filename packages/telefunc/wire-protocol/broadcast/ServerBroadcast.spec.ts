@@ -18,8 +18,8 @@ describe('keyed in-process broadcast', () => {
   it('delivers a published message to a sibling broadcast on the same key', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:basic' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._end._registerChannel()
+    receiver._end._registerChannel()
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((msg) => received.push(msg))
@@ -32,7 +32,7 @@ describe('keyed in-process broadcast', () => {
   // Catches a "skip-self" bug that excludes the source from delivery.
   it('delivers a published message to the source broadcast (self-echo)', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:self' })
-    broadcast._registerChannel()
+    broadcast._end._registerChannel()
 
     const received: Array<{ text: string }> = []
     broadcast.subscribe((msg) => received.push(msg))
@@ -46,8 +46,8 @@ describe('keyed in-process broadcast', () => {
   it('isolates messages by key — publishing on key A does not reach key B subscribers', () => {
     const a = new ServerBroadcast<{ from: string }>({ key: 'room:A' })
     const b = new ServerBroadcast<{ from: string }>({ key: 'room:B' })
-    a._registerChannel()
-    b._registerChannel()
+    a._end._registerChannel()
+    b._end._registerChannel()
 
     const receivedA: Array<{ from: string }> = []
     const receivedB: Array<{ from: string }> = []
@@ -69,10 +69,10 @@ describe('keyed in-process broadcast', () => {
     const subA = new ServerBroadcast<{ n: number }>({ key: k })
     const subB = new ServerBroadcast<{ n: number }>({ key: k })
     const subC = new ServerBroadcast<{ n: number }>({ key: k })
-    pub._registerChannel()
-    subA._registerChannel()
-    subB._registerChannel()
-    subC._registerChannel()
+    pub._end._registerChannel()
+    subA._end._registerChannel()
+    subB._end._registerChannel()
+    subC._end._registerChannel()
 
     const log: Array<[string, number]> = []
     subA.subscribe((m) => log.push(['A', m.n]))
@@ -93,8 +93,8 @@ describe('keyed in-process broadcast', () => {
   it('preserves publish order across multiple in-flight messages', () => {
     const sender = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
     const receiver = new ServerBroadcast<{ n: number }>({ key: 'room:order' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._end._registerChannel()
+    receiver._end._registerChannel()
 
     const seen: number[] = []
     receiver.subscribe((m) => seen.push(m.n))
@@ -108,7 +108,7 @@ describe('keyed in-process broadcast', () => {
   // starve the rest.
   it('isolates subscriber errors — a throwing subscriber does not break others', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:err' })
-    broadcast._registerChannel()
+    broadcast._end._registerChannel()
 
     const goodReceived: string[] = []
     broadcast.subscribe(() => {
@@ -129,7 +129,7 @@ describe('keyed in-process broadcast', () => {
   // like duplicate deliveries.
   it('subscribe() returns an unsubscribe that actually stops further delivery', () => {
     const broadcast = new ServerBroadcast<{ n: number }>({ key: 'room:unsub' })
-    broadcast._registerChannel()
+    broadcast._end._registerChannel()
 
     const seen: number[] = []
     const unsubscribe = broadcast.subscribe((m) => seen.push(m.n))
@@ -148,14 +148,14 @@ describe('keyed in-process broadcast', () => {
   it('buffers wire frames until a peer attaches, then flushes them on attach', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
-    sender._registerChannel()
-    receiver._registerChannel()
-    receiver._onPeerSubscription('text', true) // simulate client subscribe over wire
+    sender._end._registerChannel()
+    receiver._end._registerChannel()
+    receiver._end._onPeerSubscription('text', true) // simulate client subscribe over wire
 
     sender.publish({ text: 'hello' })
 
     const frames: Uint8Array[] = []
-    receiver._attachPeer(
+    receiver._end._attachPeer(
       new IndexedPeer({
         sender: {
           send: (frame) => {
@@ -193,8 +193,8 @@ describe('keyed in-process broadcast', () => {
     const k2 = 'room:receipts:B'
     const a = new ServerBroadcast<{ text: string }>({ key: k1 })
     const b = new ServerBroadcast<{ text: string }>({ key: k2 })
-    a._registerChannel()
-    b._registerChannel()
+    a._end._registerChannel()
+    b._end._registerChannel()
 
     const a1 = await a.publish({ text: 'a-one' })
     const a2 = await a.publish({ text: 'a-two' })
@@ -219,8 +219,8 @@ describe('binary in-process broadcast', () => {
   it('round-trips binary publishes preserving high-bit bytes', () => {
     const sender = new ServerBroadcast({ key: 'room:bin' })
     const receiver = new ServerBroadcast({ key: 'room:bin' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._end._registerChannel()
+    receiver._end._registerChannel()
 
     const received: Uint8Array[] = []
     receiver.subscribeBinary((data) => received.push(data))
@@ -233,8 +233,8 @@ describe('binary in-process broadcast', () => {
   it('binary subscribers do NOT receive text publishes (and vice versa)', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:mixed' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._end._registerChannel()
+    receiver._end._registerChannel()
 
     const text: Array<{ text: string }> = []
     const bin: Uint8Array[] = []
@@ -271,20 +271,20 @@ describe('Broadcast disallows channel methods', () => {
 // ───────────────────────────────────────────────────────────────────────────
 // Shield — the runtime gate that protects the server from untyped client
 // publishes. The shield is wired via `[TELEFUNC_SHIELDS]` on the type;
-// the runtime check lives in _dispatchPublishAckReq.
+// the runtime check lives in _publishFromPage.
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast shield validation', () => {
   it('rejects client publishes that fail the data shield with a SHIELD_ERROR ack', () => {
     const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:shield' })
-    broadcast._validators.set('data', (value) => {
+    broadcast._publishShield = (value) => {
       const v = value as { text?: unknown }
       return typeof v?.text === 'string' ? true : 'expected { text: string }'
-    })
-    broadcast._registerChannel()
+    }
+    broadcast._end._registerChannel()
 
     const frames: Uint8Array[] = []
-    broadcast._attachPeer(
+    broadcast._end._attachPeer(
       new IndexedPeer({
         sender: {
           send: (frame) => {
@@ -300,7 +300,7 @@ describe('Broadcast shield validation', () => {
       }),
     )
 
-    void broadcast._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
+    void broadcast._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 42 }), 1)
 
     const ack = frames.map((f) => decode(f as Uint8Array<ArrayBuffer>)).find((d) => d.tag === TAG.ACK_RES)
     expect(ack).toBeDefined()
@@ -314,15 +314,15 @@ describe('Broadcast shield validation', () => {
   it('a shield-rejected publish is not delivered to subscribers', () => {
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:shield-drop' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._end._registerChannel()
+    receiver._end._registerChannel()
 
-    sender._validators.set('data', () => 'always reject')
+    sender._publishShield = () => 'always reject'
 
     const seen: Array<{ text: string }> = []
     receiver.subscribe((m) => seen.push(m))
 
-    sender._attachPeer(
+    sender._end._attachPeer(
       new IndexedPeer({
         sender: {
           send: () => {},
@@ -335,7 +335,7 @@ describe('Broadcast shield validation', () => {
         replay: new ReplayBuffer({ maxBytes: 1024 * 1024, binaryMaxBytes: 2 * 1024 * 1024 }),
       }),
     )
-    void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
+    void sender._end._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
   })
@@ -388,8 +388,8 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     configureBroadcastTransport(transport)
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._end._registerChannel()
+    receiver._end._registerChannel()
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))
@@ -409,8 +409,8 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
     configureBroadcastTransport(transport)
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
-    sender._registerChannel()
-    receiver._registerChannel()
+    sender._end._registerChannel()
+    receiver._end._registerChannel()
 
     const received: Array<{ text: string }> = []
     receiver.subscribe((m) => received.push(m))

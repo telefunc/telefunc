@@ -23,7 +23,7 @@ type RoomRemoteReviverContract = TypeContract<never, RemoteParticipant, RemotePa
 const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   revive(metadata, context) {
-    const stub = context.createBroadcast({
+    const stub = context.createBroadcastChannel({
       channelId: metadata.channelId,
       key: metadata.roomId,
       maxFrameBytes: metadata.maxFrameBytes,

@@ -90,7 +90,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never
     },
-    createBroadcast(opts) {
+    createBroadcastChannel(opts) {
       mintedBroadcasts.push(opts)
       return { kind: 'client-broadcast', ...opts, close: async () => {}, abort: () => {} } as never
     },
@@ -248,7 +248,7 @@ describe('reference identity — duplicates in one payload', () => {
     const broadcast = new ServerBroadcast({ key: 'room:identity' })
     const body = server.serialize({ room: broadcast, roomDupe: broadcast, roomDupe2: broadcast })
 
-    expect(server.registeredChannels).toEqual([broadcast])
+    expect(server.registeredChannels).toEqual([broadcast._end])
     expect(server.lifecycles).toHaveLength(1)
 
     const client = createClientHarness()

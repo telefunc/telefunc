@@ -150,7 +150,11 @@ type ClientReviverContext = {
     ack?: boolean
     maxFrameBytes?: number
   }): ClientChannel<ClientToServer, ServerToClient>
-  createBroadcast<T = unknown>(opts: { channelId: string; key: string; maxFrameBytes?: number }): ClientBroadcast<T>
+  createBroadcastChannel<T = unknown>(opts: {
+    channelId: string
+    key: string
+    maxFrameBytes?: number
+  }): ClientBroadcast<T>
   receiveStream(metadata: StreamingMetadata): StreamSource
 }
 

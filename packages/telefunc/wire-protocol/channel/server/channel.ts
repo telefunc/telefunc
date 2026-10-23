@@ -939,7 +939,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._sendAckRes(seq, answer)
   }
 
-  protected _trackAck<T>(promise: Promise<T>): Promise<T> {
+  /** @internal */
+  _trackAck<T>(promise: Promise<T>): Promise<T> {
     this._inflightAcks++
     return promise.finally(() => {
       this._inflightAcks--
@@ -1038,7 +1039,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._openCallbacks.length = 0
   }
 
-  protected _handleCallbackError(err: unknown): boolean {
+  /** @internal */
+  _handleCallbackError(err: unknown): boolean {
     if (isAbort(err)) {
       const abortError: AbortError = err
       if (this._responseAbort) {
