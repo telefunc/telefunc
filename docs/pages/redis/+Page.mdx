@@ -31,7 +31,7 @@ That single call installs the Redis backend for both Broadcast and Room. Room st
 
 ### Sharing an existing client
 
-Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set options such as TLS or authentication.
+Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance to reuse its options, such as TLS or authentication.
 
 ```ts
 // Environment: server
