@@ -18,6 +18,7 @@ import {
   onBroadcastSeqAcrossSubscribers,
   onBroadcastSeqWhileQueued,
   onBroadcastManyKeys,
+  onBroadcastThrowingListener,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -271,6 +272,18 @@ function Publish() {
         }}
       >
         Broadcast.publish() receipts
+      </button>
+
+      <h2>Throwing Listener</h2>
+
+      <button
+        id="test-broadcast-throwing-listener"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastThrowingListener()))
+        }}
+      >
+        A listener throws, the others get the message
       </button>
 
       <h2>Seqs</h2>

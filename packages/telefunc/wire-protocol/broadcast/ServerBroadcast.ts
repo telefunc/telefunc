@@ -11,7 +11,7 @@ import type {
 } from '../channel/channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { makePublishInfo } from '../channel/channel.js'
-import { ServerChannel } from '../channel/server/channel.js'
+import { ServerChannel, reportServerChannelError } from '../channel/server/channel.js'
 import { getBroadcastAdapter } from './broadcastAdapter.js'
 import type { BroadcastPublishResult, BroadcastAdapter, BroadcastUnsubscribe } from './broadcastAdapter.js'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -24,6 +24,7 @@ import { ACK_STATUS, ERROR_REASON, encodePublishText, encodePublishBinary, TAG }
 import type { ChannelDataFrame, WirePublishInfo } from '../wire/connectionFrame.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { isAbort } from '../../node/server/Abort.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -340,7 +341,7 @@ const Broadcast = {
     const adapter = getBroadcastAdapter()
     return adapter.subscribe(key, (serialized, info) => {
       const data = parse(serialized) as ChannelData<U>
-      callback(data, { key, seq: info.seq, timestamp: info.timestamp })
+      callStaticListener(() => callback(data, { key, seq: info.seq, timestamp: info.timestamp }))
     })
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
@@ -351,7 +352,20 @@ const Broadcast = {
     const adapter = getBroadcastAdapter()
     return adapter.subscribeBinary(key, (data, info) => {
       // A copy of its own, as a `BroadcastChannel` listener gets.
-      callback(new Uint8Array(data), { key, seq: info.seq, timestamp: info.timestamp })
+      callStaticListener(() => callback(new Uint8Array(data), { key, seq: info.seq, timestamp: info.timestamp }))
     })
   },
+}
+
+/** Reports a listener's error as a channel listener's is, but an Abort: there is no channel to close. */
+function callStaticListener(call: () => unknown): void {
+  const report = (err: unknown) => {
+    if (!isAbort(err)) reportServerChannelError(err)
+  }
+  try {
+    const pending = call()
+    if (isPromise(pending)) pending.catch(report)
+  } catch (err) {
+    report(err)
+  }
 }
