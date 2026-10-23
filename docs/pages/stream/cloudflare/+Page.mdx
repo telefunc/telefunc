@@ -112,16 +112,7 @@ The client sends a session token with every request, as the `session` query para
 
 ### Room state
 
-Each <Link href="/room">room</Link> lives on a `TelefuncDurableObject` instance of its own, which stores the room's state in SQLite. One more instance stores the listing that `Room.list()` reads.
-
-Room calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. Server-side listeners (`subscribe()`, `onJoin()`, …) deliver to a Telefunc session, so install them inside a telefunction or a channel handler.
-
-| State | Storage | Consistency |
-|---|---|---|
-| Room metadata, members, message order, retained messages | The room's Durable Object (SQLite) | Strongly consistent |
-| `Room.list()` listing | The listing Durable Object (SQLite) | Checked against each room's Durable Object on read, so only open rooms are listed |
-| Broadcast sequence numbers and presence | The key's authority Durable Object (SQLite) | Strongly consistent |
-| Session affinity | Workers KV | Eventually consistent |
+<Link href="/room">Room</Link> calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. Server-side listeners (`subscribe()`, `onJoin()`, …) deliver to a Telefunc session, so install them inside a telefunction or a channel handler.
 
 ## Scaling
 
@@ -172,7 +163,7 @@ Publisher (Durable Object)
 
 ### Ordering
 
-<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Every subscriber receives them in `seq` order, and publishes from one session reach the authority in the order they were made.
+<Link href="/channel#broadcast">Broadcast</Link> publishes for a given `key` go through a single authority, which assigns a <Link href="/channel#broadcast">monotonic `seq`</Link>. Every subscriber receives them in `seq` order.
 
 ### Presence
 
@@ -203,8 +194,7 @@ A Durable Object registers with the authority on its first subscription to a key
 | Guarantee | Details |
 |---|---|
 | Ordering | Every subscriber receives a key's publishes in `seq` order. |
-| Delivery | `publish()` resolves once the key's authority has handed the message to every Durable Object with subscribers. Delivery is at-most-once: a Durable Object that fails to take the message loses it, and the loss is logged. Delivery to clients then happens over the channel connection. |
-| Subscription | A subscription is ready once the key's authority has recorded it. The authority forwards every later publish to the subscription's Durable Object. |
+| Delivery | `publish()` resolves once the key's authority has handed the message to every Durable Object with subscribers. Delivery to clients then happens over the channel connection. |
 
 > Once a broadcast message reaches a Durable Object, it has the same buffering and replay guarantees as regular channel messages.
 
