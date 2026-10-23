@@ -2,6 +2,7 @@ export { testVideoChat }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Page } from 'playwright-chromium'
+import { canCutWire, cutWire } from '../../e2e-utils'
 
 type Tally = { draws: Record<string, Record<string, number>>; decodeErrors: number }
 
@@ -81,6 +82,42 @@ function testVideoChat() {
     await leave(otherTab, 'Alice')
     await otherTab.close()
   })
+
+  if (canCutWire())
+    test('video chat: while the other side’s page can’t be reached, you see them reconnecting and your own video', async () => {
+      await openPage(page, ['Alice'])
+      await join(page, 'Alice', 'Join as Alice')
+      const bobTab = await page.context().browser()!.newPage()
+      await openPage(bobTab, ['Bob'])
+      await join(bobTab, 'Bob', 'Join as Bob')
+      const callText = () => page.locator('p', { hasText: 'In the call:' }).textContent()
+      // Bob's frames come from another page's encoder, so they count as 'unknown' here
+      const aliceDraws = async (expectDraws: (draws: Record<string, number>) => void) => {
+        await page.evaluate(() => {
+          ;(window as unknown as { tally: Tally }).tally.draws = {}
+        })
+        await autoRetry(async () => expectDraws((await tally(page)).draws.Alice ?? {}))
+      }
+      const seesBob = (draws: Record<string, number>) => expect(draws.unknown).to.be.greaterThan(15)
+      const seesOwnOnly = (draws: Record<string, number>) => {
+        expect(Object.keys(draws)).deep.equal(['Alice'])
+        expect(draws.Alice).to.be.greaterThan(15)
+      }
+      await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob'))
+      await aliceDraws(seesBob)
+
+      await bobTab.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob (reconnecting…)'))
+      await aliceDraws(seesOwnOnly)
+
+      await bobTab.context().setOffline(false)
+      await autoRetry(async () => expect(await callText()).to.equal('In the call: Alice, Bob'))
+      await aliceDraws(seesBob)
+      await leave(bobTab, 'Bob')
+      await bobTab.close()
+      await leave(page, 'Alice')
+    })
 }
 
 async function openPage(p: Page, encoderNames: string[]) {

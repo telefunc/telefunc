@@ -28,7 +28,8 @@ function VideoChat() {
 
 function InTheCall({ call }: { call: Call }) {
   const { participants } = useSyncExternalStore(call.onChange, call.snapshot)
-  return <p style={{ margin: 20 }}>In the call: {participants.map((p) => p.meta.name).join(', ')}</p>
+  const names = participants.map((p) => (p.isConnected ? p.meta.name : `${p.meta.name} (reconnecting…)`))
+  return <p style={{ margin: 20 }}>In the call: {names.join(', ')}</p>
 }
 
 function Person({ call, name }: { call: Call; name: string }) {
@@ -120,9 +121,10 @@ function Video({ label, children }: { label: string; children: React.ReactNode }
 const videoStyle = { background: '#111', borderRadius: 6, display: 'block' }
 const buttonStyle = { alignSelf: 'flex-start', padding: '8px 20px' }
 
-// Draws the other person's video, or your own while you're alone in the call.
+// Draws the other person's video, or your own while no one else in the call is connected.
 function showVideo(call: Call, myId: string, canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext('2d')!
+  const isAlone = () => !call.snapshot().participants.some((p) => p.id !== myId && p.isConnected)
   // One decoder per sender: VP8 frames of two senders through one decoder corrupt the picture
   const decoders = new Map<string, VideoDecoder>()
   const stopFrames = call.subscribeBinary(
@@ -133,7 +135,7 @@ function showVideo(call: Call, myId: string, canvas: HTMLCanvasElement) {
         if (!isKeyframe) return
         decoder = new VideoDecoder({
           output(videoFrame) {
-            if (from.id !== myId || call.count === 1) ctx.drawImage(videoFrame, 0, 0, 320, 240)
+            if (from.id !== myId || isAlone()) ctx.drawImage(videoFrame, 0, 0, 320, 240)
             videoFrame.close()
           },
           error(err) {
