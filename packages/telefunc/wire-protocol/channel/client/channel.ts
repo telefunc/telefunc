@@ -715,7 +715,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastListeners.list()) {
       try {
-        cb(parsed, info)
+        const result = cb(parsed, info)
+        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
@@ -729,7 +730,8 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     for (const cb of this._broadcastBinaryListeners.list()) {
       try {
         // Bytes of its own: a listener may write into them or transfer their buffer.
-        cb(new Uint8Array(data), info)
+        const result = cb(new Uint8Array(data), info)
+        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }

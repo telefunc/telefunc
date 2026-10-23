@@ -134,7 +134,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     const data = parse(serialized) as ChannelData<T>
     for (const cb of this._broadcastListeners.list()) {
       try {
-        cb(data, info)
+        const result = cb(data, info)
+        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
@@ -148,7 +149,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     for (const cb of this._broadcastBinaryListeners.list()) {
       try {
         // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
-        cb(new Uint8Array(data), info)
+        const result = cb(new Uint8Array(data), info)
+        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
       } catch (err) {
         if (this._handleCallbackError(err)) return
       }
