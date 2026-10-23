@@ -13,7 +13,11 @@
 
 ### BREAKING CHANGES
 
-* Telefunc now rejects any telefunction call that lacks the `x-telefunc-request` header, answering `400 Malformed Telefunc Request`. This protects telefunctions against cross-site request forgery (#500). The Telefunc client always sends this header, so most apps need no change. To migrate, apply each rule that matches your code: (1) If you call `serve({ url, method, body })`, pass the request headers as well: `serve({ url, method, body, headers: req.headers })`. Without them, `serve()` throws "`serve({ headers })`: argument `headers` is missing.". `serve({ request })` and `serve({ url, method, readable, headers })` need no change. (2) If you call telefunctions without the Telefunc client (a custom `fetch()`, curl, an end-to-end test), add the header `x-telefunc-request: txt` to the POST request. (3) If a proxy or middleware in front of your server forwards only some request headers, make it forward `x-telefunc-request` too.
+* Telefunc now rejects any telefunction call that lacks the `x-telefunc-request` header, answering `400 Malformed Telefunc Request`. This protects telefunctions against cross-site request forgery ([#500](https://github.com/telefunc/telefunc/issues/500)).  
+  **Migration.** The Telefunc client always sends this header, so most apps need no change. To migrate, apply each rule that matches your code:
+  - If you call `serve({ url, method, body })`, pass the request headers as well: `serve({ url, method, body, headers: req.headers })`. Without them, `serve()` throws "`serve({ headers })`: argument `headers` is missing.". `serve({ request })` and `serve({ url, method, readable, headers })` need no change.
+  - If you call telefunctions without the Telefunc client (a custom `fetch()`, curl, an end-to-end test), add the header `x-telefunc-request: txt` to the POST request.
+  - If a proxy or middleware in front of your server forwards only some request headers, make it forward `x-telefunc-request` too.
 
 
 
