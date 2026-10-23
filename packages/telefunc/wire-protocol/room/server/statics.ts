@@ -72,7 +72,7 @@ type RoomStatic = {
   ): Promise<Room<M, P, Pub>>
   getOrCreate<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown>(
     id: string,
-    options?: RoomOptions<M>,
+    options?: RoomOptions<M> & RoomGetOptions,
   ): Promise<Room<M, P, Pub>>
   guard<M extends RoomMeta, P extends ParticipantMeta, Pub = unknown>(
     room: Room<M, P, Pub>,
@@ -133,7 +133,7 @@ function roomNotFoundError(id: string): RoomError {
   return new RoomError(`Room not found: ${id}`)
 }
 
-type TryCreateRoomResult = { kind: 'created'; room: Room } | { kind: 'exists' } | { kind: 'closing' }
+type TryCreateRoomResult = { kind: 'created'; room: ServerRoom } | { kind: 'exists' } | { kind: 'closing' }
 
 async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
@@ -215,12 +215,14 @@ async function requireRoomMeta(id: string, config: RoomConfigRecord): Promise<St
   return stored
 }
 
-async function getOrCreateRoom(id: string, options?: RoomOptions): Promise<Room> {
+async function getOrCreateRoom(id: string, options?: RoomOptions & RoomGetOptions): Promise<Room> {
   assertRoomId(id)
-  const result = await tryCreateRoom(id, options)
-  if (result.kind === 'created') return result.room
+  const { tail, ...roomOptions } = options ?? {}
+  const result = await tryCreateRoom(id, roomOptions)
   if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
-  return await openRoom(id)
+  const room = result.kind === 'created' ? result.room : await openRoom(id)
+  if (tail === true) await room._startTail()
+  return room
 }
 
 /** A room's guards and after-hooks, typed by its participants' meta. */
