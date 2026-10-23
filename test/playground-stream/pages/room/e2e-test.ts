@@ -354,13 +354,20 @@ function testRoom() {
       expect(r.recreatedOpen).toBe(false)
     },
   )
-  testRoomScenario<{ fromPage: unknown; fromServer: unknown; fromHeld: unknown; refused: unknown }>(
+  testRoomScenario<{
+    fromPage: unknown
+    fromServer: unknown
+    fromHeld: unknown
+    fromClosing: unknown
+    refused: unknown
+  }>(
     'ack-dm',
-    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, and rejects with the recipient's Abort",
+    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, even one the page closes while it answers, and rejects with the recipient's Abort",
     (r) => {
       expect(r.fromPage).deep.equal({ echo: 'hi' })
       expect(r.fromServer).deep.equal({ echo: 'hi' })
       expect(r.fromHeld).toBe('pong')
+      expect(r.fromClosing).toBe('pong after work')
       expect(r.refused).toBe('refused')
     },
   )

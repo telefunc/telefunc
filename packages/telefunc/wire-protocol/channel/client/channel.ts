@@ -658,6 +658,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this._subscribers[kind].add(callback)
   }
 
+  /** @internal Sends what `reply` resolves to, also while closing: a graceful close waits for it, as for an ack's answer. */
+  _sendReply(reply: Promise<unknown>): void {
+    void this._trackAck(reply.then((data) => this._flow.countSent(this._connection.send(this, stringify(data)))))
+  }
+
   /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */
   _setSubscribed(kind: BroadcastKind, on: boolean): void {
     if (on === this._subscribed[kind] || this._isClosed) return

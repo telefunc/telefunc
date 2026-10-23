@@ -540,13 +540,15 @@ class RoomParticipantStub {
 
     participant._setForwarder({
       deliver: (msg) => this._notify(dmNotice(msg)),
-      // A closed stub's client left with the participant.
+      // A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it forwarded.
       deliverAck: (msg) => {
         if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
-        return new Promise<DmReply>((resolve) => {
-          this._pendingAckDms.set(msg.ackId!, resolve)
-          this._notify(dmNotice(msg))
-        })
+        return this.end._trackAck(
+          new Promise<DmReply>((resolve) => {
+            this._pendingAckDms.set(msg.ackId!, resolve)
+            this._notify(dmNotice(msg))
+          }),
+        )
       },
     })
 

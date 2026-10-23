@@ -1,6 +1,7 @@
 export { Room }
 
 import React, { useEffect, useState, useSyncExternalStore } from 'react'
+import { close } from 'telefunc/client'
 import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
@@ -852,16 +853,28 @@ function Room() {
         const serverMember = await onJoinAnswering(roomId)
         const held = await onJoinAsServer(roomId, 'Held')
         held.listen(() => 'pong')
+        // Closed while its listener still works on the answer.
+        const closing = await onJoinAsServer(roomId, 'Closing')
+        const { promise: working, resolve } = Promise.withResolvers<void>()
+        closing.listen(async () => {
+          resolve()
+          await new Promise((done) => setTimeout(done, 200))
+          return 'pong after work'
+        })
         const reply = (sent: Promise<{ response: unknown }>) =>
           sent.then(
             (receipt) => receipt.response,
             (err: Error) => err.message,
           )
+        const fromClosing = reply(me.send(closing.id, 'ping', { ack: true }))
+        await working
+        await close(closing)
         setResult(
           JSON.stringify({
             fromPage: await reply(me.send(peer.id, 'hi', { ack: true })),
             fromServer: await reply(me.send(serverMember, 'hi', { ack: true })),
             fromHeld: await reply(me.send(held.id, 'ping', { ack: true })),
+            fromClosing: await fromClosing,
             refused: await reply(me.send(serverMember, 'refuse', { ack: true })),
           }),
         )

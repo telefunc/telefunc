@@ -687,9 +687,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
         case 'dm': {
           const ackId = msg.ackId
           if (ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
-          void this._deliverMessageAck(inboxMessageFromWire(msg)).then((reply) => {
-            if (!stub.isClosed) void stub.send({ __r: 'dm-reply', ackId, reply }, { ack: false }).catch(() => {})
-          })
+          stub._sendReply(
+            this._deliverMessageAck(inboxMessageFromWire(msg)).then((reply) => ({ __r: 'dm-reply', ackId, reply })),
+          )
           return
         }
         case 'left':
