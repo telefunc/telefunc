@@ -277,6 +277,12 @@ const headings = [
   },
   {
     level: 2,
+    titleInNav: '`broadcast`',
+    title: '`broadcast` (config)',
+    url: '/broadcast-config',
+  },
+  {
+    level: 2,
     title: '`fetch`',
     url: '/fetch',
   },

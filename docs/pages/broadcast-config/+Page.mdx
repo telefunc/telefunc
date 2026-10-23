@@ -1,0 +1,44 @@
+import { Link } from '@brillout/docpress'
+import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
+
+**Environment**: server.
+
+<TelefuncStreamBeta />
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+config.broadcast = {
+  transport: myTransport, // Carries Broadcast across instances (default: none)
+}
+```
+
+`transport` is a `BroadcastTransport`:
+
+```ts ts-only
+type BroadcastTransport = {
+  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
+}
+```
+
+> `send()` and `sendBinary()` return the assigned `{ seq, timestamp }`, giving every node one global order per key (shared by text and binary): `seq` is a positive safe integer and `timestamp` a non-negative safe integer such as `Date.now()`.
+
+> `listen()` and `listenBinary()` return an unsubscribe function, and a key has at most one live listen of each kind: the next listen for it comes after that function ran. A `send()` on the same node after `listen()` returned must reach that listener: that is what delivers a publish made right after a `subscribe()`.
+
+> A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once `publishBinary()` returns.
+
+> A configured transport takes precedence over the Broadcast of an installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>), which takes precedence over the in-memory default. Assigning another transport, for example on hot reload, moves live subscriptions to it, and their `seq` then comes from the new transport, which may number lower than the old one.
+
+<ConfigWhereServer />
+
+
+## See also
+
+- <Link href="/stream/scale" />
+- <Link href="/channel" />
+- <Link href="/redis" />
