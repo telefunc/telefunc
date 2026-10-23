@@ -201,12 +201,11 @@ describe('keyed in-process broadcast', () => {
     const a2 = await a.publish({ text: 'a-two' })
     const b1 = await b.publish({ text: 'b-one' })
 
-    // Each receipt is keyed to its own topic, and seq counts independently per key.
     expect(a1.key).toBe(k1)
     expect(a2.key).toBe(k1)
     expect(b1.key).toBe(k2)
-    expect(a2.seq).toBe(a1.seq + 1)
-    expect(b1.seq).toBe(a1.seq) // separate key → seq counter is independent
+    expect(a2.seq).toBeGreaterThan(a1.seq)
+    expect(b1.seq).toBeGreaterThan(0)
     expect(typeof a1.timestamp).toBe('number')
   })
 })
@@ -339,6 +338,43 @@ describe('Broadcast shield validation', () => {
     void sender._onPeerPublishAckReqMessage(JSON.stringify({ text: 'malicious' }), 1)
 
     expect(seen).toEqual([])
+  })
+})
+
+describe('DefaultBroadcastAdapter — in-memory seq counters', () => {
+  const counters = (adapter: DefaultBroadcastAdapter) =>
+    (adapter as unknown as { keySeqs: Map<string, number> }).keySeqs.size
+
+  it('100,000 publishes to distinct keys without a subscriber keep no counter', () => {
+    const adapter = new DefaultBroadcastAdapter()
+    for (let i = 0; i < 100_000; i++) void adapter.publish(`user:${i}`, 'x')
+    expect(counters(adapter)).toBe(0)
+  })
+
+  it("a key's counter goes with its last text or binary subscriber", () => {
+    const adapter = new DefaultBroadcastAdapter()
+    const unsubscribe = adapter.subscribe('room', () => {})
+    const unsubscribeBinary = adapter.subscribeBinary('room', () => {})
+    void adapter.publish('room', 'x')
+    unsubscribe()
+    expect(counters(adapter)).toBe(1)
+    unsubscribeBinary()
+    expect(counters(adapter)).toBe(0)
+  })
+
+  it('a key published again after its counter went gets a higher seq than its last', async () => {
+    const adapter = new DefaultBroadcastAdapter()
+    const unsubscribe = adapter.subscribe('room', () => {})
+    await adapter.publish('room', 'x')
+    const last = await adapter.publish('room', 'x')
+    unsubscribe()
+    const unsubscribed = await adapter.publish('room', 'x')
+    const unsubscribedAgain = await adapter.publish('room', 'x')
+    adapter.subscribe('room', () => {})
+    const resubscribed = await adapter.publish('room', 'x')
+    expect(unsubscribed.seq).toBeGreaterThan(last.seq)
+    expect(unsubscribedAgain.seq).toBeGreaterThan(unsubscribed.seq)
+    expect(resubscribed.seq).toBeGreaterThan(unsubscribedAgain.seq)
   })
 })
 

@@ -67,8 +67,10 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private readonly binarySubscriptions = new Map<string, Set<BroadcastBinaryOnMessage>>()
   private readonly transportUnsubs = new Map<string, () => void>()
   private readonly transportBinaryUnsubs = new Map<string, () => void>()
-  /** Per-key seq counter for in-memory mode. */
+  /** Per-key seq counter for in-memory mode, while the key has a subscriber. */
   private readonly keySeqs = new Map<string, number>()
+  /** The highest seq issued on any key: a key without a counter goes on above it. */
+  private highestSeq = 0
   /** In-memory publishes waiting for the ones before them, in publish order. */
   private readonly queued = new Fifo<() => void>()
   private delivering = false
@@ -103,6 +105,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       if (s.size === 0) {
         this.subscriptions.delete(key)
         this._releaseUnsub(this.transportUnsubs, key)
+        this._releaseSeq(key)
       }
     }
   }
@@ -140,6 +143,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       if (s.size === 0) {
         this.binarySubscriptions.delete(key)
         this._releaseUnsub(this.transportBinaryUnsubs, key)
+        this._releaseSeq(key)
       }
     }
   }
@@ -160,8 +164,9 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     key: string,
     data: T,
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
-    const seq = (this.keySeqs.get(key) ?? 0) + 1
-    this.keySeqs.set(key, seq)
+    const seq = (this.keySeqs.get(key) ?? this.highestSeq) + 1
+    if (seq > this.highestSeq) this.highestSeq = seq
+    if (this.subscriptions.has(key) || this.binarySubscriptions.has(key)) this.keySeqs.set(key, seq)
     const timestamp = Date.now()
     // A publish from a listener reaches subscribers after the message it answers; one past the burst, after the turn.
     if (this.delivering || this.queued.length > 0 || this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST) {
@@ -231,6 +236,10 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     const set = subs.get(key)
     if (!set) return
     for (const onMessage of set) onMessage(data, info)
+  }
+
+  private _releaseSeq(key: string): void {
+    if (!this.subscriptions.has(key) && !this.binarySubscriptions.has(key)) this.keySeqs.delete(key)
   }
 
   private _releaseUnsub(map: Map<string, () => void>, key: string): void {
