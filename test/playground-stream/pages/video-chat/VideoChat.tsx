@@ -145,39 +145,62 @@ const noticeStyle = {
 // Draws the other person's video.
 function showVideo(call: Call, myId: string, canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext('2d')!
-  // One decoder per sender: VP8 frames of two senders through one decoder corrupt the picture
-  const decoders = new Map<string, VideoDecoder>()
+  // One player per sender: VP8 frames of two senders through one decoder corrupt the picture
+  const players = new Map<string, ReturnType<typeof createPlayer>>()
   const stopFrames = call.subscribeBinary(
     (frame, info, from) => {
       if (from.id === myId) return
       const isKeyframe = info.meta?.isKeyframe === true
-      let decoder = decoders.get(from.id)
-      if (!decoder) {
+      let player = players.get(from.id)
+      if (!player) {
         if (!isKeyframe) return
-        decoder = new VideoDecoder({
-          output(videoFrame) {
-            ctx.drawImage(videoFrame, 0, 0, 320, 240)
-            videoFrame.close()
-          },
-          error(err) {
-            console.error('decode error:', err)
-          },
-        })
-        decoder.configure({ codec: 'vp8', codedWidth: 320, codedHeight: 240 })
-        decoders.set(from.id, decoder)
+        player = createPlayer(ctx)
+        players.set(from.id, player)
       }
-      decoder.decode(new EncodedVideoChunk({ type: isKeyframe ? 'key' : 'delta', timestamp: 0, data: frame }))
+      player.push(new EncodedVideoChunk({ type: isKeyframe ? 'key' : 'delta', timestamp: 0, data: frame }))
     },
     { track: 'camera' },
   )
   const stopLeaves = call.onLeave((member) => {
-    decoders.get(member.id)?.close()
-    decoders.delete(member.id)
+    players.get(member.id)?.stop()
+    players.delete(member.id)
   })
   return () => {
     stopFrames()
     stopLeaves()
-    for (const decoder of decoders.values()) decoder.close()
+    for (const player of players.values()) player.stop()
+  }
+}
+
+// A jitter buffer: plays a sender's frames 300 ms behind, one every 1/15 s, so network bursts and gaps don't stutter
+function createPlayer(ctx: CanvasRenderingContext2D) {
+  const decoder = new VideoDecoder({
+    output(videoFrame) {
+      ctx.drawImage(videoFrame, 0, 0, 320, 240)
+      videoFrame.close()
+    },
+    error(err) {
+      console.error('decode error:', err)
+    },
+  })
+  decoder.configure({ codec: 'vp8', codedWidth: 320, codedHeight: 240 })
+  const queue: EncodedVideoChunk[] = []
+  let playing: ReturnType<typeof setInterval> | undefined
+  const starting = setTimeout(() => {
+    playing = setInterval(() => {
+      // More than a second behind (a backgrounded tab plays slower): catch up instead of falling further behind
+      while (queue.length > 15) decoder.decode(queue.shift()!)
+      const chunk = queue.shift()
+      if (chunk) decoder.decode(chunk)
+    }, 1000 / 15)
+  }, 300)
+  return {
+    push: (chunk: EncodedVideoChunk) => queue.push(chunk),
+    stop() {
+      clearTimeout(starting)
+      clearInterval(playing)
+      decoder.close()
+    },
   }
 }
 
