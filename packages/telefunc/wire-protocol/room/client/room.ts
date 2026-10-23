@@ -6,7 +6,7 @@ import { markHandled } from '../../../utils/markHandled.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../../channel/channel.js'
-import { ClientBroadcast, type ClientChannel } from '../../channel/client/channel.js'
+import type { ClientBroadcast } from '../../channel/client/channel.js'
 import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../binary.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../model.js'
 import {
@@ -661,17 +661,18 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its stub channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
-  private readonly _channel: ClientChannel
+  private readonly _stub: ClientBroadcast
   private readonly _request: (req: ParticipantStubRequest) => Promise<unknown>
 
-  constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    const request = (req: ParticipantStubRequest) => channel.send(req, { ack: true })
+  constructor(stub: ClientBroadcast, metadata: ParticipantStubMetadata) {
+    const request = async (req: ParticipantStubRequest) =>
+      roomResultValue((await stub.send(req, { ack: true })) as RoomResult)
     // Its own: the `rewound` notice forgets its seq.
     super({ participant: metadata, rewinds: { count: 0 }, request })
-    this._channel = channel
+    this._stub = stub
     this._request = request
 
-    channel.listen((notice: unknown) => {
+    stub._subscribeLocal('text', (notice) => {
       assert(hasRoomTag(notice))
       const msg = notice as ParticipantStubNotice
       switch (msg.__r) {
@@ -683,15 +684,19 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
           return this._onDemand(msg.track, msg.wanted)
         case 'demand-state':
           return this._applyDemandState(msg.tracks)
-        case 'dm':
-          // An ack DM replies through the channel's own ack: the handler's return rides it home.
-          if (msg.ackId) return this._deliverMessageAck(inboxMessageFromWire(msg))
-          return this._deliverMessage(inboxMessageFromWire(msg))
+        case 'dm': {
+          const ackId = msg.ackId
+          if (ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
+          void this._deliverMessageAck(inboxMessageFromWire(msg)).then((reply) => {
+            if (!stub.isClosed) void stub.send({ __r: 'dm-reply', ackId, reply }, { ack: false }).catch(() => {})
+          })
+          return
+        }
         case 'left':
           return this._onLeft(leaveCauseFromWire(msg))
       }
     })
-    channel.onClose(() => this._onLeft({ type: 'disconnected' }))
+    stub.onClose(() => this._onLeft({ type: 'disconnected' }))
   }
 
   /** Its own writes and the room's `p-meta` both land here. */
@@ -708,14 +713,16 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return (await this._channel.sendBinary(framed, { ack: true })) as ChannelPublishAck
+    return roomResultValue(
+      (await this._stub._publishBinaryUnreported(framed)) as unknown as RoomResult,
+    ) as ChannelPublishAck
   }
 
   async leave(): Promise<void> {
     if (this._left) return
     await this._request({ __r: 'req-leave' })
     this._onLeft({ type: 'left' })
-    void this._channel.close().catch(() => {})
+    void this._stub.close().catch(() => {})
   }
 }
 

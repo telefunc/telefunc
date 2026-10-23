@@ -1,11 +1,11 @@
-export { RoomStub, RoomParticipantStubChannel, ResponseRoomGrants, MemberMessageTexts, unorderedEventText }
+export { RoomStub, RoomParticipantStub, ResponseRoomGrants, MemberMessageTexts, unorderedEventText }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { assertUsage } from '../../../utils/assert.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
-import { ServerChannel, parsePeerText } from '../../channel/server/channel.js'
+import { parsePeerText } from '../../channel/server/channel.js'
 import type { ServerBroadcastEnd } from '../../channel/server/ServerBroadcastEnd.js'
 import type { ServerReplacerContext } from '../../values/types.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
@@ -14,17 +14,16 @@ import {
   assertProtocol,
   encodePublishBinary,
   encodePublishText,
+  ProtocolViolationError,
   type BroadcastKind,
-  type ReattachState,
   type WirePublishInfo,
 } from '../../wire/connectionFrame.js'
-import type { IndexedPeer } from '../../channel/server/IndexedPeer.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
 import { reportRoomError } from './errors.js'
 import {
-  decodeDmReply,
+  decodeDmReplyDeclaration,
   decodeParticipantFrame,
   decodeParticipantRequest,
   decodeRoomDeclaration,
@@ -39,7 +38,7 @@ import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
-import { DM_FAILURE, RoomError, roomAckError, toRoomResult } from '../errors.js'
+import { DM_FAILURE, RoomError, toRoomResult } from '../errors.js'
 import {
   leaveCauseToWire,
   dmNotice,
@@ -79,32 +78,10 @@ class ResponseRoomGrants {
   }
 }
 
-/** A Room stub answers each client request through its channel ack, under the Room error contract. */
-abstract class RoomRequestChannel extends ServerChannel {
-  /** A client may have missed state its buffer dropped, before it first connected or while offline:
-   *  each attach sends it. */
-  override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
-    super._attachPeer(peer, state)
-    this._onAttached()
-  }
-
-  protected abstract _onAttached(): void
-
-  protected _ackRoomResult(seq: number, work: Promise<unknown>): Promise<void> {
-    return this._trackAck(
-      work.then(
-        (result) => this._sendAckRes(seq, stringify(result)),
-        (error: unknown) => {
-          const { text, status } = roomAckError(error, reportRoomError)
-          this._sendAckRes(seq, text, status)
-        },
-      ),
-    )
-  }
-}
-
 /** An event an instance originates, outside any lane's order. */
-function unorderedEventText(event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent): string {
+function unorderedEventText(
+  event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent | ParticipantStubNotice,
+): string {
   return encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() })
 }
 
@@ -485,13 +462,24 @@ class RoomStub implements LaneHolder {
 
 /** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave
  *  flow back to the client. */
-class RoomParticipantStubChannel extends RoomRequestChannel {
+class RoomParticipantStub {
+  /** Its channel to its client. */
+  readonly end: ServerBroadcastEnd
   private readonly _participant: ServerLocalParticipant
   private readonly _publishShield: ShieldValidator | undefined
+  /** The ack DMs its client was sent, each awaiting the client's `dm-reply`. */
+  private readonly _pendingAckDms = new Map<string, (reply: DmReply) => void>()
 
-  constructor(participant: ServerLocalParticipant, publishShield?: ShieldValidator) {
-    // A notice refused to a client too far behind would be lost, as nothing awaits it: the client leaves instead.
-    super({ closesWhenBehind: true })
+  constructor(
+    participant: ServerLocalParticipant,
+    {
+      publishShield,
+      createBroadcastChannel,
+    }: {
+      publishShield?: ShieldValidator
+      createBroadcastChannel: ServerReplacerContext['createBroadcastChannel']
+    },
+  ) {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
       !participant._isBound,
@@ -499,22 +487,31 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
     )
     this._participant = participant
     this._publishShield = publishShield
+    this.end = createBroadcastChannel({
+      key: participant._room.id,
+      // Its client publishes text as a `req-publish` request.
+      onPublish: () => {
+        throw new ProtocolViolationError('text publish on a Room participant stub')
+      },
+      onPublishBinary: (framed) =>
+        roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed)),
+      onAttach: () => {
+        this._notify({ __r: 'p-meta', ...participant._acceptedMeta })
+        this._notify({ __r: 'demand-state', tracks: participant._demandedTracks })
+      },
+    })
+    this.end.listen((message) => this._receive(message))
     this._mirrorParticipant()
   }
 
-  protected override _onAttached(): void {
-    this._notify({ __r: 'p-meta', ...this._participant._acceptedMeta })
-    this._notify({ __r: 'demand-state', tracks: this._participant._demandedTracks })
-  }
-
-  override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
-    const request = decodeParticipantRequest(parsePeerText(text))
-    return this._ackRoomResult(seq, this._handleRequest(request))
-  }
-
-  override _onPeerBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
-    const frame = decodeParticipantFrame(framed, this._participant.id)
-    return this._ackRoomResult(seq, this._participant._publishFrame(frame, framed))
+  /** A request, sent with an ack, answers with its result; an ack DM's reply, sent without one, settles that DM. */
+  private _receive(message: unknown): Promise<RoomResult> | undefined {
+    if (isRoomRequest(message)) return roomResult(this._handleRequest(decodeParticipantRequest(message)))
+    const { ackId, reply } = decodeDmReplyDeclaration(message)
+    // The sender drops a reply after its timeout.
+    this._pendingAckDms.get(ackId)?.(reply)
+    this._pendingAckDms.delete(ackId)
+    return undefined
   }
 
   private async _handleRequest(req: ParticipantStubRequest): Promise<unknown> {
@@ -543,13 +540,13 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
 
     participant._setForwarder({
       deliver: (msg) => this._notify(dmNotice(msg)),
-      // The ack carries the client's reply; a closed stub or a transport rejection means the holder left.
+      // A closed stub's client left with the participant.
       deliverAck: (msg) => {
-        if (this.isClosed) return Promise.resolve(DM_FAILURE.left)
-        return this.send(dmNotice(msg), { ack: true }).then(
-          (reply) => decodeDmReply(reply) ?? DM_FAILURE.malformedReply,
-          () => DM_FAILURE.left,
-        )
+        if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
+        return new Promise<DmReply>((resolve) => {
+          this._pendingAckDms.set(msg.ackId!, resolve)
+          this._notify(dmNotice(msg))
+        })
       },
     })
 
@@ -562,22 +559,24 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
       left = true
       this._notify({ __r: 'left', ...leaveCauseToWire(cause) })
       // A client back while its channel still holds it gets its leave.
-      void this.close({ timeout: reconnectWindow() }).catch(() => {})
+      void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
     })
 
-    this.onClose(() => {
+    this.end.onClose(() => {
       unlistenMeta()
       unlistenDemand()
       unlistenLeave()
+      for (const resolve of this._pendingAckDms.values()) resolve(DM_FAILURE.left)
+      this._pendingAckDms.clear()
       if (!left) void participant._releaseHolder().catch(reportRoomError)
     })
   }
 
   /** The client of a closed stub is gone, and so is a notice to it. */
   private _notify(notice: ParticipantStubNotice): void {
-    if (this.isClosed) return
+    if (this.end.isClosed) return
     // Each attach sends the meta and the demand again.
     const resentOnAttach = notice.__r === 'p-meta' || notice.__r === 'demand' || notice.__r === 'demand-state'
-    void this._send(notice, { resentOnAttach })?.catch(() => {})
+    this.end.deliver(unorderedEventText(notice), { resentOnAttach })
   }
 }

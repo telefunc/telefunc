@@ -63,6 +63,7 @@ type RemoteParticipantMetadata = MemberSnapshot & { room: unknown; identity: str
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
 type ParticipantStubMetadata = {
   channelId: string
+  roomId: string
   id: string
   meta: ParticipantMeta
   selfDelivery: boolean
@@ -169,8 +170,7 @@ type RoomStubRequest =
   /** Changes only: announcements, and each member whose own want changed. */
   | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
 
-/** Client→server requests on a participant stub; an ack DM is answered through the channel's own ack, so there's no
- *  `dm-reply`. */
+/** Client→server requests on a participant stub; an ack DM's reply is a `dm-reply`, as on a room stub. */
 type ParticipantStubRequest =
   | { __r: 'req-publish'; data: unknown; retain?: boolean }
   | MemberMutationRequest

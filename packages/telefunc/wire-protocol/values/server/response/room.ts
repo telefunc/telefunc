@@ -13,7 +13,7 @@ import type {
   RemoteParticipantMetadata,
   RoomSnapshotMetadata,
 } from '../../../room/protocol.js'
-import { RoomParticipantStubChannel, ResponseRoomGrants } from '../../../room/server/stub.js'
+import { RoomParticipantStub, ResponseRoomGrants } from '../../../room/server/stub.js'
 import { remoteBacking } from '../../../room/state.js'
 import { getAdapterMaxFrameBytes, getServerConfig } from '../../../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../../../utils/assertIsNotBrowser.js'
@@ -93,13 +93,16 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Int
     return ServerLocalParticipant.isServerLocalParticipant(value)
   },
   replace(participant, context) {
-    const channel = new RoomParticipantStubChannel(participant, context.validators.get('data'))
-    context.registerChannel(channel)
+    const stub = new RoomParticipantStub(participant, {
+      publishShield: context.validators.get('data'),
+      createBroadcastChannel: context.createBroadcastChannel,
+    })
     // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
     if (!participant.selfDelivery) responseRoomGrants(context, participant._room.id).suppress(participant.id)
     const maxFrameBytes = getAdapterMaxFrameBytes()
     const metadata: ParticipantStubMetadata = {
-      channelId: channel.id,
+      channelId: stub.end.id,
+      roomId: participant._room.id,
       id: participant.id,
       meta: participant.meta,
       selfDelivery: participant.selfDelivery,
@@ -110,10 +113,10 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Int
     return {
       metadata,
       async close() {
-        await channel.close()
+        await stub.end.close()
       },
       abort(abortError) {
-        channel.abort(abortError.abortValue)
+        stub.end.abort(abortError.abortValue)
       },
     }
   },

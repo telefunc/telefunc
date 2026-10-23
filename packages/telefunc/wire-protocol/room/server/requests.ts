@@ -6,7 +6,7 @@ export {
   decodeStubBinaryFrame,
   decodeParticipantRequest,
   decodeParticipantFrame,
-  decodeDmReply,
+  decodeDmReplyDeclaration,
   decodeBinaryWantChange,
 }
 export type { RoomRequest, RoomDeclaration }
@@ -103,11 +103,7 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
   const decl = record(value, 'declaration')
   switch (decl.__r) {
     case 'dm-reply':
-      return {
-        __r: 'dm-reply',
-        ackId: text(decl.ackId, 'DM reply'),
-        reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
-      }
+      return decodeDmReplyDeclaration(decl)
     case 'sub-binary':
       return { __r: 'sub-binary', ...decodeBinaryWantChange(decl) }
     case 'sub-text':
@@ -118,6 +114,17 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
       }
   }
   return malformed('declaration')
+}
+
+/** An ack DM's reply, the one declaration a participant stub takes too. */
+function decodeDmReplyDeclaration(value: unknown): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
+  const decl = record(value, 'declaration')
+  if (decl.__r !== 'dm-reply') return malformed('declaration')
+  return {
+    __r: 'dm-reply',
+    ackId: text(decl.ackId, 'DM reply'),
+    reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
+  }
 }
 
 /** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
