@@ -433,7 +433,7 @@ See also:
 If the connection drops, Telefunc reconnects automatically and resumes existing channels and broadcasts:
 
 - Messages sent while offline are buffered and delivered in order on reconnect.
-- Messages lost in the disconnect are resent after reconnect. If you `await` your sends, a reconnect loses nothing, as long as each message is at most half its replay buffer: 64 MiB with the defaults.
+- Messages lost in the disconnect are resent after reconnect. If you `await` your sends, a reconnect loses nothing.
 - Otherwise, if the other side missed too much, the channel closes with `NetworkError`, and the error message names the setting to raise (see <Link href="/channel-config" />).
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 

@@ -35,7 +35,7 @@ config.channel = {
 > - `ChannelOverflowError` while a peer is briefly offline → raise `bufferLimit`/`bufferLimitBinary` (each held `send()` counts as its size plus 512 bytes), or apply backpressure by `await`-ing your `send()`s.
 > - `ChannelOverflowError` closing a `BroadcastChannel` whose client is online → raise `serverReplayBuffer`/`serverReplayBufferBinary`, if you lowered them.
 > - `NetworkError` right after a reconnect, whose error message names a replay buffer → `await` your `send()`s, or raise that replay buffer.
-> - Want to cap memory → `await` your `send()`s, and lower the replay buffers. Lower replay buffers can make channels slower over long-distance connections.
+> - Want to cap memory → `await` your `send()`s, and lower the replay buffers. Lower replay buffers can make channels slower over long-distance connections, and a message over half its replay buffer can end its channel with `NetworkError` on a reconnect.
 
 <ConfigWhereServer />
 
