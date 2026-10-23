@@ -7,7 +7,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 `Room` gives you multi-party **rooms**: who's in the room, messages to everyone or to one participant, audio/video tracks, and moderation. Use it for chat, game lobbies, collaborative editing, and live dashboards.
 
-> **Needs a long-running server**, as every <Link href="/stream">stream</Link> does: Room doesn't work on serverless platforms such as Vercel or AWS Lambda. On Cloudflare Workers, see <Link href="/stream/cloudflare" />.
+> **Needs a long-running server**, as <Link href="/channel">channels</Link> do: Room doesn't work on serverless platforms that enforce a short time limit on connections, such as Vercel or AWS Lambda. On Cloudflare Workers, see <Link href="/stream/cloudflare" />.
 
 > When you only need a pipe to one client, use <Link href="/channel#new-channel">`new Channel()`</Link>. When you need pub/sub without membership, use <Link href="/channel#new-broadcastchannel">`new BroadcastChannel()`</Link>.
 
