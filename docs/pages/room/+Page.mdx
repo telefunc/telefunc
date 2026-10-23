@@ -41,11 +41,9 @@ const me = await room.join({ meta: { name: 'Alice' } })
 await me.publish({ text: 'hello' })
 ```
 
-Open it in two browser tabs: the first tab sees the second one join and say hello.
+`join()` returns your participant, `me`.
 
-`join()` returns your participant, `me`. The examples below use this `room` and `me`.
-
-> `meta` is what a participant shows about itself, such as its name. A room has a `meta` too: `Room.create('lobby', { meta: { topic: 'General' } })`.
+> `meta` is what a participant shows about itself, such as its name. A room has a `meta` too: set it with `Room.create('lobby', { meta: { topic: 'General' } })`, and read it on the client with `room.meta`.
 
 
 ## Show who's in the room
@@ -74,6 +72,14 @@ function Members({ room }) {
 ```
 
 To react to one event, use `room.onJoin()`, `room.onLeave()` and `room.onParticipantUpdate()`.
+
+Every listener (`onChange()`, `onJoin()`, `subscribe()`, `listen()`, …) returns a function that removes it, for example in a React effect's cleanup:
+
+```jsx
+// Environment: client
+
+useEffect(() => room.subscribe((message) => addMessage(message)), [room])
+```
 
 
 ## Update your name or status
@@ -112,7 +118,7 @@ room.onJoin(follow)
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
 
-For updates that change many times per second, such as a mouse cursor, pass `coalesce` with a name: of the updates with the same name, only the latest is sent.
+For updates that change many times per second, such as a mouse cursor, pass `coalesce` with a name: only the latest update with that name is sent.
 
 ```js
 // Environment: client
@@ -236,7 +242,7 @@ try {
 
 <Warning>Check permissions on `identity`, never on `meta`: a client can set its `meta` to anything.</Warning>
 
-<Warning>Call `Room.guard()` in every telefunction that returns the room: a room returned without it has no guards.</Warning>
+<Warning>The hooks apply to the clients this telefunction returns the room to. Call `Room.guard()` once, with all its hooks, in every telefunction that returns the room.</Warning>
 
 To run code after a join or a message, such as saving the message, use `onAfterJoin()`, `onAfterPublish()` and `onAfterSend()` (see <Link href="#load-chat-history" />).
 
@@ -264,31 +270,39 @@ await onRemove(room.id, member.id) // `member` from room.getParticipants() or ro
 To remove every tab of a user, pass their `identity`: `Room.removeParticipant(roomId, { identity: userId, reason: 'banned' })`.
 
 The removed participant learns why:
+
 ```js
 // Environment: client
 
 me.onLeave((cause) => {
   if (cause.type === 'removed') showBanner(`Removed: ${cause.reason}`)
+  if (cause.type === 'disconnected') rejoin() // call the telefunction that returned the room again, then join()
 })
 ```
 
 
 ## Run a game loop or a bot on the server
 
-Join from the server with `{ hidden: true }`:
+Create the room and join it from the server with `{ hidden: true }`, for example in the telefunction that starts a match:
 
 ```js
+// Match.telefunc.js
 // Environment: server
 
 import { Room } from 'telefunc'
 
-const room = await Room.create(matchId, { emptyTimeout: Infinity, departureTimeout: Infinity }) // open until Room.close()
-const host = await room.join({ identity: 'host', hidden: true })
-host.listen((command) => game.apply(command))     // commands from players
-setInterval(() => host.publish(game.state()), 50) // state to everyone
+export async function onStartMatch() {
+  const matchId = crypto.randomUUID()
+  const room = await Room.create(matchId, { emptyTimeout: Infinity, departureTimeout: Infinity }) // open until Room.close()
+  const host = await room.join({ identity: 'host', hidden: true })
+  const game = createGame()
+  host.listen((command) => game.apply(command))     // commands from players
+  setInterval(() => host.publish(game.state()), 50) // state to everyone
+  return matchId
+}
 ```
 
-A hidden participant can do everything a participant does, but players don't see it among the room's participants, and it doesn't keep the room open: that's why the room is created to stay open until `Room.close(matchId)`.
+A hidden participant can do everything a participant does, but players don't see it among the room's participants.
 
 To let players send it commands, return it with the room:
 
@@ -328,9 +342,10 @@ Publish each source on its own track, and subscribe to the tracks you show:
 // Environment: client
 
 // The participant who films
+// encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder
 encodeCamera((frame, isKeyframe) => me.publishBinary(frame, { track: 'camera', meta: { isKeyframe } }))
 
-// The participants who watch
+// The participants who watch; showVideo(): your decoder, e.g. WebCodecs' VideoDecoder
 const watch = (member) =>
   member.subscribeBinary((frame, info) => showVideo(member.id, frame, info.meta.isKeyframe), { track: 'camera' })
 for (const member of await room.getParticipants()) watch(member)
@@ -361,7 +376,7 @@ await me.publish({ phase: 'voting' }, { retain: true })
 await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true })
 ```
 
-A retained message stays while its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
+The room keeps the last retained message, and each participant's last retained frame per track, so the two lines above don't replace each other. A retained message stays while its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
 
 
 ## Load chat history
@@ -379,7 +394,6 @@ export async function onJoinChat(roomId) {
   const room = await Room.get(roomId, { tail: true })
   Room.guard(room, {
     onAfterPublish: async (from, message, info) => {
-      // `user` published it: this telefunction returns the room to `user` only
       await db.messages.insert({ ...message, roomId, authorId: user.id, seq: info.seq })
     },
   })
@@ -405,9 +419,7 @@ room.subscribe((message, info) => {
 await me.publish({ text: 'hello' }) // saved by onAfterPublish()
 ```
 
-With `{ tail: true }`, the client receives every message published after its history.
-
-> A room takes one `Room.guard()` call: put this `onAfterPublish()` next to your other hooks, such as the ones in <Link href="#control-who-can-join-and-post" />.
+> Add your other hooks, such as the ones in <Link href="#control-who-can-join-and-post" />, to this same `Room.guard()` call.
 
 
 ## Leave a room
@@ -431,7 +443,7 @@ import { Room } from 'telefunc'
 await Room.close('lobby')
 ```
 
-A room also closes by itself once nobody is in it and no page has it open. To keep a room open until you call `Room.close()`:
+To keep a room open until you call `Room.close()`, create it with:
 
 ```js
 // Environment: server
@@ -439,14 +451,18 @@ A room also closes by itself once nobody is in it and no page has it open. To ke
 await Room.create('match-42', { emptyTimeout: Infinity, departureTimeout: Infinity })
 ```
 
-> To change how long a room waits before it closes, see <Link href="/room-config" />.
-
 `room.onClose()` fires when the room closes.
 
 
 ## Run on multiple servers
 
-Install <Link href="/redis">`@telefunc/redis`</Link> before your server first uses Room:
+Install <Link href="/redis">`@telefunc/redis`</Link>:
+
+```bash
+npm install @telefunc/redis ioredis
+```
+
+Call `installRedis()` before your server first uses Room:
 
 ```js
 // Environment: server
@@ -457,7 +473,7 @@ import { installRedis } from '@telefunc/redis'
 installRedis(new IORedis('redis://localhost:6379'))
 ```
 
-Then route each client to one server with sticky sessions, see <Link href="/stream/scale" />. On Cloudflare Workers, you need neither, see <Link href="/stream/cloudflare" />.
+Then route each client to one server with sticky sessions, see <Link href="/stream/scale" />. For Redis's requirements, see <Link href="/redis" />. On Cloudflare Workers, you need neither, see <Link href="/stream/cloudflare" />.
 
 
 ## Methods
@@ -481,7 +497,7 @@ Server-side.
 | `Room.removeParticipant(id, target)` | Remove a participant (`{ id, reason? }`) or every tab of a user (`{ identity, reason? }`). |
 | `Room.close(id)` | Close a room. |
 
-`options` is `{ meta?, emptyTimeout?, departureTimeout? }`.
+`options` is `{ meta? }`, and the timeouts of <Link href="/room-config" />.
 
 ### `room`
 
@@ -495,7 +511,9 @@ Server-side.
 | `onJoin(cb)` / `onLeave(cb)` / `onParticipantUpdate(cb)` | Someone joined / left / changed their `meta`. |
 | `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages / binary frames. |
 | `onAnnounce(cb)` | `Room.announce()` messages. |
-| `onUpdate(cb)` / `onEmpty(cb)` / `onClose(cb)` | The room's `meta` changed / the last participant left / the room closed. |
+| `onUpdate(cb)` / `onEmpty(cb)` / `onClose(cb)` | The room's `meta` changed: `(meta, prev)` / the last participant left / the room closed. |
+
+Properties: `id`, `meta`, `count`.
 
 ### `me`
 
