@@ -1,7 +1,7 @@
 export { Room }
 
 import React, { useEffect, useState, useSyncExternalStore } from 'react'
-import { close } from 'telefunc/client'
+import { abort, close } from 'telefunc/client'
 import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
@@ -853,31 +853,47 @@ function Room() {
         const serverMember = await onJoinAnswering(roomId)
         const held = await onJoinAsServer(roomId, 'Held')
         held.listen(() => 'pong')
-        // Closed while its listener still works on the answer.
+        // Its user closes the chat, and answers once their goodbye is posted to the room.
         const closing = await onJoinAsServer(roomId, 'Closing')
-        const { promise: working, resolve } = Promise.withResolvers<void>()
         closing.listen(async () => {
-          resolve()
-          await new Promise((done) => setTimeout(done, 200))
-          return 'pong after work'
+          void close(closing)
+          await me.publish('Closing left the chat')
+          return 'bye'
         })
+        // A reply that links back to its thread can't be sent, whether its user stays or hangs up as they answer.
+        const threadedReply = () => {
+          const thread: { replies: unknown[] } = { replies: [] }
+          const reply = { text: 'see thread', thread }
+          thread.replies.push(reply)
+          return reply
+        }
+        const unserializable = await onJoinAsServer(roomId, 'Unserializable')
+        unserializable.listen(threadedReply)
+        const aborted = await onJoinAsServer(roomId, 'Aborted')
+        aborted.listen(() => {
+          abort(aborted)
+          return threadedReply()
+        })
+        const unhandled: string[] = []
+        const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
+        window.addEventListener('unhandledrejection', recordUnhandled)
         const reply = (sent: Promise<{ response: unknown }>) =>
           sent.then(
             (receipt) => receipt.response,
             (err: Error) => err.message,
           )
-        const fromClosing = reply(me.send(closing.id, 'ping', { ack: true }))
-        await working
-        await close(closing)
-        setResult(
-          JSON.stringify({
-            fromPage: await reply(me.send(peer.id, 'hi', { ack: true })),
-            fromServer: await reply(me.send(serverMember, 'hi', { ack: true })),
-            fromHeld: await reply(me.send(held.id, 'ping', { ack: true })),
-            fromClosing: await fromClosing,
-            refused: await reply(me.send(serverMember, 'refuse', { ack: true })),
-          }),
-        )
+        const result = {
+          fromPage: await reply(me.send(peer.id, 'hi', { ack: true })),
+          fromServer: await reply(me.send(serverMember, 'hi', { ack: true })),
+          fromHeld: await reply(me.send(held.id, 'ping', { ack: true })),
+          fromClosing: await reply(me.send(closing.id, 'thanks', { ack: true })),
+          fromUnserializable: await reply(me.send(unserializable.id, 'where?', { ack: true })),
+          fromAborted: await reply(me.send(aborted.id, 'where?', { ack: true })),
+          refused: await reply(me.send(serverMember, 'refuse', { ack: true })),
+          unhandled,
+        }
+        window.removeEventListener('unhandledrejection', recordUnhandled)
+        setResult(JSON.stringify(result))
       })}
 
       {scenario('ack-timeout', null, 'An acknowledged DM nobody answers', async () => {

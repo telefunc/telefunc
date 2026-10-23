@@ -90,7 +90,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
   protected _isClosed = false
-  private _didTerminate = false
+  protected _didTerminate = false
   private _didFireClose = false
   private _didFireOpen = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
@@ -658,9 +658,21 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     return this._subscribers[kind].add(callback)
   }
 
-  /** @internal Sends what `reply` resolves to, also while closing: a graceful close waits for it, as for an ack's answer. */
-  _sendReply(reply: Promise<unknown>): void {
-    void this._trackAck(reply.then((data) => this._flow.countSent(this._connection.send(this, stringify(data)))))
+  /** @internal Sends what `reply` resolves to, also while closing: a graceful close waits for it, as for an ack's answer.
+   *  A reply it can't send is reported, and `failure` goes instead. */
+  _sendReply(reply: Promise<unknown>, failure: unknown): void {
+    const send = (data: unknown) => this._flow.countSent(this._connection.send(this, stringify(data)))
+    void this._trackAck(
+      reply.then((data) => {
+        if (this._didTerminate) return
+        try {
+          send(data)
+        } catch (err) {
+          this._handleCallbackError(err)
+          send(failure)
+        }
+      }),
+    )
   }
 
   /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */

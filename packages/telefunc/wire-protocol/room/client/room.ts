@@ -689,6 +689,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
           if (ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
           stub._sendReply(
             this._deliverMessageAck(inboxMessageFromWire(msg)).then((reply) => ({ __r: 'dm-reply', ackId, reply })),
+            { __r: 'dm-reply', ackId, reply: { ok: false, err: CLIENT_ROOM_BUG_MESSAGE } },
           )
           return
         }
