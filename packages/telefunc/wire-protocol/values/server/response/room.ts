@@ -24,7 +24,7 @@ type RoomReplacerContract = TypeContract<ServerRoom, never, RoomSnapshotMetadata
 type RoomParticipantReplacerContract = TypeContract<ServerLocalParticipant, never, ParticipantStubMetadata>
 type RoomRemoteReplacerContract = TypeContract<RemoteParticipant, never, RemoteParticipantMetadata>
 
-const ROOM_GRANTS = Symbol('telefunc.RoomResponseGrants')
+const ROOM_GRANTS = Symbol.for('telefunc.RoomResponseGrants')
 
 /** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
 function responseRoomGrants(context: InternalServerReplacerContext, roomId: string): ResponseRoomGrants {

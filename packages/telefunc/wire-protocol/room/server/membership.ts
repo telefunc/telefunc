@@ -72,7 +72,7 @@ type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
 /** `session` hosted the member: its mark goes with the cleanup. */
 type PendingMemberCleanup = { cause: WireLeaveCause; session: string; hidden?: true }
 /** An exchange hosting something under a session found it lost. */
-const SESSION_LOST: unique symbol = Symbol('telefunc.RoomSessionLost')
+const SESSION_LOST: unique symbol = Symbol.for('telefunc.RoomSessionLost')
 const identityTextEncoder = new TextEncoder()
 
 /** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */

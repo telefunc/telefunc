@@ -169,7 +169,7 @@ type TrackKey = string
 /** The default track's key; named tracks are non-empty, so `''` is unambiguous. */
 const DEFAULT_TRACK: TrackKey = ''
 /** Every track, or every member, as a want's target. */
-const ALL: unique symbol = Symbol('ALL')
+const ALL: unique symbol = Symbol.for('telefunc.RoomWantAll')
 type All = typeof ALL
 
 function publicTrack(track: TrackKey): string | null {

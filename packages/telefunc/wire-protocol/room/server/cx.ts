@@ -5,7 +5,7 @@ assertIsNotBrowser()
 
 // Room owns conflict recovery: retried after 1→64 ms of jitter until it commits. A conflict means another write
 // committed, to a cell this one read or to the head.
-const CX_CONFLICT: unique symbol = Symbol('telefunc.RoomCxConflict')
+const CX_CONFLICT: unique symbol = Symbol.for('telefunc.RoomCxConflict')
 
 async function retryCompareExchange<T>(attempt: () => Promise<T | typeof CX_CONFLICT>): Promise<T> {
   for (let n = 0; ; n++) {

@@ -41,7 +41,7 @@ const state = getGlobalObject<{
   planeFollowers: Set<BroadcastPlaneFollower>
 }>('wire-protocol/backend/install.ts', () => ({ installed: null, planeFollowers: new Set() }))
 
-const FALLBACK_KEY = [Symbol('telefunc.memoryBackend')]
+const FALLBACK_KEY = [Symbol.for('telefunc.memoryBackend')]
 
 /** Installs the process's one backend and returns its driver. Re-evaluating an entry with the same `key` returns the
  *  installed driver; the key names the factory's configuration, so that driver is the one the factory would build. */
