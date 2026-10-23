@@ -11,8 +11,8 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 import { config } from 'telefunc'
 
 config.room = {
-  emptyTimeout: 300_000,    // A room nobody joined closes this long after it's no longer used (ms)
-  departureTimeout: 20_000, // A room closes this long after its last member left (ms)
+  emptyTimeout: 300_000,    // A room nobody joined closes this long after no page has it open (ms)
+  departureTimeout: 20_000, // A room someone joined closes this long after nobody is in it and no page has it open (ms)
 }
 ```
 
