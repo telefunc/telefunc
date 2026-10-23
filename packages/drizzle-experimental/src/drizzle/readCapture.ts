@@ -1,0 +1,174 @@
+// The Drizzle read-capture edge. `reactiveDrizzle(db).select(...)` produces a CHAINABLE
+// live-builder (via wrapLiveSelect) whose terminal `.live()` runs the pipeline: extractQueryShape →
+// compileQuery → registry.acquire (eager-async hydrate in the prologue) → new LiveCell(rows) +
+// attachSource → Live<Row[]>. The cell is this package's OWN primitive (src/primitive/live.ts) — telefunc
+// core knows nothing about it. Awaiting the same builder (no `.live()`) forwards to plain rows.
+//
+// NOTHING HERE IS REQUEST-SCOPED, and that is the point: `reactiveDrizzle(db)` can be called at module
+// level and shared by every telefunction. Attachment happens at SERIALIZE time — the wire replacer sees
+// the Live in the return value, creates the channel, and activates the handle, synchronously redeeming
+// the read token (subscribe-at-redeem + the seqAtRead fence) via the source's `subscribe`; on the last
+// owning channel's close it releases the lease. The replacer has the request context it needs, so this
+// module never asks for any.
+//
+// ABANDONMENT — a `.live()` whose handle is never serialized (the telefunction throws, or returns
+// something else). Its token and subscription ref are released when the Live is COLLECTED, via the
+// lifecycle core in `bus/readLifetime.ts`. That is unbounded by spec and in practice the next GC; see the honest limit
+// in the docs. It replaces a per-request sweep that required `reactiveDrizzle(db)` to be called before the
+// body's first await — a usage rule the owner rejected — and which was in any case a leaky net: a handle
+// created after the sweep had run was never swept at all.
+//
+// What is retained until then is the GRAPH, not a counter: the token is a ref, and the ref is what keeps the
+// registry entry (and any hydrated row state) alive. A query sharing that identity keeps it alive regardless;
+// a unique one holds it alone. Paths that fail BEFORE producing a handle release immediately instead — there
+// is nothing to collect, so there is no reason to wait for a collector.
+
+export { wrapLiveSelect, compilePlanFor }
+
+import { type Table, isTable } from 'drizzle-orm'
+import { LiveCell } from '../primitive/live.js'
+import type { Live } from '../primitive/live.js'
+import { type GraphPlan, coarsePlan, compileQuery } from '../engine/compile/compile.js'
+import type { Row } from '../engine/compile/rowSpace.js'
+import { selectConfigOf } from './binding/drizzleShape.js'
+import { dialectOf, isSingleSession, rlsEnabledOf, semanticEnvironmentKeyOf } from './binding/database.js'
+import { hydrationExecutorOf } from './binding/hydrationExecutor.js'
+import { schemaFingerprint } from './extract/columns.js'
+import { identityOf } from './extract/identity.js'
+import { extractQueryShape } from './extract/queryShape.js'
+import { parseRelationId } from '../ir/relation.js'
+import type { QueryShape, RlsStatus } from '../ir/types.js'
+import { registryFor } from '../bus/dbRuntime.js'
+import { acquireSubscription } from '../bus/changeRuntime.js'
+import { createReadLifetime, invalidationSink, registerAbandonedRead, type ReadLifetime } from '../bus/readLifetime.js'
+
+/** Wrap a live SELECT builder into a CHAINABLE builder: `from`/`where`/… forward to the underlying
+ *  drizzle builder and re-wrap the result (so the chain stays live); non-builder returns (`toSQL`,
+ *  metadata) pass through untouched; the terminal `.live()` runs the read-capture pipeline and resolves
+ *  to `Live<Row[]>`, while `then`/`execute` forward untouched to plain rows (the base builder is itself
+ *  a `QueryPromise`). This is the runtime behind reactiveDrizzle's terminal `.live()`. */
+function wrapLiveSelect(baseBuilder: unknown, db: object): unknown {
+  return new Proxy(baseBuilder as object, {
+    get(target, prop, receiver) {
+      if (prop === 'live') {
+        // The terminal: run the read-capture pipeline and resolve to Live<Row[]>. `.live` is synthesized
+        // here — the base drizzle builder has no such member, so nothing leaks onto a plain builder.
+        return () => captureAndBuild(target, db)
+      }
+      const value = Reflect.get(target, prop, receiver)
+      if (typeof value !== 'function') return value
+      return (...args: unknown[]) => {
+        const next = (value as (...a: unknown[]) => unknown).apply(target, args)
+        return isBuilder(next) ? wrapLiveSelect(next, db) : next
+      }
+    },
+  })
+}
+
+/** The read-capture pipeline for one live query: compile + acquire (hydrate) + read the initial rows,
+ *  then wire a Live whose serialize-time activation redeems the token. The sink forwards the graph's
+ *  invalidation to `live.invalidate` (equivalent to the source's onInvalidate); the token subscribes it at
+ *  redeem (seam 1), and the seqAtRead fence replays a change that landed during the read window (seam 2). */
+async function captureAndBuild(builder: unknown, db: object): Promise<Live<Row[]>> {
+  const dialect = dialectOf(db)
+  const shape = extractQueryShape(builder, { dialect })
+  // READINESS BARRIER: take this read's ref on the db's change subscription AND await the transport's
+  // admission of it — before both the graph hydrate (registry.acquire) and the snapshot read below. This
+  // closes the window where a write on another instance, landing between our read and a not-yet-established
+  // subscription, would be missed. Fails the read closed if the transport refuses. Only live reads reach
+  // here — a plain awaited builder or a non-Live telefunction never subscribes. The subscription is per-DB,
+  // not per-table: one topic carries every change and the router filters locally.
+  const subscription = await acquireSubscription(db)
+  // The sink forwards graph invalidations to a Live that does not exist yet, and holds it weakly once it
+  // does. It is only ever CALLED at redeem-time or later, by which point the Live exists — an un-redeemed
+  // token is inert, so no fire reaches it before activation.
+  const sink = invalidationSink<LiveCell<Row[]>>()
+
+  // OWNERSHIP MOVES ONCE, FORWARD. From here to `acquire`, only the subscription is held, so a failure gives
+  // just it back. Once the token joins it, `lifetime` owns both. Once the handle is registered, the finalizer
+  // (on collection) and the channel lease (on activation) own them, and this function is out of the picture —
+  // which is why `register` is the LAST thing that can throw.
+  let lifetime: ReadLifetime | undefined
+  try {
+    const env = {
+      dialect,
+      semanticEnvironmentKey: await semanticEnvironmentKeyOf(db),
+      schemaFingerprint: schemaFingerprint(tableObjectsOf(builder)),
+    }
+    const { instanceKey } = identityOf(builder, env)
+    const rlsStatus = await rlsStatusOf(db, shape.tables)
+
+    // Only the token is needed here — the graph drives invalidation through the sink.
+    const { token } = await registryFor(db).acquire({
+      instanceKey,
+      tables: shape.tables,
+      rlsStatus,
+      compilePlan: compilePlanFor(db, shape),
+      executor: hydrationExecutorOf(db),
+      notify: sink.notify,
+    })
+    lifetime = createReadLifetime(token, subscription)
+
+    const rows = (await builder) as Row[] // the initial result is a plain read; the graph signals staleness
+    const live = new LiveCell<Row[]>(rows)
+    sink.hold(live)
+    // Serialize-time activation (SYNC) redeems the token — subscribing its notify to the graph's sink,
+    // replaying the seqAtRead fence, and marking it activated so the finalizer leaves it alone.
+    live.attachSource({ subscribe: () => lifetime!.activate() })
+    // The handoff. After this the handle owns both refs — the channel lease if it is serialized, the
+    // finalizer if it is collected without ever being. Last fallible statement on purpose.
+    registerAbandonedRead(live, lifetime)
+    // Just return the cell: it IS the `Live<Row[]>` the telefunction hands back, and the wire replacer
+    // serializes it. No `.client` re-type — the public type simply doesn't advertise the producer verbs.
+    return live
+  } catch (error) {
+    // EVERY way out has to give the refs back, or a db stays subscribed for a live query that does not
+    // exist. If a token ever joined the subscription, the lifetime owns both and fails them together;
+    // before that, only the subscription is outstanding. The handed-off handle never reaches here.
+    if (lifetime) lifetime.fail()
+    else subscription.release()
+    throw error
+  }
+}
+
+/** The plan compiler for one query, gated on session provability: a single-session connection (a
+ *  pinned pg Client / node:sqlite / PGlite) compiles precisely; a POOLED-UNPINNED
+ *  connection can't prove the executing session's authority (role/search_path/RLS), so precise state
+ *  could hydrate from a mismatched session — force it COARSE (invalidate-on-any-change, sound). */
+function compilePlanFor(db: object, shape: QueryShape): () => GraphPlan {
+  return isSingleSession(db) ? () => compileQuery(shape) : () => coarsePlan(shape.tables)
+}
+
+/** The distinct drizzle table objects a select builder references (from + joins + set-op arms),
+ *  for the schema fingerprint. Non-table FROMs (subquery/CTE) contribute nothing here — the shape
+ *  already degrades those to coarse. */
+function tableObjectsOf(builder: unknown): Table[] {
+  const config = selectConfigOf(builder)
+  if (!config) return []
+  const tables: Table[] = []
+  if (isTable(config.table)) tables.push(config.table)
+  for (const join of config.joins ?? []) if (isTable(join.table)) tables.push(join.table)
+  for (const op of config.setOperators ?? []) tables.push(...tableObjectsOf(op.rightSelect))
+  return tables
+}
+
+/** Aggregate row-level-security status across referenced relations. Known true dominates unknown;
+ *  unknown survives only when no relation is known true. The stateful graph later makes the shared
+ *  born-coarse decision. `tables` carries ROUTING identities, so each is decoded back to the schema/name
+ *  pair the catalog probe addresses: a schema-qualified relation is probed in ITS schema rather than
+ *  assumed to live in `public`. */
+async function rlsStatusOf(db: object, tables: string[]): Promise<RlsStatus> {
+  let sawUnknown = false
+  for (const id of tables) {
+    const { name, schema } = parseRelationId(id)
+    const status = await rlsEnabledOf(db, name, schema ? { schema } : undefined)
+    if (status === true) return true
+    if (status === 'unknown') sawUnknown = true
+  }
+  return sawUnknown ? 'unknown' : false
+}
+
+/** A drizzle query builder, distinguished from a plain method return (metadata, `toSQL()` result). */
+function isBuilder(value: unknown): boolean {
+  return typeof value === 'object' && value !== null && typeof (value as { toSQL?: unknown }).toSQL === 'function'
+}
