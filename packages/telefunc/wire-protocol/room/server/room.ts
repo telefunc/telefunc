@@ -369,7 +369,6 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   _onStubAttached(stub: RoomStub): void {
-    if (!this._stubs.has(stub)) return
     this._replica.roster.sendTo(stub)
     stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
     for (const member of stub._heldMembers()) {

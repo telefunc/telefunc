@@ -572,9 +572,7 @@ class RoomParticipantStub {
     })
   }
 
-  /** The client of a closed stub is gone, and so is a notice to it. */
   private _notify(notice: ParticipantStubNotice): void {
-    if (this.end.isClosed) return
     // Each attach sends the meta and the demand again.
     const resentOnAttach = notice.__r === 'p-meta' || notice.__r === 'demand' || notice.__r === 'demand-state'
     this.end.deliver(unorderedEventText(notice), { resentOnAttach })
