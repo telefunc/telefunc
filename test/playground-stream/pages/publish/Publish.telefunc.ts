@@ -29,7 +29,7 @@ export {
 }
 
 import { Buffer } from 'node:buffer'
-import { Broadcast, BroadcastChannel, onBug } from 'telefunc'
+import { Abort, Broadcast, BroadcastChannel, onBug } from 'telefunc'
 import { addBackendFault, pendingBackendFaults } from '../../failing-backend'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
@@ -472,7 +472,8 @@ async function onBroadcastManyKeys(count: number, subscribed: boolean) {
   await Promise.all(published)
 }
 
-/** A key's static listeners, the first throwing and the second rejecting, then one that records, then a `BroadcastChannel`'s. */
+/** A key's static listeners, the first throwing, the second rejecting and the third throwing `Abort`, then one that
+ *  records, then a `BroadcastChannel`'s. */
 async function onBroadcastThrowingListener() {
   const key = `room:throwing:${crypto.randomUUID()}`
   const received: string[] = []
@@ -482,6 +483,9 @@ async function onBroadcastThrowingListener() {
     }),
     Broadcast.subscribe(key, async () => {
       throw new Error('broadcast-listener-rejects')
+    }),
+    Broadcast.subscribe(key, () => {
+      throw Abort('broadcast-listener-aborts')
     }),
     Broadcast.subscribe<string>(key, (message) => {
       received.push(`static:${message}`)

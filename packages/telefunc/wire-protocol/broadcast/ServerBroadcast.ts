@@ -30,6 +30,7 @@ import { ACK_STATUS, encodePublishText, encodePublishBinary } from '../wire/conn
 import type { BroadcastKind, WirePublishInfo } from '../wire/connectionFrame.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
+import { isAbort } from '../../node/server/Abort.js'
 assertIsNotBrowser()
 
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
@@ -274,11 +275,16 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
     invokeChannelListener(
       callback,
       [decode(payload), makePublishInfo(route.key, info.seq, info.timestamp)],
-      reportServerChannelError,
+      reportListenerError,
     )
   })
   subscription.open()
   return () => subscription.close()
+}
+
+/** A listener's `Abort` is no bug, and there is no channel for it to close. */
+function reportListenerError(error: unknown): void {
+  if (!isAbort(error)) reportServerChannelError(error)
 }
 
 /** A route's subscription while wanted; one that ends on its own is reported and replaced once, and a transport that

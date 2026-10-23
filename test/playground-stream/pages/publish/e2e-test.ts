@@ -251,7 +251,7 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  test("broadcast: a Broadcast.subscribe() listener that throws or rejects is reported, and the key's other subscribers still get the message", async () => {
+  test("broadcast: a Broadcast.subscribe() listener that throws or rejects is reported, one that throws Abort isn't, and the key's other subscribers still get the message", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-throwing-listener')
 
