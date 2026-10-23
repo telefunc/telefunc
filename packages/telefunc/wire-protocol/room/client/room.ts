@@ -145,7 +145,12 @@ class ClientRoom extends RoomStateView implements Room {
     void this._roster.promise.catch(() => {})
   }
 
-  async join(options?: JoinOptions): Promise<LocalParticipant> {
+  join(options?: JoinOptions): Promise<LocalParticipant> {
+    const joining: Promise<LocalParticipant> = this._join(options).then((participant) => participant._handOut(joining))
+    return joining
+  }
+
+  private async _join(options?: JoinOptions): Promise<ClientRoomParticipant> {
     assertUsage(
       options?.identity === undefined,
       'join() options.identity is server-assigned: identity is trusted, so set it where trust lives, in the granting telefunction (server-side join()), not on the client.',
@@ -573,9 +578,14 @@ abstract class ClientParticipantBase extends ParticipantBase {
   }
 }
 
+/** Each member handle's `join()` promise, which keeps a room a telefunction returned open while reachable. */
+const roomHolds = new WeakMap<LocalParticipant, Promise<LocalParticipant>>()
+
 /** `LocalParticipant` returned by `ClientRoom.join()`. Operates through the room's stub. */
 class ClientRoomParticipant extends ClientParticipantBase {
   private readonly _room: ClientRoom
+  /** Weak: the room reaches this member, so a strong one would hold the room open for good. */
+  private _handle: WeakRef<LocalParticipant> | null = null
 
   constructor({
     clientRoom,
@@ -615,6 +625,27 @@ class ClientRoomParticipant extends ClientParticipantBase {
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._publishBinaryFramed(framed)
+  }
+
+  /** @internal The page's handle: it holds the room open until this member leaves, and nothing in the room reaches it. */
+  _handOut(joining: Promise<LocalParticipant>): LocalParticipant {
+    const bound = new Map<PropertyKey, unknown>()
+    const handle = new Proxy<LocalParticipant>(this, {
+      get(target, prop) {
+        const value: unknown = Reflect.get(target, prop, target)
+        return typeof value === 'function' ? getOrCreate(bound, prop, () => value.bind(target)) : value
+      },
+    })
+    if (this._left) return handle
+    roomHolds.set(handle, joining)
+    this._handle = new WeakRef(handle)
+    return handle
+  }
+
+  override _onLeft(cause: LeaveCause): void {
+    super._onLeft(cause)
+    const handle = this._handle?.deref()
+    if (handle) roomHolds.delete(handle)
   }
 
   async leave(): Promise<void> {

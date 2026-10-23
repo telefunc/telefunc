@@ -101,6 +101,16 @@ type RoomView = Awaited<ReturnType<typeof onGetRoom>>
 
 /** The join the `away-join` card starts when its second button is clicked. */
 let startAwayJoin: (() => void) | null = null
+/** The check the `member-keeps-room` card runs when its second button is clicked. */
+let checkKeptMember: (() => void) | null = null
+/** The check the `members-let-go` card runs when its second button is clicked. */
+let checkLetGo: (() => void) | null = null
+
+/** Joins through a room the page doesn't keep, and lets go of the member too, without leaving. */
+async function joinAndLetGo(roomId: string, leaves: string[]): Promise<void> {
+  const me = await (await onGetRoom(roomId)).join({ meta: { name: 'Dropped' } })
+  me.onLeave((cause) => leaves.push(cause.type))
+}
 
 /** The documented React adapter: the room's methods passed as they are. */
 function LiveCount({ room }: { room: RoomView }) {
@@ -1038,6 +1048,90 @@ function Room() {
         }))
         releasePubRoom()
       })}
+
+      {scenario('member-keeps-room', 'A member keeps its room', 'Join, then let go of the room', async () => {
+        const roomId = await createRoomId('member-keeps-room')
+        // The page keeps only `me`, not the room it joined through.
+        const me = await (await onGetRoom(roomId)).join({ meta: { name: 'Kept' } })
+        let left: string | null = null
+        me.onLeave((cause) => (left = cause.type))
+        const { promise: checked, resolve } = Promise.withResolvers<void>()
+        checkKeptMember = resolve
+        setResult(JSON.stringify({ roomId }))
+        await checked
+        const watcher = await onGetRoom(roomId)
+        const releaseWatcher = keepReachable(watcher)
+        const received: unknown[] = []
+        watcher.subscribe((data) => received.push(data))
+        const published = await me.publish('after-gc', { retain: true }).then(
+          () => 'ok',
+          (error: Error) => error.message,
+        )
+        await pollUntil(() => ({
+          result: { published, received, left },
+          done: received.length > 0 || published !== 'ok',
+        }))
+        releaseWatcher()
+      })}
+      <button id="test-room-member-keeps-room-check" onClick={() => checkKeptMember?.()}>
+        Check the member
+      </button>
+
+      {scenario(
+        'members-let-go',
+        null,
+        'Let go of a member, of one that left, and of one in a closed room',
+        async () => {
+          // Closing 500 ms after their member left and nothing holds them.
+          const dropped = `e2e-let-go-dropped:${crypto.randomUUID()}`
+          const left = `e2e-let-go-left:${crypto.randomUUID()}`
+          const timeouts = { emptyTimeout: 500, departureTimeout: 500 }
+          await Promise.all([onCreateRoomWith(dropped, timeouts), onCreateRoomWith(left, timeouts)])
+          const closed = await createRoomId('let-go-closed')
+          const guarded = await createRoomId('let-go-guarded')
+          const unhandled: unknown[] = []
+          const onUnhandled = (event: PromiseRejectionEvent) => unhandled.push(event.reason)
+          window.addEventListener('unhandledrejection', onUnhandled)
+          const droppedLeaves: string[] = []
+          await joinAndLetGo(dropped, droppedLeaves)
+          // The page keeps only a member that left.
+          const leaver = await (await onGetRoom(left)).join({ meta: { name: 'Leaver' } })
+          await leaver.leave()
+          const stays = await (await onGetRoom(closed)).join({ meta: { name: 'Stays' } })
+          const closedLeaves: string[] = []
+          stays.onLeave((cause) => closedLeaves.push(cause.type))
+          await onCloseRoom(closed)
+          const rejected = await (await onOpenGuardedRoom(guarded)).join({ meta: { name: 'Banned' } }).then(
+            () => 'joined',
+            (error: Error) => error.message,
+          )
+          const { promise: checked, resolve } = Promise.withResolvers<void>()
+          checkLetGo = resolve
+          setResult(JSON.stringify({ ready: true }))
+          await checked
+          await pollUntil(async () => {
+            const result = {
+              droppedLeaves,
+              droppedOpen: await onIsOpen(dropped),
+              leftOpen: await onIsOpen(left),
+              leaverPublish: await Promise.resolve()
+                .then(() => leaver.publish('x'))
+                .then(
+                  () => 'ok',
+                  (error: Error) => error.message,
+                ),
+              closedLeaves,
+              rejected,
+              unhandled: unhandled.length,
+            }
+            return { result, done: !result.droppedOpen && !result.leftOpen }
+          })
+          window.removeEventListener('unhandledrejection', onUnhandled)
+        },
+      )}
+      <button id="test-room-members-let-go-check" onClick={() => checkLetGo?.()}>
+        Check the members let go of
+      </button>
 
       {scenario('tail', 'Tail (single-call history)', 'Tail holds pre-subscribe messages', async () => {
         const [roomId, owner] = await createRoom('tail')

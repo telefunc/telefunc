@@ -1,7 +1,8 @@
 export { testRoom, testRoomMetaReads, testRoomLimits, testRoomAckTimeout, testRoomSmallBuffer, testRoomLongWaits }
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
-import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc } from '../../e2e-utils'
+import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc, sleep } from '../../e2e-utils'
+import { newCDPSession } from '../../../utils'
 
 /** On SSE the server waits out the 60 s reconnectTimeout for a closed tab. */
 const CLOSED_TAB_WAIT = { timeout: 90_000 }
@@ -445,6 +446,56 @@ function testRoom() {
       expect(r.cam[r.cam.length - 1]).toBe(false) // ...and left again, back to unwanted
     },
   )
+  test('room: a member the page keeps works on after the page lets go of the room it joined through and a GC pass runs', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-member-keeps-room')
+    await autoRetry(async () => {
+      expect((await getResult<{ roomId: string }>('#room-result')).roomId).match(/^e2e-member-keeps-room:/)
+    })
+    const cdp = await newCDPSession()
+    await cdp.send('HeapProfiler.collectGarbage')
+    await cdp.detach()
+    // A room the pass collected closes right after it, so it would have closed by now.
+    await sleep(1000)
+    await page.click('#test-room-member-keeps-room-check')
+    try {
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ published: 'ok', received: ['after-gc'], left: null })
+      })
+    } finally {
+      await page.goto('about:blank')
+    }
+  })
+  test('room: a GC pass after the page lets go of a member and its room makes the member leave and closes the room, a member the page keeps after it left or after Room.close() holds no room open, and a join a guard refuses rejects without an unhandled rejection', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-members-let-go')
+    await autoRetry(async () => {
+      expect((await getResult<{ ready: boolean }>('#room-result')).ready).toBe(true)
+    })
+    const cdp = await newCDPSession()
+    await cdp.send('HeapProfiler.collectGarbage')
+    await cdp.detach()
+    await sleep(1000)
+    await page.click('#test-room-members-let-go-check')
+    try {
+      await autoRetry(
+        async () => {
+          expect(await getResult('#room-result')).deep.equal({
+            droppedLeaves: ['disconnected'],
+            droppedOpen: false,
+            leftOpen: false,
+            leaverPublish: 'Participant left the room',
+            closedLeaves: ['closed'],
+            rejected: 'blocked join of Banned',
+            unhandled: 0,
+          })
+        },
+        { timeout: 20_000 },
+      )
+    } finally {
+      await page.goto('about:blank')
+    }
+  })
   testRoomScenario<{ received: string[]; existing: string[]; created: string[]; plain: string[] }>(
     'tail',
     'room: Room.get({ tail }) and Room.getOrCreate({ tail }) hold a between-get-and-subscribe message',
