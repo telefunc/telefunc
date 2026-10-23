@@ -73,8 +73,7 @@ function testRoomScenario<Result>(id: string, name: string, validate: (result: R
   })
 }
 
-/** Reads of a member's meta of more than a page that a write overlaps, on any backend: the Redis
- *  lanes run them too. */
+/** Reads of a member's meta of more than a page that a write overlaps, on any backend: the Redis lanes run them too. */
 function testRoomMetaReads() {
   testRoomScenario<Record<string, string>>(
     'meta-across-write',
