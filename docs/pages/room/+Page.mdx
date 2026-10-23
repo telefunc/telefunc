@@ -61,26 +61,16 @@ Two fields describe a participant:
 
 <Warning>Never authorize on `meta`: `from.meta.role` is whatever that client last set. Authorize on `identity`, checked against your own server-side data.</Warning>
 
-Each join gets a new participant `id`, so the same user has a different `id` in every room and tab, and after rejoining. To recognize a user across memberships, use `identity`.
-
 
 ## Presence
 
-`getParticipants()` returns the members; `onJoin()` and each member's `onLeave()` keep the list fresh, and each member's `onUpdate()` tracks their metadata. Register `onJoin()` before you call `getParticipants()`, so that you miss no join. A member who joins meanwhile shows up in both, so skip one you already listed:
+`room.snapshot()` returns the members, and `room.onChange()` fires whenever someone joins, leaves, or changes their metadata:
 
 ```js
-room.onJoin((member) => addToList(member))
-for (const member of await room.getParticipants()) addToList(member)
-
-function addToList(member) {
-  if (isListed(member.id)) return
-  render(member.id, member.meta)
-  member.onUpdate((meta) => render(member.id, meta))
-  member.onLeave(() => removeFromList(member.id)) // fires at once if the member already left
-}
+room.onChange(() => renderRoster(room.snapshot().participants))
 ```
 
-In a UI framework, use `onChange()` and `snapshot()` instead: `snapshot()` returns an immutable view that keeps the same reference until something changes, as `useSyncExternalStore()` expects:
+In React, the pair plugs into `useSyncExternalStore()`:
 
 ```jsx
 // Environment: client
@@ -94,9 +84,9 @@ function Roster() {
 }
 ```
 
-`me.setMeta({ name: 'Alice', score: 42 })` replaces your metadata, and `me.setAttributes({ score: 42 })` merges it by key (a key set to `undefined` is removed). Every observer sees the change.
+For one event at a time, use `room.onJoin()`, `room.onLeave()` and `room.onParticipantUpdate()` (see <Link href="#room" />).
 
-> Metadata is deleted when its membership ends. Keep state that must outlive a membership in your own database, keyed by `identity`. Send fast-changing state, such as cursors, with `publish()`.
+`me.setMeta({ name: 'Alice', score: 42 })` replaces your metadata, and `me.setAttributes({ score: 42 })` merges it by key (a key set to `undefined` is removed). Every observer sees the change.
 
 
 ## Messages
@@ -110,7 +100,7 @@ await me.publish({ text: 'hello' })
 room.onJoin((member) => {
   const decoder = createDecoder()
   member.subscribe((data) => decoder.push(data))
-  member.onLeave(() => decoder.close()) // a member's listeners are released when it leaves
+  member.onLeave(() => decoder.close())
 })
 ```
 
@@ -153,14 +143,12 @@ me.listen((data, from) => showDm(from.meta.name, data))
 const { seq, timestamp } = await bob.send(aliceId, 'meet me in room 2')
 ```
 
-`send()` resolves once the server queued the message, and is never retried: a message that doesn't arrive is lost. For a reply or a delivery guarantee, pass `{ ack: true }`: it waits for the recipient's handler and resolves with its return value as `response`:
+For a reply, pass `{ ack: true }`: `send()` then resolves with the recipient handler's return value as `response`:
 
 ```js
 const { response } = await bob.send(aliceId, { move: 'e4' }, { ack: true })
 // Alice: me.listen((move) => (rules.check(move) ? 'ok' : 'illegal'))
 ```
-
-> `send()` reaches only a participant in the room. To reach a user who isn't, store the message in your database and deliver it with `Room.send()` in an `onAfterJoin()` guard.
 
 
 ## Moderation
@@ -287,8 +275,6 @@ me.onDemand((track, wanted) => {
 me.publishBinary(keyframe, { track: 'camera', meta: { key: true }, retain: true })
 ```
 
-> A retained message clears when a newer one replaces it, when its publisher leaves, or when the room closes. For state that must outlive every member, publish it from a <Link href="#hidden-participants">hidden participant</Link>.
-
 <Warning>Rooms send binary over the same reliable, ordered connection as text (WebSocket or SSE). That fits data and small-scale audio/video, but not large-scale live video, which needs congestion control and simulcast: pair Rooms with a WebRTC SFU for that. See [telefunc#449](https://github.com/telefunc/telefunc/issues/449).</Warning>
 
 
@@ -328,10 +314,6 @@ room.subscribe((data, info) => { if (!stored.has(info.seq)) render(data) })
 
 Order messages by `info.seq`; `info.timestamp` is for display.
 
-> `onAfterPublish()` also runs for each binary frame, with its bytes as `message`.
-
-> The tail keeps only the latest messages, so your database stays the source of history.
-
 
 ## Switching rooms
 
@@ -344,20 +326,14 @@ current = await nextRoom.join({ meta: { name } })
 
 > A telefunction can return several rooms at once, such as `team` and `team:red`, each with its own members and guards.
 
-> Telefunc doesn't limit how many participants join a room. `count` can't enforce a limit, as concurrent joins read the same value: reserve a place in your database before `join()`, and release it in `onLeave()`.
-
 
 ## When a room closes
 
-A room closes on its own once nothing holds it open: its members hold it, and so does each page a telefunction returned the room to, until that page drops the room or its connection times out. Hidden participants and server-side `Room` objects don't hold it.
-
-Once nothing holds it, it closes after `departureTimeout` (20 seconds by default) if a member had joined, and after `emptyTimeout` (5 minutes) if none had. Set them per room, or for every room with <Link href="/room-config">`config.room`</Link>:
+A room closes on its own once it's no longer used: `departureTimeout` (20 seconds by default) after its last member left, or `emptyTimeout` (5 minutes) if nobody joined it. Set them per room, or for every room with <Link href="/room-config">`config.room`</Link>:
 
 ```js
 await Room.create('match-42', { emptyTimeout: 60_000, departureTimeout: Infinity }) // Infinity: until Room.close()
 ```
-
-It then closes as `Room.close(id)` does, and `onClose()` fires.
 
 
 ## Example: game lobby
@@ -379,8 +355,7 @@ export async function onJoinLobby(lobbyId, name) {
 export async function onReadyUp(lobbyId) {
   const players = await Room.getParticipants(lobbyId)
   if (players.length < 2 || !players.every((p) => p.meta.ready)) return
-  // Claim the start atomically, so that two last ready-ups start one game
-  if (await db.lobbies.claimStart(lobbyId)) await Room.announce(lobbyId, { type: 'start' })
+  if (await db.lobbies.claimStart(lobbyId)) await Room.announce(lobbyId, { type: 'start' }) // once per lobby
 }
 ```
 ```js
@@ -391,7 +366,7 @@ const { room, me } = await onJoinLobby('room-42', 'Alice')
 
 room.onChange(renderRoster)
 room.onAnnounce((e) => { if (e.type === 'start') startGame() })
-room.onLeave(() => void onReadyUp('room-42')) // a leave can leave everyone else ready
+room.onLeave(() => void onReadyUp('room-42'))
 
 onReadyClick(async () => {
   await me.setAttributes({ ready: true })
@@ -403,8 +378,6 @@ onReadyClick(async () => {
 ## Deployment
 
 For multiple server instances, install <Link href="/redis">`@telefunc/redis`</Link> and route each client to one server with <Link href="/stream/scale#sticky-sessions">sticky sessions</Link>, as every channel needs. On <Link href="/stream/cloudflare">Cloudflare</Link>, `telefunc/cloudflare` needs neither.
-
-> A dropped connection keeps its memberships for <Link href="/channel-config">`config.channel.reconnectTimeout`</Link>, so that a brief network blip doesn't show as a leave. Lower it to detect leaving users sooner, or raise it for flaky mobile networks.
 
 
 ## Reference
@@ -432,8 +405,8 @@ Server-side. A client gets a room when a telefunction returns it.
 ```ts
 type RoomOptions = {
   meta?: Record<string, unknown> // Room metadata (default: {})
-  emptyTimeout?: number          // Close this long after nothing holds it, if nobody joined (ms; default: config.room)
-  departureTimeout?: number      // Close this long after nothing holds it, if a member joined (ms; default: config.room)
+  emptyTimeout?: number          // Close this long after it's no longer used, if nobody joined (ms; default: config.room)
+  departureTimeout?: number      // Close this long after the last member left (ms; default: config.room)
 }
 ```
 
@@ -459,10 +432,6 @@ type RoomOptions = {
 | `onChange(cb)` / `snapshot()` | Something changed / an immutable view, for `useSyncExternalStore()`. |
 
 Read-only: `id`, `meta`, `count`, `isEmpty`, `isClosed`.
-
-`info.seq` counts up by one per message; members' `publish()` and `Room.announce()` share one order.
-
-A client that falls too far behind the room's messages is disconnected: its rooms close, and its participants leave with `'disconnected'`. Call the telefunction that returned the room again to rejoin.
 
 ### `LocalParticipant`
 
