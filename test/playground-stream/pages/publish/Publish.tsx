@@ -19,6 +19,7 @@ import {
   onBroadcastSeqWhileQueued,
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
+  onJoinChat,
 } from './Publish.telefunc'
 
 type ShieldState = {
@@ -284,6 +285,35 @@ function Publish() {
         }}
       >
         A listener throws, the others get the message
+      </button>
+
+      <h2>Chat</h2>
+
+      <button
+        id="test-chat"
+        onClick={async () => {
+          setResult('')
+          const room = await onJoinChat()
+          listenedRef.current = room
+          const messages: string[] = []
+          let avatarLoaded = false
+          const loadAvatar = async () => {
+            if (!avatarLoaded) {
+              avatarLoaded = true
+              throw new Error('Could not load the avatar')
+            }
+          }
+          room.subscribe(async (message) => {
+            await loadAvatar()
+            messages.push(message)
+            setResult(JSON.stringify({ messages }))
+          })
+          await new Promise<void>((resolve) => room.onOpen(resolve))
+          await room.publish('hello')
+          await room.publish('how are you?')
+        }}
+      >
+        Join the chat
       </button>
 
       <h2>Seqs</h2>
