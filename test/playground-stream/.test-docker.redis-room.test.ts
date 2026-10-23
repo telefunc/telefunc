@@ -13,7 +13,9 @@ if (setupDockerRun('pnpm test:docker', 3 * 60_000)) {
   testRedisRoomCrossInstance()
   testRedisAcrossServers()
   testRedisInstallAgain()
+  // Before the tests that restart a container: one that starts changes the host's network, which aborts the page's
+  // requests in flight (net::ERR_NETWORK_CHANGED).
+  testRoomMetaReads()
   testRedisOutages()
   testServerCrash()
-  testRoomMetaReads()
 }
