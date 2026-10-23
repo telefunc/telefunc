@@ -8,7 +8,7 @@ const globalObject = getGlobalObject<{ registry: Map<string, string> }>('session
 })
 
 /** `telefuncUrl` with the page's session token, named before its first request so that its concurrent calls and their
- *  channels reach one session. A query parameter, unlike a header, needs no cross-origin allowance. */
+ *  channels reach one session. A query parameter adds no header for a cross-origin server to allow. */
 function getSessionUrl(telefuncUrl: string): string {
   const { registry } = globalObject
   const token = registry.get(telefuncUrl) ?? randomUuid()
