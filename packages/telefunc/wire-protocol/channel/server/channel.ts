@@ -876,28 +876,28 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
       return Promise.resolve()
     }
-    const [first, ...rest] = listeners.list()
+    const callbacks = listeners.list()
     let firstResult: unknown
     try {
-      firstResult = first!(data)
+      firstResult = callbacks[0]!(data)
     } catch (err) {
       if (err instanceof ProtocolViolationError) throw err
       this._sendAckFailure(seq, err)
       return Promise.resolve()
     }
-    return this._sendAckAnswer(seq, firstResult, rest, data)
+    return this._sendAckAnswer(seq, firstResult, callbacks, data)
   }
 
   private async _sendAckAnswer<T>(
     seq: number,
     firstResult: unknown,
-    rest: readonly ((data: T) => unknown)[],
+    callbacks: readonly ((data: T) => unknown)[],
     data: T,
   ): Promise<void> {
     let answer: string
     try {
       let lastResult = await firstResult
-      for (const cb of rest) lastResult = await cb(data)
+      for (let index = 1; index < callbacks.length; index++) lastResult = await callbacks[index]!(data)
       answer = stringify(lastResult)
     } catch (err) {
       this._sendAckFailure(seq, err)
