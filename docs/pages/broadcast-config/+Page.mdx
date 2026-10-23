@@ -28,7 +28,9 @@ type BroadcastTransport = {
 
 > Without a `transport`, Broadcast uses the installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>) or, with none installed, stays in memory and reaches only subscribers on the same server. A configured `transport` takes precedence over both. Assigning another one, for example on hot reload, moves live subscriptions to it, and their `info.seq` then comes from the new transport, which may number lower.
 
-> `send()` and `sendBinary()` return the `{ seq, timestamp }` they assigned, and `onMessage` gets the same pair. Telefunc hands it to <Link href="/channel#broadcast">`Broadcast.subscribe()`</Link> subscribers as `info.seq` and `info.timestamp`, unchanged: it neither reorders nor drops a repeated or lower `seq`. Because `info.seq` is monotonic per key, a key's text and binary messages take their `seq` from one counter that every server shares; with a counter per server, two servers' messages on a key cross numbers.
+> `send()` and `sendBinary()` return the `{ seq, timestamp }` they assigned, and `onMessage` gets the same pair. Telefunc hands it to <Link href="/channel#broadcast">`Broadcast.subscribe()`</Link> subscribers as `info.seq` and `info.timestamp`, unchanged: it neither reorders nor drops a repeated or lower `seq`.
+
+> A key's `seq` strictly increases. A key's text and binary publishes are ordered together for subscribers, so both take their `seq` from one counter that every server shares; with a counter per server, two servers' messages on a key cross numbers. Telefunc accepts gaps, but subscribers read `seq` for ordering and gap detection, so a transport gives consecutive values per key where it can.
 
 > `seq` must be a positive safe integer and `timestamp` a non-negative safe integer such as `Date.now()`; otherwise the `publish()` fails, or `onMessage` throws.
 
