@@ -364,18 +364,18 @@ room.onJoin(watch)
 
 With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
 
-To send frames only while someone watches, use `onDemand()`, which also fires for the viewers already watching when you join:
+To send frames only while someone watches, use `onDemand()`, which also fires, as you call it, for the tracks already watched:
 
 ```js
 // Environment: client
 
-let watched = false
-me.onDemand((track, wanted) => {
-  if (track === 'camera') watched = wanted
-})
+const wanted = new Set()
+me.onDemand((track, on) => (on ? wanted.add(track) : wanted.delete(track))) // null: also wanted by a viewer of every track
 // live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) => {
-  if (watched) me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe })
+  if (wanted.has('camera') || wanted.has(null)) {
+    me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe })
+  }
 })
 ```
 
