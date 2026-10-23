@@ -137,6 +137,23 @@ function testRoomLimits() {
   )
 }
 
+/** Someone with the chat open in a browser of their own: `join` as a guest, `sign-in`, or `watch` unseen. */
+async function openChat(chatId: string, name: string, how: 'join' | 'sign-in' | 'watch') {
+  const context = await page.context().browser()!.newContext()
+  const tab = await context.newPage()
+  await navigate(`${getServerUrl()}/room?chat=${encodeURIComponent(chatId)}&as=${name}`, undefined, tab)
+  await tab.click(`#chat-${how}`)
+  await tab.waitForSelector('#chat-status')
+  const sees = async () => ({
+    status: await tab.textContent('#chat-status'),
+    members: await tab.locator('#chat-members li').allTextContents(),
+  })
+  /** The chat's activity lines about `who`: a test's cut drops every page's connection for a moment. */
+  const activity = async (who: string) =>
+    (await tab.locator('#chat-activity li').allTextContents()).filter((line) => line.startsWith(who))
+  return { context, tab, sees, activity }
+}
+
 function testRoom() {
   testRoomScenario<ChatResult>('chat', 'room: join, publish with sender identity, setMeta, leave', (result) => {
     expect(result.events).deep.equal(['join:Alice', 'leave:Alice'])
@@ -635,6 +652,92 @@ function testRoom() {
         closerConnected: null,
       })
     }, CLOSED_TAB_WAIT)
+  })
+  test("room: in a chat, everyone sees a member whose tab went offline as reconnecting, in the list, the activity, Who's online and that member's profile, and as back once it is; the member sees itself reconnecting", async () => {
+    const chatId = `e2e-chat:${crypto.randomUUID()}`
+    const alice = await openChat(chatId, 'Alice', 'join')
+    const bob = await openChat(chatId, 'Bob', 'join')
+    try {
+      await autoRetry(async () =>
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob'] }),
+      )
+      await bob.context.setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob (reconnecting…)'] })
+        expect(await alice.activity('Bob')).deep.equal(['Bob lost connection'])
+        expect((await bob.sees()).status).toBe('Reconnecting…')
+      })
+      await alice.tab.click('#chat-members button:has-text("Bob")')
+      await alice.tab.click('#chat-who')
+      await autoRetry(async () => {
+        expect(await alice.tab.textContent('#chat-profile')).toBe('Bob: reconnecting…')
+        expect(await alice.tab.textContent('#chat-online')).toBe('Alice, Bob (away)')
+      })
+      await bob.context.setOffline(false)
+      await autoRetry(async () => {
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob'] })
+        expect(await alice.activity('Bob')).deep.equal(['Bob lost connection', 'Bob is connected again'])
+        expect(await alice.tab.textContent('#chat-profile')).toBe('Bob: online')
+        expect((await bob.sees()).status).toBe('Connected')
+      })
+      await alice.tab.click('#chat-who')
+      await autoRetry(async () => expect(await alice.tab.textContent('#chat-online')).toBe('Alice, Bob'))
+    } finally {
+      await alice.context.close()
+      await bob.context.close()
+    }
+  })
+  test("room: in a chat, the server announces when a signed-in member's tab goes offline and comes back, and someone watching unseen drops without anyone seeing it", async () => {
+    const chatId = `e2e-chat:${crypto.randomUUID()}`
+    const alice = await openChat(chatId, 'Alice', 'join')
+    const carol = await openChat(chatId, 'Carol', 'sign-in')
+    const viewer = await openChat(chatId, 'Dan', 'watch')
+    try {
+      const aliceSees = async () => ({
+        count: await alice.tab.textContent('#chat-count'),
+        members: (await alice.sees()).members,
+        carol: (await alice.activity('Carol')).sort(),
+        viewer: [...(await alice.activity('Viewer')), ...(await alice.activity('Dan'))],
+      })
+      await autoRetry(async () =>
+        expect(await aliceSees()).deep.equal({
+          count: '2 in the chat',
+          members: ['Alice (you)', 'Carol'],
+          carol: [],
+          viewer: [],
+        }),
+      )
+      await carol.context.setOffline(true)
+      await viewer.context.setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        expect(await aliceSees()).deep.equal({
+          count: '2 in the chat',
+          members: ['Alice (you)', 'Carol (reconnecting…)'],
+          carol: ['Carol lost connection', 'Carol went away'],
+          viewer: [],
+        })
+        expect((await carol.sees()).status).toBe('Reconnecting…')
+        expect((await viewer.sees()).status).toBe('Reconnecting…')
+      })
+      await carol.context.setOffline(false)
+      await viewer.context.setOffline(false)
+      await autoRetry(async () => {
+        expect(await aliceSees()).deep.equal({
+          count: '2 in the chat',
+          members: ['Alice (you)', 'Carol'],
+          carol: ['Carol is back', 'Carol is connected again', 'Carol lost connection', 'Carol went away'],
+          viewer: [],
+        })
+        expect((await carol.sees()).status).toBe('Connected')
+        expect((await viewer.sees()).status).toBe('Connected')
+      })
+    } finally {
+      await alice.context.close()
+      await carol.context.close()
+      await viewer.context.close()
+    }
   })
   test('room: a join whose tab closes while its guard waits leaves no member behind', async () => {
     await navigate(`${getServerUrl()}/room`)
