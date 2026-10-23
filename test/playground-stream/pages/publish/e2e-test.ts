@@ -1,6 +1,6 @@
 export { testPublish, testPublishSmallBuffer, testPublishFailingBackend }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import {
   navigate,
   getResult,
@@ -249,6 +249,26 @@ function testPublish(isDev: boolean, inDocker = false) {
       // `seq` is monotonic per key.
       expect(second!.seq).greaterThan(first!.seq)
     })
+  })
+
+  test("broadcast: a Broadcast.subscribe() listener that throws or rejects is reported, and the key's other subscribers still get the message", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-throwing-listener')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: string[]; receiptKey: boolean }>('#publish-result')
+      expect(result).deep.equal({ received: ['static:hello', 'channel:hello'], receiptKey: true })
+    })
+    for (const error of ['broadcast-listener-throws', 'broadcast-listener-rejects']) {
+      expectLog(error, {
+        // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
+        filter: (log) =>
+          inDocker
+            ? log.logSource === 'stdout' &&
+              log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+            : log.logSource === 'stderr',
+      })
+    }
   })
 
   test("broadcast: a key's seq goes on growing after its subscribers leave and another key publishes, and runs on by one while it has a subscriber", async () => {

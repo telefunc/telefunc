@@ -25,6 +25,7 @@ export {
   onBroadcastSeqAcrossSubscribers,
   onBroadcastJoinWhileQueued,
   onBroadcastManyKeys,
+  onBroadcastThrowingListener,
 }
 
 import { Buffer } from 'node:buffer'
@@ -469,6 +470,31 @@ async function onBroadcastManyKeys(count: number, subscribed: boolean) {
     published.push(Promise.resolve(Broadcast.publish(key, i)).finally(() => off?.()))
   }
   await Promise.all(published)
+}
+
+/** A key's static listeners, the first throwing and the second rejecting, then one that records, then a `BroadcastChannel`'s. */
+async function onBroadcastThrowingListener() {
+  const key = `room:throwing:${crypto.randomUUID()}`
+  const received: string[] = []
+  const unsubscribe = [
+    Broadcast.subscribe(key, () => {
+      throw new Error('broadcast-listener-throws')
+    }),
+    Broadcast.subscribe(key, async () => {
+      throw new Error('broadcast-listener-rejects')
+    }),
+    Broadcast.subscribe<string>(key, (message) => {
+      received.push(`static:${message}`)
+    }),
+  ]
+  const room = new BroadcastChannel<string>({ key })
+  room.subscribe((message) => {
+    received.push(`channel:${message}`)
+  })
+  const receipt = await Broadcast.publish(key, 'hello')
+  for (const off of unsubscribe) off()
+  await room.close()
+  return { received, receiptKey: receipt.key === key }
 }
 
 /** On the server and on the page, the first of two subscribers unsubscribes itself on its first message. */
