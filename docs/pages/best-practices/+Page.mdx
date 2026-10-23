@@ -1,0 +1,72 @@
+import { Link, Warning } from '@brillout/docpress'
+
+Telefunc unlocks a full-stack development pattern that allows you to colocate (and co-develop) highly-tailored server functions with client code.
+
+Telefunctions are meant to be a seamless adapter between frontend and backend. They enable rapid and performant full-stack development when used as designed.
+
+## Event-based architecture
+
+Telefunction calls should always be triggered by some kind of event — typically a user action like a button click. Coupling telefunctions to individual interactions or pieces of UI allows you to tailor them to specific use-cases, keeping them slim, secure, and performant.
+
+### Colocation
+
+Colocating telefunctions with the component(s) that call them makes it simple to jump (or share types) between environments, while staying within the call scope.
+
+Telefunctions can change as fast as your UI, so deploying frontend and backend at the same time also radically simplifies versioning.
+
+### Naming convention
+
+The naming convention (e.g., `onSomeEvent`) is meant to reinforce that telefunctions are event handlers. It also helps enforce coupling and prevent scope creep.
+
+> By default, telefunction versioning is typically equivalent to project versioning. You will need a custom solution if you choose to use Telefunc with a monorepo.
+
+You can opt-out at any time by setting <Link href="/disableNamingConvention"><code>config.disableNamingConvention</code></Link>, but we recommend having a clear reason for doing so.
+
+### `*.telefunc.js` scope
+
+`*.telefunc.js` files are a minimal adapter between the frontend and backend. They should only export functions.
+
+Non-function exports increase the chance of scope creep:
+
+```ts
+// NewsletterForm.telefunc.ts
+// Environment: server
+ 
+// ✅ Exporting a function
+export async function onNewSubscription(email: string) {
+  // ...
+}
+ 
+// ❌ Non-function export
+export const isValidEmail = /^\S+@\S+\.\S+$/
+```
+
+## Control flow
+
+Telefunction calls should be invisible: the client calls (remote) logic, and gets back a `Promise` that either:
+- Resolves to the telefunction's return value, or
+- Is rejected with `TelefunctionCallAbort`.
+
+#### Telefunction guards
+
+<Warning>
+  Telefunctions are public. Never take it for granted that calls originate from authenticated clients, or are properly formed.
+</Warning>
+
+Protect telefunctions by implementing reusable guard functions with `getContext()` and `throw Abort()`.
+
+Telefunc's `shield()` enforces argument types at runtime, and enables type inference and intellisense. It is generated automatically if you're using TypeScript, but must be added manually to `.js` files.
+
+#### Expected errors
+
+Handle expected errors (e.g., `"Email exists"`) by early-returning an error code and/or message to the display to the user. For more info, see <Link href="/error-handling" />.
+
+## Multiple clients
+
+If your telefunctions are used by multiple clients, we recommend deploying one Telefunc server per client. This helps keep telefunctions slim, so you can get the most out of Telefunc.
+
+> If clients need to share a resources, it _can_ make sense to make (slightly) more generic telefunctions.
+
+### Next
+
+<Link href="/initial-data" />

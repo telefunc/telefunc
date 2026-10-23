@@ -9,8 +9,6 @@ import iconDeno from './icons/runtime/deno.svg'
 import iconCloudflare from './icons/runtime/cloudflare.svg'
 import { categories, headings, headingsDetached } from './headings'
 import { PROJECT_VERSION } from './utils/PROJECT_VERSION.js'
-import { TopNavigation } from './TopNavigation'
-import React from 'react'
 
 const config: Config = {
   name: 'Telefunc',
@@ -35,7 +33,6 @@ const config: Config = {
 
   umamiId: 'd03d0873-19dc-42c4-a250-cf8500171a9e',
 
-  // Globally-synced runtime toggle (used by /Telefunc).
   choices: {
     runtime: {
       choices: [
@@ -47,9 +44,12 @@ const config: Config = {
       ],
       default: 'Node',
     },
+    uiFrameworks: {
+      choices: ['React', 'Vue', 'Solid', 'Svelte'],
+      default: 'React',
+    },
   },
 
-  topNavigation: <TopNavigation />,
   navMaxWidth: 950 + 20 * 2,
   navLogoSize: 36,
   navLogoStyle: {

@@ -1,0 +1,61 @@
+import { Link } from '@brillout/docpress'
+
+## 1. Install
+
+```shell
+npm install telefunc
+```
+
+## 2. Add Telefunc middleware
+
+The Telefunc middleware intercepts and executes telefunction calls. This is also your opportunity to set any data you'd like available in the Telefunc request context. For more info, see <Link href="/getContext" />.
+
+See the setup guide for your stack:
+
+- <Link href="/Telefunc">Hono, Express, Fastify, Bun, Deno, Cloudflare, etc.</Link>
+- <Link href="/next">Next.js</Link>
+- <Link href="/svelte-kit">SvelteKit</Link>
+- <Link href="/vike">Vike</Link>
+- <Link href="/nuxt">Nuxt</Link>
+- <Link href="/react-router">React Router</Link>
+- <Link href="/react-native">React Native</Link>
+- <Link href="/bundler">Custom bundler</Link>
+
+For example, with [Hono](https://hono.dev):
+
+```ts
+// server.ts
+// Environment: server
+
+import { Hono } from 'hono'
+import { serve } from '@hono/node-server'
+import { Telefunc } from 'telefunc/node'
+
+const app = new Hono()
+const telefunc = new Telefunc()
+
+app.all('/_telefunc', async (c) => {
+  const response = await telefunc.serve({
+    request: c.req.raw,
+    context: {
+      // You can add any arbitrary contextual information here
+    },
+  })
+  return response ?? c.notFound()
+})
+
+const server = serve({ fetch: app.fetch, port: 3000 })
+
+// Enable WebSocket support for streams
+telefunc.installWebSocket(server)
+```
+
+### Next
+
+<Link href="/start#my-first-telefunction" />
+
+## See also
+
+- <Link href="/getContext" />
+- <Link href="/Telefunc" />
+- <Link href="/serve" />
