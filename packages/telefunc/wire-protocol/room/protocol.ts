@@ -39,6 +39,8 @@ type MemberSnapshot = {
   metaSeq: number
   identity?: string | null
   hidden?: boolean
+  /** The page holding the member can't be reached, and the room waits for it. */
+  disconnected?: true
 }
 
 /** Scalars only: the roster streams once the stub's peer attaches, so serializing a room is O(1) in members. */
@@ -95,7 +97,7 @@ type RoomMetaUpdate =
 type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
 /** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the
  *  client. */
-type SenderStamp = { fromMeta: ParticipantMeta; fromMetaSeq: number; fromIdentity?: string }
+type SenderStamp = { fromMeta: ParticipantMeta; fromMetaSeq: number; fromIdentity?: string; fromDisconnected?: true }
 /** A member's message as a client gets it: stamped only while the client can't name the sender yet. */
 type RoomDataEvent = { __r: 'data'; from: string; data: unknown } & Partial<SenderStamp>
 /** What a client sends upward to publish. Its instance verifies membership and stamps `fromMeta`. */
@@ -130,6 +132,7 @@ type RoomDmEnvelope = {
   fromMeta?: ParticipantMeta | null
   fromMetaSeq?: number
   fromIdentity?: string
+  fromDisconnected?: true
   data: unknown
   ackId?: string
 }
@@ -137,8 +140,12 @@ type RoomDmEnvelope = {
 /** The recipient handler's return, or its failure. */
 type DmReply = { ok: true; result: unknown } | RoomFailure
 
-/** A member's meta at `seq`, whole, or as the merge at `seq` changed it: a key it removed as `undefined`. */
-type MemberMetaUpdate = { seq: number; meta: ParticipantMeta } | { seq: number; attrs: ParticipantMeta }
+/** A member's meta and connection at `seq`, whole, or as the write at `seq` changed them: a merge, with a key it
+ *  removed as `undefined`, or the connection of the page holding the member. */
+type MemberMetaUpdate =
+  | { seq: number; meta: ParticipantMeta; disconnected?: true }
+  | { seq: number; attrs: ParticipantMeta }
+  | { seq: number; connected: boolean }
 
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }

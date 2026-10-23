@@ -601,6 +601,41 @@ function testRoom() {
       ])
     }, CLOSED_TAB_WAIT)
   })
+  test("room: another page's member shows when its page drops and comes back, and leaves with 'disconnected' once its page never returns", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-connection')
+    const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
+    const context = await page.context().browser()!.newContext()
+    const other = await context.newPage()
+    await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+    await other.click('#test-room-join-only')
+    await autoRetry(async () => expect(await other.textContent('#room-result')).toBe('"joined"'))
+    const seen = async () => {
+      const { events, closerConnected } = await getResult<{ events: string[]; closerConnected: boolean | null }>(
+        '#room-result',
+      )
+      return { events, closerConnected }
+    }
+    await autoRetry(async () => expect(await seen()).deep.equal({ events: [], closerConnected: true }))
+    await context.setOffline(true)
+    await cutWire()
+    await autoRetry(async () =>
+      expect(await seen()).deep.equal({ events: ['disconnect:false'], closerConnected: false }),
+    )
+    await context.setOffline(false)
+    await autoRetry(async () =>
+      expect(await seen()).deep.equal({ events: ['disconnect:false', 'reconnect:true'], closerConnected: true }),
+    )
+    await context.setOffline(true)
+    await cutWire()
+    await context.close()
+    await autoRetry(async () => {
+      expect(await seen()).deep.equal({
+        events: ['disconnect:false', 'reconnect:true', 'disconnect:false', 'leave:disconnected'],
+        closerConnected: null,
+      })
+    }, CLOSED_TAB_WAIT)
+  })
   test('room: a join whose tab closes while its guard waits leaves no member behind', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-join-races')

@@ -79,6 +79,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServe
       identity: entry.identity,
     }
     if (entry.hidden) metadata.hidden = true
+    if (!entry.meta.connected) metadata.disconnected = true
     return {
       metadata,
       close() {},

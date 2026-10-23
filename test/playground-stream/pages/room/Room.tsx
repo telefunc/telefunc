@@ -660,6 +660,28 @@ function Room() {
         },
       )}
 
+      {scenario('connection', 'Connection', "Watch another tab's member drop, come back and close", async () => {
+        const [roomId, room] = await createRoom('connection')
+        await room.join({ meta: { name: 'Watcher' } })
+        const events: string[] = []
+        room.onJoin((member) => {
+          if (member.meta.name !== 'Closer') return
+          member.onDisconnect(() => events.push(`disconnect:${member.isConnected}`))
+          member.onReconnect(() => events.push(`reconnect:${member.isConnected}`))
+          member.onLeave((cause) => events.push(`leave:${cause.type}`))
+        })
+        const closerConnected = () =>
+          room.snapshot().participants.find((member) => member.meta.name === 'Closer')?.isConnected ?? null
+        // The test joins `Closer` from another tab, takes that tab offline and back, then offline and closes it.
+        await pollUntil(
+          () => ({
+            result: { roomId, events, closerConnected: closerConnected() },
+            done: events.includes('leave:disconnected'),
+          }),
+          2 * CLOSED_TAB_POLLS,
+        )
+      })}
+
       {scenario('join-only', null, 'Join the room named in the URL', async () => {
         const roomId = new URLSearchParams(location.search).get('roomId')!
         const room = await onGetRoom(roomId)

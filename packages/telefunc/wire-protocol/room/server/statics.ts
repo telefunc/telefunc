@@ -368,6 +368,7 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
       identity: member.identity ?? null,
       meta: member.meta,
       joinedAt: member.joinedAt,
+      isConnected: member.disconnected !== true,
     }))
 }
 

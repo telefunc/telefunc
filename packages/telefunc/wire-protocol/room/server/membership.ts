@@ -458,6 +458,7 @@ function memberSnapshot(id: string, record: RoomMemberRecord, meta: ParticipantM
     identity: record.identity ?? null,
   }
   if (record.hidden) snapshot.hidden = true
+  if (record.disconnected) snapshot.disconnected = true
   return snapshot
 }
 

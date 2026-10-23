@@ -557,6 +557,8 @@ class RoomParticipantStubChannel extends RoomRequestChannel {
       void this.close({ timeout: reconnectWindow() }).catch(() => {})
     })
 
+    this.onDisconnect(() => participant._setHolderConnected(false))
+    this.onReconnect(() => participant._setHolderConnected(true))
     this.onClose(() => {
       unlistenMeta()
       unlistenDemand()

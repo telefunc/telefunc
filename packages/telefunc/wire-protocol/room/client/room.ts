@@ -140,6 +140,12 @@ class ClientRoom extends RoomStateView implements Room {
     stub._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
     // Wire death; a server `Room.close()` arrives before it, as the `closed` event.
     stub.onClose(() => this._applyClosed('disconnected'))
+    stub.onDisconnect(() => {
+      for (const local of this._localParticipants.values()) local._onDisconnected()
+    })
+    stub.onReconnect(() => {
+      for (const local of this._localParticipants.values()) local._onReconnected()
+    })
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving
     // the original rejection for each later getter.
     void this._roster.promise.catch(() => {})
@@ -393,6 +399,11 @@ class ClientRoom extends RoomStateView implements Room {
     this._model.stopRecordingMembership()
   }
 
+  /** @internal */
+  get _isConnected(): boolean {
+    return this._stub.isConnected
+  }
+
   /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
   _acceptParticipantMeta(id: string, accepted: MemberMetaUpdate): void {
     this._model.applyParticipantMeta(id, accepted)
@@ -609,6 +620,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
     this._room = clientRoom
   }
 
+  get isConnected(): boolean {
+    return this._room._isConnected
+  }
+
   protected override _resolveSender(id: string): Sender | null {
     return this._room._getRemote(id)
   }
@@ -689,6 +704,12 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       }
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
+    channel.onDisconnect(() => this._onDisconnected())
+    channel.onReconnect(() => this._onReconnected())
+  }
+
+  get isConnected(): boolean {
+    return this._channel.isConnected
   }
 
   /** Its own writes and the room's `p-meta` both land here. */
