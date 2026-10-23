@@ -69,7 +69,12 @@ function testRoomScenario<Result>(id: string, name: string, validate: (result: R
   test(name, async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click(`#test-room-${id}`)
-    await autoRetry(async () => validate(await getResult<Result>('#room-result')))
+    try {
+      await autoRetry(async () => validate(await getResult<Result>('#room-result')))
+    } finally {
+      // The page leaves with its connection, so a later test that kills its server meets no page errors.
+      await page.goto('about:blank')
+    }
   })
 }
 
