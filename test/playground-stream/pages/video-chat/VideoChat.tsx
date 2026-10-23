@@ -1,6 +1,7 @@
 export { VideoChat }
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import type { Room, LocalParticipant, RemoteParticipant } from 'telefunc/client'
 import { onJoinRoom } from './VideoChat.telefunc'
 
 declare const MediaStreamTrackProcessor: {
@@ -22,31 +23,38 @@ function Participant({ name }: { name: string }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const remoteRef = useRef<HTMLCanvasElement>(null)
   const cleanupRef = useRef<(() => void) | null>(null)
+  // Held for the page's life: a room dropped while `me` is kept gets closed by the GC.
+  const roomRef = useRef<Room | null>(null)
+  const meRef = useRef<LocalParticipant | null>(null)
 
   const join = useCallback(async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, frameRate: 15 } })
     videoRef.current!.srcObject = stream
     videoRef.current!.play()
 
-    const channel = await onJoinRoom('demo')
+    const room = (roomRef.current = await onJoinRoom('demo'))
+    const me = (meRef.current = await room.join({ meta: { name } }))
 
-    // Receive: decode VP8 → draw to canvas (with 300ms jitter buffer)
-    const decoder = createDecoder(remoteRef.current!)
-    const jitter = createJitterBuffer(decoder, 300, 15)
-    channel.subscribeBinary(jitter.push)
+    // Receive: one decoder per other member; the canvas shows the first of them
+    const remote = createRemoteView(remoteRef.current!)
+    const watch = (member: RemoteParticipant) => {
+      if (member.id !== me.id) remote.add(member)
+    }
+    const unwatch = room.onJoin(watch)
+    for (const member of await room.getParticipants()) watch(member)
 
     // Send: camera → VP8 encode → publish
-    const stop = captureAndPublish(stream, channel)
+    const stop = captureAndPublish(stream, me)
 
     cleanupRef.current = () => {
       stop()
-      jitter.stop()
-      decoder.close()
+      unwatch()
+      remote.close()
       stream.getTracks().forEach((t) => t.stop())
-      channel.close()
+      void me.leave()
     }
     setJoined(true)
-  }, [])
+  }, [name])
 
   useEffect(() => () => cleanupRef.current?.(), [])
 
@@ -97,11 +105,44 @@ function Participant({ name }: { name: string }) {
 
 // --- Helpers (could be a library) ---
 
-function createDecoder(canvas: HTMLCanvasElement) {
+function createRemoteView(canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext('2d')!
+  const decoders = new Map<
+    string,
+    { decoder: VideoDecoder; jitter: ReturnType<typeof createJitterBuffer>; unsubscribe: () => void }
+  >()
+  const isShown = (id: string) => decoders.keys().next().value === id
+  const remove = (id: string) => {
+    const entry = decoders.get(id)
+    if (!entry) return
+    decoders.delete(id)
+    entry.unsubscribe()
+    entry.jitter.stop()
+    entry.decoder.close()
+  }
+  return {
+    add(member: RemoteParticipant) {
+      if (decoders.has(member.id)) return
+      const decoder = createDecoder((frame) => {
+        if (isShown(member.id)) ctx.drawImage(frame, 0, 0, 320, 240)
+      })
+      const jitter = createJitterBuffer(decoder, 300, 15)
+      const unsubscribe = member.subscribeBinary((frame, info) => jitter.push(frame, info.meta?.isKeyframe === true), {
+        track: 'camera',
+      })
+      decoders.set(member.id, { decoder, jitter, unsubscribe })
+      member.onLeave(() => remove(member.id))
+    },
+    close() {
+      for (const id of [...decoders.keys()]) remove(id)
+    },
+  }
+}
+
+function createDecoder(draw: (frame: VideoFrame) => void) {
   const decoder = new VideoDecoder({
     output(frame) {
-      ctx.drawImage(frame, 0, 0, 320, 240)
+      draw(frame)
       frame.close()
     },
     error(err) {
@@ -113,16 +154,16 @@ function createDecoder(canvas: HTMLCanvasElement) {
 }
 
 function createJitterBuffer(decoder: VideoDecoder, bufferMs: number, fps: number) {
-  const queue: Uint8Array[] = []
+  const queue: Array<{ data: Uint8Array; isKeyframe: boolean }> = []
   let timer: ReturnType<typeof setInterval> | null = null
   let started = false
   const drain = () => {
     const f = queue.shift()
-    if (f) decodeFrame(decoder, f)
+    if (f) decoder.decode(new EncodedVideoChunk({ type: f.isKeyframe ? 'key' : 'delta', timestamp: 0, data: f.data }))
   }
   return {
-    push(data: Uint8Array) {
-      queue.push(data)
+    push(data: Uint8Array, isKeyframe: boolean) {
+      queue.push({ data, isKeyframe })
       if (!started) {
         started = true
         setTimeout(() => {
@@ -136,17 +177,14 @@ function createJitterBuffer(decoder: VideoDecoder, bufferMs: number, fps: number
   }
 }
 
-function decodeFrame(decoder: VideoDecoder, data: Uint8Array) {
-  decoder.decode(new EncodedVideoChunk({ type: data[0] === 1 ? 'key' : 'delta', timestamp: 0, data: data.subarray(1) }))
-}
-
-function captureAndPublish(stream: MediaStream, channel: { publishBinary(data: Uint8Array): any }) {
+function captureAndPublish(stream: MediaStream, me: LocalParticipant) {
   const encoder = new VideoEncoder({
     output(chunk) {
-      const buf = new Uint8Array(1 + chunk.byteLength)
-      buf[0] = chunk.type === 'key' ? 1 : 0
-      chunk.copyTo(buf.subarray(1))
-      channel.publishBinary(buf)
+      const frame = new Uint8Array(chunk.byteLength)
+      chunk.copyTo(frame)
+      const isKeyframe = chunk.type === 'key'
+      // Live video: not awaited, or each frame waits a round trip for the previous one
+      void me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe })
     },
     error(err) {
       console.error('encode error:', err)
