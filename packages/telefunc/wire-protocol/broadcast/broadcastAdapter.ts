@@ -67,10 +67,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   private readonly binarySubscriptions = new Map<string, Set<BroadcastBinaryOnMessage>>()
   private readonly transportUnsubs = new Map<string, () => void>()
   private readonly transportBinaryUnsubs = new Map<string, () => void>()
-  /** Per-key seq counter for in-memory mode, while the key has a subscriber or a queued publish. */
+  /** Per-key seq counter for in-memory mode, while the key has a subscriber. */
   private readonly keySeqs = new Map<string, number>()
-  /** Per key, its queued publishes not yet delivered. */
-  private readonly keyQueued = new Map<string, number>()
   /** The highest seq issued on any key: a key without a counter goes on above it. */
   private highestSeq = 0
   /** In-memory publishes waiting for the ones before them, in publish order. */
@@ -166,35 +164,24 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     key: string,
     data: T,
   ): BroadcastPublishResult | Promise<BroadcastPublishResult> {
-    const seq = (this.keySeqs.get(key) ?? this.highestSeq) + 1
-    if (seq > this.highestSeq) this.highestSeq = seq
     const timestamp = Date.now()
     // A publish from a listener reaches subscribers after the message it answers; one past the burst, after the turn.
     if (this.delivering || this.queued.length > 0 || this.deliveredInBurst >= IN_MEMORY_DELIVERY_BURST) {
-      // A subscriber that comes before it's delivered gets it: the key's next seq follows it.
-      this.keySeqs.set(key, seq)
-      this.keyQueued.set(key, (this.keyQueued.get(key) ?? 0) + 1)
       // The caller may reuse or transfer its buffer once the publish returns.
       const queuedData = data instanceof Uint8Array ? (new Uint8Array(data) as T) : data
       return new Promise((resolve, reject) => {
         this.queued.push(() => {
           try {
-            resolve(this._deliverInMemory(subs, key, queuedData, seq, timestamp))
+            resolve(this._deliverInMemory(subs, key, queuedData, timestamp))
           } catch (err) {
             reject(err)
-          } finally {
-            const queued = this.keyQueued.get(key)! - 1
-            if (queued > 0) this.keyQueued.set(key, queued)
-            else this.keyQueued.delete(key)
-            this._releaseSeq(key)
           }
         })
       })
     }
-    if (this.subscriptions.has(key) || this.binarySubscriptions.has(key)) this.keySeqs.set(key, seq)
     this.delivering = true
     try {
-      return this._deliverInMemory(subs, key, data, seq, timestamp)
+      return this._deliverInMemory(subs, key, data, timestamp)
     } finally {
       this.delivering = false
       if (this.queued.length > 0) this._drainQueued()
@@ -205,9 +192,11 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
     data: T,
-    seq: number,
     timestamp: number,
   ): BroadcastPublishResult {
+    const seq = (this.keySeqs.get(key) ?? this.highestSeq) + 1
+    if (seq > this.highestSeq) this.highestSeq = seq
+    if (this.subscriptions.has(key) || this.binarySubscriptions.has(key)) this.keySeqs.set(key, seq)
     if (++this.deliveredInBurst === IN_MEMORY_DELIVERY_BURST / 2) {
       afterEventLoopTurn(() => {
         this.deliveredInBurst = 0
@@ -249,7 +238,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
   }
 
   private _releaseSeq(key: string): void {
-    if (!this.subscriptions.has(key) && !this.binarySubscriptions.has(key) && !this.keyQueued.has(key)) {
+    if (!this.subscriptions.has(key) && !this.binarySubscriptions.has(key)) {
       this.keySeqs.delete(key)
     }
   }
