@@ -56,7 +56,7 @@ update()
 room.onChange(update)
 ```
 
-`room.onChange()` fires whenever someone joins, leaves, or changes their `meta`, and `room.snapshot()` returns the room as it is now.
+`room.onChange()` fires whenever someone joins, leaves, changes their `meta`, or loses and regains their connection, and `room.snapshot()` returns the room as it is now.
 
 In React:
 
@@ -71,7 +71,15 @@ function Members({ room }) {
 }
 ```
 
-To react to one event, use `room.onJoin()`, `room.onLeave()` and `room.onParticipantUpdate()`.
+A participant whose page lost its connection stays in the room while it reconnects, with `isConnected: false`:
+
+```jsx
+// Environment: client
+
+participants.map((p) => <Avatar key={p.id} {...p.meta} status={p.isConnected ? null : 'reconnecting…'} />)
+```
+
+To react to one event, use `room.onJoin()`, `room.onLeave()` and `room.onParticipantUpdate()`, or a participant's `onDisconnect()` and `onReconnect()`.
 
 Every listener (`onChange()`, `onJoin()`, `subscribe()`, `listen()`, …) returns a function that removes it, for example in a React effect's cleanup:
 
@@ -526,7 +534,7 @@ Server-side.
 |---|---|
 | `join({ meta?, selfDelivery? }?)` | Join; returns your participant. |
 | `join({ meta?, identity?, hidden? })` | Server-side: join with a user id, or as a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>. |
-| `snapshot()` / `onChange(cb)` | The room as it is now, `{ id, meta, count, isClosed, participants }` with each participant `{ id, identity, meta, joinedAt }` / called on every change. |
+| `snapshot()` / `onChange(cb)` | The room as it is now, `{ id, meta, count, isClosed, participants }` with each participant `{ id, identity, meta, joinedAt, isConnected }` / called on every change. |
 | `getParticipants()` / `getParticipant(id)` | The participants / one participant. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` / `onParticipantUpdate(cb)` | Someone joined / left / changed their `meta`. |
@@ -547,8 +555,9 @@ Properties: `id`, `meta`, `count`.
 | `setMeta(meta)` / `setAttributes(attributes)` | Replace / update your `meta`. |
 | `onDemand(cb)` | Whether anyone watches a track of yours. |
 | `leave()` / `onLeave(cb)` | Leave / you left, with `cause.type`: `'left'`, `'removed'`, `'closed'`, or `'disconnected'`. |
+| `onDisconnect(cb)` / `onReconnect(cb)` | Your connection to the room dropped / is back. |
 
-Properties: `id`, `meta`, `identity`.
+Properties: `id`, `meta`, `identity`, `isConnected`.
 
 ### Other participants
 
@@ -556,8 +565,9 @@ Properties: `id`, `meta`, `identity`.
 |---|---|
 | `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | This participant's messages / binary frames: `cb(message, info)`. |
 | `onUpdate(cb)` / `onLeave(cb)` | This participant changed their `meta` / left. |
+| `onDisconnect(cb)` / `onReconnect(cb)` | This participant's connection dropped / is back. |
 
-Properties: `id`, `meta`, `identity`.
+Properties: `id`, `meta`, `identity`, `isConnected`.
 
 ### `Room.guard()` hooks
 
