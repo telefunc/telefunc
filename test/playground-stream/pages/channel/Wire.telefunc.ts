@@ -46,7 +46,7 @@ async function onWireResume(count: number) {
  * `count` numbered messages the page sends, or the server sends at server action wireOverrun_<id>, without awaiting them;
  * the server drops the page's connections right after its own.
  *
- * cleanupState: wireOverrun_<id> = the server's tally of what the page sent; wireOverrun_<id>_onClose = its onClose error's name.
+ * cleanupState: wireOverrun_<id> = the server's tally of what the page sent; wireOverrun_<id>_onOpen = 'true' once it opens; wireOverrun_<id>_onClose = its onClose error's name.
  */
 async function onWireOverrun(count: number) {
   const ch = new Channel<(message: string) => void, (message: string) => void>()
@@ -55,6 +55,9 @@ async function onWireOverrun(count: number) {
     cleanupState[`wireOverrun_${ch.id}`] = JSON.stringify(tally.state)
   }
   report()
+  ch.onOpen(() => {
+    cleanupState[`wireOverrun_${ch.id}_onOpen`] = 'true'
+  })
   ch.onClose((err) => {
     cleanupState[`wireOverrun_${ch.id}_onClose`] = err ? err.name : 'none'
   })
