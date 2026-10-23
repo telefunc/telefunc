@@ -90,6 +90,19 @@ type RosterStream = {
   applied: Promise<void>
 }
 
+/** The page's server-joined members, each held through its own channel, by id. */
+const standaloneMembers = new Map<string, ClientStandaloneParticipant>()
+/** The page's room views, each showing a member the page holds as the page's own connection to it. */
+const roomViews = new Set<WeakRef<ClientRoom>>()
+
+function standaloneConnectionChanged(id: string, wasConnected: boolean | null): void {
+  for (const view of roomViews) {
+    const room = view.deref()
+    if (room) room._heldConnectionChanged(id, wasConnected)
+    else roomViews.delete(view)
+  }
+}
+
 /** A server room through one Broadcast stub: its frames carry events and data, its acked messages requests. */
 class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -124,6 +137,7 @@ class ClientRoom extends RoomStateView implements Room {
       closed: snapshot.closed,
       onLeave: (id, cause) => this._onLeave(id, cause),
       pendingMember: (id) => this._rosterStream?.pending.get(id),
+      heldConnection: (id) => this._heldConnection(id),
     })
     this._state = new RoomState({
       owner: this,
@@ -139,12 +153,23 @@ class ClientRoom extends RoomStateView implements Room {
     stub._subscribeLocal('text', (envelope, info) => this._onEnvelope(envelope, info))
     stub._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
     // Wire death; a server `Room.close()` arrives before it, as the `closed` event.
-    stub.onClose(() => this._applyClosed('disconnected'))
+    const view = new WeakRef(this)
+    roomViews.add(view)
+    stub.onClose(() => {
+      roomViews.delete(view)
+      this._applyClosed('disconnected')
+    })
     stub.onDisconnect(() => {
-      for (const local of this._localParticipants.values()) local._onDisconnected()
+      for (const [id, local] of this._localParticipants) {
+        this._model.heldConnectionChanged(id, true)
+        local._onDisconnected()
+      }
     })
     stub.onReconnect(() => {
-      for (const local of this._localParticipants.values()) local._onReconnected()
+      for (const [id, local] of this._localParticipants) {
+        this._model.heldConnectionChanged(id, false)
+        local._onReconnected()
+      }
     })
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving
     // the original rejection for each later getter.
@@ -402,6 +427,16 @@ class ClientRoom extends RoomStateView implements Room {
   /** @internal */
   get _isConnected(): boolean {
     return this._stub.isConnected
+  }
+
+  private _heldConnection(id: string): boolean | null {
+    if (this._localParticipants.has(id)) return this._stub.isConnected
+    return standaloneMembers.get(id)?.isConnected ?? null
+  }
+
+  /** @internal */
+  _heldConnectionChanged(id: string, wasConnected: boolean | null): void {
+    this._model.heldConnectionChanged(id, wasConnected)
   }
 
   /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
@@ -704,8 +739,24 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
       }
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
-    channel.onDisconnect(() => this._onDisconnected())
-    channel.onReconnect(() => this._onReconnected())
+    // Held from its channel's open: before it, the channel reads disconnected.
+    channel.onOpen(() => {
+      standaloneMembers.set(this.id, this)
+      standaloneConnectionChanged(this.id, null)
+    })
+    channel.onDisconnect(() => {
+      standaloneConnectionChanged(this.id, true)
+      this._onDisconnected()
+    })
+    channel.onReconnect(() => {
+      standaloneConnectionChanged(this.id, false)
+      this._onReconnected()
+    })
+  }
+
+  override _onLeft(cause: LeaveCause): void {
+    super._onLeft(cause)
+    if (standaloneMembers.get(this.id) === this) standaloneMembers.delete(this.id)
   }
 
   get isConnected(): boolean {

@@ -102,6 +102,9 @@ type RoomModelOptions = {
   onMemberMetaGap?: () => void
   /** A known member's meta update applied, from an event, a stamp or a roster read. */
   onMemberMeta?: (id: string, update: MemberMetaUpdate) => void
+  /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
+   *  doesn't hold. */
+  heldConnection?: (id: string) => boolean | null
 }
 
 type RoomStateOptions = {
@@ -223,6 +226,7 @@ class RoomModel {
   private readonly _pendingMember: (id: string) => MemberSnapshot | undefined
   private readonly _onMemberMetaGap: () => void
   private readonly _onMemberMeta: (id: string, update: MemberMetaUpdate) => void
+  private readonly _heldConnection: (id: string) => boolean | null
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
@@ -238,6 +242,7 @@ class RoomModel {
     this._pendingMember = opts.pendingMember ?? (() => undefined)
     this._onMemberMetaGap = opts.onMemberMetaGap ?? (() => {})
     this._onMemberMeta = opts.onMemberMeta ?? (() => {})
+    this._heldConnection = opts.heldConnection ?? (() => null)
     if ('members' in opts.seed) {
       this._rosterKnown = true
       for (const member of opts.seed.members) this._createEntry(member)
@@ -357,9 +362,10 @@ class RoomModel {
     const participants = Object.freeze(
       [...this._members.values()]
         .filter((entry) => !entry.hidden)
-        .map(({ id, identity, meta, joinedAt }) =>
-          Object.freeze({ id, identity, meta: meta.object, joinedAt, isConnected: meta.connected }),
-        ),
+        .map((entry) => {
+          const { id, identity, meta, joinedAt } = entry
+          return Object.freeze({ id, identity, meta: meta.object, joinedAt, isConnected: this.isConnected(entry) })
+        }),
     )
     const value = Object.freeze({
       id: this.roomId,
@@ -377,6 +383,23 @@ class RoomModel {
   private _bumpState(): void {
     this._stateVersion++
     for (const view of [...this._views]) view._changed()
+  }
+
+  /** As this side shows it: its own connection to a member it holds, the room's record for any other. */
+  isConnected(entry: MemberEntry): boolean {
+    return this._heldConnection(entry.id) ?? entry.meta.connected
+  }
+
+  /** This side's own connection to a member it holds changed from `wasConnected`, or `null` for one it didn't hold. */
+  heldConnectionChanged(id: string, wasConnected: boolean | null): void {
+    const entry = this._members.get(id)
+    if (!entry || this.isConnected(entry) === (wasConnected ?? entry.meta.connected)) return
+    this._bumpState()
+    this._connectionChanged(entry)
+  }
+
+  private _connectionChanged(entry: MemberEntry): void {
+    for (const view of [...this._views]) view._connectionChanged(entry)
   }
 
   /** Runs `read`, then `settle` with what it read, recording the membership events this model gets until `settle` ends;
@@ -464,13 +487,13 @@ class RoomModel {
     if (!entry) return false
     const listening = 'connected' in update ? [] : [...this._views].filter((view) => view._listensToMeta(entry))
     const prev = listening.length > 0 ? entry.meta.object : null
-    const wasConnected = entry.meta.connected
+    const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
     if (applied === 'gap') this._onMemberMetaGap()
     if (applied !== 'applied') return false
     this._onMemberMeta(id, update)
     this._bumpState()
-    if (entry.meta.connected !== wasConnected) for (const view of [...this._views]) view._connectionChanged(entry)
+    if (this.isConnected(entry) !== wasConnected) this._connectionChanged(entry)
     if (prev === null) return true
     const next = entry.meta.object
     for (const view of listening) view._metaChanged(entry, next, prev)
@@ -815,7 +838,7 @@ class RoomState {
   /** @internal */
   _connectionChanged(entry: MemberEntry): void {
     const listeners = this._memberListeners.get(entry)
-    const cbs = entry.meta.connected ? listeners?.reconnectCbs : listeners?.disconnectCbs
+    const cbs = this.model.isConnected(entry) ? listeners?.reconnectCbs : listeners?.disconnectCbs
     if (cbs) this._fireAll(cbs)
   }
 
@@ -922,6 +945,7 @@ class RoomState {
   private _remote(entry: MemberEntry): RemoteParticipant {
     const listeners = this._listenersOf(entry)
     if (listeners.remote) return listeners.remote
+    const model = this.model
     const remote: RemoteParticipant = {
       id: entry.id,
       get meta() {
@@ -934,7 +958,7 @@ class RoomState {
         return entry.identity
       },
       get isConnected() {
-        return entry.meta.connected
+        return model.isConnected(entry)
       },
       subscribe: (cb) => this._registerLive(entry, (listeners.dataCbs ??= new Listeners()), cb),
       subscribeBinary: (cb, opts) => {
