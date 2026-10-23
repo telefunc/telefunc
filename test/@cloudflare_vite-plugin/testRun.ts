@@ -6,6 +6,10 @@ import type { WebSocket } from 'playwright-chromium'
 import { testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
+  const isDev = cmd === 'pnpm run dev'
+  // First, so no session Durable Object exists in the isolate yet.
+  testBroadcastPublishFromWorker()
+  testSubscribeOutsideSession()
   testCloudflareBindings()
   testRunClassic(cmd, {
     // testResubscribe() waits out a presence's TTL.
@@ -19,8 +23,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // workerd logs a response it wrote to a connection the browser closed as it navigated away,
       // before the request's signal could report it.
       (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')) ||
-      // testRefusedPresence()'s KV refuses a presence write.
-      log.logText.includes('KV refused to record that this Durable Object has subscribers to the Broadcast key'),
+      // testRefusedPresence()'s authority refuses a presence, and the subscription it ended is reported.
+      log.logText.includes('Backend subscription closed: text:refused-presence'),
   })
   testTodolist()
   testChannel()
@@ -31,6 +35,27 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   testUnsubscribeTwice()
   testResubscribe()
   testRefusedPresence()
+  testRoom()
+  // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
+  if (!isDev) testRoomOrderAcrossSessions()
+  testRoomAcrossSessions()
+  testRoomStorage()
+}
+
+function testBroadcastPublishFromWorker() {
+  test('Broadcast.publish() from the Worker, outside any session', async () => {
+    const response = await fetch(getServerUrl() + '/__broadcast-publish-from-worker')
+    expect(response.status).toBe(204)
+  })
+}
+
+function testSubscribeOutsideSession() {
+  test('Broadcast.subscribe() from the Worker, outside any session, throws a usage error naming what it needs', async () => {
+    const response = await fetch(getServerUrl() + '/__broadcast-subscribe-from-worker')
+    expect(await response.text()).toContain(
+      'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
+    )
+  })
 }
 
 function testCloudflareBindings() {
@@ -329,7 +354,7 @@ function testResubscribe() {
 }
 
 function testRefusedPresence() {
-  test("Broadcast: a publish made while KV refuses its subscriber's presence write settles, and the presence's next refresh writes it", async () => {
+  test("Broadcast: a publish made while the key's authority refuses its subscriber's presence settles, and the subscription that replaces it receives the next publish", async () => {
     await page.goto(getServerUrl() + '/refused-presence')
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
@@ -338,15 +363,130 @@ function testRefusedPresence() {
     await autoRetry(async () => {
       expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
     })
-    // Each try publishes again: the presence is written at its next refresh, within 30 s.
+    // Each try publishes again, until the replacing subscription's presence is recorded.
+    await autoRetry(async () => {
+      await page.click('#publish')
+      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
+    })
+  })
+}
+
+function testRoom() {
+  test('Room inside a telefunction', async () => {
+    await page.goto(getServerUrl() + '/room')
     await autoRetry(
       async () => {
-        await page.click('#publish')
-        expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
+        expect(await page.textContent('#room-result')).toBe(JSON.stringify({ joined: 1, received: ['hello'] }))
       },
-      { timeout: 40_000 },
+      { timeout: 10000 },
     )
   })
+}
+
+function testRoomOrderAcrossSessions() {
+  test('Room and Broadcast: what two sessions publish at once reaches each in the order each called it, and both in the same order', async () => {
+    const id = crypto.randomUUID()
+    const pages = await openSessions(id, ['p1', 'p2'])
+    for (const page of pages) expect(await clickRoomCard(page, 'order-subscribe')).toBe('subscribed')
+    await Promise.all(pages.map((page) => clickRoomCard(page, 'order-publish')))
+    const calls = Array.from({ length: 30 }, (_, i) => i + 1)
+    await autoRetry(async () => {
+      const [first, second] = await Promise.all(pages.map((page) => clickRoomCard(page, 'order-received')))
+      for (const lane of ['broadcast', 'room'] as const) {
+        for (const from of ['p1', 'p2']) {
+          const own = first[lane].filter((message: string) => message.startsWith(`${from}:`))
+          expect({ lane, own }).deep.equal({ lane, own: calls.map((n) => `${from}:${n}`) })
+        }
+        expect({ lane, second: second[lane] }).deep.equal({ lane, second: first[lane] })
+      }
+    })
+    for (const page of pages) await page.context().close()
+  })
+}
+
+function testRoomAcrossSessions() {
+  test('Room and Broadcast: two sessions listening in one isolate each get a message once, on their own listeners', async () => {
+    const id = crypto.randomUUID()
+    const pages = await openSessions(id, ['p1', 'p2'])
+    for (const page of pages) await clickRoomCard(page, 'listen')
+    await clickRoomCard(pages[0]!, 'publish')
+    await autoRetry(async () => {
+      for (const page of pages) {
+        expect((await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
+      }
+    })
+    for (const page of pages) await page.context().close()
+  })
+
+  test('Broadcast: a publish right after a subscribe reaches it', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'subscribe-then-publish')).deep.equal(['at-once'])
+  })
+}
+
+function testRoomStorage() {
+  test('Room.list(): lists rooms in code point order', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'list')).deep.equal(['B', 'a', 'b', 'z', 'é', '！', '😀'])
+  })
+
+  test('Room: a retained frame larger than a SQLite row reaches a later subscriber whole', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'retain-large')).deep.equal({ size: 3 * 1024 * 1024, intact: true })
+  })
+
+  test('Room: a room closes by itself once its last member left, and is no longer listed', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'close-when-left')).deep.equal({ listed: 0 })
+  })
+
+  test('Room: its meta keeps the key order its writes gave it', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'meta-key-order')).deep.equal({
+      merged: [
+        ['b', 1],
+        ['a', 4],
+        ['c', 3],
+      ],
+      replaced: [
+        ['z', 1],
+        ['y', 2],
+      ],
+    })
+  })
+}
+
+async function openRoomPage() {
+  await page.goto(getServerUrl() + '/room')
+  await autoRetry(async () => {
+    expect(await page.locator('#hydrated').count()).toBe(1)
+  })
+}
+
+/** Pages in browsers of their own, so each has its own Telefunc session. */
+async function openSessions(id: string, names: string[]) {
+  const browser = page.context().browser()!
+  return await Promise.all(
+    names.map(async (name) => {
+      const session = await (await browser.newContext()).newPage()
+      await session.goto(`${getServerUrl()}/room?id=${id}&page=${name}`)
+      await autoRetry(async () => {
+        expect(await session.locator('#hydrated').count()).toBe(1)
+      })
+      return session
+    }),
+  )
+}
+
+async function clickRoomCard(target: typeof page, id: string): Promise<any> {
+  await target.locator('#room-card-result').evaluate((element) => {
+    element.textContent = ''
+  })
+  await target.click(`#room-${id}`)
+  await target.waitForFunction(() => document.querySelector('#room-card-result')!.textContent !== '', undefined, {
+    timeout: 30_000,
+  })
+  return JSON.parse((await target.textContent('#room-card-result'))!)
 }
 
 async function getNumberOfItems() {

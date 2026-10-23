@@ -16,7 +16,7 @@ import { textEncoder } from '../../wire/frame.js'
 import { parseSseRequestMetadata, type SseRequestMetadata } from '../sseRequest.js'
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../../wire/StreamReader.js'
 import { getChannelMux } from './mux.js'
-import type { ReconcileOutcome, ServerTransport } from './mux.js'
+import type { ChannelMux, ReconcileOutcome, ServerTransport } from './mux.js'
 import { encode, passesData, ProtocolViolationError } from '../../wire/connectionFrame.js'
 
 type SseChannelHttpResponse = {
@@ -109,7 +109,10 @@ class SseConnectionTransport {
   private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
   /** When each wire closed, for `connectTtl`: a page never reuses a connId, so a POST for one is refused. */
   private readonly closedAt = new Map<string, number>()
-  private readonly mux = getChannelMux()
+  /** Per use: a Cloudflare session DO hosts its own channels, and this transport serves every one in the isolate. */
+  private get mux(): ChannelMux {
+    return getChannelMux()
+  }
   private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
     setSessionId: (connection, sessionId) => {
@@ -139,7 +142,7 @@ class SseConnectionTransport {
       const reader = new StreamReader(source)
       const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
       connId = metadata.connId
-      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream, request)
+      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
       return await this.handleBatchPost(connId, reader)
     } catch (err) {
@@ -165,7 +168,6 @@ class SseConnectionTransport {
     connId: string,
     reader: StreamReader,
     useNodeStream: boolean,
-    request: Request,
   ): Promise<SseChannelHttpResponse> {
     const existing = this.mux.getConnectionByConnId<SseConnection>(connId)
     if (existing) this.closeConnection(existing, { permanent: false })
@@ -189,7 +191,7 @@ class SseConnectionTransport {
       resolveReady,
       pendingDispatches: new Set(),
     }
-    this.mux.onConnectionOpen(connection, this.transport, request)
+    this.mux.onConnectionOpen(connection, this.transport)
     this.resolvePendingConnections(connId, connection)
     void this.runStreamResponse(connection, reader)
 

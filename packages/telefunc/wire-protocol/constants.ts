@@ -10,6 +10,10 @@ export const SERIALIZER_PREFIX_PROMISE = '!TelefuncPromise:'
 export const SERIALIZER_PREFIX_CHANNEL = '!TelefuncChannel:'
 export const SERIALIZER_PREFIX_FUNCTION = '!TelefuncFunction:'
 export const SERIALIZER_PREFIX_BROADCAST = '!TelefuncBroadcast:'
+export const SERIALIZER_PREFIX_ROOM_STEM = '!TelefuncRoom'
+export const SERIALIZER_PREFIX_ROOM = `${SERIALIZER_PREFIX_ROOM_STEM}:`
+export const SERIALIZER_PREFIX_ROOM_PARTICIPANT = `${SERIALIZER_PREFIX_ROOM_STEM}Participant:`
+export const SERIALIZER_PREFIX_ROOM_REMOTE = `${SERIALIZER_PREFIX_ROOM_STEM}RemoteParticipant:`
 
 /** Marker key used on the ack payload of a server-returned function when its arg shield
  *  rejects the incoming args. The client-side reviver detects this and throws on the
@@ -213,6 +217,8 @@ export const WIRE_QUEUE_DELAY_MS = 300
 export const CHANNEL_BUFFER_LIMIT_BYTES = 512 * 1024
 /** Maximum bytes buffered per channel for binary messages sent before a peer connects. */
 export const CHANNEL_BUFFER_LIMIT_BINARY_BYTES = 2 * 1024 * 1024
+/** How long a Broadcast publish or a Room commit waits for this instance's new subscriptions on its key or lane. */
+export const ESTABLISH_HOLD_MS = 60_000
 
 /** How long a channel waits for its peer to connect: it outlasts a page's noticing its wire died, and a reconnect. */
 export const CHANNEL_CONNECT_TTL_MS = 15_000
@@ -249,12 +255,12 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             deadlocks (server with depleted credit could otherwise
 //                             never reply to a client that's waiting for that reply
 //                             to free credit).
-//   PUBLISH, PUBLISH_BINARY   broadcast fan-out: counted in bytes only, taking no
-//                             message credit and starting no BDP probe, against the
-//                             largest byte window the page grants, from the start.
-//                             Nothing waits on them: the count tells the server how
-//                             far behind the page is, past which it closes the
-//                             page's broadcast channel.
+//   PUBLISH, PUBLISH_BINARY   a BroadcastChannel's or a Room's fan-out: counted in
+//                             bytes only, taking no message credit and starting no
+//                             BDP probe, against the largest byte window the page
+//                             grants, from the start. Nothing waits on them: the
+//                             count tells the server how far behind the page is,
+//                             past which it closes the channel they ride.
 //
 // Window semantics: `WINDOW` and `MSG_WINDOW` advertise cumulative limits, as QUIC's MAX_DATA does.
 //

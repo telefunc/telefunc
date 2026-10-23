@@ -16,6 +16,8 @@ import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import type { AbortError } from '../../shared/Abort.js'
 import type {
   ClientReviverContext,
+  InternalClientReviverContext,
+  InternalServerReplacerContext,
   ReplacerType,
   ReviverType,
   ServerReplacerContext,
@@ -43,7 +45,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
   const producers: { createProducer: () => StreamingProducer; index: number }[] = []
   const lifecycles: Lifecycle[] = []
   let nextIndex = 0
-  const context: ServerReplacerContext = {
+  const context: InternalServerReplacerContext = {
     createChannel(opts) {
       const channel = new ServerChannel(opts)
       context.registerChannel(channel)
@@ -58,6 +60,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
       return { metadata: { __index: index }, close() {}, abort() {} }
     },
     validators: new Map(),
+    responseState: (_key, init) => init(),
   }
   const replacer = createStreamingReplacer(
     () => context,
@@ -75,7 +78,8 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const mintedBroadcasts: { channelId: string; key: string }[] = []
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
-  const context: ClientReviverContext = {
+  const context: InternalClientReviverContext = {
+    shareLifecycle() {},
     createChannel(opts) {
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never
@@ -95,6 +99,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
       // Mirror reviveResponse: the value handed out (and cached) is the GC wrapper.
       return wrapProxy(revived.value as object)
     },
+    [],
     extensionTypes,
   )
   const parseBody = (body: string) => parse(body, { reviver })

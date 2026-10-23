@@ -7,8 +7,9 @@ export default {
   // cert from Caddy's auto-generated local CA — Chromium has no reason to trust that CA, so
   // we tell it to skip cert validation. Same flag is harmless for non-docker tests that
   // already speak HTTP or have a real cert chain.
+  // The fake camera, granted without a prompt, feeds the playground's video chat page.
   chromiumLaunchOptions: {
-    args: ['--ignore-certificate-errors'],
+    args: ['--ignore-certificate-errors', '--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'],
   },
 }
 
@@ -41,6 +42,11 @@ function getCiJobs() {
     {
       name: 'TypeScript',
       command: 'pnpm run test:types',
+      setups: [ubuntu],
+    },
+    {
+      name: 'Released API',
+      command: 'pnpm run test:released-api',
       setups: [ubuntu],
     },
 

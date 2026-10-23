@@ -1,4 +1,4 @@
-export { testRunDocker }
+export { setupDockerRun, testRunDocker }
 
 import { page, test, expect, run, skip, isCI, getServerUrl, autoRetry } from '@brillout/test-e2e'
 import { execSync } from 'node:child_process'
@@ -22,17 +22,19 @@ import { testRefIdentity } from './pages/ref-identity/e2e-test'
 ;(globalThis as { process?: { env: Record<string, string | undefined> } }).process!.env.NODE_TLS_REJECT_UNAUTHORIZED =
   '0'
 
-function testRunDocker() {
+/** `additionalTimeout`: how much longer than test-e2e's default the stack may take to serve. */
+function setupDockerRun(command = 'pnpm test:docker', additionalTimeout = 0): boolean {
   // Skip locally when Docker is unavailable. On CI a missing Docker should fail loudly,
   // not silently shrink coverage.
   if (!isCI() && !isDockerAvailable()) {
     skip('SKIPPED: Docker is not available (`docker info` failed).')
-    return
+    return false
   }
 
-  run('pnpm test:docker', {
+  run(command, {
     serverUrl: 'https://localhost:8443',
     serverIsReadyMessage: 'serving initial configuration',
+    additionalTimeout,
     tolerateExitCode: [130],
     tolerateError(log) {
       const t = log.logText
@@ -73,6 +75,12 @@ function testRunDocker() {
       )
     },
   })
+
+  return true
+}
+
+function testRunDocker() {
+  if (!setupDockerRun()) return
 
   test('home page', async () => {
     await navigate(`${getServerUrl()}/`, { waitUntil: 'load' })

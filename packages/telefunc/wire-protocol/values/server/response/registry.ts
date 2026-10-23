@@ -10,12 +10,35 @@ import { promiseReplacer } from './promise.js'
 import { broadcastReplacer } from './broadcast.js'
 import { channelReplacer } from './channel.js'
 import { functionReplacer } from './function.js'
-import type { ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
+import { loadedRoomServer, type RoomServer } from '../../../room/server/load.js'
+import {
+  SERIALIZER_PREFIX_ROOM,
+  SERIALIZER_PREFIX_ROOM_PARTICIPANT,
+  SERIALIZER_PREFIX_ROOM_REMOTE,
+} from '../../../constants.js'
+import type { InternalServerReplacerContext, ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../../shared/Abort.js'
 import { assertUsage } from '../../../../utils/assert.js'
 import { isObjectOrFunction } from '../../../../utils/isObjectOrFunction.js'
 import { assertIsNotBrowser } from '../../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
+
+/** Room's own replacer once Room's server code is loaded; until then no value is a room's. */
+function roomServerReplacer(
+  prefix: string,
+  own: (server: RoomServer) => ReplacerType<TypeContract, InternalServerReplacerContext>,
+): ReplacerType<TypeContract, InternalServerReplacerContext> {
+  return {
+    prefix,
+    detect(value): value is unknown {
+      const server = loadedRoomServer()
+      return server !== undefined && own(server).detect(value)
+    },
+    replace(value, context) {
+      return own(loadedRoomServer()!).replace(value, context)
+    },
+  }
+}
 
 // Order: fileDownload/blobDownload before file/blob (brand-checked vs instanceof);
 // file before blob (File extends Blob); broadcast before channel (Broadcast extends Channel).
@@ -27,6 +50,9 @@ const serverTypes = [
   fileReplacer,
   blobReplacer,
   promiseReplacer,
+  roomServerReplacer(SERIALIZER_PREFIX_ROOM, (server) => server.roomReplacer),
+  roomServerReplacer(SERIALIZER_PREFIX_ROOM_PARTICIPANT, (server) => server.roomParticipantReplacer),
+  roomServerReplacer(SERIALIZER_PREFIX_ROOM_REMOTE, (server) => server.roomRemoteReplacer),
   broadcastReplacer,
   channelReplacer,
   functionReplacer,
@@ -42,7 +68,7 @@ const serverTypes = [
  *  re-emit the first occurrence's replacement verbatim (wire format unchanged), and the client's
  *  mirror cache (createStreamingReviver) revives equal wire strings to one object. */
 function createStreamingReplacer(
-  getContext: (value: unknown) => ServerReplacerContext,
+  getContext: (value: unknown) => InternalServerReplacerContext,
   onReplaced: (replaced: { close: () => Promise<void> | void; abort: (abortError: AbortError) => void }) => void,
   extensionTypes: ReplacerType<TypeContract, ServerReplacerContext>[],
 ) {

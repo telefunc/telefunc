@@ -3,11 +3,10 @@ import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ReplayBuffer } from '../channel/ReplayBuffer.js'
 import { ACK_STATUS, TAG, decode } from '../wire/connectionFrame.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
-import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'
-import type { BroadcastTransport } from './broadcastAdapter.js'
+import { configureBroadcastTransport, disposeBackend } from '../backend/install.js'
+import type { BroadcastTransport } from '../backend/broadcast/transport.js'
 
-const previousBroadcastAdapter = getBroadcastAdapter()
-afterEach(() => _resetBroadcastAdapterForTesting(previousBroadcastAdapter))
+afterEach(() => disposeBackend())
 
 // ───────────────────────────────────────────────────────────────────────────
 // In-process delivery — bug classes targeted: cross-key bleed, dropped
@@ -151,7 +150,7 @@ describe('keyed in-process broadcast', () => {
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:late-attach' })
     sender._registerChannel()
     receiver._registerChannel()
-    receiver._onPeerSubscription({ binary: false, subscribed: true }) // simulate client subscribe over wire
+    receiver._onPeerSubscription('text', true) // simulate client subscribe over wire
 
     sender.publish({ text: 'hello' })
 
@@ -201,7 +200,7 @@ describe('keyed in-process broadcast', () => {
     const a2 = await a.publish({ text: 'a-two' })
     const b1 = await b.publish({ text: 'b-one' })
 
-    // Each receipt is keyed to its own topic.
+    // Each receipt is keyed to its own topic, and seq increases per key.
     expect(a1.key).toBe(k1)
     expect(a2.key).toBe(k1)
     expect(b1.key).toBe(k2)
@@ -386,7 +385,7 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 
   it('publishes go through the transport and locally-subscribed receivers see the message', async () => {
     const transport = createMockTransport()
-    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
+    configureBroadcastTransport(transport)
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:basic' })
     sender._registerChannel()
@@ -407,7 +406,7 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
   // dedup, every same-node publish fans out twice.
   it('does not double-deliver when the transport echoes back to the publisher node', () => {
     const transport = createMockTransport()
-    _resetBroadcastAdapterForTesting(new DefaultBroadcastAdapter(transport))
+    configureBroadcastTransport(transport)
     const sender = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
     const receiver = new ServerBroadcast<{ text: string }>({ key: 'room:tx:echo' })
     sender._registerChannel()
@@ -423,14 +422,14 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 
   it('cross-node: a publish from node1 reaches node2 subscribers via the shared transport', () => {
     const transport = createMockTransport()
-    const node1 = new DefaultBroadcastAdapter(transport)
-    const node2 = new DefaultBroadcastAdapter(transport)
+    configureBroadcastTransport(transport)
 
-    const received: string[] = []
-    node2.subscribe('room:cross-node', (serialized) => received.push(serialized))
-    node1.publish('room:cross-node', '{"text":"from-node1"}')
+    const received: unknown[] = []
+    Broadcast.subscribe('room:cross-node', (message) => received.push(message))
+    // node1's publish, as it reaches the shared transport
+    transport.send('room:cross-node', '{"text":"from-node1"}')
 
-    expect(received).toEqual(['{"text":"from-node1"}'])
+    expect(received).toEqual([{ text: 'from-node1' }])
   })
 
   // Refcount: multiple local subscribers must share ONE transport subscription; the
@@ -438,10 +437,10 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
   // either the transport is over-subscribed (leak) or unsubscribed prematurely (loss).
   it('refcounts the transport subscription: holds while any local subscriber is attached', () => {
     const transport = createMockTransport()
-    const adapter = new DefaultBroadcastAdapter(transport)
+    configureBroadcastTransport(transport)
 
-    const u1 = adapter.subscribe('room:rc', () => {})
-    const u2 = adapter.subscribe('room:rc', () => {})
+    const u1 = Broadcast.subscribe('room:rc', () => {})
+    const u2 = Broadcast.subscribe('room:rc', () => {})
     expect(transport._listeners.get('room:rc')?.size).toBe(1) // exactly one upstream sub for both
 
     u1()
@@ -453,17 +452,17 @@ describe('DefaultBroadcastAdapter — multi-node transport', () => {
 
   it('refcount survives sub→unsub→sub: the second subscribe re-establishes the upstream sub', () => {
     const transport = createMockTransport()
-    const adapter = new DefaultBroadcastAdapter(transport)
+    configureBroadcastTransport(transport)
 
-    const u1 = adapter.subscribe('room:rc-cycle', () => {})
+    const u1 = Broadcast.subscribe('room:rc-cycle', () => {})
     u1()
     expect(transport._listeners.has('room:rc-cycle')).toBe(false)
 
-    const received: string[] = []
-    adapter.subscribe('room:rc-cycle', (s) => received.push(s))
+    const received: unknown[] = []
+    Broadcast.subscribe('room:rc-cycle', (s) => received.push(s))
     expect(transport._listeners.get('room:rc-cycle')?.size).toBe(1)
 
-    adapter.publish('room:rc-cycle', 'after-resub')
+    Broadcast.publish('room:rc-cycle', 'after-resub')
     expect(received).toEqual(['after-resub'])
   })
 })
