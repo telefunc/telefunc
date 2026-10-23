@@ -89,6 +89,9 @@ const DELIVERIES_PER_TURN = 1024
 
 const NO_TARGETS: readonly MemorySubscriptionAttempt[] = []
 
+/** The queue's head while a publish delivers at once: it keeps what that delivery causes queued behind it. */
+const DELIVERING_NOW = (): void => {}
+
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes)
 }
@@ -284,9 +287,7 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     // Counted before delivery, which may unsubscribe or subscribe.
     const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
     if (this._deliversNow()) {
-      this._deliver(() => {
-        for (const target of targets) target.deliver(payload, mark)
-      })
+      this._deliverNow(targets, payload, mark)
       return receipt
     }
     const held = typeof payload === 'string' ? payload : copyBytes(payload)
@@ -309,6 +310,19 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
 
   private _deliversNow(): boolean {
     return this._deliveries.length === 0 && this._deliveredThisTurn < DELIVERIES_PER_TURN
+  }
+
+  /** Delivers a publish while nothing is queued, holding the queue's head as `_drain()` does. */
+  private _deliverNow(
+    targets: readonly MemorySubscriptionAttempt[],
+    payload: BroadcastPayload,
+    mark: OrderingInfo,
+  ): void {
+    if (this._deliveredThisTurn++ === 0) nextTurn(() => this._nextTurn())
+    this._deliveries.push(DELIVERING_NOW)
+    for (const target of targets) target.deliver(payload, mark)
+    this._deliveries.shift()
+    this._drain()
   }
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
