@@ -118,7 +118,7 @@ room.onJoin(follow)
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
 
-For updates that change many times per second, such as a mouse cursor, pass `coalesce` with a name: only the latest update with that name is sent.
+For updates that change many times per second, such as a mouse cursor, pass `coalesce` with a name: on a slow connection, only the latest update with that name is sent, and the older ones are skipped.
 
 ```js
 // Environment: client
@@ -183,7 +183,8 @@ console.log(response) // 'ok'
 import { Room } from 'telefunc'
 
 await Room.announce('lobby', { type: 'maintenance', in: '5min' })   // to everyone
-await Room.send('lobby', { identity: winnerUserId }, { badge: 'winner' }) // to one user
+const [first] = await Room.getParticipants('lobby')
+await Room.send('lobby', { id: first.id }, { badge: 'first in' }) // to one participant
 ```
 ```js
 // Environment: client
@@ -207,9 +208,10 @@ import { Abort, getContext, Room } from 'telefunc'
 
 export async function onJoinChat(roomId) {
   const { user } = getContext()
-  const room = await Room.get(roomId)
+  const room = await Room.getOrCreate(roomId)
   Room.guard(room, {
     onBeforeJoin: (member) => {
+      // Only the join below: the client can't join this room by calling room.join() itself
       if (member.identity !== user.id) throw Abort('join through onJoinChat()')
       if (isBanned(user.id)) throw Abort('banned')
     },
@@ -242,7 +244,7 @@ try {
 
 <Warning>Check permissions on `identity`, never on `meta`: a client can set its `meta` to anything.</Warning>
 
-<Warning>The hooks apply to the clients this telefunction returns the room to. Call `Room.guard()` once, with all its hooks, in every telefunction that returns the room.</Warning>
+<Warning>Call `Room.guard()` once, with all its hooks, in every telefunction that returns the room: a client that gets the room from a telefunction without it skips the hooks.</Warning>
 
 To run code after a join or a message, such as saving the message, use `onAfterJoin()`, `onAfterPublish()` and `onAfterSend()` (see <Link href="#load-chat-history" />).
 
@@ -297,7 +299,8 @@ export async function onStartMatch() {
   const host = await room.join({ identity: 'host', hidden: true })
   const game = createGame()
   host.listen((command) => game.apply(command))     // commands from players
-  setInterval(() => host.publish(game.state()), 50) // state to everyone
+  const loop = setInterval(() => host.publish(game.state()), 50) // state to everyone
+  room.onClose(() => clearInterval(loop))
   return matchId
 }
 ```
@@ -352,17 +355,23 @@ for (const member of await room.getParticipants()) watch(member)
 room.onJoin(watch)
 ```
 
-Pause encoding while nobody watches:
+To send frames only while someone watches, use `onDemand()`:
 
 ```js
 // Environment: client
 
+let watched = false
 me.onDemand((track, wanted) => {
-  if (track === 'camera') wanted ? encoder.resume() : encoder.pause()
+  if (track === 'camera') watched = wanted
+})
+encodeCamera((frame, isKeyframe) => {
+  if (watched) me.publishBinary(frame, { track: 'camera', meta: { isKeyframe } })
 })
 ```
 
-> For live video to a large audience, use a WebRTC SFU for the video, and a room for the chat and signaling.
+> Audio works the same way, on its own track such as `{ track: 'mic' }`.
+
+> For video calls with many participants, or video streamed to an audience, use a WebRTC SFU for the video, and a room for the chat and signaling.
 
 
 ## Give late joiners the current state
@@ -376,7 +385,7 @@ await me.publish({ phase: 'voting' }, { retain: true })
 await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true })
 ```
 
-The room keeps the last retained message, and each participant's last retained frame per track, so the two lines above don't replace each other. A retained message stays while its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
+A late joiner gets the last retained message, and each participant's last retained frame on each track, as long as its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
 
 
 ## Load chat history
@@ -391,7 +400,7 @@ import { getContext, Room } from 'telefunc'
 
 export async function onJoinChat(roomId) {
   const { user } = getContext()
-  const room = await Room.get(roomId, { tail: true })
+  const room = await Room.get(roomId, { tail: true }) // the client also gets the messages published after the history you load
   Room.guard(room, {
     onAfterPublish: async (from, message, info) => {
       await db.messages.insert({ ...message, roomId, authorId: user.id, seq: info.seq })
@@ -430,7 +439,7 @@ await me.publish({ text: 'hello' }) // saved by onAfterPublish()
 await me.leave()
 ```
 
-Everyone else's `room.onLeave()` fires. To switch rooms, leave one and join the next.
+Everyone else's `room.onLeave()` fires.
 
 
 ## Close a room
@@ -485,7 +494,7 @@ Server-side.
 | Method | Description |
 |---|---|
 | `Room.create(id, options?)` | Create a room. Throws if it exists. |
-| `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. |
+| `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
 | `Room.getOrCreate(id, options?)` | Get a room, or create it. |
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
