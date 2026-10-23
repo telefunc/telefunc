@@ -211,22 +211,25 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  test('broadcast: a subscriber that comes while publishes queue gets the next seq right after the one before it', async () => {
-    await navigate(`${getServerUrl()}/publish`)
-    await page.click('#test-broadcast-seq-while-queued')
+  // In-memory only: the Docker lanes publish through Redis, which has no queue, and whose delivery can come after the publish resolves.
+  if (!inDocker) {
+    test('broadcast: a subscriber that comes while publishes queue gets the next seq right after the one before it', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-seq-while-queued')
 
-    await autoRetry(async () => {
-      const { receipts, received } = await getResult<{ receipts: number[]; received: Array<[string, number]> }>(
-        '#publish-result',
-      )
-      const [first] = receipts
-      expect(receipts).deep.equal([first, first! + 1])
-      expect(received).deep.equal([
-        ['first', first],
-        ['second', first! + 1],
-      ])
+      await autoRetry(async () => {
+        const { receipts, received } = await getResult<{ receipts: number[]; received: Array<[string, number]> }>(
+          '#publish-result',
+        )
+        const [first] = receipts
+        expect(receipts).deep.equal([first, first! + 1])
+        expect(received).deep.equal([
+          ['first', first],
+          ['second', first! + 1],
+        ])
+      })
     })
-  })
+  }
 
   // Preview on Node only: the margin is measured there. A leak of 100,000 keys' seq counters grows the heap by 7 MB or more.
   if (!isDev && !inDocker && serverRuntime() === 'node') {
