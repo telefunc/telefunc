@@ -169,12 +169,12 @@ export default {
 
 > On Cloudflare `new Telefunc` also takes `bindingName`, `kvBindingName`, `scale`, `locationFallback`, `jurisdiction`, and more — see <Link href="/stream/cloudflare#configuration" />.
 
-Add the compatibility settings, and the Durable Object and KV bindings, to your `wrangler.jsonc`:
+Add to your `wrangler.jsonc`:
 
 {/* spellcheck-ignore:on */}
 ```jsonc
 {
-  "compatibility_date": "2025-08-15", // or later: channels need MessageChannel
+  "compatibility_date": "2025-08-15", // or later
   // Required: nodejs_als (nodejs_compat works too). With enable_request_signal, a Worker's request.signal aborts when its client disconnects.
   "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "durable_objects": {

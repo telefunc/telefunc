@@ -378,10 +378,12 @@ async function openEnd(): Promise<string> {
   await navigate(`${getServerUrl()}/channel`)
   await page.click('#wire-end-open')
   let channelId = ''
+  // Open on the server: the page's wire reached it, so cutWire() has a connection to drop.
   await autoRetry(async () => {
     const { end } = await getResult<WireState>('#wire-state')
     expect(end).not.toBe(null)
     channelId = end!.channelId
+    expect((await getCleanupState())[`wireEnd_${channelId}_onOpen`]).toBe('true')
   })
   return channelId
 }
@@ -397,6 +399,7 @@ function testWireSmallReplay() {
         const { overrun } = await getResult<WireState>('#wire-state')
         expect(overrun).not.toBe(null)
         channelId = overrun!.channelId
+        expect((await getCleanupState())[`wireOverrun_${channelId}_onOpen`]).toBe('true')
       })
       await page.context().setOffline(true)
       if (from === 'server') {
