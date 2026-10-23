@@ -281,7 +281,7 @@ The removed participant learns why:
 
 me.onLeave((cause) => {
   if (cause.type === 'removed') showBanner(`Removed: ${cause.reason}`)
-  if (cause.type === 'disconnected') rejoin() // call the telefunction that returned the room again, then join()
+  if (cause.type === 'disconnected') rejoin() // automatic reconnection gave up: call the telefunction that returned the room again
 })
 ```
 
@@ -304,6 +304,7 @@ export async function onStartMatch() {
   host.listen((command) => game.apply(command))     // commands from players
   const loop = setInterval(() => host.publish(game.state()), 50) // state to everyone
   room.onClose(() => clearInterval(loop))
+  game.onEnd(() => Room.close(matchId)) // ends the match, and the loop with it
   return matchId
 }
 ```
@@ -363,7 +364,7 @@ room.onJoin(watch)
 
 With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
 
-To send frames only while someone watches, use `onDemand()`:
+To send frames only while someone watches, use `onDemand()`, which also fires for the viewers already watching when you join:
 
 ```js
 // Environment: client
@@ -416,7 +417,8 @@ export async function onJoinChat(roomId) {
     },
   })
   const history = await db.messages.latest(roomId, 50) // ordered by seq
-  return { room, history }
+  const me = await room.join({ meta: { name: user.name }, identity: user.id })
+  return { room, me, history }
 }
 ```
 ```js
@@ -425,8 +427,7 @@ export async function onJoinChat(roomId) {
 
 import { onJoinChat } from './Chat.telefunc'
 
-const { room, history } = await onJoinChat('lobby')
-const me = await room.join({ meta: { name: 'Alice' } })
+const { room, me, history } = await onJoinChat('lobby')
 
 const shown = new Set(history.map((message) => message.seq))
 for (const message of history) render(message)
@@ -461,7 +462,7 @@ import { Room } from 'telefunc'
 await Room.close('lobby')
 ```
 
-A room also closes by itself once it has been empty for a while, see <Link href="/room-config" />.
+A room also closes by itself a while after nobody is in it and no page has it open, see <Link href="/room-config" />.
 
 To keep a room open until you call `Room.close()`, create it with:
 
@@ -482,7 +483,7 @@ Install <Link href="/redis">`@telefunc/redis`</Link>:
 npm install @telefunc/redis ioredis
 ```
 
-Call `installRedis()` before your server first uses Room:
+Call `installRedis()` before your server first uses Room, for example in a module your server entry imports first (see <Link href="/redis" />):
 
 ```js
 // Environment: server
@@ -525,12 +526,12 @@ Server-side.
 |---|---|
 | `join({ meta?, selfDelivery? }?)` | Join; returns your participant. |
 | `join({ meta?, identity?, hidden? })` | Server-side: join with a user id, or as a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>. |
-| `snapshot()` / `onChange(cb)` | The room as it is now / called on every change. |
+| `snapshot()` / `onChange(cb)` | The room as it is now, `{ id, meta, count, isClosed, participants }` with each participant `{ id, identity, meta, joinedAt }` / called on every change. |
 | `getParticipants()` / `getParticipant(id)` | The participants / one participant. |
 | `getParticipants({ hidden: true })` | Server-side: the hidden participants. |
 | `onJoin(cb)` / `onLeave(cb)` / `onParticipantUpdate(cb)` | Someone joined / left / changed their `meta`. |
-| `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages / binary frames. |
-| `onAnnounce(cb)` | `Room.announce()` messages. |
+| `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | Everyone's messages / binary frames: `cb(message, info, from)`, with `info` `{ seq, timestamp }`, plus `{ track, meta }` for binary. |
+| `onAnnounce(cb)` | `Room.announce()` messages: `cb(message, info)`. |
 | `onUpdate(cb)` / `onEmpty(cb)` / `onClose(cb)` | The room's `meta` changed: `(meta, prev)` / the last participant left / the room closed. |
 
 Properties: `id`, `meta`, `count`.
@@ -553,7 +554,7 @@ Properties: `id`, `meta`, `identity`.
 
 | Method | Description |
 |---|---|
-| `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | This participant's messages / binary frames. |
+| `subscribe(cb)` / `subscribeBinary(cb, { track? }?)` | This participant's messages / binary frames: `cb(message, info)`. |
 | `onUpdate(cb)` / `onLeave(cb)` | This participant changed their `meta` / left. |
 
 Properties: `id`, `meta`, `identity`.
