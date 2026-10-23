@@ -1,5 +1,5 @@
 export { Room }
-export type { RoomGuardHooks }
+export type { RoomGuardHooks, RoomStatic }
 
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
@@ -53,6 +53,7 @@ import { cleanupFinalizedIncarnation, closeIncarnation, takeOverClose } from './
 import { cancelClose, createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
 import { listRoom, repairRoomIndex, sweepLapsedRoomsSoon } from './directory.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
+import { ROOM_GUARD_USAGE } from './lazyRoom.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
   M,
@@ -242,7 +243,7 @@ const ROOM_GUARD_KEYS = Object.keys({
 } satisfies Record<keyof RoomGuardHooks, true>) as (keyof RoomGuardHooks)[]
 
 function guardRoom(room: Room, guards: Partial<Record<keyof RoomGuardHooks, unknown>>): void {
-  assertUsage(ServerRoom.isServerRoom(room), 'Room.guard() expects a room obtained from Room.get()/Room.create()')
+  assertUsage(ServerRoom.isServerRoom(room), ROOM_GUARD_USAGE)
   assertUsage(isObject(guards), 'Room.guard() guards should be an object')
   assertKnownOptions(guards, ROOM_GUARD_KEYS, 'Room.guard()')
   for (const key of ROOM_GUARD_KEYS) {
