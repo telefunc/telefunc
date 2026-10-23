@@ -443,7 +443,7 @@ async function onBroadcastSeqAcrossSubscribers() {
 async function onBroadcastJoinWhileQueued() {
   const key = `room:join-queued:${crypto.randomUUID()}`
   const offs = [Broadcast.subscribe(key, () => {})]
-  // Resolves once the subscription is set up, so the publishes below go out at once.
+  // Resolves once the subscription is established, so the readiness gate holds none of the publishes below.
   await Broadcast.publish(key, 't0')
   for (let i = 0; i < 1_100; i++) void Broadcast.publish(`room:busy:${crypto.randomUUID()}`, i)
   const queued = [
