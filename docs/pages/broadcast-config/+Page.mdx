@@ -11,7 +11,7 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 import { config } from 'telefunc'
 
 config.broadcast = {
-  transport: myTransport, // Carries Broadcast across instances (default: none)
+  transport: undefined, // A BroadcastTransport that carries Broadcast across servers
 }
 ```
 
@@ -26,13 +26,21 @@ type BroadcastTransport = {
 }
 ```
 
-> `send()` and `sendBinary()` return the assigned `{ seq, timestamp }`, giving every node one global order per key (shared by text and binary): `seq` is a positive safe integer and `timestamp` a non-negative safe integer such as `Date.now()`.
+> Without a `transport`, Broadcast uses the installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>) or, with none installed, stays in memory and reaches only subscribers on the same server. A configured `transport` takes precedence over both. Assigning another one, for example on hot reload, moves live subscriptions to it, and their `info.seq` then comes from the new transport, which may number lower.
 
-> `listen()` and `listenBinary()` return an unsubscribe function, and a key has at most one live listen of each kind: the next listen for it comes after that function ran. A `send()` on the same node after `listen()` returned must reach that listener: that is what delivers a publish made right after a `subscribe()`.
+> `send()` and `sendBinary()` return the `{ seq, timestamp }` they assigned, and `onMessage` gets the same pair. Telefunc hands it to <Link href="/channel#broadcast">`Broadcast.subscribe()`</Link> subscribers as `info.seq` and `info.timestamp`, unchanged: it neither reorders nor drops a repeated or lower `seq`. Because `info.seq` is monotonic per key, a key's text and binary messages take their `seq` from one counter that every server shares; with a counter per server, two servers' messages on a key cross numbers.
 
-> A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once `publishBinary()` returns.
+> `seq` must be a positive safe integer and `timestamp` a non-negative safe integer such as `Date.now()`; otherwise the `publish()` fails, or `onMessage` throws.
 
-> A configured transport takes precedence over the Broadcast of an installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>), which takes precedence over the in-memory default. Assigning another transport, for example on hot reload, moves live subscriptions to it, and their `seq` then comes from the new transport, which may number lower than the old one.
+> Telefunc calls `listen()` and `listenBinary()` once per key on a server while that key has subscribers there, and calls the function they return before it listens on the key again. It passes on every message `onMessage` gets, so a `listen()` that also delivers messages sent before it hands those to subscribers as new.
+
+> A key's subscription is ready once `listen()` returns, so a publish on the same server right after a `subscribe()` goes out at once and must reach that listener. With a broker that subscribes asynchronously (a Kafka consumer joining its group, say), the transport delivers its own sends to its listeners on that server.
+
+> A `send()` that throws or rejects makes the `publish()` fail, and no subscriber gets the message. Telefunc isn't told of a dropped connection and never calls `listen()` again on its own: the transport reconnects and keeps calling the `onMessage` it was given.
+
+> A key is any well-formed string, such as `'room:lobby'`; a transport whose broker restricts names (NATS subjects) encodes it. Telefunc caps no payload: a page's publish is under 64 MiB (see <Link href="/channel#binary-data">Binary data</Link>), and a server's `Broadcast.publish()` has no limit.
+
+> A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once <Link href="/channel#broadcast">`publishBinary()`</Link> returns.
 
 <ConfigWhereServer />
 
