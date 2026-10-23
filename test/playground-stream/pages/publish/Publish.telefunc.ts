@@ -313,14 +313,22 @@ async function within10s(seen: Promise<unknown>): Promise<void> {
   clearTimeout(timer)
 }
 
-/** A chat room whose subscriber saves each message. */
+/** A chat room whose subscriber saves each message, and which sends its history to a page that joins. */
 async function onJoinChat() {
   const room = new BroadcastChannel<string>({ key: `chat:${crypto.randomUUID()}` })
   const database = connectToDatabase()
   room.subscribe(async (message) => {
     await database.saveMessage(message)
   })
+  room.onOpen(async () => {
+    for (const message of await loadHistory()) await room.publish(message)
+  })
   return room
+}
+
+/** The chat history store is down. */
+async function loadHistory(): Promise<string[]> {
+  throw new Error('Could not load the chat history')
 }
 
 /** A database that is unavailable for the first write. */

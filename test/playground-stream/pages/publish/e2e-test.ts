@@ -200,7 +200,7 @@ function testPublish(isDev: boolean, inDocker = false) {
     }
   })
 
-  test('broadcast: in a chat, a message the server fails to save or the page fails to show is reported, and the next message still arrives', async () => {
+  test('broadcast: in a chat whose saving, history, avatar or mark-as-read fails, the error is reported and the next message still arrives', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await resetCleanupState()
     await page.click('#test-chat')
@@ -212,20 +212,21 @@ function testPublish(isDev: boolean, inDocker = false) {
       const state = await getCleanupState()
       expect(state.chatSaved).toBe(JSON.stringify(['how are you?']))
       expect(state['bug:Database unavailable']).toBe('reported')
+      expect(state['bug:Could not load the chat history']).toBe('reported')
     })
-    expectLog('Database unavailable', {
-      // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
-      filter: (log) =>
-        inDocker
-          ? log.logSource === 'stdout' &&
-            log.logText
-              .split('\n')
-              .some((line) => line.includes('Database unavailable') && /^playground-[a-z]-\d+ +\| /.test(line))
-          : log.logSource === 'stderr',
-    })
-    expectLog('[telefunc:channel-error] Error: Could not load the avatar', {
-      filter: (log) => log.logSource === 'Browser Error',
-    })
+    for (const error of ['Database unavailable', 'Could not load the chat history']) {
+      expectLog(error, {
+        // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
+        filter: (log) =>
+          inDocker
+            ? log.logSource === 'stdout' &&
+              log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+            : log.logSource === 'stderr',
+      })
+    }
+    for (const error of ['Could not load the avatar', 'Could not mark the chat as read']) {
+      expectLog(`[telefunc:channel-error] Error: ${error}`, { filter: (log) => log.logSource === 'Browser Error' })
+    }
   })
 
   test("broadcast: a key's seq goes on growing after its subscribers leave and another key publishes, and runs on by one while it has a subscriber", async () => {

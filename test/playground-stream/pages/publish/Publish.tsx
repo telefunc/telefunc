@@ -303,6 +303,12 @@ function Publish() {
               throw new Error('Could not load the avatar')
             }
           }
+          const markChatAsRead = async () => {
+            throw new Error('Could not mark the chat as read')
+          }
+          room.onOpen(async () => {
+            await markChatAsRead()
+          })
           room.subscribe(async (message) => {
             await loadAvatar()
             messages.push(message)
