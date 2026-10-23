@@ -361,6 +361,8 @@ await me.publish({ phase: 'voting' }, { retain: true })
 await me.publishBinary(keyframe, { track: 'camera', meta: { isKeyframe: true }, retain: true })
 ```
 
+A retained message stays while its publisher is in the room. For state that outlives the participants, such as a game phase, publish it from a <Link href="#run-a-game-loop-or-a-bot-on-the-server">hidden participant</Link>.
+
 
 ## Load chat history
 
@@ -429,7 +431,7 @@ import { Room } from 'telefunc'
 await Room.close('lobby')
 ```
 
-A room also closes by itself once everyone has left. To keep a room open until you call `Room.close()`:
+A room also closes by itself once nobody is in it and no page has it open. To keep a room open until you call `Room.close()`:
 
 ```js
 // Environment: server
@@ -470,7 +472,7 @@ Server-side.
 | `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. |
 | `Room.getOrCreate(id, options?)` | Get a room, or create it. |
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room. |
-| `Room.join(id, { meta?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
+| `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
 | `Room.list({ prefix? }?)` | List the open rooms. |
 | `Room.setMeta(id, meta)` / `Room.setAttributes(id, attributes)` | Replace / update the room's `meta`. |
 | `Room.getParticipants(id, { identity? }?)` | List the participants, or one user's. |
