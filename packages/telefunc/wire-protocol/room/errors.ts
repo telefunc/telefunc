@@ -9,6 +9,8 @@ export {
   CLIENT_ROOM_BUG_MESSAGE,
   roomAckError,
   roomFailureError,
+  toRoomResult,
+  roomResultValue,
   DM_FAILURE,
 }
 
@@ -18,7 +20,8 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { classifyTelefuncError } from '../channel/errorClassification.js'
 import { ACK_STATUS, type AckResultStatus } from '../wire/connectionFrame.js'
-import type { DmReply, RoomFailure } from './protocol.js'
+import type { DmReply, RoomFailure, RoomResult } from './protocol.js'
+import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 
 // Error contract: Abort carries its value, RoomError carries a safe message, and bugs are reported
 // on the throwing side and hidden from the caller.
@@ -74,6 +77,28 @@ function roomAckError(err: unknown, report: (err: unknown) => void): { text: str
   if (err instanceof ChannelOverflowError) return { text: err.message, status: ACK_STATUS.OVERFLOW }
   report(err)
   return { text: ROOM_BUG_MESSAGE, status: ACK_STATUS.ERROR }
+}
+
+/** `work`'s outcome as its room stub answers its client with it. */
+function toRoomResult(work: Promise<unknown>, report: (err: unknown) => void): Promise<RoomResult> {
+  return work.then(
+    (value) => ({ ok: true, value }),
+    (err: unknown): RoomResult => {
+      if (classifyTelefuncError(err, isRoomError).kind === 'shield')
+        return { ok: false, shield: (err as Error).message }
+      if (err instanceof ChannelOverflowError) return { ok: false, overflow: err.message }
+      return toRoomFailure(err, report, ROOM_BUG_MESSAGE)
+    },
+  )
+}
+
+/** The value a client call resolves to, or throws what it rejects with, as `result` answers it. */
+function roomResultValue(result: RoomResult): unknown {
+  if (result.ok) return result.value
+  if ('abort' in result) throw createAbortError(result.abortValue)
+  if ('shield' in result) throw new ShieldValidationError(result.shield)
+  if ('overflow' in result) throw new ChannelOverflowError(result.overflow)
+  throw new Error(result.err)
 }
 
 function roomFailureError(res: RoomFailure): Error {

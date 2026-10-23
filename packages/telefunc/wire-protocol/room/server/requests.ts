@@ -1,4 +1,5 @@
 export {
+  isRoomRequest,
   decodeRoomRequest,
   decodeRoomDeclaration,
   decodeRoomPublish,
@@ -69,6 +70,11 @@ function integer(value: unknown, what: string): number {
 function optionalTrue(value: unknown, what: string): boolean {
   if (value !== undefined && value !== true) malformed(what)
   return value === true
+}
+
+/** A room stub's requests and declarations share its channel: a request is tagged `req-`. */
+function isRoomRequest(value: unknown): boolean {
+  return isRecord(value) && typeof value.__r === 'string' && value.__r.startsWith('req-')
 }
 
 function decodeRoomRequest(value: unknown): RoomRequest {

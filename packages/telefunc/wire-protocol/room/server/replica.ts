@@ -46,7 +46,7 @@ import type { MetaMirror, ServerRoom } from './room.js'
 import { RosterStream } from './RosterStream.js'
 import { toggle } from './sets.js'
 import { RoomSession } from './session.js'
-import { MemberMessageTexts, type RoomStubChannel, unorderedEventText } from './stub.js'
+import { MemberMessageTexts, type RoomStub, unorderedEventText } from './stub.js'
 import { RoomSubscriptions } from './subscriptions.js'
 assertIsNotBrowser()
 
@@ -110,12 +110,12 @@ class RoomReplica {
   /** In-flight `send(…, { ack: true })`s; a leave of either end, or a close, fails the ones it strands. */
   readonly acks = new PendingDmAcks()
   /** Every handle's attached stubs. */
-  readonly stubs = new Set<RoomStubChannel>()
+  readonly stubs = new Set<RoomStub>()
   /** The meta of each participant a client holds, which the client mirrors. */
   readonly metaMirrors = new Set<MetaMirror>()
   /** Each stub's latest view write, from its attach or a rewrite, to the key it wrote, null if it failed; its removal
    *  comes after it. */
-  private readonly _views = new Map<RoomStubChannel, Promise<string | null>>()
+  private readonly _views = new Map<RoomStub, Promise<string | null>>()
   /** A view write failed, or the session hosting the views was lost: the heartbeat writes them again. */
   private _viewsLost = false
   /** Members whose eviction failed, by id, with their identity: the session would host them for as long as it lives. */
@@ -198,7 +198,7 @@ class RoomReplica {
     this.demand.forgetMember(member)
   }
 
-  attachStub(stub: RoomStubChannel): void {
+  attachStub(stub: RoomStub): void {
     this.stubs.add(stub)
     this._views.set(
       stub,
@@ -206,7 +206,7 @@ class RoomReplica {
     )
   }
 
-  detachStub(stub: RoomStubChannel): void {
+  detachStub(stub: RoomStub): void {
     this.stubs.delete(stub)
     const view = this._views.get(stub)
     this._views.delete(stub)
@@ -219,12 +219,12 @@ class RoomReplica {
   }
 
   /** The stubs' views' keys, in order; each null and the views lost if the write failed. */
-  private async _holdViews(stubs: RoomStubChannel[]): Promise<(string | null)[]> {
+  private async _holdViews(stubs: RoomStub[]): Promise<(string | null)[]> {
     try {
       const keys = await holdViews(
         this._incarnation,
         this.session,
-        stubs.map((stub) => stub.id),
+        stubs.map((stub) => stub.end.id),
       )
       return stubs.map((_, i) => keys[i] ?? null)
     } catch (error) {

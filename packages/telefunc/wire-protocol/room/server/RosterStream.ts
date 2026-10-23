@@ -6,24 +6,24 @@ import type { MemberSnapshot, RoomRosterEvent } from '../protocol.js'
 import { Slice } from '../Slice.js'
 import type { MembershipEvent, RoomModel } from '../state.js'
 import { reportRoomError } from './errors.js'
-import { type RoomStubChannel, unorderedEventText } from './stub.js'
+import { type RoomStub, unorderedEventText } from './stub.js'
 assertIsNotBrowser()
 
 /** A view's roster to its clients: on attach, and again to every client once a roster read corrected a drift. */
 class RosterStream {
   /** Stubs whose first roster read failed: the next successful refresh sends them one. */
-  private readonly _owed = new Set<RoomStubChannel>()
+  private readonly _owed = new Set<RoomStub>()
   /** Each roster part's text for the clients that see no hidden member, at one roster version: one roster's text at
    *  most, until the first stream after a change or the room's teardown. */
   private _texts: { version: number; parts: Array<{ text: string; hidden: boolean }> } | null = null
   /** A roster reconciling into the view, whose drift reaches its clients once it ends. */
   private _reconciling = false
   /** The roster stream each stub is being sent; a newer one replaces it. */
-  private readonly _streamOf = new WeakMap<RoomStubChannel, object>()
+  private readonly _streamOf = new WeakMap<RoomStub, object>()
 
   private readonly _model: RoomModel
   /** The view's attached stubs; one that leaves it drops out of a stream. */
-  private readonly _stubs: ReadonlySet<RoomStubChannel>
+  private readonly _stubs: ReadonlySet<RoomStub>
   private readonly _ensureRoster: () => Promise<void>
 
   constructor({
@@ -32,7 +32,7 @@ class RosterStream {
     ensureRoster,
   }: {
     model: RoomModel
-    stubs: ReadonlySet<RoomStubChannel>
+    stubs: ReadonlySet<RoomStub>
     ensureRoster: () => Promise<void>
   }) {
     this._model = model
@@ -67,7 +67,7 @@ class RosterStream {
   }
 
   /** An attached stub's first roster, once the view knows it; a failed read owes it the next one. */
-  sendTo(stub: RoomStubChannel): void {
+  sendTo(stub: RoomStub): void {
     void this._ensureRoster()
       .then(() => {
         if (this._stubs.has(stub) && !this._model.closed) return this._stream([stub])
@@ -80,7 +80,7 @@ class RosterStream {
       })
   }
 
-  forget(stub: RoomStubChannel): void {
+  forget(stub: RoomStub): void {
     this._owed.delete(stub)
   }
 
@@ -92,7 +92,7 @@ class RosterStream {
   /** The roster to `stubs`, `ROOM_ROSTER_PART_MEMBERS` live members per part and a `ROOM_PLAN_SLICE_MS` slice per turn,
    *  so each event relayed between two parts is one the parts after it reflect. A stub sent a newer roster drops out.
    *  While the roster is unchanged since the stream began, each part's text is the one another stream built for it. */
-  private async _stream(stubs: RoomStubChannel[]): Promise<void> {
+  private async _stream(stubs: RoomStub[]): Promise<void> {
     const stream = {}
     for (const stub of stubs) {
       this._streamOf.set(stub, stream)

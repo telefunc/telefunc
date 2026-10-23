@@ -19,6 +19,7 @@ export type {
   DmReply,
   MemberMetaUpdate,
   RoomFailure,
+  RoomResult,
   RoomStubRequest,
   ParticipantStubRequest,
   MemberMutationRequest,
@@ -142,6 +143,13 @@ type MemberMetaUpdate = { seq: number; meta: ParticipantMeta } | { seq: number; 
 
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
+
+/** A room stub's answer to its client's request or publish: the value the call resolves to, or what it rejects with. */
+type RoomResult =
+  | { ok: true; value: unknown }
+  | RoomFailure
+  | { ok: false; shield: string }
+  | { ok: false; overflow: string }
 
 /** A member's meta, attributes and DM requests, as a participant stub carries them. */
 type MemberMutationRequest =

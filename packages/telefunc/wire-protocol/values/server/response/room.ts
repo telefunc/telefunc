@@ -41,17 +41,17 @@ const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerCon
     const { stub, metadata } = serverRoom._openStub({
       publishShield: context.validators.get('data'),
       grants: responseRoomGrants(context, serverRoom.id),
+      createBroadcastChannel: context.createBroadcastChannel,
     })
-    context.registerChannel(stub)
     const maxFrameBytes = getAdapterMaxFrameBytes()
     if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
     return {
       metadata,
       async close() {
-        await stub.close()
+        await stub.end.close()
       },
       abort(abortError) {
-        stub.abort(abortError.abortValue)
+        stub.end.abort(abortError.abortValue)
       },
     }
   },

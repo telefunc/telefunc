@@ -1,4 +1,4 @@
-export { RoomStubChannel, RoomParticipantStubChannel, ResponseRoomGrants, MemberMessageTexts, unorderedEventText }
+export { RoomStub, RoomParticipantStubChannel, ResponseRoomGrants, MemberMessageTexts, unorderedEventText }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -6,6 +6,8 @@ import { assertUsage } from '../../../utils/assert.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { ServerChannel, parsePeerText } from '../../channel/server/channel.js'
+import type { ServerBroadcastEnd } from '../../channel/server/ServerBroadcastEnd.js'
+import type { ServerReplacerContext } from '../../values/types.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import {
@@ -30,13 +32,14 @@ import {
   decodeRoomRequest,
   type RoomRequest,
   decodeStubBinaryFrame,
+  isRoomRequest,
   type RoomDeclaration,
 } from './requests.js'
 import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
-import { DM_FAILURE, RoomError, roomAckError } from '../errors.js'
+import { DM_FAILURE, RoomError, roomAckError, toRoomResult } from '../errors.js'
 import {
   leaveCauseToWire,
   dmNotice,
@@ -50,6 +53,7 @@ import {
   type RoomDemandEvent,
   type RoomDmEnvelope,
   type RoomJoinedEvent,
+  type RoomResult,
   type RoomRosterEvent,
 } from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
@@ -136,6 +140,11 @@ class MemberMessageTexts {
   }
 }
 
+/** A request's or publish's outcome as its stub answers it. */
+function roomResult(work: Promise<unknown>): Promise<RoomResult> {
+  return toRoomResult(work, reportRoomError)
+}
+
 /** The publish shield validates Room data at ingress only. */
 function assertPublishShield(validate: ShieldValidator | undefined, data: unknown): void {
   if (!validate) return
@@ -144,7 +153,9 @@ function assertPublishShield(validate: ShieldValidator | undefined, data: unknow
 }
 
 /** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
-class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
+class RoomStub implements LaneHolder {
+  /** Its channel to its client. */
+  readonly end: ServerBroadcastEnd
   private readonly _room: ServerRoom
   private readonly _publishShield: ShieldValidator | undefined
   private readonly _members = new Set<string>()
@@ -169,37 +180,43 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   constructor(
     serverRoom: ServerRoom,
-    { publishShield, grants }: { publishShield?: ShieldValidator; grants: ResponseRoomGrants },
+    {
+      publishShield,
+      grants,
+      createBroadcastChannel,
+    }: {
+      publishShield?: ShieldValidator
+      grants: ResponseRoomGrants
+      createBroadcastChannel: ServerReplacerContext['createBroadcastChannel']
+    },
   ) {
-    super({ publishes: true })
     this._room = serverRoom
     this._publishShield = publishShield
     this._selfSuppressed = grants.selfSuppressed
     this._grantedHidden = grants.hidden
+    this.end = createBroadcastChannel({
+      key: serverRoom.id,
+      onPublish: (text) => roomResult(this._publishText(decodeRoomPublish(parsePeerText(text)))),
+      onPublishBinary: (framed) => roomResult(this._publishBinary(decodeStubBinaryFrame(framed), framed)),
+      onSubscription: (kind, on) => this._onSubscription(kind, on),
+      onAttach: () => {
+        this._rosterSent = false
+        this._room._onStubAttached(this)
+      },
+    })
+    this.end.listen((message) => this._receive(message))
     grants.onSuppressed((member) => this._room._onStubSuppressed(this, member))
-  }
-
-  protected override _onAttached(): void {
-    this._rosterSent = false
-    this._room._onStubAttached(this)
   }
 
   // Client requests
 
-  protected override _onPeerData(value: unknown, bytes: number): void {
-    const declaration = decodeRoomDeclaration(value)
+  /** A request, sent with an ack, answers with its result; a declaration, sent without one, applies at once. */
+  private _receive(message: unknown): Promise<RoomResult> | undefined {
+    if (isRoomRequest(message)) return roomResult(this._handleRequest(decodeRoomRequest(message)))
+    const declaration = decodeRoomDeclaration(message)
     if (declaration.__r === 'sub-binary') this._assertTrackWantFits(declaration)
-    try {
-      this._applyDeclaration(declaration)
-    } catch (error) {
-      this._handleCallbackError(error)
-    }
-    this._flow.onConsumed(bytes)
-  }
-
-  override _onPeerAckReqMessage(text: string, seq: number): Promise<void> {
-    const request = decodeRoomRequest(parsePeerText(text))
-    return this._ackRoomResult(seq, this._handleRequest(request))
+    this._applyDeclaration(declaration)
+    return undefined
   }
 
   async _handleRequest(req: RoomRequest): Promise<unknown> {
@@ -219,17 +236,8 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     }
   }
 
-  override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    const publish = decodeRoomPublish(parsePeerText(text))
-    return this._ackRoomResult(seq, this._publishText(publish))
-  }
-
-  override _onPeerPublishBinaryAckReqMessage(framed: Uint8Array, seq: number): Promise<void> {
-    return this._ackRoomResult(seq, this._publishBinary(decodeStubBinaryFrame(framed), framed))
-  }
-
   /** Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`. */
-  override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
+  private _onSubscription(kind: BroadcastKind, on: boolean): void {
     if (kind === 'binary' || on === this._wantsText) return
     const before = on ? { all: this._wantsText, members: new Map<string, boolean>() } : null
     this._wantsText = on
@@ -312,7 +320,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
     }
     this._members.add(id)
     if (!selfDelivery) this._selfSuppressed.add(id)
-    this._sendPublish(unorderedEventText({ __r: 'joined', reqId, id }))
+    this.end.deliver(unorderedEventText({ __r: 'joined', reqId, id }))
   }
 
   _forgetMember(id: string): void {
@@ -359,12 +367,12 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   /** An event this instance originates for this client alone: state each attach sends again. */
   _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
-    this._sendPublish(unorderedEventText(event), { resentOnAttach: true })
+    this.end.deliver(unorderedEventText(event), { resentOnAttach: true })
   }
 
   /** `_relayEvent` with the event's text already made, so one text can go to many clients. */
   _relayEventText(text: string): void {
-    this._sendPublish(text, { resentOnAttach: true })
+    this.end.deliver(text, { resentOnAttach: true })
   }
 
   /** A roster part's members this client gets: `visible` itself unless the part holds a hidden member this client was
@@ -377,7 +385,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   /** A hidden member's events reach only the clients that were handed it. */
   _relayControl(wireText: string, hiddenMember: string | null, opts: { resentOnAttach: boolean }): void {
-    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._sendPublish(wireText, opts)
+    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this.end.deliver(wireText, opts)
   }
 
   _relayAnnouncement(wireText: string, ord: WirePublishInfo): void {
@@ -393,19 +401,19 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._wantsBinary(from, track) && this._replay.admitBinary(from, track, info)) this._sendPublishBinary(wireData)
+    if (this._wantsBinary(from, track) && this._replay.admitBinary(from, track, info)) this.end.deliverBinary(wireData)
   }
 
   _relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
     if (ackId) this._recordAckDm(ackId, from)
-    this._sendPublish(fromMetaSeq !== undefined && this._namesSender(from) ? texts.unstamped() : texts.stamped())
+    this.end.deliver(fromMetaSeq !== undefined && this._namesSender(from) ? texts.unstamped() : texts.stamped())
   }
 
   /** Whether this client names `member` as this view does: it got the whole roster since it attached, and every event
    *  after it, none dropped while it was away. A hidden member's grant may reach the client after a message does. */
   private _namesSender(member: string): boolean {
     return (
-      this._peer !== null &&
+      this.end.isAttached &&
       this._rosterSent &&
       this._room._replica.roster.settled &&
       this._room._model.memberHidden(member) === false
@@ -413,17 +421,17 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
   }
 
   _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void {
-    if (this._replay.admit(event.from, info)) this._sendPublish(encodePublishText(serialized, info))
+    if (this._replay.admit(event.from, info)) this.end.deliver(encodePublishText(serialized, info))
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void {
     if (this._replay.admitBinary(frame.from, frame.track, info)) {
-      this._sendPublishBinary(encodePublishBinary(framed, info))
+      this.end.deliverBinary(encodePublishBinary(framed, info))
     }
   }
 
   private _relayTextLive(key: string, wireText: string, ord: WirePublishInfo): void {
-    if (this._replay.admit(key, ord)) this._sendPublish(wireText)
+    if (this._replay.admit(key, ord)) this.end.deliver(wireText)
   }
 
   // Ack-DM correlations

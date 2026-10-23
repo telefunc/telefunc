@@ -27,13 +27,14 @@ import {
   type SenderStamp,
   type RoomEnvelope,
   type RoomJoinedEvent,
+  type RoomResult,
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from '../protocol.js'
 import { RoomModel, RoomState, RoomStateView, type MembershipEvent } from '../state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
-import { CLIENT_ROOM_BUG_MESSAGE } from '../errors.js'
+import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../errors.js'
 import { ParticipantBase } from '../participant.js'
 import type { MetaRewinds } from '../MemberMeta.js'
 import type {
@@ -231,20 +232,22 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
-  _request(req: RoomStubRequest): Promise<unknown> {
-    return this._stub.send(req, { ack: true })
+  async _request(req: RoomStubRequest): Promise<unknown> {
+    return roomResultValue((await this._stub.send(req, { ack: true })) as RoomResult)
   }
 
   /** @internal `from` is a claim: the server checks it against this stub's members and stamps `fromMeta` itself. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     const publish: RoomDataPublish = { __r: 'data', from, data }
     if (retain) publish.retain = true
-    return await this._stub._publishUnreported(publish)
+    return roomResultValue((await this._stub._publishUnreported(publish)) as unknown as RoomResult) as ChannelPublishAck
   }
 
   /** @internal */
   async _publishBinaryFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
-    return await this._stub._publishBinaryUnreported(framed)
+    return roomResultValue(
+      (await this._stub._publishBinaryUnreported(framed)) as unknown as RoomResult,
+    ) as ChannelPublishAck
   }
 
   /** @internal A local participant completed its voluntary leave. */
