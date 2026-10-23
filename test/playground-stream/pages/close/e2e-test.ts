@@ -108,6 +108,22 @@ function testClose() {
     })
   })
 
+  test('close: a page that reloads ends its open channel on the server at once', async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await resetCleanupState()
+    await page.click('#test-keep-channel')
+    await autoRetry(async () => {
+      expect((await getCleanupState()).keptChannel).toBe('open')
+    })
+    await page.reload()
+    await autoRetry(
+      async () => {
+        expect((await getCleanupState()).keptChannel).toBe('none')
+      },
+      { timeout: 3_000 },
+    )
+  })
+
   test('close: a channel the server aborted before returning it reaches the client aborted', async () => {
     await navigate(`${getServerUrl()}/close`)
     await page.click('#test-aborted-channel')

@@ -4,6 +4,7 @@ export {
   onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onKeptChannel,
   onAbortedChannel,
   onCloseUnreturned,
   onCloseFn,
@@ -97,6 +98,19 @@ async function onCloseChannel() {
   cleanupState.closeChannel_onCloseErr = 'pending'
   ch.onClose((err) => {
     cleanupState.closeChannel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'
+  })
+  return ch.client
+}
+
+/** cleanupState: keptChannel = 'open' once its page's wire reached the server, then its onClose error's message, or 'none'. */
+async function onKeptChannel() {
+  const ch = new Channel<never, never>()
+  cleanupState.keptChannel = 'pending'
+  ch.onOpen(() => {
+    cleanupState.keptChannel = 'open'
+  })
+  ch.onClose((err) => {
+    cleanupState.keptChannel = err ? err.message : 'none'
   })
   return ch.client
 }

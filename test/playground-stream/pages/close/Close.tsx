@@ -9,6 +9,7 @@ import {
   onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onKeptChannel,
   onAbortedChannel,
   onCloseUnreturned,
   onCloseFn,
@@ -22,6 +23,7 @@ function Close() {
   const [hydrated, setHydrated] = useState(false)
   const [result, setResult] = useState<string>('')
   const pendingChannelRef = useRef<ClientChannel | null>(null)
+  const keptChannelRef = useRef<ClientChannel | null>(null)
   const pendingPassedFnRef = useRef<object | null>(null)
   useEffect(() => setHydrated(true), [])
 
@@ -104,6 +106,17 @@ function Close() {
         }}
       >
         Channel: close(channel)
+      </button>
+
+      <button
+        id="test-keep-channel"
+        onClick={async () => {
+          setResult('')
+          keptChannelRef.current = await onKeptChannel()
+          setResult(JSON.stringify({ method: 'keep(channel)' }))
+        }}
+      >
+        Channel: keep it open
       </button>
 
       <button
