@@ -1,7 +1,7 @@
 export { VideoChat }
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import type { Room, LocalParticipant, RemoteParticipant } from 'telefunc/client'
+import type { LocalParticipant, RemoteParticipant } from 'telefunc/client'
 import { onJoinRoom } from './VideoChat.telefunc'
 
 declare const MediaStreamTrackProcessor: {
@@ -23,17 +23,14 @@ function Participant({ name }: { name: string }) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const remoteRef = useRef<HTMLCanvasElement>(null)
   const cleanupRef = useRef<(() => void) | null>(null)
-  // Held for the page's life: a room dropped while `me` is kept gets closed by the GC.
-  const roomRef = useRef<Room | null>(null)
-  const meRef = useRef<LocalParticipant | null>(null)
 
   const join = useCallback(async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, frameRate: 15 } })
     videoRef.current!.srcObject = stream
     videoRef.current!.play()
 
-    const room = (roomRef.current = await onJoinRoom('demo'))
-    const me = (meRef.current = await room.join({ meta: { name } }))
+    const room = await onJoinRoom('demo')
+    const me = await room.join({ meta: { name } })
 
     // Receive: one decoder per other member; the canvas shows the first of them
     const remote = createRemoteView(remoteRef.current!)

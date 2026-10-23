@@ -22,7 +22,7 @@ function testVideoChat() {
       )
       expect(seen).deep.equal({ Alice: ['Bob'], Bob: ['Alice'] })
       for (const d of decoders) {
-        expect(Object.values(d.senders)[0]).to.be.greaterThan(15)
+        expect(d.senders[d.column === 'Alice' ? 'Bob' : 'Alice']).to.be.greaterThan(15)
         expect(d.errors).to.equal(0)
       }
     })
