@@ -110,7 +110,7 @@ The client sends a session token with every request, as the `session` query para
 </Warning>
 
 
-### Room state
+### Rooms
 
 <Link href="/room">Room</Link> calls such as `Room.create()`, `Room.announce()` and `Room.close()` work anywhere in your Worker, including cron triggers and queue consumers. Server-side listeners (`subscribe()`, `onJoin()`, …) deliver to a Telefunc session, so install them inside a telefunction or a channel handler.
 
