@@ -256,7 +256,7 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   readonly identity: string | null
   /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
   readonly selfDelivery: boolean
-  /** False while your page can't reach the room, which waits for it. */
+  /** False while the page holding you can't reach the room. */
   readonly isConnected: boolean
 
   /** Publish a message to the whole room. */
@@ -282,9 +282,9 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the
    *  room), `'disconnected'` (the connection died, or fell further behind than the server holds for it). */
   onLeave(callback: (cause: LeaveCause) => void): () => void
-  /** Your page can't reach the room: what you send waits, and the room keeps you. */
+  /** The page holding you can't reach the room; the room keeps you meanwhile. */
   onDisconnect(callback: () => void): () => void
-  /** Your page reaches the room again, and what waited is sent. */
+  /** The page holding you reaches the room again. */
   onReconnect(callback: () => void): () => void
 } & RoomShield<Pub>
 
