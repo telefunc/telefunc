@@ -850,6 +850,8 @@ function Room() {
         const peer = await room.join({ meta: { name: 'Peer' } })
         peer.listen((data) => ({ echo: data }))
         const serverMember = await onJoinAnswering(roomId)
+        const held = await onJoinAsServer(roomId, 'Held')
+        held.listen(() => 'pong')
         const reply = (sent: Promise<{ response: unknown }>) =>
           sent.then(
             (receipt) => receipt.response,
@@ -859,6 +861,7 @@ function Room() {
           JSON.stringify({
             fromPage: await reply(me.send(peer.id, 'hi', { ack: true })),
             fromServer: await reply(me.send(serverMember, 'hi', { ack: true })),
+            fromHeld: await reply(me.send(held.id, 'ping', { ack: true })),
             refused: await reply(me.send(serverMember, 'refuse', { ack: true })),
           }),
         )
