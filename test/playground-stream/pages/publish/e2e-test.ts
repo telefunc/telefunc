@@ -188,7 +188,14 @@ function testPublish(isDev: boolean, inDocker = false) {
       expect(result).deep.equal({ received: ['static:hello', 'channel:hello'], receiptKey: true })
     })
     for (const error of ['broadcast-listener-throws', 'broadcast-listener-rejects']) {
-      expectLog(error, { filter: (log) => log.logSource === 'stderr' })
+      expectLog(error, {
+        // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
+        filter: (log) =>
+          inDocker
+            ? log.logSource === 'stdout' &&
+              log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+            : log.logSource === 'stderr',
+      })
     }
   })
 
