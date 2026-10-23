@@ -385,6 +385,11 @@ class ChannelMux {
     if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
   }
 
+  /** Ends the channels of a session whose wire closed transiently as a permanent close would have: its page left. */
+  endSession(sessionId: string): void {
+    this.detachSession(sessionId, DETACH_REASON.PERMANENT)
+  }
+
   readPermanentTermination(connection: Wire): boolean {
     return this.connectionEntries.get(connection)?.state.terminatePermanently ?? false
   }

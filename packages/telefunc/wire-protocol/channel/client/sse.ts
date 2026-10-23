@@ -128,6 +128,16 @@ class SseTransport implements UpgradeSource {
     this.fetchImpl = fetchImpl
     this.userHeaders = userHeaders
     this.owner = owner
+    if (typeof window !== 'undefined') window.addEventListener('pagehide', this.onPageHide)
+  }
+
+  /** A page that leaves for good closes its wire, as a WebSocket's does; one kept in the back/forward cache keeps it. */
+  private readonly onPageHide = (event: PageTransitionEvent): void => {
+    if (event.persisted) return
+    // `keepalive`, as the request outlives the page; not `sendBeacon`, which can't send the request-kind header.
+    void this.post(encodeSseRequest({ connId: this.connId, close: true }), undefined, { keepalive: true }).catch(
+      () => {},
+    )
   }
 
   async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
@@ -499,9 +509,13 @@ class SseTransport implements UpgradeSource {
     )
   }
 
-  /** Every request this transport makes. The three senders differ only in what they send and what
+  /** Every request this transport makes. Its senders differ only in what they send and what
    *  a failure means to them, so that is all they say. */
-  private post(body: BodyInit, signal: AbortSignal, extra?: { accept?: string; duplex?: 'half' }): Promise<Response> {
+  private post(
+    body: BodyInit,
+    signal: AbortSignal | undefined,
+    extra?: { accept?: string; duplex?: 'half'; keepalive?: true },
+  ): Promise<Response> {
     const headers: Record<string, string> = {
       ...this.userHeaders,
       'Content-Type': 'application/octet-stream',
@@ -513,6 +527,7 @@ class SseTransport implements UpgradeSource {
       headers,
       body,
       signal,
+      keepalive: extra?.keepalive,
       // @ts-ignore duplex is not yet in TypeScript's RequestInit
       duplex: extra?.duplex,
     })
@@ -624,6 +639,7 @@ class SseTransport implements UpgradeSource {
   }
 
   dispose(): void {
+    if (typeof window !== 'undefined') window.removeEventListener('pagehide', this.onPageHide)
     this.connecting = false
     if (this.startTimer) {
       clearTimeout(this.startTimer)

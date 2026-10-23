@@ -107,8 +107,9 @@ class SseConnectionTransport {
    *  connection — covers the same-instance race where the long-lived stream-request POST
    *  lands before the stream-response POST. */
   private readonly pendingConnections = new Map<string, Set<(connection: SseConnection | null) => void>>()
-  /** When each wire closed, for `connectTtl`: a page never reuses a connId, so a POST for one is refused. */
-  private readonly closedAt = new Map<string, number>()
+  /** When each wire closed and the session it had, for `connectTtl`: a page never reuses a connId, so a POST for one is
+   *  refused. */
+  private readonly closedWires = new Map<string, { at: number; sessionId: string | null }>()
   private readonly mux = getChannelMux()
   private readonly transport: ServerTransport<SseConnection> = {
     getSessionId: (connection) => connection.sessionId ?? undefined,
@@ -141,6 +142,7 @@ class SseConnectionTransport {
       connId = metadata.connId
       if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream, request)
       if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
+      if (metadata.close) return this.handleClosePost(connId)
       return await this.handleBatchPost(connId, reader)
     } catch (err) {
       // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
@@ -230,6 +232,19 @@ class SseConnectionTransport {
     return okResponse()
   }
 
+  /** The page left for good: its wire closes as a WebSocket's does when its page leaves. One its page lost first has
+   *  left its session's channels waiting for a reconnect, which end now. */
+  private handleClosePost(connId: string): SseChannelHttpResponse {
+    const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
+    if (connection) {
+      this.closeConnection(connection, { permanent: true })
+      return okResponse()
+    }
+    const sessionId = this.closedWires.get(connId)?.sessionId
+    if (sessionId) this.mux.endSession(sessionId)
+    return okResponse()
+  }
+
   /** Short-lived outbox batch POST. A RECONCILE's RECONCILED goes as it is answered, ahead of what the frames behind it
    *  send: those are what the page carries with it, which it doesn't replay. Tracked in `pendingDispatches` so
    *  `runStreamResponse` won't send its own reconciled mid-batch. */
@@ -307,17 +322,17 @@ class SseConnectionTransport {
   private async resolveConnection(connId: string): Promise<SseConnection | null> {
     const connection = this.mux.getConnectionByConnId<SseConnection>(connId)
     if (connection) return connection
-    if (this.closedAt.has(connId)) return null
+    if (this.closedWires.has(connId)) return null
     return await this.waitForConnection(connId)
   }
 
-  private rememberClosed(connId: string): void {
+  private rememberClosed({ connId, sessionId }: SseConnection): void {
     const now = performance.now()
-    for (const [closed, at] of this.closedAt) {
+    for (const [closed, { at }] of this.closedWires) {
       if (now - at < this.mux.connectTtl) break
-      this.closedAt.delete(closed)
+      this.closedWires.delete(closed)
     }
-    this.closedAt.set(connId, now)
+    this.closedWires.set(connId, { at: now, sessionId })
   }
 
   /** Mirrors `ChannelMux.waitForChannelRegistration`: the timeout path must remove the
@@ -377,7 +392,7 @@ class SseConnectionTransport {
   private closeConnection(connection: SseConnection, { permanent }: { permanent: boolean }): void {
     if (connection.closed) return
     connection.closed = true
-    this.rememberClosed(connection.connId)
+    this.rememberClosed(connection)
     // Unblock any data POST awaiting `ready` — its dispatch sees the closed connection and bails.
     connection.resolveReady()
     this.mux.onConnectionClosed(connection, { permanent })
