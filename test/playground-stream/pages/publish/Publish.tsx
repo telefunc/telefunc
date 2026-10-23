@@ -23,6 +23,7 @@ import {
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
+  onBroadcastKeyOrders,
   onBroadcastSelfUnsubscribe,
   onBroadcastReconnect,
   onBroadcastWhileOffline,
@@ -406,6 +407,18 @@ function Publish() {
         }}
       >
         Broadcast.publish() receipts
+      </button>
+
+      <h2>Key Orders</h2>
+
+      <button
+        id="test-broadcast-key-orders"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onBroadcastKeyOrders()))
+        }}
+      >
+        Orders of unsubscribed keys
       </button>
 
       <h2>Subscriber Unsubscribes Itself</h2>

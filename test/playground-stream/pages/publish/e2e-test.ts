@@ -248,6 +248,25 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
+  // The in-memory backend's: Redis keeps each key's order in Redis.
+  if (!isDev && !inDocker) {
+    test("broadcast: the in-memory backend keeps no order for a key nobody subscribes to, and a key's seq still increases after its subscriber leaves", async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-key-orders')
+
+      await autoRetry(async () => {
+        const result = await getResult<{ heldMB: number; subscribedSeq: number; otherSeq: number; freedSeq: number }>(
+          '#publish-result',
+        )
+        // 100,000 orders of 1 KB keys would hold over 100 MB.
+        expect(result.heldMB).lessThan(10)
+        expect(result.freedSeq).greaterThan(result.subscribedSeq)
+        // A freed key starts above every seq given since.
+        expect(result.freedSeq).greaterThan(result.otherSeq)
+      })
+    })
+  }
+
   test("broadcast: a subscriber that unsubscribes itself doesn't make the next one miss a message", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-self-unsubscribe')

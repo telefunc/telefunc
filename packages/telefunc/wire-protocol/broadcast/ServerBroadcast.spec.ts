@@ -200,12 +200,11 @@ describe('keyed in-process broadcast', () => {
     const a2 = await a.publish({ text: 'a-two' })
     const b1 = await b.publish({ text: 'b-one' })
 
-    // Each receipt is keyed to its own topic, and seq counts independently per key.
+    // Each receipt is keyed to its own topic, and seq increases per key.
     expect(a1.key).toBe(k1)
     expect(a2.key).toBe(k1)
     expect(b1.key).toBe(k2)
     expect(a2.seq).toBe(a1.seq + 1)
-    expect(b1.seq).toBe(a1.seq) // separate key → seq counter is independent
     expect(typeof a1.timestamp).toBe('number')
   })
 })

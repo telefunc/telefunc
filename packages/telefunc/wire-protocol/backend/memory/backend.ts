@@ -250,7 +250,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   private readonly _directory = new Map<string, DirectoryEntry>()
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly _directoryChecks: DirectoryCheck[] = []
+  /** The order of each key subscribed here; an unsubscribed key's next publish starts above `_broadcastHighest`. */
   private readonly _broadcastOrder = new Map<string, OrderingInfo>()
+  /** The highest `seq` and `timestamp` a Broadcast publish was given. */
+  private readonly _broadcastHighest: OrderingInfo = { seq: 0, timestamp: 0 }
   private readonly _broadcastSubs: Record<BroadcastKind, Subscriptions> = { text: new Map(), binary: new Map() }
   private _revSeq = 0
   /** Deliveries in seq order: the running one stays queued, so a publish made inside it is delivered after. */
@@ -270,7 +273,13 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
   }
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): PublishResult | Promise<PublishResult> {
-    const mark = advanceOrder(this._broadcastOrder, route.key, Date.now())
+    const order = this._broadcastOrder.get(route.key)
+    const mark = nextOrderMark(order ?? this._broadcastHighest, Date.now())
+    // Only a subscribed key has an order.
+    if (order !== undefined || this._broadcastSubscribed(route.key)) this._broadcastOrder.set(route.key, mark)
+    const highest = this._broadcastHighest
+    if (mark.seq > highest.seq) highest.seq = mark.seq
+    if (mark.timestamp > highest.timestamp) highest.timestamp = mark.timestamp
     const targets = this._broadcastSubs[route.kind].get(route.key) ?? []
     // Counted before delivery, which may unsubscribe or subscribe.
     const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
@@ -288,6 +297,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
         resolve(receipt)
       })
     })
+  }
+
+  private _broadcastSubscribed(key: string): boolean {
+    return this._broadcastSubs.text.has(key) || this._broadcastSubs.binary.has(key)
   }
 
   private _deliversNow(): boolean {
@@ -510,7 +523,10 @@ class MemoryBackend implements BroadcastDriver, RoomDriver {
     const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt({
       receiver,
       localReceiverCount,
-      detach: () => removeSubscription(subs, key, sub),
+      detach: () => {
+        removeSubscription(subs, key, sub)
+        if (!('roomId' in source) && !this._broadcastSubscribed(key)) this._broadcastOrder.delete(key)
+      },
     })
     subs.set(key, [...(subs.get(key) ?? []), sub])
     // Ready once what was committed before it is delivered, as a network subscriber hears its confirmation after the

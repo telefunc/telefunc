@@ -19,6 +19,7 @@ export {
   onBroadcastAnswerOrder,
   onBroadcastSelfAnswer,
   onStaticPublishReceipts,
+  onBroadcastKeyOrders,
   onBroadcastSelfUnsubscribe,
   onBroadcastReconnect,
   onBroadcastWhileOffline,
@@ -32,9 +33,7 @@ import { onServerAction } from '../../server-actions'
 
 type TextMsg = { text: string; from: string }
 
-/** Two broadcast instances sharing a key — publish from one, subscribe on the other.
- *  The key is unique per call: the in-memory adapter's seq counter is per-key, so a
- *  fixed key would leak seq state across page loads and break the [1,2,3] assertion. */
+/** Two broadcast instances sharing a key — publish from one, subscribe on the other. */
 async function onTextBroadcast() {
   const key = `room:text-test:${crypto.randomUUID()}`
   const publisher = new BroadcastChannel<TextMsg>({ key })
@@ -415,6 +414,32 @@ async function onStaticPublishReceipts() {
   const text = await Broadcast.publish(key, 'hi')
   const binary = await Broadcast.publishBinary(key, new Uint8Array([1]))
   return { key, receipts: [text, binary].map((receipt) => ({ key: receipt.key, seq: receipt.seq })) }
+}
+
+/** The server heap 100,000 publishes to keys nobody subscribes to keep, and the `seq`s of a key published to while
+ *  subscribed, then again after its subscriber left and another key was published to. */
+async function onBroadcastKeyOrders() {
+  const prefix = `room:unsubscribed:${crypto.randomUUID()}:${'k'.repeat(1000)}:`
+  collectGarbage()
+  const heapBefore = process.memoryUsage().heapUsed
+  for (let i = 0; i < 100_000; i++) await Broadcast.publish(`${prefix}${i}`, i)
+  collectGarbage()
+  const heldMB = (process.memoryUsage().heapUsed - heapBefore) / 1e6
+  const key = `room:freed:${crypto.randomUUID()}`
+  const unsubscribe = Broadcast.subscribe(key, () => {})
+  const subscribedSeq = (await Broadcast.publish(key, 'subscribed')).seq
+  unsubscribe()
+  let otherSeq = 0
+  for (let i = 0; i < 3; i++) otherSeq = (await Broadcast.publish(`${key}:other`, i)).seq
+  const freedSeq = (await Broadcast.publish(key, 'freed')).seq
+  return { heldMB, subscribedSeq, otherSeq, freedSeq }
+}
+
+function collectGarbage() {
+  // Bun has no --expose-gc: it collects with Bun.gc(true).
+  const { gc, Bun: bun } = globalThis as { gc?: () => void; Bun?: { gc(force: boolean): void } }
+  if (gc) gc()
+  else bun!.gc(true)
 }
 
 /** On the server and on the page, the first of two subscribers unsubscribes itself on its first message. */
