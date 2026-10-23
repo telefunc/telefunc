@@ -194,7 +194,7 @@ me.listen((message, from) => {
 })
 ```
 
-`{ identity }` reaches the participants the server joined with that identity, as in <Link href="#control-who-can-join-and-post" />; to reach one participant, pass `{ id }`.
+Sending to `{ identity }` works when the server joined the user with that `identity`, as in <Link href="#control-who-can-join-and-post" />. To send to one participant, pass `{ id }`.
 
 
 ## Control who can join and post
@@ -212,7 +212,7 @@ export async function onJoinChat(roomId) {
   const room = await Room.getOrCreate(roomId)
   Room.guard(room, {
     onBeforeJoin: (member) => {
-      // Only the join below: the client can't join this room by calling room.join() itself
+      // Rejects a client calling room.join() itself (it has no identity): users join only below
       if (member.identity !== user.id) throw Abort('join through onJoinChat()')
       if (isBanned(user.id)) throw Abort('banned')
     },
@@ -244,6 +244,8 @@ try {
 `identity` is your user id, set by the server at `join()`. Every message carries its sender's `identity` (`from.identity`), and a client can't change it.
 
 <Warning>Check permissions on `identity`, never on `meta`: a client can set its `meta` to anything.</Warning>
+
+The hooks run for the client this telefunction returns the room to, so `user` in them is that client's user.
 
 <Warning>Call `Room.guard()` once, with all its hooks, in every telefunction that returns the room: a client that gets the room from a telefunction without it skips the hooks.</Warning>
 
@@ -347,8 +349,10 @@ Publish each source on its own track, and subscribe to the tracks you show:
 
 // The participant who films
 // encodeCamera(): your encoder, e.g. WebCodecs' VideoEncoder
-// not awaited: awaiting each frame would hold the next one back by a round trip
-encodeCamera((frame, isKeyframe) => me.publishBinary(frame, { track: 'camera', meta: { isKeyframe } }))
+// live video: don't await, or each frame waits a round trip for the previous one
+encodeCamera((frame, isKeyframe) =>
+  me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe }),
+)
 
 // The participants who watch; showVideo(): your decoder, e.g. WebCodecs' VideoDecoder
 const watch = (member) =>
@@ -356,6 +360,8 @@ const watch = (member) =>
 for (const member of await room.getParticipants()) watch(member)
 room.onJoin(watch)
 ```
+
+With `retain: isKeyframe`, a viewer who arrives mid-stream starts from the last keyframe, see <Link href="#give-late-joiners-the-current-state" />.
 
 To send frames only while someone watches, use `onDemand()`:
 
@@ -366,9 +372,9 @@ let watched = false
 me.onDemand((track, wanted) => {
   if (track === 'camera') watched = wanted
 })
-// not awaited: awaiting each frame would hold the next one back by a round trip
+// live video: don't await, or each frame waits a round trip for the previous one
 encodeCamera((frame, isKeyframe) => {
-  if (watched) me.publishBinary(frame, { track: 'camera', meta: { isKeyframe } })
+  if (watched) me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe })
 })
 ```
 
@@ -403,7 +409,7 @@ import { getContext, Room } from 'telefunc'
 
 export async function onJoinChat(roomId) {
   const { user } = getContext()
-  const room = await Room.get(roomId, { tail: true }) // the client also gets the messages published after the history you load
+  const room = await Room.getOrCreate(roomId, { tail: true }) // the client also gets the messages published after the history you load
   Room.guard(room, {
     onAfterPublish: async (from, message, info) => {
       await db.messages.insert({ ...message, roomId, authorId: user.id, seq: info.seq })
@@ -455,6 +461,8 @@ import { Room } from 'telefunc'
 await Room.close('lobby')
 ```
 
+A room also closes by itself once it has been empty for a while, see <Link href="/room-config" />.
+
 To keep a room open until you call `Room.close()`, create it with:
 
 ```js
@@ -498,7 +506,7 @@ Server-side.
 |---|---|
 | `Room.create(id, options?)` | Create a room. Throws if it exists. |
 | `Room.get(id, { tail? }?)` | Get a room. Throws if it doesn't exist. With `tail: true`, the client also gets the messages published after the history you load (see <Link href="#load-chat-history" />). |
-| `Room.getOrCreate(id, options?)` | Get a room, or create it. |
+| `Room.getOrCreate(id, { ...options, tail? }?)` | Get a room, or create it. `tail` as for `Room.get()`. |
 | `Room.guard(room, hooks)` | Add `onBefore*()` and `onAfter*()` hooks to a room. |
 | `Room.join(id, { meta?, selfDelivery?, identity?, hidden? }?)` | Join a room from the server, without getting the room first. |
 | `Room.list({ prefix? }?)` | List the open rooms. |
