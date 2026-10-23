@@ -575,6 +575,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
         }
       } catch (err) {
+        // A listener's ProtocolViolationError ends the wire, as a malformed frame does.
+        if (err instanceof ProtocolViolationError) throw err
         if (this._handleCallbackError(err)) return
       }
     }
@@ -909,7 +911,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     for (const waiter of waiters) waiter()
   }
 
-  private async _answerAckReq<T>(
+  /** The first listener runs in the receive turn, where a ProtocolViolationError it throws ends the wire. */
+  private _answerAckReq<T>(
     listeners: Listeners<(data: T) => unknown>,
     data: T,
     seq: number,
@@ -917,26 +920,48 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   ): Promise<void> {
     if (listeners.size === 0) {
       this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
-      return
+      return Promise.resolve()
     }
     const verdict = validate ? validate(data) : true
     // `shield-error` status lets the client reject its `send()` promise with a branded
     // ShieldValidationError — same identity every other shield-fail surface produces.
     if (verdict !== true) {
       this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
-      return
+      return Promise.resolve()
     }
+    const [first, ...rest] = listeners.list()
+    let firstResult: unknown
+    try {
+      firstResult = first!(data)
+    } catch (err) {
+      if (err instanceof ProtocolViolationError) throw err
+      this._sendAckFailure(seq, err)
+      return Promise.resolve()
+    }
+    return this._sendAckAnswer(seq, firstResult, rest, data)
+  }
+
+  private async _sendAckAnswer<T>(
+    seq: number,
+    firstResult: unknown,
+    rest: readonly ((data: T) => unknown)[],
+    data: T,
+  ): Promise<void> {
     let answer: string
     try {
-      let lastResult: unknown
-      for (const cb of listeners.list()) lastResult = await cb(data)
+      let lastResult = await firstResult
+      for (const cb of rest) lastResult = await cb(data)
       answer = stringify(lastResult)
     } catch (err) {
-      if (this._handleCallbackError(err)) return
-      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this._sendAckFailure(seq, err)
       return
     }
     this._sendAckRes(seq, answer)
+  }
+
+  private _sendAckFailure(seq: number, err: unknown): void {
+    if (this._handleCallbackError(err)) return
+    this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }
 
   /** @internal */
