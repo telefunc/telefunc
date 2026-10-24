@@ -133,7 +133,6 @@ function testWire(isDev: boolean) {
       const ws = new globalThis.WebSocket(url)
       ws.binaryType = 'arraybuffer'
       await new Promise((resolve) => (ws.onopen = resolve))
-      let closed = false
       let sessionId: string | undefined
       // Takes the first answer to the RECONCILE in flight.
       let settle: ((answer: 'reconciled' | 'closed') => void) | undefined
@@ -141,10 +140,7 @@ function testWire(isDev: boolean) {
         settle?.(answer)
         settle = undefined
       }
-      ws.onclose = () => {
-        closed = true
-        answered('closed')
-      }
+      ws.onclose = () => answered('closed')
       ws.onmessage = (event) => {
         const frame = new Uint8Array(event.data as ArrayBuffer)
         // RECONCILED, its JSON after the 7-byte header.
@@ -152,10 +148,11 @@ function testWire(isDev: boolean) {
         sessionId = JSON.parse(new TextDecoder().decode(frame.subarray(7))).sessionId
         answered('reconciled')
       }
-      // A RECONCILE naming what changed once the first is answered.
+      // A RECONCILE naming what changed once the first is answered; one on a socket the server closed isn't sent.
       const answer = (reconcile: { open: object[]; released?: number[] }) =>
-        new Promise<'reconciled' | 'closed'>((resolve) => {
-          if (closed) return resolve('closed')
+        new Promise<'reconciled' | 'closed' | 'already closed'>((resolve) => {
+          // CLOSING from the server's close frame on, ahead of the close event.
+          if (ws.readyState !== globalThis.WebSocket.OPEN) return resolve('already closed')
           settle = resolve
           const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
           // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
