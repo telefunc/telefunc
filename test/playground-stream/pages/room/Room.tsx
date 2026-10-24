@@ -111,6 +111,8 @@ let checkKeptMember: (() => void) | null = null
 let checkLetGo: (() => void) | null = null
 /** The chat the `ack-dm-close` card closes when its second button is clicked. */
 let closeChat: (() => void) | null = null
+/** The room view the `ack-dm-close-view` card closes when its second button is clicked. */
+let closeViewChat: (() => void) | null = null
 /** The call the `ack-dm-hang-up` card hangs up when its second button is clicked. */
 let hangUp: (() => void) | null = null
 
@@ -915,6 +917,29 @@ function Room() {
         setResult(JSON.stringify({ answer: await answer, closed: true }))
       })}
       <button id="test-room-ack-dm-close-chat" onClick={() => closeChat?.()}>
+        Close the chat
+      </button>
+
+      {scenario('ack-dm-close-view', null, 'Ask a member a page joined, who saves their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm-close-view')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const chat = await onGetRoom(roomId)
+        const leaving = await chat.join({ meta: { name: 'Leaving' } })
+        leaving.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
+          return 'bye'
+        })
+        const answer = replyOf(me.send(leaving.id, 'thanks', { ack: true }))
+        const { promise: closeClicked, resolve } = Promise.withResolvers<void>()
+        closeViewChat = resolve
+        await closeClicked
+        const closing = close(chat)
+        setResult(JSON.stringify({ roomId, closing: true }))
+        await closing
+        setResult(JSON.stringify({ answer: await answer, closed: true }))
+      })}
+      <button id="test-room-ack-dm-close-view-chat" onClick={() => closeViewChat?.()}>
         Close the chat
       </button>
 

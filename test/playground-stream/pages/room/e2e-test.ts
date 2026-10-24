@@ -397,6 +397,28 @@ function testRoom() {
       await page.goto('about:blank')
     }
   })
+  test('room: a member a page joined, whose room view the page closes while the member saves its reply to an acknowledged DM, sends the reply, and the close finishes after it', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-ack-dm-close-view')
+    let roomId = ''
+    await autoRetry(async () => {
+      const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
+      expect(r.saving).toBe(true)
+      roomId = r.roomId
+    })
+    await page.click('#test-room-ack-dm-close-view-chat')
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({ roomId, closing: true })
+    })
+    await runServerAction(`saveReply_${roomId}`)
+    try {
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ answer: 'bye', closed: true })
+      })
+    } finally {
+      await page.goto('about:blank')
+    }
+  })
   test("room: an acknowledged DM to a server member a page holds rejects with the member's leave at once when the page aborts it while it saves its reply, with no unhandled rejection after the save", async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-ack-dm-hang-up')
