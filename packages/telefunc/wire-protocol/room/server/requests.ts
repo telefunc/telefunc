@@ -1,12 +1,12 @@
 export {
+  isRoomRequest,
   decodeRoomRequest,
   decodeRoomDeclaration,
   decodeRoomPublish,
   decodeStubBinaryFrame,
   decodeParticipantRequest,
   decodeParticipantFrame,
-  decodeDmReply,
-  decodeBinaryWantChange,
+  decodeParticipantDeclaration,
 }
 export type { RoomRequest, RoomDeclaration }
 
@@ -71,6 +71,11 @@ function optionalTrue(value: unknown, what: string): boolean {
   return value === true
 }
 
+/** A stub's requests and declarations share its channel: a request is tagged `req-`. */
+function isRoomRequest(value: unknown): boolean {
+  return isRecord(value) && typeof value.__r === 'string' && value.__r.startsWith('req-')
+}
+
 function decodeRoomRequest(value: unknown): RoomRequest {
   const req = record(value, 'request')
   switch (req.__r) {
@@ -97,13 +102,13 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
   const decl = record(value, 'declaration')
   switch (decl.__r) {
     case 'dm-reply':
-      return {
-        __r: 'dm-reply',
-        ackId: text(decl.ackId, 'DM reply'),
-        reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
-      }
-    case 'sub-binary':
-      return { __r: 'sub-binary', ...decodeBinaryWantChange(decl) }
+      return decodeDmReplyDeclaration(decl)
+    case 'sub-binary': {
+      const { member, track, on } = decl
+      if (member !== null && !isMemberId(member)) malformed('binary wants')
+      if (track !== null && !isRoomTrack(track)) malformed('binary wants')
+      return { __r: 'sub-binary', member: member ?? ALL, track: track ?? ALL, on: flag(on, 'binary wants') }
+    }
     case 'sub-text':
       return {
         __r: 'sub-text',
@@ -114,25 +119,28 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
   return malformed('declaration')
 }
 
-/** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
-function decodeDmReply(reply: unknown): DmReply | null {
-  if (!isRecord(reply)) return null
-  if (reply.ok === true) return { ok: true, result: reply.result }
-  if (reply.ok !== false) return null
-  if (reply.abort === true) return { ok: false, abort: true, abortValue: reply.abortValue }
-  return typeof reply.err === 'string' ? { ok: false, err: reply.err } : null
+function decodeParticipantDeclaration(value: unknown): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
+  const decl = record(value, 'declaration')
+  if (decl.__r !== 'dm-reply') malformed('declaration')
+  return decodeDmReplyDeclaration(decl)
 }
 
-/** A client-declared `sub-binary` change. */
-function decodeBinaryWantChange({ member, track, on }: Record<string, unknown>): BinaryWantChange {
-  if (member !== null && !isMemberId(member)) malformed('binary wants')
-  if (track !== null && !isRoomTrack(track)) malformed('binary wants')
-  return { member: member ?? ALL, track: track ?? ALL, on: flag(on, 'binary wants') }
+function decodeDmReplyDeclaration(decl: Record<string, unknown>): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
+  return { __r: 'dm-reply', ackId: text(decl.ackId, 'DM reply'), reply: decodeDmReply(decl.reply) }
+}
+
+/** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
+function decodeDmReply(value: unknown): DmReply {
+  const reply = record(value, 'DM reply')
+  if (reply.ok === true) return { ok: true, result: reply.result }
+  if (reply.ok !== false) malformed('DM reply')
+  if (reply.abort === true) return { ok: false, abort: true, abortValue: reply.abortValue }
+  return { ok: false, err: text(reply.err, 'DM reply') }
 }
 
 /** A declared text want per member id, into a record no key can reach the prototype of. */
-function decodeTextWants(changes: unknown): Record<string, boolean> {
-  if (!isRecord(changes)) malformed('text wants')
+function decodeTextWants(value: unknown): Record<string, boolean> {
+  const changes = record(value, 'text wants')
   const members: Record<string, boolean> = Object.create(null)
   for (const [memberId, wanted] of Object.entries(changes)) {
     if (!isMemberId(memberId)) malformed('text wants')

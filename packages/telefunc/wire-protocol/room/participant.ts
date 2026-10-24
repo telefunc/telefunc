@@ -46,7 +46,7 @@ abstract class ParticipantBase implements LocalParticipant {
   private _pendingInbox: Fifo<HeldDm> | null = null
   private _pendingInboxBytes = 0
   /** When a client holds this participant, its inbox forwards there instead of to local listeners (see
-   *  `RoomParticipantStubChannel`). */
+   *  `RoomParticipantStub`). */
   private _forwarder: InboxForwarder | null = null
 
   /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
@@ -66,7 +66,7 @@ abstract class ParticipantBase implements LocalParticipant {
     this._flushHeld(forwarder)
   }
 
-  /** @internal Already bound to a client holder (serialized once, via `RoomParticipantStubChannel`)? */
+  /** @internal Already bound to a client holder (serialized once, via `RoomParticipantStub`)? */
   get _isBound(): boolean {
     return this._forwarder !== null
   }

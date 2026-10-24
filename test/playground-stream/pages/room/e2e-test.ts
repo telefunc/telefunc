@@ -79,6 +79,32 @@ function testRoomScenario<Result>(id: string, name: string, validate: (result: R
   })
 }
 
+/** A card whose recipient saves its reply to an acknowledged DM, and whose second button acts meanwhile. */
+function testRoomAckDmWhileSaving(id: string, button: string, name: string, meanwhile: object, after: object) {
+  test(name, async () => {
+    await navigate(`${getServerUrl()}/room`)
+    try {
+      await page.click(`#test-room-${id}`)
+      let roomId = ''
+      await autoRetry(async () => {
+        const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
+        expect(r.saving).toBe(true)
+        roomId = r.roomId
+      })
+      await page.click(`#test-room-${id}-${button}`)
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ roomId, ...meanwhile })
+      })
+      await runServerAction(`saveReply_${roomId}`)
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal(after)
+      })
+    } finally {
+      await page.goto('about:blank')
+    }
+  })
+}
+
 /** Reads of a member's meta of more than a page that a write overlaps, on any backend: the Redis lanes run them too. */
 function testRoomMetaReads() {
   testRoomScenario<Record<string, string>>(
@@ -354,14 +380,47 @@ function testRoom() {
       expect(r.recreatedOpen).toBe(false)
     },
   )
-  testRoomScenario<{ fromPage: unknown; fromServer: unknown; refused: unknown }>(
+  testRoomScenario<{
+    fromPage: unknown
+    fromPageUnsendable: unknown
+    fromServer: unknown
+    fromHeld: unknown
+    fromHeldUnsendable: unknown
+    refused: unknown
+    unhandled: string[]
+  }>(
     'ack-dm',
-    "room: an acknowledged DM resolves with its recipient's reply, from a page or a server member, and rejects with the recipient's Abort",
+    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, and rejects with the recipient's Abort, or an error when a reply from a page or from a server member a page holds can't be serialized, without an unhandled rejection",
     (r) => {
       expect(r.fromPage).deep.equal({ echo: 'hi' })
+      expect(r.fromPageUnsendable).toBe("Internal client room error — see the recipient's client logs")
       expect(r.fromServer).deep.equal({ echo: 'hi' })
+      expect(r.fromHeld).toBe('pong')
+      expect(r.fromHeldUnsendable).toBe("Internal client room error — see the recipient's client logs")
       expect(r.refused).toBe('refused')
+      expect(r.unhandled).deep.equal([])
     },
+  )
+  testRoomAckDmWhileSaving(
+    'ack-dm-close',
+    'chat',
+    'room: a server member a page holds and closes while it saves its reply to an acknowledged DM sends the reply, and the close finishes after it',
+    { closing: true },
+    { answer: 'bye', closed: true },
+  )
+  testRoomAckDmWhileSaving(
+    'ack-dm-close-view',
+    'chat',
+    'room: a member a page joined, whose room view the page closes while the member saves its reply to an acknowledged DM, sends the reply, and the close finishes after it',
+    { closing: true },
+    { answer: 'bye', closed: true },
+  )
+  testRoomAckDmWhileSaving(
+    'ack-dm-hang-up',
+    'now',
+    "room: an acknowledged DM to a server member a page holds rejects with the member's leave at once when the page aborts it while it saves its reply, with no unhandled rejection after the save",
+    { fromHangingUp: 'Participant left the room' },
+    { fromHangingUp: 'Participant left the room', unhandled: [] },
   )
   testRoomScenario<{ listed: number | string; serverCount: number; count: number; emptied: boolean }>(
     'roster-churn',
@@ -800,6 +859,27 @@ function testRoom() {
       })
     })
   })
+  test("room: a page back from offline, twice, gets its room's meta each time, though its room sent it more meanwhile than bufferLimit holds", async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-meta-away')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-meta-away:/)
+    })
+    for (const absence of [1, 2]) {
+      await page.context().setOffline(true)
+      await cutWire()
+      await runServerAction(`roomMetaAway_${roomId}`)
+      await autoRetry(async () => {
+        expect((await getCleanupState())[`roomMetaAway_${roomId}`]).toBe(`done-${absence}`)
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ roomId, topic: `away-${absence}`, filler: `${absence}` })
+      })
+    }
+  })
   test('room: a page offline while its room sent it more than bufferLimit holds is let go at its reconnect: its view closes and its member leaves, with no gap delivered', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-overflow')
@@ -824,6 +904,25 @@ function testRoom() {
         isClosed: true,
         leaves: ['Me:disconnected'],
       })
+    })
+  })
+  test('room: a page offline while its server-joined participant was sent more than bufferLimit holds is let go at its reconnect: its participant leaves, with no gap delivered', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-participant-overflow')
+    let roomId = ''
+    await autoRetry(async () => {
+      roomId = (await getResult<{ roomId: string }>('#room-result')).roomId
+      expect(roomId).match(/^e2e-participant-overflow:/)
+    })
+    await page.context().setOffline(true)
+    await cutWire()
+    await runServerAction(`participantOverflow_${roomId}`)
+    await autoRetry(async () => {
+      expect((await getCleanupState())[`participantOverflow_${roomId}`]).toBe('done')
+    })
+    await page.context().setOffline(false)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({ roomId, got: ['before'], myCause: { type: 'disconnected' } })
     })
   })
   test("room: on a 1 Mbit/s link, a page gets 640 KB of its room's messages and publishes 640 KB without reconnecting", async () => {

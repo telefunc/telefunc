@@ -7,18 +7,18 @@ export {
   toRoomFailure,
   ROOM_BUG_MESSAGE,
   CLIENT_ROOM_BUG_MESSAGE,
-  roomAckError,
   roomFailureError,
+  toRoomResult,
+  roomResultValue,
   DM_FAILURE,
 }
 
 import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
-import { stringify } from '@brillout/json-serializer/stringify'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { classifyTelefuncError } from '../channel/errorClassification.js'
-import { ACK_STATUS, type AckResultStatus } from '../wire/connectionFrame.js'
-import type { DmReply, RoomFailure } from './protocol.js'
+import type { DmReply, RoomFailure, RoomResult } from './protocol.js'
+import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 
 // Error contract: Abort carries its value, RoomError carries a safe message, and bugs are reported
 // on the throwing side and hidden from the caller.
@@ -56,8 +56,8 @@ function participantLeftError(): RoomError {
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
 const CLIENT_ROOM_BUG_MESSAGE = "Internal client room error — see the recipient's client logs"
 
-/** `roomAckError`'s classification rendered for an ack DM's reply, which travels on an inbox lane, not as a channel
- *  ack. */
+/** An error as an ack DM's reply carries it: an Abort with its value, a RoomError's or a shield's message, a bug
+ *  reported and hidden. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage: string): RoomFailure {
   const classified = classifyTelefuncError(err, isRoomError)
   if (classified.kind === 'abort') return { ok: false, abort: true, abortValue: classified.error.abortValue }
@@ -66,14 +66,25 @@ function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage:
   return { ok: false, err: bugMessage }
 }
 
-function roomAckError(err: unknown, report: (err: unknown) => void): { text: string; status: AckResultStatus } {
-  const classified = classifyTelefuncError(err, isRoomError)
-  if (classified.kind === 'abort') return { text: stringify(classified.error.abortValue), status: ACK_STATUS.ABORT }
-  if (classified.kind === 'expected') return { text: classified.error.message, status: ACK_STATUS.ERROR }
-  if (classified.kind === 'shield') return { text: classified.error.message, status: ACK_STATUS.SHIELD_ERROR }
-  if (err instanceof ChannelOverflowError) return { text: err.message, status: ACK_STATUS.OVERFLOW }
-  report(err)
-  return { text: ROOM_BUG_MESSAGE, status: ACK_STATUS.ERROR }
+function toRoomResult(work: Promise<unknown>, report: (err: unknown) => void): Promise<RoomResult> {
+  return work.then(
+    (value) => ({ ok: true, value }),
+    (err: unknown): RoomResult => {
+      const classified = classifyTelefuncError(err, isRoomError)
+      if (classified.kind === 'shield') return { ok: false, shield: classified.error.message }
+      if (err instanceof ChannelOverflowError) return { ok: false, overflow: err.message }
+      return toRoomFailure(err, report, ROOM_BUG_MESSAGE)
+    },
+  )
+}
+
+async function roomResultValue<T = unknown>(answer: Promise<unknown>): Promise<T> {
+  const result = (await answer) as RoomResult
+  if (result.ok) return result.value as T
+  if ('abort' in result) throw createAbortError(result.abortValue)
+  if ('shield' in result) throw new ShieldValidationError(result.shield)
+  if ('overflow' in result) throw new ChannelOverflowError(result.overflow)
+  throw new Error(result.err)
 }
 
 function roomFailureError(res: RoomFailure): Error {
@@ -88,6 +99,4 @@ const DM_FAILURE = {
   overflow: { ok: false, err: 'Inbox overflowed before the message was handled' },
   timeout: { ok: false, err: 'send({ ack: true }) timed out: the recipient never handled the message' },
   roomClosed: { ok: false, err: 'Room is closed' },
-  // An ack response isn't decoded in the receive turn like a frame, so a malformed one fails only its DM.
-  malformedReply: { ok: false, err: 'Malformed DM reply' },
 } as const satisfies Record<string, DmReply>

@@ -19,6 +19,7 @@ export type {
   DmReply,
   MemberMetaUpdate,
   RoomFailure,
+  RoomResult,
   RoomStubRequest,
   ParticipantStubRequest,
   MemberMutationRequest,
@@ -62,6 +63,7 @@ type RemoteParticipantMetadata = MemberSnapshot & { room: unknown; identity: str
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
 type ParticipantStubMetadata = {
   channelId: string
+  roomId: string
   id: string
   meta: ParticipantMeta
   selfDelivery: boolean
@@ -140,8 +142,15 @@ type DmReply = { ok: true; result: unknown } | RoomFailure
 /** A member's meta at `seq`, whole, or as the merge at `seq` changed it: a key it removed as `undefined`. */
 type MemberMetaUpdate = { seq: number; meta: ParticipantMeta } | { seq: number; attrs: ParticipantMeta }
 
-/** Published failure form for the one path that cannot use a native channel ack. */
+/** A safe Room failure: an Abort value or a caller-facing message. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
+
+/** A room stub's answer to its client's request or publish: the value the call resolves to, or what it rejects with. */
+type RoomResult =
+  | { ok: true; value: unknown }
+  | RoomFailure
+  | { ok: false; shield: string }
+  | { ok: false; overflow: string }
 
 /** A member's meta, attributes and DM requests, as a participant stub carries them. */
 type MemberMutationRequest =
@@ -161,8 +170,7 @@ type RoomStubRequest =
   /** Changes only: announcements, and each member whose own want changed. */
   | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
 
-/** Client→server requests on a participant stub; an ack DM is answered through the channel's own ack, so there's no
- *  `dm-reply`. */
+/** Client→server requests on a participant stub; an ack DM's reply is a `dm-reply`, as on a room stub. */
 type ParticipantStubRequest =
   | { __r: 'req-publish'; data: unknown; retain?: boolean }
   | MemberMutationRequest

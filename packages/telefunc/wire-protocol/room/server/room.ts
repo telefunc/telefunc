@@ -27,7 +27,7 @@ import {
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import { type RoomModel, RoomState, RoomStateView } from '../state.js'
 import { ParticipantBase } from '../participant.js'
-import { MemberMessageTexts, RoomStubChannel } from './stub.js'
+import { MemberMessageTexts, RoomStub } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
@@ -83,9 +83,9 @@ class ServerRoom extends RoomStateView implements Room {
   readonly _state: RoomState
   /** @internal */
   readonly _local: LocalHolder
-  private readonly _stubs = new Set<RoomStubChannel>()
+  private readonly _stubs = new Set<RoomStub>()
   /** The attached stub holding each member a client joined through. */
-  private readonly _stubOf = new Map<string, RoomStubChannel>()
+  private readonly _stubOf = new Map<string, RoomStub>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** The local participants that joined with `selfDelivery: false`. */
   private readonly _localSuppressed = new Set<string>()
@@ -287,7 +287,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const id of this._admissions.keys()) this._admissions.set(id, 'abandoned')
     // A client back while its channel still holds it gets `closed`.
     const timeout = reconnectWindow()
-    for (const stub of this._stubs) void stub.close({ timeout }).catch(() => {})
+    for (const stub of this._stubs) void stub.end.close({ timeout }).catch(() => {})
     this._replica.track(this)
   }
 
@@ -295,7 +295,7 @@ class ServerRoom extends RoomStateView implements Room {
   _onDm(envelope: RoomDmEnvelope, serialized: string, info: WirePublishInfo): void {
     const holder = this._holderOf(envelope.to)
     // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
-    if (holder instanceof RoomStubChannel) {
+    if (holder instanceof RoomStub) {
       if (envelope.fromMetaSeq !== undefined) {
         this._replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
       }
@@ -335,16 +335,16 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
    *  earlier one is in the snapshot. */
-  _openStub(options: ConstructorParameters<typeof RoomStubChannel>[1]): {
-    stub: RoomStubChannel
+  _openStub(options: ConstructorParameters<typeof RoomStub>[1]): {
+    stub: RoomStub
     metadata: RoomSnapshotMetadata
   } {
-    const stub = new RoomStubChannel(this, options)
+    const stub = new RoomStub(this, options)
     this._attachStub(stub)
     return {
       stub,
       metadata: {
-        channelId: stub.id,
+        channelId: stub.end.id,
         roomId: this.id,
         meta: this._model.metaEntries(),
         closed: this.isClosed,
@@ -355,7 +355,7 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  _attachStub(stub: RoomStubChannel): void {
+  _attachStub(stub: RoomStub): void {
     this._stubs.add(stub)
     this._replica.attachStub(stub)
     if (this._tail !== null) {
@@ -363,13 +363,12 @@ class ServerRoom extends RoomStateView implements Room {
       stub._beginTail(this._tail.take(), () => this._replica.plan.textChanged(stub, []))
       this._tail = null
     }
-    stub.onClose(() => this._detachStub(stub))
+    stub.end.onClose(() => this._detachStub(stub))
     this._replica.track(this)
     this._replica.plan.holderChanged(stub)
   }
 
-  _onStubAttached(stub: RoomStubChannel): void {
-    if (!this._stubs.has(stub)) return
+  _onStubAttached(stub: RoomStub): void {
     this._replica.roster.sendTo(stub)
     stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
     for (const member of stub._heldMembers()) {
@@ -377,7 +376,7 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  private _detachStub(stub: RoomStubChannel): void {
+  private _detachStub(stub: RoomStub): void {
     this._stubs.delete(stub)
     this._replica.detachStub(stub)
     stub._endTail()
@@ -395,12 +394,12 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal A response serialized a participant whose own frames the stub's client doesn't get back. */
-  _onStubSuppressed(stub: RoomStubChannel, member: string): void {
+  _onStubSuppressed(stub: RoomStub, member: string): void {
     if (this._stubs.has(stub)) this._replica.plan.memberChanged(member)
   }
 
   async _joinStubMember(
-    stub: RoomStubChannel,
+    stub: RoomStub,
     req: Extract<RoomRequest, { __r: 'req-join' }>,
   ): Promise<{ id: string; joinedAt: number }> {
     const admission = {
@@ -435,7 +434,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** A stub that is not attached holds no lanes. */
   private _holdsLanes(holder: LaneHolder): boolean {
-    return holder === this._local || this._stubs.has(holder as RoomStubChannel)
+    return holder === this._local || this._stubs.has(holder as RoomStub)
   }
 
   /** @internal Whether this handle observes the room: a client stub, a participant, or a listener. */
@@ -448,7 +447,7 @@ class ServerRoom extends RoomStateView implements Room {
     return this._tail !== null
   }
 
-  private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {
+  private _holderOf(id: string): ServerLocalParticipant | RoomStub | undefined {
     return this._localParticipants.get(id) ?? this._stubOf.get(id)
   }
 

@@ -6,6 +6,7 @@ import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
 import { ServerChannel } from '../channel/server/channel.js'
 import { ServerBroadcast } from '../broadcast/ServerBroadcast.js'
+import { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import { wrapProxy } from '../../utils/wrapProxy.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { parseHttpRequest } from '../../node/server/runTelefunc/parseHttpRequest.js'
@@ -54,6 +55,11 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
     registerChannel(channel) {
       registeredChannels.push(channel)
     },
+    createBroadcastChannel(opts) {
+      const end = new ServerBroadcastEnd(opts)
+      context.registerChannel(end)
+      return end
+    },
     sendStream(createProducer) {
       const index = nextIndex++
       producers.push({ createProducer, index })
@@ -84,7 +90,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never
     },
-    createBroadcast(opts) {
+    createBroadcastChannel(opts) {
       mintedBroadcasts.push(opts)
       return { kind: 'client-broadcast', ...opts, close: async () => {}, abort: () => {} } as never
     },
@@ -242,7 +248,7 @@ describe('reference identity — duplicates in one payload', () => {
     const broadcast = new ServerBroadcast({ key: 'room:identity' })
     const body = server.serialize({ room: broadcast, roomDupe: broadcast, roomDupe2: broadcast })
 
-    expect(server.registeredChannels).toEqual([broadcast])
+    expect(server.registeredChannels).toEqual([broadcast._end])
     expect(server.lifecycles).toHaveLength(1)
 
     const client = createClientHarness()

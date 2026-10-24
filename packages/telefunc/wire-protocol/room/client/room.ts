@@ -6,7 +6,7 @@ import { markHandled } from '../../../utils/markHandled.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../../channel/channel.js'
-import { ClientBroadcast, type ClientChannel } from '../../channel/client/channel.js'
+import type { ClientBroadcast } from '../../channel/client/channel.js'
 import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../binary.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../model.js'
 import {
@@ -14,6 +14,7 @@ import {
   inboxMessageFromWire,
   joinedMember,
   leaveCauseFromWire,
+  type DmReply,
   type InboxMessage,
   type MemberSnapshot,
   type ParticipantStubMetadata,
@@ -33,7 +34,7 @@ import {
 } from '../protocol.js'
 import { RoomModel, RoomState, RoomStateView, type MembershipEvent } from '../state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
-import { CLIENT_ROOM_BUG_MESSAGE } from '../errors.js'
+import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../errors.js'
 import { ParticipantBase } from '../participant.js'
 import type { MetaRewinds } from '../MemberMeta.js'
 import type {
@@ -51,6 +52,12 @@ import type {
 
 /** What a room's stub relays to its client on the text lane. */
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
+
+/** A reply that can't be sent is reported, and the sender gets an error instead. */
+function sendDmReply(stub: ClientBroadcast, ackId: string, reply: Promise<DmReply>): void {
+  const declare = (answer: DmReply): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
+  stub._sendReply(reply.then(declare), declare({ ok: false, err: CLIENT_ROOM_BUG_MESSAGE }))
+}
 
 /** The member an event concerns while that member's join may still be settling. */
 function heldMemberOf(event: ClientRoomEvent): string | null {
@@ -217,8 +224,7 @@ class ClientRoom extends RoomStateView implements Room {
       participant._deliverMessage(msg)
       return
     }
-    const ackId = msg.ackId
-    void participant._deliverMessageAck(msg).then((reply) => this._notify({ __r: 'dm-reply', ackId, reply }))
+    sendDmReply(this._stub, msg.ackId, participant._deliverMessageAck(msg))
   }
 
   /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -231,20 +237,20 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   /** @internal */
-  _request(req: RoomStubRequest): Promise<unknown> {
-    return this._stub.send(req, { ack: true })
+  async _request(req: RoomStubRequest): Promise<unknown> {
+    return roomResultValue(this._stub.send(req, { ack: true }))
   }
 
   /** @internal `from` is a claim: the server checks it against this stub's members and stamps `fromMeta` itself. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     const publish: RoomDataPublish = { __r: 'data', from, data }
     if (retain) publish.retain = true
-    return await this._stub._publishUnreported(publish)
+    return roomResultValue<ChannelPublishAck>(this._stub._publishUnreported(publish))
   }
 
   /** @internal */
   async _publishBinaryFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
-    return await this._stub._publishBinaryUnreported(framed)
+    return roomResultValue<ChannelPublishAck>(this._stub._publishBinaryUnreported(framed))
   }
 
   /** @internal A local participant completed its voluntary leave. */
@@ -441,7 +447,7 @@ class ClientRoom extends RoomStateView implements Room {
     })
   }
 
-  /** A closed stub's server side is gone with its wants, and a DM reply to it times out as any lost reply does. */
+  /** A closed stub's server side is gone with its wants. */
   private _notify(notice: RoomStubRequest): void {
     if (!this._stub.isClosed) void this._stub.send(notice, { ack: false }).catch(() => {})
   }
@@ -658,37 +664,38 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its stub channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
-  private readonly _channel: ClientChannel
+  private readonly _stub: ClientBroadcast
   private readonly _request: (req: ParticipantStubRequest) => Promise<unknown>
 
-  constructor(channel: ClientChannel, metadata: ParticipantStubMetadata) {
-    const request = (req: ParticipantStubRequest) => channel.send(req, { ack: true })
+  constructor(stub: ClientBroadcast, metadata: ParticipantStubMetadata) {
+    const request = async (req: ParticipantStubRequest) => roomResultValue(stub.send(req, { ack: true }))
     // Its own: the `rewound` notice forgets its seq.
     super({ participant: metadata, rewinds: { count: 0 }, request })
-    this._channel = channel
+    this._stub = stub
     this._request = request
 
-    channel.listen((notice: unknown) => {
-      assert(hasRoomTag(notice))
-      const msg = notice as ParticipantStubNotice
-      switch (msg.__r) {
-        case 'p-meta':
-          return this._onOwnMetaWritten(msg)
-        case 'rewound':
-          return this._forgetMetaSeq()
-        case 'demand':
-          return this._onDemand(msg.track, msg.wanted)
-        case 'demand-state':
-          return this._applyDemandState(msg.tracks)
-        case 'dm':
-          // An ack DM replies through the channel's own ack: the handler's return rides it home.
-          if (msg.ackId) return this._deliverMessageAck(inboxMessageFromWire(msg))
-          return this._deliverMessage(inboxMessageFromWire(msg))
-        case 'left':
-          return this._onLeft(leaveCauseFromWire(msg))
-      }
-    })
-    channel.onClose(() => this._onLeft({ type: 'disconnected' }))
+    stub._subscribeLocal('text', (notice) => this._onNotice(notice))
+    stub.onClose(() => this._onLeft({ type: 'disconnected' }))
+  }
+
+  private _onNotice(notice: unknown): void {
+    assert(hasRoomTag(notice))
+    const msg = notice as ParticipantStubNotice
+    switch (msg.__r) {
+      case 'p-meta':
+        return this._onOwnMetaWritten(msg)
+      case 'rewound':
+        return this._forgetMetaSeq()
+      case 'demand':
+        return this._onDemand(msg.track, msg.wanted)
+      case 'demand-state':
+        return this._applyDemandState(msg.tracks)
+      case 'dm':
+        if (msg.ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
+        return sendDmReply(this._stub, msg.ackId, this._deliverMessageAck(inboxMessageFromWire(msg)))
+      case 'left':
+        return this._onLeft(leaveCauseFromWire(msg))
+    }
   }
 
   /** Its own writes and the room's `p-meta` both land here. */
@@ -705,14 +712,14 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return (await this._channel.sendBinary(framed, { ack: true })) as ChannelPublishAck
+    return roomResultValue<ChannelPublishAck>(this._stub._publishBinaryUnreported(framed))
   }
 
   async leave(): Promise<void> {
     if (this._left) return
     await this._request({ __r: 'req-leave' })
     this._onLeft({ type: 'left' })
-    void this._channel.close().catch(() => {})
+    void this._stub.close().catch(() => {})
   }
 }
 

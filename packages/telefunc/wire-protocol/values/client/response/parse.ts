@@ -117,7 +117,7 @@ async function reviveResponse(
         connection,
       })
     },
-    createBroadcast(opts) {
+    createBroadcastChannel(opts) {
       return new ClientBroadcast({
         channelId: opts.channelId,
         key: opts.key,

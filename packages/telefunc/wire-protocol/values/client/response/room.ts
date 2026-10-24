@@ -23,7 +23,7 @@ type RoomRemoteReviverContract = TypeContract<never, RemoteParticipant, RemotePa
 const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   revive(metadata, context) {
-    const stub = context.createBroadcast({
+    const stub = context.createBroadcastChannel({
       channelId: metadata.channelId,
       key: metadata.roomId,
       maxFrameBytes: metadata.maxFrameBytes,
@@ -43,14 +43,18 @@ const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext
 const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, InternalClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   revive(metadata, context) {
-    const channel = context.createChannel({ channelId: metadata.channelId, maxFrameBytes: metadata.maxFrameBytes })
+    const stub = context.createBroadcastChannel({
+      channelId: metadata.channelId,
+      key: metadata.roomId,
+      maxFrameBytes: metadata.maxFrameBytes,
+    })
     return {
-      value: new ClientStandaloneParticipant(channel, metadata),
+      value: new ClientStandaloneParticipant(stub, metadata),
       async close() {
-        await channel.close()
+        await stub.close()
       },
       abort(abortError) {
-        channel.abort(abortError.abortValue, abortError.message)
+        stub.abort(abortError.abortValue, abortError.message)
       },
     }
   },

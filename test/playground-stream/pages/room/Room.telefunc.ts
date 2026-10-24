@@ -23,8 +23,10 @@ export {
   onCloseRoomWithMember,
   onBackgroundErrors,
   onRoomWhileAway,
+  onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
   onRoomOverflow,
+  onParticipantOverflow,
   onGetRoomOverflow,
   onRoomBurst,
   onGetWatchedCount,
@@ -69,6 +71,7 @@ export {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onSaveReply,
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
@@ -317,6 +320,20 @@ async function onRoomWhileAway(roomId: string, memberId: string) {
   })
 }
 
+/** Run by the test with `runServerAction()` while the page is away, once per absence: the room's meta changes, then a
+ *  member's meta changes past the page's 512 KiB bufferLimit for text, which drops the room's change from its buffer. */
+async function onRoomMetaWhileAway(roomId: string) {
+  const srv = await (await Room.get(roomId)).join({ meta: { name: 'Srv' } })
+  awayMembers.set(roomId, [srv])
+  let absence = 0
+  onServerAction(`roomMetaAway_${roomId}`, async () => {
+    absence++
+    await Room.setMeta(roomId, { topic: `away-${absence}` })
+    for (let n = 0; n < 6; n++) await srv.setMeta({ name: 'Srv', filler: `${absence}`.padEnd(128 * 1024) })
+    cleanupState[`roomMetaAway_${roomId}`] = `done-${absence}`
+  })
+}
+
 /** A member the test removes, with `runServerAction()`, while the page is away. */
 async function onRoomLeaveWhileJoining(roomId: string) {
   const other = await (await Room.get(roomId)).join({ meta: { name: 'Other' } })
@@ -342,6 +359,19 @@ async function onRoomOverflow(roomId: string) {
     cleanupState[`roomOverflow_${roomId}`] = 'done'
   })
   await speaker.publish('before')
+}
+
+/** A sender DMs 'before' to the page's server-joined participant `memberId`, then, run by the test while the page is
+ *  offline, 1 MiB: more than the page's 512 KiB bufferLimit for text holds. */
+async function onParticipantOverflow(roomId: string, memberId: string) {
+  const sender = await (await Room.get(roomId)).join({ meta: { name: 'Sender' } })
+  awayMembers.set(roomId, [sender])
+  onServerAction(`participantOverflow_${roomId}`, async () => {
+    // The participant leaves once its page's buffer drops a DM, so a later one finds it gone.
+    for (let n = 0; n < 8; n++) await sender.send(memberId, String(n).padEnd(128 * 1024)).catch(() => {})
+    cleanupState[`participantOverflow_${roomId}`] = 'done'
+  })
+  await sender.send(memberId, 'before')
 }
 
 async function onGetRoomOverflow(roomId: string) {
@@ -790,6 +820,13 @@ async function onJoinAnswering(roomId: string) {
     return { echo: data }
   })
   return me.id
+}
+
+/** A store's save of a reply, finished by the test with `runServerAction()`. */
+async function onSaveReply(roomId: string) {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  onServerAction(`saveReply_${roomId}`, resolve)
+  await promise
 }
 
 const churning = new Map<string, () => Promise<number>>()
