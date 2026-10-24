@@ -693,7 +693,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
-  _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
+  _publishUnreported<Result = ChannelPublishAck>(data: ChannelData<T>): Promise<Result> {
     if (this._isClosed) throw new ChannelClosedError()
     const serialized = stringify(data)
     return this._sendAckReq((onQueued) => this._connection.sendPublishAckReq(this, serialized, onQueued))
@@ -708,7 +708,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   }
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
-  _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
+  _publishBinaryUnreported<Result = ChannelPublishAck>(data: Uint8Array): Promise<Result> {
     if (this._isClosed) throw new ChannelClosedError()
     return this._sendAckReq((onQueued) => this._connection.sendPublishBinaryAckReq(this, data, onQueued))
   }

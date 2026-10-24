@@ -240,14 +240,12 @@ class ClientRoom extends RoomStateView implements Room {
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     const publish: RoomDataPublish = { __r: 'data', from, data }
     if (retain) publish.retain = true
-    return roomResultValue((await this._stub._publishUnreported(publish)) as unknown as RoomResult) as ChannelPublishAck
+    return roomResultValue(await this._stub._publishUnreported<RoomResult>(publish)) as ChannelPublishAck
   }
 
   /** @internal */
   async _publishBinaryFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
-    return roomResultValue(
-      (await this._stub._publishBinaryUnreported(framed)) as unknown as RoomResult,
-    ) as ChannelPublishAck
+    return roomResultValue(await this._stub._publishBinaryUnreported<RoomResult>(framed)) as ChannelPublishAck
   }
 
   /** @internal A local participant completed its voluntary leave. */
@@ -714,9 +712,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return roomResultValue(
-      (await this._stub._publishBinaryUnreported(framed)) as unknown as RoomResult,
-    ) as ChannelPublishAck
+    return roomResultValue(await this._stub._publishBinaryUnreported<RoomResult>(framed)) as ChannelPublishAck
   }
 
   async leave(): Promise<void> {
