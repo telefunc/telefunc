@@ -50,6 +50,12 @@ class AwaitedChannels {
     this.attachedCount++
   }
 
+  /** Awaited no more: it holds nothing, and stays while a RECONCILE names it. */
+  expire(awaited: AwaitedChannel): void {
+    awaited.phase = 'expired'
+    this.drop(awaited)
+  }
+
   hold(awaited: AwaitedChannel, frame: ChannelFrame, bytes: number): void {
     awaited.held.push({ frame, bytes })
     this.backlog.bytes += bytes

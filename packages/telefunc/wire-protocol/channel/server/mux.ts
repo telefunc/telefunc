@@ -952,8 +952,7 @@ class ChannelMux {
 
   /** Not registered within `connectTtl`, or shut down as it registered. */
   private expireAwaited(awaited: AwaitedChannel): void {
-    awaited.phase = 'expired'
-    awaited.entry.state.awaited.drop(awaited)
+    awaited.entry.state.awaited.expire(awaited)
     this.send(awaited.wire, encode.attachResult(awaited.open.ix, null))
   }
 
