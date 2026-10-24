@@ -6,8 +6,7 @@ export {
   decodeStubBinaryFrame,
   decodeParticipantRequest,
   decodeParticipantFrame,
-  decodeDmReplyDeclaration,
-  decodeBinaryWantChange,
+  decodeParticipantDeclaration,
 }
 export type { RoomRequest, RoomDeclaration }
 
@@ -104,8 +103,12 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
   switch (decl.__r) {
     case 'dm-reply':
       return decodeDmReplyDeclaration(decl)
-    case 'sub-binary':
-      return { __r: 'sub-binary', ...decodeBinaryWantChange(decl) }
+    case 'sub-binary': {
+      const { member, track, on } = decl
+      if (member !== null && !isMemberId(member)) malformed('binary wants')
+      if (track !== null && !isRoomTrack(track)) malformed('binary wants')
+      return { __r: 'sub-binary', member: member ?? ALL, track: track ?? ALL, on: flag(on, 'binary wants') }
+    }
     case 'sub-text':
       return {
         __r: 'sub-text',
@@ -116,31 +119,23 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
   return malformed('declaration')
 }
 
-/** An ack DM's reply, the one declaration a participant stub takes too. */
-function decodeDmReplyDeclaration(value: unknown): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
+function decodeParticipantDeclaration(value: unknown): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
   const decl = record(value, 'declaration')
   if (decl.__r !== 'dm-reply') return malformed('declaration')
-  return {
-    __r: 'dm-reply',
-    ackId: text(decl.ackId, 'DM reply'),
-    reply: decodeDmReply(decl.reply) ?? malformed('DM reply'),
-  }
+  return decodeDmReplyDeclaration(decl)
+}
+
+function decodeDmReplyDeclaration(decl: Record<string, unknown>): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
+  return { __r: 'dm-reply', ackId: text(decl.ackId, 'DM reply'), reply: decodeDmReply(decl.reply) }
 }
 
 /** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
-function decodeDmReply(reply: unknown): DmReply | null {
-  if (!isRecord(reply)) return null
+function decodeDmReply(reply: unknown): DmReply {
+  if (!isRecord(reply)) malformed('DM reply')
   if (reply.ok === true) return { ok: true, result: reply.result }
-  if (reply.ok !== false) return null
+  if (reply.ok !== false) malformed('DM reply')
   if (reply.abort === true) return { ok: false, abort: true, abortValue: reply.abortValue }
-  return typeof reply.err === 'string' ? { ok: false, err: reply.err } : null
-}
-
-/** A client-declared `sub-binary` change. */
-function decodeBinaryWantChange({ member, track, on }: Record<string, unknown>): BinaryWantChange {
-  if (member !== null && !isMemberId(member)) malformed('binary wants')
-  if (track !== null && !isRoomTrack(track)) malformed('binary wants')
-  return { member: member ?? ALL, track: track ?? ALL, on: flag(on, 'binary wants') }
+  return { ok: false, err: text(reply.err, 'DM reply') }
 }
 
 /** A declared text want per member id, into a record no key can reach the prototype of. */

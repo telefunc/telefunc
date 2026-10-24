@@ -23,7 +23,7 @@ import type { ChannelPublishAck } from '../../channel/channel.js'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
 import { reportRoomError } from './errors.js'
 import {
-  decodeDmReplyDeclaration,
+  decodeParticipantDeclaration,
   decodeParticipantFrame,
   decodeParticipantRequest,
   decodeRoomDeclaration,
@@ -506,7 +506,7 @@ class RoomParticipantStub {
   /** A request, sent with an ack, answers with its result; an ack DM's reply, sent without one, settles that DM. */
   private _receive(message: unknown): Promise<RoomResult> | undefined {
     if (isRoomRequest(message)) return roomResult(this._handleRequest(decodeParticipantRequest(message)))
-    const { ackId, reply } = decodeDmReplyDeclaration(message)
+    const { ackId, reply } = decodeParticipantDeclaration(message)
     // The sender drops a reply after its timeout.
     this._pendingAckDms.get(ackId)?.(reply)
     this._pendingAckDms.delete(ackId)
