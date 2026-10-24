@@ -906,7 +906,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._sendAckRes(seq, answer)
   }
 
-  private _sendAckFailure(seq: number, err: unknown): void {
+  protected _sendAckFailure(seq: number, err: unknown): void {
     if (this._handleCallbackError(err)) return
     this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }

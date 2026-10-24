@@ -6,7 +6,6 @@ import { ServerChannel } from './channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { ACK_STATUS, ERROR_REASON, ProtocolViolationError } from '../../wire/connectionFrame.js'
 import type { BroadcastKind, ReattachState } from '../../wire/connectionFrame.js'
 
@@ -113,7 +112,6 @@ class ServerBroadcastEnd<ClientToServer = unknown, ServerToClient = unknown> ext
   private _sendPublishFailure(seq: number, err: unknown): void {
     if (err instanceof ChannelOverflowError) return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
     if (isShieldValidationError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
-    if (this._handleCallbackError(err)) return
-    this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+    this._sendAckFailure(seq, err)
   }
 }
