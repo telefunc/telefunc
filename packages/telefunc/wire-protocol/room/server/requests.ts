@@ -71,7 +71,7 @@ function optionalTrue(value: unknown, what: string): boolean {
   return value === true
 }
 
-/** A room stub's requests and declarations share its channel: a request is tagged `req-`. */
+/** A stub's requests and declarations share its channel: a request is tagged `req-`. */
 function isRoomRequest(value: unknown): boolean {
   return isRecord(value) && typeof value.__r === 'string' && value.__r.startsWith('req-')
 }
