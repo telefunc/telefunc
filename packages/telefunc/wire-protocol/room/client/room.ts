@@ -90,12 +90,12 @@ type RosterStream = {
   applied: Promise<void>
 }
 
-/** The page's server-joined members, each held through its own channel, by id. */
-const standaloneMembers = new Map<string, ClientStandaloneParticipant>()
+/** The members the page holds, joined through any of its room views or held through their own channel, by id. */
+const heldMembers = new Map<string, ClientParticipantBase>()
 /** The page's room views, each showing a member the page holds as the page's own connection to it. */
 const roomViews = new Set<WeakRef<ClientRoom>>()
 
-function standaloneConnectionChanged(id: string, wasConnected: boolean | null): void {
+function heldConnectionChanged(id: string, wasConnected: boolean | null): void {
   for (const view of roomViews) {
     const room = view.deref()
     if (room) room._heldConnectionChanged(id, wasConnected)
@@ -160,16 +160,10 @@ class ClientRoom extends RoomStateView implements Room {
       this._applyClosed('disconnected')
     })
     stub.onDisconnect(() => {
-      for (const [id, local] of this._localParticipants) {
-        this._model.heldConnectionChanged(id, true)
-        local._onDisconnected()
-      }
+      for (const local of this._localParticipants.values()) local._onDisconnected()
     })
     stub.onReconnect(() => {
-      for (const [id, local] of this._localParticipants) {
-        this._model.heldConnectionChanged(id, false)
-        local._onReconnected()
-      }
+      for (const local of this._localParticipants.values()) local._onReconnected()
     })
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving
     // the original rejection for each later getter.
@@ -213,6 +207,7 @@ class ClientRoom extends RoomStateView implements Room {
       }
       this._localParticipants.set(id, participant)
       this._model.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
+      participant._holdOnPage()
       return participant
     } finally {
       this._joins.delete(reqId)
@@ -430,8 +425,7 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   private _heldConnection(id: string): boolean | null {
-    if (this._localParticipants.has(id)) return this._stub.isConnected
-    return standaloneMembers.get(id)?.isConnected ?? null
+    return heldMembers.get(id)?.isConnected ?? null
   }
 
   /** @internal */
@@ -501,6 +495,27 @@ abstract class ClientParticipantBase extends ParticipantBase {
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
   private readonly _requestParticipant: (request: MemberMutationRequest) => Promise<unknown>
+
+  /** @internal The page holds this member from now on, until it leaves. */
+  _holdOnPage(): void {
+    heldMembers.set(this.id, this)
+    heldConnectionChanged(this.id, null)
+  }
+
+  override _onDisconnected(): void {
+    heldConnectionChanged(this.id, true)
+    super._onDisconnected()
+  }
+
+  override _onReconnected(): void {
+    heldConnectionChanged(this.id, false)
+    super._onReconnected()
+  }
+
+  override _onLeft(cause: LeaveCause): void {
+    super._onLeft(cause)
+    if (heldMembers.get(this.id) === this) heldMembers.delete(this.id)
+  }
 
   constructor({
     participant,
@@ -740,23 +755,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     })
     channel.onClose(() => this._onLeft({ type: 'disconnected' }))
     // Held from its channel's open: before it, the channel reads disconnected.
-    channel.onOpen(() => {
-      standaloneMembers.set(this.id, this)
-      standaloneConnectionChanged(this.id, null)
-    })
-    channel.onDisconnect(() => {
-      standaloneConnectionChanged(this.id, true)
-      this._onDisconnected()
-    })
-    channel.onReconnect(() => {
-      standaloneConnectionChanged(this.id, false)
-      this._onReconnected()
-    })
-  }
-
-  override _onLeft(cause: LeaveCause): void {
-    super._onLeft(cause)
-    if (standaloneMembers.get(this.id) === this) standaloneMembers.delete(this.id)
+    channel.onOpen(() => this._holdOnPage())
+    channel.onDisconnect(() => this._onDisconnected())
+    channel.onReconnect(() => this._onReconnected())
   }
 
   get isConnected(): boolean {
