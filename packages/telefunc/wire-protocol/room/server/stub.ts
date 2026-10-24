@@ -140,8 +140,8 @@ class RoomStub implements LaneHolder {
   private readonly _selfSuppressed: Set<string>
   /** Hidden members this response handed the client: their events are relayed to it alone. */
   private readonly _grantedHidden: Set<string>
-  /** Live ack-DM correlations, stored in their constant-offset deadline order. */
-  private readonly _pendingAckDms = new Map<string, { sender: string; expiresAt: number }>()
+  /** The ack DMs its client was sent, each awaiting the client's `dm-reply`, in their constant-offset deadline order. */
+  private readonly _pendingAckDms = new Map<string, { expiresAt: number; resolve: (reply: DmReply | null) => void }>()
   private readonly _replay = new ReplayGate()
   private _wantsText = false
   private readonly _textMemberWants = new Set<string>()
@@ -380,7 +380,7 @@ class RoomStub implements LaneHolder {
   }
 
   _relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
-    if (ackId) this._recordAckDm(ackId, from)
+    if (ackId) this._awaitDmReply(ackId, from)
     this.end.deliver(fromMetaSeq !== undefined && this._namesSender(from) ? texts.unstamped() : texts.stamped())
   }
 
@@ -411,14 +411,21 @@ class RoomStub implements LaneHolder {
 
   // Ack-DM correlations
 
-  /** Sweeps correlations whose sender already timed out. */
-  private _recordAckDm(ackId: string, sender: string): void {
+  /** A closing stub's close waits for the reply, as for the replies a participant stub forwards; it drops the replies
+   *  whose sender already timed out. */
+  private _awaitDmReply(ackId: string, sender: string): void {
     const now = Date.now()
     for (const [id, entry] of this._pendingAckDms) {
       if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
       this._pendingAckDms.delete(id)
+      entry.resolve(null)
     }
-    this._pendingAckDms.set(ackId, { sender, expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS })
+    const answer = new Promise<DmReply | null>((resolve) => {
+      this._pendingAckDms.set(ackId, { expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS, resolve })
+    })
+    void this.end
+      ._trackAck(answer.then((reply) => reply && this._room._writes.publishDmAck(sender, ackId, reply)))
+      .catch(reportRoomError)
   }
 
   private _replyDm(ackId: string, reply: DmReply): void {
@@ -426,7 +433,7 @@ class RoomStub implements LaneHolder {
     // The sender drops a reply after its timeout.
     if (!entry) return
     this._pendingAckDms.delete(ackId)
-    void this._room._writes.publishDmAck(entry.sender, ackId, reply).catch(reportRoomError)
+    entry.resolve(reply)
   }
 
   // Tail
