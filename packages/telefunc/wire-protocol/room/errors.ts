@@ -70,8 +70,8 @@ function toRoomResult(work: Promise<unknown>, report: (err: unknown) => void): P
   return work.then(
     (value) => ({ ok: true, value }),
     (err: unknown): RoomResult => {
-      if (classifyTelefuncError(err, isRoomError).kind === 'shield')
-        return { ok: false, shield: (err as Error).message }
+      const classified = classifyTelefuncError(err, isRoomError)
+      if (classified.kind === 'shield') return { ok: false, shield: classified.error.message }
       if (err instanceof ChannelOverflowError) return { ok: false, overflow: err.message }
       return toRoomFailure(err, report, ROOM_BUG_MESSAGE)
     },
