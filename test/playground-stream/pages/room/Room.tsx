@@ -76,6 +76,7 @@ import {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onSaveReply,
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
@@ -108,6 +109,24 @@ let startAwayJoin: (() => void) | null = null
 let checkKeptMember: (() => void) | null = null
 /** The check the `members-let-go` card runs when its second button is clicked. */
 let checkLetGo: (() => void) | null = null
+/** The chat the `ack-dm-close` card closes when its second button is clicked. */
+let closeChat: (() => void) | null = null
+/** The call the `ack-dm-unsendable` card hangs up when its second button is clicked. */
+let hangUp: (() => void) | null = null
+
+const replyOf = (sent: Promise<{ response: unknown }>) =>
+  sent.then(
+    (receipt) => receipt.response,
+    (err: Error) => err.message,
+  )
+
+/** A reply that links back to its thread, which can't be sent. */
+function threadedReply() {
+  const thread: { replies: unknown[] } = { replies: [] }
+  const reply = { text: 'see thread', thread }
+  thread.replies.push(reply)
+  return reply
+}
 
 /** Joins through a room the page doesn't keep, and lets go of the member too, without leaving. */
 async function joinAndLetGo(roomId: string, leaves: string[]): Promise<void> {
@@ -853,48 +872,74 @@ function Room() {
         const serverMember = await onJoinAnswering(roomId)
         const held = await onJoinAsServer(roomId, 'Held')
         held.listen(() => 'pong')
-        // Its user closes the chat, and answers once their goodbye is posted to the room.
-        const closing = await onJoinAsServer(roomId, 'Closing')
-        closing.listen(async () => {
-          void close(closing)
-          await me.publish('Closing left the chat')
+        setResult(
+          JSON.stringify({
+            fromPage: await replyOf(me.send(peer.id, 'hi', { ack: true })),
+            fromServer: await replyOf(me.send(serverMember, 'hi', { ack: true })),
+            fromHeld: await replyOf(me.send(held.id, 'ping', { ack: true })),
+            refused: await replyOf(me.send(serverMember, 'refuse', { ack: true })),
+          }),
+        )
+      })}
+
+      {scenario('ack-dm-close', null, 'Ask a member who saves their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm-close')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const leaving = await onJoinAsServer(roomId, 'Leaving')
+        leaving.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
           return 'bye'
         })
-        // A reply that links back to its thread can't be sent, whether its user stays or hangs up as they answer.
-        const threadedReply = () => {
-          const thread: { replies: unknown[] } = { replies: [] }
-          const reply = { text: 'see thread', thread }
-          thread.replies.push(reply)
-          return reply
-        }
-        const unserializable = await onJoinAsServer(roomId, 'Unserializable')
-        unserializable.listen(threadedReply)
-        const aborted = await onJoinAsServer(roomId, 'Aborted')
-        aborted.listen(() => {
-          abort(aborted)
-          return threadedReply()
-        })
+        const answer = replyOf(me.send(leaving.id, 'thanks', { ack: true }))
+        const { promise: closeClicked, resolve } = Promise.withResolvers<void>()
+        closeChat = resolve
+        await closeClicked
+        const closing = close(leaving)
+        setResult(JSON.stringify({ roomId, closing: true }))
+        await closing
+        setResult(JSON.stringify({ answer: await answer, closed: true }))
+      })}
+      <button id="test-room-ack-dm-close-chat" onClick={() => closeChat?.()}>
+        Close the chat
+      </button>
+
+      {scenario('ack-dm-unsendable', null, 'Ask members whose reply links back to its thread', async () => {
+        const [roomId, room] = await createRoom('ack-dm-unsendable')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const staying = await onJoinAsServer(roomId, 'Staying')
+        staying.listen(threadedReply)
+        const fromStaying = await replyOf(me.send(staying.id, 'where?', { ack: true }))
         const unhandled: string[] = []
         const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
         window.addEventListener('unhandledrejection', recordUnhandled)
-        const reply = (sent: Promise<{ response: unknown }>) =>
-          sent.then(
-            (receipt) => receipt.response,
-            (err: Error) => err.message,
-          )
-        const result = {
-          fromPage: await reply(me.send(peer.id, 'hi', { ack: true })),
-          fromServer: await reply(me.send(serverMember, 'hi', { ack: true })),
-          fromHeld: await reply(me.send(held.id, 'ping', { ack: true })),
-          fromClosing: await reply(me.send(closing.id, 'thanks', { ack: true })),
-          fromUnserializable: await reply(me.send(unserializable.id, 'where?', { ack: true })),
-          fromAborted: await reply(me.send(aborted.id, 'where?', { ack: true })),
-          refused: await reply(me.send(serverMember, 'refuse', { ack: true })),
-          unhandled,
+        try {
+          const hangingUp = await onJoinAsServer(roomId, 'Hanging up')
+          const { promise: saved, resolve: onSaved } = Promise.withResolvers<void>()
+          hangingUp.listen(async () => {
+            setResult(JSON.stringify({ roomId, saving: true }))
+            await onSaveReply(roomId)
+            onSaved()
+            return threadedReply()
+          })
+          const answer = replyOf(me.send(hangingUp.id, 'where?', { ack: true }))
+          const { promise: hangUpClicked, resolve } = Promise.withResolvers<void>()
+          hangUp = resolve
+          await hangUpClicked
+          abort(hangingUp)
+          const fromHangingUp = await answer
+          setResult(JSON.stringify({ roomId, fromHangingUp }))
+          await saved
+          // The reply's rejection, if any, is reported by the next task.
+          await new Promise((next) => setTimeout(next))
+          setResult(JSON.stringify({ fromStaying, fromHangingUp, unhandled }))
+        } finally {
+          window.removeEventListener('unhandledrejection', recordUnhandled)
         }
-        window.removeEventListener('unhandledrejection', recordUnhandled)
-        setResult(JSON.stringify(result))
       })}
+      <button id="test-room-ack-dm-unsendable-hang-up" onClick={() => hangUp?.()}>
+        Hang up
+      </button>
 
       {scenario('ack-timeout', null, 'An acknowledged DM nobody answers', async () => {
         const [, room] = await createRoom('ack-timeout')

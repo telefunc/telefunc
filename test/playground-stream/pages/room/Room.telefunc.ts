@@ -71,6 +71,7 @@ export {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onSaveReply,
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
@@ -819,6 +820,13 @@ async function onJoinAnswering(roomId: string) {
     return { echo: data }
   })
   return me.id
+}
+
+/** A store's save of a reply, finished by the test with `runServerAction()`. */
+async function onSaveReply(roomId: string) {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  onServerAction(`saveReply_${roomId}`, resolve)
+  await promise
 }
 
 const churning = new Map<string, () => Promise<number>>()
