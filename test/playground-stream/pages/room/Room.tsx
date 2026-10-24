@@ -1666,17 +1666,20 @@ function Room() {
         const [roomId, view] = await createRoom('meta-away')
         await view.join({ meta: { name: 'Me' } })
         await onRoomMetaWhileAway(roomId)
-        await pollUntil(() => ({ done: view.count === 2 }))
-        const srvId = (await view.getParticipants()).find((member) => member.meta.name === 'Srv')!.id
-        const filler = async () =>
-          ((await view.getParticipant(srvId))?.meta.filler as string | undefined)?.trim() ?? null
-        await pollUntil(
-          async () => ({
-            done: false,
-            result: { roomId, topic: (view.meta as { topic?: string }).topic ?? null, filler: await filler() },
-          }),
-          600,
-        )
+        keepReachable(view)
+        const update = () => {
+          const { meta, participants } = view.snapshot()
+          const srv = participants.find((member) => member.meta.name === 'Srv')
+          setResult(
+            JSON.stringify({
+              roomId,
+              topic: (meta as { topic?: string }).topic ?? null,
+              filler: (srv?.meta.filler as string | undefined)?.trim() ?? null,
+            }),
+          )
+        }
+        update()
+        view.onChange(update)
       })}
 
       {scenario('overflow', 'Offline past bufferLimit', 'Let go with ChannelOverflowError', async () => {
