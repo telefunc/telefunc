@@ -117,7 +117,7 @@ class MemberMessageTexts {
   }
 }
 
-/** A stub's ack DMs awaiting their `dm-reply`: null once its sender timed out or the stub closed. */
+/** A stub's ack DMs awaiting their `dm-reply`: null once its sender timed out, or on `drop()`. */
 class PendingDmReplies {
   private readonly _pending = new Map<string, { expiresAt: number; resolve: (reply: DmReply | null) => void }>()
 
@@ -439,8 +439,7 @@ class RoomStub implements LaneHolder {
 
   // Ack-DM correlations
 
-  /** A closing stub's close waits for the reply, as for the replies a participant stub forwards; it drops the replies
-   *  whose sender already timed out. */
+  /** A closing stub's close waits for the reply, as for the replies a participant stub forwards. */
   private _awaitDmReply(ackId: string, sender: string): void {
     void this.end
       ._trackAck(
