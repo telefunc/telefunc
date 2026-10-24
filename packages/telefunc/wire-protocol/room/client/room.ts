@@ -670,32 +670,34 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
     this._stub = stub
     this._request = request
 
-    stub._subscribeLocal('text', (notice) => {
-      assert(hasRoomTag(notice))
-      const msg = notice as ParticipantStubNotice
-      switch (msg.__r) {
-        case 'p-meta':
-          return this._onOwnMetaWritten(msg)
-        case 'rewound':
-          return this._forgetMetaSeq()
-        case 'demand':
-          return this._onDemand(msg.track, msg.wanted)
-        case 'demand-state':
-          return this._applyDemandState(msg.tracks)
-        case 'dm': {
-          const ackId = msg.ackId
-          if (ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
-          stub._sendReply(
-            this._deliverMessageAck(inboxMessageFromWire(msg)).then((reply) => ({ __r: 'dm-reply', ackId, reply })),
-            { __r: 'dm-reply', ackId, reply: { ok: false, err: CLIENT_ROOM_BUG_MESSAGE } },
-          )
-          return
-        }
-        case 'left':
-          return this._onLeft(leaveCauseFromWire(msg))
-      }
-    })
+    stub._subscribeLocal('text', (notice) => this._onNotice(notice))
     stub.onClose(() => this._onLeft({ type: 'disconnected' }))
+  }
+
+  private _onNotice(notice: unknown): void {
+    assert(hasRoomTag(notice))
+    const msg = notice as ParticipantStubNotice
+    switch (msg.__r) {
+      case 'p-meta':
+        return this._onOwnMetaWritten(msg)
+      case 'rewound':
+        return this._forgetMetaSeq()
+      case 'demand':
+        return this._onDemand(msg.track, msg.wanted)
+      case 'demand-state':
+        return this._applyDemandState(msg.tracks)
+      case 'dm': {
+        const ackId = msg.ackId
+        if (ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
+        this._stub._sendReply(
+          this._deliverMessageAck(inboxMessageFromWire(msg)).then((reply) => ({ __r: 'dm-reply', ackId, reply })),
+          { __r: 'dm-reply', ackId, reply: { ok: false, err: CLIENT_ROOM_BUG_MESSAGE } },
+        )
+        return
+      }
+      case 'left':
+        return this._onLeft(leaveCauseFromWire(msg))
+    }
   }
 
   /** Its own writes and the room's `p-meta` both land here. */
