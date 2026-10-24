@@ -241,7 +241,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   onOpen(callback: () => void): void {
     if (this._didFireOpen) {
-      callback()
+      invokeChannelListener(callback, [], (err) => this._handleCallbackError(err))
       return
     }
     this._openCallbacks.push(callback)
@@ -527,13 +527,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private _invokeAll(callbacks: Array<() => void>): void {
-    for (const cb of callbacks) {
-      try {
-        cb()
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
-    }
+    for (const cb of callbacks) if (invokeChannelListener(cb, [], (err) => this._handleCallbackError(err))) return
   }
 
   private _fireClose(err?: Error): void {

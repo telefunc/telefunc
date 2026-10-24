@@ -16,6 +16,7 @@ import type {
   ChannelListener,
   ChannelBinaryListener,
 } from '../channel.js'
+import { invokeChannelListener } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
@@ -360,7 +361,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   onOpen(callback: () => void): void {
     if (this._didFireOpen) {
-      callback()
+      invokeChannelListener(callback, [], (err) => this._handleCallbackError(err))
       return
     }
     this._openCallbacks.push(callback)
@@ -1060,13 +1061,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private _invokeAll(callbacks: Array<() => void>): void {
-    for (const cb of callbacks) {
-      try {
-        cb()
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
-    }
+    for (const cb of callbacks) if (invokeChannelListener(cb, [], (err) => this._handleCallbackError(err))) return
   }
 
   protected _handleCallbackError(err: unknown): boolean {
