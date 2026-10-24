@@ -653,7 +653,7 @@ function testRoom() {
       })
     }, CLOSED_TAB_WAIT)
   })
-  test("room: in a chat, everyone sees a member whose tab went offline as reconnecting, in the list, the activity, Who's online and that member's profile, and as back once it is; the member sees itself reconnecting at once, and back at once with no flicker", async () => {
+  test("room: in a chat, everyone sees a member whose tab went offline as reconnecting, in the list, the activity, Who's online and that member's profile, and as back once it is; the member sees itself reconnecting at once, in the list and on its own profile, and back at once with no flicker", async () => {
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const bob = await openChat(chatId, 'Bob', 'join')
@@ -661,6 +661,8 @@ function testRoom() {
       await autoRetry(async () =>
         expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob'] }),
       )
+      await bob.tab.click('#chat-members button:has-text("Bob (you)")')
+      await autoRetry(async () => expect(await bob.tab.textContent('#chat-profile')).toBe('Bob: online'))
       await bob.context.setOffline(true)
       await cutWire()
       await autoRetry(async () => {
@@ -671,6 +673,7 @@ function testRoom() {
           members: ['Alice', 'Bob (you) (reconnecting…)'],
         })
         expect(await bob.activity('Bob')).deep.equal(['Bob lost connection'])
+        expect(await bob.tab.textContent('#chat-profile')).toBe('Bob: reconnecting…')
       })
       await alice.tab.click('#chat-members button:has-text("Bob")')
       await alice.tab.click('#chat-who')
@@ -687,6 +690,7 @@ function testRoom() {
       const bobBack = async () => {
         expect(await bob.sees()).deep.equal({ status: 'Connected', members: ['Alice', 'Bob (you)'] })
         expect(await bob.activity('Bob')).deep.equal(['Bob lost connection', 'Bob is connected again'])
+        expect(await bob.tab.textContent('#chat-profile')).toBe('Bob: online')
       }
       await autoRetry(bobBack)
       // The room's own record of Bob's drop and return reaches his tab as it comes back, and changes nothing he sees.
@@ -699,7 +703,7 @@ function testRoom() {
       await bob.context.close()
     }
   })
-  test("room: in a chat, the server announces when a signed-in member's tab goes offline and comes back, and someone watching unseen drops without anyone seeing it; the signed-in member sees itself reconnecting", async () => {
+  test("room: in a chat, the server announces when a signed-in member's tab goes offline and comes back, and someone watching unseen drops without anyone seeing it; the signed-in member sees itself reconnecting, in the list and on its own profile", async () => {
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const carol = await openChat(chatId, 'Carol', 'sign-in')
@@ -719,6 +723,8 @@ function testRoom() {
           viewer: [],
         }),
       )
+      await carol.tab.click('#chat-members button:has-text("Carol (you)")')
+      await autoRetry(async () => expect(await carol.tab.textContent('#chat-profile')).toBe('Carol: online'))
       await carol.context.setOffline(true)
       await viewer.context.setOffline(true)
       await cutWire()
@@ -733,6 +739,7 @@ function testRoom() {
           status: 'Reconnecting…',
           members: ['Alice', 'Carol (you) (reconnecting…)'],
         })
+        expect(await carol.tab.textContent('#chat-profile')).toBe('Carol: reconnecting…')
         expect((await viewer.sees()).status).toBe('Reconnecting…')
       })
       await carol.context.setOffline(false)
@@ -745,6 +752,7 @@ function testRoom() {
           viewer: [],
         })
         expect(await carol.sees()).deep.equal({ status: 'Connected', members: ['Alice', 'Carol (you)'] })
+        expect(await carol.tab.textContent('#chat-profile')).toBe('Carol: online')
         expect((await viewer.sees()).status).toBe('Connected')
       })
     } finally {
