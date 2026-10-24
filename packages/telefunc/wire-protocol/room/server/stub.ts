@@ -505,10 +505,16 @@ class RoomParticipantStub {
   private _receive(message: unknown): Promise<RoomResult> | undefined {
     if (isRoomRequest(message)) return roomResult(this._handleRequest(decodeParticipantRequest(message)))
     const { ackId, reply } = decodeParticipantDeclaration(message)
-    // The sender drops a reply after its timeout.
-    this._pendingAckDms.get(ackId)?.(reply)
-    this._pendingAckDms.delete(ackId)
+    this._replyDm(ackId, reply)
     return undefined
+  }
+
+  private _replyDm(ackId: string, reply: DmReply): void {
+    const resolve = this._pendingAckDms.get(ackId)
+    // The sender drops a reply after its timeout.
+    if (!resolve) return
+    this._pendingAckDms.delete(ackId)
+    resolve(reply)
   }
 
   private async _handleRequest(req: ParticipantStubRequest): Promise<unknown> {
