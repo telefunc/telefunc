@@ -134,28 +134,36 @@ function testWire(isDev: boolean) {
       ws.binaryType = 'arraybuffer'
       await new Promise((resolve) => (ws.onopen = resolve))
       let closed = false
-      let answers = 0
       let sessionId: string | undefined
-      ws.onclose = () => (closed = true)
+      // Takes the first answer to the RECONCILE in flight.
+      let settle: ((answer: 'reconciled' | 'closed') => void) | undefined
+      const answered = (answer: 'reconciled' | 'closed') => {
+        settle?.(answer)
+        settle = undefined
+      }
+      ws.onclose = () => {
+        closed = true
+        answered('closed')
+      }
       ws.onmessage = (event) => {
         const frame = new Uint8Array(event.data as ArrayBuffer)
         // RECONCILED, its JSON after the 7-byte header.
         if (frame[0] !== 0x05) return
         sessionId = JSON.parse(new TextDecoder().decode(frame.subarray(7))).sessionId
-        answers++
+        answered('reconciled')
       }
       // A RECONCILE naming what changed once the first is answered.
-      const answer = async (reconcile: { open: object[]; released?: number[] }) => {
-        const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
-        // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
-        const frame = new Uint8Array(7 + payload.byteLength)
-        frame[0] = 0x04
-        frame.set(payload, 7)
-        const answered = answers
-        ws.send(frame)
-        await autoRetry(() => expect(closed || answers > answered).toBe(true))
-        return closed ? 'closed' : 'reconciled'
-      }
+      const answer = (reconcile: { open: object[]; released?: number[] }) =>
+        new Promise<'reconciled' | 'closed'>((resolve) => {
+          if (closed) return resolve('closed')
+          settle = resolve
+          const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
+          // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
+          const frame = new Uint8Array(7 + payload.byteLength)
+          frame[0] = 0x04
+          frame.set(payload, 7)
+          ws.send(frame)
+        })
       return { ws, answer }
     }
 
