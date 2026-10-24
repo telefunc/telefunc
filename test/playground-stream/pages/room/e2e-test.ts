@@ -79,6 +79,32 @@ function testRoomScenario<Result>(id: string, name: string, validate: (result: R
   })
 }
 
+/** A card whose recipient saves its reply to an acknowledged DM, and whose second button closes the chat meanwhile. */
+function testRoomAckDmClose(id: string, name: string) {
+  test(name, async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click(`#test-room-${id}`)
+    let roomId = ''
+    await autoRetry(async () => {
+      const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
+      expect(r.saving).toBe(true)
+      roomId = r.roomId
+    })
+    await page.click(`#test-room-${id}-chat`)
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({ roomId, closing: true })
+    })
+    await runServerAction(`saveReply_${roomId}`)
+    try {
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ answer: 'bye', closed: true })
+      })
+    } finally {
+      await page.goto('about:blank')
+    }
+  })
+}
+
 /** Reads of a member's meta of more than a page that a write overlaps, on any backend: the Redis lanes run them too. */
 function testRoomMetaReads() {
   testRoomScenario<Record<string, string>>(
@@ -375,50 +401,14 @@ function testRoom() {
       expect(r.unhandled).deep.equal([])
     },
   )
-  test('room: a server member a page holds and closes while it saves its reply to an acknowledged DM sends the reply, and the close finishes after it', async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-ack-dm-close')
-    let roomId = ''
-    await autoRetry(async () => {
-      const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
-      expect(r.saving).toBe(true)
-      roomId = r.roomId
-    })
-    await page.click('#test-room-ack-dm-close-chat')
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({ roomId, closing: true })
-    })
-    await runServerAction(`saveReply_${roomId}`)
-    try {
-      await autoRetry(async () => {
-        expect(await getResult('#room-result')).deep.equal({ answer: 'bye', closed: true })
-      })
-    } finally {
-      await page.goto('about:blank')
-    }
-  })
-  test('room: a member a page joined, whose room view the page closes while the member saves its reply to an acknowledged DM, sends the reply, and the close finishes after it', async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-ack-dm-close-view')
-    let roomId = ''
-    await autoRetry(async () => {
-      const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
-      expect(r.saving).toBe(true)
-      roomId = r.roomId
-    })
-    await page.click('#test-room-ack-dm-close-view-chat')
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({ roomId, closing: true })
-    })
-    await runServerAction(`saveReply_${roomId}`)
-    try {
-      await autoRetry(async () => {
-        expect(await getResult('#room-result')).deep.equal({ answer: 'bye', closed: true })
-      })
-    } finally {
-      await page.goto('about:blank')
-    }
-  })
+  testRoomAckDmClose(
+    'ack-dm-close',
+    'room: a server member a page holds and closes while it saves its reply to an acknowledged DM sends the reply, and the close finishes after it',
+  )
+  testRoomAckDmClose(
+    'ack-dm-close-view',
+    'room: a member a page joined, whose room view the page closes while the member saves its reply to an acknowledged DM, sends the reply, and the close finishes after it',
+  )
   test("room: an acknowledged DM to a server member a page holds rejects with the member's leave at once when the page aborts it while it saves its reply, with no unhandled rejection after the save", async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-ack-dm-hang-up')
