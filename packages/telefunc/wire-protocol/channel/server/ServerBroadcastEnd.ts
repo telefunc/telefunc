@@ -104,11 +104,14 @@ class ServerBroadcastEnd extends ServerChannel {
   }
 
   private async _sendPublishAnswer(seq: number, result: unknown): Promise<void> {
+    let answer: string
     try {
-      this._sendAckRes(seq, stringify(await result))
+      answer = stringify(await result)
     } catch (err) {
       this._sendPublishFailure(seq, err)
+      return
     }
+    this._sendAckRes(seq, answer)
   }
 
   /** A full buffer refusing the publish is no bug: the page's publish() rejects with a ChannelOverflowError. */
