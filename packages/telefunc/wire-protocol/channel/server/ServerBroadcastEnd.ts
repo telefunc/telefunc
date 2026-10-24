@@ -43,14 +43,23 @@ class ServerBroadcastEnd extends ServerChannel {
     this._deliver(frame, true)
   }
 
-  /** Buffered while its page is away, where dropping a `gap` frame lets the page go. */
+  /** Buffered while its page is away, where dropping a `gap` frame, which its page doesn't get again as it attaches,
+   *  lets the page go. */
   private _deliver(frame: string | Uint8Array, gap: boolean): void {
     const binary = typeof frame !== 'string'
     const peer = this._peer
     if (peer === null) {
       if (binary) this._prePeerBuffer.pushPublishBinary(frame, gap)
       else this._prePeerBuffer.pushPublish(frame, gap)
-      this._closeIfDroppedOffline(binary)
+      if (this._prePeerBuffer.droppedGap) {
+        const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
+        this._endWithError(
+          ERROR_REASON.OVERFLOW,
+          new ChannelOverflowError(
+            `Channel closed: more was sent to its client while it was offline than config.channel.${limit} lets the server hold`,
+          ),
+        )
+      }
       return
     }
     if (this._flow.isPastByteCredit && this._isPeerBehind()) {
@@ -61,19 +70,6 @@ class ServerBroadcastEnd extends ServerChannel {
       return
     }
     this._flow.countPublishSent(binary ? peer.sendPublishBinary(frame) : peer.sendPublish(frame))
-  }
-
-  /** The buffer for an offline page dropped a publish that its page doesn't get again as it attaches: rather than be
-   *  sent a gap, it gets the end at its next attach. */
-  private _closeIfDroppedOffline(binary: boolean): void {
-    if (!this._prePeerBuffer.droppedGap) return
-    const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
-    this._endWithError(
-      ERROR_REASON.OVERFLOW,
-      new ChannelOverflowError(
-        `Channel closed: more was sent to its client while it was offline than config.channel.${limit} lets the server hold`,
-      ),
-    )
   }
 
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
