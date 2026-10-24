@@ -359,16 +359,18 @@ function testRoom() {
     fromPageUnsendable: unknown
     fromServer: unknown
     fromHeld: unknown
+    fromHeldUnsendable: unknown
     refused: unknown
     unhandled: string[]
   }>(
     'ack-dm',
-    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, and rejects with the recipient's Abort, or an error when a page's reply can't be serialized",
+    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, and rejects with the recipient's Abort, or an error when a reply from a page or from a server member a page holds can't be serialized",
     (r) => {
       expect(r.fromPage).deep.equal({ echo: 'hi' })
       expect(r.fromPageUnsendable).toBe("Internal client room error — see the recipient's client logs")
       expect(r.fromServer).deep.equal({ echo: 'hi' })
       expect(r.fromHeld).toBe('pong')
+      expect(r.fromHeldUnsendable).toBe("Internal client room error — see the recipient's client logs")
       expect(r.refused).toBe('refused')
       expect(r.unhandled).deep.equal([])
     },
@@ -395,16 +397,16 @@ function testRoom() {
       await page.goto('about:blank')
     }
   })
-  test("room: an acknowledged DM to a server member a page holds rejects with an error when its reply can't be serialized, and with the member's leave when the page aborts it before its reply is saved, without an unhandled rejection", async () => {
+  test("room: an acknowledged DM to a server member a page holds rejects with the member's leave at once when the page aborts it while it saves its reply, with no unhandled rejection after the save", async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-ack-dm-unsendable')
+    await page.click('#test-room-ack-dm-hang-up')
     let roomId = ''
     await autoRetry(async () => {
       const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
       expect(r.saving).toBe(true)
       roomId = r.roomId
     })
-    await page.click('#test-room-ack-dm-unsendable-hang-up')
+    await page.click('#test-room-ack-dm-hang-up-now')
     await autoRetry(async () => {
       expect(await getResult('#room-result')).deep.equal({ roomId, fromHangingUp: 'Participant left the room' })
     })
@@ -412,7 +414,6 @@ function testRoom() {
     try {
       await autoRetry(async () => {
         expect(await getResult('#room-result')).deep.equal({
-          fromStaying: "Internal client room error — see the recipient's client logs",
           fromHangingUp: 'Participant left the room',
           unhandled: [],
         })

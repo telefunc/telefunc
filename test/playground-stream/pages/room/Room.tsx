@@ -111,7 +111,7 @@ let checkKeptMember: (() => void) | null = null
 let checkLetGo: (() => void) | null = null
 /** The chat the `ack-dm-close` card closes when its second button is clicked. */
 let closeChat: (() => void) | null = null
-/** The call the `ack-dm-unsendable` card hangs up when its second button is clicked. */
+/** The call the `ack-dm-hang-up` card hangs up when its second button is clicked. */
 let hangUp: (() => void) | null = null
 
 const replyOf = (sent: Promise<{ response: unknown }>) =>
@@ -874,6 +874,8 @@ function Room() {
         const serverMember = await onJoinAnswering(roomId)
         const held = await onJoinAsServer(roomId, 'Held')
         held.listen(() => 'pong')
+        const heldThreaded = await onJoinAsServer(roomId, 'Held threaded')
+        heldThreaded.listen(threadedReply)
         const unhandled: string[] = []
         const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
         window.addEventListener('unhandledrejection', recordUnhandled)
@@ -884,6 +886,7 @@ function Room() {
               fromPageUnsendable: await replyOf(me.send(threaded.id, 'where?', { ack: true })),
               fromServer: await replyOf(me.send(serverMember, 'hi', { ack: true })),
               fromHeld: await replyOf(me.send(held.id, 'ping', { ack: true })),
+              fromHeldUnsendable: await replyOf(me.send(heldThreaded.id, 'where?', { ack: true })),
               refused: await replyOf(me.send(serverMember, 'refuse', { ack: true })),
               unhandled,
             }),
@@ -915,25 +918,22 @@ function Room() {
         Close the chat
       </button>
 
-      {scenario('ack-dm-unsendable', null, 'Ask members whose reply links back to its thread', async () => {
-        const [roomId, room] = await createRoom('ack-dm-unsendable')
+      {scenario('ack-dm-hang-up', null, 'Ask a member who saves their reply, then hang up', async () => {
+        const [roomId, room] = await createRoom('ack-dm-hang-up')
         const me = await room.join({ meta: { name: 'Asker' } })
-        const staying = await onJoinAsServer(roomId, 'Staying')
-        staying.listen(threadedReply)
-        const fromStaying = await replyOf(me.send(staying.id, 'where?', { ack: true }))
+        const hangingUp = await onJoinAsServer(roomId, 'Hanging up')
+        const { promise: saved, resolve: onSaved } = Promise.withResolvers<void>()
+        hangingUp.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
+          onSaved()
+          return 'bye'
+        })
         const unhandled: string[] = []
         const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
         window.addEventListener('unhandledrejection', recordUnhandled)
         try {
-          const hangingUp = await onJoinAsServer(roomId, 'Hanging up')
-          const { promise: saved, resolve: onSaved } = Promise.withResolvers<void>()
-          hangingUp.listen(async () => {
-            setResult(JSON.stringify({ roomId, saving: true }))
-            await onSaveReply(roomId)
-            onSaved()
-            return threadedReply()
-          })
-          const answer = replyOf(me.send(hangingUp.id, 'where?', { ack: true }))
+          const answer = replyOf(me.send(hangingUp.id, 'thanks', { ack: true }))
           const { promise: hangUpClicked, resolve } = Promise.withResolvers<void>()
           hangUp = resolve
           await hangUpClicked
@@ -943,12 +943,12 @@ function Room() {
           await saved
           // The reply's rejection, if any, is reported by the next task.
           await new Promise((next) => setTimeout(next))
-          setResult(JSON.stringify({ fromStaying, fromHangingUp, unhandled }))
+          setResult(JSON.stringify({ fromHangingUp, unhandled }))
         } finally {
           window.removeEventListener('unhandledrejection', recordUnhandled)
         }
       })}
-      <button id="test-room-ack-dm-unsendable-hang-up" onClick={() => hangUp?.()}>
+      <button id="test-room-ack-dm-hang-up-now" onClick={() => hangUp?.()}>
         Hang up
       </button>
 
