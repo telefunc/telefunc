@@ -869,17 +869,28 @@ function Room() {
         const me = await room.join({ meta: { name: 'Asker' } })
         const peer = await room.join({ meta: { name: 'Peer' } })
         peer.listen((data) => ({ echo: data }))
+        const threaded = await room.join({ meta: { name: 'Threaded' } })
+        threaded.listen(threadedReply)
         const serverMember = await onJoinAnswering(roomId)
         const held = await onJoinAsServer(roomId, 'Held')
         held.listen(() => 'pong')
-        setResult(
-          JSON.stringify({
-            fromPage: await replyOf(me.send(peer.id, 'hi', { ack: true })),
-            fromServer: await replyOf(me.send(serverMember, 'hi', { ack: true })),
-            fromHeld: await replyOf(me.send(held.id, 'ping', { ack: true })),
-            refused: await replyOf(me.send(serverMember, 'refuse', { ack: true })),
-          }),
-        )
+        const unhandled: string[] = []
+        const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
+        window.addEventListener('unhandledrejection', recordUnhandled)
+        try {
+          setResult(
+            JSON.stringify({
+              fromPage: await replyOf(me.send(peer.id, 'hi', { ack: true })),
+              fromPageUnsendable: await replyOf(me.send(threaded.id, 'where?', { ack: true })),
+              fromServer: await replyOf(me.send(serverMember, 'hi', { ack: true })),
+              fromHeld: await replyOf(me.send(held.id, 'ping', { ack: true })),
+              refused: await replyOf(me.send(serverMember, 'refuse', { ack: true })),
+              unhandled,
+            }),
+          )
+        } finally {
+          window.removeEventListener('unhandledrejection', recordUnhandled)
+        }
       })}
 
       {scenario('ack-dm-close', null, 'Ask a member who saves their reply', async () => {

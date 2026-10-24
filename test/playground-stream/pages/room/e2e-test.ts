@@ -354,14 +354,23 @@ function testRoom() {
       expect(r.recreatedOpen).toBe(false)
     },
   )
-  testRoomScenario<{ fromPage: unknown; fromServer: unknown; fromHeld: unknown; refused: unknown }>(
+  testRoomScenario<{
+    fromPage: unknown
+    fromPageUnsendable: unknown
+    fromServer: unknown
+    fromHeld: unknown
+    refused: unknown
+    unhandled: string[]
+  }>(
     'ack-dm',
-    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, and rejects with the recipient's Abort",
+    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, and rejects with the recipient's Abort, or an error when a page's reply can't be serialized",
     (r) => {
       expect(r.fromPage).deep.equal({ echo: 'hi' })
+      expect(r.fromPageUnsendable).toBe("Internal client room error — see the recipient's client logs")
       expect(r.fromServer).deep.equal({ echo: 'hi' })
       expect(r.fromHeld).toBe('pong')
       expect(r.refused).toBe('refused')
+      expect(r.unhandled).deep.equal([])
     },
   )
   test('room: a server member a page holds and closes while it saves its reply to an acknowledged DM sends the reply, and the close finishes after it', async () => {
