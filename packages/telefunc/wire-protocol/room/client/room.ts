@@ -95,6 +95,10 @@ const heldMembers = new Map<string, ClientParticipantBase>()
 /** The page's room views, each showing a member the page holds as the page's own connection to it. */
 const roomViews = new Set<WeakRef<ClientRoom>>()
 
+function heldConnection(id: string): boolean | null {
+  return heldMembers.get(id)?.isConnected ?? null
+}
+
 function heldConnectionChanged(id: string, wasConnected: boolean | null): void {
   for (const view of roomViews) {
     const room = view.deref()
@@ -137,7 +141,7 @@ class ClientRoom extends RoomStateView implements Room {
       closed: snapshot.closed,
       onLeave: (id, cause) => this._onLeave(id, cause),
       pendingMember: (id) => this._rosterStream?.pending.get(id),
-      heldConnection: (id) => this._heldConnection(id),
+      heldConnection,
     })
     this._state = new RoomState({
       owner: this,
@@ -422,10 +426,6 @@ class ClientRoom extends RoomStateView implements Room {
   /** @internal */
   get _isConnected(): boolean {
     return this._stub.isConnected
-  }
-
-  private _heldConnection(id: string): boolean | null {
-    return heldMembers.get(id)?.isConnected ?? null
   }
 
   /** @internal */
