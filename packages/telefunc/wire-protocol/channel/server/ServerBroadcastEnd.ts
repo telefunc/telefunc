@@ -82,11 +82,11 @@ class ServerBroadcastEnd extends ServerChannel {
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this._answerPublish(seq, () => this._options.onPublish(text))
+    return this._trackAck(this._answerPublish(seq, () => this._options.onPublish(text)))
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._answerPublish(seq, () => this._options.onPublishBinary(data))
+    return this._trackAck(this._answerPublish(seq, () => this._options.onPublishBinary(data)))
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
@@ -104,7 +104,7 @@ class ServerBroadcastEnd extends ServerChannel {
       this._sendPublishFailure(seq, err)
       return Promise.resolve()
     }
-    return this._trackAck(this._sendPublishAnswer(seq, result))
+    return this._sendPublishAnswer(seq, result)
   }
 
   private async _sendPublishAnswer(seq: number, result: unknown): Promise<void> {
