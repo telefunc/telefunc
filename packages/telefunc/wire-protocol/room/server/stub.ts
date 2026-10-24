@@ -117,6 +117,35 @@ class MemberMessageTexts {
   }
 }
 
+/** A stub's ack DMs awaiting their `dm-reply`: null once its sender timed out or the stub closed. */
+class PendingDmReplies {
+  private readonly _pending = new Map<string, { expiresAt: number; resolve: (reply: DmReply | null) => void }>()
+
+  /** Drops the replies whose sender already timed out. */
+  await(ackId: string): Promise<DmReply | null> {
+    const now = Date.now()
+    for (const [id, entry] of this._pending) {
+      if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
+      this._pending.delete(id)
+      entry.resolve(null)
+    }
+    return new Promise((resolve) => this._pending.set(ackId, { expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS, resolve }))
+  }
+
+  settle(ackId: string, reply: DmReply): void {
+    const entry = this._pending.get(ackId)
+    // The sender drops a reply after its timeout.
+    if (!entry) return
+    this._pending.delete(ackId)
+    entry.resolve(reply)
+  }
+
+  drop(): void {
+    for (const entry of this._pending.values()) entry.resolve(null)
+    this._pending.clear()
+  }
+}
+
 function roomResult(work: Promise<unknown>): Promise<RoomResult> {
   return toRoomResult(work, reportRoomError)
 }
@@ -140,8 +169,7 @@ class RoomStub implements LaneHolder {
   private readonly _selfSuppressed: Set<string>
   /** Hidden members this response handed the client: their events are relayed to it alone. */
   private readonly _grantedHidden: Set<string>
-  /** The ack DMs its client was sent, each awaiting the client's `dm-reply`, in their constant-offset deadline order. */
-  private readonly _pendingAckDms = new Map<string, { expiresAt: number; resolve: (reply: DmReply | null) => void }>()
+  private readonly _dmReplies = new PendingDmReplies()
   private readonly _replay = new ReplayGate()
   private _wantsText = false
   private readonly _textMemberWants = new Set<string>()
@@ -228,7 +256,7 @@ class RoomStub implements LaneHolder {
       case 'sub-text':
         return this._declareTextWants(declaration.members, declaration.announce)
       case 'dm-reply':
-        return this._replyDm(declaration.ackId, declaration.reply)
+        return this._dmReplies.settle(declaration.ackId, declaration.reply)
     }
   }
 
@@ -414,26 +442,11 @@ class RoomStub implements LaneHolder {
   /** A closing stub's close waits for the reply, as for the replies a participant stub forwards; it drops the replies
    *  whose sender already timed out. */
   private _awaitDmReply(ackId: string, sender: string): void {
-    const now = Date.now()
-    for (const [id, entry] of this._pendingAckDms) {
-      if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
-      this._pendingAckDms.delete(id)
-      entry.resolve(null)
-    }
-    const answer = new Promise<DmReply | null>((resolve) => {
-      this._pendingAckDms.set(ackId, { expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS, resolve })
-    })
     void this.end
-      ._trackAck(answer.then((reply) => reply && this._room._writes.publishDmAck(sender, ackId, reply)))
+      ._trackAck(
+        this._dmReplies.await(ackId).then((reply) => reply && this._room._writes.publishDmAck(sender, ackId, reply)),
+      )
       .catch(reportRoomError)
-  }
-
-  private _replyDm(ackId: string, reply: DmReply): void {
-    const entry = this._pendingAckDms.get(ackId)
-    // The sender drops a reply after its timeout.
-    if (!entry) return
-    this._pendingAckDms.delete(ackId)
-    entry.resolve(reply)
   }
 
   // Tail
@@ -472,8 +485,7 @@ class RoomParticipantStub {
   readonly end: ServerBroadcastEnd
   private readonly _participant: ServerLocalParticipant
   private readonly _publishShield: ShieldValidator | undefined
-  /** The ack DMs its client was sent, each awaiting the client's `dm-reply`. */
-  private readonly _pendingAckDms = new Map<string, (reply: DmReply) => void>()
+  private readonly _dmReplies = new PendingDmReplies()
 
   constructor(
     participant: ServerLocalParticipant,
@@ -512,16 +524,8 @@ class RoomParticipantStub {
   private _receive(message: unknown): Promise<RoomResult> | undefined {
     if (isRoomRequest(message)) return roomResult(this._handleRequest(decodeParticipantRequest(message)))
     const { ackId, reply } = decodeParticipantDeclaration(message)
-    this._replyDm(ackId, reply)
+    this._dmReplies.settle(ackId, reply)
     return undefined
-  }
-
-  private _replyDm(ackId: string, reply: DmReply): void {
-    const resolve = this._pendingAckDms.get(ackId)
-    // The sender drops a reply after its timeout.
-    if (!resolve) return
-    this._pendingAckDms.delete(ackId)
-    resolve(reply)
   }
 
   private async _handleRequest(req: ParticipantStubRequest): Promise<unknown> {
@@ -553,12 +557,9 @@ class RoomParticipantStub {
       // A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it forwarded.
       deliverAck: (msg) => {
         if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
-        return this.end._trackAck(
-          new Promise<DmReply>((resolve) => {
-            this._pendingAckDms.set(msg.ackId!, resolve)
-            this._notify(dmNotice(msg))
-          }),
-        )
+        const reply = this._dmReplies.await(msg.ackId!)
+        this._notify(dmNotice(msg))
+        return this.end._trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
       },
     })
 
@@ -578,8 +579,7 @@ class RoomParticipantStub {
       unlistenMeta()
       unlistenDemand()
       unlistenLeave()
-      for (const resolve of this._pendingAckDms.values()) resolve(DM_FAILURE.left)
-      this._pendingAckDms.clear()
+      this._dmReplies.drop()
       if (!left) void participant._releaseHolder().catch(reportRoomError)
     })
   }
