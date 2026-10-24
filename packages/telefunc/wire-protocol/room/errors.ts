@@ -78,8 +78,9 @@ function toRoomResult(work: Promise<unknown>, report: (err: unknown) => void): P
   )
 }
 
-function roomResultValue(result: RoomResult): unknown {
-  if (result.ok) return result.value
+async function roomResultValue<T = unknown>(answer: Promise<unknown>): Promise<T> {
+  const result = (await answer) as RoomResult
+  if (result.ok) return result.value as T
   if ('abort' in result) throw createAbortError(result.abortValue)
   if ('shield' in result) throw new ShieldValidationError(result.shield)
   if ('overflow' in result) throw new ChannelOverflowError(result.overflow)

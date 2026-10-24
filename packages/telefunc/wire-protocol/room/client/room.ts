@@ -28,7 +28,6 @@ import {
   type SenderStamp,
   type RoomEnvelope,
   type RoomJoinedEvent,
-  type RoomResult,
   type RoomRosterEvent,
   type RoomSnapshotMetadata,
   type RoomStubRequest,
@@ -239,19 +238,19 @@ class ClientRoom extends RoomStateView implements Room {
 
   /** @internal */
   async _request(req: RoomStubRequest): Promise<unknown> {
-    return roomResultValue((await this._stub.send(req, { ack: true })) as RoomResult)
+    return roomResultValue(this._stub.send(req, { ack: true }))
   }
 
   /** @internal `from` is a claim: the server checks it against this stub's members and stamps `fromMeta` itself. */
   async _publishText(from: string, data: unknown, retain?: boolean): Promise<ChannelPublishAck> {
     const publish: RoomDataPublish = { __r: 'data', from, data }
     if (retain) publish.retain = true
-    return roomResultValue(await this._stub._publishUnreported<RoomResult>(publish)) as ChannelPublishAck
+    return roomResultValue<ChannelPublishAck>(this._stub._publishUnreported(publish))
   }
 
   /** @internal */
   async _publishBinaryFramed(framed: Uint8Array): Promise<ChannelPublishAck> {
-    return roomResultValue(await this._stub._publishBinaryUnreported<RoomResult>(framed)) as ChannelPublishAck
+    return roomResultValue<ChannelPublishAck>(this._stub._publishBinaryUnreported(framed))
   }
 
   /** @internal A local participant completed its voluntary leave. */
@@ -669,8 +668,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
   private readonly _request: (req: ParticipantStubRequest) => Promise<unknown>
 
   constructor(stub: ClientBroadcast, metadata: ParticipantStubMetadata) {
-    const request = async (req: ParticipantStubRequest) =>
-      roomResultValue((await stub.send(req, { ack: true })) as RoomResult)
+    const request = async (req: ParticipantStubRequest) => roomResultValue(stub.send(req, { ack: true }))
     // Its own: the `rewound` notice forgets its seq.
     super({ participant: metadata, rewinds: { count: 0 }, request })
     this._stub = stub
@@ -714,7 +712,7 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
   protected async _sendPublishBinary(framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
-    return roomResultValue(await this._stub._publishBinaryUnreported<RoomResult>(framed)) as ChannelPublishAck
+    return roomResultValue<ChannelPublishAck>(this._stub._publishBinaryUnreported(framed))
   }
 
   async leave(): Promise<void> {
