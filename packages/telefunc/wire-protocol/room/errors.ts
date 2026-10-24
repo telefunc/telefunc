@@ -66,7 +66,6 @@ function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage:
   return { ok: false, err: bugMessage }
 }
 
-/** `work`'s outcome as its room stub answers its client with it. */
 function toRoomResult(work: Promise<unknown>, report: (err: unknown) => void): Promise<RoomResult> {
   return work.then(
     (value) => ({ ok: true, value }),
@@ -79,7 +78,6 @@ function toRoomResult(work: Promise<unknown>, report: (err: unknown) => void): P
   )
 }
 
-/** The value a client call resolves to, or throws what it rejects with, as `result` answers it. */
 function roomResultValue(result: RoomResult): unknown {
   if (result.ok) return result.value
   if ('abort' in result) throw createAbortError(result.abortValue)

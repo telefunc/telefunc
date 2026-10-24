@@ -117,7 +117,6 @@ class MemberMessageTexts {
   }
 }
 
-/** A request's or publish's outcome as its stub answers it. */
 function roomResult(work: Promise<unknown>): Promise<RoomResult> {
   return toRoomResult(work, reportRoomError)
 }

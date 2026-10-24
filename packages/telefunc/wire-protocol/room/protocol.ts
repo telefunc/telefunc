@@ -142,7 +142,7 @@ type DmReply = { ok: true; result: unknown } | RoomFailure
 /** A member's meta at `seq`, whole, or as the merge at `seq` changed it: a key it removed as `undefined`. */
 type MemberMetaUpdate = { seq: number; meta: ParticipantMeta } | { seq: number; attrs: ParticipantMeta }
 
-/** Published failure form for the one path that cannot use a native channel ack. */
+/** A safe Room failure: an Abort value or a caller-facing message. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
 
 /** A room stub's answer to its client's request or publish: the value the call resolves to, or what it rejects with. */
