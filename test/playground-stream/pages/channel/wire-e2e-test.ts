@@ -1,12 +1,13 @@
 export { testWire, testWireSmallReplay, testWireSlowPing }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl, expectLog } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
 import type { Request, Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
   getResult,
   getCleanupState,
+  resetCleanupState,
   runServerAction,
   cutWire,
   canCutWire,
@@ -33,6 +34,7 @@ type WireState = {
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
   connection: { channelId: string; events: string[] } | null
+  presence: { channelId: string; online: boolean } | null
 }
 
 // The end card's channel sends these before the server ends it.
@@ -80,6 +82,33 @@ function testWire(isDev: boolean) {
       await autoRetry(async () => {
         const seen = ['open:true', 'disconnect:false', 'reconnect:true']
         expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+    })
+
+  if (canCutWire())
+    test('channel: an async onDisconnect or onReconnect that fails is reported on either end, and the channel goes on', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await resetCleanupState()
+      await page.click('#wire-presence')
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence?.online).toBe(true)
+      })
+      await page.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence?.online).toBe(false)
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        const { presence } = await getResult<WireState>('#wire-state')
+        const state = await getCleanupState()
+        expect(presence?.online).toBe(true)
+        expect(state[`wirePresence_${presence?.channelId}`]).toBe('online')
+        expect(state['bug:Database unavailable']).toBe('reported')
+      })
+      expectLog('Database unavailable', { filter: (log) => log.logSource === 'stderr' })
+      expectLog('[telefunc:channel-error] Error: Could not load the missed messages', {
+        filter: (log) => log.logSource === 'Browser Error',
       })
     })
 

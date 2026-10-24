@@ -8,13 +8,18 @@ export {
   onWireRelease,
   onWireUpload,
   onWireConnection,
+  onWirePresence,
 }
 
-import { Channel, Abort } from 'telefunc'
+import { Channel, Abort, onBug } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
 import { onServerAction } from '../../server-actions'
 import { Tally, textMessage, binaryMessage } from './wire-messages'
+
+onBug((err) => {
+  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
+})
 
 /**
  * Each end sends `count` numbered messages as text and as binary, awaiting each send; the server drops the page's
@@ -189,4 +194,31 @@ async function onWireConnection() {
   ch.onDisconnect(() => report('disconnect'))
   ch.onReconnect(() => report('reconnect'))
   return { channel: ch.client, channelId: ch.id }
+}
+
+/** A member's channel that saves whether they're online; cleanupState: wirePresence_<id> = the status the database holds. */
+async function onWirePresence() {
+  const ch = new Channel<never, never>()
+  const database = connectToDatabase()
+  ch.onDisconnect(async () => {
+    await database.saveStatus(ch.id, 'away')
+  })
+  ch.onReconnect(async () => {
+    await database.saveStatus(ch.id, 'online')
+  })
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/** A database that is unavailable for the first write. */
+function connectToDatabase() {
+  let connected = false
+  return {
+    async saveStatus(memberId: string, status: string) {
+      if (!connected) {
+        connected = true
+        throw new Error('Database unavailable')
+      }
+      cleanupState[`wirePresence_${memberId}`] = status
+    },
+  }
 }

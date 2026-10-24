@@ -12,6 +12,7 @@ import {
   onWireRelease,
   onWireUpload,
   onWireConnection,
+  onWirePresence,
 } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
 
@@ -31,6 +32,7 @@ type WireState = {
   upload: { channelId: string; sent: number } | null
   /** What the page's end saw: 'open', 'disconnect', 'reconnect', each with isConnected. */
   connection: { channelId: string; events: string[] } | null
+  presence: { channelId: string; online: boolean } | null
 }
 
 const RESUME_COUNT = 256
@@ -55,6 +57,7 @@ function WireDemo() {
     release: null,
     upload: null,
     connection: null,
+    presence: null,
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
   const overrunChannel = useRef<Awaited<ReturnType<typeof onWireOverrun>>['channel'] | null>(null)
@@ -62,6 +65,7 @@ function WireDemo() {
   const largeChannel = useRef<Awaited<ReturnType<typeof onWireLarge>>['channel'] | null>(null)
   const resumeChannel = useRef<Awaited<ReturnType<typeof onWireResume>>['channel'] | null>(null)
   const connectionChannel = useRef<Awaited<ReturnType<typeof onWireConnection>>['channel'] | null>(null)
+  const presenceChannel = useRef<Awaited<ReturnType<typeof onWirePresence>>['channel'] | null>(null)
 
   const connection = useCallback(async () => {
     const { channel, channelId } = await onWireConnection()
@@ -74,6 +78,25 @@ function WireDemo() {
     channel.onOpen(() => report('open'))
     channel.onDisconnect(() => report('disconnect'))
     channel.onReconnect(() => report('reconnect'))
+  }, [])
+
+  const presence = useCallback(async () => {
+    const { channel, channelId } = await onWirePresence()
+    presenceChannel.current = channel
+    const show = (online: boolean) => setState((s) => ({ ...s, presence: { channelId, online } }))
+    let loaded = false
+    const loadMissedMessages = async () => {
+      if (!loaded) {
+        loaded = true
+        throw new Error('Could not load the missed messages')
+      }
+    }
+    channel.onOpen(() => show(true))
+    channel.onDisconnect(() => show(false))
+    channel.onReconnect(async () => {
+      await loadMissedMessages()
+    })
+    channel.onReconnect(() => show(true))
   }, [])
 
   const resume = useCallback(async () => {
@@ -308,6 +331,14 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Open a channel that shows its connection
+        </button>
+        <button
+          id="wire-presence"
+          type="button"
+          onClick={presence}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Go online
         </button>
         <button
           id="wire-end-open"
