@@ -181,50 +181,62 @@ function testWire(isDev: boolean) {
       expect(await answer(maxChannels + 1)).toBe('closed')
     })
 
-    test('channel: a RECONCILE naming new channels past what a connection may hold, on top of those it holds, closes the WebSocket', async () => {
+    test('channel: a RECONCILE naming new channels past what a connection may hold, on top of those it holds, or naming a channel it holds under another id, closes the WebSocket', async () => {
       // MAX_CHANNELS_PER_CONNECTION
       const maxChannels = 4_096
-      const url = new URL('/_telefunc', getServerUrl())
-      url.protocol = 'ws:'
-      const ws = new globalThis.WebSocket(url)
-      ws.binaryType = 'arraybuffer'
-      await new Promise((resolve) => (ws.onopen = resolve))
-      let closed = false
-      const reconciled: { sessionId: string }[] = []
-      ws.onclose = () => (closed = true)
-      ws.onmessage = (event) => {
-        const frame = new Uint8Array(event.data as ArrayBuffer)
-        // RECONCILED, its JSON after the 7-byte header.
-        if (frame[0] === 0x05) reconciled.push(JSON.parse(new TextDecoder().decode(frame.subarray(7))))
+      const connect = async () => {
+        const url = new URL('/_telefunc', getServerUrl())
+        url.protocol = 'ws:'
+        const ws = new globalThis.WebSocket(url)
+        ws.binaryType = 'arraybuffer'
+        await new Promise((resolve) => (ws.onopen = resolve))
+        let closed = false
+        let answers = 0
+        let sessionId: string | undefined
+        ws.onclose = () => (closed = true)
+        ws.onmessage = (event) => {
+          const frame = new Uint8Array(event.data as ArrayBuffer)
+          // RECONCILED, its JSON after the 7-byte header.
+          if (frame[0] !== 0x05) return
+          sessionId = JSON.parse(new TextDecoder().decode(frame.subarray(7))).sessionId
+          answers++
+        }
+        // A RECONCILE naming what changed once the first is answered.
+        const answer = async (reconcile: { open: object[]; released?: number[] }) => {
+          const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
+          // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
+          const frame = new Uint8Array(7 + payload.byteLength)
+          frame[0] = 0x04
+          frame.set(payload, 7)
+          const answered = answers
+          ws.send(frame)
+          await autoRetry(() => expect(closed || answers > answered).toBe(true))
+          return closed ? 'closed' : 'reconciled'
+        }
+        return { ws, answer }
       }
       // Channels the page opened that the server hasn't registered yet, so it awaits each one.
-      const opened = (from: number, count: number) =>
+      const opened = (from: number, count: number, name = 'unregistered') =>
         Array.from({ length: count }, (_, n) => ({
-          id: `unregistered-${from + n}`,
+          id: `${name}-${from + n}`,
           ix: from + n,
           lastSeq: 0,
           initial: true,
         }))
-      const answer = async (reconcile: object) => {
-        const payload = new TextEncoder().encode(JSON.stringify(reconcile))
-        // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
-        const frame = new Uint8Array(7 + payload.byteLength)
-        frame[0] = 0x04
-        frame.set(payload, 7)
-        const answered = reconciled.length
-        ws.send(frame)
-        await autoRetry(() => expect(closed || reconciled.length > answered).toBe(true))
-        return closed ? 'closed' : 'reconciled'
-      }
+      const full = await connect()
+      const renaming = await connect()
       try {
-        expect(await answer({ open: opened(0, maxChannels) })).toBe('reconciled')
-        const { sessionId } = reconciled[0]!
+        expect(await full.answer({ open: opened(0, maxChannels) })).toBe('reconciled')
         // The page released 16 and opened 16: it still holds as many.
         const released = Array.from({ length: 16 }, (_, ix) => ix)
-        expect(await answer({ sessionId, released, open: opened(maxChannels, 16) })).toBe('reconciled')
-        expect(await answer({ sessionId, released: [], open: opened(maxChannels + 16, 1) })).toBe('closed')
+        expect(await full.answer({ released, open: opened(maxChannels, 16) })).toBe('reconciled')
+        expect(await full.answer({ released: [], open: opened(maxChannels + 16, 1) })).toBe('closed')
+
+        expect(await renaming.answer({ open: opened(0, 1) })).toBe('reconciled')
+        expect(await renaming.answer({ released: [], open: opened(0, 1, 'renamed') })).toBe('closed')
       } finally {
-        ws.close()
+        full.ws.close()
+        renaming.ws.close()
       }
     })
 
