@@ -30,6 +30,7 @@ import type {
   RoomMetaEntry,
   RoomMetaUpdate,
   SenderStamp,
+  WholeMemberUpdate,
 } from './protocol.js'
 import type {
   BinaryFrameInfo,
@@ -44,7 +45,6 @@ import type {
 /** A binary listener's track filter: one track, or `ALL`. */
 type TrackFilter = TrackKey | All
 /** A membership event as this model got it, whether it applied it or not. */
-type WholeMemberUpdate = Extract<MemberMetaUpdate, { meta: ParticipantMeta }>
 type MembershipEvent = { join: MemberSnapshot } | { leave: string } | { meta: { id: string; update: MemberMetaUpdate } }
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
 type TrackCounts = { all: number; named: Map<TrackKey, number> }

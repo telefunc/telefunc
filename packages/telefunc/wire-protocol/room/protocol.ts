@@ -18,6 +18,7 @@ export type {
   RoomDmEnvelope,
   DmReply,
   MemberMetaUpdate,
+  WholeMemberUpdate,
   RoomFailure,
   RoomStubRequest,
   ParticipantStubRequest,
@@ -146,6 +147,7 @@ type MemberMetaUpdate =
   | { seq: number; meta: ParticipantMeta; disconnected?: true }
   | { seq: number; attrs: ParticipantMeta }
   | { seq: number; connected: boolean }
+type WholeMemberUpdate = Extract<MemberMetaUpdate, { meta: ParticipantMeta }>
 
 /** Published failure form for the one path that cannot use a native channel ack. */
 type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }

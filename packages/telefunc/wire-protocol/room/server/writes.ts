@@ -21,7 +21,14 @@ import {
   ROOM_BUG_MESSAGE,
 } from '../errors.js'
 import { ownMetaArgument, senderOf } from '../model.js'
-import type { MemberMetaUpdate, DmReply, RoomCtrlEnvelope, RoomDmEnvelope, SenderStamp } from '../protocol.js'
+import type {
+  MemberMetaUpdate,
+  WholeMemberUpdate,
+  DmReply,
+  RoomCtrlEnvelope,
+  RoomDmEnvelope,
+  SenderStamp,
+} from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
@@ -48,9 +55,7 @@ type WritesHost = {
 type WritesOf = {
   guards(): Partial<RoomGuardHooks> | null
   /** A local participant, whose meta a view that holds no roster yet doesn't hold. */
-  local(
-    id: string,
-  ): { meta: ParticipantMeta; identity: string | null; _metaSeq: number; isConnected: boolean } | undefined
+  local(id: string): { meta: ParticipantMeta; identity: string | null; _acceptedMeta: WholeMemberUpdate } | undefined
 }
 
 /** A member's writes through one handle: each passes its guard, carries its sender's stamp, commits its cells with its
@@ -183,11 +188,10 @@ class RoomWrites {
 
   /** `sender` with the meta seq it reflects, read before a guard waits: a meta write meanwhile takes the next seq. */
   private _stampOf(from: string, sender: Sender): SenderStamp {
-    const known = this._host._model.acceptedMeta(from)
-    const local = known === null ? this._of.local(from)! : null
-    const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: known?.seq ?? local!._metaSeq }
+    const accepted = this._host._model.acceptedMeta(from) ?? this._of.local(from)!._acceptedMeta
+    const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: accepted.seq }
     if (sender.identity !== null) stamp.fromIdentity = sender.identity
-    if (known === null ? !local!.isConnected : known.disconnected) stamp.fromDisconnected = true
+    if (accepted.disconnected) stamp.fromDisconnected = true
     return stamp
   }
 

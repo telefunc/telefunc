@@ -11,7 +11,7 @@ import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { publicTrack, type TrackKey } from './binary.js'
-import type { MemberMetaUpdate, DmReply, InboxMessage } from './protocol.js'
+import type { MemberMetaUpdate, WholeMemberUpdate, DmReply, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -77,14 +77,9 @@ abstract class ParticipantBase implements LocalParticipant {
     return this._meta.object
   }
 
-  /** @internal */
-  get _metaSeq(): number {
-    return this._meta.seq
-  }
-
   /** @internal Whole, as an attach resends it. */
-  get _acceptedMeta(): MemberMetaUpdate {
-    const update: Extract<MemberMetaUpdate, { meta: ParticipantMeta }> = {
+  get _acceptedMeta(): WholeMemberUpdate {
+    const update: WholeMemberUpdate = {
       meta: this._meta.object,
       seq: this._meta.seq,
     }
