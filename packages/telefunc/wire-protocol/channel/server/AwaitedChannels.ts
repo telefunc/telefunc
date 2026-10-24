@@ -70,7 +70,7 @@ class AwaitedChannels {
     return held
   }
 
-  drop(awaited: AwaitedChannel): void {
+  private drop(awaited: AwaitedChannel): void {
     for (const { bytes } of awaited.held) {
       this.backlog.bytes -= bytes
       this.backlog.frames--
