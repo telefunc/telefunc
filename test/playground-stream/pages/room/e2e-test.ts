@@ -364,7 +364,7 @@ function testRoom() {
     unhandled: string[]
   }>(
     'ack-dm',
-    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, and rejects with the recipient's Abort, or an error when a reply from a page or from a server member a page holds can't be serialized",
+    "room: an acknowledged DM resolves with its recipient's reply, from a page, a server member or a server member a page holds, and rejects with the recipient's Abort, or an error when a reply from a page or from a server member a page holds can't be serialized, without an unhandled rejection",
     (r) => {
       expect(r.fromPage).deep.equal({ echo: 'hi' })
       expect(r.fromPageUnsendable).toBe("Internal client room error — see the recipient's client logs")
