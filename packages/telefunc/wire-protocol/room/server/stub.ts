@@ -171,7 +171,6 @@ class RoomStub implements LaneHolder {
     this._selfSuppressed = grants.selfSuppressed
     this._grantedHidden = grants.hidden
     this.end = createBroadcastChannel({
-      key: serverRoom.id,
       onPublish: (text) => roomResult(this._publishText(decodeRoomPublish(parsePeerText(text)))),
       onPublishBinary: (framed) => roomResult(this._publishBinary(decodeStubBinaryFrame(framed), framed)),
       onSubscription: (kind, on) => this._onSubscription(kind, on),
@@ -487,7 +486,6 @@ class RoomParticipantStub {
     this._participant = participant
     this._publishShield = publishShield
     this.end = createBroadcastChannel({
-      key: participant._room.id,
       // Its client publishes text as a `req-publish` request.
       onPublish: () => {
         throw new ProtocolViolationError('text publish on a Room participant stub')

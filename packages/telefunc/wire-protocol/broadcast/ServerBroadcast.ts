@@ -60,7 +60,6 @@ class ServerBroadcast<T = unknown> {
     assertBroadcastKey(opts.key)
     this.key = opts.key
     this._end = new ServerBroadcastEnd({
-      key: this.key,
       onPublish: (serialized) => this._publishFromPage(serialized),
       onPublishBinary: (data) => this._publish('binary', data),
       onSubscription: (kind, on) => {

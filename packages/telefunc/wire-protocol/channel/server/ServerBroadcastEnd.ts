@@ -10,7 +10,6 @@ import { ACK_STATUS, ERROR_REASON, ProtocolViolationError } from '../../wire/con
 import type { BroadcastKind, ReattachState } from '../../wire/connectionFrame.js'
 
 type BroadcastEndOptions = {
-  key: string
   /** A publish from its page: what it returns answers the page's `publish()`. */
   onPublish(serialized: string): unknown
   onPublishBinary(data: Uint8Array): unknown
@@ -21,17 +20,12 @@ type BroadcastEndOptions = {
 }
 
 /** The server end of a page's `ClientBroadcast`: a channel to that page, which also takes the page's publishes and
- *  subscriptions on `key`, and delivers publishes to it. */
-class ServerBroadcastEnd<ClientToServer = unknown, ServerToClient = unknown> extends ServerChannel<
-  ClientToServer,
-  ServerToClient
-> {
-  readonly key: string
+ *  subscriptions, and delivers publishes to it. */
+class ServerBroadcastEnd extends ServerChannel {
   private readonly _options: BroadcastEndOptions
 
   constructor(options: BroadcastEndOptions) {
     super({ publishes: true })
-    this.key = options.key
     this._options = options
   }
 
