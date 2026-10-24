@@ -847,11 +847,16 @@ class ChannelMux {
   ): ChannelHandle[] {
     const session = this.sessions.peekSession(sessionId)
     const { awaited } = entry.state
-    const holds = (ix: number): boolean => session?.has(ix) === true || awaited.get(ix) !== undefined
-    // The channels the connection holds once this frame applies, counted before any is allocated.
+    const heldId = (ix: number): string | undefined => session?.get(ix)?.channel.id ?? awaited.get(ix)?.open.id
+    // At least the channels the connection holds once this frame applies, counted before any is allocated.
     let held = (session?.size ?? 0) + awaited.unattached
-    for (const ix of new Set(released)) if (holds(ix)) held--
-    for (const { ix } of open) if (!holds(ix)) held++
+    for (const ix of new Set(released)) if (heldId(ix) !== undefined) held--
+    for (const { id, ix } of open) {
+      const heldAs = heldId(ix)
+      // An index names one channel until the page releases it.
+      assertProtocol(heldAs === undefined || heldAs === id, 'RECONCILE names a held index under another id')
+      if (heldAs === undefined) held++
+    }
     assertProtocol(held <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over the connection channel cap')
     const handles: ChannelHandle[] = []
     for (const each of open) {
