@@ -121,7 +121,7 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
 
 function decodeParticipantDeclaration(value: unknown): Extract<RoomDeclaration, { __r: 'dm-reply' }> {
   const decl = record(value, 'declaration')
-  if (decl.__r !== 'dm-reply') return malformed('declaration')
+  if (decl.__r !== 'dm-reply') malformed('declaration')
   return decodeDmReplyDeclaration(decl)
 }
 
@@ -130,8 +130,8 @@ function decodeDmReplyDeclaration(decl: Record<string, unknown>): Extract<RoomDe
 }
 
 /** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
-function decodeDmReply(reply: unknown): DmReply {
-  if (!isRecord(reply)) malformed('DM reply')
+function decodeDmReply(value: unknown): DmReply {
+  const reply = record(value, 'DM reply')
   if (reply.ok === true) return { ok: true, result: reply.result }
   if (reply.ok !== false) malformed('DM reply')
   if (reply.abort === true) return { ok: false, abort: true, abortValue: reply.abortValue }
@@ -139,8 +139,8 @@ function decodeDmReply(reply: unknown): DmReply {
 }
 
 /** A declared text want per member id, into a record no key can reach the prototype of. */
-function decodeTextWants(changes: unknown): Record<string, boolean> {
-  if (!isRecord(changes)) malformed('text wants')
+function decodeTextWants(value: unknown): Record<string, boolean> {
+  const changes = record(value, 'text wants')
   const members: Record<string, boolean> = Object.create(null)
   for (const [memberId, wanted] of Object.entries(changes)) {
     if (!isMemberId(memberId)) malformed('text wants')
