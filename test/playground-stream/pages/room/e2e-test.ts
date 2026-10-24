@@ -79,25 +79,25 @@ function testRoomScenario<Result>(id: string, name: string, validate: (result: R
   })
 }
 
-/** A card whose recipient saves its reply to an acknowledged DM, and whose second button closes the chat meanwhile. */
-function testRoomAckDmClose(id: string, name: string) {
+/** A card whose recipient saves its reply to an acknowledged DM, and whose second button acts meanwhile. */
+function testRoomAckDmWhileSaving(id: string, button: string, name: string, meanwhile: object, after: object) {
   test(name, async () => {
     await navigate(`${getServerUrl()}/room`)
-    await page.click(`#test-room-${id}`)
-    let roomId = ''
-    await autoRetry(async () => {
-      const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
-      expect(r.saving).toBe(true)
-      roomId = r.roomId
-    })
-    await page.click(`#test-room-${id}-chat`)
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({ roomId, closing: true })
-    })
-    await runServerAction(`saveReply_${roomId}`)
     try {
+      await page.click(`#test-room-${id}`)
+      let roomId = ''
       await autoRetry(async () => {
-        expect(await getResult('#room-result')).deep.equal({ answer: 'bye', closed: true })
+        const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
+        expect(r.saving).toBe(true)
+        roomId = r.roomId
+      })
+      await page.click(`#test-room-${id}-${button}`)
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal({ roomId, ...meanwhile })
+      })
+      await runServerAction(`saveReply_${roomId}`)
+      await autoRetry(async () => {
+        expect(await getResult('#room-result')).deep.equal(after)
       })
     } finally {
       await page.goto('about:blank')
@@ -401,39 +401,27 @@ function testRoom() {
       expect(r.unhandled).deep.equal([])
     },
   )
-  testRoomAckDmClose(
+  testRoomAckDmWhileSaving(
     'ack-dm-close',
+    'chat',
     'room: a server member a page holds and closes while it saves its reply to an acknowledged DM sends the reply, and the close finishes after it',
+    { closing: true },
+    { answer: 'bye', closed: true },
   )
-  testRoomAckDmClose(
+  testRoomAckDmWhileSaving(
     'ack-dm-close-view',
+    'chat',
     'room: a member a page joined, whose room view the page closes while the member saves its reply to an acknowledged DM, sends the reply, and the close finishes after it',
+    { closing: true },
+    { answer: 'bye', closed: true },
   )
-  test("room: an acknowledged DM to a server member a page holds rejects with the member's leave at once when the page aborts it while it saves its reply, with no unhandled rejection after the save", async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-ack-dm-hang-up')
-    let roomId = ''
-    await autoRetry(async () => {
-      const r = await getResult<{ roomId: string; saving?: boolean }>('#room-result')
-      expect(r.saving).toBe(true)
-      roomId = r.roomId
-    })
-    await page.click('#test-room-ack-dm-hang-up-now')
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({ roomId, fromHangingUp: 'Participant left the room' })
-    })
-    await runServerAction(`saveReply_${roomId}`)
-    try {
-      await autoRetry(async () => {
-        expect(await getResult('#room-result')).deep.equal({
-          fromHangingUp: 'Participant left the room',
-          unhandled: [],
-        })
-      })
-    } finally {
-      await page.goto('about:blank')
-    }
-  })
+  testRoomAckDmWhileSaving(
+    'ack-dm-hang-up',
+    'now',
+    "room: an acknowledged DM to a server member a page holds rejects with the member's leave at once when the page aborts it while it saves its reply, with no unhandled rejection after the save",
+    { fromHangingUp: 'Participant left the room' },
+    { fromHangingUp: 'Participant left the room', unhandled: [] },
+  )
   testRoomScenario<{ listed: number | string; serverCount: number; count: number; emptied: boolean }>(
     'roster-churn',
     'room: a page opening a room of 2,000 members while members join, leave and change meta loads its roster, counts only visible members, and sees no empty room',
