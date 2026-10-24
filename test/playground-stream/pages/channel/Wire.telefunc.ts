@@ -196,17 +196,29 @@ async function onWireConnection() {
   return { channel: ch.client, channelId: ch.id }
 }
 
-/** A member's channel that saves whether they're online; cleanupState: wirePresence_<id> = the status the database holds. */
+const sessions = new Set<string>()
+
+/** A member's channel that saves whether they're online, and ends once they signed out; cleanupState:
+ *  wirePresence_<id> = the status the database holds. */
 async function onWirePresence() {
   const ch = new Channel<never, never>()
   const database = connectToDatabase()
+  const session = crypto.randomUUID()
+  sessions.add(session)
+  // The member signs out on another device.
+  onServerAction(`wirePresence_${ch.id}_signOut`, () => sessions.delete(session))
   ch.onDisconnect(async () => {
     await database.saveStatus(ch.id, 'away')
   })
   ch.onReconnect(async () => {
+    if (!(await isSignedIn(session))) throw Abort({ reason: 'signed out' })
     await database.saveStatus(ch.id, 'online')
   })
   return { channel: ch.client, channelId: ch.id }
+}
+
+async function isSignedIn(session: string) {
+  return sessions.has(session)
 }
 
 /** A database that is unavailable for the first write. */

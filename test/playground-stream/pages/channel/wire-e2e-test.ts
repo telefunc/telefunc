@@ -34,7 +34,7 @@ type WireState = {
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
   connection: { channelId: string; events: string[] } | null
-  presence: { channelId: string; online: boolean } | null
+  presence: { channelId: string; online: boolean; closed?: string } | null
 }
 
 // The end card's channel sends these before the server ends it.
@@ -86,7 +86,7 @@ function testWire(isDev: boolean) {
     })
 
   if (canCutWire())
-    test('channel: an async onDisconnect or onReconnect that fails is reported on either end, and the channel goes on', async () => {
+    test('channel: an async onDisconnect or onReconnect that fails is reported on either end and the channel goes on, and one that aborts ends the channel with its abort value', async () => {
       await navigate(`${getServerUrl()}/channel`)
       await resetCleanupState()
       await page.click('#wire-presence')
@@ -105,6 +105,21 @@ function testWire(isDev: boolean) {
         expect(presence?.online).toBe(true)
         expect(state[`wirePresence_${presence?.channelId}`]).toBe('online')
         expect(state['bug:Database unavailable']).toBe('reported')
+      })
+
+      // Signed out on another device while offline: the server's onReconnect ends the channel.
+      const { presence } = await getResult<WireState>('#wire-state')
+      await page.context().setOffline(true)
+      await cutWire()
+      await runServerAction(`wirePresence_${presence?.channelId}_signOut`)
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence).deep.equal({
+          channelId: presence?.channelId,
+          online: false,
+          closed: 'abort:{"reason":"signed out"}',
+        })
+        expect((await getCleanupState())[`wirePresence_${presence?.channelId}`]).toBe('away')
       })
       expectLog('Database unavailable', { filter: (log) => log.logSource === 'stderr' })
       expectLog('[telefunc:channel-error] Error: Could not load the missed messages', {

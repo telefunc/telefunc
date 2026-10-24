@@ -32,7 +32,8 @@ type WireState = {
   upload: { channelId: string; sent: number } | null
   /** What the page's end saw: 'open', 'disconnect', 'reconnect', each with isConnected. */
   connection: { channelId: string; events: string[] } | null
-  presence: { channelId: string; online: boolean } | null
+  /** closed: 'abort:<value as JSON>' or the error's name, once the channel closed. */
+  presence: { channelId: string; online: boolean; closed?: string } | null
 }
 
 const RESUME_COUNT = 256
@@ -97,6 +98,10 @@ function WireDemo() {
       await loadMissedMessages()
     })
     channel.onReconnect(() => show(true))
+    channel.onClose((err) => {
+      const closed = err instanceof Abort ? `abort:${JSON.stringify(err.abortValue)}` : err?.name
+      setState((s) => ({ ...s, presence: { channelId, online: false, closed } }))
+    })
   }, [])
 
   const resume = useCallback(async () => {
