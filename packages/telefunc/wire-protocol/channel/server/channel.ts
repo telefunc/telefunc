@@ -229,13 +229,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       const buffered = needsAck
         ? this._trackAck(
             new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-              this._prePeerBuffer.pushTextAck(serialized, resolve, reject, false)
+              this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
             }),
           )
         : new Promise<void>((resolve, reject) => {
-            this._prePeerBuffer.pushText(serialized, resolve, reject, false)
+            this._prePeerBuffer.pushText(serialized, resolve, reject)
           })
-      this._closeIfDroppedOffline(false)
       return buffered
     }
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
@@ -274,12 +273,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!this._peer) {
       const buffered = needsAck
         ? new Promise<unknown>((resolve, reject) => {
-            this._prePeerBuffer.pushBinaryAck(data, resolve, reject, false)
+            this._prePeerBuffer.pushBinaryAck(data, resolve, reject)
           })
         : new Promise<void>((resolve, reject) => {
-            this._prePeerBuffer.pushBinary(data, resolve, reject, false)
+            this._prePeerBuffer.pushBinary(data, resolve, reject)
           })
-      this._closeIfDroppedOffline(true)
       return buffered
     }
     // Ack-bearing path bypasses credit; see `_send` for rationale.
@@ -781,19 +779,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._peer) this._peer.sendError(reason)
     else this._ensurePendingEnd().error = reason
     this._shutdown(err)
-  }
-
-  /** The buffer for an offline page dropped a publish that its page doesn't get again as it attaches: rather than be
-   *  sent a gap, it gets the end at its next attach. */
-  protected _closeIfDroppedOffline(binary: boolean): void {
-    if (!this._prePeerBuffer.droppedGap) return
-    const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
-    this._endWithError(
-      ERROR_REASON.OVERFLOW,
-      new ChannelOverflowError(
-        `Channel closed: more was sent to its client while it was offline than config.channel.${limit} lets the server hold`,
-      ),
-    )
   }
 
   /** Send an ack response, buffering it if the peer is currently disconnected. */

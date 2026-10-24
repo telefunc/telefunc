@@ -69,6 +69,19 @@ class ServerBroadcastEnd<ClientToServer = unknown, ServerToClient = unknown> ext
     this._flow.countPublishSent(binary ? peer.sendPublishBinary(frame) : peer.sendPublish(frame))
   }
 
+  /** The buffer for an offline page dropped a publish that its page doesn't get again as it attaches: rather than be
+   *  sent a gap, it gets the end at its next attach. */
+  private _closeIfDroppedOffline(binary: boolean): void {
+    if (!this._prePeerBuffer.droppedGap) return
+    const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
+    this._endWithError(
+      ERROR_REASON.OVERFLOW,
+      new ChannelOverflowError(
+        `Channel closed: more was sent to its client while it was offline than config.channel.${limit} lets the server hold`,
+      ),
+    )
+  }
+
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     super._attachPeer(peer, state)
     if (this._peer === peer && !this._isClosed) this._options.onAttach?.()
