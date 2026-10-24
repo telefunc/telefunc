@@ -14,6 +14,7 @@ import {
   inboxMessageFromWire,
   joinedMember,
   leaveCauseFromWire,
+  type DmReply,
   type InboxMessage,
   type MemberSnapshot,
   type ParticipantStubMetadata,
@@ -52,6 +53,12 @@ import type {
 
 /** What a room's stub relays to its client on the text lane. */
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
+
+/** A reply that can't be sent is reported, and the sender gets an error instead. */
+function sendDmReply(stub: ClientBroadcast, ackId: string, reply: Promise<DmReply>): void {
+  const declare = (answer: DmReply): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
+  stub._sendReply(reply.then(declare), declare({ ok: false, err: CLIENT_ROOM_BUG_MESSAGE }))
+}
 
 /** The member an event concerns while that member's join may still be settling. */
 function heldMemberOf(event: ClientRoomEvent): string | null {
@@ -218,11 +225,7 @@ class ClientRoom extends RoomStateView implements Room {
       participant._deliverMessage(msg)
       return
     }
-    const ackId = msg.ackId
-    this._stub._sendReply(
-      participant._deliverMessageAck(msg).then((reply) => ({ __r: 'dm-reply', ackId, reply })),
-      { __r: 'dm-reply', ackId, reply: { ok: false, err: CLIENT_ROOM_BUG_MESSAGE } },
-    )
+    sendDmReply(this._stub, msg.ackId, participant._deliverMessageAck(msg))
   }
 
   /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -689,15 +692,9 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
         return this._onDemand(msg.track, msg.wanted)
       case 'demand-state':
         return this._applyDemandState(msg.tracks)
-      case 'dm': {
-        const ackId = msg.ackId
-        if (ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
-        this._stub._sendReply(
-          this._deliverMessageAck(inboxMessageFromWire(msg)).then((reply) => ({ __r: 'dm-reply', ackId, reply })),
-          { __r: 'dm-reply', ackId, reply: { ok: false, err: CLIENT_ROOM_BUG_MESSAGE } },
-        )
-        return
-      }
+      case 'dm':
+        if (msg.ackId === undefined) return this._deliverMessage(inboxMessageFromWire(msg))
+        return sendDmReply(this._stub, msg.ackId, this._deliverMessageAck(inboxMessageFromWire(msg)))
       case 'left':
         return this._onLeft(leaveCauseFromWire(msg))
     }
