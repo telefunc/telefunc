@@ -219,7 +219,10 @@ class ClientRoom extends RoomStateView implements Room {
       return
     }
     const ackId = msg.ackId
-    void participant._deliverMessageAck(msg).then((reply) => this._notify({ __r: 'dm-reply', ackId, reply }))
+    this._stub._sendReply(
+      participant._deliverMessageAck(msg).then((reply) => ({ __r: 'dm-reply', ackId, reply })),
+      { __r: 'dm-reply', ackId, reply: { ok: false, err: CLIENT_ROOM_BUG_MESSAGE } },
+    )
   }
 
   /** @internal Revival of a serialized `RemoteParticipant` (see `roomRemoteReviver`). */
@@ -442,7 +445,7 @@ class ClientRoom extends RoomStateView implements Room {
     })
   }
 
-  /** A closed stub's server side is gone with its wants, and a DM reply to it times out as any lost reply does. */
+  /** A closed stub's server side is gone with its wants. */
   private _notify(notice: RoomStubRequest): void {
     if (!this._stub.isClosed) void this._stub.send(notice, { ack: false }).catch(() => {})
   }
