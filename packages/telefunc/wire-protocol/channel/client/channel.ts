@@ -90,7 +90,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
   protected _isClosed = false
-  protected _didTerminate = false
+  private _didTerminate = false
   private _didFireClose = false
   private _didFireOpen = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
@@ -664,7 +664,6 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     const send = (data: unknown) => this._flow.countSent(this._connection.send(this, stringify(data)))
     void this._trackAck(
       reply.then((data) => {
-        if (this._didTerminate) return
         try {
           send(data)
         } catch (err) {
