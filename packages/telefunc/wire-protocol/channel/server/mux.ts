@@ -845,6 +845,14 @@ class ChannelMux {
     entry: ConnectionEntry,
     connection: Wire,
   ): ChannelHandle[] {
+    const session = this.sessions.peekSession(sessionId)
+    const { awaited } = entry.state
+    const holds = (ix: number): boolean => session?.has(ix) === true || awaited.get(ix) !== undefined
+    // The channels the connection holds once this frame applies, counted before any is allocated.
+    let held = (session?.size ?? 0) + awaited.unattached
+    for (const ix of new Set(released)) if (holds(ix)) held--
+    for (const { ix } of open) if (!holds(ix)) held++
+    assertProtocol(held <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over the connection channel cap')
     const handles: ChannelHandle[] = []
     for (const each of open) {
       const handle = this.attach(each, entry, connection, false)
@@ -912,7 +920,7 @@ class ChannelMux {
       return
     }
     this.sessions.add(sessionId, handle)
-    awaited.phase = 'attached'
+    entry.state.awaited.attach(awaited)
     // Once the registering code added its listeners; the ATTACH_RESULT follows, so its lastSeq counts what was held.
     const settle = async (): Promise<void> => {
       if (entry.state.awaited.get(awaited.open.ix) !== awaited) return
