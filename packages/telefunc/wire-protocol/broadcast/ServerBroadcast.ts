@@ -143,7 +143,8 @@ class ServerBroadcast<T = unknown> {
 
   _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const data = parse(serialized) as ChannelData<T>
-    if (!this._callListeners(this._subscribers.text.list(), rawInfo, (cb, info) => cb(data, info))) return
+    const listeners = this._subscribers.text.list()
+    if (!this._callListeners(listeners, rawInfo, (cb, info) => cb(data, info))) return
     if (!this._peerSubscriptions.text) return
     this._end.deliver(encodePublishText(serialized, rawInfo))
   }
