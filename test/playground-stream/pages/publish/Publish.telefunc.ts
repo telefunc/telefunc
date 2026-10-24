@@ -26,6 +26,7 @@ export {
   onBroadcastJoinWhileQueued,
   onBroadcastManyKeys,
   onBroadcastThrowingListener,
+  onJoinChat,
 }
 
 import { Buffer } from 'node:buffer'
@@ -35,6 +36,10 @@ import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 
 type TextMsg = { text: string; from: string }
+
+onBug((err) => {
+  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
+})
 
 /** Two broadcast instances sharing a key — publish from one, subscribe on the other.
  *  The key is unique per call, so no other page load publishes on it. */
@@ -554,4 +559,38 @@ async function within10s(seen: Promise<unknown>): Promise<void> {
   const timer = setTimeout(deadline.resolve, 10_000)
   await Promise.race([seen, deadline.promise])
   clearTimeout(timer)
+}
+
+/** A chat room whose subscriber saves each message, and which sends its history to a page that joins. */
+async function onJoinChat() {
+  const room = new BroadcastChannel<string>({ key: `chat:${crypto.randomUUID()}` })
+  const database = connectToDatabase()
+  room.subscribe(async (message) => {
+    await database.saveMessage(message)
+  })
+  room.onOpen(async () => {
+    for (const message of await loadHistory()) await room.publish(message)
+  })
+  return room
+}
+
+/** The chat history store is down. */
+async function loadHistory(): Promise<string[]> {
+  throw new Error('Could not load the chat history')
+}
+
+/** A database that is unavailable for the first write. */
+function connectToDatabase() {
+  let connected = false
+  const saved: string[] = []
+  return {
+    async saveMessage(message: string) {
+      if (!connected) {
+        connected = true
+        throw new Error('Database unavailable')
+      }
+      saved.push(message)
+      cleanupState.chatSaved = JSON.stringify(saved)
+    },
+  }
 }

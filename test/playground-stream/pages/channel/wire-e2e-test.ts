@@ -227,6 +227,45 @@ function testWire(isDev: boolean) {
   })
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
+    // MAX_CHANNELS_PER_CONNECTION
+    const maxChannels = 4_096
+    const connect = async () => {
+      const url = new URL('/_telefunc', getServerUrl())
+      url.protocol = 'ws:'
+      const ws = new globalThis.WebSocket(url)
+      ws.binaryType = 'arraybuffer'
+      await new Promise((resolve) => (ws.onopen = resolve))
+      let sessionId: string | undefined
+      // Takes the first answer to the RECONCILE in flight.
+      let settle: ((answer: 'reconciled' | 'closed') => void) | undefined
+      const answered = (answer: 'reconciled' | 'closed') => {
+        settle?.(answer)
+        settle = undefined
+      }
+      ws.onclose = () => answered('closed')
+      ws.onmessage = (event) => {
+        const frame = new Uint8Array(event.data as ArrayBuffer)
+        // RECONCILED, its JSON after the 7-byte header.
+        if (frame[0] !== 0x05) return
+        sessionId = JSON.parse(new TextDecoder().decode(frame.subarray(7))).sessionId
+        answered('reconciled')
+      }
+      // A RECONCILE naming what changed once the first is answered; one on a socket the server closed isn't sent.
+      const answer = (reconcile: { open: object[]; released?: number[] }) =>
+        new Promise<'reconciled' | 'closed' | 'already closed'>((resolve) => {
+          // CLOSING from the server's close frame on, ahead of the close event.
+          if (ws.readyState !== globalThis.WebSocket.OPEN) return resolve('already closed')
+          settle = resolve
+          const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
+          // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
+          const frame = new Uint8Array(7 + payload.byteLength)
+          frame[0] = 0x04
+          frame.set(payload, 7)
+          ws.send(frame)
+        })
+      return { ws, answer }
+    }
+
     test('channel: a channel a call returns while the WebSocket is dead without a word opens on both ends once the page notices', async () => {
       const proxy = await startBlackHoleProxy(getServerUrl())
       try {
@@ -254,33 +293,43 @@ function testWire(isDev: boolean) {
     })
 
     test('channel: a RECONCILE naming more channels than a connection may hold closes the WebSocket before any RECONCILED', async () => {
-      // MAX_CHANNELS_PER_CONNECTION
-      const maxChannels = 4_096
-      const answer = (entries: number) =>
-        new Promise<'reconciled' | 'closed'>((resolve) => {
-          const url = new URL('/_telefunc', getServerUrl())
-          url.protocol = 'ws:'
-          const ws = new globalThis.WebSocket(url)
-          ws.binaryType = 'arraybuffer'
-          ws.onopen = () => {
-            const open = Array.from({ length: entries }, (_, ix) => ({ id: `unknown-${ix}`, ix, lastSeq: 0 }))
-            const payload = new TextEncoder().encode(JSON.stringify({ open }))
-            // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
-            const frame = new Uint8Array(7 + payload.byteLength)
-            frame[0] = 0x04
-            frame.set(payload, 7)
-            ws.send(frame)
-          }
-          ws.onmessage = (event) => {
-            // RECONCILED
-            if (new Uint8Array(event.data as ArrayBuffer)[0] !== 0x05) return
-            resolve('reconciled')
-            ws.close()
-          }
-          ws.onclose = () => resolve('closed')
-        })
-      expect(await answer(maxChannels)).toBe('reconciled')
-      expect(await answer(maxChannels + 1)).toBe('closed')
+      const open = (entries: number) =>
+        Array.from({ length: entries }, (_, ix) => ({ id: `unknown-${ix}`, ix, lastSeq: 0 }))
+      const fits = await connect()
+      const over = await connect()
+      try {
+        expect(await fits.answer({ open: open(maxChannels) })).toBe('reconciled')
+        expect(await over.answer({ open: open(maxChannels + 1) })).toBe('closed')
+      } finally {
+        fits.ws.close()
+        over.ws.close()
+      }
+    })
+
+    test('channel: a RECONCILE naming new channels past what a connection may hold, on top of those it holds, or naming a channel it holds under another id, closes the WebSocket', async () => {
+      // Channels the page opened that the server hasn't registered yet, so it awaits each one.
+      const opened = (from: number, count: number, name = 'unregistered') =>
+        Array.from({ length: count }, (_, n) => ({
+          id: `${name}-${from + n}`,
+          ix: from + n,
+          lastSeq: 0,
+          initial: true,
+        }))
+      const full = await connect()
+      const renaming = await connect()
+      try {
+        expect(await full.answer({ open: opened(0, maxChannels) })).toBe('reconciled')
+        // The page released 16 and opened 16: it still holds as many.
+        const released = Array.from({ length: 16 }, (_, ix) => ix)
+        expect(await full.answer({ released, open: opened(maxChannels, 16) })).toBe('reconciled')
+        expect(await full.answer({ released: [], open: opened(maxChannels + 16, 1) })).toBe('closed')
+
+        expect(await renaming.answer({ open: opened(0, 1) })).toBe('reconciled')
+        expect(await renaming.answer({ released: [], open: opened(0, 1, 'renamed') })).toBe('closed')
+      } finally {
+        full.ws.close()
+        renaming.ws.close()
+      }
     })
 
     test('channel: a channel whose first WebSocket a network drop stops opens on the next', async () => {

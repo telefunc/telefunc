@@ -4,6 +4,7 @@ export {
   onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onKeptChannel,
   onAbortedChannel,
   onCloseUnreturned,
   onCloseFn,
@@ -11,12 +12,17 @@ export {
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
   onGcPassedFnOnClose,
+  onEditDocument,
 }
 
 import { EventEmitter } from 'node:events'
-import { BroadcastChannel, Channel, getContext } from 'telefunc'
+import { BroadcastChannel, Channel, getContext, onBug } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
+
+onBug((err) => {
+  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
+})
 
 // ── Targeted single-type telefunctions ─────────────────────────────
 
@@ -97,6 +103,19 @@ async function onCloseChannel() {
   cleanupState.closeChannel_onCloseErr = 'pending'
   ch.onClose((err) => {
     cleanupState.closeChannel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'
+  })
+  return ch.client
+}
+
+/** cleanupState: keptChannel = 'open' once its page's wire reached the server, then its onClose error's message, or 'none'. */
+async function onKeptChannel() {
+  const ch = new Channel<never, never>()
+  cleanupState.keptChannel = 'pending'
+  ch.onOpen(() => {
+    cleanupState.keptChannel = 'open'
+  })
+  ch.onClose((err) => {
+    cleanupState.keptChannel = err ? err.message : 'none'
   })
   return ch.client
 }
@@ -257,4 +276,17 @@ async function onMixedForClose(callback: (msg: string) => void) {
   }
 
   return { generator, stream, channel: ch.client, fn }
+}
+
+/** Opens the document for editing, releasing its lock once the request is over. */
+async function onEditDocument() {
+  getContext().onClose(async () => {
+    await releaseLock()
+  })
+  return { text: 'Draft' }
+}
+
+/** The lock server is down. */
+async function releaseLock() {
+  throw new Error('Could not release the lock')
 }

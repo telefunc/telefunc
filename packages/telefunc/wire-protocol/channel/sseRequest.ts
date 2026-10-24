@@ -4,20 +4,22 @@ export type { SseRequestMetadata }
 import { encodeLengthPrefixedString, encodeU32 } from '../wire/frame.js'
 import { assert } from '../../utils/assert.js'
 
-/** The metadata header that opens every SSE POST. The two booleans select the POST kind:
+/** The metadata header that opens every SSE POST. The flags select the POST kind:
  *  - neither: short outbox batch POST. Body ends quickly, so the server defers `reconciled`
  *    to body-end — dispatched frames lift each channel's `_lastClientSeq` first, giving
  *    accurate `lastSeq` numbers.
  *  - `streamResponse`: opens the server→client `text/event-stream` downstream wire.
  *  - `streamRequest`: the long-lived client→server upload POST. Its body never ends, so the
- *    server emits `reconciled` inline instead of deferring. */
+ *    server emits `reconciled` inline instead of deferring.
+ *  - `close`: the page leaves for good, so the server closes the wire as a WebSocket close would. */
 type SseRequestMetadata = {
   connId: string
   streamResponse?: true
   streamRequest?: true
+  close?: true
 }
 
-/** `[u32 length][metadata UTF-8]` — the wire header, shared by all three POST kinds. The
+/** `[u32 length][metadata UTF-8]` — the wire header, shared by every POST kind. The
  *  streaming stream-request POST pushes this onto its body directly (its body can't be a
  *  one-shot Blob); the others hand it to `encodeSseRequest` with their batch appended. */
 function encodeSseRequestMetadata(metadata: SseRequestMetadata): Uint8Array<ArrayBuffer> {
@@ -48,5 +50,6 @@ function parseSseRequestMetadata(metadataText: string): SseRequestMetadata {
   const metadata: SseRequestMetadata = { connId: raw.connId }
   if (raw.streamResponse === true) metadata.streamResponse = true
   if (raw.streamRequest === true) metadata.streamRequest = true
+  if (raw.close === true) metadata.close = true
   return metadata
 }

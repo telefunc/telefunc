@@ -386,6 +386,11 @@ class ChannelMux {
     if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
   }
 
+  /** Ends the channels of a session whose wire closed transiently as a permanent close would have: its page left. */
+  endSession(sessionId: string): void {
+    this.detachSession(sessionId, DETACH_REASON.PERMANENT)
+  }
+
   readPermanentTermination(connection: Wire): boolean {
     return this.connectionEntries.get(connection)?.state.terminatePermanently ?? false
   }
@@ -841,6 +846,19 @@ class ChannelMux {
     entry: ConnectionEntry,
     connection: Wire,
   ): ChannelHandle[] {
+    const session = this.sessions.peekSession(sessionId)
+    const { awaited } = entry.state
+    const heldId = (ix: number): string | undefined => session?.get(ix)?.channel.id ?? awaited.get(ix)?.open.id
+    // At least the channels the connection holds once this frame applies, counted before any is allocated.
+    let held = (session?.size ?? 0) + awaited.unattached
+    for (const ix of new Set(released)) if (heldId(ix) !== undefined) held--
+    for (const { id, ix } of open) {
+      const heldAs = heldId(ix)
+      // An index names one channel until the page releases it.
+      assertProtocol(heldAs === undefined || heldAs === id, 'RECONCILE names a held index under another id')
+      if (heldAs === undefined) held++
+    }
+    assertProtocol(held <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE over the connection channel cap')
     const handles: ChannelHandle[] = []
     for (const each of open) {
       const handle = this.attach(each, entry, connection, false)
@@ -908,7 +926,7 @@ class ChannelMux {
       return
     }
     this.sessions.add(sessionId, handle)
-    awaited.phase = 'attached'
+    entry.state.awaited.attach(awaited)
     // Once the registering code added its listeners; the ATTACH_RESULT follows, so its lastSeq counts what was held.
     const settle = async (): Promise<void> => {
       if (entry.state.awaited.get(awaited.open.ix) !== awaited) return
@@ -935,8 +953,7 @@ class ChannelMux {
 
   /** Not registered within `connectTtl`, or shut down as it registered. */
   private expireAwaited(awaited: AwaitedChannel): void {
-    awaited.phase = 'expired'
-    awaited.entry.state.awaited.drop(awaited)
+    awaited.entry.state.awaited.expire(awaited)
     this.send(awaited.wire, encode.attachResult(awaited.open.ix, null))
   }
 
