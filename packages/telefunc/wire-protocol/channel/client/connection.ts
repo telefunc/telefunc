@@ -131,8 +131,8 @@ interface MuxChannel {
   _onTransportClose(err?: Error): void
   /** Its wire went away, and the connection reconnects. */
   _onTransportDisconnect(): void
-  /** Its RECONCILE entry on each (re)attach to `uplink`'s wire; `batched`: its flow-control frames wait for a POST. */
-  _reattachState(batched: boolean, uplink: Uplink): ReattachState
+  /** Its RECONCILE entry on each (re)attach to `uplink`'s wire. */
+  _reattachState(uplink: Uplink): ReattachState
   /** Its RECONCILE entry's `probe` was answered by the RECONCILED. */
   _onProbeAnswered(probe: number): void
   /** The largest windows the replay buffers allow: the one the page grants, and the one the server grants it. */
@@ -1429,14 +1429,13 @@ class ClientConnection implements MuxConnection {
   // ── Protocol internals ──
 
   buildReconcileFrame(): OutboundFrame {
-    const { uplink, batched } = this.transport
+    const { uplink } = this.transport
     // The wire that has the session holds what the RECONCILEs before named: one there names what changed since.
     const changes = this.sessionId !== null && this.reconciledWire === this.wire
     const ixes = changes ? new Set([...this.unnamedIxes, ...this.closedIxes]) : this.channels.keys()
     const open = this.declareOpenEntries(ixes, {
       skipUnnamed: false,
       uplink,
-      batched,
     })
     const reconcile: ReconcilePayload = { open }
     if (this.sessionId) reconcile.sessionId = this.sessionId
@@ -1448,7 +1447,7 @@ class ClientConnection implements MuxConnection {
   /** The old wire's last frame; a channel no RECONCILE named yet is left out, to reconcile after the handoff. */
   private buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
-    const open = this.declareOpenEntries(this.channels.keys(), { skipUnnamed: true, uplink, batched: false })
+    const open = this.declareOpenEntries(this.channels.keys(), { skipUnnamed: true, uplink })
     this.releasedIxes = []
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
@@ -1458,11 +1457,9 @@ class ClientConnection implements MuxConnection {
     {
       skipUnnamed,
       uplink,
-      batched,
     }: {
       skipUnnamed: boolean
       uplink: Uplink
-      batched: boolean
     },
   ): ReconcileOpenEntry[] {
     this.enterReconciling()
@@ -1486,7 +1483,7 @@ class ClientConnection implements MuxConnection {
         lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState(batched, uplink)
+      const state = entry.channel._reattachState(uplink)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)

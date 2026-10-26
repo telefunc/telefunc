@@ -96,6 +96,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _didFireClose = false
   private _didFireOpen = false
   private _isConnected = false
+  /** Its flow-control frames wait for a batch POST. */
+  private _batched = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
   private _closeDeadline = 0
   private _closeWaiters: Array<() => void> = []
@@ -284,9 +286,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Called by transport connection ──
 
-  /** @internal Probes a path it hasn't measured, unless its flow-control frames wait for a batched POST. */
-  _reattachState(batched: boolean, uplink: Uplink): ReattachState {
-    const probe = batched ? undefined : this._flow.probeAttach(uplink.link)
+  /** @internal Probes a path it hasn't measured. */
+  _reattachState(uplink: Uplink): ReattachState {
+    const probe = this._flow.probeAttach(uplink.link)
     return probe === undefined ? {} : { probe }
   }
 
@@ -312,11 +314,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _onTransportBatched(): void {
+    this._batched = true
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) return
+    this._batched = batched
     if (batched) this._flow.useBatchTransportInitial()
     this._flow.attach(uplink, downlink)
     if (this._didFireOpen) this._fireReconnect()
@@ -451,7 +455,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._connection.sendBdpPingAck(this, {
           probe: frame.probe,
           backlog: this._flow.onPing(),
-          pathRtt: this._flow.pathRtt(),
+          // The server's round trip leaves out the wait for a batch POST, so no path is vouched for.
+          pathRtt: this._batched ? Infinity : this._flow.pathRtt(),
         })
         return
       case TAG.BDP_PING_ACK:
