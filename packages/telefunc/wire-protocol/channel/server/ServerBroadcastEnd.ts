@@ -1,12 +1,10 @@
 export { ServerBroadcastEnd }
 
-import { stringify } from '@brillout/json-serializer/stringify'
 import { ServerChannel } from './channel.js'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { ChannelOverflowError } from '../channelErrors.js'
-import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { ACK_STATUS, ERROR_REASON } from '../../wire/connectionFrame.js'
+import { ERROR_REASON } from '../../wire/connectionFrame.js'
 import type { BroadcastKind, ReattachState } from '../../wire/connectionFrame.js'
 
 /** The server end of a page's `ClientBroadcast`: a channel to that page, which also takes the page's publishes and
@@ -91,38 +89,16 @@ class ServerBroadcastEnd extends ServerChannel {
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
     const handler = this._publishHandler
     assert(handler)
-    return this._trackAck(this._answerPublish(seq, () => handler(text)))
+    return this._trackAck(this._answerRequest(seq, () => handler(text), 'publish'))
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     const handler = this._publishBinaryHandler
     assert(handler)
-    return this._trackAck(this._answerPublish(seq, () => handler(data)))
+    return this._trackAck(this._answerRequest(seq, () => handler(data), 'publish'))
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
     this._subscriptionHandler?.(kind, on)
-  }
-
-  private async _answerPublish(seq: number, publish: () => unknown): Promise<void> {
-    // Until `publish` returns, a ProtocolViolationError is this request's own and ends its wire.
-    let violationPeer = this._peer
-    let answer: string
-    try {
-      const result = publish()
-      violationPeer = null
-      answer = stringify(await result)
-    } catch (err) {
-      this._sendPublishFailure(seq, err, violationPeer)
-      return
-    }
-    this._sendAckRes(seq, answer)
-  }
-
-  /** A full buffer refusing the publish is no bug: the page's publish() rejects with a ChannelOverflowError. */
-  private _sendPublishFailure(seq: number, err: unknown, violationPeer: IndexedPeer | null): void {
-    if (err instanceof ChannelOverflowError) return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
-    if (isShieldValidationError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
-    this._sendAckFailure(seq, err, violationPeer)
   }
 }

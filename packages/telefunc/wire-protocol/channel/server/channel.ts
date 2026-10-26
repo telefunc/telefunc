@@ -27,7 +27,7 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { isAbort } from '../../../node/server/Abort.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
-import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
+import { ShieldValidationError, isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
@@ -881,27 +881,40 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
       return
     }
-    // Until a listener returns, a ProtocolViolationError is this request's own and ends its wire.
+    await this._answerRequest(seq, () => callInOrder(listeners.list(), data), 'request')
+  }
+
+  /** Answers request `seq` with what `run` resolves to, or with its failure; a publish answers a full buffer or a shield
+   *  failure with the status its page's `publish()` rejects with. */
+  protected async _answerRequest(seq: number, run: () => unknown, kind: 'request' | 'publish'): Promise<void> {
+    // Until `run` returns, a ProtocolViolationError is this request's own and ends its wire.
     let violationPeer = this._peer
     let answer: string
     try {
-      let lastResult: unknown
-      for (const cb of listeners.list()) {
-        const result = cb(data)
-        violationPeer = null
-        lastResult = await result
-      }
-      answer = stringify(lastResult)
+      const result = run()
+      violationPeer = null
+      answer = stringify(await result)
     } catch (err) {
-      this._sendAckFailure(seq, err, violationPeer)
+      this._sendRequestFailure(seq, err, violationPeer, kind)
       return
     }
     this._sendAckRes(seq, answer)
   }
 
   /** A ProtocolViolationError ends `violationPeer`'s wire, as a malformed frame does; without one, it is a callback error. */
-  protected _sendAckFailure(seq: number, err: unknown, violationPeer: IndexedPeer | null): void {
+  private _sendRequestFailure(
+    seq: number,
+    err: unknown,
+    violationPeer: IndexedPeer | null,
+    kind: 'request' | 'publish',
+  ): void {
     if (violationPeer && err instanceof ProtocolViolationError) return violationPeer.sender.terminate()
+    if (kind === 'publish' && err instanceof ChannelOverflowError) {
+      return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
+    }
+    if (kind === 'publish' && isShieldValidationError(err)) {
+      return this._sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
+    }
     if (this._handleCallbackError(err)) return
     this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }
@@ -1039,6 +1052,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this._reconnectTimer = null
   }
+}
+
+/** Calls each listener once the one before it settled, the first in this turn; resolves to the last one's result. */
+function callInOrder<T>(listeners: readonly ((data: T) => unknown)[], data: T): unknown {
+  const first = listeners[0]!(data)
+  return listeners.length === 1 ? first : callRestInOrder(first, listeners, data)
+}
+
+async function callRestInOrder<T>(first: unknown, listeners: readonly ((data: T) => unknown)[], data: T) {
+  let last = await first
+  for (let i = 1; i < listeners.length; i++) last = await listeners[i]!(data)
+  return last
 }
 
 function rejectOverflow(): Promise<never> {
