@@ -96,8 +96,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _didFireClose = false
   private _didFireOpen = false
   private _isConnected = false
-  /** Its flow-control frames wait for a batch POST. */
-  private _batched = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
   private _closeDeadline = 0
   private _closeWaiters: Array<() => void> = []
@@ -314,13 +312,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _onTransportBatched(): void {
-    this._batched = true
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) return
-    this._batched = batched
     if (batched) this._flow.useBatchTransportInitial()
     this._flow.attach(uplink, downlink)
     if (this._didFireOpen) this._fireReconnect()
@@ -455,8 +451,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._connection.sendBdpPingAck(this, {
           probe: frame.probe,
           backlog: this._flow.onPing(),
-          // The server's round trip leaves out the wait for a batch POST, so no path is vouched for.
-          pathRtt: this._batched ? Infinity : this._flow.pathRtt(),
+          pathRtt: this._flow.pathRtt(),
         })
         return
       case TAG.BDP_PING_ACK:

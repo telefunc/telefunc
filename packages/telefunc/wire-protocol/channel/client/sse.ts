@@ -138,6 +138,8 @@ class SseTransport implements UpgradeSource {
     void this.post(encodeSseRequest({ connId: this.connId, close: true }), undefined, { keepalive: true }).catch(
       () => {},
     )
+    // The unload ends its requests next, which loses no wire: a WebSocket its upgrade opened closes with the page.
+    this.abandonActiveTransport()
   }
 
   async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
