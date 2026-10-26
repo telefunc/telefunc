@@ -56,6 +56,8 @@ function runPlayground(
         log.logText.includes('[telefunc:rxjs]') ||
         log.logText.includes('Unhandled rxjs error') ||
         log.logText.includes('Shield Validation Error') ||
+        // A listener that relayed a question to a page whose answer the server can't read (pages/channel/Wire.tsx).
+        log.logText.includes('Error: peer payload is not parsable') ||
         // Transitions between tests close the previous page's channels; the server-side
         // Subject/Observable wire waits for a reconnect within the grace period and logs this
         // if the browser has already navigated away.

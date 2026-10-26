@@ -136,6 +136,21 @@ async function joinAndLetGo(roomId: string, leaves: string[]): Promise<void> {
   me.onLeave((cause) => leaves.push(cause.type))
 }
 
+/** Joins the room named in the URL as `Mallory`, then sends what no client library sends, as a hostile page can. */
+async function joinAndSendMalformed(kind: 'request' | 'publish'): Promise<void> {
+  const roomId = new URLSearchParams(location.search).get('roomId')!
+  const room = await onGetRoom(roomId)
+  keepReachable(room)
+  await room.join({ meta: { name: 'Mallory' } })
+  // The room's own channel, past the API that checks what goes on it.
+  const { _stub: stub } = room as unknown as {
+    _stub: { send(data: unknown, options: { ack: true }): Promise<unknown>; publish(data: unknown): Promise<unknown> }
+  }
+  await (kind === 'request' ? stub.send({ __r: 'req-bogus' }, { ack: true }) : stub.publish({ __r: 'bogus' })).catch(
+    () => {},
+  )
+}
+
 /** The documented React adapter: the room's methods passed as they are. */
 function LiveCount({ room }: { room: RoomView }) {
   const snapshot = useSyncExternalStore(room.onChange, room.snapshot)
@@ -691,6 +706,29 @@ function Room() {
         await room.join({ meta: { name: 'Closer' } })
         setResult(JSON.stringify('joined'))
       })}
+
+      {scenario('malformed', 'Malformed requests', 'Join, and say goodbye to whoever leaves', async () => {
+        const [roomId, room] = await createRoom('malformed')
+        const events: string[] = []
+        const received: unknown[] = []
+        room.subscribe((data) => received.push(data))
+        room.onJoin((member) => events.push(`join:${member.meta.name}`))
+        const me = await room.join({ meta: { name: 'Witness' } })
+        room.onLeave((member, cause) => {
+          events.push(`leave:${member.meta.name}:${cause.type}`)
+          void me.publish(`bye ${member.meta.name}`)
+        })
+        // The test joins `Mallory` from another tab, which then sends a malformed request or publish.
+        await pollUntil(() => ({ result: { roomId, events, received }, done: received.length > 0 }), 150)
+      })}
+
+      {scenario('malformed-request', null, 'Join the room named in the URL, then send a malformed request', () =>
+        joinAndSendMalformed('request'),
+      )}
+
+      {scenario('malformed-publish', null, 'Join the room named in the URL, then send a malformed publish', () =>
+        joinAndSendMalformed('publish'),
+      )}
 
       {scenario(
         'own-meta-race',

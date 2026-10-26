@@ -660,6 +660,28 @@ function testRoom() {
       ])
     }, CLOSED_TAB_WAIT)
   })
+  for (const kind of ['request', 'publish'] as const)
+    test(`room: a page that sends a malformed Room ${kind} loses its connection: its member leaves, and the room keeps working for the others`, async () => {
+      await navigate(`${getServerUrl()}/room`)
+      await page.click('#test-room-malformed')
+      const { roomId } = await autoRetry(() => getResult<{ roomId: string }>('#room-result'))
+      const context = await page.context().browser()!.newContext()
+      try {
+        const other = await context.newPage()
+        await navigate(`${getServerUrl()}/room?roomId=${encodeURIComponent(roomId)}`, undefined, other)
+        await other.click(`#test-room-malformed-${kind}`)
+        await autoRetry(async () => {
+          expect(await getResult('#room-result')).deep.equal({
+            roomId,
+            events: ['join:Witness', 'join:Mallory', 'leave:Mallory:disconnected'],
+            received: ['bye Mallory'],
+          })
+        })
+      } finally {
+        await context.close()
+        await page.goto('about:blank')
+      }
+    })
   test('room: a join whose tab closes while its guard waits leaves no member behind', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-join-races')

@@ -1,4 +1,15 @@
-export { onWireResume, onWireOverrun, onWireEnd, onWireLarge, onWireOpen, onWireHeld, onWireRelease, onWireUpload }
+export {
+  onWireResume,
+  onWireOverrun,
+  onWireEnd,
+  onWireLarge,
+  onWireOpen,
+  onWireHeld,
+  onWireRelease,
+  onWireUpload,
+  onWireAnswer,
+  onWireAsk,
+}
 
 import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
@@ -165,4 +176,24 @@ async function onWireUpload() {
     cleanupState[`wireUpload_${ch.id}`] = JSON.stringify(tally.state)
   })
   return { channel: ch.client, channelId: ch.id }
+}
+
+/** The channels whose page answers the questions onWireAsk relays, by channel id. */
+const answerers = new Map<string, Channel<never, (question: string) => string>>()
+
+/** A channel whose page answers the questions the server relays to it. */
+async function onWireAnswer() {
+  const ch = new Channel<never, (question: string) => string>()
+  answerers.set(ch.id, ch)
+  ch.onClose(() => {
+    answerers.delete(ch.id)
+  })
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/** A channel whose acknowledged questions the server relays to the answerer each names, with its answer as the ack. */
+async function onWireAsk() {
+  const ch = new Channel<(question: { to: string; text: string }) => string, never>()
+  ch.listen(async ({ to, text }) => await answerers.get(to)!.send(text, { ack: true }))
+  return ch.client
 }
