@@ -1,11 +1,11 @@
 export { PendingDmAcks }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import type { DmReply } from '../protocol.js'
+import type { RoomResult } from '../protocol.js'
 import { toggleEntry } from './sets.js'
 assertIsNotBrowser()
 
-type PendingDmAck = { from: string; to: string; settle: (reply: DmReply) => void }
+type PendingDmAck = { from: string; to: string; settle: (reply: RoomResult) => void }
 
 /** In-flight `send(…, { ack: true })`s by `ackId`, indexed by both ends too, so a leave settles only
  *  the ones it strands. */
@@ -18,7 +18,7 @@ class PendingDmAcks {
     for (const member of [pending.from, pending.to]) toggleEntry(this._byMember, member, ackId, true)
   }
 
-  settle(ackId: string, reply: DmReply): void {
+  settle(ackId: string, reply: RoomResult): void {
     this.delete(ackId)?.settle(reply)
   }
 
@@ -36,11 +36,11 @@ class PendingDmAcks {
   }
 
   /** Settles every wait the member sends or receives. */
-  settleMember(member: string, reply: DmReply): void {
+  settleMember(member: string, reply: RoomResult): void {
     for (const ackId of this._byMember.get(member) ?? []) this.settle(ackId, reply)
   }
 
-  settleAll(reply: DmReply): void {
+  settleAll(reply: RoomResult): void {
     for (const ackId of this._byId.keys()) this.settle(ackId, reply)
   }
 }

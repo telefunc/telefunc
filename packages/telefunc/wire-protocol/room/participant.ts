@@ -11,7 +11,7 @@ import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { publicTrack, type TrackKey } from './binary.js'
-import type { MemberMetaUpdate, WholeMemberUpdate, DmReply, InboxMessage } from './protocol.js'
+import type { MemberMetaUpdate, WholeMemberUpdate, RoomResult, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -24,8 +24,8 @@ import type {
 /** What holding a DM before the first `listen()` retains beyond its serialized bytes (about 55 measured), so many small
  *  ones are bounded by memory too. The inbox is the one lane no want gates, so the only one to bridge. */
 const PENDING_INBOX_OVERHEAD_BYTES = 64
-type HeldDm = { msg: InboxMessage; bytes: number; ackResolve?: (reply: DmReply) => void }
-type InboxForwarder = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<DmReply> }
+type HeldDm = { msg: InboxMessage; bytes: number; ackResolve?: (reply: RoomResult) => void }
+type InboxForwarder = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<RoomResult> }
 
 /** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 abstract class ParticipantBase implements LocalParticipant {
@@ -142,12 +142,12 @@ abstract class ParticipantBase implements LocalParticipant {
 
   /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never
    *  rejects. */
-  _deliverMessageAck(msg: InboxMessage): Promise<DmReply> {
+  _deliverMessageAck(msg: InboxMessage): Promise<RoomResult> {
     if (this._forwarder) return this._forwarder.deliverAck(msg)
     if (this._messageCbs?.size) return this._fireInboxAck(msg)
     if (this._left) return Promise.resolve(DM_FAILURE.left)
     if (this._inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
-    return new Promise<DmReply>((resolve) => this._hold(msg, resolve))
+    return new Promise<RoomResult>((resolve) => this._hold(msg, resolve))
   }
 
   /** The inbox attached: DMs held until now go out in order, and nothing is held again. */
@@ -162,7 +162,7 @@ abstract class ParticipantBase implements LocalParticipant {
     }
   }
 
-  private _hold(msg: InboxMessage, ackResolve?: (reply: DmReply) => void): void {
+  private _hold(msg: InboxMessage, ackResolve?: (reply: RoomResult) => void): void {
     const pending = (this._pendingInbox ??= new Fifo())
     const bytes = utf8ByteLength(stringify(msg)) + PENDING_INBOX_OVERHEAD_BYTES
     pending.push({ msg, bytes, ackResolve })
@@ -187,9 +187,9 @@ abstract class ParticipantBase implements LocalParticipant {
     for (const cb of this._messageCbs?.list() ?? []) this._invoke(cb, msg.data, sender)
   }
 
-  /** The last listener's return is the reply; a throw is the failure reply (`Abort(value)` reaches the sender, anything
-   *  else is a bug reported here). */
-  private async _fireInboxAck(msg: InboxMessage): Promise<DmReply> {
+  /** The last listener's return is the reply; a throw is the failure reply (see `toRoomFailure`: a bug is reported
+   *  here, the sender gets only that it failed). */
+  private async _fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
     const sender = this._senderOf(msg)
     let result: unknown
     for (const cb of this._messageCbs?.list() ?? []) {
@@ -199,7 +199,7 @@ abstract class ParticipantBase implements LocalParticipant {
         return toRoomFailure(err, (e) => this._reportError(e), this._bugMessage)
       }
     }
-    return { ok: true, result }
+    return { ok: true, value: result }
   }
 
   /** The live room-backed sender, when this flavor has a room view. */

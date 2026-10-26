@@ -16,7 +16,6 @@ export type {
   SenderStamp,
   RoomDataPublish,
   RoomDmEnvelope,
-  DmReply,
   MemberMetaUpdate,
   WholeMemberUpdate,
   RoomFailure,
@@ -140,9 +139,6 @@ type RoomDmEnvelope = {
   ackId?: string
 }
 
-/** The recipient handler's return, or its failure. */
-type DmReply = { ok: true; result: unknown } | RoomFailure
-
 /** A member's meta and connection at `seq`, whole, or as the write at `seq` changed them: a merge, with a key it
  *  removed as `undefined`, or the connection of the page holding the member. */
 type MemberMetaUpdate =
@@ -151,15 +147,13 @@ type MemberMetaUpdate =
   | { seq: number; connected: boolean }
 type WholeMemberUpdate = Extract<MemberMetaUpdate, { meta: ParticipantMeta }>
 
-/** A safe Room failure: an Abort value or a caller-facing message. */
-type RoomFailure = { ok: false; abort: true; abortValue: unknown } | { ok: false; err: string }
+/** A safe Room failure, tagged as `classifyTelefuncError` names it: an Abort's value, or a caller-facing message. */
+type RoomFailure =
+  | { ok: false; kind: 'abort'; abortValue: unknown }
+  | { ok: false; kind: 'shield' | 'overflow' | 'error'; message: string }
 
-/** A room stub's answer to its client's request or publish: the value the call resolves to, or what it rejects with. */
-type RoomResult =
-  | { ok: true; value: unknown }
-  | RoomFailure
-  | { ok: false; shield: string }
-  | { ok: false; overflow: string }
+/** A Room answer: to a request or publish, or an ack DM's reply; the value the call resolves to, or what it rejects with. */
+type RoomResult = { ok: true; value: unknown } | RoomFailure
 
 /** A member's meta, attributes and DM requests, as a participant stub carries them. */
 type MemberMutationRequest =
@@ -173,7 +167,7 @@ type RoomStubRequest =
   | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
   | { __r: 'req-leave'; id: string }
   | (MemberMutationRequest & { id: string })
-  | { __r: 'dm-reply'; ackId: string; reply: DmReply }
+  | { __r: 'dm-reply'; ackId: string; reply: RoomResult }
   /** A `BinaryWantChange`, with `null` for `ALL`. */
   | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
   /** Changes only: announcements, and each member whose own want changed. */

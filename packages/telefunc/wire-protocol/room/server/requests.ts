@@ -15,7 +15,7 @@ import { ProtocolViolationError } from '../../wire/connectionFrame.js'
 import { ALL, decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { isRecord } from '../model.js'
 import type {
-  DmReply,
+  RoomResult,
   MemberMutationRequest,
   ParticipantStubRequest,
   RoomDataPublish,
@@ -130,12 +130,13 @@ function decodeDmReplyDeclaration(decl: Record<string, unknown>): Extract<RoomDe
 }
 
 /** A client-supplied reply, rebuilt field by field so no other key rides into the `dm-ack` envelope. */
-function decodeDmReply(value: unknown): DmReply {
+function decodeDmReply(value: unknown): RoomResult {
   const reply = record(value, 'DM reply')
-  if (reply.ok === true) return { ok: true, result: reply.result }
+  if (reply.ok === true) return { ok: true, value: reply.value }
   if (reply.ok !== false) malformed('DM reply')
-  if (reply.abort === true) return { ok: false, abort: true, abortValue: reply.abortValue }
-  return { ok: false, err: text(reply.err, 'DM reply') }
+  if (reply.kind === 'abort') return { ok: false, kind: 'abort', abortValue: reply.abortValue }
+  if (reply.kind !== 'shield' && reply.kind !== 'overflow' && reply.kind !== 'error') malformed('DM reply')
+  return { ok: false, kind: reply.kind, message: text(reply.message, 'DM reply') }
 }
 
 /** A declared text want per member id, into a record no key can reach the prototype of. */

@@ -17,7 +17,7 @@ import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
 import { ChannelOverflowError } from '../channel/channelErrors.js'
 import { classifyTelefuncError } from '../channel/errorClassification.js'
-import type { DmReply, RoomFailure, RoomResult } from './protocol.js'
+import type { RoomFailure, RoomResult } from './protocol.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 
 // Error contract: Abort carries its value, RoomError carries a safe message, and bugs are reported
@@ -56,47 +56,54 @@ function participantLeftError(): RoomError {
 const ROOM_BUG_MESSAGE = `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`
 const CLIENT_ROOM_BUG_MESSAGE = "Internal client room error — see the recipient's client logs"
 
-/** An error as an ack DM's reply carries it: an Abort with its value, a RoomError's or a shield's message, a bug
- *  reported and hidden. */
+/** An error as a Room answer carries it: an Abort with its value, a shield's, an overflow's or a RoomError's message, a
+ *  bug reported and hidden behind `bugMessage`. */
 function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage: string): RoomFailure {
   const classified = classifyTelefuncError(err, isRoomError)
-  if (classified.kind === 'abort') return { ok: false, abort: true, abortValue: classified.error.abortValue }
-  if (classified.kind !== 'bug') return { ok: false, err: classified.error.message }
+  if (classified.kind === 'abort') return { ok: false, kind: 'abort', abortValue: classified.error.abortValue }
+  if (classified.kind === 'shield') return { ok: false, kind: 'shield', message: classified.error.message }
+  if (classified.kind === 'expected') return { ok: false, kind: 'error', message: classified.error.message }
+  if (err instanceof ChannelOverflowError) return { ok: false, kind: 'overflow', message: err.message }
   report(err)
-  return { ok: false, err: bugMessage }
+  return { ok: false, kind: 'error', message: bugMessage }
 }
 
 function toRoomResult(work: Promise<unknown>, report: (err: unknown) => void): Promise<RoomResult> {
   return work.then(
-    (value) => ({ ok: true, value }),
-    (err: unknown): RoomResult => {
-      const classified = classifyTelefuncError(err, isRoomError)
-      if (classified.kind === 'shield') return { ok: false, shield: classified.error.message }
-      if (err instanceof ChannelOverflowError) return { ok: false, overflow: err.message }
-      return toRoomFailure(err, report, ROOM_BUG_MESSAGE)
-    },
+    (value): RoomResult => ({ ok: true, value }),
+    (err: unknown) => toRoomFailure(err, report, ROOM_BUG_MESSAGE),
   )
+}
+
+/** The error a caller's promise rejects with. */
+function roomFailureError(failure: RoomFailure): Error {
+  switch (failure.kind) {
+    case 'abort':
+      return createAbortError(failure.abortValue)
+    case 'shield':
+      return new ShieldValidationError(failure.message)
+    case 'overflow':
+      return new ChannelOverflowError(failure.message)
+    case 'error':
+      return new RoomError(failure.message)
+  }
 }
 
 async function roomResultValue<T = unknown>(answer: Promise<unknown>): Promise<T> {
   const result = (await answer) as RoomResult
-  if (result.ok) return result.value as T
-  if ('abort' in result) throw createAbortError(result.abortValue)
-  if ('shield' in result) throw new ShieldValidationError(result.shield)
-  if ('overflow' in result) throw new ChannelOverflowError(result.overflow)
-  throw new Error(result.err)
-}
-
-function roomFailureError(res: RoomFailure): Error {
-  if ('abort' in res) return createAbortError(res.abortValue)
-  return new RoomError(res.err)
+  if (!result.ok) throw roomFailureError(result)
+  return result.value as T
 }
 
 /** The replies an `{ ack: true }` sender gets when no handler of the recipient answered. */
 const DM_FAILURE = {
-  left: { ok: false, err: PARTICIPANT_LEFT },
-  noListener: { ok: false, err: 'No participant inbox listener is attached' },
-  overflow: { ok: false, err: 'Inbox overflowed before the message was handled' },
-  timeout: { ok: false, err: 'send({ ack: true }) timed out: the recipient never handled the message' },
-  roomClosed: { ok: false, err: 'Room is closed' },
-} as const satisfies Record<string, DmReply>
+  left: { ok: false, kind: 'error', message: PARTICIPANT_LEFT },
+  noListener: { ok: false, kind: 'error', message: 'No participant inbox listener is attached' },
+  overflow: { ok: false, kind: 'error', message: 'Inbox overflowed before the message was handled' },
+  timeout: {
+    ok: false,
+    kind: 'error',
+    message: 'send({ ack: true }) timed out: the recipient never handled the message',
+  },
+  roomClosed: { ok: false, kind: 'error', message: 'Room is closed' },
+} as const satisfies Record<string, RoomFailure>

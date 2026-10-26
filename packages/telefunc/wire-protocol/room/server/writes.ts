@@ -24,7 +24,7 @@ import { ownMetaArgument, senderOf } from '../model.js'
 import type {
   MemberMetaUpdate,
   WholeMemberUpdate,
-  DmReply,
+  RoomResult,
   RoomCtrlEnvelope,
   RoomDmEnvelope,
   SenderStamp,
@@ -209,7 +209,7 @@ class RoomWrites {
   private async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const acks = this._host._replica.acks
     const ackId = crypto.randomUUID()
-    const reply = new Promise<DmReply>((settle) => acks.add(ackId, { from, to, settle }))
+    const reply = new Promise<RoomResult>((settle) => acks.add(ackId, { from, to, settle }))
     // Bounds the wait nothing else settles: a lost reply frame, or a recipient that never handled the DM.
     const timer = unrefTimer(setTimeout(() => void this._settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
     let receipt: RoomSendReceipt
@@ -223,12 +223,12 @@ class RoomWrites {
     const settled = await reply
     clearTimeout(timer)
     if (!settled.ok) throw roomFailureError(settled)
-    return { ...receipt, response: settled.result }
+    return { ...receipt, response: settled.value }
   }
 
   /** The recipient stores its reply before committing its frame, so a reply whose frame was lost is still read. */
   private async _settleTimedOut(from: string, ackId: string): Promise<void> {
-    let reply: DmReply
+    let reply: RoomResult
     try {
       reply = (await takeDmReply(this._host.id, this._host._incarnation.inc, from, ackId)) ?? DM_FAILURE.timeout
     } catch (err) {
@@ -257,7 +257,7 @@ class RoomWrites {
   }
 
   /** A sender that left had its wait failed by its leave; only a closed room is an error. */
-  async publishDmAck(to: string, ackId: string, reply: DmReply): Promise<void> {
+  async publishDmAck(to: string, ackId: string, reply: RoomResult): Promise<void> {
     await storeDmReply(this._host.id, this._host._incarnation.inc, to, ackId, reply)
     await commitToInbox(this._host.id, this._host._incarnation.inc, { __r: 'dm-ack', to, ackId, ...reply })
   }

@@ -42,7 +42,6 @@ import { DM_FAILURE, RoomError, toRoomResult } from '../errors.js'
 import {
   leaveCauseToWire,
   dmNotice,
-  type DmReply,
   type MemberSnapshot,
   type MemberWants,
   type ParticipantStubNotice,
@@ -119,10 +118,10 @@ class MemberMessageTexts {
 
 /** A stub's ack DMs awaiting their `dm-reply`: null once its sender timed out, or on `drop()`. */
 class PendingDmReplies {
-  private readonly _pending = new Map<string, { expiresAt: number; resolve: (reply: DmReply | null) => void }>()
+  private readonly _pending = new Map<string, { expiresAt: number; resolve: (reply: RoomResult | null) => void }>()
 
   /** Drops the replies whose sender already timed out. */
-  await(ackId: string): Promise<DmReply | null> {
+  await(ackId: string): Promise<RoomResult | null> {
     const now = performance.now()
     for (const [id, entry] of this._pending) {
       if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
@@ -132,7 +131,7 @@ class PendingDmReplies {
     return new Promise((resolve) => this._pending.set(ackId, { expiresAt: now + ROOM_DM_ACK_TIMEOUT_MS, resolve }))
   }
 
-  settle(ackId: string, reply: DmReply): void {
+  settle(ackId: string, reply: RoomResult): void {
     const entry = this._pending.get(ackId)
     // The sender drops a reply after its timeout.
     if (!entry) return

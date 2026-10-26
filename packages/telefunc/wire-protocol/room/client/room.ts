@@ -14,7 +14,7 @@ import {
   inboxMessageFromWire,
   joinedMember,
   leaveCauseFromWire,
-  type DmReply,
+  type RoomResult,
   type InboxMessage,
   type MemberSnapshot,
   type ParticipantStubMetadata,
@@ -54,9 +54,9 @@ import type {
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
 
 /** A reply that can't be sent is reported, and the sender gets an error instead. */
-function sendDmReply(stub: ClientBroadcast, ackId: string, reply: Promise<DmReply>): void {
-  const declare = (answer: DmReply): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
-  stub._sendReply(reply.then(declare), declare({ ok: false, err: CLIENT_ROOM_BUG_MESSAGE }))
+function sendDmReply(stub: ClientBroadcast, ackId: string, reply: Promise<RoomResult>): void {
+  const declare = (answer: RoomResult): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
+  stub._sendReply(reply.then(declare), declare({ ok: false, kind: 'error', message: CLIENT_ROOM_BUG_MESSAGE }))
 }
 
 /** The member an event concerns while that member's join may still be settling. */
