@@ -341,6 +341,15 @@ function testStreaming() {
     })
   })
 
+  test("streaming: transferring one returned stream's chunks to a Web Worker leaves the other stream's chunks intact", async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-two-streams-to-worker')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result).deep.equal({ sums: { first: 8 * 1024, second: 2 * 8 * 1024 } })
+    })
+  })
+
   if (process.env.PUBLIC_ENV__STREAM_TRANSPORT !== 'channel') {
     test('streaming: a returned stream of one 256 MiB chunk reaches the page within 8 s', async () => {
       await navigate(`${getServerUrl()}/streaming`)
