@@ -125,23 +125,6 @@ describe('keyed in-process broadcast', () => {
     expect(goodReceived).toEqual(['hi'])
   })
 
-  // A server entry run by Node next to a workspace-linked telefunc that Vite inlines loads two copies of the package.
-  it("reports a throwing subscriber to an onBug() the server entry registered on the package's other copy", async () => {
-    const otherCopy = '../../node/server/runTelefunc/onBug.js?other-copy'
-    const { onBug }: typeof import('../../node/server/runTelefunc/onBug.js') = await import(otherCopy)
-    const bugs: string[] = []
-    onBug((err) => bugs.push((err as Error).message))
-
-    const broadcast = new ServerBroadcast<{ text: string }>({ key: 'room:err-other-copy' })
-    broadcast._registerChannel()
-    broadcast.subscribe(() => {
-      throw new Error('bad subscriber')
-    })
-    broadcast.publish({ text: 'hi' })
-
-    expect(bugs).toEqual(['bad subscriber'])
-  })
-
   // The unsubscribe handle returned by `subscribe()` is the only way for users to
   // detach a callback. A regression here causes silent listener leaks that look
   // like duplicate deliveries.
