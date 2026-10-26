@@ -37,10 +37,6 @@ import { onServerAction } from '../../server-actions'
 
 type TextMsg = { text: string; from: string }
 
-onBug((err) => {
-  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
-})
-
 /** Two broadcast instances sharing a key — publish from one, subscribe on the other.
  *  The key is unique per call, so no other page load publishes on it. */
 async function onTextBroadcast() {
