@@ -843,8 +843,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     for (const waiter of waiters) waiter()
   }
 
-  /** The first listener runs in the receive turn, where a ProtocolViolationError it throws ends the wire. */
-  private _answerAckReq<T>(
+  private async _answerAckReq<T>(
     listeners: Listeners<(data: T) => unknown>,
     data: T,
     seq: number,
@@ -852,46 +851,31 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   ): Promise<void> {
     if (listeners.size === 0) {
       this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
-      return Promise.resolve()
+      return
     }
     const verdict = validate ? validate(data) : true
     // `shield-error` status lets the client reject its `send()` promise with a branded
     // ShieldValidationError — same identity every other shield-fail surface produces.
     if (verdict !== true) {
       this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
-      return Promise.resolve()
+      return
     }
-    const callbacks = listeners.list()
-    let firstResult: unknown
-    try {
-      firstResult = callbacks[0]!(data)
-    } catch (err) {
-      if (err instanceof ProtocolViolationError) throw err
-      this._sendAckFailure(seq, err)
-      return Promise.resolve()
-    }
-    return this._sendAckAnswer(seq, firstResult, callbacks, data)
-  }
-
-  private async _sendAckAnswer<T>(
-    seq: number,
-    firstResult: unknown,
-    callbacks: readonly ((data: T) => unknown)[],
-    data: T,
-  ): Promise<void> {
+    const peer = this._peer
     let answer: string
     try {
-      let lastResult = await firstResult
-      for (let index = 1; index < callbacks.length; index++) lastResult = await callbacks[index]!(data)
+      let lastResult: unknown
+      for (const cb of listeners.list()) lastResult = await cb(data)
       answer = stringify(lastResult)
     } catch (err) {
-      this._sendAckFailure(seq, err)
+      this._sendAckFailure(seq, err, peer)
       return
     }
     this._sendAckRes(seq, answer)
   }
 
-  protected _sendAckFailure(seq: number, err: unknown): void {
+  /** A ProtocolViolationError ends `peer`'s wire, the one the request came on, as a malformed frame does. */
+  protected _sendAckFailure(seq: number, err: unknown, peer: IndexedPeer | null): void {
+    if (err instanceof ProtocolViolationError) return peer?.sender.terminate()
     if (this._handleCallbackError(err)) return
     this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }

@@ -6,7 +6,7 @@ import { ServerChannel } from './channel.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
-import { ACK_STATUS, ERROR_REASON, ProtocolViolationError } from '../../wire/connectionFrame.js'
+import { ACK_STATUS, ERROR_REASON } from '../../wire/connectionFrame.js'
 import type { BroadcastKind, ReattachState } from '../../wire/connectionFrame.js'
 
 type BroadcastEndOptions = {
@@ -89,35 +89,22 @@ class ServerBroadcastEnd extends ServerChannel {
     this._options.onSubscription?.(kind, on)
   }
 
-  /** Runs `publish` in the receive turn, where a ProtocolViolationError it throws ends the wire, as a malformed frame
-   *  does. */
-  private _answerPublish(seq: number, publish: () => unknown): Promise<void> {
-    let result: unknown
-    try {
-      result = publish()
-    } catch (err) {
-      if (err instanceof ProtocolViolationError) throw err
-      this._sendPublishFailure(seq, err)
-      return Promise.resolve()
-    }
-    return this._sendPublishAnswer(seq, result)
-  }
-
-  private async _sendPublishAnswer(seq: number, result: unknown): Promise<void> {
+  private async _answerPublish(seq: number, publish: () => unknown): Promise<void> {
+    const peer = this._peer
     let answer: string
     try {
-      answer = stringify(await result)
+      answer = stringify(await publish())
     } catch (err) {
-      this._sendPublishFailure(seq, err)
+      this._sendPublishFailure(seq, err, peer)
       return
     }
     this._sendAckRes(seq, answer)
   }
 
   /** A full buffer refusing the publish is no bug: the page's publish() rejects with a ChannelOverflowError. */
-  private _sendPublishFailure(seq: number, err: unknown): void {
+  private _sendPublishFailure(seq: number, err: unknown, peer: IndexedPeer | null): void {
     if (err instanceof ChannelOverflowError) return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
     if (isShieldValidationError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
-    this._sendAckFailure(seq, err)
+    this._sendAckFailure(seq, err, peer)
   }
 }
