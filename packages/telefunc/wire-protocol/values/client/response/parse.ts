@@ -263,19 +263,15 @@ class FrameDemuxer {
     const readNextChunk = () => this.readNextChunkForIndex(index)
     const cancel = () => this.cancelIndex(index)
     const isCancelled = () => this.cancelledIndices.has(index)
+    const readOwnedChunk = async () => {
+      const chunk = await readNextChunk()
+      return chunk && ownIndexedPayload(chunk)
+    }
     return {
       readNextChunk,
       bytes: (opts) => readChunksToBytes(readNextChunk, isCancelled, opts),
       stream: (opts) =>
-        createReadableChunkStream({
-          readNextChunk: async () => {
-            const chunk = await readNextChunk()
-            return chunk && ownIndexedPayload(chunk)
-          },
-          cancel,
-          isCancelled,
-          readOptions: opts,
-        }),
+        createReadableChunkStream({ readNextChunk: readOwnedChunk, cancel, isCancelled, readOptions: opts }),
       cancel,
       // Inline streams abort via HTTP body reader cancellation, not per-index.
       abort() {},
