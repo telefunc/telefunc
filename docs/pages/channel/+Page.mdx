@@ -443,7 +443,7 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
 - `onDisconnect()` fires on both ends when the connection drops, and `onReconnect()` once it's back; `isConnected` is `false` in between. If it doesn't come back within `reconnectTimeout`, `onClose(err)` fires with a `NetworkError` instead of `onReconnect()`.
 
-> Reconnection is automatic — you don't need to handle it in your application code. Use `onDisconnect()` and `onReconnect()` only to show it, for example a "reconnecting…" badge.
+> Reconnection is automatic — you don't need to handle it in your application code. Use `onDisconnect()` and `onReconnect()` to show it, for example a "reconnecting…" badge, or to act on it, for example saving whether a member is online.
 
 
 ## See also
