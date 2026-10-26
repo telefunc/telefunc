@@ -430,7 +430,7 @@ class RoomStubChannel extends RoomRequestChannel implements LaneHolder {
 
   /** Sweeps correlations whose sender already timed out. */
   private _recordAckDm(ackId: string, sender: string): void {
-    const now = Date.now()
+    const now = performance.now()
     for (const [id, entry] of this._pendingAckDms) {
       if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
       this._pendingAckDms.delete(id)

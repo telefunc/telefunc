@@ -43,7 +43,7 @@ async function repairRoomIndex(
 let nextSweepAt = 0
 
 function sweepLapsedRoomsSoon(): void {
-  const now = Date.now()
+  const now = performance.now()
   if (now < nextSweepAt) return
   nextSweepAt = now + ROOM_HEARTBEAT_INTERVAL_MS
   void sweepLapsedRooms(getRoomBackend()).catch(reportRoomError)

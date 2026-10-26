@@ -300,7 +300,7 @@ class RoomDemand {
     const { instance } = page
     const reporter = getOrCreate(this._reporters, instance, () => ({ expiresAt: 0, page: 0, telling: 0, asked: false }))
     const continues = page.page === reporter.page + 1
-    reporter.expiresAt = Date.now() + ROOM_DEMAND_TTL_MS
+    reporter.expiresAt = performance.now() + ROOM_DEMAND_TTL_MS
     reporter.page = page.page
     let tellsAgain = false
     for (const want of page.wants) {
@@ -382,7 +382,7 @@ class RoomDemand {
 
   /** Drops the reporters whose lease lapsed, and all they told: a step per entry once one did. */
   *expire(): Generator<void> {
-    const now = Date.now()
+    const now = performance.now()
     const lapsed = new Set<string>()
     for (const [instance, { expiresAt }] of this._reporters) if (expiresAt <= now) lapsed.add(instance)
     if (lapsed.size === 0) return
