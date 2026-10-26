@@ -860,27 +860,27 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
       return
     }
-    // A listener's ProtocolViolationError ends the request's wire only when thrown before the first await.
-    let peer = this._peer
+    // Until a listener returns, a ProtocolViolationError is this request's own and ends its wire.
+    let violationPeer = this._peer
     let answer: string
     try {
       let lastResult: unknown
       for (const cb of listeners.list()) {
         const result = cb(data)
-        peer = null
+        violationPeer = null
         lastResult = await result
       }
       answer = stringify(lastResult)
     } catch (err) {
-      this._sendAckFailure(seq, err, peer)
+      this._sendAckFailure(seq, err, violationPeer)
       return
     }
     this._sendAckRes(seq, answer)
   }
 
-  /** A ProtocolViolationError ends `peer`'s wire as a malformed frame does; with no `peer`, it is a callback error. */
-  protected _sendAckFailure(seq: number, err: unknown, peer: IndexedPeer | null): void {
-    if (peer && err instanceof ProtocolViolationError) return peer.sender.terminate()
+  /** A ProtocolViolationError ends `violationPeer`'s wire, as a malformed frame does; without one, it is a callback error. */
+  protected _sendAckFailure(seq: number, err: unknown, violationPeer: IndexedPeer | null): void {
+    if (violationPeer && err instanceof ProtocolViolationError) return violationPeer.sender.terminate()
     if (this._handleCallbackError(err)) return
     this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }

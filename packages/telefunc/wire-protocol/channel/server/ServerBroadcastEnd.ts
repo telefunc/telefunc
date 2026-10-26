@@ -90,24 +90,24 @@ class ServerBroadcastEnd extends ServerChannel {
   }
 
   private async _answerPublish(seq: number, publish: () => unknown): Promise<void> {
-    // A ProtocolViolationError ends the request's wire only when `publish` throws it before its first await.
-    let peer = this._peer
+    // Until `publish` returns, a ProtocolViolationError is this request's own and ends its wire.
+    let violationPeer = this._peer
     let answer: string
     try {
       const result = publish()
-      peer = null
+      violationPeer = null
       answer = stringify(await result)
     } catch (err) {
-      this._sendPublishFailure(seq, err, peer)
+      this._sendPublishFailure(seq, err, violationPeer)
       return
     }
     this._sendAckRes(seq, answer)
   }
 
   /** A full buffer refusing the publish is no bug: the page's publish() rejects with a ChannelOverflowError. */
-  private _sendPublishFailure(seq: number, err: unknown, peer: IndexedPeer | null): void {
+  private _sendPublishFailure(seq: number, err: unknown, violationPeer: IndexedPeer | null): void {
     if (err instanceof ChannelOverflowError) return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
     if (isShieldValidationError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
-    this._sendAckFailure(seq, err, peer)
+    this._sendAckFailure(seq, err, violationPeer)
   }
 }
