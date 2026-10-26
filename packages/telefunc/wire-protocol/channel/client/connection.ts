@@ -784,7 +784,10 @@ class ClientConnection implements MuxConnection {
   }
 
   sendBdpPingAck(channel: MuxChannel, { probe, backlog, pathRtt }: BdpPingAck): void {
-    this.sendUnsequenced(channel, 'flow-control', (ix) => encode.bdpPingAck(ix, probe, backlog, pathRtt))
+    // The round trip a page measures on batch POSTs leaves out the wait for its POST, so it vouches for no path.
+    this.sendUnsequenced(channel, 'flow-control', (ix) =>
+      encode.bdpPingAck(ix, probe, backlog, this.transport.batched ? Infinity : pathRtt),
+    )
   }
 
   bufferedAmount(): number {
