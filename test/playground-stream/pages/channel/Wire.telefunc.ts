@@ -11,15 +11,11 @@ export {
   onWirePresence,
 }
 
-import { Channel, Abort, onBug } from 'telefunc'
+import { Channel, Abort } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { cutWireSockets } from '../../wire-sockets'
 import { onServerAction } from '../../server-actions'
 import { Tally, textMessage, binaryMessage } from './wire-messages'
-
-onBug((err) => {
-  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
-})
 
 /**
  * Each end sends `count` numbered messages as text and as binary, awaiting each send; the server drops the page's
