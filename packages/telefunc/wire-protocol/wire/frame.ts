@@ -3,11 +3,13 @@ export {
   decodeU32,
   concat,
   concatAll,
+  splitOwned,
   encodeLengthPrefixedFrames,
   encodeLengthPrefixedString,
   readLengthPrefixedString,
   encodeIndexedFrame,
   decodeIndexedFrame,
+  ownIndexedPayload,
   encodeRequestEnvelope,
   textEncoder,
   textDecoder,
@@ -20,6 +22,7 @@ const textEncoder = {
 const textDecoder = new TextDecoder()
 
 const U32_SIZE = 4 // byte size of a uint32
+const EMPTY = new Uint8Array(0)
 
 type RequestEnvelopePart = Blob | Uint8Array<ArrayBuffer>
 
@@ -55,6 +58,27 @@ function concatAll(parts: readonly Uint8Array<ArrayBuffer>[]): Uint8Array<ArrayB
     offset += p.length
   }
   return result
+}
+
+/** The first `n` bytes of `parts` in a buffer of their own, and the bytes after them. */
+function splitOwned(
+  parts: readonly Uint8Array<ArrayBuffer>[],
+  n: number,
+): [bytes: Uint8Array<ArrayBuffer>, rest: Uint8Array<ArrayBuffer>] {
+  const bytes = new Uint8Array(n)
+  let offset = 0
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]!
+    const take = Math.min(p.length, n - offset)
+    bytes.set(p.subarray(0, take), offset)
+    offset += take
+    if (take < p.length) {
+      const rest = parts.slice(i)
+      rest[0] = p.subarray(take)
+      return [bytes, rest.length === 1 ? rest[0] : concatAll(rest)]
+    }
+  }
+  return [bytes, EMPTY]
 }
 
 /** Encode a batch of frames as [u32 len][frame][u32 len][frame]... using the shared u32 codec. */
@@ -132,4 +156,13 @@ function decodeIndexedFrame(frameBody: Uint8Array<ArrayBuffer>): {
   payload: Uint8Array<ArrayBuffer>
 } {
   return { index: frameBody[0]!, payload: frameBody.subarray(INDEX_BYTES) }
+}
+
+/** A decoded indexed frame's `payload` in a buffer the app may transfer: copied unless its buffer holds nothing but
+ *  the payload and its own frame's header. */
+function ownIndexedPayload(payload: Uint8Array<ArrayBuffer>): Uint8Array<ArrayBuffer> {
+  const alone =
+    payload.byteOffset <= U32_SIZE + INDEX_BYTES &&
+    payload.byteOffset + payload.byteLength === payload.buffer.byteLength
+  return alone ? payload : payload.slice()
 }

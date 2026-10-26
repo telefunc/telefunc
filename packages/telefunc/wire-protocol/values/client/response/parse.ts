@@ -22,6 +22,7 @@ import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
+import { ownIndexedPayload } from '../../../wire/frame.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {
@@ -265,7 +266,16 @@ class FrameDemuxer {
     return {
       readNextChunk,
       bytes: (opts) => readChunksToBytes(readNextChunk, isCancelled, opts),
-      stream: (opts) => createReadableChunkStream({ readNextChunk, cancel, isCancelled, readOptions: opts }),
+      stream: (opts) =>
+        createReadableChunkStream({
+          readNextChunk: async () => {
+            const chunk = await readNextChunk()
+            return chunk && ownIndexedPayload(chunk)
+          },
+          cancel,
+          isCancelled,
+          readOptions: opts,
+        }),
       cancel,
       // Inline streams abort via HTTP body reader cancellation, not per-index.
       abort() {},
