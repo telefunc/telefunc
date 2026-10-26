@@ -297,6 +297,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
+  /** @internal */
+  _onUpgradeJoined(): void {
+    if (!this._isClosed) this._flow.restartRound()
+  }
+
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()

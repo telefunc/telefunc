@@ -315,6 +315,11 @@ class FlowControl {
     this._bdp.attach(uplink.link)
   }
 
+  /** Frames held back arrived at once: the round in flight doesn't count them as delivered within its round trip. */
+  restartRound(): void {
+    this._bdp.reset()
+  }
+
   /** Attach on another wire than the last, or the first: the limits go out again, which repairs what the prior lost. */
   reattach(): void {
     this._bdp.reset()

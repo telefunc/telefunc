@@ -123,6 +123,8 @@ interface MuxChannel {
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
   /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
   _onTransportBatched(): void
+  /** The upgrade's join handed it, at once, the frames it held. */
+  _onUpgradeJoined(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
@@ -1092,6 +1094,7 @@ class ClientConnection implements MuxConnection {
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
     this.closeUnacknowledged(deferredOmitted)
     for (const entry of buffer.new) this.dispatchFrame(entry.frame)
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onUpgradeJoined()
     this.flushPendingRegisterReconcile()
     this.startTtlIfIdle()
   }
