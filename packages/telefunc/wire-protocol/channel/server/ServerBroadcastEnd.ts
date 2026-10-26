@@ -90,10 +90,13 @@ class ServerBroadcastEnd extends ServerChannel {
   }
 
   private async _answerPublish(seq: number, publish: () => unknown): Promise<void> {
-    const peer = this._peer
+    // A ProtocolViolationError ends the request's wire only when `publish` throws it before its first await.
+    let peer = this._peer
     let answer: string
     try {
-      answer = stringify(await publish())
+      const result = publish()
+      peer = null
+      answer = stringify(await result)
     } catch (err) {
       this._sendPublishFailure(seq, err, peer)
       return
