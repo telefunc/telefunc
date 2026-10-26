@@ -123,7 +123,7 @@ class PendingDmReplies {
 
   /** Drops the replies whose sender already timed out. */
   await(ackId: string): Promise<DmReply | null> {
-    const now = Date.now()
+    const now = performance.now()
     for (const [id, entry] of this._pending) {
       if (entry.expiresAt > now) break // constant offset ⇒ insertion order is deadline order; the rest are younger
       this._pending.delete(id)
@@ -574,6 +574,8 @@ class RoomParticipantStub {
       void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
     })
 
+    this.end.onDisconnect(() => participant._setHolderConnected(false))
+    this.end.onReconnect(() => participant._setHolderConnected(true))
     this.end.onClose(() => {
       unlistenMeta()
       unlistenDemand()

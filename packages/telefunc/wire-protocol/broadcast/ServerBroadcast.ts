@@ -92,6 +92,10 @@ class ServerBroadcast<T = unknown> {
     return this._end.isClosed
   }
 
+  get isConnected(): boolean {
+    return this._end.isConnected
+  }
+
   // Channel methods that don't apply to broadcast: throw at runtime.
   send(): never {
     assertUsage(false, '`send()` is not available on a `BroadcastChannel` — use `publish()`.')
@@ -128,6 +132,14 @@ class ServerBroadcast<T = unknown> {
 
   onOpen(callback: () => void): void {
     this._end.onOpen(callback)
+  }
+
+  onDisconnect(callback: () => void): void {
+    this._end.onDisconnect(callback)
+  }
+
+  onReconnect(callback: () => void): void {
+    this._end.onReconnect(callback)
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
@@ -223,6 +235,7 @@ type BroadcastChannel<T = unknown> = {
   readonly key: string
   readonly id: string
   readonly isClosed: boolean
+  readonly isConnected: boolean
   readonly [TELEFUNC_SHIELDS]: {
     data: ChannelData<T>
     ack: unknown
@@ -233,6 +246,8 @@ type BroadcastChannel<T = unknown> = {
   subscribeBinary(callback: BroadcastBinaryListener): () => void
   onClose(callback: ChannelCloseCallback): void
   onOpen(callback: () => void): void
+  onDisconnect(callback: () => void): void
+  onReconnect(callback: () => void): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void

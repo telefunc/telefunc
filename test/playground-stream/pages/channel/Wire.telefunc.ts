@@ -9,6 +9,8 @@ export {
   onWireUpload,
   onWireAnswer,
   onWireAsk,
+  onWireConnection,
+  onWirePresence,
 }
 
 import { Channel, Abort } from 'telefunc'
@@ -196,4 +198,57 @@ async function onWireAsk() {
   const ch = new Channel<(question: { to: string; text: string }) => string, never>()
   ch.listen(async ({ to, text }) => await answerers.get(to)!.send(text, { ack: true }))
   return ch.client
+}
+
+/** cleanupState: wireConnection_<id> = what the server end saw: 'open', 'disconnect', 'reconnect', each with isConnected. */
+async function onWireConnection() {
+  const ch = new Channel<never, never>()
+  const events: string[] = []
+  const report = (event: string) => {
+    events.push(`${event}:${ch.isConnected}`)
+    cleanupState[`wireConnection_${ch.id}`] = JSON.stringify(events)
+  }
+  ch.onOpen(() => report('open'))
+  ch.onDisconnect(() => report('disconnect'))
+  ch.onReconnect(() => report('reconnect'))
+  return { channel: ch.client, channelId: ch.id }
+}
+
+const sessions = new Set<string>()
+
+/** A member's channel that saves whether they're online, and ends once they signed out; cleanupState:
+ *  wirePresence_<id> = the status the database holds. */
+async function onWirePresence() {
+  const ch = new Channel<never, never>()
+  const database = connectToDatabase()
+  const session = crypto.randomUUID()
+  sessions.add(session)
+  // The member signs out on another device.
+  onServerAction(`wirePresence_${ch.id}_signOut`, () => sessions.delete(session))
+  ch.onDisconnect(async () => {
+    await database.saveStatus(ch.id, 'away')
+  })
+  ch.onReconnect(async () => {
+    if (!(await isSignedIn(session))) throw Abort({ reason: 'signed out' })
+    await database.saveStatus(ch.id, 'online')
+  })
+  return { channel: ch.client, channelId: ch.id }
+}
+
+async function isSignedIn(session: string) {
+  return sessions.has(session)
+}
+
+/** A database that is unavailable for the first write. */
+function connectToDatabase() {
+  let connected = false
+  return {
+    async saveStatus(memberId: string, status: string) {
+      if (!connected) {
+        connected = true
+        throw new Error('Database unavailable')
+      }
+      cleanupState[`wirePresence_${memberId}`] = status
+    },
+  }
 }

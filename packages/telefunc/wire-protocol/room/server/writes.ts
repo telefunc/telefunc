@@ -21,7 +21,14 @@ import {
   ROOM_BUG_MESSAGE,
 } from '../errors.js'
 import { ownMetaArgument, senderOf } from '../model.js'
-import type { MemberMetaUpdate, DmReply, RoomCtrlEnvelope, RoomDmEnvelope, SenderStamp } from '../protocol.js'
+import type {
+  MemberMetaUpdate,
+  WholeMemberUpdate,
+  DmReply,
+  RoomCtrlEnvelope,
+  RoomDmEnvelope,
+  SenderStamp,
+} from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
@@ -30,7 +37,7 @@ import { reportRoomError } from './errors.js'
 import { SEMANTIC_LANE, commitControlOrThrow, commitRoomLaneOrThrow, commitToInbox, encodeRoomRecord } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { reapAndReadMembersById, storeDmReply, takeDmReply } from './membership.js'
-import { dropMemberMetaGeneration, writeMemberMeta, type MemberMetaWrite } from './meta.js'
+import { dropMemberMetaGeneration, writeMemberConnection, writeMemberMeta, type MemberMetaWrite } from './meta.js'
 import type { RoomReplica } from './replica.js'
 import type { RoomGuardHooks } from './statics.js'
 assertIsNotBrowser()
@@ -39,7 +46,7 @@ assertIsNotBrowser()
 type WritesHost = {
   readonly id: string
   readonly _incarnation: RoomIncarnation
-  readonly _model: Pick<RoomModel, 'closed' | 'memberMetaSeq'>
+  readonly _model: Pick<RoomModel, 'closed' | 'acceptedMeta'>
   readonly _state: Pick<RoomState, 'getRemote'>
   readonly _replica: RoomReplica
 }
@@ -48,7 +55,7 @@ type WritesHost = {
 type WritesOf = {
   guards(): Partial<RoomGuardHooks> | null
   /** A local participant, whose meta a view that holds no roster yet doesn't hold. */
-  local(id: string): { meta: ParticipantMeta; identity: string | null; _metaSeq: number } | undefined
+  local(id: string): { meta: ParticipantMeta; identity: string | null; _acceptedMeta: WholeMemberUpdate } | undefined
 }
 
 /** A member's writes through one handle: each passes its guard, carries its sender's stamp, commits its cells with its
@@ -73,21 +80,39 @@ class RoomWrites {
     return await this._writeMemberMeta(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
   }
 
+  /** The connection of the page holding the member, which its holder here saw change. */
+  async setMemberConnected(id: string, connected: boolean): Promise<void> {
+    await this._inCallOrder(`meta:${id}`, async (sent) => {
+      const written = await writeMemberConnection(this._host._incarnation, id, connected)
+      if (written !== null) await this._publishMemberUpdate(id, written.update, written.hidden, sent)
+    })
+  }
+
   /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
    *  seq order. */
   private async _writeMemberMeta(id: string, write: MemberMetaWrite): Promise<MemberMetaUpdate> {
     const host = this._host
     return await this._inCallOrder(`meta:${id}`, async (sent) => {
       const { update, hidden, replaced } = await writeMemberMeta(host._incarnation, id, write)
-      const accepted: Extract<RoomCtrlEnvelope, { __r: 'p-meta' }> = { __r: 'p-meta', id, ...update }
-      if (hidden) accepted.hidden = true
-      host._replica.applyControl(accepted)
-      const publishing = commitControlOrThrow(host.id, host._incarnation.inc, accepted)
-      sent()
-      await publishing
+      await this._publishMemberUpdate(id, update, hidden, sent)
       if (replaced !== null) await dropMemberMetaGeneration(host._incarnation, id, replaced, update.seq)
       return update
     })
+  }
+
+  private async _publishMemberUpdate(
+    id: string,
+    update: MemberMetaUpdate,
+    hidden: boolean,
+    sent: () => void,
+  ): Promise<void> {
+    const host = this._host
+    const accepted: Extract<RoomCtrlEnvelope, { __r: 'p-meta' }> = { __r: 'p-meta', id, ...update }
+    if (hidden) accepted.hidden = true
+    host._replica.applyControl(accepted)
+    const publishing = commitControlOrThrow(host.id, host._incarnation.inc, accepted)
+    sent()
+    await publishing
   }
 
   async publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
@@ -163,9 +188,10 @@ class RoomWrites {
 
   /** `sender` with the meta seq it reflects, read before a guard waits: a meta write meanwhile takes the next seq. */
   private _stampOf(from: string, sender: Sender): SenderStamp {
-    const seq = this._host._model.memberMetaSeq(from) ?? this._of.local(from)!._metaSeq
-    const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: seq }
+    const accepted = this._host._model.acceptedMeta(from) ?? this._of.local(from)!._acceptedMeta
+    const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: accepted.seq }
     if (sender.identity !== null) stamp.fromIdentity = sender.identity
+    if (accepted.disconnected) stamp.fromDisconnected = true
     return stamp
   }
 

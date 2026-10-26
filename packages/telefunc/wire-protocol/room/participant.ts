@@ -11,7 +11,7 @@ import { DM_FAILURE, participantLeftError, toRoomFailure } from './errors.js'
 import { ownLeaveCause, ownMetadata, senderOf } from './model.js'
 import { MemberMeta, type MetaRewinds } from './MemberMeta.js'
 import { publicTrack, type TrackKey } from './binary.js'
-import type { MemberMetaUpdate, DmReply, InboxMessage } from './protocol.js'
+import type { MemberMetaUpdate, WholeMemberUpdate, DmReply, InboxMessage } from './protocol.js'
 import type {
   BinaryPublishOptions,
   LeaveCause,
@@ -40,6 +40,8 @@ abstract class ParticipantBase implements LocalParticipant {
   private _leaveCbs: Listeners<(cause: LeaveCause) => unknown> | null = null
   private _messageCbs: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
   private _demandCbs: Listeners<(track: string | null, wanted: boolean) => unknown> | null = null
+  private _disconnectCbs: Listeners<() => unknown> | null = null
+  private _reconnectCbs: Listeners<() => unknown> | null = null
   private _listenerCleanups: Set<() => void> | null = null
   private _inboxAttached = false
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
@@ -75,14 +77,19 @@ abstract class ParticipantBase implements LocalParticipant {
     return this._meta.object
   }
 
-  /** @internal */
-  get _metaSeq(): number {
-    return this._meta.seq
+  /** @internal Whole, as an attach resends it. */
+  get _acceptedMeta(): WholeMemberUpdate {
+    const update: WholeMemberUpdate = {
+      meta: this._meta.object,
+      seq: this._meta.seq,
+    }
+    if (!this._meta.connected) update.disconnected = true
+    return update
   }
 
-  /** @internal Whole, as an attach resends it. */
-  get _acceptedMeta(): MemberMetaUpdate {
-    return { meta: this._meta.object, seq: this._meta.seq }
+  /** The connection of the page holding this member, as the room accepted it. */
+  protected get _acceptedConnected(): boolean {
+    return this._meta.connected
   }
 
   /** @internal A meta update the room accepted, applied in seq order; whether it applied. One past a gap waits for the
@@ -107,6 +114,7 @@ abstract class ParticipantBase implements LocalParticipant {
   abstract setMeta(meta: ParticipantMeta): Promise<void>
   abstract setAttributes(attributes: ParticipantMeta): Promise<void>
   abstract leave(): Promise<void>
+  abstract get isConnected(): boolean
   /** A user callback threw. Each side reports through its own pipeline. */
   protected abstract _reportError(err: unknown): void
   /** An ack DM's reply to a bug in a `listen()` handler, naming where `_reportError` logged it. */
@@ -211,6 +219,24 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal Room-wide demand for one of this member's tracks changed. */
   _onDemand(track: TrackKey, wanted: boolean): void {
     for (const cb of this._demandCbs?.list() ?? []) this._invoke(cb, publicTrack(track), wanted)
+  }
+
+  onDisconnect(callback: () => void): () => void {
+    return this._register((this._disconnectCbs ??= new Listeners()), callback)
+  }
+
+  onReconnect(callback: () => void): () => void {
+    return this._register((this._reconnectCbs ??= new Listeners()), callback)
+  }
+
+  /** @internal */
+  _onDisconnected(): void {
+    for (const cb of this._disconnectCbs?.list() ?? []) this._invoke(cb)
+  }
+
+  /** @internal */
+  _onReconnected(): void {
+    for (const cb of this._reconnectCbs?.list() ?? []) this._invoke(cb)
   }
 
   onLeave(callback: (cause: LeaveCause) => void): () => void {

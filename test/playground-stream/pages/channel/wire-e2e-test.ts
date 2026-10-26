@@ -1,17 +1,19 @@
 export { testWire, testWireSmallReplay, testWireSlowPing }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl, expectLog } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
-import type { Response, WebSocket } from 'playwright-chromium'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
   getResult,
   getCleanupState,
+  resetCleanupState,
   runServerAction,
   cutWire,
   canCutWire,
   dropNextWebSocket,
   forceServerGc,
+  sleep,
   holdNextSsePost,
   holdNextSseWire,
   holdNextSseOpen,
@@ -33,6 +35,8 @@ type WireState = {
   upload: { channelId: string; sent: number } | null
   answerer: { channelId: string; closed: string | null } | null
   ask: { toOther: string; toOwn: string } | null
+  connection: { channelId: string; events: string[] } | null
+  presence: { channelId: string; online: boolean; closed?: string } | null
 }
 
 // The end card's channel sends these before the server ends it.
@@ -81,6 +85,104 @@ function testWire(isDev: boolean) {
         expect(cuts.length).toBe(2)
         expect(cuts.every((cut) => cut > 0)).toBe(true)
       })
+    })
+
+  if (canCutWire())
+    test('channel: when the connection drops, each end sees onDisconnect, and onReconnect once the page is back', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#wire-connection')
+      const events = async () => {
+        const { connection } = await getResult<WireState>('#wire-state')
+        const server = (await getCleanupState())[`wireConnection_${connection?.channelId}`]
+        return { page: connection?.events, server: server && JSON.parse(server) }
+      }
+      await autoRetry(async () => {
+        expect(await events()).deep.equal({ page: ['open:true'], server: ['open:true'] })
+      })
+      await page.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        const seen = ['open:true', 'disconnect:false']
+        expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        const seen = ['open:true', 'disconnect:false', 'reconnect:true']
+        expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+    })
+
+  if (canCutWire())
+    test('channel: an async onDisconnect or onReconnect that fails is reported on either end and the channel goes on, and one that aborts ends the channel with its abort value', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await resetCleanupState()
+      await page.click('#wire-presence')
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence?.online).toBe(true)
+      })
+      await page.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence?.online).toBe(false)
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        const { presence } = await getResult<WireState>('#wire-state')
+        const state = await getCleanupState()
+        expect(presence?.online).toBe(true)
+        expect(state[`wirePresence_${presence?.channelId}`]).toBe('online')
+        expect(state['bug:Database unavailable']).toBe('reported')
+      })
+
+      // Signed out on another device while offline: the server's onReconnect ends the channel.
+      const { presence } = await getResult<WireState>('#wire-state')
+      await page.context().setOffline(true)
+      await cutWire()
+      await runServerAction(`wirePresence_${presence?.channelId}_signOut`)
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence).deep.equal({
+          channelId: presence?.channelId,
+          online: false,
+          closed: 'abort:{"reason":"signed out"}',
+        })
+        expect((await getCleanupState())[`wirePresence_${presence?.channelId}`]).toBe('away')
+      })
+      expectLog('Database unavailable', { filter: (log) => log.logSource === 'stderr' })
+      expectLog('[telefunc:channel-error] Error: Could not load the missed messages', {
+        filter: (log) => log.logSource === 'Browser Error',
+      })
+    })
+
+  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse', 'ws']))
+    test('channel: a page moving from SSE to a WebSocket fires neither onDisconnect nor onReconnect on either end', async () => {
+      // The page lets go of its SSE stream once the WebSocket carries the channel.
+      let sseRetired = false
+      const onRequestFailed = (request: Request) => {
+        if (request.url().includes('_telefunc=sse') && request.failure()?.errorText === 'net::ERR_ABORTED')
+          sseRetired = true
+      }
+      let webSockets = 0
+      const onWebSocket = (ws: WebSocket) => {
+        if (ws.url().includes('/_telefunc')) webSockets++
+      }
+      page.on('requestfailed', onRequestFailed)
+      page.on('websocket', onWebSocket)
+      try {
+        await navigate(`${getServerUrl()}/channel`)
+        await page.click('#wire-connection')
+        await autoRetry(async () => expect({ sseRetired, webSockets }).deep.equal({ sseRetired: true, webSockets: 1 }))
+        await sleep(1_000)
+        const { connection } = await getResult<WireState>('#wire-state')
+        const server = (await getCleanupState())[`wireConnection_${connection!.channelId}`]
+        expect({ page: connection!.events, server: JSON.parse(server!) }).deep.equal({
+          page: ['open:true'],
+          server: ['open:true'],
+        })
+      } finally {
+        page.off('requestfailed', onRequestFailed)
+        page.off('websocket', onWebSocket)
+      }
     })
 
   const ends = [
@@ -152,6 +254,45 @@ function testWire(isDev: boolean) {
   })
 
   if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['ws'])) {
+    // MAX_CHANNELS_PER_CONNECTION
+    const maxChannels = 4_096
+    const connect = async () => {
+      const url = new URL('/_telefunc', getServerUrl())
+      url.protocol = 'ws:'
+      const ws = new globalThis.WebSocket(url)
+      ws.binaryType = 'arraybuffer'
+      await new Promise((resolve) => (ws.onopen = resolve))
+      let sessionId: string | undefined
+      // Takes the first answer to the RECONCILE in flight.
+      let settle: ((answer: 'reconciled' | 'closed') => void) | undefined
+      const answered = (answer: 'reconciled' | 'closed') => {
+        settle?.(answer)
+        settle = undefined
+      }
+      ws.onclose = () => answered('closed')
+      ws.onmessage = (event) => {
+        const frame = new Uint8Array(event.data as ArrayBuffer)
+        // RECONCILED, its JSON after the 7-byte header.
+        if (frame[0] !== 0x05) return
+        sessionId = JSON.parse(new TextDecoder().decode(frame.subarray(7))).sessionId
+        answered('reconciled')
+      }
+      // A RECONCILE naming what changed once the first is answered; one on a socket the server closed isn't sent.
+      const answer = (reconcile: { open: object[]; released?: number[] }) =>
+        new Promise<'reconciled' | 'closed' | 'already closed'>((resolve) => {
+          // CLOSING from the server's close frame on, ahead of the close event.
+          if (ws.readyState !== globalThis.WebSocket.OPEN) return resolve('already closed')
+          settle = resolve
+          const payload = new TextEncoder().encode(JSON.stringify({ sessionId, ...reconcile }))
+          // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
+          const frame = new Uint8Array(7 + payload.byteLength)
+          frame[0] = 0x04
+          frame.set(payload, 7)
+          ws.send(frame)
+        })
+      return { ws, answer }
+    }
+
     test('channel: a channel a call returns while the WebSocket is dead without a word opens on both ends once the page notices', async () => {
       const proxy = await startBlackHoleProxy(getServerUrl())
       try {
@@ -179,33 +320,43 @@ function testWire(isDev: boolean) {
     })
 
     test('channel: a RECONCILE naming more channels than a connection may hold closes the WebSocket before any RECONCILED', async () => {
-      // MAX_CHANNELS_PER_CONNECTION
-      const maxChannels = 4_096
-      const answer = (entries: number) =>
-        new Promise<'reconciled' | 'closed'>((resolve) => {
-          const url = new URL('/_telefunc', getServerUrl())
-          url.protocol = 'ws:'
-          const ws = new globalThis.WebSocket(url)
-          ws.binaryType = 'arraybuffer'
-          ws.onopen = () => {
-            const open = Array.from({ length: entries }, (_, ix) => ({ id: `unknown-${ix}`, ix, lastSeq: 0 }))
-            const payload = new TextEncoder().encode(JSON.stringify({ open }))
-            // A RECONCILE: tag 0x04, then index 0 and seq 0 in the 7-byte header.
-            const frame = new Uint8Array(7 + payload.byteLength)
-            frame[0] = 0x04
-            frame.set(payload, 7)
-            ws.send(frame)
-          }
-          ws.onmessage = (event) => {
-            // RECONCILED
-            if (new Uint8Array(event.data as ArrayBuffer)[0] !== 0x05) return
-            resolve('reconciled')
-            ws.close()
-          }
-          ws.onclose = () => resolve('closed')
-        })
-      expect(await answer(maxChannels)).toBe('reconciled')
-      expect(await answer(maxChannels + 1)).toBe('closed')
+      const open = (entries: number) =>
+        Array.from({ length: entries }, (_, ix) => ({ id: `unknown-${ix}`, ix, lastSeq: 0 }))
+      const fits = await connect()
+      const over = await connect()
+      try {
+        expect(await fits.answer({ open: open(maxChannels) })).toBe('reconciled')
+        expect(await over.answer({ open: open(maxChannels + 1) })).toBe('closed')
+      } finally {
+        fits.ws.close()
+        over.ws.close()
+      }
+    })
+
+    test('channel: a RECONCILE naming new channels past what a connection may hold, on top of those it holds, or naming a channel it holds under another id, closes the WebSocket', async () => {
+      // Channels the page opened that the server hasn't registered yet, so it awaits each one.
+      const opened = (from: number, count: number, name = 'unregistered') =>
+        Array.from({ length: count }, (_, n) => ({
+          id: `${name}-${from + n}`,
+          ix: from + n,
+          lastSeq: 0,
+          initial: true,
+        }))
+      const full = await connect()
+      const renaming = await connect()
+      try {
+        expect(await full.answer({ open: opened(0, maxChannels) })).toBe('reconciled')
+        // The page released 16 and opened 16: it still holds as many.
+        const released = Array.from({ length: 16 }, (_, ix) => ix)
+        expect(await full.answer({ released, open: opened(maxChannels, 16) })).toBe('reconciled')
+        expect(await full.answer({ released: [], open: opened(maxChannels + 16, 1) })).toBe('closed')
+
+        expect(await renaming.answer({ open: opened(0, 1) })).toBe('reconciled')
+        expect(await renaming.answer({ released: [], open: opened(0, 1, 'renamed') })).toBe('closed')
+      } finally {
+        full.ws.close()
+        renaming.ws.close()
+      }
     })
 
     test('channel: a channel whose first WebSocket a network drop stops opens on the next', async () => {

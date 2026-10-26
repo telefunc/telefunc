@@ -29,13 +29,15 @@ type RoomMemberRecord = {
   joinedAt: number
   /** The session hosting the member. */
   session: string
-  /** Issued by the member's single owner, counting its meta writes; orders `p-meta` events. */
+  /** Issued by the member's single owner, counting its meta and connection writes; orders `p-meta` events. */
   metaSeq: number
   /** The `metaSeq` of the replace that wrote the meta's keys, 0 for the join's. */
   metaGen: number
   identity?: string
   /** Off-presence (`join({ hidden: true })`): routable, but not in count, roster or presence events. */
   hidden?: boolean
+  /** The page holding the member can't be reached, and the room waits for it. */
+  disconnected?: true
 }
 
 /** What an instance receives: one track of a member, every track of a member (no `track`), or one track of every

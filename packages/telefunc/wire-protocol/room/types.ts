@@ -141,6 +141,8 @@ type ParticipantSnapshotView<P extends ParticipantMeta = ParticipantMeta> = {
   readonly identity: string | null
   readonly meta: P
   readonly joinedAt: number
+  /** False while the participant's page can't be reached and the room waits for it. */
+  readonly isConnected: boolean
 }
 
 /** Immutable and reference-stable until the room changes. */
@@ -254,6 +256,8 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   readonly identity: string | null
   /** Whether the messages you publish are delivered back to the room object on your side. Set at `join()`. */
   readonly selfDelivery: boolean
+  /** False while the page holding you can't reach the room. */
+  readonly isConnected: boolean
 
   /** Publish a message to the whole room. */
   publish(data: Pub, options?: PublishOptions): Promise<ChannelPublishAck>
@@ -278,6 +282,10 @@ type LocalParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknown
   /** You left. `cause.type` says how: `'left'` (you), `'removed'` (kicked, with the kick's `reason`), `'closed'` (the
    *  room), `'disconnected'` (the connection died, or fell further behind than the server holds for it). */
   onLeave(callback: (cause: LeaveCause) => void): () => void
+  /** The page holding you can't reach the room; the room keeps you meanwhile. */
+  onDisconnect(callback: () => void): () => void
+  /** The page holding you reaches the room again. */
+  onReconnect(callback: () => void): () => void
 } & RoomShield<Pub>
 
 /** A returnable view of another room member, bound to its room's live state. */
@@ -288,6 +296,8 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   readonly identity: string | null
   /** Unix epoch milliseconds. */
   readonly joinedAt: number
+  /** False while the member's page can't be reached and the room waits for it. */
+  readonly isConnected: boolean
 
   /** Receive only this member's messages. Returns an unsubscribe function. */
   subscribe(callback: (data: Pub, info: ChannelPublishInfo) => unknown): () => void
@@ -298,4 +308,8 @@ type RemoteParticipant<P extends ParticipantMeta = ParticipantMeta, Pub = unknow
   onUpdate(callback: (meta: P, prev: P) => void): () => void
   /** This member left the room. `cause` as on `Room`'s `onLeave`. */
   onLeave(callback: (cause: LeaveCause) => void): () => void
+  /** This member's page can't be reached. The room keeps it until it's back, or it leaves with `'disconnected'`. */
+  onDisconnect(callback: () => void): () => void
+  /** This member's page is back. */
+  onReconnect(callback: () => void): () => void
 }

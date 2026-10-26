@@ -265,10 +265,11 @@ class RoomReplica {
 
   /** A stamp newer than the sender's meta here is the update this view missed so far: it applies and relays first, so
    *  every client here names the sender as of the send. */
-  applyStamp(id: string, { fromMeta, fromMetaSeq }: SenderStamp): void {
+  applyStamp(id: string, { fromMeta, fromMetaSeq, fromDisconnected }: SenderStamp): void {
     const hidden = this.model.memberHidden(id)
     if (hidden === null || !this.model.newerStamp(id, fromMetaSeq)) return
     const update: Extract<PresenceEvent, { __r: 'p-meta' }> = { __r: 'p-meta', id, meta: fromMeta, seq: fromMetaSeq }
+    if (fromDisconnected) update.disconnected = true
     if (hidden) update.hidden = true
     this.applyControl(update)
   }

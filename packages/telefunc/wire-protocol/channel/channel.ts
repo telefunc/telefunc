@@ -87,6 +87,8 @@ type ChannelCloseCallback = (err?: Error) => void | Promise<void>
 type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false> = {
   readonly id: string
   readonly isClosed: boolean
+  /** False while the other side can't be reached and the channel waits for it to come back. */
+  readonly isConnected: boolean
   /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */
   send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
   /** Per-send ack opt-in — always returns `Promise<ack>`. */
@@ -101,6 +103,10 @@ type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false
   listenBinary(callback: ChannelBinaryListener): () => void
   onClose(callback: ChannelCloseCallback): void
   onOpen(callback: () => void): void
+  /** The other side became unreachable: the channel stays open, and what it sends waits. */
+  onDisconnect(callback: () => void): void
+  /** The other side is back, and what waited is sent. */
+  onReconnect(callback: () => void): void
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult>
   abort(): void
   abort(abortValue: unknown, message?: string): void

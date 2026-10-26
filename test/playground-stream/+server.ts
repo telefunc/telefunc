@@ -5,7 +5,7 @@ import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import IORedis, { Cluster, type Redis } from 'ioredis'
 import { installRedis } from '@telefunc/redis'
-import { Broadcast, BroadcastChannel, config, Room, serve, type LocalParticipant } from 'telefunc'
+import { Broadcast, BroadcastChannel, config, onBug, Room, serve, type LocalParticipant } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { Telefunc as TelefuncBun } from 'telefunc/bun'
 import { Telefunc as TelefuncDeno } from 'telefunc/deno'
@@ -21,6 +21,10 @@ config.shield = true
 if (process.env.CHANNEL_CONFIG) Object.assign(config.channel, JSON.parse(process.env.CHANNEL_CONFIG))
 
 const INST = process.env.INSTANCE_ID ?? '?'
+
+onBug((err) => {
+  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
+})
 
 // The Redis nodes the instances share, for the test routes below.
 let redisNodes = (): Redis[] => (redis ? [redis] : [])

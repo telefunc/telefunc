@@ -1,7 +1,7 @@
 export { StreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { concatAll } from '../../../wire/frame.js'
+import { splitOwned } from '../../../wire/frame.js'
 import { throwAbortError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)
@@ -60,7 +60,11 @@ class StreamReader extends BaseStreamReader {
       parts.push(value!)
       length += value!.length
     }
-    if (parts) this.buffer = parts.length === 1 ? parts[0]! : concatAll(parts)
+    if (parts) {
+      const [result, rest] = splitOwned(parts, n)
+      this.buffer = rest
+      return result
+    }
     const result = this.buffer.subarray(0, n)
     this.buffer = n < this.buffer.length ? this.buffer.subarray(n) : EMPTY
     return result

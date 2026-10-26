@@ -51,7 +51,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   test('a form POST without the `x-telefunc-request` header is rejected', async () => {
     for (const action of ['/_telefunc', '/_telefunc?_telefunc=txt']) {
       await page.goto(`${getServerUrl()}/`)
-      const responsePromise = page.waitForResponse((resp) => resp.url() === `${getServerUrl()}${action}`)
+      const responsePromise = page.waitForResponse(
+        (resp) => resp.url() === `${getServerUrl()}${action}` && resp.request().isNavigationRequest(),
+      )
       await page.evaluate((action) => {
         const form = document.createElement('form')
         form.method = 'POST'

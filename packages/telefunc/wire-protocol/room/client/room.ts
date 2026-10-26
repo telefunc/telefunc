@@ -97,6 +97,23 @@ type RosterStream = {
   applied: Promise<void>
 }
 
+/** The members the page holds, joined through any of its room views or held through their own channel, by id. */
+const heldMembers = new Map<string, ClientParticipantBase>()
+/** The page's room views, each showing a member the page holds as the page's own connection to it. */
+const roomViews = new Set<WeakRef<ClientRoom>>()
+
+function heldConnection(id: string): boolean | null {
+  return heldMembers.get(id)?.isConnected ?? null
+}
+
+function heldConnectionChanged(id: string, wasConnected: boolean | null): void {
+  for (const view of roomViews) {
+    const room = view.deref()
+    if (room) room._heldConnectionChanged(id, wasConnected)
+    else roomViews.delete(view)
+  }
+}
+
 /** A server room through one Broadcast stub: its frames carry events and data, its acked messages requests. */
 class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
@@ -131,6 +148,7 @@ class ClientRoom extends RoomStateView implements Room {
       closed: snapshot.closed,
       onLeave: (id, cause) => this._onLeave(id, cause),
       pendingMember: (id) => this._rosterStream?.pending.get(id),
+      heldConnection,
     })
     this._state = new RoomState({
       owner: this,
@@ -146,7 +164,18 @@ class ClientRoom extends RoomStateView implements Room {
     stub._subscribeLocal('text', (envelope, info) => this._onEnvelope(envelope, info))
     stub._subscribeLocal('binary', (framed, info) => this._onBinaryFrame(framed, info))
     // Wire death; a server `Room.close()` arrives before it, as the `closed` event.
-    stub.onClose(() => this._applyClosed('disconnected'))
+    const view = new WeakRef(this)
+    roomViews.add(view)
+    stub.onClose(() => {
+      roomViews.delete(view)
+      this._applyClosed('disconnected')
+    })
+    stub.onDisconnect(() => {
+      for (const local of this._localParticipants.values()) local._onDisconnected()
+    })
+    stub.onReconnect(() => {
+      for (const local of this._localParticipants.values()) local._onReconnected()
+    })
     // A backend rejection can arrive before the application asks for the roster. Mark it handled here while preserving
     // the original rejection for each later getter.
     void this._roster.promise.catch(() => {})
@@ -189,6 +218,7 @@ class ClientRoom extends RoomStateView implements Room {
       }
       this._localParticipants.set(id, participant)
       this._model.applyJoin({ id, meta, joinedAt, metaSeq: 0, identity: null })
+      participant._holdOnPage()
       return participant
     } finally {
       this._joins.delete(reqId)
@@ -399,6 +429,16 @@ class ClientRoom extends RoomStateView implements Room {
     this._model.stopRecordingMembership()
   }
 
+  /** @internal */
+  get _isConnected(): boolean {
+    return this._stub.isConnected
+  }
+
+  /** @internal */
+  _heldConnectionChanged(id: string, wasConnected: boolean | null): void {
+    this._model.heldConnectionChanged(id, wasConnected)
+  }
+
   /** @internal Apply an accepted member meta (event or own write's ack) and mirror it into a local participant. */
   _acceptParticipantMeta(id: string, accepted: MemberMetaUpdate): void {
     this._model.applyParticipantMeta(id, accepted)
@@ -461,6 +501,27 @@ abstract class ClientParticipantBase extends ParticipantBase {
   protected readonly _bugMessage = CLIENT_ROOM_BUG_MESSAGE
 
   private readonly _requestParticipant: (request: MemberMutationRequest) => Promise<unknown>
+
+  /** @internal The page holds this member from now on, until it leaves. */
+  _holdOnPage(): void {
+    heldMembers.set(this.id, this)
+    heldConnectionChanged(this.id, null)
+  }
+
+  override _onDisconnected(): void {
+    heldConnectionChanged(this.id, true)
+    super._onDisconnected()
+  }
+
+  override _onReconnected(): void {
+    heldConnectionChanged(this.id, false)
+    super._onReconnected()
+  }
+
+  override _onLeft(cause: LeaveCause): void {
+    super._onLeft(cause)
+    if (heldMembers.get(this.id) === this) heldMembers.delete(this.id)
+  }
 
   constructor({
     participant,
@@ -615,6 +676,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
     this._room = clientRoom
   }
 
+  get isConnected(): boolean {
+    return this._room._isConnected
+  }
+
   protected override _resolveSender(id: string): Sender | null {
     return this._room._getRemote(id)
   }
@@ -676,6 +741,14 @@ class ClientStandaloneParticipant extends ClientParticipantBase {
 
     stub._subscribeLocal('text', (notice) => this._onNotice(notice))
     stub.onClose(() => this._onLeft({ type: 'disconnected' }))
+    // Held from its channel's open: before it, the channel reads disconnected.
+    stub.onOpen(() => this._holdOnPage())
+    stub.onDisconnect(() => this._onDisconnected())
+    stub.onReconnect(() => this._onReconnected())
+  }
+
+  get isConnected(): boolean {
+    return this._stub.isConnected
   }
 
   private _onNotice(notice: unknown): void {

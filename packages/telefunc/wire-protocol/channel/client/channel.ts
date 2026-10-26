@@ -87,12 +87,17 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly _listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
   private _openCallbacks: Array<() => void> = []
+  private _disconnectCallbacks: Array<() => void> = []
+  private _reconnectCallbacks: Array<() => void> = []
   private _closeCallbacks: Array<ChannelCloseCallback> = []
   private _closeError: Error | undefined
   protected _isClosed = false
   private _didTerminate = false
   private _didFireClose = false
   private _didFireOpen = false
+  private _isConnected = false
+  /** Its flow-control frames wait for a batch POST. */
+  private _batched = false
   private _closePromise: Promise<ChannelCloseResult> | null = null
   private _closeDeadline = 0
   private _closeWaiters: Array<() => void> = []
@@ -147,6 +152,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   get isClosed(): boolean {
     return this._isClosed
+  }
+
+  get isConnected(): boolean {
+    return this._isConnected
   }
 
   send(data: ChannelData<ClientToServer>): Promise<void>
@@ -234,17 +243,25 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   onOpen(callback: () => void): void {
     if (this._didFireOpen) {
-      callback()
+      invokeChannelListener(callback, [], (err) => this._handleCallbackError(err))
       return
     }
     this._openCallbacks.push(callback)
+  }
+
+  onDisconnect(callback: () => void): void {
+    if (!this._didFireClose) this._disconnectCallbacks.push(callback)
+  }
+
+  onReconnect(callback: () => void): void {
+    if (!this._didFireClose) this._reconnectCallbacks.push(callback)
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     if (this._closePromise) return this._closePromise
     if (this._didTerminate) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    this._closeDeadline = Date.now() + timeout
+    this._closeDeadline = performance.now() + timeout
     this._expectCloseAck = true
     this._isClosed = true
     this._connection.sendCloseRequest(this, timeout)
@@ -269,9 +286,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Called by transport connection ──
 
-  /** @internal Probes a path it hasn't measured, unless its flow-control frames wait for a batched POST. */
-  _reattachState(batched: boolean, uplink: Uplink): ReattachState {
-    const probe = batched ? undefined : this._flow.probeAttach(uplink.link)
+  /** @internal Probes a path it hasn't measured. */
+  _reattachState(uplink: Uplink): ReattachState {
+    const probe = this._flow.probeAttach(uplink.link)
     return probe === undefined ? {} : { probe }
   }
 
@@ -297,14 +314,24 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal */
   _onTransportBatched(): void {
+    this._batched = true
     if (!this._isClosed) this._flow.useBatchTransportInitial()
   }
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) return
+    this._batched = batched
     if (batched) this._flow.useBatchTransportInitial()
     this._flow.attach(uplink, downlink)
-    this._fireOpen()
+    if (this._didFireOpen) this._fireReconnect()
+    else this._fireOpen()
+  }
+
+  /** @internal Its wire went away, and the connection reconnects. */
+  _onTransportDisconnect(): void {
+    if (!this._isConnected || this._isClosed) return
+    this._isConnected = false
+    this._invokeAll(this._disconnectCallbacks)
   }
 
   _onTransportMessage(data: string, bytes: number): void {
@@ -428,7 +455,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._connection.sendBdpPingAck(this, {
           probe: frame.probe,
           backlog: this._flow.onPing(),
-          pathRtt: this._flow.pathRtt(),
+          // The server's round trip leaves out the wait for a batch POST, so no path is vouched for.
+          pathRtt: this._batched ? Infinity : this._flow.pathRtt(),
         })
         return
       case TAG.BDP_PING_ACK:
@@ -463,7 +491,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onTransportCloseRequest(timeoutMs: number): void {
     if (this._didTerminate) return
-    const peerDeadline = Date.now() + normalizeCloseTimeout(timeoutMs)
+    const peerDeadline = performance.now() + normalizeCloseTimeout(timeoutMs)
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     this._connection.sendCloseAck(this)
     if (this._isClosed) {
@@ -492,14 +520,19 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _fireOpen(): void {
     if (this._didFireOpen) return
     this._didFireOpen = true
-    for (const cb of this._openCallbacks) {
-      try {
-        cb()
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
-    }
+    this._isConnected = true
+    this._invokeAll(this._openCallbacks)
     this._openCallbacks.length = 0
+  }
+
+  private _fireReconnect(): void {
+    if (this._isConnected) return
+    this._isConnected = true
+    this._invokeAll(this._reconnectCallbacks)
+  }
+
+  private _invokeAll(callbacks: Array<() => void>): void {
+    for (const cb of callbacks) if (invokeChannelListener(cb, [], (err) => this._handleCallbackError(err))) return
   }
 
   private _fireClose(err?: Error): void {
@@ -510,6 +543,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this._closeCallbacks.length = 0
     this._openCallbacks.length = 0
+    this._disconnectCallbacks.length = 0
+    this._reconnectCallbacks.length = 0
     this._notifyCloseProgress()
   }
 
@@ -522,7 +557,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._finalizeClose()
         break
       }
-      const remaining = this._closeDeadline - Date.now()
+      const remaining = this._closeDeadline - performance.now()
       if (remaining <= 0) {
         this._finalizeClose(new ChannelClosedError('Channel close timed out'))
         break
@@ -598,6 +633,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _finalizeClose(err?: Error): void {
     if (this._didTerminate) return
     this._didTerminate = true
+    this._isConnected = false
     this._closeError = err
     this._flow.shutdown()
     const ackErr = err ?? new ChannelClosedError()

@@ -300,7 +300,7 @@ class ServerRoom extends RoomStateView implements Room {
         this._replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
       }
       const unstampedEvent = () => {
-        const { fromMeta, fromMetaSeq, fromIdentity, ...unstamped } = envelope
+        const { fromMeta, fromMetaSeq, fromIdentity, fromDisconnected, ...unstamped } = envelope
         return unstamped
       }
       const texts = new MemberMessageTexts({ serialized, info, unstampedEvent })
@@ -364,6 +364,8 @@ class ServerRoom extends RoomStateView implements Room {
       this._tail = null
     }
     stub.end.onClose(() => this._detachStub(stub))
+    stub.end.onDisconnect(() => this._setHeldConnected(stub, false))
+    stub.end.onReconnect(() => this._setHeldConnected(stub, true))
     this._replica.track(this)
     this._replica.plan.holderChanged(stub)
   }
@@ -373,6 +375,12 @@ class ServerRoom extends RoomStateView implements Room {
     stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
     for (const member of stub._heldMembers()) {
       stub._relayEvent({ __r: 'demand-state', member, tracks: this._replica.demand.wanted(member) })
+    }
+  }
+
+  private _setHeldConnected(stub: RoomStub, connected: boolean): void {
+    for (const id of stub._heldMembers()) {
+      void this._writes.setMemberConnected(id, connected).catch(reportRoomError)
     }
   }
 
@@ -524,10 +532,24 @@ class ServerLocalParticipant extends ParticipantBase {
     }
   }
 
+  /** As the room accepted it: always true for one no page holds. */
+  get isConnected(): boolean {
+    return this._acceptedConnected
+  }
+
   override _acceptMeta(update: MemberMetaUpdate): boolean {
+    const wasConnected = this.isConnected
     if (!super._acceptMeta(update)) return false
     this._metaMirror?.accepted(update)
+    if (this.isConnected === wasConnected) return true
+    if (this.isConnected) this._onReconnected()
+    else this._onDisconnected()
     return true
+  }
+
+  /** @internal The page holding this participant can reach it, or can't. */
+  _setHolderConnected(connected: boolean): void {
+    void this._room._writes.setMemberConnected(this.id, connected).catch(reportRoomError)
   }
 
   /** @internal The client holding this participant went away without leaving. */

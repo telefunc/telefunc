@@ -20,6 +20,7 @@ export {
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
   onReturnTwoLargeStreams,
+  onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
   onReturnFailingStream,
@@ -391,6 +392,20 @@ function byteStream(chunks: number) {
 /** 2 MiB each, more than the page buffers for a stream it isn't reading. */
 const onReturnTwoLargeStreams = async () => {
   return { first: byteStream(32), second: byteStream(32) }
+}
+
+function filledStream(byte: number) {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < 8; i++) controller.enqueue(new Uint8Array(1024).fill(byte))
+      controller.close()
+    },
+  })
+}
+
+/** Small enough that several chunks arrive in one read of the response. */
+const onReturnTwoStreamsOfSmallChunks = async () => {
+  return { first: filledStream(1), second: filledStream(2) }
 }
 
 const onReturnOneLargeChunk = async () => {

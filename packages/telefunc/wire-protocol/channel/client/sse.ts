@@ -36,7 +36,7 @@ import type {
 } from './connection.js'
 import type { Heartbeat } from './Heartbeat.js'
 
-type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number }
+type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
 /** A POST body built ahead from the outbox's first `count` entries, `first` through `last`. */
 type OutboxFold = { blob: Blob; count: number; first: OutboxEntry; last: OutboxEntry }
@@ -99,7 +99,7 @@ class SseTransport implements UpgradeSource {
   private unfolded = 0
   /** The next POST's body, as far as `foldOutbox` built it. */
   private folded: OutboxFold | null = null
-  private lastPostStartedAt = 0
+  private lastPostStartedAt = Number.NEGATIVE_INFINITY
   /** What a batch POST is sized to carry: what its bytes take `SSE_POST_TARGET_MS` to cross at the rate the last ones did. */
   private postBytes = SSE_POST_MIN_BYTES
   /** The body of the batch POST out, 0 with none. */
@@ -128,6 +128,16 @@ class SseTransport implements UpgradeSource {
     this.fetchImpl = fetchImpl
     this.userHeaders = userHeaders
     this.owner = owner
+    if (typeof window !== 'undefined') window.addEventListener('pagehide', this.onPageHide)
+  }
+
+  /** A page that leaves for good closes its wire, as a WebSocket's does; one kept in the back/forward cache keeps it. */
+  private readonly onPageHide = (event: PageTransitionEvent): void => {
+    if (event.persisted) return
+    // `keepalive`, as the request outlives the page; not `sendBeacon`, which can't send the request-kind header.
+    void this.post(encodeSseRequest({ connId: this.connId, close: true }), undefined, { keepalive: true }).catch(
+      () => {},
+    )
   }
 
   async emitBarrier(buildFrame: () => OutboundFrame, signal: AbortSignal): Promise<BarrierEmission> {
@@ -187,9 +197,9 @@ class SseTransport implements UpgradeSource {
       this.streamRequest.unconfirmed?.push(frame.frame)
       return
     }
-    const now = Date.now()
+    const now = performance.now()
     const deadline = this.getFrameDeadline(frame.kind, now)
-    const entry = { frame: frame.frame, deadline }
+    const entry = { frame: frame.frame, deadline, queuedAt: now }
     this.outbox.push(entry)
     this.outboxBytes += frame.frame.byteLength
     this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
@@ -327,7 +337,8 @@ class SseTransport implements UpgradeSource {
     // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
     abort.abort()
     this.streamRequest = { tag: 'failed' }
-    if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: Date.now() })))
+    const now = performance.now()
+    if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: now, queuedAt: now })))
     this.owner._onTransportBatched(this)
   }
 
@@ -390,10 +401,11 @@ class SseTransport implements UpgradeSource {
 
   private rollbackInitialBatch(stage: SseInitialBatchStage): void {
     if (stage.movedOutbox.length === 0 && stage.movedBufferedFrames.length === 0) return
-    const now = Date.now()
+    const now = performance.now()
     const movedBuffered: OutboxEntry[] = stage.movedBufferedFrames.map((entry) => ({
       frame: entry.frame,
       deadline: this.getFrameDeadline(entry.kind, now),
+      queuedAt: now,
     }))
     this.requeue(stage.movedOutbox.concat(movedBuffered))
   }
@@ -418,7 +430,7 @@ class SseTransport implements UpgradeSource {
     assert(this.transportAbort)
     this.flushScheduler.cancel()
     this.flushing = true
-    const now = Date.now()
+    const now = performance.now()
     const queued = this.takeOutbox()
     const head = this.foldHeading(queued)
     this.folded = null
@@ -434,7 +446,8 @@ class SseTransport implements UpgradeSource {
       this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
       const response = await this.postAndRead(body, wire.signal)
       if (!response.ok) throw new Error('POST failed')
-      this.sizePosts(body.size, Date.now() - now)
+      this.sizePosts(body.size, performance.now() - now)
+      this.uplink.link.postAnswered(performance.now() - oldestQueuedAt(queued))
     } catch {
       // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
       if (wire !== this.transportAbort) {
@@ -495,13 +508,17 @@ class SseTransport implements UpgradeSource {
         this.outboxBytes -= entry.frame.byteLength
         void this.sendStandalonePost([entry.frame])
       },
-      Math.max(0, entry.deadline - Date.now()),
+      Math.max(0, entry.deadline - performance.now()),
     )
   }
 
-  /** Every request this transport makes. The three senders differ only in what they send and what
+  /** Every request this transport makes. Its senders differ only in what they send and what
    *  a failure means to them, so that is all they say. */
-  private post(body: BodyInit, signal: AbortSignal, extra?: { accept?: string; duplex?: 'half' }): Promise<Response> {
+  private post(
+    body: BodyInit,
+    signal: AbortSignal | undefined,
+    extra?: { accept?: string; duplex?: 'half'; keepalive?: true },
+  ): Promise<Response> {
     const headers: Record<string, string> = {
       ...this.userHeaders,
       'Content-Type': 'application/octet-stream',
@@ -513,6 +530,7 @@ class SseTransport implements UpgradeSource {
       headers,
       body,
       signal,
+      keepalive: extra?.keepalive,
       // @ts-ignore duplex is not yet in TypeScript's RequestInit
       duplex: extra?.duplex,
     })
@@ -553,7 +571,7 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.schedule(earliest)
   }
 
-  private getFrameDeadline(kind: OutboundFrameKind, now = Date.now()): number {
+  private getFrameDeadline(kind: OutboundFrameKind, now = performance.now()): number {
     switch (kind) {
       case 'reconcile':
       case 'released':
@@ -624,6 +642,7 @@ class SseTransport implements UpgradeSource {
   }
 
   dispose(): void {
+    if (typeof window !== 'undefined') window.removeEventListener('pagehide', this.onPageHide)
     this.connecting = false
     if (this.startTimer) {
       clearTimeout(this.startTimer)
@@ -647,6 +666,12 @@ class SseTransport implements UpgradeSource {
     this.streamRequest.body.close()
     this.streamRequest = { tag: 'idle' }
   }
+}
+
+function oldestQueuedAt(entries: readonly OutboxEntry[]): number {
+  let oldest = Infinity
+  for (const { queuedAt } of entries) if (queuedAt < oldest) oldest = queuedAt
+  return oldest
 }
 
 function bytesOf(entries: readonly OutboxEntry[]): number {

@@ -9,6 +9,7 @@ import {
   onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onKeptChannel,
   onAbortedChannel,
   onCloseUnreturned,
   onCloseFn,
@@ -16,12 +17,14 @@ import {
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
   onGcPassedFnOnClose,
+  onEditDocument,
 } from './Close.telefunc'
 
 function Close() {
   const [hydrated, setHydrated] = useState(false)
   const [result, setResult] = useState<string>('')
   const pendingChannelRef = useRef<ClientChannel | null>(null)
+  const keptChannelRef = useRef<ClientChannel | null>(null)
   const pendingPassedFnRef = useRef<object | null>(null)
   useEffect(() => setHydrated(true), [])
 
@@ -107,6 +110,17 @@ function Close() {
       </button>
 
       <button
+        id="test-keep-channel"
+        onClick={async () => {
+          setResult('')
+          keptChannelRef.current = await onKeptChannel()
+          setResult(JSON.stringify({ method: 'keep(channel)' }))
+        }}
+      >
+        Channel: keep it open
+      </button>
+
+      <button
         id="test-aborted-channel"
         onClick={async () => {
           setResult('')
@@ -155,6 +169,18 @@ function Close() {
         }}
       >
         Fn: close(fn)
+      </button>
+
+      <h2>Edit a document</h2>
+
+      <button
+        id="test-edit-document"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onEditDocument()))
+        }}
+      >
+        Edit the document
       </button>
 
       <h2>Channel onClose ordering</h2>

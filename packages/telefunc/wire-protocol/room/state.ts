@@ -30,6 +30,7 @@ import type {
   RoomMetaEntry,
   RoomMetaUpdate,
   SenderStamp,
+  WholeMemberUpdate,
 } from './protocol.js'
 import type {
   BinaryFrameInfo,
@@ -75,6 +76,8 @@ type MemberListeners = {
     tracks: TrackCounts
   } | null
   updateCbs: Listeners<(meta: ParticipantMeta, prev: ParticipantMeta) => void> | null
+  disconnectCbs: Listeners<() => void> | null
+  reconnectCbs: Listeners<() => void> | null
   leaveCbs: Listeners<(cause: LeaveCause) => void> | null
 }
 
@@ -99,6 +102,9 @@ type RoomModelOptions = {
   onMemberMetaGap?: () => void
   /** A known member's meta update applied, from an event, a stamp or a roster read. */
   onMemberMeta?: (id: string, update: MemberMetaUpdate) => void
+  /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
+   *  doesn't hold. */
+  heldConnection?: (id: string) => boolean | null
 }
 
 type RoomStateOptions = {
@@ -220,6 +226,7 @@ class RoomModel {
   private readonly _pendingMember: (id: string) => MemberSnapshot | undefined
   private readonly _onMemberMetaGap: () => void
   private readonly _onMemberMeta: (id: string, update: MemberMetaUpdate) => void
+  private readonly _heldConnection: (id: string) => boolean | null
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
@@ -235,6 +242,7 @@ class RoomModel {
     this._pendingMember = opts.pendingMember ?? (() => undefined)
     this._onMemberMetaGap = opts.onMemberMetaGap ?? (() => {})
     this._onMemberMeta = opts.onMemberMeta ?? (() => {})
+    this._heldConnection = opts.heldConnection ?? (() => null)
     if ('members' in opts.seed) {
       this._rosterKnown = true
       for (const member of opts.seed.members) this._createEntry(member)
@@ -261,15 +269,10 @@ class RoomModel {
     return this._rosterKnown
   }
 
-  /** A member's meta with the revision it was accepted at. */
-  acceptedMeta(id: string): { meta: ParticipantMeta; seq: number } | null {
+  /** A member's meta and connection, whole, with the revision they were accepted at. */
+  acceptedMeta(id: string): WholeMemberUpdate | null {
     const entry = this._members.get(id)
-    return entry ? { meta: entry.meta.object, seq: entry.meta.seq } : null
-  }
-
-  /** How many meta writes of the member this model reflects; null for a member it doesn't know. */
-  memberMetaSeq(id: string): number | null {
-    return this._members.get(id)?.meta.seq ?? null
+    return entry ? wholeUpdate(entry.meta.seq, entry.meta.object, !entry.meta.connected) : null
   }
 
   /** Whether a sender's stamp at `seq` is newer than the member's meta here. */
@@ -319,6 +322,7 @@ class RoomModel {
     const { meta, joinedAt, identity, hidden } = this._members.get(id)!
     const member: MemberSnapshot = { id, meta: meta.object, joinedAt, metaSeq: meta.seq, identity }
     if (hidden) member.hidden = true
+    if (!meta.connected) member.disconnected = true
     return member
   }
 
@@ -358,7 +362,10 @@ class RoomModel {
     const participants = Object.freeze(
       [...this._members.values()]
         .filter((entry) => !entry.hidden)
-        .map(({ id, identity, meta, joinedAt }) => Object.freeze({ id, identity, meta: meta.object, joinedAt })),
+        .map((entry) => {
+          const { id, identity, meta, joinedAt } = entry
+          return Object.freeze({ id, identity, meta: meta.object, joinedAt, isConnected: this.isConnected(entry) })
+        }),
     )
     const value = Object.freeze({
       id: this.roomId,
@@ -376,6 +383,23 @@ class RoomModel {
   private _bumpState(): void {
     this._stateVersion++
     for (const view of [...this._views]) view._changed()
+  }
+
+  /** As this side shows it: its own connection to a member it holds, the room's record for any other. */
+  isConnected(entry: MemberEntry): boolean {
+    return this._heldConnection(entry.id) ?? entry.meta.connected
+  }
+
+  /** This side's own connection to a member it holds changed from `wasConnected`, or `null` for one it didn't hold. */
+  heldConnectionChanged(id: string, wasConnected: boolean | null): void {
+    const entry = this._members.get(id)
+    if (!entry || this.isConnected(entry) === (wasConnected ?? entry.meta.connected)) return
+    this._bumpState()
+    this._connectionChanged(entry)
+  }
+
+  private _connectionChanged(entry: MemberEntry): void {
+    for (const view of [...this._views]) view._connectionChanged(entry)
   }
 
   /** Runs `read`, then `settle` with what it read, recording the membership events this model gets until `settle` ends;
@@ -461,13 +485,15 @@ class RoomModel {
     // Before the first roster every member is unknown, and the first roster applies the changes after its own.
     if (!entry && !this._rosterKnown) getOrCreate(this._preRosterMeta, id, () => []).push(update)
     if (!entry) return false
-    const listening = [...this._views].filter((view) => view._listensToMeta(entry))
+    const listening = 'connected' in update ? [] : [...this._views].filter((view) => view._listensToMeta(entry))
     const prev = listening.length > 0 ? entry.meta.object : null
+    const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
     if (applied === 'gap') this._onMemberMetaGap()
     if (applied !== 'applied') return false
     this._onMemberMeta(id, update)
     this._bumpState()
+    if (this.isConnected(entry) !== wasConnected) this._connectionChanged(entry)
     if (prev === null) return true
     const next = entry.meta.object
     for (const view of listening) view._metaChanged(entry, next, prev)
@@ -534,17 +560,20 @@ class RoomModel {
     fromMeta,
     fromMetaSeq,
     fromIdentity,
+    fromDisconnected,
   }: { from: string } & Partial<SenderStamp>): { entry: MemberEntry } | { sender: Sender } {
     const entry = this._members.get(from)
     if (fromMeta !== undefined && fromMetaSeq !== undefined) {
       if (!entry) return { sender: senderOf(from, fromMeta, fromIdentity ?? null) }
-      if (entry.meta.newerStamp(fromMetaSeq)) this.applyParticipantMeta(from, { seq: fromMetaSeq, meta: fromMeta })
+      if (entry.meta.newerStamp(fromMetaSeq)) {
+        this.applyParticipantMeta(from, wholeUpdate(fromMetaSeq, fromMeta, fromDisconnected === true))
+      }
       return { entry }
     }
     const pending = this._pendingMember(from)
     if (entry) {
       if (pending !== undefined && pending.metaSeq > entry.meta.seq) {
-        this.applyParticipantMeta(from, { seq: pending.metaSeq, meta: pending.meta })
+        this.applyParticipantMeta(from, wholeUpdate(pending.metaSeq, pending.meta, pending.disconnected === true))
       }
       return { entry }
     }
@@ -628,7 +657,7 @@ class RoomModel {
       return true
     }
     if (member.metaSeq <= entry.meta.seq) return false
-    const update = { seq: member.metaSeq, meta: member.meta }
+    const update = wholeUpdate(member.metaSeq, member.meta, member.disconnected === true)
     if (narrate) {
       this.applyParticipantMeta(member.id, update)
       return true
@@ -806,6 +835,13 @@ class RoomState {
     if (this.model.count === 0) this._fireAll(this._emptyCbs)
   }
 
+  /** @internal */
+  _connectionChanged(entry: MemberEntry): void {
+    const listeners = this._memberListeners.get(entry)
+    const cbs = this.model.isConnected(entry) ? listeners?.reconnectCbs : listeners?.disconnectCbs
+    if (cbs) this._fireAll(cbs)
+  }
+
   /** @internal Whether a member meta change needs its previous meta built for this view. */
   _listensToMeta(entry: MemberEntry): boolean {
     return (this._memberListeners.get(entry)?.updateCbs ?? null) !== null || this._participantUpdateCbs.size > 0
@@ -893,7 +929,15 @@ class RoomState {
   private _listenersOf(entry: MemberEntry): MemberListeners {
     const existing = this._memberListeners.get(entry)
     if (existing !== undefined) return existing
-    const listeners: MemberListeners = { remote: null, dataCbs: null, binary: null, updateCbs: null, leaveCbs: null }
+    const listeners: MemberListeners = {
+      remote: null,
+      dataCbs: null,
+      binary: null,
+      updateCbs: null,
+      disconnectCbs: null,
+      reconnectCbs: null,
+      leaveCbs: null,
+    }
     this._memberListeners.set(entry, listeners)
     return listeners
   }
@@ -901,6 +945,7 @@ class RoomState {
   private _remote(entry: MemberEntry): RemoteParticipant {
     const listeners = this._listenersOf(entry)
     if (listeners.remote) return listeners.remote
+    const model = this.model
     const remote: RemoteParticipant = {
       id: entry.id,
       get meta() {
@@ -912,6 +957,9 @@ class RoomState {
       get identity() {
         return entry.identity
       },
+      get isConnected() {
+        return model.isConnected(entry)
+      },
       subscribe: (cb) => this._registerLive(entry, (listeners.dataCbs ??= new Listeners()), cb),
       subscribeBinary: (cb, opts) => {
         const listener = binaryListener(cb, opts)
@@ -919,6 +967,8 @@ class RoomState {
         return this._registerLive(entry, binary.cbs, listener, { counts: binary.tracks, track: listener.track })
       },
       onUpdate: (cb) => this._registerLive(entry, (listeners.updateCbs ??= new Listeners()), cb),
+      onDisconnect: (cb) => this._registerLive(entry, (listeners.disconnectCbs ??= new Listeners()), cb),
+      onReconnect: (cb) => this._registerLive(entry, (listeners.reconnectCbs ??= new Listeners()), cb),
       onLeave: (cb: (cause: LeaveCause) => void) => {
         if (!entry.left) return this._register((listeners.leaveCbs ??= new Listeners()), cb, entry)
         assert(entry.leaveCause)
@@ -968,7 +1018,15 @@ class RoomState {
   private _releaseEntryListeners(entry: MemberEntry): void {
     const listeners = this._memberListeners.get(entry)
     if (!listeners) return
-    for (const list of [listeners.dataCbs, listeners.binary?.cbs, listeners.updateCbs, listeners.leaveCbs]) {
+    const lists = [
+      listeners.dataCbs,
+      listeners.binary?.cbs,
+      listeners.updateCbs,
+      listeners.disconnectCbs,
+      listeners.reconnectCbs,
+      listeners.leaveCbs,
+    ]
+    for (const list of lists) {
       if (!list) continue
       for (const unlisten of this._listenerCleanups.get(list) ?? []) unlisten()
       this._listenerCleanups.delete(list)
@@ -996,12 +1054,12 @@ class RoomState {
 }
 
 function newEntry(
-  { id, meta, joinedAt, metaSeq, identity, hidden }: MemberSnapshot,
+  { id, meta, joinedAt, metaSeq, identity, hidden, disconnected }: MemberSnapshot,
   rewinds: MetaRewinds,
 ): MemberEntry {
   return {
     id,
-    meta: new MemberMeta({ meta, seq: metaSeq, rewinds }),
+    meta: new MemberMeta({ meta, seq: metaSeq, rewinds, connected: disconnected !== true }),
     joinedAt,
     identity: identity ?? null,
     hidden: hidden === true,
@@ -1023,9 +1081,20 @@ function replayMembershipEvent(
     const { id, update } = event.meta
     const member = members.get(id)
     if (member === undefined) return
-    const meta = new MemberMeta({ meta: member.meta, seq: member.metaSeq })
-    if (meta.apply(update) === 'applied') members.set(id, { ...member, meta: meta.object, metaSeq: meta.seq })
+    const meta = new MemberMeta({ meta: member.meta, seq: member.metaSeq, connected: member.disconnected !== true })
+    if (meta.apply(update) !== 'applied') return
+    const { disconnected, ...rest } = member
+    const next: MemberSnapshot = { ...rest, meta: meta.object, metaSeq: meta.seq }
+    if (!meta.connected) next.disconnected = true
+    members.set(id, next)
   }
+}
+
+/** A member's whole meta and connection at `seq`, as a roster or a stamp carries them. */
+function wholeUpdate(seq: number, meta: ParticipantMeta, disconnected: boolean): WholeMemberUpdate {
+  const update: WholeMemberUpdate = { seq, meta }
+  if (disconnected) update.disconnected = true
+  return update
 }
 
 /** Validate a `subscribeBinary` track option: `undefined` = every track, `null` = the default track, a non-empty name =

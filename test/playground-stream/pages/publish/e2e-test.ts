@@ -6,6 +6,7 @@ import {
   getResult,
   failBackend,
   getCleanupState,
+  resetCleanupState,
   cutWire,
   canCutWire,
   runServerAction,
@@ -268,6 +269,35 @@ function testPublish(isDev: boolean, inDocker = false) {
               log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
             : log.logSource === 'stderr',
       })
+    }
+  })
+
+  test('broadcast: in a chat whose saving, history, avatar or mark-as-read fails, the error is reported and the next message still arrives', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await resetCleanupState()
+    await page.click('#test-chat')
+
+    await autoRetry(async () => {
+      expect(await getResult<{ messages: string[] }>('#publish-result')).deep.equal({ messages: ['how are you?'] })
+    })
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.chatSaved).toBe(JSON.stringify(['how are you?']))
+      expect(state['bug:Database unavailable']).toBe('reported')
+      expect(state['bug:Could not load the chat history']).toBe('reported')
+    })
+    for (const error of ['Database unavailable', 'Could not load the chat history']) {
+      expectLog(error, {
+        // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
+        filter: (log) =>
+          inDocker
+            ? log.logSource === 'stdout' &&
+              log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+            : log.logSource === 'stderr',
+      })
+    }
+    for (const error of ['Could not load the avatar', 'Could not mark the chat as read']) {
+      expectLog(`[telefunc:channel-error] Error: ${error}`, { filter: (log) => log.logSource === 'Browser Error' })
     }
   })
 

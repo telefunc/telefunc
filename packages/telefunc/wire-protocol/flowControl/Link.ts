@@ -69,6 +69,18 @@ class Link {
   private roseAt = 0
   /** In bytes per ms, a rate the link carries at least: what an answer, a heartbeat or an acknowledgement showed. */
   floor = 0
+  /** Where this side's frames go by batch POST: how long each POST's oldest frame waited for its answer. */
+  private readonly postWaits = new Waits()
+
+  /** Takes how long a batch POST's oldest frame waited for its answer. */
+  postAnswered(wait: number): void {
+    this.postWaits.note(wait, performance.now())
+  }
+
+  /** The longest a frame waited for its batch POST's answer, of the POSTs answered at or after `at`. */
+  longestPostWaitSince(at: number): number {
+    return this.postWaits.since(at)
+  }
 
   /** Takes a round trip a probe on this wire took. */
   measured(rtt: number): void {

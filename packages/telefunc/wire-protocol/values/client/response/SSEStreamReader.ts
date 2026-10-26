@@ -2,7 +2,7 @@ export { SSEStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { SSEEvents } from '../../../channel/client/SSEEvents.js'
-import { concatAll } from '../../../wire/frame.js'
+import { splitOwned } from '../../../wire/frame.js'
 import { throwAbortError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)
@@ -65,7 +65,11 @@ class SSEStreamReader extends BaseStreamReader {
         length += event.length
       })
     }
-    if (parts) this.binary = parts.length === 1 ? parts[0]! : concatAll(parts)
+    if (parts) {
+      const [result, rest] = splitOwned(parts, n)
+      this.binary = rest
+      return result
+    }
     const result = this.binary.subarray(0, n)
     this.binary = n < this.binary.length ? this.binary.subarray(n) : EMPTY
     return result
