@@ -241,7 +241,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._closePromise) return this._closePromise
     if (this._didTerminate) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    this._closeDeadline = Date.now() + timeout
+    this._closeDeadline = performance.now() + timeout
     this._expectCloseAck = true
     this._isClosed = true
     this._connection.sendCloseRequest(this, timeout)
@@ -457,7 +457,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onTransportCloseRequest(timeoutMs: number): void {
     if (this._didTerminate) return
-    const peerDeadline = Date.now() + normalizeCloseTimeout(timeoutMs)
+    const peerDeadline = performance.now() + normalizeCloseTimeout(timeoutMs)
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     this._connection.sendCloseAck(this)
     if (this._isClosed) {
@@ -517,7 +517,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._finalizeClose()
         break
       }
-      const remaining = this._closeDeadline - Date.now()
+      const remaining = this._closeDeadline - performance.now()
       if (remaining <= 0) {
         this._finalizeClose(new ChannelClosedError('Channel close timed out'))
         break

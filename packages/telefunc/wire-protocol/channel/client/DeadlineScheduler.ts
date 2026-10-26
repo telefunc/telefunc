@@ -21,7 +21,7 @@ class DeadlineScheduler {
         this.scheduledAt = 0
         this.run()
       },
-      Math.max(0, deadlineAt - Date.now()),
+      Math.max(0, deadlineAt - performance.now()),
     )
   }
 
