@@ -123,7 +123,7 @@ interface MuxChannel {
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
   /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
   _onTransportBatched(): void
-  /** The upgrade's join handed it, at once, the frames it held. */
+  /** The upgrade joined: it is on the WebSocket, and was handed at once the frames the join held. */
   _onUpgradeJoined(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/

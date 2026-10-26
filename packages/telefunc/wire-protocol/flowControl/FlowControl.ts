@@ -361,6 +361,11 @@ class FlowControl {
     if (this.byteWindow > prev) this._advertiseBytes('flow-control')
   }
 
+  /** Back to the stream transport's initial window, where the estimator never grew the batch-POST one. */
+  useStreamTransportInitial(): void {
+    this._bdp.undoByteWindowRaise(CREDIT_WINDOW_INITIAL_BYTES)
+  }
+
   shutdown(): void {
     if (this._shutdown) return
     this._shutdown = true
