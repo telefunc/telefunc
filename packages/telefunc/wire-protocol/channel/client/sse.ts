@@ -36,7 +36,7 @@ import type {
 } from './connection.js'
 import type { Heartbeat } from './Heartbeat.js'
 
-type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number }
+type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
 
 /** A POST body built ahead from the outbox's first `count` entries, `first` through `last`. */
 type OutboxFold = { blob: Blob; count: number; first: OutboxEntry; last: OutboxEntry }
@@ -199,7 +199,7 @@ class SseTransport implements UpgradeSource {
     }
     const now = performance.now()
     const deadline = this.getFrameDeadline(frame.kind, now)
-    const entry = { frame: frame.frame, deadline }
+    const entry = { frame: frame.frame, deadline, queuedAt: now }
     this.outbox.push(entry)
     this.outboxBytes += frame.frame.byteLength
     this.unfolded = (this.outbox.length === 1 ? 0 : this.unfolded) + frame.frame.byteLength
@@ -337,7 +337,8 @@ class SseTransport implements UpgradeSource {
     // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
     abort.abort()
     this.streamRequest = { tag: 'failed' }
-    if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: performance.now() })))
+    const now = performance.now()
+    if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: now, queuedAt: now })))
     this.owner._onTransportBatched(this)
   }
 
@@ -404,6 +405,7 @@ class SseTransport implements UpgradeSource {
     const movedBuffered: OutboxEntry[] = stage.movedBufferedFrames.map((entry) => ({
       frame: entry.frame,
       deadline: this.getFrameDeadline(entry.kind, now),
+      queuedAt: now,
     }))
     this.requeue(stage.movedOutbox.concat(movedBuffered))
   }
@@ -445,6 +447,7 @@ class SseTransport implements UpgradeSource {
       const response = await this.postAndRead(body, wire.signal)
       if (!response.ok) throw new Error('POST failed')
       this.sizePosts(body.size, performance.now() - now)
+      this.uplink.link.postAnswered(performance.now() - oldestQueuedAt(queued))
     } catch {
       // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
       if (wire !== this.transportAbort) {
@@ -663,6 +666,12 @@ class SseTransport implements UpgradeSource {
     this.streamRequest.body.close()
     this.streamRequest = { tag: 'idle' }
   }
+}
+
+function oldestQueuedAt(entries: readonly OutboxEntry[]): number {
+  let oldest = Infinity
+  for (const { queuedAt } of entries) if (queuedAt < oldest) oldest = queuedAt
+  return oldest
 }
 
 function bytesOf(entries: readonly OutboxEntry[]): number {

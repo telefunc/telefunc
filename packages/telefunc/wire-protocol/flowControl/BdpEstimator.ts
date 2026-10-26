@@ -137,7 +137,8 @@ class BdpEstimator {
     const starved = senderBacklog * 8 < this._byteWindow
     this._boundRoundTrip(rtt, received, starved, deliveredBefore)
     const pathRtt = this._pathRtt(senderPathRtt)
-    const loopRtt = pathRtt + roundWait
+    // A round of credit on a batch-POST wire also waits for its POST.
+    const loopRtt = pathRtt + roundWait + (link?.longestPostWaitSince(this._lastPingAt) ?? 0)
     const byteSample = received * (loopRtt < rtt ? loopRtt / rtt : 1)
     const bytes = this._byteDecision(byteSample, pathRtt < Infinity, starved)
     const msgs = this._msgDecision(this._msgsReceived - this._msgsAtPingSent, starved)
