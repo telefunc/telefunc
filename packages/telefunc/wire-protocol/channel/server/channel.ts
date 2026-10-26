@@ -881,20 +881,29 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
       return
     }
-    await this._answerRequest(seq, () => callInOrder(listeners.list(), data), 'request')
+    await this._answerRequest(seq, listeners.list(), data, 'request')
   }
 
-  /** Answers request `seq` with what `run` resolves to, or with its failure; a publish answers a full buffer or a shield
-   *  failure with the status its page's `publish()` rejects with. */
-  protected async _answerRequest(seq: number, run: () => unknown, kind: 'request' | 'publish'): Promise<void> {
-    // A malformed request ends its page's wire, as a malformed frame does; one raised after `run` returns comes from
-    // another page (a relayed message answered malformed), so it only fails this request.
+  /** Answers request `seq` with the last listener's result, or with its failure; a publish answers a full buffer or a
+   *  shield failure with the status its page's `publish()` rejects with. */
+  protected async _answerRequest<T>(
+    seq: number,
+    listeners: readonly ((data: T) => unknown)[],
+    data: T,
+    kind: 'request' | 'publish',
+  ): Promise<void> {
+    // A malformed request ends its page's wire, as a malformed frame does; one raised after the first listener returns
+    // comes from another page (a relayed message answered malformed), so it only fails this request.
     let violationPeer = this._peer
     let answer: string
     try {
-      const result = run()
-      violationPeer = null
-      answer = stringify(await result)
+      let lastResult: unknown
+      for (const listener of listeners) {
+        const result = listener(data)
+        violationPeer = null
+        lastResult = await result
+      }
+      answer = stringify(lastResult)
     } catch (err) {
       this._sendRequestFailure(seq, err, violationPeer, kind)
       return
@@ -1053,18 +1062,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this._reconnectTimer = null
   }
-}
-
-/** Calls each listener once the one before it settled, the first in this turn; resolves to the last one's result. */
-function callInOrder<T>(listeners: readonly ((data: T) => unknown)[], data: T): unknown {
-  const first = listeners[0]!(data)
-  return listeners.length === 1 ? first : callRestInOrder(first, listeners, data)
-}
-
-async function callRestInOrder<T>(first: unknown, listeners: readonly ((data: T) => unknown)[], data: T) {
-  let last = await first
-  for (let i = 1; i < listeners.length; i++) last = await listeners[i]!(data)
-  return last
 }
 
 function rejectOverflow(): Promise<never> {

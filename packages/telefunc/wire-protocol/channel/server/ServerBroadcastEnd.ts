@@ -89,13 +89,13 @@ class ServerBroadcastEnd extends ServerChannel {
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
     const handler = this._publishHandler
     assert(handler)
-    return this._trackAck(this._answerRequest(seq, () => handler(text), 'publish'))
+    return this._trackAck(this._answerRequest(seq, [handler], text, 'publish'))
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     const handler = this._publishBinaryHandler
     assert(handler)
-    return this._trackAck(this._answerRequest(seq, () => handler(data), 'publish'))
+    return this._trackAck(this._answerRequest(seq, [handler], data, 'publish'))
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
