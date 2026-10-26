@@ -36,6 +36,7 @@ import { RoomWrites, runAfterHook } from './writes.js'
 import { commitControlOrThrow, withinRoomHorizon } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { reportServerChannelError } from '../../channel/server/channel.js'
+import type { ServerBroadcastEnd } from '../../channel/server/ServerBroadcastEnd.js'
 import { getServerConfig, reconnectWindow } from '../../../node/server/serverConfig.js'
 import { createMember, evictMember } from './membership.js'
 import { memberCellKey } from './cells.js'
@@ -335,23 +336,16 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
    *  earlier one is in the snapshot. */
-  _openStub(options: ConstructorParameters<typeof RoomStub>[1]): {
-    stub: RoomStub
-    metadata: RoomSnapshotMetadata
-  } {
-    const stub = new RoomStub(this, options)
-    this._attachStub(stub)
+  _openStub(end: ServerBroadcastEnd, options: ConstructorParameters<typeof RoomStub>[2]): RoomSnapshotMetadata {
+    this._attachStub(new RoomStub(this, end, options))
     return {
-      stub,
-      metadata: {
-        channelId: stub.end.id,
-        roomId: this.id,
-        meta: this._model.metaEntries(),
-        closed: this.isClosed,
-        metaSeq: this._model.metaSeq,
-        bufferLimit: getServerConfig().channel.bufferLimit,
-        count: this.count,
-      },
+      channelId: end.id,
+      roomId: this.id,
+      meta: this._model.metaEntries(),
+      closed: this.isClosed,
+      metaSeq: this._model.metaSeq,
+      bufferLimit: getServerConfig().channel.bufferLimit,
+      count: this.count,
     }
   }
 

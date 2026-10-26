@@ -38,20 +38,20 @@ const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerCon
     return ServerRoom.isServerRoom(value)
   },
   replace(serverRoom, context) {
-    const { stub, metadata } = serverRoom._openStub({
+    const end = context.createBroadcastChannel()
+    const metadata = serverRoom._openStub(end, {
       publishShield: context.validators.get('data'),
       grants: responseRoomGrants(context, serverRoom.id),
-      createBroadcastChannel: context.createBroadcastChannel,
     })
     const maxFrameBytes = getAdapterMaxFrameBytes()
     if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
     return {
       metadata,
       async close() {
-        await stub.end.close()
+        await end.close()
       },
       abort(abortError) {
-        stub.end.abort(abortError.abortValue)
+        end.abort(abortError.abortValue)
       },
     }
   },
@@ -94,15 +94,13 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Int
     return ServerLocalParticipant.isServerLocalParticipant(value)
   },
   replace(participant, context) {
-    const stub = new RoomParticipantStub(participant, {
-      publishShield: context.validators.get('data'),
-      createBroadcastChannel: context.createBroadcastChannel,
-    })
+    const end = context.createBroadcastChannel()
+    new RoomParticipantStub(participant, end, { publishShield: context.validators.get('data') })
     // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
     if (!participant.selfDelivery) responseRoomGrants(context, participant._room.id).suppress(participant.id)
     const maxFrameBytes = getAdapterMaxFrameBytes()
     const metadata: ParticipantStubMetadata = {
-      channelId: stub.end.id,
+      channelId: end.id,
       roomId: participant._room.id,
       id: participant.id,
       meta: participant.meta,
@@ -114,10 +112,10 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Int
     return {
       metadata,
       async close() {
-        await stub.end.close()
+        await end.close()
       },
       abort(abortError) {
-        stub.end.abort(abortError.abortValue)
+        end.abort(abortError.abortValue)
       },
     }
   },

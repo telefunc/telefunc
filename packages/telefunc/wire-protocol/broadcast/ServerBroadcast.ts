@@ -59,13 +59,12 @@ class ServerBroadcast<T = unknown> {
   constructor(opts: { key: string }) {
     assertBroadcastKey(opts.key)
     this.key = opts.key
-    this._end = new ServerBroadcastEnd({
-      onPublish: (serialized) => this._publishFromPage(serialized),
-      onPublishBinary: (data) => this._publish('binary', data),
-      onSubscription: (kind, on) => {
-        this._peerSubscriptions[kind] = on
-        this._syncSubscription(kind)
-      },
+    this._end = new ServerBroadcastEnd()
+    this._end.onPublish((serialized) => this._publishFromPage(serialized))
+    this._end.onPublishBinary((data) => this._publish('binary', data))
+    this._end.onSubscription((kind, on) => {
+      this._peerSubscriptions[kind] = on
+      this._syncSubscription(kind)
     })
     this._routes = {
       text: new RouteSubscription({ key: this.key, kind: 'text' }, (payload, rawInfo) =>

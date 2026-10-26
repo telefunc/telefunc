@@ -7,7 +7,6 @@ import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { parsePeerText } from '../../channel/server/channel.js'
 import type { ServerBroadcastEnd } from '../../channel/server/ServerBroadcastEnd.js'
-import type { ServerReplacerContext } from '../../values/types.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
 import type { ShieldValidator } from '../../../node/server/shield.js'
 import {
@@ -183,30 +182,22 @@ class RoomStub implements LaneHolder {
 
   constructor(
     serverRoom: ServerRoom,
-    {
-      publishShield,
-      grants,
-      createBroadcastChannel,
-    }: {
-      publishShield?: ShieldValidator
-      grants: ResponseRoomGrants
-      createBroadcastChannel: ServerReplacerContext['createBroadcastChannel']
-    },
+    end: ServerBroadcastEnd,
+    { publishShield, grants }: { publishShield?: ShieldValidator; grants: ResponseRoomGrants },
   ) {
     this._room = serverRoom
     this._publishShield = publishShield
     this._selfSuppressed = grants.selfSuppressed
     this._grantedHidden = grants.hidden
-    this.end = createBroadcastChannel({
-      onPublish: (text) => roomResult(this._publishText(decodeRoomPublish(parsePeerText(text)))),
-      onPublishBinary: (framed) => roomResult(this._publishBinary(decodeStubBinaryFrame(framed), framed)),
-      onSubscription: (kind, on) => this._onSubscription(kind, on),
-      onAttach: () => {
-        this._rosterSent = false
-        this._room._onStubAttached(this)
-      },
+    this.end = end
+    end.onPublish((text) => roomResult(this._publishText(decodeRoomPublish(parsePeerText(text)))))
+    end.onPublishBinary((framed) => roomResult(this._publishBinary(decodeStubBinaryFrame(framed), framed)))
+    end.onSubscription((kind, on) => this._onSubscription(kind, on))
+    end.onAttach(() => {
+      this._rosterSent = false
+      this._room._onStubAttached(this)
     })
-    this.end.listen((message) => this._receive(message))
+    end.listen((message) => this._receive(message))
     grants.onSuppressed((member) => this._room._onStubSuppressed(this, member))
   }
 
@@ -487,13 +478,8 @@ class RoomParticipantStub {
 
   constructor(
     participant: ServerLocalParticipant,
-    {
-      publishShield,
-      createBroadcastChannel,
-    }: {
-      publishShield?: ShieldValidator
-      createBroadcastChannel: ServerReplacerContext['createBroadcastChannel']
-    },
+    end: ServerBroadcastEnd,
+    { publishShield }: { publishShield?: ShieldValidator },
   ) {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
@@ -502,19 +488,19 @@ class RoomParticipantStub {
     )
     this._participant = participant
     this._publishShield = publishShield
-    this.end = createBroadcastChannel({
-      // Its client publishes text as a `req-publish` request.
-      onPublish: () => {
-        throw new ProtocolViolationError('text publish on a Room participant stub')
-      },
-      onPublishBinary: (framed) =>
-        roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed)),
-      onAttach: () => {
-        this._notify({ __r: 'p-meta', ...participant._acceptedMeta })
-        this._notify({ __r: 'demand-state', tracks: participant._demandedTracks })
-      },
+    this.end = end
+    // Its client publishes text as a `req-publish` request.
+    end.onPublish(() => {
+      throw new ProtocolViolationError('text publish on a Room participant stub')
     })
-    this.end.listen((message) => this._receive(message))
+    end.onPublishBinary((framed) =>
+      roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed)),
+    )
+    end.onAttach(() => {
+      this._notify({ __r: 'p-meta', ...participant._acceptedMeta })
+      this._notify({ __r: 'demand-state', tracks: participant._demandedTracks })
+    })
+    end.listen((message) => this._receive(message))
     this._mirrorParticipant()
   }
 

@@ -44,7 +44,7 @@ export type {
 
 import type { ServerChannel } from '../channel/server/channel.js'
 import type { ServerBroadcast } from '../broadcast/ServerBroadcast.js'
-import type { BroadcastEndOptions, ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
+import type { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import type { ClientChannel, ClientBroadcast } from '../channel/client/channel.js'
 import type { AbortError } from '../../shared/Abort.js'
 import type { ShieldValidators } from '../../node/server/shield.js'
@@ -187,7 +187,7 @@ type ServerReplacerContext = {
   /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
   registerChannel(channel: ServerChannel<any, any>): void
   /** Creates and registers the server end of a page's `ClientBroadcast`. */
-  createBroadcastChannel(opts: BroadcastEndOptions): ServerBroadcastEnd
+  createBroadcastChannel(): ServerBroadcastEnd
   sendStream(createProducer: () => StreamingProducer): {
     metadata: StreamingMetadata
     close: () => Promise<void> | void

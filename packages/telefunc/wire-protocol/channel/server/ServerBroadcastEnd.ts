@@ -1,32 +1,43 @@
 export { ServerBroadcastEnd }
-export type { BroadcastEndOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { ServerChannel } from './channel.js'
+import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
 import { ChannelOverflowError } from '../channelErrors.js'
 import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ACK_STATUS, ERROR_REASON } from '../../wire/connectionFrame.js'
 import type { BroadcastKind, ReattachState } from '../../wire/connectionFrame.js'
 
-type BroadcastEndOptions = {
-  /** A publish from its page: what it returns answers the page's `publish()`. */
-  onPublish(serialized: string): unknown
-  onPublishBinary(data: Uint8Array): unknown
-  /** Its page subscribes or unsubscribes `kind`, and declares both at each attach. */
-  onSubscription?(kind: BroadcastKind, on: boolean): void
-  /** Each attach of its page while the channel is open, after the page's subscriptions applied. */
-  onAttach?(): void
-}
-
 /** The server end of a page's `ClientBroadcast`: a channel to that page, which also takes the page's publishes and
  *  subscriptions, and delivers publishes to it. */
 class ServerBroadcastEnd extends ServerChannel {
-  private readonly _options: BroadcastEndOptions
+  private _publishHandler: ((serialized: string) => unknown) | null = null
+  private _publishBinaryHandler: ((data: Uint8Array) => unknown) | null = null
+  private _subscriptionHandler: ((kind: BroadcastKind, on: boolean) => void) | null = null
+  private _attachHandler: (() => void) | null = null
 
-  constructor(options: BroadcastEndOptions) {
+  constructor() {
     super({ publishes: true })
-    this._options = options
+  }
+
+  /** A publish from its page: what `handler` returns answers the page's `publish()`. */
+  onPublish(handler: (serialized: string) => unknown): void {
+    this._publishHandler = handler
+  }
+
+  onPublishBinary(handler: (data: Uint8Array) => unknown): void {
+    this._publishBinaryHandler = handler
+  }
+
+  /** Its page subscribes or unsubscribes `kind`, and declares both at each attach. */
+  onSubscription(handler: (kind: BroadcastKind, on: boolean) => void): void {
+    this._subscriptionHandler = handler
+  }
+
+  /** Each attach of its page while the channel is open, after the page's subscriptions applied. */
+  onAttach(handler: () => void): void {
+    this._attachHandler = handler
   }
 
   get isAttached(): boolean {
@@ -74,19 +85,23 @@ class ServerBroadcastEnd extends ServerChannel {
 
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     super._attachPeer(peer, state)
-    if (this._peer === peer && !this._isClosed) this._options.onAttach?.()
+    if (this._peer === peer && !this._isClosed) this._attachHandler?.()
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this._trackAck(this._answerPublish(seq, () => this._options.onPublish(text)))
+    const handler = this._publishHandler
+    assert(handler)
+    return this._trackAck(this._answerPublish(seq, () => handler(text)))
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._trackAck(this._answerPublish(seq, () => this._options.onPublishBinary(data)))
+    const handler = this._publishBinaryHandler
+    assert(handler)
+    return this._trackAck(this._answerPublish(seq, () => handler(data)))
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
-    this._options.onSubscription?.(kind, on)
+    this._subscriptionHandler?.(kind, on)
   }
 
   private async _answerPublish(seq: number, publish: () => unknown): Promise<void> {

@@ -55,8 +55,8 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
     registerChannel(channel) {
       registeredChannels.push(channel)
     },
-    createBroadcastChannel(opts) {
-      const end = new ServerBroadcastEnd(opts)
+    createBroadcastChannel() {
+      const end = new ServerBroadcastEnd()
       context.registerChannel(end)
       return end
     },
