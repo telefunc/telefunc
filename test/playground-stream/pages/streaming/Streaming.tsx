@@ -23,6 +23,7 @@ import {
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
   onReturnTwoLargeStreams,
+  onReturnTwoStreamsOfSmallChunks,
   onReturnOneLargeChunk,
   onReturnFinishedAndEndlessStreams,
   onReturnFailingStream,
@@ -711,6 +712,29 @@ function Streaming() {
       </button>
 
       <button
+        id="test-two-streams-to-worker"
+        onClick={async () => {
+          setResult('')
+          const worker = new Worker(new URL('./sumWorker.ts', import.meta.url), { type: 'module' })
+          try {
+            const { first, second } = await onReturnTwoStreamsOfSmallChunks()
+            await Promise.all([transferToWorker(worker, 'first', first), transferToWorker(worker, 'second', second)])
+            const sums = await new Promise((resolve) => {
+              worker.onmessage = (event) => resolve(event.data)
+              worker.postMessage('sums')
+            })
+            setResult(JSON.stringify({ sums }))
+          } catch (err: any) {
+            setResult(JSON.stringify({ error: err.message }))
+          } finally {
+            worker.terminate()
+          }
+        }}
+      >
+        Two streams, each chunk transferred to a Web Worker
+      </button>
+
+      <button
         id="test-one-large-returned-chunk"
         onClick={async () => {
           setResult('')
@@ -768,6 +792,15 @@ function Streaming() {
       </button>
     </div>
   )
+}
+
+async function transferToWorker(worker: Worker, name: string, stream: ReadableStream<Uint8Array>) {
+  const reader = stream.getReader()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) return
+    worker.postMessage({ name, chunk: value }, [value.buffer])
+  }
 }
 
 async function byteCount(stream: ReadableStream<Uint8Array>): Promise<number> {

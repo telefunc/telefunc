@@ -1353,8 +1353,8 @@ class ClientConnection implements MuxConnection {
       this.dispose()
       return
     }
-    const startedAt = prevStartedAt || Date.now()
-    if (Date.now() - startedAt > this.reconnectTimeoutMs) {
+    const startedAt = prevStartedAt || performance.now()
+    if (performance.now() - startedAt > this.reconnectTimeoutMs) {
       this.closeAll(err instanceof Error ? err : new NetworkError('Connection dropped', true))
       this.dispose()
       return

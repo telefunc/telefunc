@@ -99,7 +99,7 @@ class SseTransport implements UpgradeSource {
   private unfolded = 0
   /** The next POST's body, as far as `foldOutbox` built it. */
   private folded: OutboxFold | null = null
-  private lastPostStartedAt = 0
+  private lastPostStartedAt = Number.NEGATIVE_INFINITY
   /** What a batch POST is sized to carry: what its bytes take `SSE_POST_TARGET_MS` to cross at the rate the last ones did. */
   private postBytes = SSE_POST_MIN_BYTES
   /** The body of the batch POST out, 0 with none. */
@@ -197,7 +197,7 @@ class SseTransport implements UpgradeSource {
       this.streamRequest.unconfirmed?.push(frame.frame)
       return
     }
-    const now = Date.now()
+    const now = performance.now()
     const deadline = this.getFrameDeadline(frame.kind, now)
     const entry = { frame: frame.frame, deadline }
     this.outbox.push(entry)
@@ -337,7 +337,7 @@ class SseTransport implements UpgradeSource {
     // Aborted, not ended: a proxy holding the body forwards it once it ends, and the server would run it after what follows.
     abort.abort()
     this.streamRequest = { tag: 'failed' }
-    if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: Date.now() })))
+    if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: performance.now() })))
     this.owner._onTransportBatched(this)
   }
 
@@ -400,7 +400,7 @@ class SseTransport implements UpgradeSource {
 
   private rollbackInitialBatch(stage: SseInitialBatchStage): void {
     if (stage.movedOutbox.length === 0 && stage.movedBufferedFrames.length === 0) return
-    const now = Date.now()
+    const now = performance.now()
     const movedBuffered: OutboxEntry[] = stage.movedBufferedFrames.map((entry) => ({
       frame: entry.frame,
       deadline: this.getFrameDeadline(entry.kind, now),
@@ -428,7 +428,7 @@ class SseTransport implements UpgradeSource {
     assert(this.transportAbort)
     this.flushScheduler.cancel()
     this.flushing = true
-    const now = Date.now()
+    const now = performance.now()
     const queued = this.takeOutbox()
     const head = this.foldHeading(queued)
     this.folded = null
@@ -444,7 +444,7 @@ class SseTransport implements UpgradeSource {
       this.watchPost(wire, SSE_POST_FLOOR_MS + (body.size * 1000) / SSE_POST_MIN_BYTES_PER_S)
       const response = await this.postAndRead(body, wire.signal)
       if (!response.ok) throw new Error('POST failed')
-      this.sizePosts(body.size, Date.now() - now)
+      this.sizePosts(body.size, performance.now() - now)
     } catch {
       // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
       if (wire !== this.transportAbort) {
@@ -505,7 +505,7 @@ class SseTransport implements UpgradeSource {
         this.outboxBytes -= entry.frame.byteLength
         void this.sendStandalonePost([entry.frame])
       },
-      Math.max(0, entry.deadline - Date.now()),
+      Math.max(0, entry.deadline - performance.now()),
     )
   }
 
@@ -568,7 +568,7 @@ class SseTransport implements UpgradeSource {
     this.flushScheduler.schedule(earliest)
   }
 
-  private getFrameDeadline(kind: OutboundFrameKind, now = Date.now()): number {
+  private getFrameDeadline(kind: OutboundFrameKind, now = performance.now()): number {
     switch (kind) {
       case 'reconcile':
       case 'released':

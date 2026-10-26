@@ -394,7 +394,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._closePromise) return this._closePromise
     if (this._didShutdown) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    this._closeDeadline = Date.now() + timeout
+    this._closeDeadline = performance.now() + timeout
     // A channel no response carried yet has no page to acknowledge its close.
     this._awaitingCloseAck = this._didRegister
     this._startClose()
@@ -682,7 +682,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerCloseRequest(timeoutMs: number): void {
     if (this._didShutdown) return
     assertProtocol(timeoutMs <= TIMER_DELAY_MAX_MS, `CLOSE timeout ${timeoutMs}`)
-    const peerDeadline = Date.now() + timeoutMs
+    const peerDeadline = performance.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
     else this._ensurePendingEnd().closeAck = true
@@ -800,7 +800,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._pendingEnd === null) return
     const { closeAck, closeRequest, abort, error } = this._pendingEnd
     if (closeAck) peer.sendCloseAck()
-    if (closeRequest) this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - Date.now()))
+    if (closeRequest)
+      this._closeRequestSeq = peer.sendCloseRequest(Math.max(0, this._closeDeadline - performance.now()))
     if (abort !== null) peer.sendAbort(abort)
     if (error !== null) peer.sendError(error)
     this._pendingEnd = null
@@ -888,7 +889,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._shutdown()
         break
       }
-      const remaining = this._closeDeadline - Date.now()
+      const remaining = this._closeDeadline - performance.now()
       if (remaining <= 0) {
         this._shutdown(new ChannelClosedError('Channel close timed out'))
         break
