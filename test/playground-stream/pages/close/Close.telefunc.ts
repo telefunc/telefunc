@@ -16,13 +16,9 @@ export {
 }
 
 import { EventEmitter } from 'node:events'
-import { BroadcastChannel, Channel, getContext, onBug } from 'telefunc'
+import { BroadcastChannel, Channel, getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
-
-onBug((err) => {
-  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
-})
 
 // ── Targeted single-type telefunctions ─────────────────────────────
 

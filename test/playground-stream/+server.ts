@@ -4,7 +4,7 @@ import type { IncomingMessage, Server as HttpServer, ServerResponse } from 'node
 import { Hono } from 'hono'
 import vike from '@vikejs/hono'
 import { installRedis } from '@telefunc/redis'
-import { config, serve } from 'telefunc'
+import { config, onBug, serve } from 'telefunc'
 import { Telefunc } from 'telefunc/node'
 import { Telefunc as TelefuncBun } from 'telefunc/bun'
 import { Telefunc as TelefuncDeno } from 'telefunc/deno'
@@ -19,6 +19,10 @@ config.shield = true
 if (process.env.CHANNEL_CONFIG) Object.assign(config.channel, JSON.parse(process.env.CHANNEL_CONFIG))
 
 const INST = process.env.INSTANCE_ID ?? '?'
+
+onBug((err) => {
+  cleanupState[`bug:${err instanceof Error ? err.message : String(err)}`] = 'reported'
+})
 
 if (redis) {
   installRedis(redis)
