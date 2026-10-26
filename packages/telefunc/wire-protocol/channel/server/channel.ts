@@ -887,7 +887,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Answers request `seq` with what `run` resolves to, or with its failure; a publish answers a full buffer or a shield
    *  failure with the status its page's `publish()` rejects with. */
   protected async _answerRequest(seq: number, run: () => unknown, kind: 'request' | 'publish'): Promise<void> {
-    // Until `run` returns, a ProtocolViolationError is this request's own and ends its wire.
+    // A malformed request ends its page's wire, as a malformed frame does; one raised after `run` returns comes from
+    // another page (a relayed message answered malformed), so it only fails this request.
     let violationPeer = this._peer
     let answer: string
     try {
@@ -901,7 +902,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._sendAckRes(seq, answer)
   }
 
-  /** A ProtocolViolationError ends `violationPeer`'s wire, as a malformed frame does; without one, it is a callback error. */
+  /** Ends `violationPeer`'s wire on a ProtocolViolationError; otherwise answers the failure. */
   private _sendRequestFailure(
     seq: number,
     err: unknown,
