@@ -1,6 +1,7 @@
 export { testClose }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import type { WebSocket } from 'playwright-chromium'
 import { resetCleanupState, getCleanupState, forceServerGc, navigate, getResult, sleep } from '../../e2e-utils'
 
 function testClose(inDocker = false) {
@@ -123,6 +124,46 @@ function testClose(inDocker = false) {
       { timeout: 3_000 },
     )
   })
+
+  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '[]').join() === 'sse,ws') {
+    test('close: a page that reloads while its connection moves to a WebSocket ends its open channel on the server at once', async () => {
+      await navigate(`${getServerUrl()}/close`)
+      await resetCleanupState()
+      // Its POSTs are answered a second late, as on a slow network: the server moves the channel to the WebSocket
+      // before the page hears that it did.
+      await page.evaluate(() => {
+        const fetch = globalThis.fetch
+        globalThis.fetch = async (input, init) => {
+          const response = await fetch(input, init)
+          if ((init?.headers as Record<string, string> | undefined)?.Accept !== 'text/event-stream') {
+            await new Promise((resolve) => setTimeout(resolve, 1_000))
+          }
+          return response
+        }
+      })
+      let onMoved!: () => void
+      const moved = new Promise<void>((resolve) => (onMoved = resolve))
+      const onWebSocket = (ws: WebSocket) => {
+        // RECONCILED: the server moved the page's channels to this WebSocket.
+        ws.on('framereceived', ({ payload }) => typeof payload !== 'string' && payload[0] === 0x05 && onMoved())
+      }
+      page.on('websocket', onWebSocket)
+      try {
+        await page.click('#test-keep-channel')
+        await moved
+      } finally {
+        page.off('websocket', onWebSocket)
+      }
+      expect((await getCleanupState()).keptChannel).toBe('open')
+      await page.reload()
+      await autoRetry(
+        async () => {
+          expect((await getCleanupState()).keptChannel).toBe('none')
+        },
+        { timeout: 3_000 },
+      )
+    })
+  }
 
   test('close: a channel the server aborted before returning it reaches the client aborted', async () => {
     await navigate(`${getServerUrl()}/close`)
