@@ -1,4 +1,6 @@
-export { NetworkError }
+export { NetworkError, isNetworkError }
+
+const networkErrorBrand = Symbol.for('telefunc.NetworkError')
 
 /** Network failure: the connection to the server couldn't be established or was lost.
  *  Thrown for regular telefunction calls — as the `ConnectionError` subclass, with `isChannel: false`
@@ -8,6 +10,8 @@ export { NetworkError }
  *
  *  Catch it with a single `instanceof NetworkError` and read `isChannel` to tell the two apart. */
 class NetworkError extends Error {
+  readonly [networkErrorBrand] = true as const
+
   /** `true` if the failure happened on a channel connection, `false` for a regular telefunction call. */
   readonly isChannel: boolean
 
@@ -18,4 +22,8 @@ class NetworkError extends Error {
     this.isChannel = isChannel
     Error.captureStackTrace?.(this, new.target)
   }
+}
+
+function isNetworkError(thing: unknown): thing is NetworkError {
+  return thing instanceof NetworkError || (typeof thing === 'object' && thing !== null && networkErrorBrand in thing)
 }
