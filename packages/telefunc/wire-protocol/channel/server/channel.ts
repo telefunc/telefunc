@@ -971,7 +971,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didShutdown) return
     this._didShutdown = true
     this._isClosed = true
-    this._isConnected = false
     this._closeError = err
     const pageAttached = this._peer !== null
     this._peer = null
@@ -1017,6 +1016,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _fireClose(err?: Error): void {
     if (this._didFireClose) return
     this._didFireClose = true
+    this._isConnected = false
     for (const cb of this._closeCallbacks) {
       this._invokeCloseCallback(cb, err, true)
     }

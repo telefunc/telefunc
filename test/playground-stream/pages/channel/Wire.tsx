@@ -30,7 +30,7 @@ type WireState = {
   /** close: what the page's close() resolved to, once the channel opened and the server's messages arrived. */
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
-  /** What the page's end saw: 'open', 'disconnect', 'reconnect', each with isConnected. */
+  /** What the page's end saw: 'start' (before open), 'open', 'disconnect', 'reconnect', 'close', each with isConnected. */
   connection: { channelId: string; events: string[] } | null
   /** closed: 'abort:<value as JSON>' or the error's name, once the channel closed. */
   presence: { channelId: string; online: boolean; closed?: string } | null
@@ -76,9 +76,11 @@ function WireDemo() {
       events.push(`${event}:${channel.isConnected}`)
       setState((s) => ({ ...s, connection: { channelId, events: [...events] } }))
     }
+    report('start')
     channel.onOpen(() => report('open'))
     channel.onDisconnect(() => report('disconnect'))
     channel.onReconnect(() => report('reconnect'))
+    channel.onClose(() => report('close'))
   }, [])
 
   const presence = useCallback(async () => {
@@ -336,6 +338,14 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Open a channel that shows its connection
+        </button>
+        <button
+          id="wire-connection-close"
+          type="button"
+          onClick={() => connectionChannel.current!.close()}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Close it
         </button>
         <button
           id="wire-presence"

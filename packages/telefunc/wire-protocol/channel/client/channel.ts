@@ -541,6 +541,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _fireClose(err?: Error): void {
     if (this._didFireClose) return
     this._didFireClose = true
+    this._isConnected = false
     for (const cb of this._closeCallbacks) {
       this._invokeCloseCallback(cb, err, true)
     }
@@ -636,7 +637,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _finalizeClose(err?: Error): void {
     if (this._didTerminate) return
     this._didTerminate = true
-    this._isConnected = false
     this._closeError = err
     this._flow.shutdown()
     const ackErr = err ?? new ChannelClosedError()
