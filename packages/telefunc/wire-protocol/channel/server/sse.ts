@@ -17,7 +17,7 @@ import { parseSseRequestMetadata, type SseRequestMetadata } from '../sseRequest.
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../../wire/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, passesData, ProtocolViolationError } from '../../wire/connectionFrame.js'
+import { encode, isProtocolViolationError, passesData, ProtocolViolationError } from '../../wire/connectionFrame.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -150,11 +150,7 @@ class SseConnectionTransport {
       if (err instanceof OversizeFrameError && connId !== null) this.closeWire(connId)
       // A typed protocol-input fault is the client's: answer 400 and stay quiet. Anything else is our
       // bug — rethrow so the request pipeline (`runTelefunc`) logs it and masks it as a 500.
-      if (
-        err instanceof ProtocolViolationError ||
-        err instanceof OversizeFrameError ||
-        err instanceof StreamTruncatedError
-      ) {
+      if (isProtocolViolationError(err) || err instanceof OversizeFrameError || err instanceof StreamTruncatedError) {
         return badRequest()
       }
       throw err
@@ -414,8 +410,7 @@ function parseMetadata(raw: string): SseRequestMetadata {
 }
 
 function reportDispatchBug(err: unknown): void {
-  if (err instanceof ProtocolViolationError || err instanceof OversizeFrameError || err instanceof StreamTruncatedError)
-    return
+  if (isProtocolViolationError(err) || err instanceof OversizeFrameError || err instanceof StreamTruncatedError) return
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
 
