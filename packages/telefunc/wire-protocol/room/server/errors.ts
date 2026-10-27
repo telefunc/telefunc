@@ -1,6 +1,6 @@
 export { reportRoomError }
 
-import { ChannelOverflowError } from '../../channel/channelErrors.js'
+import { isChannelOverflowError } from '../../channel/channelErrors.js'
 import { reportServerChannelError } from '../../channel/server/channel.js'
 import { isRoomError } from '../errors.js'
 
@@ -8,6 +8,6 @@ import { isRoomError } from '../errors.js'
  *  held-send bound refused is no bug either, as Broadcast's refused publish isn't, but nothing else hears of it. */
 function reportRoomError(err: unknown): void {
   if (isRoomError(err)) return
-  if (err instanceof ChannelOverflowError) console.error(err)
+  if (isChannelOverflowError(err)) console.error(err)
   else reportServerChannelError(err)
 }

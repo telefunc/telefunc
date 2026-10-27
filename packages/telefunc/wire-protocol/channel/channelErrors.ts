@@ -1,4 +1,4 @@
-export { ChannelClosedError, ChannelOverflowError, isExpectedChannelFailure, replayLossError }
+export { ChannelClosedError, ChannelOverflowError, isChannelOverflowError, isExpectedChannelFailure, replayLossError }
 
 import { NetworkError } from '../../shared/NetworkError.js'
 
@@ -11,12 +11,23 @@ class ChannelClosedError extends Error {
   }
 }
 
+const channelOverflowErrorBrand = Symbol.for('telefunc.ChannelOverflowError')
+
 /** Used when a buffered channel send is dropped in order to keep memory usage hard-capped. */
 class ChannelOverflowError extends Error {
+  readonly [channelOverflowErrorBrand] = true as const
+
   constructor(message = 'Channel send buffer overflow') {
     super(message)
     this.name = 'ChannelOverflowError'
   }
+}
+
+function isChannelOverflowError(thing: unknown): thing is ChannelOverflowError {
+  return (
+    thing instanceof ChannelOverflowError ||
+    (typeof thing === 'object' && thing !== null && channelOverflowErrorBrand in thing)
+  )
 }
 
 function isExpectedChannelFailure(err: unknown): err is ChannelClosedError | ChannelOverflowError | NetworkError {

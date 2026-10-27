@@ -15,7 +15,7 @@ export {
 
 import { createAbortError } from '../../shared/Abort.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../shared/constants.js'
-import { ChannelOverflowError } from '../channel/channelErrors.js'
+import { ChannelOverflowError, isChannelOverflowError } from '../channel/channelErrors.js'
 import { classifyTelefuncError } from '../channel/errorClassification.js'
 import type { RoomFailure, RoomResult } from './protocol.js'
 import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
@@ -63,7 +63,7 @@ function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage:
   if (classified.kind === 'abort') return { ok: false, kind: 'abort', abortValue: classified.error.abortValue }
   if (classified.kind === 'shield') return { ok: false, kind: 'shield', message: classified.error.message }
   if (classified.kind === 'expected') return { ok: false, kind: 'error', message: classified.error.message }
-  if (err instanceof ChannelOverflowError) return { ok: false, kind: 'overflow', message: err.message }
+  if (isChannelOverflowError(err)) return { ok: false, kind: 'overflow', message: err.message }
   report(err)
   return { ok: false, kind: 'error', message: bugMessage }
 }

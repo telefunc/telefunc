@@ -29,7 +29,7 @@ import type { ShieldValidator, ShieldValidators } from '../../../node/server/shi
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError, isShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError, isChannelOverflowError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
@@ -919,7 +919,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     kind: 'request' | 'publish',
   ): void {
     if (violationPeer && err instanceof ProtocolViolationError) return violationPeer.sender.terminate()
-    if (kind === 'publish' && err instanceof ChannelOverflowError) {
+    if (kind === 'publish' && isChannelOverflowError(err)) {
       return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
     }
     if (kind === 'publish' && isShieldValidationError(err)) {
