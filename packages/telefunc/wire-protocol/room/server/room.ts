@@ -22,12 +22,19 @@ import {
   type RoomDmEnvelope,
   type RoomCtrlEnvelope,
   type MemberMetaUpdate,
+  type ParticipantStubMetadata,
   type RoomSnapshotMetadata,
 } from '../protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import { type RoomModel, RoomState, RoomStateView } from '../state.js'
 import { ParticipantBase } from '../participant.js'
-import { MemberMessageTexts, RoomStub, type RoomStubOptions } from './stub.js'
+import {
+  MemberMessageTexts,
+  RoomParticipantStub,
+  RoomStub,
+  type RoomParticipantStubOptions,
+  type RoomStubOptions,
+} from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
@@ -517,6 +524,25 @@ class ServerLocalParticipant extends ParticipantBase {
   async _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._writes.publishBinaryFrame(frame, framed)
+  }
+
+  /** @internal Its client's holder, which its inbox forwards to. */
+  _openStub(stub: Omit<RoomParticipantStubOptions, 'participant'>): ParticipantStubMetadata {
+    // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
+    assertUsage(
+      !this._isBound,
+      'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
+    )
+    this._setForwarder(new RoomParticipantStub({ ...stub, participant: this }))
+    return {
+      channelId: stub.end.id,
+      roomId: this._room.id,
+      id: this.id,
+      meta: this.meta,
+      selfDelivery: this.selfDelivery,
+      identity: this.identity,
+      bufferLimit: getServerConfig().channel.bufferLimit,
+    }
   }
 
   /** @internal Each meta update this participant applies, and each failover rewind of its seq, which a client holding

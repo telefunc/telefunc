@@ -1,9 +1,8 @@
 export { RoomStub, RoomParticipantStub, ResponseRoomGrants, MemberMessageTexts, unorderedEventText }
-export type { RoomStubOptions }
+export type { RoomStubOptions, RoomParticipantStubOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { assertUsage } from '../../../utils/assert.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { parsePeerText } from '../../channel/server/channel.js'
@@ -48,6 +47,7 @@ import {
   type RoomCtrlEnvelope,
   type RoomDataPublish,
   type RoomDemandEvent,
+  type InboxMessage,
   type RoomDmEnvelope,
   type RoomJoinedEvent,
   type RoomResult,
@@ -465,6 +465,12 @@ class RoomStub implements LaneHolder {
 
 /** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave
  *  flow back to the client. */
+type RoomParticipantStubOptions = {
+  participant: ServerLocalParticipant
+  end: ServerBroadcastEnd
+  publishShield?: ShieldValidator
+}
+
 class RoomParticipantStub {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
@@ -472,20 +478,7 @@ class RoomParticipantStub {
   private readonly _publishShield: ShieldValidator | undefined
   private readonly _dmReplies = new PendingDmReplies()
 
-  constructor({
-    participant,
-    end,
-    publishShield,
-  }: {
-    participant: ServerLocalParticipant
-    end: ServerBroadcastEnd
-    publishShield?: ShieldValidator
-  }) {
-    // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
-    assertUsage(
-      !participant._isBound,
-      'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
-    )
+  constructor({ participant, end, publishShield }: RoomParticipantStubOptions) {
     this._participant = participant
     this._publishShield = publishShield
     this.end = end
@@ -536,17 +529,6 @@ class RoomParticipantStub {
       rewound: () => this._notify({ __r: 'rewound' }),
     })
 
-    participant._setForwarder({
-      deliver: (msg) => this._notify(dmNotice(msg)),
-      // A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it forwarded.
-      deliverAck: (msg) => {
-        if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
-        const reply = this._dmReplies.await(msg.ackId!)
-        this._notify(dmNotice(msg))
-        return this.end._trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
-      },
-    })
-
     const unlistenDemand = participant.onDemand((track, wanted) =>
       this._notify({ __r: 'demand', track: track ?? DEFAULT_TRACK, wanted }),
     )
@@ -568,6 +550,19 @@ class RoomParticipantStub {
       this._dmReplies.drop()
       if (!left) void participant._releaseHolder().catch(reportRoomError)
     })
+  }
+
+  /** Its participant's inbox forwards here. */
+  deliver(msg: InboxMessage): void {
+    this._notify(dmNotice(msg))
+  }
+
+  /** A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it forwarded. */
+  deliverAck(msg: InboxMessage): Promise<RoomResult> {
+    if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
+    const reply = this._dmReplies.await(msg.ackId!)
+    this._notify(dmNotice(msg))
+    return this.end._trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
   }
 
   private _notify(notice: ParticipantStubNotice): void {
