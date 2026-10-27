@@ -123,6 +123,8 @@ interface MuxChannel {
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void
   /** Its frames go in batch POSTs from now on: the wire's streaming upload failed after the channel opened. */
   _onTransportBatched(): void
+  /** The upgrade joined: it is on the WebSocket, and was handed at once the frames the join held. */
+  _onUpgradeJoined(): void
   /** Entry point for every per-channel wire frame (data + per-channel ctrl). The
    *  channel splits ctrl vs data internally. Connection-level frames (PING/PONG/
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
@@ -843,7 +845,8 @@ class ClientConnection implements MuxConnection {
   /** The wire's upload fell back to batch POSTs, which a channel may have opened before (see `_onTransportOpen`). */
   _onTransportBatched(transport: ClientChannelTransport): void {
     if (transport !== this.transport) return
-    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._onTransportBatched()
+    // Open ones only, as the join's undo: one still opening takes the batched window from its own open on this wire.
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onTransportBatched()
   }
 
   _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
@@ -1094,6 +1097,7 @@ class ClientConnection implements MuxConnection {
     for (const entry of buffer.old) this.dispatchFrame(entry.frame)
     this.closeUnacknowledged(deferredOmitted)
     for (const entry of buffer.new) this.dispatchFrame(entry.frame)
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onUpgradeJoined()
     this.flushPendingRegisterReconcile()
     this.startTtlIfIdle()
   }

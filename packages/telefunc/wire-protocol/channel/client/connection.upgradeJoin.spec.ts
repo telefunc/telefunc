@@ -36,6 +36,7 @@ function createChannel(dispatched: DecodedFrame[]) {
     },
     _onTransportClose() {},
     _onTransportBatched() {},
+    _onUpgradeJoined() {},
     _reattachState: () => ({}),
     _onProbeAnswered() {},
     _fitReplays() {},
