@@ -300,7 +300,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */
   _onUpgradeJoined(): void {
     if (this._isClosed) return
-    this._flow.useStreamTransportInitial()
+    this._flow.undoBatchTransportInitial()
     this._flow.restartRound()
   }
 

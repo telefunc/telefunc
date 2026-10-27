@@ -30,8 +30,8 @@ class BdpEstimator {
   private _byteWindow: number = CREDIT_WINDOW_INITIAL_BYTES
   /** The largest the byte window gets: `CREDIT_WINDOW_MAX_BYTES`, or less where the sender's replay holds less. */
   private _byteWindowMax: number = CREDIT_WINDOW_MAX_BYTES
-  /** The byte window is what `raiseByteWindow` set: no growth since. */
-  private _byteWindowRaised = false
+  /** The byte window `raiseByteWindow` replaced, until it grows or the raise is undone; 0 otherwise. */
+  private _byteWindowBeforeRaise = 0
   private _bytesAtPingSent = 0
   private _bytesReceived = 0
   // Message-count axis
@@ -205,23 +205,23 @@ class BdpEstimator {
     this._byteWindow = Math.min(this._byteWindowMax, this._grownWindow || this._byteWindow * 2)
     this._grownWindow = 0
     this._grewSincePing = true
-    this._byteWindowRaised = false
+    this._byteWindowBeforeRaise = 0
   }
 
   /** Raises the byte window to `bytes`, within its cap; never lowers it. */
   raiseByteWindow(bytes: number): void {
     const window = Math.min(this._byteWindowMax, bytes)
     if (window <= this._byteWindow) return
+    if (this._byteWindowBeforeRaise === 0) this._byteWindowBeforeRaise = this._byteWindow
     this._byteWindow = window
     this._grewSincePing = true
-    this._byteWindowRaised = true
   }
 
-  /** Lowers the byte window to `bytes` where it is still what `raiseByteWindow` set. */
-  undoByteWindowRaise(bytes: number): void {
-    if (!this._byteWindowRaised) return
-    this._byteWindowRaised = false
-    this._byteWindow = Math.min(this._byteWindowMax, bytes)
+  /** Back to the byte window before `raiseByteWindow`, within its cap, where it didn't grow since. */
+  undoByteWindowRaise(): void {
+    if (this._byteWindowBeforeRaise === 0) return
+    this._byteWindow = Math.min(this._byteWindowMax, this._byteWindowBeforeRaise)
+    this._byteWindowBeforeRaise = 0
   }
 
   /** The byte window gets to `bytes` at most, `CREDIT_WINDOW_MAX_BYTES` if more, and is lowered to it. */
