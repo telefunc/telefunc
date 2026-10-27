@@ -20,9 +20,9 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That one `installRedis()` call configures Broadcast and Room from the same client. Telefunc runs its commands on its own connection, duplicated from your client with retries off, so a command whose reply was lost rejects rather than executes twice. Your client keeps its options, and Telefunc's connection closes when your client does. Make the call before the first Broadcast or Room use: an earlier use starts the in-memory backend, and `installRedis()` then throws.
+That one `installRedis()` call configures Broadcast and Room from the same client. Make the call before the first Broadcast or Room use: an earlier use starts the in-memory backend, and `installRedis()` then throws.
 
-`installRedis()` uses the same optional `prefix` for Broadcast and Room; `{` is reserved in prefixes. Calling it again with the same client and prefix does nothing. ioredis applies `keyPrefix` to commands but not to Pub/Sub channels, so `installRedis()` throws for a client that sets one; use `installRedis(redis, { prefix })` instead.
+`installRedis()` uses the same optional `prefix` for Broadcast and Room. Calling it again with the same client and prefix does nothing. A client that sets ioredis's `keyPrefix` makes `installRedis()` throw; pass `installRedis(redis, { prefix })` instead.
 
 `Channel` is per-instance — reconnects must land on the instance holding the channel's state. Pair this package with sticky sessions at the load balancer; see [Scaling](https://telefunc.com/stream/scale).
 
@@ -54,10 +54,8 @@ installRedis(redis)
 
 ## Delivery and Cluster notes
 
-On a Cluster, a room's keys share one hash slot.
-
-All subscriptions share one subscriber connection. When it drops, they resume on a fresh one; messages published in between are lost. While a Cluster reshards or fails over, a message can arrive late: subscribers wait up to one second for it, so they still receive messages in the order they were published, and drop one later than that. After a failover whose new master missed the last writes, subscribers still connected receive the later messages with `seq` numbers they already saw. When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops. Keep master clocks synchronized: expiries use the clock of the master that owns the room's slot.
+When you remove a Cluster node (`redis-cli --cluster del-node`), shut it down too: a removed node left running keeps the subscribers connected to it, and they receive nothing until it stops. Keep master clocks synchronized: room expiries use the masters' clocks.
 
 Room keeps its state (rooms, members, lane order) in keys that Redis must never evict: use `maxmemory-policy noeviction`. Any other policy can silently close a room.
 
-On a Cluster, a publish's `receivers` is omitted: a master's `PUBLISH` counts only its own subscribers, so it can't prove that nobody is subscribed.
+On Redis Cluster, publish receipts omit `receivers`.
