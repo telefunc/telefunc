@@ -12,8 +12,33 @@ type SlowLinkState = {
 // Preview only: the page loads through a proxy in the test process, which Vite's HMR socket would share.
 function testSlowLink(isDev: boolean) {
   if (isDev) return
-  // With two transports the page opens an SSE stream, then a WebSocket: wire-e2e-test.ts covers a slow link there.
-  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).length > 1) return
+  // With two transports the page opens an SSE stream, then moves to a WebSocket: the link share after the move is tested
+  // here, the rest of a slow link in wire-e2e-test.ts.
+  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).length > 1) {
+    test("channel: on a 1 MB/s link, once the page moved from SSE to a WebSocket, a channel's acknowledged sends beside another channel's download answer as on a WebSocket from the start", async () => {
+      const proxy = await startBlackHoleProxy(getServerUrl())
+      try {
+        await navigate(`${proxy.url}/channel`)
+        proxy.pace({ downBytesPerSecond: 1_000_000, upBytesPerSecond: 1_000_000, queueBytes: 64 * 1024 })
+        await page.click('#channel-test-link-share')
+        let linkShare: SlowLinkState['linkShare'] = null
+        await autoRetry(
+          async () => {
+            linkShare = (await getResult<SlowLinkState>('#channel-state')).linkShare
+            expect(linkShare).not.toBe(null)
+          },
+          { timeout: 50_000 },
+        )
+        // The last send goes after the move: a page that starts on a WebSocket answers it in ~2 s.
+        expect(linkShare!.pingMs.at(-1)).lessThan(2700)
+      } finally {
+        // The page leaves before the proxy closes, which would cut its connections.
+        await page.goto('about:blank')
+        await proxy.close()
+      }
+    })
+    return
+  }
 
   test("channel: on a 1 MB/s link, a channel's acknowledged sends beside another channel's download answer, on the connection they started on", async () => {
     const proxy = await startBlackHoleProxy(getServerUrl())
