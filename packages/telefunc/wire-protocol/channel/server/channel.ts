@@ -27,9 +27,9 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { isAbort } from '../../../node/server/Abort.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
-import { ShieldValidationError, isShieldValidationError } from '../../../shared/ShieldValidationError.js'
+import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
-import { ChannelClosedError, ChannelOverflowError, isChannelOverflowError, replayLossError } from '../channelErrors.js'
+import { ChannelClosedError, ChannelOverflowError, replayLossError } from '../channelErrors.js'
 import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
@@ -882,17 +882,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
       return
     }
-    await this._answerRequest(seq, listeners.list(), data, 'request')
+    await this._answerRequest(seq, listeners.list(), data)
   }
 
-  /** Answers request `seq` with the last listener's result, or with its failure; a publish answers a full buffer or a
-   *  shield failure with the status its page's `publish()` rejects with. */
-  protected async _answerRequest<T>(
-    seq: number,
-    listeners: readonly ((data: T) => unknown)[],
-    data: T,
-    kind: 'request' | 'publish',
-  ): Promise<void> {
+  /** Answers request `seq` with the last listener's result, or with its failure. */
+  protected async _answerRequest<T>(seq: number, listeners: readonly ((data: T) => unknown)[], data: T): Promise<void> {
     // A malformed request ends its page's wire, as a malformed frame does; one raised after the first listener returns
     // comes from another page (a relayed message answered malformed), so it only fails this request.
     let violationPeer = this._peer
@@ -906,26 +900,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
       answer = stringify(lastResult)
     } catch (err) {
-      this._sendRequestFailure(seq, err, violationPeer, kind)
+      this._sendRequestFailure(seq, err, violationPeer)
       return
     }
     this._sendAckRes(seq, answer)
   }
 
   /** Ends `violationPeer`'s wire on a ProtocolViolationError; otherwise answers the failure. */
-  private _sendRequestFailure(
-    seq: number,
-    err: unknown,
-    violationPeer: IndexedPeer | null,
-    kind: 'request' | 'publish',
-  ): void {
+  protected _sendRequestFailure(seq: number, err: unknown, violationPeer: IndexedPeer | null): void {
     if (violationPeer && isProtocolViolationError(err)) return violationPeer.sender.terminate()
-    if (kind === 'publish' && isChannelOverflowError(err)) {
-      return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
-    }
-    if (kind === 'publish' && isShieldValidationError(err)) {
-      return this._sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
-    }
     if (this._handleCallbackError(err)) return
     this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }

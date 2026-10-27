@@ -4,8 +4,9 @@ export type { BroadcastEndOwner }
 import { ServerChannel } from './channel.js'
 import { assert } from '../../../utils/assert.js'
 import type { IndexedPeer } from './IndexedPeer.js'
-import { ChannelOverflowError } from '../channelErrors.js'
-import { ERROR_REASON } from '../../wire/connectionFrame.js'
+import { ChannelOverflowError, isChannelOverflowError } from '../channelErrors.js'
+import { isShieldValidationError } from '../../../shared/ShieldValidationError.js'
+import { ACK_STATUS, ERROR_REASON } from '../../wire/connectionFrame.js'
 import type { BroadcastKind, ReattachState } from '../../wire/connectionFrame.js'
 
 /** What a page's publishes, subscriptions and attaches go to. */
@@ -83,13 +84,20 @@ class ServerBroadcastEnd extends ServerChannel {
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
     const owner = this._owner
     assert(owner)
-    return this._trackAck(this._answerRequest(seq, [(t: string) => owner._onPagePublish(t)], text, 'publish'))
+    return this._trackAck(this._answerRequest(seq, [(t: string) => owner._onPagePublish(t)], text))
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     const owner = this._owner
     assert(owner)
-    return this._trackAck(this._answerRequest(seq, [(d: Uint8Array) => owner._onPagePublishBinary(d)], data, 'publish'))
+    return this._trackAck(this._answerRequest(seq, [(d: Uint8Array) => owner._onPagePublishBinary(d)], data))
+  }
+
+  /** A full buffer or a shield failure answers with the status its page's `publish()` rejects with. */
+  protected override _sendRequestFailure(seq: number, err: unknown, violationPeer: IndexedPeer | null): void {
+    if (isChannelOverflowError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
+    if (isShieldValidationError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
+    super._sendRequestFailure(seq, err, violationPeer)
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
