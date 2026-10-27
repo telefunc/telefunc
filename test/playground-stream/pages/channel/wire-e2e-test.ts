@@ -155,8 +155,8 @@ function testWire(isDev: boolean) {
         const { connection } = await getResult<WireState>('#wire-state')
         const server = (await getCleanupState())[`wireConnection_${connection!.channelId}`]
         expect({ page: connection!.events, server: JSON.parse(server!) }).deep.equal({
-          page: ['open:true'],
-          server: ['open:true'],
+          page: ['start:false', 'open:true'],
+          server: ['start:false', 'open:true'],
         })
       } finally {
         page.off('requestfailed', onRequestFailed)
