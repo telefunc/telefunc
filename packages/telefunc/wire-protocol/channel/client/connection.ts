@@ -843,7 +843,8 @@ class ClientConnection implements MuxConnection {
   /** The wire's upload fell back to batch POSTs, which a channel may have opened before (see `_onTransportOpen`). */
   _onTransportBatched(transport: ClientChannelTransport): void {
     if (transport !== this.transport) return
-    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._onTransportBatched()
+    // Open ones only, as the join's undo: one still opening takes the batched window from its own open on this wire.
+    for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onTransportBatched()
   }
 
   _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
