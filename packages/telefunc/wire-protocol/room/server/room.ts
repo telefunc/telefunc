@@ -205,7 +205,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._admissions.delete(id)
       this._replica.applyControl(join)
       // A drop of the page's wire during the admission skipped this member: it starts disconnected.
-      if (this._stubOf.get(id)?.end.isConnected === false) this._setMemberConnected(id, false)
+      if (this._stubOf.get(id)?._end.isConnected === false) this._setMemberConnected(id, false)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
@@ -296,7 +296,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const id of this._admissions.keys()) this._admissions.set(id, 'abandoned')
     // A client back while its channel still holds it gets `closed`.
     const timeout = reconnectWindow()
-    for (const stub of this._stubs) void stub.end.close({ timeout }).catch(() => {})
+    for (const stub of this._stubs) void stub._end.close({ timeout }).catch(() => {})
     this._replica.track(this)
   }
 

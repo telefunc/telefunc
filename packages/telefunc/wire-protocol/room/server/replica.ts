@@ -224,7 +224,7 @@ class RoomReplica {
       const keys = await holdViews(
         this._incarnation,
         this.session,
-        stubs.map((stub) => stub.end.id),
+        stubs.map((stub) => stub._end.id),
       )
       return stubs.map((_, i) => keys[i] ?? null)
     } catch (error) {

@@ -161,7 +161,7 @@ type RoomStubOptions = {
 /** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
 class RoomStub implements LaneHolder, BroadcastEndOwner {
   /** Its channel to its client. */
-  readonly end: ServerBroadcastEnd
+  readonly _end: ServerBroadcastEnd
   private readonly _room: ServerRoom
   private readonly _publishShield: ShieldValidator | undefined
   private readonly _members = new Set<string>()
@@ -188,7 +188,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     this._publishShield = publishShield
     this._selfSuppressed = grants.selfSuppressed
     this._grantedHidden = grants.hidden
-    this.end = end
+    this._end = end
     end._setOwner(this)
     end.listen((message) => this._receive(message))
     end.onClose(() => room._detachStub(this))
@@ -324,7 +324,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     }
     this._members.add(id)
     if (!selfDelivery) this._selfSuppressed.add(id)
-    this.end.deliver(unorderedEventText({ __r: 'joined', reqId, id }))
+    this._end.deliver(unorderedEventText({ __r: 'joined', reqId, id }))
   }
 
   _forgetMember(id: string): void {
@@ -371,12 +371,12 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   /** An event this instance originates for this client alone: state each attach sends again. */
   _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
-    this.end.deliver(unorderedEventText(event), { resentOnAttach: true })
+    this._end.deliver(unorderedEventText(event), { resentOnAttach: true })
   }
 
   /** `_relayEvent` with the event's text already made, so one text can go to many clients. */
   _relayEventText(text: string): void {
-    this.end.deliver(text, { resentOnAttach: true })
+    this._end.deliver(text, { resentOnAttach: true })
   }
 
   /** A roster part's members this client gets: `visible` itself unless the part holds a hidden member this client was
@@ -389,7 +389,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   /** A hidden member's events reach only the clients that were handed it. */
   _relayControl(wireText: string, hiddenMember: string | null, opts: { resentOnAttach: boolean }): void {
-    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this.end.deliver(wireText, opts)
+    if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._end.deliver(wireText, opts)
   }
 
   _relayAnnouncement(wireText: string, ord: WirePublishInfo): void {
@@ -405,19 +405,19 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._wantsBinary(from, track) && this._replay.admitBinary(from, track, info)) this.end.deliverBinary(wireData)
+    if (this._wantsBinary(from, track) && this._replay.admitBinary(from, track, info)) this._end.deliverBinary(wireData)
   }
 
   _relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
     if (ackId) this._awaitDmReply(ackId, from)
-    this.end.deliver(fromMetaSeq !== undefined && this._namesSender(from) ? texts.unstamped() : texts.stamped())
+    this._end.deliver(fromMetaSeq !== undefined && this._namesSender(from) ? texts.unstamped() : texts.stamped())
   }
 
   /** Whether this client names `member` as this view does: it got the whole roster since it attached, and every event
    *  after it, none dropped while it was away. A hidden member's grant may reach the client after a message does. */
   private _namesSender(member: string): boolean {
     return (
-      this.end.isAttached &&
+      this._end.isAttached &&
       this._rosterSent &&
       this._room._replica.roster.settled &&
       this._room._model.memberHidden(member) === false
@@ -425,24 +425,24 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   }
 
   _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void {
-    if (this._replay.admit(event.from, info)) this.end.deliver(encodePublishText(serialized, info))
+    if (this._replay.admit(event.from, info)) this._end.deliver(encodePublishText(serialized, info))
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void {
     if (this._replay.admitBinary(frame.from, frame.track, info)) {
-      this.end.deliverBinary(encodePublishBinary(framed, info))
+      this._end.deliverBinary(encodePublishBinary(framed, info))
     }
   }
 
   private _relayTextLive(key: string, wireText: string, ord: WirePublishInfo): void {
-    if (this._replay.admit(key, ord)) this.end.deliver(wireText)
+    if (this._replay.admit(key, ord)) this._end.deliver(wireText)
   }
 
   // Ack-DM correlations
 
   /** A closing stub's close waits for the reply, as for the replies a participant stub forwards. */
   private _awaitDmReply(ackId: string, sender: string): void {
-    void this.end
+    void this._end
       ._trackAck(
         this._dmReplies.await(ackId).then((reply) => reply && this._room._writes.publishDmAck(sender, ackId, reply)),
       )
@@ -488,7 +488,7 @@ type RoomParticipantStubOptions = {
  *  flow back to the client. */
 class RoomParticipantStub implements BroadcastEndOwner {
   /** Its channel to its client. */
-  readonly end: ServerBroadcastEnd
+  private readonly _end: ServerBroadcastEnd
   private readonly _participant: ServerLocalParticipant
   private readonly _publishShield: ShieldValidator | undefined
   private readonly _dmReplies = new PendingDmReplies()
@@ -496,7 +496,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
   constructor({ participant, end, publishShield }: RoomParticipantStubOptions) {
     this._participant = participant
     this._publishShield = publishShield
-    this.end = end
+    this._end = end
     end._setOwner(this)
     end.listen((message) => this._receive(message))
     this._mirrorParticipant()
@@ -558,12 +558,12 @@ class RoomParticipantStub implements BroadcastEndOwner {
       left = true
       this._notify({ __r: 'left', ...leaveCauseToWire(cause) })
       // A client back while its channel still holds it gets its leave.
-      void this.end.close({ timeout: reconnectWindow() }).catch(() => {})
+      void this._end.close({ timeout: reconnectWindow() }).catch(() => {})
     })
 
-    this.end.onDisconnect(() => participant._setHolderConnected(false))
-    this.end.onReconnect(() => participant._setHolderConnected(true))
-    this.end.onClose(() => {
+    this._end.onDisconnect(() => participant._setHolderConnected(false))
+    this._end.onReconnect(() => participant._setHolderConnected(true))
+    this._end.onClose(() => {
       unlistenMeta()
       unlistenDemand()
       unlistenLeave()
@@ -579,15 +579,15 @@ class RoomParticipantStub implements BroadcastEndOwner {
 
   /** A closed stub's client left with the participant; a closing stub's close waits for the replies to DMs it forwarded. */
   deliverAck(msg: InboxMessage): Promise<RoomResult> {
-    if (this.end.isClosed) return Promise.resolve(DM_FAILURE.left)
+    if (this._end.isClosed) return Promise.resolve(DM_FAILURE.left)
     const reply = this._dmReplies.await(msg.ackId!)
     this._notify(dmNotice(msg))
-    return this.end._trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
+    return this._end._trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
   }
 
   private _notify(notice: ParticipantStubNotice): void {
     // Each attach sends the meta and the demand again.
     const resentOnAttach = notice.__r === 'p-meta' || notice.__r === 'demand' || notice.__r === 'demand-state'
-    this.end.deliver(unorderedEventText(notice), { resentOnAttach })
+    this._end.deliver(unorderedEventText(notice), { resentOnAttach })
   }
 }
