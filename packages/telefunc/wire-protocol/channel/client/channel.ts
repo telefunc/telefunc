@@ -307,6 +307,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) return
     if (batched) this._flow.useBatchTransportInitial()
+    else this._flow.undoBatchTransportInitial()
     this._flow.attach(uplink, downlink)
     this._fireOpen()
   }
