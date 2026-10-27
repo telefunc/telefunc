@@ -105,7 +105,7 @@ channel.send('Hello!')
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Called when the other side becomes unreachable / is back. See <Link href="#reconnection" />. |
-| `isConnected` | `false` while the other side is unreachable. |
+| `isConnected` | `true` from `onOpen` until `onClose`, except while the other side is unreachable. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
@@ -379,7 +379,7 @@ broadcast.subscribe((n) => showToast(n))
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
 | `onDisconnect(cb)` / `onReconnect(cb)` | Called when the other side becomes unreachable / is back. See <Link href="#reconnection" />. |
-| `isConnected` | `false` while the other side is unreachable. |
+| `isConnected` | `true` from `onOpen` until `onClose`, except while the other side is unreachable. |
 | `close()` | Close gracefully. |
 | `abort(abortValue?)` | Terminate immediately. |
 
