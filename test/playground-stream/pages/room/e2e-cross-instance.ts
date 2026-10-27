@@ -200,7 +200,7 @@ function testRedisAcrossServers() {
     const key = newId('redis-kinds')
     try {
       await broadcastRequest('b', '/api/broadcast-cross-instance/subscribe', key, 'POST')
-      const start = Date.now()
+      const start = performance.now()
       await broadcastRequest('a', '/api/broadcast-cross-instance/publish', key, 'POST', 'text')
       for (const n of [1, 2, 3, 4, 5]) {
         await broadcastRequest('a', '/api/broadcast-cross-instance/publish?kind=binary', key, 'POST', n)
@@ -209,7 +209,7 @@ function testRedisAcrossServers() {
         expect(await broadcastReceived('b', key)).deep.equal(['text', ...[1, 2, 3, 4, 5].map((n) => `binary:${n}`)])
       })
       // A frame held for a missing predecessor waits one second.
-      expect(Date.now() - start).lessThan(800)
+      expect(performance.now() - start).lessThan(800)
     } finally {
       await broadcastRequest('b', '/api/broadcast-cross-instance/unsubscribe', key, 'DELETE').catch(() => {})
     }
