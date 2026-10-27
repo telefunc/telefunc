@@ -887,8 +887,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** Answers request `seq` with the last listener's result, or with its failure. */
   protected async _answerRequest<T>(seq: number, listeners: readonly ((data: T) => unknown)[], data: T): Promise<void> {
-    // A malformed request ends its page's wire, as a malformed frame does; one raised after the first listener returns
-    // comes from another page (a relayed message answered malformed), so it only fails this request.
+    // A Room stub's listener decodes its page's request: a ProtocolViolationError until the listener returns ends the
+    // page's wire. A later one is another page's malformed reply to a send the listener awaits: it fails the request.
     let violationPeer = this._peer
     let answer: string
     try {
