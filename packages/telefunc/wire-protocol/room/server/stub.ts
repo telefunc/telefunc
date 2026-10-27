@@ -180,12 +180,18 @@ class RoomStub implements LaneHolder {
   /** @internal Whether this client was sent the whole roster since it attached. */
   _rosterSent = false
 
-  constructor(
-    serverRoom: ServerRoom,
-    end: ServerBroadcastEnd,
-    { publishShield, grants }: { publishShield?: ShieldValidator; grants: ResponseRoomGrants },
-  ) {
-    this._room = serverRoom
+  constructor({
+    room,
+    end,
+    publishShield,
+    grants,
+  }: {
+    room: ServerRoom
+    end: ServerBroadcastEnd
+    publishShield?: ShieldValidator
+    grants: ResponseRoomGrants
+  }) {
+    this._room = room
     this._publishShield = publishShield
     this._selfSuppressed = grants.selfSuppressed
     this._grantedHidden = grants.hidden
@@ -476,11 +482,15 @@ class RoomParticipantStub {
   private readonly _publishShield: ShieldValidator | undefined
   private readonly _dmReplies = new PendingDmReplies()
 
-  constructor(
-    participant: ServerLocalParticipant,
-    end: ServerBroadcastEnd,
-    { publishShield }: { publishShield?: ShieldValidator },
-  ) {
+  constructor({
+    participant,
+    end,
+    publishShield,
+  }: {
+    participant: ServerLocalParticipant
+    end: ServerBroadcastEnd
+    publishShield?: ShieldValidator
+  }) {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
       !participant._isBound,

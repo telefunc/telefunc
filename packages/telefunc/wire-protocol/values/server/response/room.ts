@@ -39,7 +39,8 @@ const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerCon
   },
   replace(serverRoom, context) {
     const end = context.createBroadcastChannel()
-    const metadata = serverRoom._openStub(end, {
+    const metadata = serverRoom._openStub({
+      end,
       publishShield: context.validators.get('data'),
       grants: responseRoomGrants(context, serverRoom.id),
     })
@@ -95,7 +96,7 @@ const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, Int
   },
   replace(participant, context) {
     const end = context.createBroadcastChannel()
-    new RoomParticipantStub(participant, end, { publishShield: context.validators.get('data') })
+    new RoomParticipantStub({ participant, end, publishShield: context.validators.get('data') })
     // Its room's stub, if co-returned, drops this member's echo at the source; otherwise the grant goes unused.
     if (!participant.selfDelivery) responseRoomGrants(context, participant._room.id).suppress(participant.id)
     const maxFrameBytes = getAdapterMaxFrameBytes()
