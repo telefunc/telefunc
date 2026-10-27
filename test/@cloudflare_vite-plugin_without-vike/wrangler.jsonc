@@ -1,0 +1,15 @@
+{
+  // spellcheck-ignore
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "telefunc_test_cloudflare_vite-plugin_without-vike",
+  "main": "./worker.ts",
+  "compatibility_date": "2025-08-06",
+  "compatibility_flags": ["nodejs_als"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "TelefuncDurableObject", "class_name": "TelefuncDurableObject" }
+    ]
+  },
+  "kv_namespaces": [{ "binding": "TelefuncKV", "id": "telefunc-kv" }],
+  "migrations": [{ "tag": "v1", "new_classes": ["TelefuncDurableObject"] }]
+}

@@ -1,0 +1,19 @@
+{
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite build && vite preview --port 3000",
+    "cf-typegen": "wrangler types --include-runtime false"
+  },
+  "dependencies": {
+    "telefunc": "0.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.30.3",
+    "@cloudflare/workers-types": "^4.20260305.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.0.16",
+    "wrangler": "^4.79.0"
+  },
+  "type": "module"
+}
