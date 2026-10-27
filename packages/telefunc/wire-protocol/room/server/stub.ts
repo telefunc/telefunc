@@ -463,14 +463,14 @@ class RoomStub implements LaneHolder {
   }
 }
 
-/** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave
- *  flow back to the client. */
 type RoomParticipantStubOptions = {
   participant: ServerLocalParticipant
   end: ServerBroadcastEnd
   publishShield?: ShieldValidator
 }
 
+/** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave
+ *  flow back to the client. */
 class RoomParticipantStub {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd

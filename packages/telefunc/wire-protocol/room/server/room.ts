@@ -526,7 +526,7 @@ class ServerLocalParticipant extends ParticipantBase {
     return await this._room._writes.publishBinaryFrame(frame, framed)
   }
 
-  /** @internal Its client's holder, which its inbox forwards to. */
+  /** @internal A client's hold on this participant, which its inbox forwards to. */
   _openStub(stub: Omit<RoomParticipantStubOptions, 'participant'>): ParticipantStubMetadata {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
