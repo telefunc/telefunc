@@ -8,7 +8,6 @@ export {
   ROOM_BUG_MESSAGE,
   CLIENT_ROOM_BUG_MESSAGE,
   roomFailureError,
-  toRoomResult,
   roomResultValue,
   DM_FAILURE,
 }
@@ -66,13 +65,6 @@ function toRoomFailure(err: unknown, report: (err: unknown) => void, bugMessage:
   if (isChannelOverflowError(err)) return { ok: false, kind: 'overflow', message: err.message }
   report(err)
   return { ok: false, kind: 'error', message: bugMessage }
-}
-
-function toRoomResult(work: Promise<unknown>, report: (err: unknown) => void): Promise<RoomResult> {
-  return work.then(
-    (value): RoomResult => ({ ok: true, value }),
-    (err: unknown) => toRoomFailure(err, report, ROOM_BUG_MESSAGE),
-  )
 }
 
 /** The error a caller's promise rejects with. */

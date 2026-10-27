@@ -36,7 +36,7 @@ import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
-import { DM_FAILURE, RoomError, toRoomResult } from '../errors.js'
+import { DM_FAILURE, RoomError, ROOM_BUG_MESSAGE, toRoomFailure } from '../errors.js'
 import {
   leaveCauseToWire,
   dmNotice,
@@ -145,7 +145,10 @@ class PendingDmReplies {
 }
 
 function roomResult(work: Promise<unknown>): Promise<RoomResult> {
-  return toRoomResult(work, reportRoomError)
+  return work.then(
+    (value): RoomResult => ({ ok: true, value }),
+    (err: unknown) => toRoomFailure(err, reportRoomError, ROOM_BUG_MESSAGE),
+  )
 }
 
 type RoomStubOptions = {
