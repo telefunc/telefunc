@@ -1,3 +1,12 @@
+## [0.3.1](https://github.com/telefunc/telefunc/compare/v0.3.0...v0.3.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* accept a full URL and a `Headers` object in `serve({ url, headers })` ([#505](https://github.com/telefunc/telefunc/issues/505)) ([25597bb](https://github.com/telefunc/telefunc/commit/25597bbe2a303af0feff5c6d8cb1b294bf763e1d))
+
+
+
 # [0.3.0](https://github.com/telefunc/telefunc/compare/v0.2.24...v0.3.0) (2026-10-23)
 
 

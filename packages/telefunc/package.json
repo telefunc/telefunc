@@ -1,6 +1,6 @@
 {
   "name": "telefunc",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "scripts": {
     "build": "rm -rf dist/ && tsc --build",
     "dev": "tsc --watch",
