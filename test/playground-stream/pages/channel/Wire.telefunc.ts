@@ -200,7 +200,8 @@ async function onWireAsk() {
   return ch.client
 }
 
-/** cleanupState: wireConnection_<id> = what the server end saw: 'open', 'disconnect', 'reconnect', each with isConnected. */
+/** cleanupState: wireConnection_<id> = what the server end saw: 'start' (before open), 'open', 'disconnect', 'reconnect', 'close',
+ *  each with isConnected. */
 async function onWireConnection() {
   const ch = new Channel<never, never>()
   const events: string[] = []
@@ -208,9 +209,11 @@ async function onWireConnection() {
     events.push(`${event}:${ch.isConnected}`)
     cleanupState[`wireConnection_${ch.id}`] = JSON.stringify(events)
   }
+  report('start')
   ch.onOpen(() => report('open'))
   ch.onDisconnect(() => report('disconnect'))
   ch.onReconnect(() => report('reconnect'))
+  ch.onClose(() => report('close'))
   return { channel: ch.client, channelId: ch.id }
 }
 

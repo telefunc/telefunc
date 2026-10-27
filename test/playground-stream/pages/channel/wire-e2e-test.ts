@@ -88,7 +88,7 @@ function testWire(isDev: boolean) {
     })
 
   if (canCutWire())
-    test('channel: when the connection drops, each end sees onDisconnect, and onReconnect once the page is back', async () => {
+    test('channel: each end is connected from onOpen until onClose, sees onDisconnect when the connection drops, and onReconnect once the page is back', async () => {
       await navigate(`${getServerUrl()}/channel`)
       await page.click('#wire-connection')
       const events = async () => {
@@ -97,17 +97,23 @@ function testWire(isDev: boolean) {
         return { page: connection?.events, server: server && JSON.parse(server) }
       }
       await autoRetry(async () => {
-        expect(await events()).deep.equal({ page: ['open:true'], server: ['open:true'] })
+        const seen = ['start:false', 'open:true']
+        expect(await events()).deep.equal({ page: seen, server: seen })
       })
       await page.context().setOffline(true)
       await cutWire()
       await autoRetry(async () => {
-        const seen = ['open:true', 'disconnect:false']
+        const seen = ['start:false', 'open:true', 'disconnect:false']
         expect(await events()).deep.equal({ page: seen, server: seen })
       })
       await page.context().setOffline(false)
       await autoRetry(async () => {
-        const seen = ['open:true', 'disconnect:false', 'reconnect:true']
+        const seen = ['start:false', 'open:true', 'disconnect:false', 'reconnect:true']
+        expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+      await page.click('#wire-connection-close')
+      await autoRetry(async () => {
+        const seen = ['start:false', 'open:true', 'disconnect:false', 'reconnect:true', 'close:false']
         expect(await events()).deep.equal({ page: seen, server: seen })
       })
     })
@@ -176,8 +182,8 @@ function testWire(isDev: boolean) {
         const { connection } = await getResult<WireState>('#wire-state')
         const server = (await getCleanupState())[`wireConnection_${connection!.channelId}`]
         expect({ page: connection!.events, server: JSON.parse(server!) }).deep.equal({
-          page: ['open:true'],
-          server: ['open:true'],
+          page: ['start:false', 'open:true'],
+          server: ['start:false', 'open:true'],
         })
       } finally {
         page.off('requestfailed', onRequestFailed)

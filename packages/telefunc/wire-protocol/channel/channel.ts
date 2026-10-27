@@ -87,7 +87,7 @@ type ChannelCloseCallback = (err?: Error) => void | Promise<void>
 type ChannelBase<TOut = unknown, TIn = unknown, TDefault extends boolean = false> = {
   readonly id: string
   readonly isClosed: boolean
-  /** False while the other side can't be reached and the channel waits for it to come back. */
+  /** True from open until close, except while the other side can't be reached. */
   readonly isConnected: boolean
   /** Default send. Returns `Promise<ack>` when `TDefault = true`, otherwise `Promise<void>`. */
   send(data: ChannelData<TOut>): TDefault extends true ? Promise<ChannelAck<TOut>> : Promise<void>
