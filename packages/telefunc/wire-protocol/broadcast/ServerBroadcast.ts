@@ -15,7 +15,7 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { invokeChannelListener, makePublishInfo } from '../channel/channel.js'
 import { reportServerChannelError } from '../channel/server/channel.js'
-import { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
+import { ServerBroadcastEnd, type BroadcastEndOwner } from '../channel/server/ServerBroadcastEnd.js'
 import { assertPublishShield, type ShieldValidator } from '../../node/server/shield.js'
 import type { BroadcastPayload, BroadcastRoute } from '../backend/broadcast/contract.js'
 import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
@@ -36,7 +36,7 @@ assertIsNotBrowser()
 const SERVER_BROADCAST_BRAND: unique symbol = Symbol.for('ServerBroadcast')
 type BroadcastUnsubscribe = () => void
 
-class ServerBroadcast<T = unknown> {
+class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
   readonly [SERVER_BROADCAST_BRAND] = true
   /** @see ChannelShield in ../channel/channel.ts — broadcast only validates incoming
    *  publishes from clients (the `data` direction). The `ack` slot is unused: publish
@@ -59,12 +59,7 @@ class ServerBroadcast<T = unknown> {
     assertBroadcastKey(opts.key)
     this.key = opts.key
     this._end = new ServerBroadcastEnd()
-    this._end.onPublish((serialized) => this._publishFromPage(serialized))
-    this._end.onPublishBinary((data) => this._publish('binary', data))
-    this._end.onSubscription((kind, on) => {
-      this._peerSubscriptions[kind] = on
-      this._syncSubscription(kind)
-    })
+    this._end._setOwner(this)
     this._routes = {
       text: new RouteSubscription({ key: this.key, kind: 'text' }, (payload, rawInfo) =>
         this._deliverBroadcastMessage(payload, rawInfo),
@@ -217,10 +212,21 @@ class ServerBroadcast<T = unknown> {
     return getBroadcastBackend().publish({ key: this.key, kind }, payload)
   }
 
-  /** Without a shield, the page's payload is never parsed here. */
-  private _publishFromPage(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
+  /** @internal Without a shield, the page's payload is never parsed here. */
+  _onPagePublish(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
     if (this._publishShield) assertPublishShield(this._publishShield, parse(serialized))
     return this._publish('text', serialized)
+  }
+
+  /** @internal */
+  _onPagePublishBinary(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
+    return this._publish('binary', data)
+  }
+
+  /** @internal */
+  _onPageSubscription(kind: BroadcastKind, on: boolean): void {
+    this._peerSubscriptions[kind] = on
+    this._syncSubscription(kind)
   }
 }
 

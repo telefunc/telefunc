@@ -6,7 +6,7 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { parsePeerText } from '../../channel/server/channel.js'
-import type { ServerBroadcastEnd } from '../../channel/server/ServerBroadcastEnd.js'
+import type { BroadcastEndOwner, ServerBroadcastEnd } from '../../channel/server/ServerBroadcastEnd.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
 import { assertPublishShield, type ShieldValidator } from '../../../node/server/shield.js'
 import {
@@ -156,7 +156,7 @@ type RoomStubOptions = {
 }
 
 /** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
-class RoomStub implements LaneHolder {
+class RoomStub implements LaneHolder, BroadcastEndOwner {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
   private readonly _room: ServerRoom
@@ -186,15 +186,34 @@ class RoomStub implements LaneHolder {
     this._selfSuppressed = grants.selfSuppressed
     this._grantedHidden = grants.hidden
     this.end = end
-    end.onPublish((text) => roomResult(this._publishText(decodeRoomPublish(parsePeerText(text)))))
-    end.onPublishBinary((framed) => roomResult(this._publishBinary(decodeStubBinaryFrame(framed), framed)))
-    end.onSubscription((kind, on) => this._onSubscription(kind, on))
-    end.onAttach(() => {
-      this._rosterSent = false
-      this._room._onStubAttached(this)
-    })
+    end._setOwner(this)
     end.listen((message) => this._receive(message))
     grants.onSuppressed((member) => this._room._onStubSuppressed(this, member))
+  }
+
+  // Client publishes, subscriptions and attaches
+
+  _onPagePublish(text: string): Promise<RoomResult> {
+    return roomResult(this._publishText(decodeRoomPublish(parsePeerText(text))))
+  }
+
+  _onPagePublishBinary(framed: Uint8Array): Promise<RoomResult> {
+    return roomResult(this._publishBinary(decodeStubBinaryFrame(framed), framed))
+  }
+
+  /** Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`. */
+  _onPageSubscription(kind: BroadcastKind, on: boolean): void {
+    if (kind === 'binary' || on === this._wantsText) return
+    const before = on ? { all: this._wantsText, members: new Map<string, boolean>() } : null
+    this._wantsText = on
+    // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
+    if (on) this._flushTail()
+    this._room._onHolderTextChanged(this, before)
+  }
+
+  _onPageAttach(): void {
+    this._rosterSent = false
+    this._room._onStubAttached(this)
   }
 
   // Client requests
@@ -223,16 +242,6 @@ class RoomStub implements LaneHolder {
       case 'req-dm':
         return await room._writes.sendDm(this._requireMember(req.id), req.to, req.data, req.ack === true)
     }
-  }
-
-  /** Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`. */
-  private _onSubscription(kind: BroadcastKind, on: boolean): void {
-    if (kind === 'binary' || on === this._wantsText) return
-    const before = on ? { all: this._wantsText, members: new Map<string, boolean>() } : null
-    this._wantsText = on
-    // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
-    if (on) this._flushTail()
-    this._room._onHolderTextChanged(this, before)
   }
 
   private _applyDeclaration(declaration: RoomDeclaration): void {
@@ -471,7 +480,7 @@ type RoomParticipantStubOptions = {
 
 /** One client's hold on a server participant: its requests act as that participant, whose inbox, demand, meta and leave
  *  flow back to the client. */
-class RoomParticipantStub {
+class RoomParticipantStub implements BroadcastEndOwner {
   /** Its channel to its client. */
   readonly end: ServerBroadcastEnd
   private readonly _participant: ServerLocalParticipant
@@ -482,19 +491,24 @@ class RoomParticipantStub {
     this._participant = participant
     this._publishShield = publishShield
     this.end = end
-    // Its client publishes text as a `req-publish` request.
-    end.onPublish(() => {
-      throw new ProtocolViolationError('text publish on a Room participant stub')
-    })
-    end.onPublishBinary((framed) =>
-      roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed)),
-    )
-    end.onAttach(() => {
-      this._notify({ __r: 'p-meta', ...participant._acceptedMeta })
-      this._notify({ __r: 'demand-state', tracks: participant._demandedTracks })
-    })
+    end._setOwner(this)
     end.listen((message) => this._receive(message))
     this._mirrorParticipant()
+  }
+
+  /** Its client publishes text as a `req-publish` request. */
+  _onPagePublish(): never {
+    throw new ProtocolViolationError('text publish on a Room participant stub')
+  }
+
+  _onPagePublishBinary(framed: Uint8Array): Promise<RoomResult> {
+    const participant = this._participant
+    return roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed))
+  }
+
+  _onPageAttach(): void {
+    this._notify({ __r: 'p-meta', ...this._participant._acceptedMeta })
+    this._notify({ __r: 'demand-state', tracks: this._participant._demandedTracks })
   }
 
   /** A request, sent with an ack, answers with its result; an ack DM's reply, sent without one, settles that DM. */
