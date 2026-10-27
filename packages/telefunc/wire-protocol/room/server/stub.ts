@@ -1,4 +1,5 @@
 export { RoomStub, RoomParticipantStub, ResponseRoomGrants, MemberMessageTexts, unorderedEventText }
+export type { RoomStubOptions }
 
 import { stringify } from '@brillout/json-serializer/stringify'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -155,6 +156,13 @@ function assertPublishShield(validate: ShieldValidator | undefined, data: unknow
   if (result !== true) throw new ShieldValidationError(result)
 }
 
+type RoomStubOptions = {
+  room: ServerRoom
+  end: ServerBroadcastEnd
+  publishShield?: ShieldValidator
+  grants: ResponseRoomGrants
+}
+
 /** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
 class RoomStub implements LaneHolder {
   /** Its channel to its client. */
@@ -180,17 +188,7 @@ class RoomStub implements LaneHolder {
   /** @internal Whether this client was sent the whole roster since it attached. */
   _rosterSent = false
 
-  constructor({
-    room,
-    end,
-    publishShield,
-    grants,
-  }: {
-    room: ServerRoom
-    end: ServerBroadcastEnd
-    publishShield?: ShieldValidator
-    grants: ResponseRoomGrants
-  }) {
+  constructor({ room, end, publishShield, grants }: RoomStubOptions) {
     this._room = room
     this._publishShield = publishShield
     this._selfSuppressed = grants.selfSuppressed

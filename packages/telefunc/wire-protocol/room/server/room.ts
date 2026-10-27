@@ -27,7 +27,7 @@ import {
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import { type RoomModel, RoomState, RoomStateView } from '../state.js'
 import { ParticipantBase } from '../participant.js'
-import { MemberMessageTexts, RoomStub } from './stub.js'
+import { MemberMessageTexts, RoomStub, type RoomStubOptions } from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
@@ -335,7 +335,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
    *  earlier one is in the snapshot. */
-  _openStub(stub: Omit<ConstructorParameters<typeof RoomStub>[0], 'room'>): RoomSnapshotMetadata {
+  _openStub(stub: Omit<RoomStubOptions, 'room'>): RoomSnapshotMetadata {
     this._attachStub(new RoomStub({ ...stub, room: this }))
     return {
       channelId: stub.end.id,
