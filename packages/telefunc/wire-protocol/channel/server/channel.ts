@@ -863,7 +863,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     for (const waiter of waiters) waiter()
   }
 
-  private async _answerAckReq<T>(
+  private _answerAckReq<T>(
     listeners: Listeners<(data: T) => unknown>,
     data: T,
     seq: number,
@@ -871,16 +871,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   ): Promise<void> {
     if (listeners.size === 0) {
       this._sendAckRes(seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
-      return
+      return Promise.resolve()
     }
     const verdict = validate ? validate(data) : true
     // `shield-error` status lets the client reject its `send()` promise with a branded
     // ShieldValidationError — same identity every other shield-fail surface produces.
     if (verdict !== true) {
       this._sendAckRes(seq, verdict, ACK_STATUS.SHIELD_ERROR)
-      return
+      return Promise.resolve()
     }
-    await this._answerRequest(seq, listeners.list(), data)
+    return this._answerRequest(seq, listeners.list(), data)
   }
 
   /** Answers request `seq` with the last listener's result, or with its failure. */
