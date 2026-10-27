@@ -13,6 +13,7 @@ import {
   assertProtocol,
   encodePublishBinary,
   encodePublishText,
+  isProtocolViolationError,
   ProtocolViolationError,
   type BroadcastKind,
   type WirePublishInfo,
@@ -49,6 +50,7 @@ import {
   type RoomDemandEvent,
   type InboxMessage,
   type RoomDmEnvelope,
+  type RoomFailure,
   type RoomJoinedEvent,
   type RoomResult,
   type RoomRosterEvent,
@@ -151,6 +153,17 @@ function roomResult(work: Promise<unknown>): Promise<RoomResult> {
   )
 }
 
+/** Runs a stub's handling of what its page sent: a malformed message ends the page's wire and fails its request. */
+function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promise<RoomFailure> {
+  try {
+    return handle()
+  } catch (err) {
+    if (!isProtocolViolationError(err)) throw err
+    end._terminateWire()
+    return Promise.resolve({ ok: false, kind: 'error', message: err.message })
+  }
+}
+
 type RoomStubOptions = {
   room: ServerRoom
   end: ServerBroadcastEnd
@@ -190,7 +203,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     this._grantedHidden = grants.hidden
     this._end = end
     end._setOwner(this)
-    end.listen((message) => this._receive(message))
+    end.listen((message) => receiveFromPage(end, () => this._receive(message)))
     end.onClose(() => room._detachStub(this))
     end.onDisconnect(() => room._setHeldConnected(this, false))
     end.onReconnect(() => room._setHeldConnected(this, true))
@@ -200,11 +213,11 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   // Client publishes, subscriptions and attaches
 
   _onPagePublish(text: string): Promise<RoomResult> {
-    return roomResult(this._publishText(decodeRoomPublish(parsePeerText(text))))
+    return receiveFromPage(this._end, () => roomResult(this._publishText(decodeRoomPublish(parsePeerText(text)))))
   }
 
   _onPagePublishBinary(framed: Uint8Array): Promise<RoomResult> {
-    return roomResult(this._publishBinary(decodeStubBinaryFrame(framed), framed))
+    return receiveFromPage(this._end, () => roomResult(this._publishBinary(decodeStubBinaryFrame(framed), framed)))
   }
 
   /** Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`. */
@@ -498,18 +511,22 @@ class RoomParticipantStub implements BroadcastEndOwner {
     this._publishShield = publishShield
     this._end = end
     end._setOwner(this)
-    end.listen((message) => this._receive(message))
+    end.listen((message) => receiveFromPage(end, () => this._receive(message)))
     this._mirrorParticipant()
   }
 
   /** Its client publishes text as a `req-publish` request. */
-  _onPagePublish(): never {
-    throw new ProtocolViolationError('text publish on a Room participant stub')
+  _onPagePublish(): Promise<RoomResult> {
+    return receiveFromPage(this._end, () => {
+      throw new ProtocolViolationError('text publish on a Room participant stub')
+    })
   }
 
   _onPagePublishBinary(framed: Uint8Array): Promise<RoomResult> {
     const participant = this._participant
-    return roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed))
+    return receiveFromPage(this._end, () =>
+      roomResult(participant._publishFrame(decodeParticipantFrame(framed, participant.id), framed)),
+    )
   }
 
   _onPageAttach(): void {

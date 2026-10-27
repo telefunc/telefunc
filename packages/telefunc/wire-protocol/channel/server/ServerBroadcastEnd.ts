@@ -37,6 +37,11 @@ class ServerBroadcastEnd extends ServerChannel {
     return this._peer !== null
   }
 
+  /** Ends its page's wire, as a frame that breaks the protocol does. */
+  _terminateWire(): void {
+    this._peer?.sender.terminate()
+  }
+
   /** A PUBLISH frame to its page, never refused: a page too far behind is let go. One `resentOnAttach`, which the owner
    *  sends again at each attach, may be dropped while the page is away without leaving it a gap. */
   deliver(frame: string, opts?: { resentOnAttach?: boolean }): void {
@@ -96,10 +101,10 @@ class ServerBroadcastEnd extends ServerChannel {
   }
 
   /** A full buffer or a shield failure answers with the status its page's `publish()` rejects with. */
-  protected override _sendRequestFailure(seq: number, err: unknown, violationPeer: IndexedPeer | null): void {
+  protected override _sendRequestFailure(seq: number, err: unknown): void {
     if (isChannelOverflowError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
     if (isShieldValidationError(err)) return this._sendAckRes(seq, err.message, ACK_STATUS.SHIELD_ERROR)
-    super._sendRequestFailure(seq, err, violationPeer)
+    super._sendRequestFailure(seq, err)
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {

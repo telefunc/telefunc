@@ -46,7 +46,6 @@ import {
   ERROR_REASON,
   ProtocolViolationError,
   TAG,
-  isProtocolViolationError,
   assertProtocol,
   countsCredit,
   isChannelCtrlTag,
@@ -576,8 +575,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
           pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
         }
       } catch (err) {
-        // A listener's ProtocolViolationError ends the wire, as a malformed frame does.
-        if (isProtocolViolationError(err)) throw err
         if (this._handleCallbackError(err)) return
       }
     }
@@ -888,28 +885,19 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** Answers request `seq` with the last listener's result, or with its failure. */
   protected async _answerRequest<T>(seq: number, listeners: readonly ((data: T) => unknown)[], data: T): Promise<void> {
-    // A Room stub's listener decodes its page's request: a ProtocolViolationError until the listener returns ends the
-    // page's wire. A later one is another page's malformed reply to a send the listener awaits: it fails the request.
-    let violationPeer = this._peer
     let answer: string
     try {
       let lastResult: unknown
-      for (const listener of listeners) {
-        const result = listener(data)
-        violationPeer = null
-        lastResult = await result
-      }
+      for (const listener of listeners) lastResult = await listener(data)
       answer = stringify(lastResult)
     } catch (err) {
-      this._sendRequestFailure(seq, err, violationPeer)
+      this._sendRequestFailure(seq, err)
       return
     }
     this._sendAckRes(seq, answer)
   }
 
-  /** Ends `violationPeer`'s wire on a ProtocolViolationError; otherwise answers the failure. */
-  protected _sendRequestFailure(seq: number, err: unknown, violationPeer: IndexedPeer | null): void {
-    if (violationPeer && isProtocolViolationError(err)) return violationPeer.sender.terminate()
+  protected _sendRequestFailure(seq: number, err: unknown): void {
     if (this._handleCallbackError(err)) return
     this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
   }
