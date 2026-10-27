@@ -197,6 +197,8 @@ class ServerRoom extends RoomStateView implements Room {
       this._assertAdmitted(id)
       this._admissions.delete(id)
       this._replica.applyControl(join)
+      // A drop of the page's wire during the admission skipped this member: it starts disconnected.
+      if (this._stubOf.get(id)?.end.isConnected === false) this._setMemberConnected(id, false)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
@@ -372,9 +374,12 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   private _setHeldConnected(stub: RoomStub, connected: boolean): void {
-    for (const id of stub._heldMembers()) {
-      void this._writes.setMemberConnected(id, connected).catch(reportRoomError)
-    }
+    // An admission under way takes the wire's state once its join applies.
+    for (const id of stub._heldMembers()) if (!this._admissions.has(id)) this._setMemberConnected(id, connected)
+  }
+
+  private _setMemberConnected(id: string, connected: boolean): void {
+    void this._writes.setMemberConnected(id, connected).catch(reportRoomError)
   }
 
   private _detachStub(stub: RoomStub): void {

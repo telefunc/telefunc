@@ -784,6 +784,37 @@ function testRoom() {
       await bob.context.close()
     }
   })
+  test('room: in a members-only chat, a member whose tab goes offline while the membership service decides is shown reconnecting once admitted, and back once its tab is', async () => {
+    const chatId = `e2e-chat:${crypto.randomUUID()}`
+    const alice = await openChat(chatId, 'Alice', 'join')
+    const context = await page.context().browser()!.newContext()
+    const tab = await context.newPage()
+    try {
+      await navigate(`${getServerUrl()}/room?chat=${encodeURIComponent(chatId)}&as=Bob`, undefined, tab)
+      await tab.click('#chat-join-member')
+      const lookup = `chatMember_${chatId}_Bob`
+      await autoRetry(async () => expect((await getCleanupState())[lookup]).toBe('asked'))
+      await context.setOffline(true)
+      await cutWire()
+      await runServerAction(lookup)
+      await autoRetry(async () =>
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob (reconnecting…)'] }),
+      )
+      await alice.tab.click('#chat-who')
+      await autoRetry(async () => expect(await alice.tab.textContent('#chat-online')).toBe('Alice, Bob (away)'))
+      await context.setOffline(false)
+      await autoRetry(async () => {
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob'] })
+        expect(await tab.textContent('#chat-status')).toBe('Connected')
+        expect(await tab.locator('#chat-members li').allTextContents()).deep.equal(['Alice', 'Bob (you)'])
+      })
+      await alice.tab.click('#chat-who')
+      await autoRetry(async () => expect(await alice.tab.textContent('#chat-online')).toBe('Alice, Bob'))
+    } finally {
+      await alice.context.close()
+      await context.close()
+    }
+  })
   test("room: in a chat, the server announces when a signed-in member's tab goes offline and comes back, and someone watching unseen drops without anyone seeing it; the signed-in member sees itself reconnecting, in the list and on its own profile", async () => {
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')

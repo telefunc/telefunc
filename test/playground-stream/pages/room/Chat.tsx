@@ -1,13 +1,13 @@
 export { Chat }
 
 import React, { useEffect, useState, useSyncExternalStore } from 'react'
-import { onGetChat, onSignIn, onWatchChat, onWhoIsOnline, onGetChatMember } from './Chat.telefunc'
+import { onGetChat, onGetMembersChat, onSignIn, onWatchChat, onWhoIsOnline, onGetChatMember } from './Chat.telefunc'
 
 type ChatRoom = Awaited<ReturnType<typeof onGetChat>>
 type Me = Awaited<ReturnType<ChatRoom['join']>>
 type Profile = Awaited<ReturnType<typeof onGetChatMember>>
 
-/** A chat at `?chat=<id>&as=<name>`: join as a guest, sign in, or watch unseen. */
+/** A chat at `?chat=<id>&as=<name>`: join as a guest, join as a member, sign in, or watch unseen. */
 function Chat() {
   const [joined, setJoined] = useState<{ chat: ChatRoom; me: Me } | null>(null)
   const [params, setParams] = useState<URLSearchParams | null>(null)
@@ -20,11 +20,18 @@ function Chat() {
     const chat = await onGetChat(chatId)
     setJoined({ chat, me: await chat.join({ meta: { name } }) })
   }
+  const joinAsMember = async () => {
+    const chat = await onGetMembersChat(chatId)
+    setJoined({ chat, me: await chat.join({ meta: { name } }) })
+  }
   return (
     <div>
       <h2>Chat</h2>
       <button id="chat-join" onClick={joinAsGuest}>
         Join as a guest
+      </button>
+      <button id="chat-join-member" onClick={joinAsMember}>
+        Join as a member
       </button>
       <button id="chat-sign-in" onClick={async () => setJoined(await onSignIn(chatId, name))}>
         Sign in
