@@ -127,10 +127,12 @@ function column(p: Page, name: string) {
 }
 
 async function join(p: Page, name: string, button: string) {
-  // Retried until hydration makes the button act
+  const leaveButton = column(p, name).getByRole('button', { name: 'Leave' })
+  // Retried until hydration makes the button act; once a click joined, the button is gone
   await autoRetry(async () => {
-    await column(p, name).getByRole('button', { name: button }).click({ timeout: 1000 })
-    await column(p, name).getByRole('button', { name: 'Leave' }).waitFor({ timeout: 1000 })
+    if (!(await leaveButton.isVisible()))
+      await column(p, name).getByRole('button', { name: button }).click({ timeout: 1000 })
+    await leaveButton.waitFor({ timeout: 1000 })
   })
 }
 
