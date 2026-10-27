@@ -137,14 +137,28 @@ async function joinAndLetGo(roomId: string, leaves: string[]): Promise<void> {
 }
 
 /** Joins the room named in the URL as `Mallory`, then sends what no client library sends, as a hostile page can. */
-async function joinAndSendMalformed(kind: 'request' | 'publish'): Promise<void> {
+async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Promise<void> {
   const roomId = new URLSearchParams(location.search).get('roomId')!
   const room = await onGetRoom(roomId)
   keepReachable(room)
-  await room.join({ meta: { name: 'Mallory' } })
   // The room's own channel, past the API that checks what goes on it.
   const { _end: end } = room as unknown as {
-    _end: { send(data: unknown, options: { ack: true }): Promise<unknown>; publish(data: unknown): Promise<unknown> }
+    _end: {
+      send(data: unknown, options: { ack: true }): Promise<unknown>
+      publish(data: unknown): Promise<unknown>
+      _sendReply(reply: Promise<unknown>, failure: unknown): void
+    }
+  }
+  const me = await room.join({ meta: { name: 'Mallory' } })
+  if (kind === 'reply') {
+    const sendReply = end._sendReply.bind(end)
+    end._sendReply = (reply, failure) =>
+      sendReply(
+        reply.then((dmReply) => ({ ...(dmReply as object), reply: 'bogus' })),
+        failure,
+      )
+    me.listen(() => 'hi')
+    return
   }
   await (kind === 'request' ? end.send({ __r: 'req-bogus' }, { ack: true }) : end.publish({ __r: 'bogus' })).catch(
     () => {},
@@ -733,15 +747,26 @@ function Room() {
         const [roomId, room] = await createRoom('malformed')
         const events: string[] = []
         const received: unknown[] = []
+        let dm: string | null = null
         room.subscribe((data) => received.push(data))
-        room.onJoin((member) => events.push(`join:${member.meta.name}`))
+        room.onJoin((member) => {
+          events.push(`join:${member.meta.name}`)
+          if (member.meta.name !== 'Mallory') return
+          void me.send(member.id, 'hello?', { ack: true }).then(
+            () => (dm = 'answered'),
+            () => (dm = 'rejected'),
+          )
+        })
         const me = await room.join({ meta: { name: 'Witness' } })
         room.onLeave((member, cause) => {
           events.push(`leave:${member.meta.name}:${cause.type}`)
           void me.publish(`bye ${member.meta.name}`)
         })
-        // The test joins `Mallory` from another tab, which then sends a malformed request or publish.
-        await pollUntil(() => ({ result: { roomId, events, received }, done: received.length > 0 }), 150)
+        // The test joins `Mallory` from another tab, which then sends a malformed request, publish or DM reply.
+        await pollUntil(
+          () => ({ result: { roomId, events, received, dm }, done: received.length > 0 && dm !== null }),
+          150,
+        )
       })}
 
       {scenario('malformed-request', null, 'Join the room named in the URL, then send a malformed request', () =>
@@ -750,6 +775,10 @@ function Room() {
 
       {scenario('malformed-publish', null, 'Join the room named in the URL, then send a malformed publish', () =>
         joinAndSendMalformed('publish'),
+      )}
+
+      {scenario('malformed-reply', null, 'Join the room named in the URL, then reply to a DM malformed', () =>
+        joinAndSendMalformed('reply'),
       )}
 
       {scenario(

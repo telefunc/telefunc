@@ -677,7 +677,7 @@ function testRoom() {
       ])
     }, CLOSED_TAB_WAIT)
   })
-  for (const kind of ['request', 'publish'] as const)
+  for (const kind of ['request', 'publish', 'reply'] as const)
     test(`room: a page that sends a malformed Room ${kind} loses its connection: its member leaves, and the room keeps working for the others`, async () => {
       await navigate(`${getServerUrl()}/room`)
       await page.click('#test-room-malformed')
@@ -692,6 +692,8 @@ function testRoom() {
             roomId,
             events: ['join:Witness', 'join:Mallory', 'leave:Mallory:disconnected'],
             received: ['bye Mallory'],
+            // In the `reply` case, Mallory answers this DM malformed.
+            dm: 'rejected',
           })
         })
       } finally {
