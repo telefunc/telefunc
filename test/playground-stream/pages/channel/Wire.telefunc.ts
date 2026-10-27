@@ -10,6 +10,7 @@ export {
   onWireAnswer,
   onWireAsk,
   onWireConnection,
+  onWireChat,
   onWirePresence,
 }
 
@@ -213,6 +214,31 @@ async function onWireConnection() {
   ch.onOpen(() => report('open'))
   ch.onDisconnect(() => report('disconnect'))
   ch.onReconnect(() => report('reconnect'))
+  ch.onClose(() => report('close'))
+  return { channel: ch.client, channelId: ch.id }
+}
+
+/** A chat whose server saves each message before acknowledging it, and ends the chat while a save is pending.
+ *  Server actions: wireChat_<id>_close, _check (records isConnected), _saved (the database finishes the save).
+ *  cleanupState: wireChat_<id> = what the server end saw: 'open', 'message', 'closing' (a check), 'close', each with isConnected. */
+async function onWireChat() {
+  const ch = new Channel<(message: string) => Promise<string>, never>()
+  const events: string[] = []
+  const report = (event: string) => {
+    events.push(`${event}:${ch.isConnected}`)
+    cleanupState[`wireChat_${ch.id}`] = JSON.stringify(events)
+  }
+  let saved!: () => void
+  const save = new Promise<void>((resolve) => (saved = resolve))
+  onServerAction(`wireChat_${ch.id}_saved`, () => saved())
+  onServerAction(`wireChat_${ch.id}_close`, () => void ch.close({ timeout: 60_000 }))
+  onServerAction(`wireChat_${ch.id}_check`, () => report(ch.isClosed ? 'closing' : 'check'))
+  ch.listen(async (message) => {
+    report('message')
+    await save
+    return `saved:${message}`
+  })
+  ch.onOpen(() => report('open'))
   ch.onClose(() => report('close'))
   return { channel: ch.client, channelId: ch.id }
 }

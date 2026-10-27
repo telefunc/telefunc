@@ -36,6 +36,7 @@ type WireState = {
   answerer: { channelId: string; closed: string | null } | null
   ask: { toOther: string; toOwn: string } | null
   connection: { channelId: string; events: string[] } | null
+  chat: { channelId: string; events: string[] } | null
   presence: { channelId: string; online: boolean; closed?: string } | null
 }
 
@@ -115,6 +116,49 @@ function testWire(isDev: boolean) {
       await autoRetry(async () => {
         const seen = ['start:false', 'open:true', 'disconnect:false', 'reconnect:true', 'close:false']
         expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+    })
+
+  if (canCutWire())
+    test("channel: while a close waits on a message's save, each end is disconnected once the connection drops and connected once the page is back, until onClose", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#wire-chat')
+      let channelId = ''
+      const events = async () => {
+        const { chat } = await getResult<WireState>('#wire-state')
+        channelId = chat!.channelId
+        const server = (await getCleanupState())[`wireChat_${channelId}`]
+        return { page: chat!.events, server: server && JSON.parse(server) }
+      }
+      const last = async () => {
+        await page.click('#wire-chat-check')
+        await runServerAction(`wireChat_${channelId}_check`)
+        const seen = await events()
+        return { page: seen.page.at(-1), server: seen.server.at(-1) }
+      }
+      await autoRetry(async () => {
+        expect(await events()).deep.equal({ page: ['open:true'], server: ['open:true', 'message:true'] })
+      })
+      await runServerAction(`wireChat_${channelId}_close`)
+      await autoRetry(async () => {
+        expect(await last()).deep.equal({ page: 'closing:true', server: 'closing:true' })
+      })
+      await page.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        expect(await last()).deep.equal({ page: 'closing:false', server: 'closing:false' })
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        expect(await last()).deep.equal({ page: 'closing:true', server: 'closing:true' })
+      })
+      await runServerAction(`wireChat_${channelId}_saved`)
+      await autoRetry(async () => {
+        const seen = await events()
+        expect({ page: seen.page.at(-1), server: seen.server.at(-1) }).deep.equal({
+          page: 'close:false',
+          server: 'close:false',
+        })
       })
     })
 
