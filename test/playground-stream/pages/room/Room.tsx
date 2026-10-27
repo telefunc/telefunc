@@ -679,14 +679,14 @@ function Room() {
               () => 'rejected',
             )
 
-          const start = Date.now()
+          const start = performance.now()
           const toLeaving = b.send(a.id, 'ping', { ack: true })
           await a.leave()
           const recipientLeft = await outcome(toLeaving)
           const fromLeaving = b.send(c.id, 'ping', { ack: true })
           await b.leave()
           const senderLeft = await outcome(fromLeaving)
-          const seconds = (Date.now() - start) / 1000
+          const seconds = (performance.now() - start) / 1000
 
           // The test joins `Closer` from another tab, then closes it; on SSE the server waits out reconnectTimeout (60 s).
           await pollUntil(
@@ -785,7 +785,7 @@ function Room() {
         let settledAt: number | null = null
         await pollUntil(async () => {
           const joins = await onGetSlowJoins(roomId)
-          if (settledAt === null && joins.done.includes('Closer')) settledAt = Date.now()
+          if (settledAt === null && joins.done.includes('Closer')) settledAt = performance.now()
           const serverCount = (await onGetRoom(roomId)).count
           return {
             result: {
@@ -797,7 +797,7 @@ function Room() {
               settled: settledAt !== null,
             },
             // A member admitted after its tab closed would show within a second of the guard's end.
-            done: settledAt !== null && Date.now() - settledAt > 1000 && room.count === 0 && serverCount === 0,
+            done: settledAt !== null && performance.now() - settledAt > 1000 && room.count === 0 && serverCount === 0,
           }
         }, CLOSED_TAB_POLLS)
       })}
@@ -892,8 +892,8 @@ function Room() {
         let closedAt: number | null = null
         await pollUntil(async () => {
           const open = await isOpen()
-          if (closedAt === null && open.held && !open.empty && !open.departed) closedAt = Date.now()
-          const outlived = closedAt !== null && Date.now() - closedAt > 1500
+          if (closedAt === null && open.held && !open.empty && !open.departed) closedAt = performance.now()
+          const outlived = closedAt !== null && performance.now() - closedAt > 1500
           return { result: { base, open, outlived }, done: outlived }
         })
       })}
@@ -1042,12 +1042,12 @@ function Room() {
         const me = await room.join({ meta: { name: 'Asker' } })
         const silent = await room.join({ meta: { name: 'Silent' } })
         silent.listen(() => new Promise(() => {}))
-        const start = Date.now()
+        const start = performance.now()
         const error = await me.send(silent.id, 'hello?', { ack: true }).then(
           () => null,
           () => 'rejected',
         )
-        setResult(JSON.stringify({ error, seconds: Math.round((Date.now() - start) / 1000) }))
+        setResult(JSON.stringify({ error, seconds: Math.round((performance.now() - start) / 1000) }))
       })}
 
       {scenario(
