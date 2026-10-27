@@ -271,7 +271,7 @@ describe('Broadcast disallows channel methods', () => {
 // ───────────────────────────────────────────────────────────────────────────
 // Shield — the runtime gate that protects the server from untyped client
 // publishes. The shield is wired via `[TELEFUNC_SHIELDS]` on the type;
-// the runtime check lives in _publishFromPage.
+// the runtime check is assertPublishShield, which _onPagePublish calls.
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('Broadcast shield validation', () => {
