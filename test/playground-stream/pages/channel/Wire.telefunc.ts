@@ -198,7 +198,7 @@ async function onWireConnection() {
 
 /** A chat whose server saves each message before acknowledging it, and ends the chat while a save is pending.
  *  Server actions: wireChat_<id>_close, _check (records isConnected), _saved (the database finishes the save).
- *  cleanupState: wireChat_<id> = what the server end saw: 'open', 'message', 'closing' (a check), 'close', each with isConnected. */
+ *  cleanupState: wireChat_<id> = what the server end saw: 'open', 'message', 'closing' (a check), 'disconnect', 'reconnect', 'close', each with isConnected. */
 async function onWireChat() {
   const ch = new Channel<(message: string) => Promise<string>, never>()
   const events: string[] = []
@@ -217,6 +217,8 @@ async function onWireChat() {
     return `saved:${message}`
   })
   ch.onOpen(() => report('open'))
+  ch.onDisconnect(() => report('disconnect'))
+  ch.onReconnect(() => report('reconnect'))
   ch.onClose(() => report('close'))
   return { channel: ch.client, channelId: ch.id }
 }

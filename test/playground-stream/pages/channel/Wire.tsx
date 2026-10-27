@@ -33,7 +33,7 @@ type WireState = {
   upload: { channelId: string; sent: number } | null
   /** What the page's end saw: 'start' (before open), 'open', 'disconnect', 'reconnect', 'close', each with isConnected. */
   connection: { channelId: string; events: string[] } | null
-  /** What the page's end saw: 'open', 'check' ('closing' once a close started), 'close', each with isConnected. */
+  /** What the page's end saw: 'open', 'check' ('closing' once a close started), 'disconnect', 'reconnect', 'close', each with isConnected. */
   chat: { channelId: string; events: string[] } | null
   /** closed: 'abort:<value as JSON>' or the error's name, once the channel closed. */
   presence: { channelId: string; online: boolean; closed?: string } | null
@@ -99,6 +99,8 @@ function WireDemo() {
     }
     chatReport.current = report
     channel.onOpen(() => report('open'))
+    channel.onDisconnect(() => report('disconnect'))
+    channel.onReconnect(() => report('reconnect'))
     channel.onClose(() => report('close'))
     await channel.send('hello', { ack: true })
   }, [])

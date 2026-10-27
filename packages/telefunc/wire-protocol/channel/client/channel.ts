@@ -324,7 +324,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) {
-      if (this._didFireOpen && !this._didFireClose) this._isConnected = true
+      if (this._didFireOpen) this._fireReconnect()
       return
     }
     if (batched) this._flow.useBatchTransportInitial()
@@ -338,7 +338,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onTransportDisconnect(): void {
     if (!this._isConnected) return
     this._isConnected = false
-    if (!this._isClosed) this._invokeAll(this._disconnectCallbacks)
+    this._invokeAll(this._disconnectCallbacks)
   }
 
   _onTransportMessage(data: string, bytes: number): void {
@@ -532,7 +532,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private _fireReconnect(): void {
-    if (this._isConnected) return
+    if (this._isConnected || this._didFireClose) return
     this._isConnected = true
     this._invokeAll(this._reconnectCallbacks)
   }

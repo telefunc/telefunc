@@ -93,7 +93,7 @@ function testWire(isDev: boolean) {
     })
 
   if (canCutWire())
-    test("channel: while a close waits on a message's save, each end is disconnected once the connection drops and connected once the page is back, until onClose", async () => {
+    test("channel: while a close waits on a message's save, each end is disconnected and fires onDisconnect once the connection drops, and is connected and fires onReconnect once the page is back, until onClose", async () => {
       await navigate(`${getServerUrl()}/channel`)
       await page.click('#wire-chat')
       let channelId = ''
@@ -109,6 +109,14 @@ function testWire(isDev: boolean) {
         const seen = await events()
         return { page: seen.page.at(-1), server: seen.server.at(-1) }
       }
+      const isCheck = (event: string) => event.startsWith('closing:')
+      const lastEvent = async () => {
+        const seen = await events()
+        return {
+          page: seen.page.findLast((e) => !isCheck(e)),
+          server: seen.server.findLast((e: string) => !isCheck(e)),
+        }
+      }
       await autoRetry(async () => {
         expect(await events()).deep.equal({ page: ['open:true'], server: ['open:true', 'message:true'] })
       })
@@ -120,17 +128,22 @@ function testWire(isDev: boolean) {
       await cutWire()
       await autoRetry(async () => {
         expect(await last()).deep.equal({ page: 'closing:false', server: 'closing:false' })
+        expect(await lastEvent()).deep.equal({ page: 'disconnect:false', server: 'disconnect:false' })
       })
       await page.context().setOffline(false)
       await autoRetry(async () => {
         expect(await last()).deep.equal({ page: 'closing:true', server: 'closing:true' })
+        expect(await lastEvent()).deep.equal({ page: 'reconnect:true', server: 'reconnect:true' })
       })
       await runServerAction(`wireChat_${channelId}_saved`)
       await autoRetry(async () => {
         const seen = await events()
-        expect({ page: seen.page.at(-1), server: seen.server.at(-1) }).deep.equal({
-          page: 'close:false',
-          server: 'close:false',
+        expect({
+          page: seen.page.filter((e) => !isCheck(e)),
+          server: seen.server.filter((e: string) => !isCheck(e)),
+        }).deep.equal({
+          page: ['open:true', 'disconnect:false', 'reconnect:true', 'close:false'],
+          server: ['open:true', 'message:true', 'disconnect:false', 'reconnect:true', 'close:false'],
         })
       })
     })
