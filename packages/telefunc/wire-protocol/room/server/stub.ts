@@ -9,7 +9,7 @@ import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { parsePeerText } from '../../channel/server/channel.js'
 import type { ServerBroadcastEnd } from '../../channel/server/ServerBroadcastEnd.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
-import type { ShieldValidator } from '../../../node/server/shield.js'
+import { assertPublishShield, type ShieldValidator } from '../../../node/server/shield.js'
 import {
   assertProtocol,
   encodePublishBinary,
@@ -18,7 +18,6 @@ import {
   type BroadcastKind,
   type WirePublishInfo,
 } from '../../wire/connectionFrame.js'
-import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
 import { reportRoomError } from './errors.js'
@@ -147,13 +146,6 @@ class PendingDmReplies {
 
 function roomResult(work: Promise<unknown>): Promise<RoomResult> {
   return toRoomResult(work, reportRoomError)
-}
-
-/** The publish shield validates Room data at ingress only. */
-function assertPublishShield(validate: ShieldValidator | undefined, data: unknown): void {
-  if (!validate) return
-  const result = validate(data)
-  if (result !== true) throw new ShieldValidationError(result)
 }
 
 type RoomStubOptions = {

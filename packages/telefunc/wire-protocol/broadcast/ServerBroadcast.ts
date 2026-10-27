@@ -16,8 +16,7 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { invokeChannelListener, makePublishInfo } from '../channel/channel.js'
 import { reportServerChannelError } from '../channel/server/channel.js'
 import { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
-import type { ShieldValidator } from '../../node/server/shield.js'
-import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
+import { assertPublishShield, type ShieldValidator } from '../../node/server/shield.js'
 import type { BroadcastPayload, BroadcastRoute } from '../backend/broadcast/contract.js'
 import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
@@ -49,7 +48,7 @@ class ServerBroadcast<T = unknown> {
   readonly key: string
   /** @internal Its channel to the page it is returned to. */
   readonly _end: ServerBroadcastEnd
-  /** @internal The `data` shield its response found for it, which each publish from its page passes. */
+  /** @internal The `data` shield each publish from its page passes; set by values/server/response/broadcast.ts. */
   _publishShield: ShieldValidator | undefined
 
   private readonly _subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
@@ -220,10 +219,7 @@ class ServerBroadcast<T = unknown> {
 
   /** Without a shield, the page's payload is never parsed here. */
   private _publishFromPage(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
-    if (this._publishShield) {
-      const result = this._publishShield(parse(serialized))
-      if (result !== true) throw new ShieldValidationError(result)
-    }
+    if (this._publishShield) assertPublishShield(this._publishShield, parse(serialized))
     return this._publish('text', serialized)
   }
 }
