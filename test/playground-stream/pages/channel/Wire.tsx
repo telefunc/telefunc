@@ -12,6 +12,7 @@ import {
   onWireRelease,
   onWireUpload,
   onWireConnection,
+  onWireChat,
   onWirePresence,
 } from './Wire.telefunc'
 import { Tally, textMessage, binaryMessage, type TallyState } from './wire-messages'
@@ -32,6 +33,8 @@ type WireState = {
   upload: { channelId: string; sent: number } | null
   /** What the page's end saw: 'start' (before open), 'open', 'disconnect', 'reconnect', 'close', each with isConnected. */
   connection: { channelId: string; events: string[] } | null
+  /** What the page's end saw: 'open', 'check' ('closing' once a close started), 'close', each with isConnected. */
+  chat: { channelId: string; events: string[] } | null
   /** closed: 'abort:<value as JSON>' or the error's name, once the channel closed. */
   presence: { channelId: string; online: boolean; closed?: string } | null
 }
@@ -58,6 +61,7 @@ function WireDemo() {
     release: null,
     upload: null,
     connection: null,
+    chat: null,
     presence: null,
   })
   const endChannel = useRef<Awaited<ReturnType<typeof onWireEnd>>['channel'] | null>(null)
@@ -66,6 +70,8 @@ function WireDemo() {
   const largeChannel = useRef<Awaited<ReturnType<typeof onWireLarge>>['channel'] | null>(null)
   const resumeChannel = useRef<Awaited<ReturnType<typeof onWireResume>>['channel'] | null>(null)
   const connectionChannel = useRef<Awaited<ReturnType<typeof onWireConnection>>['channel'] | null>(null)
+  const chatChannel = useRef<Awaited<ReturnType<typeof onWireChat>>['channel'] | null>(null)
+  const chatReport = useRef<(event: string) => void>(() => {})
   const presenceChannel = useRef<Awaited<ReturnType<typeof onWirePresence>>['channel'] | null>(null)
 
   const connection = useCallback(async () => {
@@ -81,6 +87,20 @@ function WireDemo() {
     channel.onDisconnect(() => report('disconnect'))
     channel.onReconnect(() => report('reconnect'))
     channel.onClose(() => report('close'))
+  }, [])
+
+  const chat = useCallback(async () => {
+    const { channel, channelId } = await onWireChat()
+    chatChannel.current = channel
+    const events: string[] = []
+    const report = (event: string) => {
+      events.push(`${event}:${channel.isConnected}`)
+      setState((s) => ({ ...s, chat: { channelId, events: [...events] } }))
+    }
+    chatReport.current = report
+    channel.onOpen(() => report('open'))
+    channel.onClose(() => report('close'))
+    await channel.send('hello', { ack: true })
   }, [])
 
   const presence = useCallback(async () => {
@@ -346,6 +366,22 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Close it
+        </button>
+        <button
+          id="wire-chat"
+          type="button"
+          onClick={chat}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Open a chat and send a message
+        </button>
+        <button
+          id="wire-chat-check"
+          type="button"
+          onClick={() => chatReport.current(chatChannel.current!.isClosed ? 'closing' : 'check')}
+          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
+        >
+          Show whether the chat is connected
         </button>
         <button
           id="wire-presence"

@@ -323,7 +323,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
-    if (this._isClosed) return
+    if (this._isClosed) {
+      if (this._didFireOpen && !this._didFireClose) this._isConnected = true
+      return
+    }
     if (batched) this._flow.useBatchTransportInitial()
     else this._flow.undoBatchTransportInitial()
     this._flow.attach(uplink, downlink)
@@ -333,9 +336,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal Its wire went away, and the connection reconnects. */
   _onTransportDisconnect(): void {
-    if (!this._isConnected || this._isClosed) return
+    if (!this._isConnected) return
     this._isConnected = false
-    this._invokeAll(this._disconnectCallbacks)
+    if (!this._isClosed) this._invokeAll(this._disconnectCallbacks)
   }
 
   _onTransportMessage(data: string, bytes: number): void {

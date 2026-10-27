@@ -453,6 +453,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this._sendPendingEnd(peer)
     if (this._isClosed) {
+      if (this._didFireOpen && !this._didFireClose) this._isConnected = true
       this._notifyCloseProgress()
       return
     }
@@ -715,9 +716,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         })
       }, reconnectTimeout),
     )
-    if (!this._isConnected || this._isClosed) return
+    if (!this._isConnected) return
     this._isConnected = false
-    this._invokeAll(this._disconnectCallbacks)
+    if (!this._isClosed) this._invokeAll(this._disconnectCallbacks)
   }
 
   _onPeerRecoveryFailure(): void {
