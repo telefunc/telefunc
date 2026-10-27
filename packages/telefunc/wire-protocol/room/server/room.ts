@@ -344,10 +344,10 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
    *  earlier one is in the snapshot. */
-  _openStub(stub: Omit<RoomStubOptions, 'room'>): RoomSnapshotMetadata {
-    this._attachStub(new RoomStub({ ...stub, room: this }))
+  _openStub({ end, publishShield, grants }: Omit<RoomStubOptions, 'room'>): RoomSnapshotMetadata {
+    this._attachStub(new RoomStub({ room: this, end, publishShield, grants }))
     return {
-      channelId: stub.end.id,
+      channelId: end.id,
       roomId: this.id,
       meta: this._model.metaEntries(),
       closed: this.isClosed,
@@ -527,15 +527,15 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   /** @internal A client's hold on this participant, which its inbox forwards to. */
-  _openStub(stub: Omit<RoomParticipantStubOptions, 'participant'>): ParticipantStubMetadata {
+  _openStub({ end, publishShield }: Omit<RoomParticipantStubOptions, 'participant'>): ParticipantStubMetadata {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
       !this._isBound,
       'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
     )
-    this._setForwarder(new RoomParticipantStub({ ...stub, participant: this }))
+    this._setForwarder(new RoomParticipantStub({ participant: this, end, publishShield }))
     return {
-      channelId: stub.end.id,
+      channelId: end.id,
       roomId: this._room.id,
       id: this.id,
       meta: this.meta,
