@@ -143,10 +143,10 @@ async function joinAndSendMalformed(kind: 'request' | 'publish'): Promise<void> 
   keepReachable(room)
   await room.join({ meta: { name: 'Mallory' } })
   // The room's own channel, past the API that checks what goes on it.
-  const { _stub: stub } = room as unknown as {
-    _stub: { send(data: unknown, options: { ack: true }): Promise<unknown>; publish(data: unknown): Promise<unknown> }
+  const { _end: end } = room as unknown as {
+    _end: { send(data: unknown, options: { ack: true }): Promise<unknown>; publish(data: unknown): Promise<unknown> }
   }
-  await (kind === 'request' ? stub.send({ __r: 'req-bogus' }, { ack: true }) : stub.publish({ __r: 'bogus' })).catch(
+  await (kind === 'request' ? end.send({ __r: 'req-bogus' }, { ack: true }) : end.publish({ __r: 'bogus' })).catch(
     () => {},
   )
 }
