@@ -365,9 +365,6 @@ class ServerRoom extends RoomStateView implements Room {
       stub._beginTail(this._tail.take(), () => this._replica.plan.textChanged(stub, []))
       this._tail = null
     }
-    stub.end.onClose(() => this._detachStub(stub))
-    stub.end.onDisconnect(() => this._setHeldConnected(stub, false))
-    stub.end.onReconnect(() => this._setHeldConnected(stub, true))
     this._replica.track(this)
     this._replica.plan.holderChanged(stub)
   }
@@ -380,7 +377,8 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  private _setHeldConnected(stub: RoomStub, connected: boolean): void {
+  /** @internal */
+  _setHeldConnected(stub: RoomStub, connected: boolean): void {
     // An admission under way takes the wire's state once its join applies.
     for (const id of stub._heldMembers()) if (!this._admissions.has(id)) this._setMemberConnected(id, connected)
   }
@@ -389,7 +387,8 @@ class ServerRoom extends RoomStateView implements Room {
     void this._writes.setMemberConnected(id, connected).catch(reportRoomError)
   }
 
-  private _detachStub(stub: RoomStub): void {
+  /** @internal */
+  _detachStub(stub: RoomStub): void {
     this._stubs.delete(stub)
     this._replica.detachStub(stub)
     stub._endTail()
