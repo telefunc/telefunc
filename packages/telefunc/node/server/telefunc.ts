@@ -27,7 +27,7 @@ type HttpRequest =
       /** The body of HTTP Request. */
       body: string
       /** The HTTP request headers */
-      headers: Record<string, string | string[] | undefined> | [string, string][]
+      headers: Record<string, string | string[] | undefined> | [string, string][] | Headers
       /** The context object, see https://telefunc.com/getContext  */
       context?: Telefunc.Context
     }
@@ -45,7 +45,7 @@ type HttpRequest =
       /** The Node.js `req` readable stream. */
       readable: Readable
       /** The HTTP request headers */
-      headers: Record<string, string | string[] | undefined> | [string, string][]
+      headers: Record<string, string | string[] | undefined> | [string, string][] | Headers
       /** The context object, see https://telefunc.com/getContext  */
       context?: Telefunc.Context
     }
@@ -84,10 +84,12 @@ async function resolveHttpRequest(httpRequest: HttpRequest, response?: Writable)
   if ('request' in httpRequest) {
     return { request: httpRequest.request, context: httpRequest.context }
   }
+  // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
+  const url = new URL(httpRequest.url, 'http://localhost').href
   if ('readable' in httpRequest) {
     const request = await nodeReadableToWebRequest(
       httpRequest.readable,
-      'http://localhost' + httpRequest.url,
+      url,
       httpRequest.method,
       httpRequest.headers,
       response,
@@ -95,7 +97,7 @@ async function resolveHttpRequest(httpRequest: HttpRequest, response?: Writable)
     return { request, readable: httpRequest.readable, context: httpRequest.context }
   }
   // Backward compat: construct a Request from primitives
-  const request = new Request('http://localhost' + httpRequest.url, {
+  const request = new Request(url, {
     method: httpRequest.method,
     body: httpRequest.body,
     headers: normalizeHeaders(httpRequest.headers),

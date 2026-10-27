@@ -5,7 +5,7 @@ import { loadStreamNodeModule } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
 assertIsNotBrowser()
 
-type HeadersInput = Record<string, string | string[] | undefined> | [string, string][]
+type HeadersInput = Record<string, string | string[] | undefined> | [string, string][] | Headers
 
 async function nodeReadableToWebRequest(
   readable: Readable,
@@ -47,6 +47,9 @@ function normalizeHeaders(headers: HeadersInput): [string, string][] {
   // The Web Headers constructor rejects any name starting with `:`, so drop them — the
   // request's method and URL are passed via separate params already.
   if (Array.isArray(headers)) return headers.filter(([k]) => k.charCodeAt(0) !== 58 /* ':' */)
+  // A `Headers` object (e.g. `request.headers`) has no own properties for `Object.entries()` to list, so iterate it
+  // instead — checking `Symbol.iterator` rather than `instanceof Headers` also covers `Headers` polyfills.
+  if (Symbol.iterator in headers) return Array.from(headers)
   const pairs: [string, string][] = []
   for (const [key, value] of Object.entries(headers)) {
     if (value === undefined) continue
