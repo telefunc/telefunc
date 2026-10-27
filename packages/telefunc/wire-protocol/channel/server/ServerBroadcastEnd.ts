@@ -78,7 +78,9 @@ class ServerBroadcastEnd extends ServerChannel {
 
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     super._attachPeer(peer, state)
-    if (this._peer === peer && !this._isClosed) this._owner?._onPageAttach?.()
+    if (this._peer !== peer || this._isClosed) return
+    assert(this._owner)
+    this._owner._onPageAttach?.()
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
@@ -101,6 +103,7 @@ class ServerBroadcastEnd extends ServerChannel {
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
-    this._owner?._onPageSubscription?.(kind, on)
+    assert(this._owner)
+    this._owner._onPageSubscription?.(kind, on)
   }
 }
