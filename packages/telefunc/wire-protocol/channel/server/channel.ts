@@ -46,6 +46,7 @@ import {
   ERROR_REASON,
   ProtocolViolationError,
   TAG,
+  isProtocolViolationError,
   assertProtocol,
   countsCredit,
   isChannelCtrlTag,
@@ -575,7 +576,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         }
       } catch (err) {
         // A listener's ProtocolViolationError ends the wire, as a malformed frame does.
-        if (err instanceof ProtocolViolationError) throw err
+        if (isProtocolViolationError(err)) throw err
         if (this._handleCallbackError(err)) return
       }
     }
@@ -918,7 +919,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     violationPeer: IndexedPeer | null,
     kind: 'request' | 'publish',
   ): void {
-    if (violationPeer && err instanceof ProtocolViolationError) return violationPeer.sender.terminate()
+    if (violationPeer && isProtocolViolationError(err)) return violationPeer.sender.terminate()
     if (kind === 'publish' && isChannelOverflowError(err)) {
       return this._sendAckRes(seq, err.message, ACK_STATUS.OVERFLOW)
     }

@@ -1,6 +1,6 @@
 export { ChannelClosedError, ChannelOverflowError, isChannelOverflowError, isExpectedChannelFailure, replayLossError }
 
-import { NetworkError } from '../../shared/NetworkError.js'
+import { NetworkError, isNetworkError } from '../../shared/NetworkError.js'
 
 /** Thrown synchronously by `send()` when the channel is already closed.
  *  Also used to reject pending ack promises when the channel shuts down. */
@@ -31,7 +31,7 @@ function isChannelOverflowError(thing: unknown): thing is ChannelOverflowError {
 }
 
 function isExpectedChannelFailure(err: unknown): err is ChannelClosedError | ChannelOverflowError | NetworkError {
-  return err instanceof ChannelClosedError || err instanceof ChannelOverflowError || err instanceof NetworkError
+  return err instanceof ChannelClosedError || isChannelOverflowError(err) || isNetworkError(err)
 }
 
 /** How a channel ends when a reconnect needs what `side`'s replay buffer dropped. */
