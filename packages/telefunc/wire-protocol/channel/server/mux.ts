@@ -29,6 +29,7 @@ import {
   ProtocolViolationError,
   assertProtocol,
   decodeClientFrame,
+  isProtocolViolationError,
   encode,
   isOneFrame,
   messageFrames,
@@ -101,7 +102,7 @@ type StagedUpgrade = {
 }
 
 function retargetToProbe(err: unknown, probe: Wire): unknown {
-  if (!(err instanceof ProtocolViolationError) || err.target !== undefined) return err
+  if (!isProtocolViolationError(err) || err.target !== undefined) return err
   return new ProtocolViolationError(err.message, probe)
 }
 
@@ -420,7 +421,7 @@ class ChannelMux {
         if (frame[0] === TAG.RECONCILE) outcome = dispatched
       }
     } catch (err) {
-      if (!(err instanceof ProtocolViolationError)) throw err
+      if (!isProtocolViolationError(err)) throw err
       this.terminateWire(connection)
     }
     return outcome
@@ -542,7 +543,7 @@ class ChannelMux {
       entry.state.frameDelivery = delivery
       return (await this.handleFrame(entry, connection, rawFrame)) ?? null
     } catch (err) {
-      if (!(err instanceof ProtocolViolationError)) throw err
+      if (!isProtocolViolationError(err)) throw err
       this.terminateWire(err.target ?? connection)
       return null
     } finally {
@@ -945,7 +946,7 @@ class ChannelMux {
       for (const { frame } of held) this.dispatchChannelFrame(sessionId, frame)
       return true
     } catch (err) {
-      if (!(err instanceof ProtocolViolationError)) throw err
+      if (!isProtocolViolationError(err)) throw err
       this.terminateWire(wire)
       return false
     }
