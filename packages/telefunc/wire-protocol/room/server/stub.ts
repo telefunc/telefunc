@@ -602,7 +602,9 @@ class RoomParticipantStub implements BroadcastEndOwner {
     return this._end._trackAck(reply.then((answer) => answer ?? DM_FAILURE.left))
   }
 
+  /** A closed stub's client gets no notice: one sent after an overflow ended it would arrive after a gap. */
   private _notify(notice: ParticipantStubNotice): void {
+    if (this._end.isClosed) return
     // Each attach sends the meta and the demand again.
     const resentOnAttach = notice.__r === 'p-meta' || notice.__r === 'demand' || notice.__r === 'demand-state'
     this._end.deliver(unorderedEventText(notice), { resentOnAttach })
