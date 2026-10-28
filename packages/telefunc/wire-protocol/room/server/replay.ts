@@ -1,4 +1,4 @@
-export { ReplayGate, LocalHolder, ANNOUNCE_KEY }
+export { ReplayGate, LocalHolder, ANNOUNCE_KEY, heldWeight }
 export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -11,7 +11,7 @@ import type { MemberWants } from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomState } from '../state.js'
 import { toggle } from './sets.js'
-import { ROOM_REPLAY_HOLD_BYTES_MAX } from './constants.js'
+import { ROOM_REPLAY_HOLD_BYTES_MAX, ROOM_REPLAY_HOLD_ENTRY_BYTES } from './constants.js'
 assertIsNotBrowser()
 
 // Text gate keys: a member's id, and for announcements a key no id takes.
@@ -20,6 +20,12 @@ const ANNOUNCE_KEY = '\0announce'
 /** A binary want whose retained frames are being read, and the live frames it holds meanwhile. */
 type ReplayHold = { change: BinaryWantChange; held: HeldFrame[]; bytes: number }
 type HeldFrame = { from: string; bytes: number; relay: () => void }
+
+/** What holding a frame retains: the whole storage behind `bytes`, the `decoded` bytes parsed out of it, and the
+ *  entry. */
+function heldWeight(bytes: Uint8Array, decoded = 0): number {
+  return bytes.buffer.byteLength + decoded + ROOM_REPLAY_HOLD_ENTRY_BYTES
+}
 
 /** One holder's order across retained replay and live frames, per sender: a frame is admitted only if it is newer than
  *  every frame the holder already has from that sender on its lane. A replayed retained frame can win the race against
@@ -64,7 +70,8 @@ class ReplayGate {
     return this._holds.size > 0
   }
 
-  /** Whether a replay holds the live frame; `relay` delivers it once that replay ends. */
+  /** Whether a replay holds the live frame, which retains `bytes` (see `heldWeight()`); `relay` delivers it once that
+   *  replay ends. */
   heldBinary(member: string, track: string, bytes: number, relay: () => void): boolean {
     if (this._binaryHigh.get(member)?.has(track)) return false
     for (const hold of this._holds) {
@@ -198,11 +205,10 @@ class LocalHolder implements LaneHolder {
     if (!this._wantsBinary(frame.from, frame.track)) return
     const { from, track } = frame
     const replay = this._replay
-    if (
-      replay.holding &&
-      replay.heldBinary(from, track, frame.payload.byteLength, () => this.relayBinary(frame, info))
-    ) {
-      return
+    if (replay.holding) {
+      // The track and metadata decoded out of the frame were encoded in the bytes before its payload.
+      const weight = heldWeight(frame.payload, frame.payload.byteOffset)
+      if (replay.heldBinary(from, track, weight, () => this.relayBinary(frame, info))) return
     }
     if (replay.admitBinary(from, track, info)) this._applyBinary(frame, info)
   }

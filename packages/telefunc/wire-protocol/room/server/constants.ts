@@ -4,6 +4,7 @@ export {
   ROOM_TAIL_HOLD_MAX,
   ROOM_TAIL_HOLD_CODE_UNITS_MAX,
   ROOM_REPLAY_HOLD_BYTES_MAX,
+  ROOM_REPLAY_HOLD_ENTRY_BYTES,
   ROOM_TAIL_ATTACH_TIMEOUT_MS,
   ROOM_DEMAND_TTL_MS,
   ROOM_DM_ACK_TIMEOUT_MS,
@@ -29,6 +30,8 @@ const ROOM_TAIL_HOLD_MAX = 256
 const ROOM_TAIL_HOLD_CODE_UNITS_MAX = 1024 * 1024
 // The live frames a holder's replays hold back; past it they go out at once, ahead of the retained frames they follow.
 const ROOM_REPLAY_HOLD_BYTES_MAX = 1024 * 1024
+// What holding a frame retains besides its bytes (178 bytes measured), so empty frames count too.
+const ROOM_REPLAY_HOLD_ENTRY_BYTES = 256
 // Each half of the fetched-tail handoff has an independent bounded lease.
 const ROOM_TAIL_ATTACH_TIMEOUT_MS = 60_000
 // Three heartbeats tolerate two missed demand refreshes before expiring a crashed watcher.

@@ -33,7 +33,7 @@ import {
   isRoomRequest,
   type RoomDeclaration,
 } from './requests.js'
-import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
+import { ANNOUNCE_KEY, ReplayGate, heldWeight, type LaneHolder } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
@@ -422,7 +422,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     const replay = this._replay
     if (
       replay.holding &&
-      replay.heldBinary(from, track, wireData.byteLength, () => this._relayBinary(wireData, from, track, info))
+      replay.heldBinary(from, track, heldWeight(wireData), () => this._relayBinary(wireData, from, track, info))
     ) {
       return
     }
