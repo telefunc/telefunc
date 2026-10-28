@@ -288,6 +288,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (on && member !== ALL && !this._room._model.hasMember(member)) return
     if (!applyBinaryWantChange(this._binary, change)) return
     if (track !== ALL) this._trackWants += on ? 1 : -1
+    if (!on) this._replay.forgetUnwantedBinary((member, track) => this._wantsBinary(member, track))
     this._room._onHolderBinaryChanged(this, change)
   }
 

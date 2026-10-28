@@ -103,6 +103,14 @@ class ReplayGate {
     return true
   }
 
+  /** A lane no want covers any more starts afresh: a later subscription to it gets its retained frame again. */
+  forgetUnwantedBinary(wanted: (member: string, track: string) => boolean): void {
+    for (const [member, high] of this._binaryHigh) {
+      for (const track of high.keys()) if (!wanted(member, track)) high.delete(track)
+      if (high.size === 0) this._binaryHigh.delete(member)
+    }
+  }
+
   /** The frames held from `member` go with it: its leave reached the holder before them. */
   forgetMember(member: string): void {
     this._high.delete(member)
@@ -242,7 +250,9 @@ class LocalHolder implements LaneHolder {
   }
 
   applyBinary(change: BinaryWantChange): boolean {
-    return applyBinaryWantChange(this._binaryWants, change)
+    if (!applyBinaryWantChange(this._binaryWants, change)) return false
+    if (!change.on) this._replay.forgetUnwantedBinary((member, track) => this._wantsBinary(member, track))
+    return true
   }
 
   get _wantsAnnounce(): boolean {
