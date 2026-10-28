@@ -367,8 +367,10 @@ async function onParticipantOverflow(roomId: string, memberId: string) {
   const sender = await (await Room.get(roomId)).join({ meta: { name: 'Sender' } })
   awayMembers.set(roomId, [sender])
   onServerAction(`participantOverflow_${roomId}`, async () => {
-    // The participant leaves once its page's buffer drops a DM, so a later one finds it gone.
-    for (let n = 0; n < 8; n++) await sender.send(memberId, String(n).padEnd(128 * 1024)).catch(() => {})
+    // Sent at once: the DMs after the one its page's buffer drops reach the participant before it leaves.
+    await Promise.all(
+      Array.from({ length: 8 }, (_, n) => sender.send(memberId, String(n).padEnd(128 * 1024)).catch(() => {})),
+    )
     cleanupState[`participantOverflow_${roomId}`] = 'done'
   })
   await sender.send(memberId, 'before')
