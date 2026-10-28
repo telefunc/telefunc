@@ -295,32 +295,39 @@ class RoomReplica {
    *  retained lanes it covers. As with text, a frame replays only while its member is in the roster: a leave clears the
    *  member's retained frames, and one read just before that is gone with it. */
   async replayBinary(holder: LaneHolder, change: BinaryWantChange): Promise<void> {
-    const { member, track } = change
     // A live frame on a lane another want's subscription already delivers would otherwise beat its retained frame.
     const release = holder._holdBinary(change)
+    let holding = true
     try {
-      await this.sync.ensureRoster()
-      await (member === ALL ? this.plan.binaryReady() : this.plan.pairsReady(member, track))
-      const backend = getRoomBackend()
-      const lanes: LaneId[] =
-        member !== ALL && track !== ALL
-          ? [{ kind: 'binary', member, track }]
-          : await backend.listRetained(
-              this.id,
-              this._incarnation.inc,
-              member !== ALL ? { member } : track !== ALL ? { track } : undefined,
-            )
-      for (const lane of lanes) {
-        if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
-        const stored = await backend.readRetained(this.id, this._incarnation.inc, lane)
-        if (stored === null || !this.model.hasMember(lane.member)) continue
-        const framed = stored.payload
-        const frame = decodeBinaryFrame(framed)
-        assert(frame)
-        holder._emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed)
-      }
+      await withinRoomHorizon(this._readRetainedBinary(holder, change, () => holding))
     } finally {
+      holding = false
       release()
+    }
+  }
+
+  /** Emits only while `holding()`: once the replay's horizon released the live frames, a later read would follow them. */
+  private async _readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, holding: () => boolean) {
+    await this.sync.ensureRoster()
+    await (member === ALL ? this.plan.binaryReady() : this.plan.pairsReady(member, track))
+    const backend = getRoomBackend()
+    const lanes: LaneId[] =
+      member !== ALL && track !== ALL
+        ? [{ kind: 'binary', member, track }]
+        : await backend.listRetained(
+            this.id,
+            this._incarnation.inc,
+            member !== ALL ? { member } : track !== ALL ? { track } : undefined,
+          )
+    for (const lane of lanes) {
+      if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
+      const stored = await backend.readRetained(this.id, this._incarnation.inc, lane)
+      if (!holding()) return
+      if (stored === null || !this.model.hasMember(lane.member)) continue
+      const framed = stored.payload
+      const frame = decodeBinaryFrame(framed)
+      assert(frame)
+      holder._emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed)
     }
   }
 
