@@ -6,18 +6,17 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { parsePeerText } from '../../channel/server/channel.js'
-import type { BroadcastEndOwner, ServerBroadcastEnd } from '../../channel/server/ServerBroadcastEnd.js'
 import { reconnectWindow } from '../../../node/server/serverConfig.js'
 import { assertPublishShield, type ShieldValidator } from '../../../node/server/shield.js'
+import { assertProtocol, isProtocolViolationError, ProtocolViolationError } from '../../wire/connectionFrame.js'
 import {
-  assertProtocol,
   encodePublishBinary,
   encodePublishText,
-  isProtocolViolationError,
-  ProtocolViolationError,
+  type BroadcastEndOwner,
   type BroadcastKind,
+  type ServerBroadcastEnd,
   type WirePublishInfo,
-} from '../../wire/connectionFrame.js'
+} from '../../../node/server/__internal.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
 import { reportRoomError } from './errors.js'

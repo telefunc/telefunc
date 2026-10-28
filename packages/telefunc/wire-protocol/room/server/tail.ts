@@ -4,7 +4,7 @@ export type { TailEntry }
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { ROOM_TAIL_ATTACH_TIMEOUT_MS, ROOM_TAIL_HOLD_CODE_UNITS_MAX, ROOM_TAIL_HOLD_MAX } from './constants.js'
-import type { WirePublishInfo } from '../../wire/connectionFrame.js'
+import type { WirePublishInfo } from '../../../node/server/__internal.js'
 assertIsNotBrowser()
 
 type TailEntry = { serialized: string; ord: WirePublishInfo; from: string }

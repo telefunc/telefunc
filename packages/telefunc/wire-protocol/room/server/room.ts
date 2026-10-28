@@ -6,7 +6,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { markHandled } from '../../../utils/markHandled.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
-import type { WirePublishInfo } from '../../wire/connectionFrame.js'
+import type { WirePublishInfo } from '../../../node/server/__internal.js'
 import {
   encodeBinaryFrame,
   decodeBinaryFrame,

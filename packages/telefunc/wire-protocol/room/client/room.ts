@@ -6,7 +6,7 @@ import { markHandled } from '../../../utils/markHandled.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 import { makePublishInfo, type ChannelPublishAck, type ChannelPublishInfo } from '../../channel/channel.js'
-import type { ClientBroadcast } from '../../channel/client/channel.js'
+import type { ClientBroadcast } from '../../../node/server/__internal.js'
 import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../binary.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../model.js'
 import {
