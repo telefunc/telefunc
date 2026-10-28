@@ -1,4 +1,4 @@
-export { ReplayGate, ReplayHold, LocalHolder, ANNOUNCE_KEY, heldWeight }
+export { ReplayGate, ReplayHold, LocalHolder, ANNOUNCE_KEY, heldWeight, heldTextWeight }
 export type { LaneHolder, TextWantsChange }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
@@ -25,8 +25,14 @@ function heldWeight(bytes: Uint8Array, decoded = 0): number {
   return bytes.buffer.byteLength + decoded + ROOM_REPLAY_HOLD_ENTRY_BYTES
 }
 
-/** A binary want whose retained frames are being read: it holds the live frames the want covers on lanes its holder has
- *  had none from, until `end()` once the read settled, or `flush()` earlier. */
+/** What holding a message retains: its text, or what was parsed from it, two bytes a code unit, and the entry. */
+function heldTextWeight(serialized: string): number {
+  return serialized.length * 2 + ROOM_REPLAY_HOLD_ENTRY_BYTES
+}
+
+/** A want whose retained frames, or retained message (`change` null: a text want), are being read: it holds the live
+ *  frames or messages the want covers on lanes its holder has had none from, until `end()` once the read settled, or
+ *  `flush()` earlier. */
 class ReplayHold {
   held: HeldFrame[] = []
   bytes = 0
@@ -36,12 +42,14 @@ class ReplayHold {
   readonly firstLive = new Map<string, Map<string, WirePublishInfo>>()
 
   constructor(
-    readonly change: BinaryWantChange,
+    readonly change: BinaryWantChange | null,
     private readonly _gate: ReplayGate,
   ) {}
 
-  covers(member: string, track: string): boolean {
+  /** Whether it holds `member`'s frames on `track`, or with `track` null its messages. */
+  covers(member: string, track: string | null): boolean {
     const { change } = this
+    if (change === null || track === null) return change === null && track === null
     return (change.member === ALL || change.member === member) && (change.track === ALL || change.track === track)
   }
 
@@ -74,28 +82,29 @@ class ReplayGate {
   private _heldBytes = 0
 
   admit(key: string, info: WirePublishInfo): boolean {
-    return admitInto(this._high, key, info)
+    const first = !this._high.has(key)
+    if (!admitInto(this._high, key, info)) return false
+    if (first && key !== ANNOUNCE_KEY) this._firstLive(key, null, info)
+    return true
   }
 
   admitBinary(member: string, track: string, info: WirePublishInfo): boolean {
     const high = getOrCreate(this._binaryHigh, member, () => new Map())
     const first = !high.has(track)
     if (!admitInto(high, track, info)) return false
-    if (first) {
-      for (const hold of this._replays) {
-        if (hold.holding || !hold.covers(member, track)) continue
-        const lanes = getOrCreate(hold.firstLive, member, () => new Map())
-        if (!lanes.has(track)) lanes.set(track, info)
-      }
-    }
+    if (first) this._firstLive(member, track, info)
     return true
   }
 
-  /** A retained frame `hold` read: once the hold let its frames go early, it follows them unless the holder got it
-   *  live already, or from an overlapping replay. */
-  admitRetained(hold: ReplayHold, member: string, track: string, info: WirePublishInfo): boolean {
-    if (hold.holding || !this._binaryHigh.get(member)?.has(track)) return this.admitBinary(member, track, info)
-    const firstLive = hold.firstLive.get(member)?.get(track)
+  /** A retained frame `hold` read, or with `track` null its retained message: once the hold let its frames go early, it
+   *  follows them unless the holder got it live already, or from an overlapping replay. */
+  admitRetained(hold: ReplayHold, member: string, track: string | null, info: WirePublishInfo): boolean {
+    if (track === null) {
+      if (hold.holding || !this._high.has(member)) return this.admit(member, info)
+    } else if (hold.holding || !this._binaryHigh.get(member)?.has(track)) {
+      return this.admitBinary(member, track, info)
+    }
+    const firstLive = hold.firstLive.get(member)?.get(track ?? '')
     if (firstLive === undefined || !isNewer(firstLive, info)) return false
     const key = JSON.stringify([member, track, info.seq, info.timestamp])
     if (this._lateRetained.has(key)) return false
@@ -126,9 +135,9 @@ class ReplayGate {
     }
   }
 
-  /** Holds the live frames `change` covers on lanes the holder has had none from: the retained frames read meanwhile
-   *  go out first. */
-  holdBinary(change: BinaryWantChange): ReplayHold {
+  /** Holds the live frames `change` covers on lanes the holder has had none from, or with `change` null the live
+   *  messages of senders it has had none from: what is retained, read meanwhile, goes out first. */
+  hold(change: BinaryWantChange | null): ReplayHold {
     const hold = new ReplayHold(change, this)
     this._replays.add(hold)
     this._holding++
@@ -140,10 +149,10 @@ class ReplayGate {
     return this._holding > 0
   }
 
-  /** Whether a replay holds the live frame, which retains `bytes` (see `heldWeight()`); `relay` delivers it once that
-   *  replay lets its frames go. */
-  heldBinary(member: string, track: string, bytes: number, relay: () => void): boolean {
-    if (this._binaryHigh.get(member)?.has(track)) return false
+  /** Whether a replay holds `member`'s live frame on `track`, or with `track` null its live message, which retains
+   *  `bytes` (see `heldWeight()`); `relay` delivers it once that replay lets its frames go. */
+  held(member: string, track: string | null, bytes: number, relay: () => void): boolean {
+    if (track === null ? this._high.has(member) : this._binaryHigh.get(member)?.has(track)) return false
     for (const hold of this._replays) {
       if (!hold.holding || !hold.covers(member, track)) continue
       hold.held.push({ from: member, bytes, relay })
@@ -184,6 +193,15 @@ class ReplayGate {
     if (this._replays.size === 0) this._lateRetained.clear()
   }
 
+  /** A lane's first receipt, for each replay covering it that let its frames go early. */
+  private _firstLive(member: string, track: string | null, info: WirePublishInfo): void {
+    for (const hold of this._replays) {
+      if (hold.holding || !hold.covers(member, track)) continue
+      const lanes = getOrCreate(hold.firstLive, member, () => new Map())
+      if (!lanes.has(track ?? '')) lanes.set(track ?? '', info)
+    }
+  }
+
   private _unhold(hold: ReplayHold, bytes: number): void {
     hold.bytes -= bytes
     this._heldBytes -= bytes
@@ -215,12 +233,13 @@ interface LaneHolder {
   _textDemand(): MemberWants
   _wantsTextFrom(member: string): boolean
   _wantsBinary(member: string, track: string): boolean
-  /** Holds the live frames `change` newly covers while its replay reads the retained ones. */
-  _holdBinary(change: BinaryWantChange): ReplayHold
+  /** Holds the live frames `change` newly covers, or with `change` null live messages, while its replay reads what is
+   *  retained. */
+  _hold(change: BinaryWantChange | null): ReplayHold
   /** The members whose own frames the holder doesn't get back. */
   _suppressedMembers(): ReadonlySet<string>
   /** A retained frame decoded, then in its wire form, which only a holder that forwards it takes. */
-  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void
+  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string, hold: ReplayHold): void
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array, hold: ReplayHold): void
 }
 
@@ -281,8 +300,14 @@ class LocalHolder implements LaneHolder {
     return !this._suppressed.has(member) && binaryWantsCovers(this._binaryWants, member, track)
   }
 
-  relayText(event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._wantsTextFrom(event.from) && this._replay.admit(event.from, info)) this._applyText(event, info)
+  relayText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void {
+    if (!this._wantsTextFrom(event.from)) return
+    const replay = this._replay
+    if (replay.holding) {
+      const relay = () => this.relayText(event, info, serialized)
+      if (replay.held(event.from, null, heldTextWeight(serialized), relay)) return
+    }
+    if (replay.admit(event.from, info)) this._applyText(event, info)
   }
 
   relayAnnouncement(data: unknown, info: WirePublishInfo): void {
@@ -298,17 +323,17 @@ class LocalHolder implements LaneHolder {
     if (replay.holding) {
       // The track and metadata decoded out of the frame were encoded in the bytes before its payload.
       const weight = heldWeight(frame.payload, frame.payload.byteOffset)
-      if (replay.heldBinary(from, track, weight, () => this.relayBinary(frame, info))) return
+      if (replay.held(from, track, weight, () => this.relayBinary(frame, info))) return
     }
     if (replay.admitBinary(from, track, info)) this._applyBinary(frame, info)
   }
 
-  _holdBinary(change: BinaryWantChange): ReplayHold {
-    return this._replay.holdBinary(change)
+  _hold(change: BinaryWantChange | null): ReplayHold {
+    return this._replay.hold(change)
   }
 
-  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo): void {
-    if (this._replay.admit(event.from, info)) this._applyText(event, info)
+  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, _serialized: string, hold: ReplayHold): void {
+    if (this._replay.admitRetained(hold, event.from, null, info)) this._applyText(event, info)
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, _framed: Uint8Array, hold: ReplayHold): void {

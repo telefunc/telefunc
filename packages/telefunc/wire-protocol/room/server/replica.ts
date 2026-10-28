@@ -276,6 +276,18 @@ class RoomReplica {
 
   async replayText(holder: LaneHolder, before: TextWantsChange): Promise<void> {
     if (before.all) return
+    // A live message from a sender another want's subscription already delivers would otherwise beat the retained one.
+    const hold = holder._hold(null)
+    const reading = this._readRetainedText(holder, before, hold).finally(() => hold.end())
+    try {
+      await withinRoomHorizon(reading)
+    } finally {
+      // Past the horizon the held messages go out, and a retained one the read returns later follows them.
+      hold.flush()
+    }
+  }
+
+  private async _readRetainedText(holder: LaneHolder, before: TextWantsChange, hold: ReplayHold): Promise<void> {
     await this.sync.ensureRoster()
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this.plan.semanticReady)
@@ -287,7 +299,7 @@ class RoomReplica {
     const had = before.members.get(event.from) ?? holder._textDemand().members.has(event.from)
     if (had || !holder._wantsTextFrom(event.from) || !this.model.hasMember(event.from)) return
     // Replay the stored order as-is; the holder admits it only if it is newer than what it has.
-    holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized)
+    holder._emitRetainedText(event, { seq: stored.seq, timestamp: stored.timestamp }, serialized, hold)
   }
 
   /** Binary uses the same readiness handoff and stored receipt; its holder dedupes the live/retained race per lane, so
@@ -296,7 +308,7 @@ class RoomReplica {
    *  member's retained frames, and one read just before that is gone with it. */
   async replayBinary(holder: LaneHolder, change: BinaryWantChange): Promise<void> {
     // A live frame on a lane another want's subscription already delivers would otherwise beat its retained frame.
-    const hold = holder._holdBinary(change)
+    const hold = holder._hold(change)
     const reading = this._readRetainedBinary(holder, change, hold).finally(() => hold.end())
     try {
       await withinRoomHorizon(reading)
