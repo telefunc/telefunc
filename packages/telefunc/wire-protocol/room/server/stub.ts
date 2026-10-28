@@ -33,7 +33,7 @@ import {
   isRoomRequest,
   type RoomDeclaration,
 } from './requests.js'
-import { ANNOUNCE_KEY, ReplayGate, heldWeight, type LaneHolder } from './replay.js'
+import { ANNOUNCE_KEY, ReplayGate, heldWeight, type LaneHolder, type ReplayHold } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
@@ -429,7 +429,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (replay.admitBinary(from, track, info)) this._end.deliverBinary(wireData)
   }
 
-  _holdBinary(change: BinaryWantChange): () => void {
+  _holdBinary(change: BinaryWantChange): ReplayHold {
     return this._replay.holdBinary(change)
   }
 
@@ -453,8 +453,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (this._replay.admit(event.from, info)) this._end.deliver(encodePublishText(serialized, info))
   }
 
-  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void {
-    if (this._replay.admitBinary(frame.from, frame.track, info)) {
+  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array, hold: ReplayHold): void {
+    if (this._replay.admitRetained(hold, frame.from, frame.track, info)) {
       this._end.deliverBinary(encodePublishBinary(framed, info))
     }
   }

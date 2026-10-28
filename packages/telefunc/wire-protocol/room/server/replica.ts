@@ -41,7 +41,7 @@ import {
   takeDmReplies,
 } from './membership.js'
 import type { StoredRoomMeta } from './meta.js'
-import type { LaneHolder, TextWantsChange } from './replay.js'
+import type { LaneHolder, ReplayHold, TextWantsChange } from './replay.js'
 import type { MetaMirror, ServerRoom } from './room.js'
 import { RosterStream } from './RosterStream.js'
 import { toggle } from './sets.js'
@@ -296,18 +296,17 @@ class RoomReplica {
    *  member's retained frames, and one read just before that is gone with it. */
   async replayBinary(holder: LaneHolder, change: BinaryWantChange): Promise<void> {
     // A live frame on a lane another want's subscription already delivers would otherwise beat its retained frame.
-    const release = holder._holdBinary(change)
-    let holding = true
+    const hold = holder._holdBinary(change)
+    const reading = this._readRetainedBinary(holder, change, hold).finally(() => hold.end())
     try {
-      await withinRoomHorizon(this._readRetainedBinary(holder, change, () => holding))
+      await withinRoomHorizon(reading)
     } finally {
-      holding = false
-      release()
+      // Past the horizon the held frames go out, and a retained frame the read returns later follows them.
+      hold.flush()
     }
   }
 
-  /** Emits only while `holding()`: once the replay's horizon released the live frames, a later read would follow them. */
-  private async _readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, holding: () => boolean) {
+  private async _readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {
     await this.sync.ensureRoster()
     await (member === ALL ? this.plan.binaryReady() : this.plan.pairsReady(member, track))
     const backend = getRoomBackend()
@@ -322,12 +321,11 @@ class RoomReplica {
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
       const stored = await backend.readRetained(this.id, this._incarnation.inc, lane)
-      if (!holding()) return
       if (stored === null || !this.model.hasMember(lane.member)) continue
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
       assert(frame)
-      holder._emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed)
+      holder._emitRetainedBinary(frame, { seq: stored.seq, timestamp: stored.timestamp }, framed, hold)
     }
   }
 
