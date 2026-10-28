@@ -4,7 +4,6 @@ export type { AcceptedCommitWire, CloudflareRoomAuthorityStub, CommitWire, Regis
 
 // A room's authority owns its time, state and fanout.
 
-import { DurableObject } from 'cloudflare:workers'
 import type {
   CellsCx,
   CxResult,
@@ -25,7 +24,8 @@ import type { OrderingInfo } from '../../../wire/orderingFrame.js'
 import { assert } from '../../../../utils/assert.js'
 import { encodeLaneKey, everyMemberLaneKey, everyTrackLaneKey } from '../../../backend/room/laneKey.js'
 import { commitPreconditionHolds, isOpenIncarnation, publicHead } from '../../../backend/room/semantics.js'
-import { Fanout, type RoomSessionNamespace } from './Fanout.js'
+import { Fanout } from './Fanout.js'
+import type { TelefuncExtensionNamespace } from '../extensions.js'
 import { deleteRetained, installRetained, listRetained, readRetained } from './retained.js'
 import {
   deleteExpiredRoutes,
@@ -62,19 +62,20 @@ type CommitWire = AcceptedCommitWire | StaleCommit
 
 type RegisterWire = { ok: true } | { rejected: true; reason: string }
 
-/** The room authority's own methods, which its Durable Object serves over RPC. */
-type CloudflareRoomAuthorityStub = Omit<RoomAuthority, keyof DurableObject>
+/** The room authority's methods, which its Durable Object serves over RPC. */
+type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
-/** A Durable Object that can act as a room authority, fanning out to the session DOs of `sessions`. Its tables are
- *  created on first use, so a DO in another role never has them. */
-class RoomAuthority<Env = unknown> extends DurableObject<Env> {
+/** The role of a Durable Object that is a room authority, or the room directory, fanning out to the session DOs of
+ *  `sessions`. Its tables are created on first use. */
+class RoomAuthority {
+  readonly #ctx: DurableObjectState
   readonly #fanout: Fanout
   #schema = false
 
-  constructor(ctx: DurableObjectState, env: Env, sessions: RoomSessionNamespace) {
-    super(ctx, env)
+  constructor(ctx: DurableObjectState, sessions: TelefuncExtensionNamespace) {
+    this.#ctx = ctx
     this.#fanout = new Fanout(sessions)
   }
 
@@ -236,29 +237,29 @@ class RoomAuthority<Env = unknown> extends DurableObject<Env> {
   /** The schema is created outside the transaction, so a refused first write can't roll it back. */
   #transaction<T>(fn: (sql: SqlStorage) => T): T {
     const sql = this.#sql()
-    return this.ctx.storage.transactionSync(() => fn(sql))
+    return this.#ctx.storage.transactionSync(() => fn(sql))
   }
 
   #sql(): SqlStorage {
     if (!this.#schema) {
-      initSchema(this.ctx.storage.sql)
+      initSchema(this.#ctx.storage.sql)
       this.#schema = true
     }
-    return this.ctx.storage.sql
+    return this.#ctx.storage.sql
   }
 
   async #scheduleMaintenanceIfNeeded(): Promise<void> {
     const now = Date.now()
     const deadline = nextMaintenanceDeadline(this.#sql(), now)
-    const currentAlarm = await this.ctx.storage.getAlarm()
+    const currentAlarm = await this.#ctx.storage.getAlarm()
     if (deadline === null) {
-      if (currentAlarm !== null) await this.ctx.storage.deleteAlarm()
+      if (currentAlarm !== null) await this.#ctx.storage.deleteAlarm()
       return
     }
     const nextAlarm = deadline <= now ? now + ROOM_MAINTENANCE_RETRY_MS : deadline
     if (currentAlarm === nextAlarm) return
     // Never postpone an already-scheduled retry for work that is due now.
     if (deadline <= now && currentAlarm !== null && currentAlarm <= nextAlarm) return
-    await this.ctx.storage.setAlarm(nextAlarm)
+    await this.#ctx.storage.setAlarm(nextAlarm)
   }
 }

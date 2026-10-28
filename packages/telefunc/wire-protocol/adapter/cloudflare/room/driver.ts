@@ -1,6 +1,5 @@
 /// <reference types="@cloudflare/workers-types" />
 export { CloudflareRoomDriver }
-export type { CloudflareRoomNamespace }
 
 import type {
   CellsCx,
@@ -26,24 +25,21 @@ import type { OrderingInfo, SubscriptionDriver } from '../../../../node/server/_
 import type { CloudflareRoomAuthorityStub } from './do.js'
 import { getRoomSessionManager } from './subscription.js'
 import { currentCloudflareSession, requireCloudflareSession } from '../session.js'
+import type { TelefuncExtensionNamespace, TelefuncExtensionStub } from '../extensions.js'
+import { ROOM_CLOUDFLARE_EXTENSION } from '../../../room/server/constants.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
 const DIRECTORY_DO_NAME = '__telefunc_room_directory__'
 
-type CloudflareRoomNamespace = {
-  idFromName(name: string): unknown
-  get(id: unknown): CloudflareRoomAuthorityStub
-}
-
 /** A subscription requires its session DO's context; a lane commit made in one goes through that session's ordered
  *  stub. */
 class CloudflareRoomDriver implements RoomDriver {
   readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource>
-  readonly #rooms: () => CloudflareRoomNamespace
+  readonly #namespace: () => TelefuncExtensionNamespace
 
-  constructor({ rooms }: { rooms: () => CloudflareRoomNamespace }) {
-    this.#rooms = rooms
+  constructor({ namespace }: { namespace: () => TelefuncExtensionNamespace }) {
+    this.#namespace = namespace
     this.subscriptions = {
       bind: (source) => {
         requireCloudflareSession()
@@ -158,7 +154,17 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 
   #object(name: string): CloudflareRoomAuthorityStub {
-    const namespace = this.#rooms()
-    return namespace.get(namespace.idFromName(name))
+    const namespace = this.#namespace()
+    return roomAuthorityStub(namespace.get(namespace.idFromName(name)))
   }
+}
+
+/** A room authority's methods, called through its Durable Object's `telefuncRole()`. */
+function roomAuthorityStub(stub: TelefuncExtensionStub): CloudflareRoomAuthorityStub {
+  return new Proxy({} as CloudflareRoomAuthorityStub, {
+    get:
+      (_, method: string) =>
+      (...args: unknown[]) =>
+        stub.telefuncRole(ROOM_CLOUDFLARE_EXTENSION, method, args),
+  })
 }

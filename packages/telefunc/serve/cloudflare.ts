@@ -33,21 +33,22 @@ import {
   resolveSessionRoutingTarget,
 } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/sessionPin.js'
-import { assertUsage } from '../utils/assert.js'
+import { assert, assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/backend.js'
-import {
-  getRoomSessionManager,
-  type RoomSessionDeliveryRequest,
-} from '../wire-protocol/adapter/cloudflare/room/subscription.js'
-import { RoomAuthority } from '../wire-protocol/adapter/cloudflare/room/do.js'
+import { getCloudflareExtension, type CloudflareExtensionRole } from '../wire-protocol/adapter/cloudflare/extensions.js'
+import '../wire-protocol/adapter/cloudflare/room/extension.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
+
+/** The extension whose role a Durable Object has, kept in its storage so that its alarm() finds the role after an
+ *  eviction. */
+const ROLE_STORAGE_KEY = 'telefunc:extension-role'
 
 /** A Durable Object takes a WebSocket message of 32 MiB at most. */
 const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -107,7 +108,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const cloudflareBackend = installBackend(
     () =>
       new CloudflareBackend({
-        rooms: () => telefuncNamespace(workerEnv),
+        namespace: () => telefuncNamespace(workerEnv),
         broadcast: new CloudflareBroadcast({
           baseInstanceName,
           scale,
@@ -129,14 +130,15 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const getContext = options?.context
 
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
-  // coordinator, a room authority or the room directory.
-  const TelefuncDurableObject = class extends RoomAuthority<Cloudflare.Env> {
+  // coordinator, or an extension's role.
+  const TelefuncDurableObject = class extends DurableObject<Cloudflare.Env> {
     readonly #authorityState: CloudflareBroadcastAuthorityState
     readonly #broadcastCalls: BroadcastCalls = new OrderedStubs()
     readonly #session: CloudflareSession
+    readonly #roles = new Map<string, CloudflareExtensionRole>()
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-      super(ctx, env, telefuncNamespace(env))
+      super(ctx, env)
       this.#authorityState = new CloudflareBroadcastAuthorityState(ctx)
       const id = ctx.id.toString()
       this.#session = {
@@ -192,8 +194,37 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.#authorityState.setPresence(request)
     }
 
-    telefuncRoomDeliver(request: RoomSessionDeliveryRequest) {
-      return this.#runInSession(() => getRoomSessionManager().deliver(request))
+    /** The RPC method every extension's role is called through. */
+    async telefuncRole(name: string, method: string, args: unknown[]): Promise<unknown> {
+      const role = this.#role(name)
+      const call = (role as Record<string, unknown>)[method]
+      assertUsage(typeof call === 'function', `The Cloudflare extension ${name} has no role method ${method}()`)
+      if ((await this.ctx.storage.get(ROLE_STORAGE_KEY)) !== name) await this.ctx.storage.put(ROLE_STORAGE_KEY, name)
+      return call.apply(role, args)
+    }
+
+    telefuncSessionCall(name: string, method: string, args: unknown[]): unknown {
+      const call = getCloudflareExtension(name)?.session?.[method] as ((...args: unknown[]) => unknown) | undefined
+      assertUsage(call, `The Cloudflare extension ${name} has no session call ${method}()`)
+      return this.#runInSession(() => call(...args))
+    }
+
+    /** Only a role schedules alarms. */
+    async alarm(): Promise<void> {
+      const name = await this.ctx.storage.get<string>(ROLE_STORAGE_KEY)
+      assert(name !== undefined)
+      await this.#role(name).alarm?.()
+    }
+
+    /** Built once, synchronously, so that concurrent first calls share it. */
+    #role(name: string): CloudflareExtensionRole {
+      const built = this.#roles.get(name)
+      if (built) return built
+      const extension = getCloudflareExtension(name)
+      assertUsage(extension?.role, `The Cloudflare extension ${name} isn't registered`)
+      const role = extension.role(this.ctx as never, this.env as never, () => telefuncNamespace(this.env))
+      this.#roles.set(name, role)
+      return role
     }
 
     #runInSession<T>(fn: () => T): T {

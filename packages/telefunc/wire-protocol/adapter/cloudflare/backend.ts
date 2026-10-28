@@ -8,20 +8,22 @@ import type {
   PublishResult,
 } from '../../backend/broadcast/contract.js'
 import type { SubscriptionDriver } from '../../backend/subscription.js'
-import { ROOM_PLANE } from '../../backend/room/plane.js'
 import type { CloudflareBroadcast } from './broadcast.js'
-import { CloudflareRoomDriver, type CloudflareRoomNamespace } from './room/driver.js'
+import { getCloudflareExtensionPlanes, type TelefuncExtensionNamespace } from './extensions.js'
 import { currentCloudflareSession, requireCloudflareSession } from './session.js'
 
 /** A subscription requires its session DO's context. */
 class CloudflareBackend implements BroadcastDriver {
   readonly broadcast: CloudflareBroadcast
   readonly subscriptions: SubscriptionDriver<BroadcastRoute>
-  readonly planes: { readonly [ROOM_PLANE]: () => CloudflareRoomDriver }
+  readonly #namespace: () => TelefuncExtensionNamespace
 
-  constructor({ rooms, broadcast }: { rooms: () => CloudflareRoomNamespace; broadcast: CloudflareBroadcast }) {
+  constructor({
+    namespace,
+    broadcast,
+  }: { namespace: () => TelefuncExtensionNamespace; broadcast: CloudflareBroadcast }) {
     this.broadcast = broadcast
-    this.planes = { [ROOM_PLANE]: () => new CloudflareRoomDriver({ rooms }) }
+    this.#namespace = namespace
     this.subscriptions = {
       bind: (source) => {
         const session = requireCloudflareSession()
@@ -32,6 +34,11 @@ class CloudflareBackend implements BroadcastDriver {
       },
       partitionHere: () => currentCloudflareSession()?.broadcast.partition ?? null,
     }
+  }
+
+  /** The planes of the Cloudflare extensions registered so far. */
+  get planes(): { readonly [key: symbol]: () => unknown } {
+    return getCloudflareExtensionPlanes(this.#namespace)
   }
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {

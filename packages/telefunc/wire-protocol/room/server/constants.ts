@@ -1,4 +1,5 @@
 export {
+  ROOM_CLOUDFLARE_EXTENSION,
   ROOM_HEARTBEAT_INTERVAL_MS,
   ROOM_SESSION_TTL_MS,
   ROOM_TAIL_HOLD_MAX,
@@ -54,3 +55,5 @@ const ROOM_TOMBSTONE_TTL_MS = 60_000
 const ROOM_CLOSE_LEASE_MS = 15_000
 /** How long past an unheld room's close its head lapses: the close that server's timer starts lands well before. */
 const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000
+/** The name Room's Cloudflare extension registers its role and session calls under. */
+const ROOM_CLOUDFLARE_EXTENSION = 'room'

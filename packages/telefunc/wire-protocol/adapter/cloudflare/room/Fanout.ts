@@ -1,34 +1,25 @@
 export { Fanout }
-export type { RoomSessionNamespace, RoomSessionStub }
 
 import type { OrderingInfo } from '../../../wire/orderingFrame.js'
-import { ROOM_HORIZON_MS } from '../../../room/server/constants.js'
+import { ROOM_CLOUDFLARE_EXTENSION, ROOM_HORIZON_MS } from '../../../room/server/constants.js'
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
 import { OrderedStubs, reportLostDeliveries } from '../OrderedStubs.js'
-
-type RoomSessionStub = {
-  telefuncRoomDeliver(request: RoomSessionDeliveryRequest): Promise<void>
-}
-
-type RoomSessionNamespace = {
-  idFromString(id: string): unknown
-  get(id: unknown): RoomSessionStub
-}
+import type { TelefuncExtensionNamespace, TelefuncExtensionStub } from '../extensions.js'
 
 /** A room authority's deliveries. Each session DO's frames go through one ordered stub, so they arrive in commit order
  *  without waiting on each other. A lane has one route per subscribed session DO, at most the deployment's session
  *  shards, so the authority calls each itself, well within an invocation's subrequest limit. */
 class Fanout {
-  readonly #sessions: RoomSessionNamespace
-  readonly #calls = new OrderedStubs<RoomSessionStub>()
+  readonly #sessions: TelefuncExtensionNamespace
+  readonly #calls = new OrderedStubs<TelefuncExtensionStub>()
   /** A token's delivery, kept until it is awaited or two rotations later, which come a horizon apart at the
    *  earliest. */
   #deliveries = new Map<string, Promise<void>>()
   #rotated = new Map<string, Promise<void>>()
   #rotatedAt = Date.now()
 
-  constructor(sessions: RoomSessionNamespace) {
+  constructor(sessions: TelefuncExtensionNamespace) {
     this.#sessions = sessions
   }
 
@@ -38,7 +29,10 @@ class Fanout {
       this.#calls.call(
         route.sessionDoId,
         () => this.#sessions.get(this.#sessions.idFromString(route.sessionDoId)),
-        (session) => session.telefuncRoomDeliver({ route, payload, info }),
+        (session) => {
+          const request: RoomSessionDeliveryRequest = { route, payload, info }
+          return session.telefuncSessionCall(ROOM_CLOUDFLARE_EXTENSION, 'deliver', [request])
+        },
       ),
     )
     return Promise.allSettled(handoffs).then((outcomes) => reportLostDeliveries('Cloudflare Room delivery', outcomes))

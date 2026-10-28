@@ -30,3 +30,10 @@ export { reportBug } from '../../wire-protocol/channel/server/channel.js'
 export { getChannelLimits } from './serverConfig.js'
 export { untether } from '../../utils/wrapProxy.js'
 export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
+export { registerCloudflareExtension } from '../../wire-protocol/adapter/cloudflare/extensions.js'
+export type {
+  CloudflareExtension,
+  CloudflareExtensionRole,
+  TelefuncExtensionNamespace,
+  TelefuncExtensionStub,
+} from '../../wire-protocol/adapter/cloudflare/extensions.js'
