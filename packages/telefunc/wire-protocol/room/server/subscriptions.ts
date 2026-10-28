@@ -6,8 +6,8 @@ import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { getRoomBackend } from '../../backend/room/plane.js'
 import type { RoomSubscriptionSource } from '../../backend/room/contract.js'
 import { encodeLaneKey } from '../../backend/room/laneKey.js'
-import { reportServerChannelError } from '../../channel/server/channel.js'
 import {
+  reportBug,
   reportSubscriptionEnd,
   type BackendReceiver,
   type BackendSubscription,
@@ -792,7 +792,7 @@ class RoomSubscriptions {
   private _onTerminal(slot: LaneSubscription, failure?: unknown): void {
     // A replacement that ends is its recovery's failure, which the recovery reports.
     if (this._recovering.has(slot)) return
-    if (failure !== undefined) reportSubscriptionEnd(failure, reportServerChannelError)
+    if (failure !== undefined) reportSubscriptionEnd(failure, reportBug)
     this._recovering.add(slot)
     void this._recover(slot).catch(reportRoomError)
   }

@@ -1,5 +1,5 @@
 export { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX, ROOM_MEMBER_TRACKS_MAX, ROOM_PLAN_SLICE_MS }
-import { MAX_CHANNELS_PER_CONNECTION } from '../constants.js'
+import { MAX_CHANNELS_PER_CONNECTION } from '../../client/__internal.js'
 
 // Each named track a room handle subscribes to is a substream, as a channel is: as many as one connection carries.
 const ROOM_TRACK_WANTS_MAX = MAX_CHANNELS_PER_CONNECTION

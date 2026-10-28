@@ -9,7 +9,7 @@ import type {
   RoomSnapshotMetadata,
 } from '../../../room/protocol.js'
 import { assert } from '../../../../utils/assert.js'
-import { untether } from '../../../../utils/wrapProxy.js'
+import { untether } from '../../../../client/__internal.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,

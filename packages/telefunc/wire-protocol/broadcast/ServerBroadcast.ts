@@ -14,7 +14,7 @@ import type {
 } from '../channel/channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { invokeChannelListener, makePublishInfo } from '../channel/channel.js'
-import { reportServerChannelError } from '../channel/server/channel.js'
+import { reportBug } from '../channel/server/channel.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from '../channel/server/ServerBroadcastEnd.js'
 import { assertPublishShield, type ShieldValidator } from '../../node/server/shield.js'
 import type { BroadcastPayload, BroadcastRoute } from '../backend/broadcast/contract.js'
@@ -295,7 +295,7 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
 
 /** A listener's `Abort` is no bug, and there is no channel for it to close. */
 function reportListenerError(error: unknown): void {
-  if (!isAbort(error)) reportServerChannelError(error)
+  if (!isAbort(error)) reportBug(error)
 }
 
 /** A route's subscription while wanted; one that ends on its own is reported and replaced once, and a transport that
@@ -335,7 +335,7 @@ class RouteSubscription<Kind extends BroadcastKind> {
     // Only a terminal end rejects `ready`, after the manager retired the subscription; an unsubscribe resolves it.
     const ended = () =>
       void subscription.ready.catch((error: unknown) => {
-        reportSubscriptionEnd(error, reportServerChannelError)
+        reportSubscriptionEnd(error, reportBug)
         if (this._current !== subscription) return
         this._current = null
         if (!replacing || wasReady) this._subscribe(true)

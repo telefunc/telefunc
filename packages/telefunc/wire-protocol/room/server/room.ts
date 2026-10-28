@@ -6,7 +6,7 @@ import { assert, assertUsage } from '../../../utils/assert.js'
 import { markHandled } from '../../../utils/markHandled.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
-import type { WirePublishInfo } from '../../../node/server/__internal.js'
+import { getChannelLimits, reportBug, type WirePublishInfo } from '../../../node/server/__internal.js'
 import {
   encodeBinaryFrame,
   decodeBinaryFrame,
@@ -42,8 +42,6 @@ import type { RoomReplica } from './replica.js'
 import { RoomWrites, runAfterHook } from './writes.js'
 import { commitControlOrThrow, withinRoomHorizon } from './lanes.js'
 import { reportRoomError } from './errors.js'
-import { reportServerChannelError } from '../../channel/server/channel.js'
-import { getServerConfig, reconnectWindow } from '../../../node/server/serverConfig.js'
 import { createMember, evictMember } from './membership.js'
 import { memberCellKey } from './cells.js'
 import type { RoomIncarnation } from './lifecycle.js'
@@ -113,7 +111,7 @@ class ServerRoom extends RoomStateView implements Room {
         this._onHolderTextChanged(this._local, this._local.refreshText(member))
         if (binary !== null && this._local.applyBinary(binary)) this._onHolderBinaryChanged(this._local, binary)
       },
-      onCallbackError: reportServerChannelError,
+      onCallbackError: reportBug,
     })
     this._local = new LocalHolder(this._state, this._localSuppressed)
     this._writes = new RoomWrites(this, {
@@ -295,7 +293,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._localSuppressed.clear()
     for (const id of this._admissions.keys()) this._admissions.set(id, 'abandoned')
     // A client back while its channel still holds it gets `closed`.
-    const timeout = reconnectWindow()
+    const timeout = getChannelLimits().reconnectWindow
     for (const stub of this._stubs) void stub._end.close({ timeout }).catch(() => {})
     this._replica.track(this)
   }
@@ -352,7 +350,7 @@ class ServerRoom extends RoomStateView implements Room {
       meta: this._model.metaEntries(),
       closed: this.isClosed,
       metaSeq: this._model.metaSeq,
-      bufferLimit: getServerConfig().channel.bufferLimit,
+      bufferLimit: getChannelLimits().bufferLimit,
       count: this.count,
     }
   }
@@ -540,7 +538,7 @@ class ServerLocalParticipant extends ParticipantBase {
       meta: this.meta,
       selfDelivery: this.selfDelivery,
       identity: this.identity,
-      bufferLimit: getServerConfig().channel.bufferLimit,
+      bufferLimit: getChannelLimits().bufferLimit,
     }
   }
 
@@ -624,10 +622,10 @@ class ServerLocalParticipant extends ParticipantBase {
   }
 
   protected _reportError(err: unknown): void {
-    reportServerChannelError(err)
+    reportBug(err)
   }
 
   protected _inboxBufferLimit(): number {
-    return getServerConfig().channel.bufferLimit
+    return getChannelLimits().bufferLimit
   }
 }

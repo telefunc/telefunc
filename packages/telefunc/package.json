@@ -107,6 +107,7 @@
       "default": "./dist/serve/cloudflare.js"
     },
     "./__internal": {
+      "browser": "./dist/client/__internal.js",
       "types": "./dist/node/server/__internal.d.ts",
       "default": "./dist/node/server/__internal.js"
     }

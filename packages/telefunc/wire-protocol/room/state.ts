@@ -4,7 +4,7 @@ export type { MembershipEvent }
 import { assert, assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { invokeChannelListener, type ChannelPublishInfo } from '../channel/channel.js'
-import { untether } from '../../utils/wrapProxy.js'
+import { untether } from '../../client/__internal.js'
 import { makeDisposer } from './disposer.js'
 import { Slice } from './Slice.js'
 import { Listeners } from '../../utils/Listeners.js'

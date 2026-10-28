@@ -6,7 +6,7 @@ import { unrefTimer } from '../../../utils/unrefTimer.js'
 import type { CommitAccepted } from '../../backend/room/contract.js'
 import { encodeLaneKey } from '../../backend/room/laneKey.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
-import { reportServerChannelError } from '../../channel/server/channel.js'
+import { reportBug } from '../../../node/server/__internal.js'
 import type { BinaryFrame } from '../binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
@@ -274,6 +274,6 @@ async function runAfterHook(hook: () => unknown): Promise<void> {
   try {
     await hook()
   } catch (error) {
-    reportServerChannelError(error)
+    reportBug(error)
   }
 }

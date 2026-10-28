@@ -6,12 +6,12 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { parsePeerText } from '../../channel/server/channel.js'
-import { reconnectWindow } from '../../../node/server/serverConfig.js'
 import { assertPublishShield, type ShieldValidator } from '../../../node/server/shield.js'
 import { assertProtocol, isProtocolViolationError, ProtocolViolationError } from '../../wire/connectionFrame.js'
 import {
   encodePublishBinary,
   encodePublishText,
+  getChannelLimits,
   type BroadcastEndOwner,
   type BroadcastKind,
   type ServerBroadcastEnd,
@@ -574,7 +574,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
       left = true
       this._notify({ __r: 'left', ...leaveCauseToWire(cause) })
       // A client back while its channel still holds it gets its leave.
-      void this._end.close({ timeout: reconnectWindow() }).catch(() => {})
+      void this._end.close({ timeout: getChannelLimits().reconnectWindow }).catch(() => {})
     })
 
     this._end.onDisconnect(() => participant._setHolderConnected(false))

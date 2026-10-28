@@ -7,6 +7,7 @@ export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
 export { pingDeadlineOf }
 export { reconnectWindow }
+export { getChannelLimits }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -409,9 +410,18 @@ function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInter
 }
 
 /** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
-function reconnectWindow(): number {
-  const c = getServerConfig().channel
+function reconnectWindow(c = getServerConfig().channel): number {
   return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
+}
+
+/** What a channel to a page may hold, how long it waits for its page to come back, and the adapter's frame cap. */
+function getChannelLimits(): { bufferLimit: number; reconnectWindow: number; maxFrameBytes: number | undefined } {
+  const { channel } = getServerConfig()
+  return {
+    bufferLimit: channel.bufferLimit,
+    reconnectWindow: reconnectWindow(channel),
+    maxFrameBytes: getAdapterMaxFrameBytes(),
+  }
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.
