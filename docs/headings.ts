@@ -271,12 +271,6 @@ const headings = [
   },
   {
     level: 2,
-    titleInNav: '`room`',
-    title: '`room` (config)',
-    url: '/room-config',
-  },
-  {
-    level: 2,
     titleInNav: '`broadcast`',
     title: '`broadcast` (config)',
     url: '/broadcast-config',
@@ -336,6 +330,7 @@ const headings = [
     title: '`Room`',
     url: '/room',
     sectionTitles: [
+      'Install',
       'Create and join a room',
       "Show who's in the room",
       'Update your name or status',
@@ -354,6 +349,11 @@ const headings = [
       'Run on multiple servers',
       'Methods',
     ],
+  },
+  {
+    level: 2,
+    title: '`Room` config',
+    url: '/room-config',
   },
   {
     level: 2,

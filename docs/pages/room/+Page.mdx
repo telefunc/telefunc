@@ -12,6 +12,17 @@ import { TelefuncStreamBeta } from '../../components'
 > When you only need a pipe to one client, use <Link href="/channel#new-channel">`new Channel()`</Link>. When you need pub/sub without membership, use <Link href="/channel#new-broadcastchannel">`new BroadcastChannel()`</Link>.
 
 
+## Install
+
+```bash
+npm install @telefunc/room
+```
+
+> There isn't any other setup: Telefunc finds `@telefunc/*` packages in your `package.json` and auto-loads them.
+
+> Without a Telefunc bundler plugin (Vite, webpack, Next.js, Babel), register it manually: `import '@telefunc/room/client'` in your client entry. The server needs no extra import: importing `Room` from `@telefunc/room` registers it.
+
+
 ## Create and join a room
 
 A telefunction returns the room, and the client joins it:
@@ -20,7 +31,7 @@ A telefunction returns the room, and the client joins it:
 // Lobby.telefunc.js
 // Environment: server
 
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 export async function onGetLobby() {
   return await Room.getOrCreate('lobby')
@@ -143,7 +154,7 @@ Pass your types to `Room.get()`, `Room.create()` or `Room.getOrCreate()`:
 // Chat.telefunc.ts
 // Environment: server
 
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 type RoomMeta = { topic: string }
 type MemberMeta = { name: string }
@@ -188,7 +199,7 @@ console.log(response) // 'ok'
 ```js
 // Environment: server
 
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 await Room.announce('lobby', { type: 'maintenance', in: '5min' })   // to everyone
 await Room.send('lobby', { identity: userId }, { badge: 'winner' }) // to every tab of one user
@@ -213,7 +224,8 @@ Call `Room.guard()` in the telefunction that returns the room, and throw <Link h
 // Chat.telefunc.js
 // Environment: server
 
-import { Abort, getContext, Room } from 'telefunc'
+import { Abort, getContext } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 export async function onJoinChat(roomId) {
   const { user } = getContext()
@@ -266,7 +278,8 @@ To run code after a join or a message, such as saving the message, use `onAfterJ
 // Moderation.telefunc.js
 // Environment: server
 
-import { Abort, getContext, Room } from 'telefunc'
+import { Abort, getContext } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 export async function onRemove(roomId, participantId) {
   const { user } = getContext()
@@ -302,7 +315,7 @@ Create the room and join it from the server with `{ hidden: true }`, for example
 // Match.telefunc.js
 // Environment: server
 
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 export async function onStartMatch() {
   const matchId = crypto.randomUUID()
@@ -325,7 +338,8 @@ To let players send it commands, return it with the room:
 // Match.telefunc.js
 // Environment: server
 
-import { getContext, Room } from 'telefunc'
+import { getContext } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 export async function onJoinMatch(matchId, name) {
   const { user } = getContext()
@@ -414,7 +428,8 @@ Save each message in `onAfterPublish()`, and return the history with the room:
 // Chat.telefunc.js
 // Environment: server
 
-import { getContext, Room } from 'telefunc'
+import { getContext } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 export async function onJoinChat(roomId) {
   const { user } = getContext()
@@ -465,7 +480,7 @@ Everyone else's `room.onLeave()` fires.
 ```js
 // Environment: server
 
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 await Room.close('lobby')
 ```
