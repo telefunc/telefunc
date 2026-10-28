@@ -392,6 +392,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._stubs.delete(stub)
     this._replica.detachStub(stub)
     stub._endTail()
+    stub._endReplayHolds()
     this._replica.track(this)
     this._replica.plan.holderGone(stub)
     for (const id of stub._heldMembers()) {

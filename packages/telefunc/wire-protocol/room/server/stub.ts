@@ -418,7 +418,19 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._wantsBinary(from, track) && this._replay.admitBinary(from, track, info)) this._end.deliverBinary(wireData)
+    if (!this._wantsBinary(from, track)) return
+    const replay = this._replay
+    if (
+      replay.holding &&
+      replay.heldBinary(from, track, wireData.byteLength, () => this._relayBinary(wireData, from, track, info))
+    ) {
+      return
+    }
+    if (replay.admitBinary(from, track, info)) this._end.deliverBinary(wireData)
+  }
+
+  _holdBinary(change: BinaryWantChange): () => void {
+    return this._replay.holdBinary(change)
   }
 
   _relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
@@ -488,6 +500,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   _endTail(): void {
     this._tail?.end()
     this._tail = null
+  }
+
+  _endReplayHolds(): void {
+    this._replay.dropHolds()
   }
 }
 

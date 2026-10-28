@@ -5,16 +5,20 @@ import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { makePublishInfo, type ChannelPublishInfo } from '../../channel/channel.js'
 import type { WirePublishInfo } from '../../wire/connectionFrame.js'
-import type { BinaryFrame, BinaryWantChange } from '../binary.js'
+import { ALL, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
 import type { MemberWants } from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
 import type { RoomState } from '../state.js'
 import { toggle } from './sets.js'
+import { ROOM_REPLAY_HOLD_BYTES_MAX } from './constants.js'
 assertIsNotBrowser()
 
 // Text gate keys: a member's id, and for announcements a key no id takes.
 const ANNOUNCE_KEY = '\0announce'
+
+/** A binary want whose retained frames are being read, and the relays of the live frames it holds meanwhile. */
+type ReplayHold = { change: BinaryWantChange; relays: (() => void)[]; bytes: number }
 
 /** One holder's order across retained replay and live frames, per sender: a frame is admitted only if it is newer than
  *  every frame the holder already has from that sender on its lane. A replayed retained frame can win the race against
@@ -24,6 +28,8 @@ class ReplayGate {
   private readonly _high = new Map<string, WirePublishInfo>()
   /** Binary lanes by sender, then track, so a sender's leave forgets only its own. */
   private readonly _binaryHigh = new Map<string, Map<string, WirePublishInfo>>()
+  private readonly _holds = new Set<ReplayHold>()
+  private _heldBytes = 0
 
   admit(key: string, info: WirePublishInfo): boolean {
     return admitInto(this._high, key, info)
@@ -37,6 +43,48 @@ class ReplayGate {
   forgetMember(member: string): void {
     this._high.delete(member)
     this._binaryHigh.delete(member)
+  }
+
+  /** Holds the live frames `change` covers on lanes the holder has had none from, until the returned release runs
+   *  their relays again: the retained frames read in between go out first. */
+  holdBinary(change: BinaryWantChange): () => void {
+    const hold: ReplayHold = { change, relays: [], bytes: 0 }
+    this._holds.add(hold)
+    return () => this._release(hold)
+  }
+
+  /** Whether some replay may hold a live frame. */
+  get holding(): boolean {
+    return this._holds.size > 0
+  }
+
+  /** Whether a replay holds the live frame; `relay` delivers it once that replay ends. */
+  heldBinary(member: string, track: string, bytes: number, relay: () => void): boolean {
+    if (this._binaryHigh.get(member)?.has(track)) return false
+    for (const hold of this._holds) {
+      const { change } = hold
+      if ((change.member !== ALL && change.member !== member) || (change.track !== ALL && change.track !== track)) {
+        continue
+      }
+      hold.relays.push(relay)
+      hold.bytes += bytes
+      this._heldBytes += bytes
+      if (this._heldBytes > ROOM_REPLAY_HOLD_BYTES_MAX) for (const held of this._holds) this._release(held)
+      return true
+    }
+    return false
+  }
+
+  /** The holder is gone: what its replays hold is dropped. */
+  dropHolds(): void {
+    this._holds.clear()
+    this._heldBytes = 0
+  }
+
+  private _release(hold: ReplayHold): void {
+    if (!this._holds.delete(hold)) return
+    this._heldBytes -= hold.bytes
+    for (const relay of hold.relays) relay()
   }
 }
 
@@ -62,6 +110,8 @@ interface LaneHolder {
   _textDemand(): MemberWants
   _wantsTextFrom(member: string): boolean
   _wantsBinary(member: string, track: string): boolean
+  /** Holds the live frames `change` newly covers until the returned release, which its replay calls once done. */
+  _holdBinary(change: BinaryWantChange): () => void
   /** The members whose own frames the holder doesn't get back. */
   _suppressedMembers(): ReadonlySet<string>
   /** A retained frame decoded, then in its wire form, which only a holder that forwards it takes. */
@@ -134,9 +184,20 @@ class LocalHolder implements LaneHolder {
   }
 
   relayBinary(frame: BinaryFrame, info: WirePublishInfo): void {
-    if (this._wantsBinary(frame.from, frame.track) && this._replay.admitBinary(frame.from, frame.track, info)) {
-      this._applyBinary(frame, info)
+    if (!this._wantsBinary(frame.from, frame.track)) return
+    const { from, track } = frame
+    const replay = this._replay
+    if (
+      replay.holding &&
+      replay.heldBinary(from, track, frame.payload.byteLength, () => this.relayBinary(frame, info))
+    ) {
+      return
     }
+    if (replay.admitBinary(from, track, info)) this._applyBinary(frame, info)
+  }
+
+  _holdBinary(change: BinaryWantChange): () => void {
+    return this._replay.holdBinary(change)
   }
 
   _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo): void {
