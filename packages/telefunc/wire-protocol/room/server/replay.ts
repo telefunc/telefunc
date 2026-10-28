@@ -68,6 +68,8 @@ class ReplayGate {
   private readonly _binaryHigh = new Map<string, Map<string, WirePublishInfo>>()
   /** The binary replays whose reads haven't settled. */
   private readonly _replays = new Set<ReplayHold>()
+  /** The late retained frames the holder got while some replay is pending: overlapping replays read the same one. */
+  private readonly _lateRetained = new Set<string>()
   private _holding = 0
   private _heldBytes = 0
 
@@ -90,11 +92,15 @@ class ReplayGate {
   }
 
   /** A retained frame `hold` read: once the hold let its frames go early, it follows them unless the holder got it
-   *  live already. */
+   *  live already, or from an overlapping replay. */
   admitRetained(hold: ReplayHold, member: string, track: string, info: WirePublishInfo): boolean {
     if (hold.holding || !this._binaryHigh.get(member)?.has(track)) return this.admitBinary(member, track, info)
     const firstLive = hold.firstLive.get(member)?.get(track)
-    return firstLive !== undefined && isNewer(firstLive, info)
+    if (firstLive === undefined || !isNewer(firstLive, info)) return false
+    const key = JSON.stringify([member, track, info.seq, info.timestamp])
+    if (this._lateRetained.has(key)) return false
+    this._lateRetained.add(key)
+    return true
   }
 
   /** The frames held from `member` go with it: its leave reached the holder before them. */
@@ -143,6 +149,7 @@ class ReplayGate {
       hold.held = []
     }
     this._replays.clear()
+    this._lateRetained.clear()
     this._holding = 0
     this._heldBytes = 0
   }
@@ -161,6 +168,7 @@ class ReplayGate {
   /** @internal */
   _end(hold: ReplayHold): void {
     this._replays.delete(hold)
+    if (this._replays.size === 0) this._lateRetained.clear()
   }
 
   private _unhold(hold: ReplayHold, bytes: number): void {
