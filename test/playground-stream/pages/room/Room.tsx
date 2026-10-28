@@ -149,14 +149,17 @@ async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Prom
       _sendReply(reply: Promise<unknown>, failure: unknown): void
     }
   }
-  const me = await room.join({ meta: { name: 'Mallory' } })
   if (kind === 'reply') {
+    // Before the join: a DM that arrives while the join settles is answered through the end as it is then.
     const sendReply = end._sendReply.bind(end)
     end._sendReply = (reply, failure) =>
       sendReply(
         reply.then((dmReply) => ({ ...(dmReply as object), reply: 'bogus' })),
         failure,
       )
+  }
+  const me = await room.join({ meta: { name: 'Mallory' } })
+  if (kind === 'reply') {
     me.listen(() => 'hi')
     return
   }
