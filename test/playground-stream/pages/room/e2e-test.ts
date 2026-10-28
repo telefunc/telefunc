@@ -1,4 +1,12 @@
-export { testRoom, testRoomMetaReads, testRoomLimits, testRoomAckTimeout, testRoomSmallBuffer, testRoomLongWaits }
+export {
+  testRoom,
+  testRoomFailingBackend,
+  testRoomMetaReads,
+  testRoomLimits,
+  testRoomAckTimeout,
+  testRoomSmallBuffer,
+  testRoomLongWaits,
+}
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import type { Response, WebSocket } from 'playwright-chromium'
 import { navigate, getResult, getCleanupState, runServerAction, cutWire, forceServerGc, sleep } from '../../e2e-utils'
@@ -1223,23 +1231,6 @@ function testRoom() {
       expect(r.kept).deep.equal(Array.from({ length: 256 }, (_, i) => `n${i + 44}`))
     },
   )
-  test('room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, and a lane the store ends is replaced', async () => {
-    await navigate(`${getServerUrl()}/room`)
-    await page.click('#test-room-hiccups')
-    await autoRetry(async () => {
-      expect(await getResult('#room-result')).deep.equal({
-        leave: {
-          firstLeave: 'Internal Server Error — see server logs',
-          publishAfter: 'ok',
-          secondLeave: 'ok',
-          leaves: ['Me:left'],
-          count: 0,
-        },
-        join: { firstJoin: 'Internal Server Error — see server logs', count: 1, listed: ['Second'] },
-        lane: { ended: true, got: ['before', 'after'] },
-      })
-    })
-  })
   test('room: a page that reconnects while its join is pending gets the leave, with its cause, of a member removed while it was away', async () => {
     await navigate(`${getServerUrl()}/room`)
     await page.click('#test-room-away-join')
@@ -1262,6 +1253,27 @@ function testRoom() {
         joined: true,
         leaves: [['Other', { type: 'removed', reason: 'while-joining' }]],
         count: 1,
+      })
+    })
+  })
+}
+
+/** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
+function testRoomFailingBackend() {
+  test('room: a store write that fails once heals: a failed leave can be retried, a failed join leaves no member, and a lane the store ends is replaced', async () => {
+    await navigate(`${getServerUrl()}/room`)
+    await page.click('#test-room-hiccups')
+    await autoRetry(async () => {
+      expect(await getResult('#room-result')).deep.equal({
+        leave: {
+          firstLeave: 'Internal Server Error — see server logs',
+          publishAfter: 'ok',
+          secondLeave: 'ok',
+          leaves: ['Me:left'],
+          count: 0,
+        },
+        join: { firstJoin: 'Internal Server Error — see server logs', count: 1, listed: ['Second'] },
+        lane: { ended: true, got: ['before', 'after'] },
       })
     })
   })
