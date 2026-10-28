@@ -21,8 +21,10 @@ function pluginBuildEntry(): Plugin[] {
       apply: 'build',
       transform: {
         // The auto importer can't load the server entry inside a Cloudflare Worker: it imports a file path
-        filter: { id: /^\0virtual:cloudflare\/worker-entry$/ },
+        // Telefunc's loader, not the Worker entry: only a Worker that uses Telefunc imports the telefunctions
+        filter: { id: /\/telefunc\/dist\/node\/server\/runTelefunc\/loadTelefuncFilesUsingVite\.js$/ },
         handler(code, id) {
+          if (!this.environment.config.plugins.some((p) => p.name === 'vite-plugin-cloudflare')) return
           const { magicString, getMagicStringResult } = getMagicString(code, id)
           // Only Telefunc's part: other parts of the server entry (e.g. Vike's) load the main Worker's app
           magicString.prepend(getServerProductionEntryCode())
