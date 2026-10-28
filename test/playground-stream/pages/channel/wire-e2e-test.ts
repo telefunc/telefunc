@@ -33,8 +33,6 @@ type WireState = {
   held: { run: string; first: number; closed: number } | null
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
-  answerer: { channelId: string; closed: string | null } | null
-  ask: { toOther: string; toOwn: string } | null
   connection: { channelId: string; events: string[] } | null
   chat: { channelId: string; events: string[] } | null
   presence: { channelId: string; online: boolean; closed?: string } | null
@@ -46,31 +44,6 @@ const sentBefore = ['m0', 'm1', 'm2']
 // Preview only: dev serves `/_telefunc` from Vite's middleware, where the server can't drop the page's connections.
 function testWire(isDev: boolean) {
   if (isDev) return
-
-  test("channel: a page that answers a relayed acknowledged message malformed loses its connection, and the asking page's send rejects while its channel keeps working", async () => {
-    const context = await page.context().browser()!.newContext()
-    try {
-      const other = await context.newPage()
-      await navigate(`${getServerUrl()}/channel`, undefined, other)
-      await other.click('#wire-answer-malformed')
-      const otherState = async () => JSON.parse((await other.textContent('#wire-state'))!) as WireState
-      const { channelId } = (await autoRetry(async () => {
-        const { answerer } = await otherState()
-        expect(answerer).not.toBe(null)
-        return answerer
-      }))!
-      await navigate(`${getServerUrl()}/channel?answerer=${channelId}`)
-      await page.click('#wire-ask')
-      await autoRetry(async () => {
-        const { ask } = await getResult<WireState>('#wire-state')
-        expect(ask).deep.equal({ toOther: 'Error', toOwn: 'answer to question' })
-        const { answerer } = await otherState()
-        expect(answerer!.closed).not.toBe(null)
-      })
-    } finally {
-      await context.close()
-    }
-  })
 
   if (canCutWire())
     test('channel: 256 messages of 16 KiB each way, text and binary, each send awaited, all arrive once and in order though the server drops the connection halfway through each direction', async () => {

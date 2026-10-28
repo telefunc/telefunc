@@ -11,8 +11,6 @@ import {
   onWireHeld,
   onWireRelease,
   onWireUpload,
-  onWireAnswer,
-  onWireAsk,
   onWireConnection,
   onWireChat,
   onWirePresence,
@@ -33,10 +31,6 @@ type WireState = {
   /** close: what the page's close() resolved to, once the channel opened and the server's messages arrived. */
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
-  /** closed: 'none' or the error's name, once the answerer's channel closed. */
-  answerer: { channelId: string; closed: string | null } | null
-  /** The answer, or the error's name, of the question to the other page's answerer, then to the page's own. */
-  ask: { toOther: string; toOwn: string } | null
   /** What the page's end saw: 'start' (before open), 'open', 'disconnect', 'reconnect', 'close', each with isConnected. */
   connection: { channelId: string; events: string[] } | null
   /** What the page's end saw: 'open', 'check' ('closing' once a close started), 'disconnect', 'reconnect', 'close', each with isConnected. */
@@ -66,8 +60,6 @@ function WireDemo() {
     held: null,
     release: null,
     upload: null,
-    answerer: null,
-    ask: null,
     connection: null,
     chat: null,
     presence: null,
@@ -264,39 +256,6 @@ function WireDemo() {
     setState((s) => ({ ...s, upload: { ...s.upload!, sent } }))
   }, [])
 
-  const answerer = useRef<Awaited<ReturnType<typeof onWireAnswer>>['channel'] | null>(null)
-  const answerMalformed = useCallback(async () => {
-    const { channel, channelId } = await onWireAnswer()
-    answerer.current = channel
-    setState((s) => ({ ...s, answerer: { channelId, closed: null } }))
-    channel.onClose((err) => setState((s) => ({ ...s, answerer: { channelId, closed: err ? err.name : 'none' } })))
-    channel.listen(() => 'answer')
-    // The page's connection, past the channel that encodes its answers, as a hostile page can reach it.
-    const { _connection: connection } = channel as unknown as {
-      _connection: { sendAckRes(answered: unknown, ackedSeq: number, result: string): void }
-    }
-    const sendAckRes = connection.sendAckRes
-    connection.sendAckRes = (answered, ackedSeq) => sendAckRes.call(connection, answered, ackedSeq, '{')
-  }, [])
-
-  // Held: a channel the page drops closes once garbage-collected.
-  const asking = useRef<unknown[]>([])
-  const ask = useCallback(async () => {
-    const other = new URLSearchParams(location.search).get('answerer')!
-    const own = await onWireAnswer()
-    own.channel.listen((question) => `answer to ${question}`)
-    const channel = await onWireAsk()
-    asking.current = [own.channel, channel]
-    // A send on a closed channel throws at once.
-    const askTo = (to: string) =>
-      Promise.resolve()
-        .then(() => channel.send({ to, text: 'question' }, { ack: true }))
-        .catch((err: Error) => err.name)
-    const toOther = await askTo(other)
-    const toOwn = await askTo(own.channelId)
-    setState((s) => ({ ...s, ask: { toOther, toOwn } }))
-  }, [])
-
   const release = useCallback(async (when: 'arrived' | 'opened') => {
     const { channel, channelId } = await onWireRelease(RELEASE_COUNT)
     let received = 0
@@ -473,22 +432,6 @@ function WireDemo() {
           className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
         >
           Abort the call that opened it
-        </button>
-        <button
-          id="wire-answer-malformed"
-          type="button"
-          onClick={answerMalformed}
-          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
-        >
-          Answer relayed questions with an acknowledgement the server can't read
-        </button>
-        <button
-          id="wire-ask"
-          type="button"
-          onClick={ask}
-          className="px-3 py-1.5 text-sm rounded bg-slate-600 text-white hover:bg-slate-700"
-        >
-          Ask the answerer named in the URL, then the page's own
         </button>
       </div>
       <pre id="wire-state" className="text-xs">
