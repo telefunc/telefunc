@@ -117,7 +117,7 @@ class MemberMessageTexts {
   }
 }
 
-/** A stub's ack DMs awaiting their `dm-reply`: null once its sender timed out, or on `drop()`. */
+/** A stub's ack DMs awaiting their `dm-reply`: null at the next `await()` once its sender timed out, or on `drop()`. */
 class PendingDmReplies {
   private readonly _pending = new Map<string, { expiresAt: number; resolve: (reply: RoomResult | null) => void }>()
 
