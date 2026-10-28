@@ -12,7 +12,7 @@ import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
 import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
-import { assert } from '../../../../utils/assert.js'
+import { assert, assertUsage } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 
 const clientTypes = [
@@ -54,6 +54,11 @@ function createStreamingReviver(
         return { replacement: handedOut }
       }
     }
+    // The serializer escapes a string the telefunction returned, so only an extension writes this prefix.
+    assertUsage(
+      !value.startsWith('!Telefunc'),
+      `The response holds a ${value.split(':')[0]} value, which no loaded extension revives: load the client entry of the package that sends it.`,
+    )
     return undefined
   }
   return reviver

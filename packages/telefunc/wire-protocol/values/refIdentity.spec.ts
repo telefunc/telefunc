@@ -574,6 +574,27 @@ describe('reference identity — full pipeline', () => {
     abortController.abort()
     expect(counters.clientAbort).toBe(1)
   })
+
+  test('a value whose extension the client did not load is a usage error naming its prefix', async () => {
+    const serverType: ReplacerType<
+      TypeContract<{ unknownSpec: true }, unknown, Record<string, never>>,
+      ServerReplacerContext
+    > = {
+      prefix: '!TelefuncUnknownSpec:',
+      detect(value): value is { unknownSpec: true } {
+        return typeof value === 'object' && value !== null && 'unknownSpec' in value
+      },
+      replace() {
+        return { metadata: {}, close() {}, abort() {} }
+      },
+    }
+    const serverExtensions = [serverType as ReplacerType<TypeContract, ServerReplacerContext>]
+    await expect(roundTrip({ value: { unknownSpec: true } }, { serverExtensions })).rejects.toThrow(
+      'The response holds a !TelefuncUnknownSpec value, which no loaded extension revives',
+    )
+    const { ret } = await roundTrip({ text: '!TelefuncUnknownSpec:{}' }, { serverExtensions })
+    expect((ret as { text: string }).text).toBe('!TelefuncUnknownSpec:{}')
+  })
 })
 
 // ───────────────────────────────────────────────────────────────────────────
