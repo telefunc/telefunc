@@ -851,14 +851,20 @@ async function onSeedAndChurn(roomId: string) {
   await Room.join(roomId, { meta: { name: 'Hidden' }, hidden: true })
   let tick = 0
   const passing: Awaited<ReturnType<typeof Room.join>>[] = []
+  const churn: (Promise<unknown> | undefined)[] = []
   const timer = setInterval(() => {
     tick++
     void members[tick % members.length]!.setAttributes({ n: tick })
-    if (tick % 2 === 0) void Room.join(roomId, { meta: { name: `p${tick}` } }).then((member) => passing.push(member))
-    else void passing.shift()?.leave()
+    if (tick % 2 === 0) {
+      churn.push(Room.join(roomId, { meta: { name: `p${tick}` } }).then((member) => passing.push(member)))
+    } else {
+      churn.push(passing.shift()?.leave())
+    }
   }, 5)
   churning.set(roomId, async () => {
     clearInterval(timer)
+    // A join or leave still in flight lands after the count otherwise.
+    await Promise.all(churn)
     await Promise.all(passing.map((member) => member.leave()))
     return (await Room.get(roomId)).count
   })
