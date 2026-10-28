@@ -21,7 +21,10 @@ class CloudflareBackend implements BroadcastDriver {
   constructor({
     namespace,
     broadcast,
-  }: { namespace: () => TelefuncExtensionNamespace; broadcast: CloudflareBroadcast }) {
+  }: {
+    namespace: () => TelefuncExtensionNamespace
+    broadcast: CloudflareBroadcast
+  }) {
     this.broadcast = broadcast
     this.#namespace = namespace
     this.subscriptions = {
@@ -37,7 +40,7 @@ class CloudflareBackend implements BroadcastDriver {
   }
 
   /** The planes of the Cloudflare extensions registered so far. */
-  get planes(): { readonly [key: symbol]: () => unknown } {
+  get planes(): { readonly [key: symbol]: (kit: never) => unknown } {
     return getCloudflareExtensionPlanes(this.#namespace)
   }
 

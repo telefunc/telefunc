@@ -18,8 +18,9 @@ import { getOrCreate } from '../../utils/getOrCreate.js'
 
 /** A backend: Broadcast's driver, and the driver of each other plane it serves. */
 type BackendDriver = BroadcastDriver & {
-  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call. */
-  readonly planes?: { readonly [key: symbol]: () => unknown }
+  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call, given the
+   *  `kit` the extension passes it. */
+  readonly planes?: { readonly [key: symbol]: (kit: never) => unknown }
 }
 
 type Installed = {
@@ -95,10 +96,11 @@ function getBroadcastBackend(): BroadcastBackend {
 }
 
 /** The plane `key` of the installed backend, built once per installed backend: `supervise` wraps the driver the
- *  backend serves, or the in-memory one `fallback` builds when the process installed none. */
+ *  backend serves, built with the extension's `kit`, or the in-memory one `fallback` builds when the process installed
+ *  none. */
 function backendPlane<Driver, Plane extends BackendPlane>(
   key: symbol,
-  { fallback, supervise }: { fallback: () => Driver; supervise: (driver: Driver) => Plane },
+  { fallback, supervise, kit }: { fallback: () => Driver; supervise: (driver: Driver) => Plane; kit?: unknown },
 ): Plane {
   assertUsage(
     !(state.broadcastOverride && (state.installed?.fallback ?? true)),
@@ -109,7 +111,7 @@ function backendPlane<Driver, Plane extends BackendPlane>(
     if (installed.fallback) return supervise(fallback())
     const build = installed.driver.planes?.[key]
     assertUsage(build, `The installed backend doesn't serve ${String(key)}, which this call needs`)
-    return supervise(build() as Driver)
+    return supervise(build(kit as never) as Driver)
   }) as Plane
 }
 

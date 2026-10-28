@@ -25,6 +25,7 @@ export type {
   RoomBackend,
   RoomDriver,
   RoomHead,
+  RoomPlaneKit,
   RoomSubscriptionSource,
 }
 
@@ -34,6 +35,16 @@ import type { BackendReceiver, BackendSubscription, SubscriptionDriver, Ordering
 const CELL_PAGE_SIZE = 1024
 /** The entries a directory list's or due read's page holds. */
 const DIRECTORY_PAGE_SIZE = 100
+
+/** Room's lane keys and page sizes, which `backendPlane()` hands a backend's Room driver. */
+type RoomPlaneKit = {
+  encodeLaneKey(lane: LaneId | EveryTrackLane | EveryMemberLane): string
+  decodeLaneKey(key: string): LaneId
+  everyMemberLaneKey(track: string): string
+  everyTrackLaneKey(member: string): string
+  CELL_PAGE_SIZE: number
+  DIRECTORY_PAGE_SIZE: number
+}
 
 /** Each lane is its own ordering domain: one semantic, one control, one demand, one per member for inbox, and one per
  *  (member, track) for binary. */

@@ -29,6 +29,11 @@
     "ioredis": "^5.10.1 || ^6",
     "telefunc": ">=0.3.1"
   },
+  "peerDependenciesMeta": {
+    "@telefunc/room": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@telefunc/room": "workspace:*",
     "ioredis": "5.10.1",
