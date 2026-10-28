@@ -10,10 +10,15 @@ export {
   roomFailureError,
   roomResultValue,
   DM_FAILURE,
-  isChannelOverflowError,
 }
 
-import { Abort, ChannelOverflowError, ShieldValidationError, isShieldValidationError } from 'telefunc/__internal'
+import {
+  Abort,
+  ChannelOverflowError,
+  ShieldValidationError,
+  isChannelOverflowError,
+  isShieldValidationError,
+} from 'telefunc/__internal'
 import type { RoomFailure, RoomResult } from './protocol.js'
 
 // Error contract: Abort carries its value, RoomError carries a safe message, and bugs are reported
@@ -33,11 +38,6 @@ class RoomError extends Error {
 
 function isRoomError(thing: unknown): thing is RoomError {
   return typeof thing === 'object' && thing !== null && roomErrorBrand in thing
-}
-
-/** Also an overflow error of another copy of telefunc, by its global brand. */
-function isChannelOverflowError(thing: unknown): thing is ChannelOverflowError {
-  return typeof thing === 'object' && thing !== null && Symbol.for('telefunc.ChannelOverflowError') in thing
 }
 
 function roomClosedError(roomId: string): RoomError {
