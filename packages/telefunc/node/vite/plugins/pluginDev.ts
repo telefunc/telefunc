@@ -26,7 +26,7 @@ function pluginDev(): Plugin[] {
       configResolved: {
         async handler(config) {
           isCloudflarePlugin = config.plugins.some((p) => p.name === 'vite-plugin-cloudflare')
-          fixOptimizeDeps(config.optimizeDeps)
+          Object.values(config.environments).forEach((env) => fixOptimizeDeps(env.optimizeDeps))
           await determineFsAllowList(config)
         },
       },
@@ -55,10 +55,13 @@ function pluginDev(): Plugin[] {
   ]
 }
 
-// - Vike adds @brillout/json-serializer to optimizeDeps.exclude
-// - We need to remove @brillout/json-serializer from optimizeDeps.exclude to avoid:
+// - Vike adds @brillout/json-serializer, @brillout/import and @brillout/vite-plugin-server-entry to optimizeDeps.exclude
+// - We need to remove them from optimizeDeps.exclude to avoid:
 //   ```
 //   10:41:35 AM [vite] Internal server error: Failed to resolve import "@brillout/json-serializer/parse" from "node_modules/.vite/deps/chunk-HMXEIHOJ.js?v=9404be11". Does the file exist?
+//   ```
+//   ```
+//   Error: Cannot find module '@brillout/vite-plugin-server-entry/runtime' imported from '/my-app/node_modules/.vite/deps_ssr/telefunc-CIJh5jn0.js'
 //   ```
 // - We can't add @brillout/json-serializer to optimizeDeps.include because Vite complains:
 //   ```
@@ -66,7 +69,8 @@ function pluginDev(): Plugin[] {
 //   Failed to resolve dependency: @brillout/json-serializer/stringify, present in 'optimizeDeps.include'
 //   ```
 function fixOptimizeDeps(optimizeDeps: { exclude?: string[] }) {
-  optimizeDeps.exclude = optimizeDeps.exclude?.filter((entry) => !entry.startsWith('@brillout/json-serializer'))
+  const deps = ['@brillout/json-serializer', '@brillout/import', '@brillout/vite-plugin-server-entry']
+  optimizeDeps.exclude = optimizeDeps.exclude?.filter((entry) => !deps.some((dep) => entry.startsWith(dep)))
 }
 
 async function determineFsAllowList(config: ResolvedConfig) {
