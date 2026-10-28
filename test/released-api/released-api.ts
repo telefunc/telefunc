@@ -13,6 +13,8 @@ import * as babel from 'telefunc/babel'
 import * as node from 'telefunc/node'
 import * as internal from 'telefunc/__internal'
 import * as redis from '@telefunc/redis'
+import * as room from '@telefunc/room'
+import * as roomClient from '@telefunc/room/client'
 
 void [telefunc, asyncHooks, client, react, reactStreaming, reactStreamingServer, vite, webpackLoader]
-void [next, nuxt, babel, node, internal, redis]
+void [next, nuxt, babel, node, internal, redis, room, roomClient]

@@ -615,6 +615,9 @@ importers:
       '@telefunc/redis':
         specifier: workspace:*
         version: link:../../packages/redis
+      '@telefunc/room':
+        specifier: workspace:*
+        version: link:../../packages/room
       telefunc:
         specifier: link:../../packages/telefunc
         version: link:../../packages/telefunc
