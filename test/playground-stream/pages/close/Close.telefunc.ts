@@ -4,15 +4,19 @@ export {
   onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onKeptChannel,
+  onAbortedChannel,
+  onCloseUnreturned,
   onCloseFn,
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
   onGcPassedFnOnClose,
+  onEditDocument,
 }
 
 import { EventEmitter } from 'node:events'
-import { Channel, getContext } from 'telefunc'
+import { BroadcastChannel, Channel, getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -97,6 +101,43 @@ async function onCloseChannel() {
     cleanupState.closeChannel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'
   })
   return ch.client
+}
+
+/** cleanupState: keptChannel = 'open' once its page's wire reached the server, then its onClose error's message, or 'none'. */
+async function onKeptChannel() {
+  const ch = new Channel<never, never>()
+  cleanupState.keptChannel = 'pending'
+  ch.onOpen(() => {
+    cleanupState.keptChannel = 'open'
+  })
+  ch.onClose((err) => {
+    cleanupState.keptChannel = err ? err.message : 'none'
+  })
+  return ch.client
+}
+
+async function onAbortedChannel() {
+  const ch = new Channel<never, never>()
+  ch.abort('before-return')
+  return ch.client
+}
+
+/** Closes a `Channel` and a `BroadcastChannel` this telefunction never returns: how long each `close()` takes, and
+ *  what its `onClose` receives. */
+async function onCloseUnreturned() {
+  const closeOf = async (channel: Channel<never, never> | BroadcastChannel) => {
+    let onCloseErr = 'not-fired'
+    channel.onClose((err) => {
+      onCloseErr = err ? err.message : 'none'
+    })
+    const start = performance.now()
+    await channel.close()
+    return { ms: Math.round(performance.now() - start), onCloseErr }
+  }
+  return {
+    channel: await closeOf(new Channel<never, never>()),
+    broadcast: await closeOf(new BroadcastChannel({ key: `close-unreturned:${crypto.randomUUID()}` })),
+  }
 }
 
 async function onCloseFn(callback: () => void) {
@@ -231,4 +272,17 @@ async function onMixedForClose(callback: (msg: string) => void) {
   }
 
   return { generator, stream, channel: ch.client, fn }
+}
+
+/** Opens the document for editing, releasing its lock once the request is over. */
+async function onEditDocument() {
+  getContext().onClose(async () => {
+    await releaseLock()
+  })
+  return { text: 'Draft' }
+}
+
+/** The lock server is down. */
+async function releaseLock() {
+  throw new Error('Could not release the lock')
 }

@@ -1,7 +1,7 @@
 export { Close }
 
 import React, { useEffect, useRef, useState } from 'react'
-import { close } from 'telefunc/client'
+import { Abort, close } from 'telefunc/client'
 import type { ClientChannel } from 'telefunc'
 import {
   onMixedForClose,
@@ -9,17 +9,22 @@ import {
   onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onKeptChannel,
+  onAbortedChannel,
+  onCloseUnreturned,
   onCloseFn,
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
   onGcPassedFnOnClose,
+  onEditDocument,
 } from './Close.telefunc'
 
 function Close() {
   const [hydrated, setHydrated] = useState(false)
   const [result, setResult] = useState<string>('')
   const pendingChannelRef = useRef<ClientChannel | null>(null)
+  const keptChannelRef = useRef<ClientChannel | null>(null)
   const pendingPassedFnRef = useRef<object | null>(null)
   useEffect(() => setHydrated(true), [])
 
@@ -104,6 +109,45 @@ function Close() {
         Channel: close(channel)
       </button>
 
+      <button
+        id="test-keep-channel"
+        onClick={async () => {
+          setResult('')
+          keptChannelRef.current = await onKeptChannel()
+          setResult(JSON.stringify({ method: 'keep(channel)' }))
+        }}
+      >
+        Channel: keep it open
+      </button>
+
+      <button
+        id="test-aborted-channel"
+        onClick={async () => {
+          setResult('')
+          const channel = await onAbortedChannel()
+          channel.onClose((err) => {
+            setResult(
+              JSON.stringify({
+                method: 'aborted channel',
+                abortValue: err instanceof Abort ? err.abortValue : (err?.name ?? 'none'),
+              }),
+            )
+          })
+        }}
+      >
+        Channel: aborted before it was returned
+      </button>
+
+      <button
+        id="test-close-unreturned"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ method: 'close() unreturned', ...(await onCloseUnreturned()) }))
+        }}
+      >
+        Channel: close() of one never returned
+      </button>
+
       <h2>Function</h2>
 
       <button
@@ -125,6 +169,18 @@ function Close() {
         }}
       >
         Fn: close(fn)
+      </button>
+
+      <h2>Edit a document</h2>
+
+      <button
+        id="test-edit-document"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onEditDocument()))
+        }}
+      >
+        Edit the document
       </button>
 
       <h2>Channel onClose ordering</h2>

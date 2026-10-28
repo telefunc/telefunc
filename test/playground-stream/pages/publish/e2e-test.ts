@@ -1,7 +1,18 @@
 export { testPublish }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import {
+  navigate,
+  getResult,
+  getCleanupState,
+  resetCleanupState,
+  cutWire,
+  canCutWire,
+  runServerAction,
+  forceServerGc,
+  serverHeapUsed,
+  serverRuntime,
+} from '../../e2e-utils'
 
 type ShieldState = {
   validReceiptKey: string | null
@@ -26,7 +37,7 @@ type ServerBroadcastResult = {
   done: boolean
 }
 
-function testPublish() {
+function testPublish(isDev: boolean, inDocker = false) {
   test('broadcast: paired text publish/subscribe roundtrip', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-text-broadcast')
@@ -34,15 +45,16 @@ function testPublish() {
     await autoRetry(async () => {
       const result = await getResult<TextBroadcastResult>('#publish-result')
 
-      // 3 publishes → 3 acks with monotonically increasing seq, all keyed to the shared topic.
+      // 3 publishes → 3 acks with consecutive seqs, all keyed to the shared topic.
       expect(result.acks.length).toBe(3)
-      expect(result.acks.map((a) => a.seq)).deep.equal([1, 2, 3])
+      const first = result.acks[0]!.seq
+      expect(result.acks.map((a) => a.seq)).deep.equal([first, first + 1, first + 2])
       for (const ack of result.acks) expect(ack.key).match(/^room:text-test:/)
 
       // Subscriber on the same key received all 3 messages in publish order.
       expect(result.received.map((r) => r.text)).deep.equal(['msg-0', 'msg-1', 'msg-2'])
       for (const r of result.received) expect(r.from).toBe('client')
-      expect(result.received.map((r) => r.seq)).deep.equal([1, 2, 3])
+      expect(result.received.map((r) => r.seq)).deep.equal([first, first + 1, first + 2])
     })
   })
 
@@ -54,14 +66,15 @@ function testPublish() {
       const result = await getResult<BinaryPairResult>('#publish-result')
 
       expect(result.acks.length).toBe(3)
-      expect(result.acks.map((a) => a.seq)).deep.equal([1, 2, 3])
+      const first = result.acks[0]!.seq
+      expect(result.acks.map((a) => a.seq)).deep.equal([first, first + 1, first + 2])
       for (const ack of result.acks) expect(ack.key).match(/^room:binary-test:/)
 
       // Each frame is 128 bytes filled with i + 10 (10, 11, 12).
       expect(result.received.length).toBe(3)
       expect(result.received.map((r) => r.size)).deep.equal([128, 128, 128])
       expect(result.received.map((r) => r.firstByte)).deep.equal([10, 11, 12])
-      expect(result.received.map((r) => r.seq)).deep.equal([1, 2, 3])
+      expect(result.received.map((r) => r.seq)).deep.equal([first, first + 1, first + 2])
     })
   })
 
@@ -97,4 +110,238 @@ function testPublish() {
       expect(state.receivedAfterInvalid).deep.equal([{ text: 'hi' }])
     })
   })
+
+  test("broadcast: each binary listener gets bytes of its own, so one that transfers their buffer leaves the next one's and the page's intact", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-own-bytes')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ page: unknown[]; server: unknown[] }>('#publish-result')
+      expect(result).deep.equal({
+        page: [[1, 2, 3]],
+        server: [
+          [1, 2, 3],
+          [1, 2, 3],
+        ],
+      })
+    })
+  })
+
+  test("broadcast: the server's own listeners keep getting a key's messages after the page unsubscribes", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-server-listener')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: Array<string | number> }>('#publish-result')
+      expect(result.received).deep.equal(['after', 3])
+    })
+  })
+
+  test('broadcast: what onOpen publishes reaches the page that opened the broadcast', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-on-open-publish')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: string[] }>('#publish-result')
+      expect(result.received).deep.equal(['from-onOpen'])
+    })
+  })
+
+  test("broadcast: a listener's answer reaches every subscriber after the message it answers", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-answer-order')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ seen: string[] }>('#publish-result')
+      expect(result.seen).deep.equal(['first:1', 'second:1', 'first:2', 'second:2'])
+    })
+  })
+
+  test('broadcast: the server answers the next call while listeners answer every message on their own key', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-self-answer')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ answers: number }>('#publish-result')
+      expect(result.answers).greaterThan(0)
+    })
+  })
+
+  test('broadcast: a static Broadcast.publish() resolves to a receipt with its key', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-static-receipts')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ key: string; receipts: Array<{ key: string; seq: number }> }>('#publish-result')
+      const [first, second] = result.receipts
+      expect(result.receipts.map((receipt) => receipt.key)).deep.equal([result.key, result.key])
+      // `seq` is monotonic per key.
+      expect(second!.seq).greaterThan(first!.seq)
+    })
+  })
+
+  test("broadcast: a Broadcast.subscribe() listener that throws or rejects is reported, and the key's other subscribers still get the message", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-throwing-listener')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: string[]; receiptKey: boolean }>('#publish-result')
+      expect(result).deep.equal({ received: ['static:hello', 'channel:hello'], receiptKey: true })
+    })
+    for (const error of ['broadcast-listener-throws', 'broadcast-listener-rejects']) {
+      expectLog(error, {
+        // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
+        filter: (log) =>
+          inDocker
+            ? log.logSource === 'stdout' &&
+              log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+            : log.logSource === 'stderr',
+      })
+    }
+  })
+
+  test('broadcast: in a chat whose saving, history, avatar or mark-as-read fails, the error is reported and the next message still arrives', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await resetCleanupState()
+    await page.click('#test-chat')
+
+    await autoRetry(async () => {
+      expect(await getResult<{ messages: string[] }>('#publish-result')).deep.equal({ messages: ['how are you?'] })
+    })
+    await autoRetry(async () => {
+      const state = await getCleanupState()
+      expect(state.chatSaved).toBe(JSON.stringify(['how are you?']))
+      expect(state['bug:Database unavailable']).toBe('reported')
+      expect(state['bug:Could not load the chat history']).toBe('reported')
+    })
+    for (const error of ['Database unavailable', 'Could not load the chat history']) {
+      expectLog(error, {
+        // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
+        filter: (log) =>
+          inDocker
+            ? log.logSource === 'stdout' &&
+              log.logText.split('\n').some((line) => line.includes(error) && /^playground-[a-z]-\d+ +\| /.test(line))
+            : log.logSource === 'stderr',
+      })
+    }
+    for (const error of ['Could not load the avatar', 'Could not mark the chat as read']) {
+      expectLog(`[telefunc:channel-error] Error: ${error}`, { filter: (log) => log.logSource === 'Browser Error' })
+    }
+  })
+
+  test("broadcast: a key's seq goes on growing after its subscribers leave and another key publishes, and runs on by one while it has a subscriber", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-seq-across-subscribers')
+
+    await autoRetry(async () => {
+      const { seqs } = await getResult<{ seqs: number[] }>('#publish-result')
+      expect(seqs.length).toBe(5)
+      expect(seqs[1]).toBe(seqs[0]! + 1)
+      for (let i = 1; i < seqs.length; i++) expect(seqs[i]).greaterThan(seqs[i - 1]!)
+    })
+  })
+
+  // In-memory only: the Docker lanes publish through Redis, which has no queue, and whose delivery can come after the publish resolves.
+  if (!inDocker) {
+    test('broadcast: a subscriber that comes while publishes queue gets the next seq right after the one before it', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-seq-while-queued')
+
+      await autoRetry(async () => {
+        const { receipts, received } = await getResult<{ receipts: number[]; received: Array<[string, number]> }>(
+          '#publish-result',
+        )
+        const [first] = receipts
+        expect(receipts).deep.equal([first, first! + 1])
+        expect(received).deep.equal([
+          ['first', first],
+          ['second', first! + 1],
+        ])
+      })
+    })
+  }
+
+  // Preview on Node only: the margin is measured there. A leak of 100,000 keys' seq counters grows the heap by 7 MB or more.
+  if (!isDev && !inDocker && serverRuntime() === 'node') {
+    for (const subscribed of [false, true]) {
+      test(`broadcast: publishes to 100,000 distinct keys, ${subscribed ? 'each while a subscriber comes and goes' : 'none subscribed'}, leave the server's heap where it was`, async () => {
+        await navigate(`${getServerUrl()}/publish`)
+        const run = async () => {
+          await page.click(`#test-broadcast-many-keys${subscribed ? '-subscribed' : ''}`)
+          await autoRetry(async () =>
+            expect(await getResult<{ done: boolean }>('#publish-result')).deep.equal({ done: true }),
+          )
+        }
+        // A first run warms up what the code allocates once.
+        await run()
+        await forceServerGc()
+        const before = await serverHeapUsed()
+        await run()
+        await forceServerGc()
+        expect((await serverHeapUsed()) - before).lessThan(3_000_000)
+      })
+    }
+  }
+
+  test("broadcast: a subscriber that unsubscribes itself doesn't make the next one miss a message", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-self-unsubscribe')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ pageSeen: string[]; serverSeen: string[] }>('#publish-result')
+      expect(result.pageSeen).deep.equal(['once:one', 'other:one', 'other:two'])
+      expect(result.serverSeen).deep.equal(['once:one', 'other:one', 'other:two'])
+    })
+  })
+
+  // Preview only: Vite HMR reloads an offline page.
+  if (!isDev && !inDocker) {
+    test('broadcast: a page that subscribes while its connection is silently dead gets what is published after it reconnects', async () => {
+      await navigate(`${getServerUrl()}/publish`)
+      await page.click('#test-broadcast-reconnect-open')
+      await autoRetry(async () => {
+        expect((await getResult<{ open: boolean }>('#publish-result')).open).toBe(true)
+      })
+
+      await page.context().setOffline(true)
+      await page.click('#test-broadcast-reconnect-subscribe')
+      await page.waitForTimeout(3000)
+      await page.context().setOffline(false)
+      await page.click('#test-broadcast-reconnect-publish')
+
+      await autoRetry(async () => {
+        const result = await getResult<{ received: string[] }>('#publish-result')
+        expect(result.received).deep.equal(['after-reconnect'])
+      })
+    })
+
+    for (const { count, received, closed } of [
+      { count: 2, received: ['before', '0', '1'], closed: null },
+      { count: 8, received: ['before'], closed: 'ChannelOverflowError' },
+    ]) {
+      if (canCutWire())
+        test(`broadcast: a page offline while ${count * 128} KiB is published ${closed ? 'leaves with ChannelOverflowError on both ends' : 'gets all of it once back'}`, async () => {
+          await navigate(`${getServerUrl()}/publish`)
+          await page.click(`#test-broadcast-while-offline-${count}`)
+          let key: string | null = null
+          await autoRetry(async () => {
+            const result = await getResult<{ key: string; received: string[] }>('#publish-result')
+            expect(result.received).deep.equal(['before'])
+            key = result.key
+          })
+
+          await page.context().setOffline(true)
+          await cutWire()
+          await runServerAction(`publish_${key}`)
+          await page.context().setOffline(false)
+
+          await autoRetry(async () => {
+            const result = await getResult<{ received: string[]; closed: string | null }>('#publish-result')
+            expect(result.received).deep.equal(received)
+            expect(result.closed).toBe(closed)
+            if (closed) expect((await getCleanupState())[`whileOffline_${key}_serverClose`]).toBe(closed)
+          })
+        })
+    }
+  }
 }

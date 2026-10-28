@@ -56,8 +56,12 @@ type HttpRequest =
 async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, arguments.length)
   const httpRequestResolved = await resolveHttpRequest(httpRequest)
-  const httpResponse = await runTelefunc(httpRequestResolved)
-  return httpResponse
+  try {
+    return await runTelefunc(httpRequestResolved)
+  } finally {
+    // Past this, `httpResponse.pipe(res)` ends a streaming response's body once the client is gone.
+    httpRequestResolved.unwatch?.()
+  }
 }
 
 /** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */
@@ -80,21 +84,24 @@ async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   return serve(httpRequest)
 }
 
-async function resolveHttpRequest(httpRequest: HttpRequest, response?: Writable): Promise<HttpRequestResolved> {
+async function resolveHttpRequest(
+  httpRequest: HttpRequest,
+  response?: Writable,
+): Promise<HttpRequestResolved & { unwatch?: () => void }> {
   if ('request' in httpRequest) {
     return { request: httpRequest.request, context: httpRequest.context }
   }
   // `url` is either the full URL (e.g. `request.url`) or only its pathname (e.g. `req.originalUrl`)
   const url = new URL(httpRequest.url, 'http://localhost').href
   if ('readable' in httpRequest) {
-    const request = await nodeReadableToWebRequest(
+    const { request, unwatch } = await nodeReadableToWebRequest(
       httpRequest.readable,
       url,
       httpRequest.method,
       httpRequest.headers,
       response,
     )
-    return { request, readable: httpRequest.readable, context: httpRequest.context }
+    return { request, readable: httpRequest.readable, context: httpRequest.context, unwatch }
   }
   // Backward compat: construct a Request from primitives
   const request = new Request(url, {

@@ -57,7 +57,7 @@ import { TelefuncStreamBeta } from '../../components'
    // Compress.telefunc.ts
    // Environment: server
 
-   export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+   export async function onCompress(data: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
      // A stream flows in, a transformed stream flows back out
      return data.pipeThrough(new CompressionStream('gzip'))
    }
@@ -279,7 +279,7 @@ Return a `ReadableStream`:
 import fs from 'node:fs'
 import { Readable } from 'node:stream'
 
-export function onDownload(fileName: string): ReadableStream<Uint8Array> {
+export async function onDownload(fileName: string): Promise<ReadableStream<Uint8Array>> {
   return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
 }
 ```
@@ -300,6 +300,8 @@ while (true) {
 ```
 
 > You can also return a `File` or `Blob` instead, see: <Link href="/file-download" />.
+
+> If a call returns several streams, the client holds the data of a stream your code isn't reading until your code reads or cancels that stream.
 
 
 #### Client → server
@@ -346,7 +348,7 @@ A simple example transform with gzip compression:
 // Compress.telefunc.ts
 // Environment: server
 
-export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export async function onCompress(data: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
   return data.pipeThrough(new CompressionStream('gzip'))
 }
 ```
@@ -371,7 +373,7 @@ import { getContext } from 'telefunc'
 import { spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 
-export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export async function onCompressVideo(video: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
   const { onClose } = getContext()
 
   // Re-encode to a smaller H.264/MP4, on the fly
@@ -380,7 +382,8 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
   // Kill the encoder if the client disconnects mid-stream — otherwise the process leaks
   onClose(() => ffmpeg.kill())
 
-  video.pipeTo(Writable.toWeb(ffmpeg.stdin))
+  // A client that drops mid-upload rejects the pipe: stop the encoder rather than leave the rejection unhandled
+  video.pipeTo(Writable.toWeb(ffmpeg.stdin)).catch(() => ffmpeg.kill())
   return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
 }
 ```
@@ -511,7 +514,7 @@ onClose((err) => {
     // Either side called abort(value)
     console.log(err.abortValue)
   } else if (err instanceof NetworkError) {
-    // Connection lost (couldn't reconnect)
+    // Connection lost (couldn't reconnect, or missed too much while offline)
   }
 })
 ```

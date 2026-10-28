@@ -15,6 +15,7 @@ import { testStreamToServer } from './pages/stream-to-server/e2e-test'
 import { testLiveQuery } from './pages/live-query/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
 import { testPublish } from './pages/publish/e2e-test'
+import { testRedisReconnect } from './pages/publish/redis-e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 
 // Caddy serves https://localhost:8443 with its own internal CA — skip cert validation.
@@ -91,13 +92,14 @@ function testRunDocker() {
   testFileDownload()
   testStreaming()
   testAbort()
-  testClose()
+  testClose(true)
   testChannel(false, true)
-  testFunction()
-  testStreamToServer()
+  testFunction(false, true)
+  testStreamToServer(false, true)
   testLiveQuery()
   testRxjs(true)
-  testPublish()
+  testPublish(false, true)
+  testRedisReconnect()
   testRefIdentity()
 }
 

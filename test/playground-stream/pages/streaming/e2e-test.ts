@@ -331,6 +331,66 @@ function testStreaming() {
         expect(lastMs - firstMs).lessThan(last.duration)
       })
     })
+
+  test("streaming: reading one returned stream to its end, then the other, doesn't hang on the other's unread bytes", async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-two-large-streams-in-turn')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result).deep.equal({ firstBytes: 2 * 1024 * 1024, secondBytes: 2 * 1024 * 1024 })
+    })
+  })
+
+  test("streaming: transferring one returned stream's chunks to a Web Worker leaves the other stream's chunks intact", async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-two-streams-to-worker')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result).deep.equal({ sums: { first: 8 * 1024, second: 2 * 8 * 1024 } })
+    })
+  })
+
+  if (process.env.PUBLIC_ENV__STREAM_TRANSPORT !== 'channel') {
+    test('streaming: a returned stream of one 256 MiB chunk reaches the page within 8 s', async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click('#test-one-large-returned-chunk')
+      let result: { bytes: number; ms: number } | undefined
+      await autoRetry(
+        async () => {
+          result = await getResult('#streaming-result')
+        },
+        { timeout: 50_000 },
+      )
+      expect(result!.bytes).toBe(256 * 1024 * 1024)
+      expect(result!.ms).lessThan(8000)
+    })
+  }
+
+  for (const order of ['finish-first', 'cancel-first'] as const) {
+    test(`streaming: the server stops producing a returned stream the page cancels while it reads another to its end (${order})`, async () => {
+      await navigate(`${getServerUrl()}/streaming`)
+      await page.click(`#test-finished-and-cancelled-streams-${order}`)
+      let key: string | null = null
+      await autoRetry(async () => {
+        key = (await getResult('#streaming-result')).key
+      })
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state[`endless_${key}`]).toBe('cancelled')
+      })
+    })
+  }
+
+  test('streaming: cancelling a returned stream that failed, or a generator whose finally throws, leaves the server answering', async () => {
+    await navigate(`${getServerUrl()}/streaming`)
+    await page.click('#test-cancel-failed-streams')
+    await autoRetry(async () => {
+      const result = await getResult('#streaming-result')
+      expect(result.errors).to.have.length(2)
+      expect(result.errors).not.to.include('none')
+      expect(result.nextCall).deep.equal([1, 2, 3, 4, 5])
+    })
+  })
 }
 
 function parseChannelTransports(value: string | undefined): Array<'sse' | 'ws'> {

@@ -8,19 +8,19 @@ export { PROVIDED_CONTEXT } from './context/getContext.js'
 export { REQUEST_CONTEXT } from './context/requestContext.js'
 export type { Context } from './context/context.js'
 export { Abort } from './Abort.js'
-export { download } from '../../wire-protocol/download.js'
-export type { FileDownload, BlobDownload, DownloadProgress } from '../../wire-protocol/types.js'
+export { download } from '../../wire-protocol/values/download.js'
+export type { FileDownload, BlobDownload, DownloadProgress } from '../../wire-protocol/values/types.js'
 export { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 export { shield } from './shield.js'
 export type { ShieldValidator, ShieldValidators } from './shield.js'
 export { onBug } from './runTelefunc/onBug.js'
-export { Channel } from '../../wire-protocol/server/channel.js'
-export { Broadcast, BroadcastChannel } from '../../wire-protocol/server/server-broadcast.js'
-export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel-errors.js'
+export { Channel } from '../../wire-protocol/channel/server/channel.js'
+export { Broadcast, BroadcastChannel } from '../../wire-protocol/broadcast/ServerBroadcast.js'
+export { ChannelClosedError, ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 export { NetworkError } from '../../shared/NetworkError.js'
-export type { ChannelBase, ClientChannel } from '../../wire-protocol/channel.js'
-export { DefaultBroadcastAdapter } from '../../wire-protocol/server/broadcast.js'
-export type { BroadcastAdapter, BroadcastTransport } from '../../wire-protocol/server/broadcast.js'
+export type { ChannelBase, ClientChannel } from '../../wire-protocol/channel/channel.js'
+export { DefaultBroadcastAdapter } from '../../wire-protocol/broadcast/broadcastAdapter.js'
+export type { BroadcastAdapter, BroadcastTransport } from '../../wire-protocol/broadcast/broadcastAdapter.js'
 export type { TelefuncServerExtension } from './extensions.js'
 export type {
   TypeContract,
@@ -29,7 +29,7 @@ export type {
   StreamingReplacerType,
   ServerReplacerContext,
   ServerReviverContext,
-} from '../../wire-protocol/types.js'
+} from '../../wire-protocol/values/types.js'
 
 // TO-DO/next-major-release: remove
 export type { Telefunc } from './context/TelefuncNamespace.js'
