@@ -20,6 +20,11 @@ import {
   onGetWatched,
   onWatchRoomTrack,
   onGetWatchedTrack,
+  onHoldRetainedReads,
+  onHeldRetainedReads,
+  onReleaseRetainedReads,
+  onWatchEveryFrame,
+  onGetEveryFrame,
   onJoinHiddenAndHand,
   onHiddenSetMeta,
   onHiddenLeave,
@@ -1607,6 +1612,45 @@ function Room() {
           releasePubView()
         },
       )}
+
+      {scenario('retain-leave', null, 'A member leaves while a late view replays', async () => {
+        const [roomId, pubView] = await createRoom('retain-leave')
+        const releasePubView = keepReachable(pubView)
+        const a = await pubView.join({ meta: { name: 'A' } })
+        const b = await pubView.join({ meta: { name: 'B' } })
+        await a.publishBinary(new Uint8Array([1]), { track: 'cam', retain: true })
+        // Delivers the cam track on the server already, so live frames reach a late view while its replay reads.
+        await onWatchRoomTrack(roomId, 'cam')
+
+        await onHoldRetainedReads(roomId)
+        const late = await onGetRoom(roomId)
+        const frames: Array<[string | null, number, unknown]> = []
+        const left: unknown[] = []
+        late.subscribeBinary((data, info, from) => frames.push([info.track, data[0]!, from.meta.name ?? null]))
+        late.onLeave((member) => left.push(member.meta.name))
+        await onWatchEveryFrame(roomId)
+        // The page's replay and the server view's each wait on the retained read.
+        await pollUntil(async () => ({ done: (await onHeldRetainedReads(roomId)) >= 2 }))
+        await a.publishBinary(new Uint8Array([4]), { track: 'cam' })
+        await b.publishBinary(new Uint8Array([5]), { track: 'cam' })
+        await pollUntil(async () => {
+          const seen = (await onGetWatchedTrack(roomId)).frames
+          return { done: seen.includes(4) && seen.includes(5) }
+        })
+        await a.leave()
+        await pollUntil(() => ({ done: left.includes('A') }))
+        await onReleaseRetainedReads(roomId)
+
+        await b.publishBinary(new Uint8Array([9]), { track: 'cam' })
+        await pollUntil(async () => {
+          const server = await onGetEveryFrame(roomId)
+          return {
+            result: { frames, server },
+            done: frames.some(([, n]) => n === 9) && server.some(([n]) => n === 9),
+          }
+        })
+        releasePubView()
+      })}
 
       {scenario('hidden', 'Hidden participants', 'Hidden member handed to one page', async () => {
         const [roomId, view] = await createRoom('hidden')

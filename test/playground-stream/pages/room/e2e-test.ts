@@ -956,6 +956,20 @@ function testRoom() {
       expect(r.server).deep.equal({ text: ['pinned', 'live', 'live-2'], frames: [1, 4] })
     },
   )
+  testRoomScenario<{ frames: Array<[string | null, number, unknown]>; server: Array<[number, unknown]> }>(
+    'retain-leave',
+    "room: a member who leaves while a late subscriber's replay holds its live frames has none of them delivered after its leave, on the page or the server, and another member's held frames still arrive",
+    (r) => {
+      expect(r.frames).deep.equal([
+        ['cam', 5, 'B'],
+        ['cam', 9, 'B'],
+      ])
+      expect(r.server).deep.equal([
+        [5, 'B'],
+        [9, 'B'],
+      ])
+    },
+  )
   testRoomScenario<{
     events: string[]
     handedEvents: string[]

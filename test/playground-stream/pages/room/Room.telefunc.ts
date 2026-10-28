@@ -15,6 +15,11 @@ export {
   onGetWatched,
   onWatchRoomTrack,
   onGetWatchedTrack,
+  onHoldRetainedReads,
+  onHeldRetainedReads,
+  onReleaseRetainedReads,
+  onWatchEveryFrame,
+  onGetEveryFrame,
   onJoinHiddenAndHand,
   onHiddenSetMeta,
   onHiddenLeave,
@@ -81,7 +86,13 @@ import { Buffer } from 'node:buffer'
 import { Room, Abort, BroadcastChannel, onBug, type LeaveCause, type LocalParticipant } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
-import { addBackendFault, endBackendSubscriptions, holdCellPages, type BackendFault } from '../../failing-backend'
+import {
+  addBackendFault,
+  endBackendSubscriptions,
+  holdCellPages,
+  holdRetainedReads,
+  type BackendFault,
+} from '../../failing-backend'
 
 async function onCreateRoom(roomId: string) {
   return await Room.create(roomId, { meta: { topic: 'e2e' } })
@@ -203,6 +214,37 @@ async function onWatchRoomTrack(roomId: string, track: string) {
 
 async function onGetWatchedTrack(roomId: string) {
   return { text: watched.get(roomId) ?? [], frames: watchedTracks.get(roomId) ?? [] }
+}
+
+const retainedReads = new Map<string, ReturnType<typeof holdRetainedReads>>()
+
+/** The store's reads of the room's retained frames wait until `onReleaseRetainedReads()`. */
+async function onHoldRetainedReads(roomId: string) {
+  retainedReads.set(roomId, holdRetainedReads(roomId))
+}
+
+async function onHeldRetainedReads(roomId: string) {
+  return retainedReads.get(roomId)!.held()
+}
+
+async function onReleaseRetainedReads(roomId: string) {
+  retainedReads.get(roomId)!.release()
+  retainedReads.delete(roomId)
+}
+
+const everyFrame = new Map<string, Array<[number, unknown]>>()
+
+/** A server-side view's subscriber of every member's every track: each frame's first byte and its sender's name. */
+async function onWatchEveryFrame(roomId: string) {
+  const room = await Room.get(roomId)
+  const frames: Array<[number, unknown]> = []
+  everyFrame.set(roomId, frames)
+  watchedRooms.set(roomId, room)
+  room.subscribeBinary((data, _info, from) => frames.push([data[0]!, from.meta.name ?? null]))
+}
+
+async function onGetEveryFrame(roomId: string) {
+  return everyFrame.get(roomId) ?? []
 }
 
 const hiddenBots = new Map<string, LocalParticipant>()
