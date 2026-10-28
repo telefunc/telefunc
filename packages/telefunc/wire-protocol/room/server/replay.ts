@@ -17,8 +17,9 @@ assertIsNotBrowser()
 // Text gate keys: a member's id, and for announcements a key no id takes.
 const ANNOUNCE_KEY = '\0announce'
 
-/** A binary want whose retained frames are being read, and the relays of the live frames it holds meanwhile. */
-type ReplayHold = { change: BinaryWantChange; relays: (() => void)[]; bytes: number }
+/** A binary want whose retained frames are being read, and the live frames it holds meanwhile. */
+type ReplayHold = { change: BinaryWantChange; held: HeldFrame[]; bytes: number }
+type HeldFrame = { from: string; bytes: number; relay: () => void }
 
 /** One holder's order across retained replay and live frames, per sender: a frame is admitted only if it is newer than
  *  every frame the holder already has from that sender on its lane. A replayed retained frame can win the race against
@@ -40,15 +41,20 @@ class ReplayGate {
     return admitInto(high, track, info)
   }
 
+  /** The frames held from `member` go with it: its leave reached the holder before them. */
   forgetMember(member: string): void {
     this._high.delete(member)
     this._binaryHigh.delete(member)
+    for (const hold of this._holds) {
+      for (const frame of hold.held) if (frame.from === member) this._unhold(hold, frame.bytes)
+      hold.held = hold.held.filter((frame) => frame.from !== member)
+    }
   }
 
   /** Holds the live frames `change` covers on lanes the holder has had none from, until the returned release runs
    *  their relays again: the retained frames read in between go out first. */
   holdBinary(change: BinaryWantChange): () => void {
-    const hold: ReplayHold = { change, relays: [], bytes: 0 }
+    const hold: ReplayHold = { change, held: [], bytes: 0 }
     this._holds.add(hold)
     return () => this._release(hold)
   }
@@ -66,7 +72,7 @@ class ReplayGate {
       if ((change.member !== ALL && change.member !== member) || (change.track !== ALL && change.track !== track)) {
         continue
       }
-      hold.relays.push(relay)
+      hold.held.push({ from: member, bytes, relay })
       hold.bytes += bytes
       this._heldBytes += bytes
       if (this._heldBytes > ROOM_REPLAY_HOLD_BYTES_MAX) for (const held of this._holds) this._release(held)
@@ -83,8 +89,13 @@ class ReplayGate {
 
   private _release(hold: ReplayHold): void {
     if (!this._holds.delete(hold)) return
-    this._heldBytes -= hold.bytes
-    for (const relay of hold.relays) relay()
+    this._unhold(hold, hold.bytes)
+    for (const frame of hold.held) frame.relay()
+  }
+
+  private _unhold(hold: ReplayHold, bytes: number): void {
+    hold.bytes -= bytes
+    this._heldBytes -= bytes
   }
 }
 
