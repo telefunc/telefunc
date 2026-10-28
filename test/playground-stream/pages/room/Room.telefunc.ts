@@ -15,6 +15,11 @@ export {
   onGetWatched,
   onWatchRoomTrack,
   onGetWatchedTrack,
+  onHoldRetainedReads,
+  onHeldRetainedReads,
+  onReleaseRetainedReads,
+  onWatchEveryFrame,
+  onGetEveryFrame,
   onJoinHiddenAndHand,
   onHiddenSetMeta,
   onHiddenLeave,
@@ -87,6 +92,7 @@ import {
   endBackendSubscriptions,
   holdCellPages,
   holdSubscriptions,
+  holdRetainedReads,
   type BackendFault,
 } from '../../failing-backend'
 
@@ -210,6 +216,37 @@ async function onWatchRoomTrack(roomId: string, track: string) {
 
 async function onGetWatchedTrack(roomId: string) {
   return { text: watched.get(roomId) ?? [], frames: watchedTracks.get(roomId) ?? [] }
+}
+
+const retainedReads = new Map<string, ReturnType<typeof holdRetainedReads>>()
+
+/** The store's reads of the room's retained frames wait until `onReleaseRetainedReads()`. */
+async function onHoldRetainedReads(roomId: string) {
+  retainedReads.set(roomId, holdRetainedReads(roomId))
+}
+
+async function onHeldRetainedReads(roomId: string) {
+  return retainedReads.get(roomId)!.held()
+}
+
+async function onReleaseRetainedReads(roomId: string) {
+  retainedReads.get(roomId)!.release()
+  retainedReads.delete(roomId)
+}
+
+const everyFrame = new Map<string, Array<[number, unknown]>>()
+
+/** A server-side view's subscriber of every member's every track: each frame's first byte and its sender's name. */
+async function onWatchEveryFrame(roomId: string) {
+  const room = await Room.get(roomId)
+  const frames: Array<[number, unknown]> = []
+  everyFrame.set(roomId, frames)
+  watchedRooms.set(roomId, room)
+  room.subscribeBinary((data, _info, from) => frames.push([data[0]!, from.meta.name ?? null]))
+}
+
+async function onGetEveryFrame(roomId: string) {
+  return everyFrame.get(roomId) ?? []
 }
 
 const hiddenBots = new Map<string, LocalParticipant>()
@@ -623,26 +660,35 @@ async function onConcurrentMetaWrites(roomId: string) {
 /** A meta of 1,500 keys, `a0`… or `b0`…: more than one page of cells. */
 const bigMeta = (prefix: string) => Object.fromEntries(Array.from({ length: 1500 }, (_, i) => [`${prefix}${i}`, i]))
 
-const replacing = new Map<string, ReturnType<typeof setInterval>>()
+const replacing = new Map<string, { timer: ReturnType<typeof setInterval>; writes: Promise<unknown>[] }>()
 
 /** Sets a member's and the room's meta to the `a` meta, then replaces both with the `b` and `a` metas in turn every
- *  10 ms, each replace overlapping the ones before it, until `onStopReplacingMeta()`. */
+ *  10 ms, each replace overlapping the ones before it, until `onStopReplacingMeta()`. A store slower than that, as
+ *  Redis is, gets the next pair only while at most one pair is in flight, so what it queues stays bounded. */
 async function onReplaceMetaInLoop(roomId: string) {
   const me = await Room.join(roomId, { meta: { name: 'Big', ...bigMeta('a') } })
   await Room.setMeta(roomId, bigMeta('a'))
   let round = 0
+  let inFlight = 0
+  const writes: Promise<unknown>[] = []
   const timer = setInterval(() => {
+    if (inFlight > 2) return
     const prefix = round++ % 2 === 0 ? 'b' : 'a'
-    void me.setMeta({ name: 'Big', ...bigMeta(prefix) })
-    void Room.setMeta(roomId, bigMeta(prefix))
+    for (const write of [me.setMeta({ name: 'Big', ...bigMeta(prefix) }), Room.setMeta(roomId, bigMeta(prefix))]) {
+      inFlight++
+      writes.push(write.finally(() => inFlight--))
+    }
   }, 10)
-  replacing.set(roomId, timer)
+  replacing.set(roomId, { timer, writes })
   return me.id
 }
 
+/** Resolves once the replaces in flight are done, so the next test's writes don't queue behind them. */
 async function onStopReplacingMeta(roomId: string) {
-  clearInterval(replacing.get(roomId))
+  const { timer, writes } = replacing.get(roomId)!
+  clearInterval(timer)
   replacing.delete(roomId)
+  await Promise.allSettled(writes)
 }
 
 /** A member's `a` meta, set as its write `gen` (a replace from 9 or 99 writes keys one digit longer), read by the room's
@@ -849,14 +895,20 @@ async function onSeedAndChurn(roomId: string) {
   await Room.join(roomId, { meta: { name: 'Hidden' }, hidden: true })
   let tick = 0
   const passing: Awaited<ReturnType<typeof Room.join>>[] = []
+  const churn: (Promise<unknown> | undefined)[] = []
   const timer = setInterval(() => {
     tick++
     void members[tick % members.length]!.setAttributes({ n: tick })
-    if (tick % 2 === 0) void Room.join(roomId, { meta: { name: `p${tick}` } }).then((member) => passing.push(member))
-    else void passing.shift()?.leave()
+    if (tick % 2 === 0) {
+      churn.push(Room.join(roomId, { meta: { name: `p${tick}` } }).then((member) => passing.push(member)))
+    } else {
+      churn.push(passing.shift()?.leave())
+    }
   }, 5)
   churning.set(roomId, async () => {
     clearInterval(timer)
+    // A join or leave still in flight lands after the count otherwise.
+    await Promise.all(churn)
     await Promise.all(passing.map((member) => member.leave()))
     return (await Room.get(roomId)).count
   })
