@@ -17,6 +17,8 @@ interface PeerSender {
   sendWait(): SendWait
   /** The bytes the wire delivered in the `ms` before the frame it's handling arrived. */
   deliveredBeforeFrame(ms: number): number
+  /** Ends the wire, as a frame that breaks the protocol does. */
+  terminate(): void
 }
 
 type IndexedPeerOptions = {

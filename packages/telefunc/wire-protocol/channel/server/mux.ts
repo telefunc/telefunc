@@ -317,6 +317,7 @@ class ChannelMux {
           const state = this.connectionEntries.get(connection)?.state
           return state ? state.deliveries.before(state.frameDelivery, ms) : 0
         },
+        terminate: () => this.terminateWire(connection),
       },
     }
     this.connectionEntries.set(connection, entry)

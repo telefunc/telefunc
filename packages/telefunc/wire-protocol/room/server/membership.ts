@@ -25,7 +25,7 @@ import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
 import { roomClosedError } from '../errors.js'
 import {
   leaveCauseToWire,
-  type DmReply,
+  type RoomResult,
   type MemberSnapshot,
   type RoomCtrlEnvelope,
   type WireLeaveCause,
@@ -513,7 +513,13 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
 }
 
 /** Kept only while its sender is a member, whose leave drops what it never settled. */
-async function storeDmReply(roomId: string, inc: string, sender: string, ackId: string, reply: DmReply): Promise<void> {
+async function storeDmReply(
+  roomId: string,
+  inc: string,
+  sender: string,
+  ackId: string,
+  reply: RoomResult,
+): Promise<void> {
   const member = memberCellKey(sender)
   await mutateCells(roomId, inc, [member], (cells) => ({
     value: undefined,
@@ -522,22 +528,22 @@ async function storeDmReply(roomId: string, inc: string, sender: string, ackId: 
 }
 
 /** The reply stored for `ackId`, deleted as it is read, or null if none is. */
-async function takeDmReply(roomId: string, inc: string, sender: string, ackId: string): Promise<DmReply | null> {
+async function takeDmReply(roomId: string, inc: string, sender: string, ackId: string): Promise<RoomResult | null> {
   const key = dmReplyCellKey(sender, ackId)
   const raw = (await readOpenCells(roomId, inc, [key])).cells.get(key)
   if (raw === undefined) return null
   await dropDmReply(roomId, inc, sender, ackId)
-  return decodeRoomRecord<DmReply>(raw)
+  return decodeRoomRecord<RoomResult>(raw)
 }
 
 /** Every reply stored for `sender`, by `ackId`, deleted a page at a time as it is read. */
-async function takeDmReplies(roomId: string, inc: string, sender: string): Promise<Map<string, DmReply>> {
+async function takeDmReplies(roomId: string, inc: string, sender: string): Promise<Map<string, RoomResult>> {
   const backend = getRoomBackend()
-  const replies = new Map<string, DmReply>()
+  const replies = new Map<string, RoomResult>()
   const slice = new Slice()
   for await (const page of backend.readCellPages(roomId, inc, dmReplyCellPrefix(sender))) {
     if ('staleInc' in page) throw roomClosedError(roomId)
-    for (const [key, raw] of page.cells) replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<DmReply>(raw))
+    for (const [key, raw] of page.cells) replies.set(ackIdOfDmReplyCellKey(key), decodeRoomRecord<RoomResult>(raw))
     if (!(await deleteCells(roomId, inc, page.cells.keys()))) throw roomClosedError(roomId)
     if (slice.over) await slice.next()
   }

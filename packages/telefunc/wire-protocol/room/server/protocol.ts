@@ -9,7 +9,7 @@ export type {
   RoomDmAckEnvelope,
 }
 
-import type { DmReply, SenderStamp } from '../protocol.js'
+import type { RoomResult, SenderStamp } from '../protocol.js'
 import type { RoomMeta } from '../types.js'
 
 /** The head's config. `meta` is the one the room was created with, until its first meta write (see `meta.ts`). `inc`
@@ -65,4 +65,4 @@ type RoomDemandPage = {
  *  still names the sender. */
 type RoomDataEnvelope = { __r: 'data'; from: string; data: unknown } & SenderStamp
 /** An ack DM's reply, on the original sender's inbox lane. */
-type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
+type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & RoomResult

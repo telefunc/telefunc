@@ -63,12 +63,12 @@ class ServerChannelBuffer<TAck = never> {
     return this.#text.droppedGap || this.#binary.droppedGap
   }
 
-  pushText(data: string, resolve: () => void, reject: (err: Error) => void, gap: boolean): void {
-    this.#text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++, gap)
+  pushText(data: string, resolve: () => void, reject: (err: Error) => void): void {
+    this.#text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++, false)
   }
 
-  pushTextAck(data: string, resolve: (value: TAck) => void, reject: (err: Error) => void, gap: boolean): void {
-    this.#text.push(TAG.TEXT_ACK_REQ, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++, gap)
+  pushTextAck(data: string, resolve: (value: TAck) => void, reject: (err: Error) => void): void {
+    this.#text.push(TAG.TEXT_ACK_REQ, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++, false)
   }
 
   pushPublish(data: string, gap: boolean): void {
@@ -76,12 +76,12 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   /** Holds a copy, as an attached send encodes the caller's bytes at once and the caller may then reuse them. */
-  pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void, gap: boolean): void {
-    this.#binary.pushCopy(TAG.BINARY, data, { resolve, reject }, this.#insertionSeq++, gap)
+  pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void): void {
+    this.#binary.pushCopy(TAG.BINARY, data, { resolve, reject }, this.#insertionSeq++, false)
   }
 
-  pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void, gap: boolean): void {
-    this.#binary.pushCopy(TAG.BINARY_ACK_REQ, data, { resolve, reject }, this.#insertionSeq++, gap)
+  pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void): void {
+    this.#binary.pushCopy(TAG.BINARY_ACK_REQ, data, { resolve, reject }, this.#insertionSeq++, false)
   }
 
   pushPublishBinary(data: Uint8Array, gap: boolean): void {

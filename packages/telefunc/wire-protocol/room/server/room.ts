@@ -22,12 +22,19 @@ import {
   type RoomDmEnvelope,
   type RoomCtrlEnvelope,
   type MemberMetaUpdate,
+  type ParticipantStubMetadata,
   type RoomSnapshotMetadata,
 } from '../protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import { type RoomModel, RoomState, RoomStateView } from '../state.js'
 import { ParticipantBase } from '../participant.js'
-import { MemberMessageTexts, RoomStubChannel } from './stub.js'
+import {
+  MemberMessageTexts,
+  RoomParticipantStub,
+  RoomStub,
+  type RoomParticipantStubOptions,
+  type RoomStubOptions,
+} from './stub.js'
 import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
@@ -83,9 +90,9 @@ class ServerRoom extends RoomStateView implements Room {
   readonly _state: RoomState
   /** @internal */
   readonly _local: LocalHolder
-  private readonly _stubs = new Set<RoomStubChannel>()
+  private readonly _stubs = new Set<RoomStub>()
   /** The attached stub holding each member a client joined through. */
-  private readonly _stubOf = new Map<string, RoomStubChannel>()
+  private readonly _stubOf = new Map<string, RoomStub>()
   private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** The local participants that joined with `selfDelivery: false`. */
   private readonly _localSuppressed = new Set<string>()
@@ -198,7 +205,7 @@ class ServerRoom extends RoomStateView implements Room {
       this._admissions.delete(id)
       this._replica.applyControl(join)
       // A drop of the page's wire during the admission skipped this member: it starts disconnected.
-      if (this._stubOf.get(id)?.isConnected === false) this._setMemberConnected(id, false)
+      if (this._stubOf.get(id)?._end.isConnected === false) this._setMemberConnected(id, false)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
@@ -289,7 +296,7 @@ class ServerRoom extends RoomStateView implements Room {
     for (const id of this._admissions.keys()) this._admissions.set(id, 'abandoned')
     // A client back while its channel still holds it gets `closed`.
     const timeout = reconnectWindow()
-    for (const stub of this._stubs) void stub.close({ timeout }).catch(() => {})
+    for (const stub of this._stubs) void stub._end.close({ timeout }).catch(() => {})
     this._replica.track(this)
   }
 
@@ -297,7 +304,7 @@ class ServerRoom extends RoomStateView implements Room {
   _onDm(envelope: RoomDmEnvelope, serialized: string, info: WirePublishInfo): void {
     const holder = this._holderOf(envelope.to)
     // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
-    if (holder instanceof RoomStubChannel) {
+    if (holder instanceof RoomStub) {
       if (envelope.fromMetaSeq !== undefined) {
         this._replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
       }
@@ -337,27 +344,20 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal A client's view of this room. It attaches before the snapshot, so every later event relays and every
    *  earlier one is in the snapshot. */
-  _openStub(options: ConstructorParameters<typeof RoomStubChannel>[1]): {
-    stub: RoomStubChannel
-    metadata: RoomSnapshotMetadata
-  } {
-    const stub = new RoomStubChannel(this, options)
-    this._attachStub(stub)
+  _openStub({ end, publishShield, grants }: Omit<RoomStubOptions, 'room'>): RoomSnapshotMetadata {
+    this._attachStub(new RoomStub({ room: this, end, publishShield, grants }))
     return {
-      stub,
-      metadata: {
-        channelId: stub.id,
-        roomId: this.id,
-        meta: this._model.metaEntries(),
-        closed: this.isClosed,
-        metaSeq: this._model.metaSeq,
-        bufferLimit: getServerConfig().channel.bufferLimit,
-        count: this.count,
-      },
+      channelId: end.id,
+      roomId: this.id,
+      meta: this._model.metaEntries(),
+      closed: this.isClosed,
+      metaSeq: this._model.metaSeq,
+      bufferLimit: getServerConfig().channel.bufferLimit,
+      count: this.count,
     }
   }
 
-  _attachStub(stub: RoomStubChannel): void {
+  _attachStub(stub: RoomStub): void {
     this._stubs.add(stub)
     this._replica.attachStub(stub)
     if (this._tail !== null) {
@@ -365,15 +365,11 @@ class ServerRoom extends RoomStateView implements Room {
       stub._beginTail(this._tail.take(), () => this._replica.plan.textChanged(stub, []))
       this._tail = null
     }
-    stub.onClose(() => this._detachStub(stub))
-    stub.onDisconnect(() => this._setHeldConnected(stub, false))
-    stub.onReconnect(() => this._setHeldConnected(stub, true))
     this._replica.track(this)
     this._replica.plan.holderChanged(stub)
   }
 
-  _onStubAttached(stub: RoomStubChannel): void {
-    if (!this._stubs.has(stub)) return
+  _onStubAttached(stub: RoomStub): void {
     this._replica.roster.sendTo(stub)
     stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
     for (const member of stub._heldMembers()) {
@@ -381,7 +377,8 @@ class ServerRoom extends RoomStateView implements Room {
     }
   }
 
-  private _setHeldConnected(stub: RoomStubChannel, connected: boolean): void {
+  /** @internal */
+  _setHeldConnected(stub: RoomStub, connected: boolean): void {
     // An admission under way takes the wire's state once its join applies.
     for (const id of stub._heldMembers()) if (!this._admissions.has(id)) this._setMemberConnected(id, connected)
   }
@@ -390,7 +387,8 @@ class ServerRoom extends RoomStateView implements Room {
     void this._writes.setMemberConnected(id, connected).catch(reportRoomError)
   }
 
-  private _detachStub(stub: RoomStubChannel): void {
+  /** @internal */
+  _detachStub(stub: RoomStub): void {
     this._stubs.delete(stub)
     this._replica.detachStub(stub)
     stub._endTail()
@@ -408,12 +406,12 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal A response serialized a participant whose own frames the stub's client doesn't get back. */
-  _onStubSuppressed(stub: RoomStubChannel, member: string): void {
+  _onStubSuppressed(stub: RoomStub, member: string): void {
     if (this._stubs.has(stub)) this._replica.plan.memberChanged(member)
   }
 
   async _joinStubMember(
-    stub: RoomStubChannel,
+    stub: RoomStub,
     req: Extract<RoomRequest, { __r: 'req-join' }>,
   ): Promise<{ id: string; joinedAt: number }> {
     const admission = {
@@ -448,7 +446,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** A stub that is not attached holds no lanes. */
   private _holdsLanes(holder: LaneHolder): boolean {
-    return holder === this._local || this._stubs.has(holder as RoomStubChannel)
+    return holder === this._local || this._stubs.has(holder as RoomStub)
   }
 
   /** @internal Whether this handle observes the room: a client stub, a participant, or a listener. */
@@ -461,7 +459,7 @@ class ServerRoom extends RoomStateView implements Room {
     return this._tail !== null
   }
 
-  private _holderOf(id: string): ServerLocalParticipant | RoomStubChannel | undefined {
+  private _holderOf(id: string): ServerLocalParticipant | RoomStub | undefined {
     return this._localParticipants.get(id) ?? this._stubOf.get(id)
   }
 
@@ -525,6 +523,25 @@ class ServerLocalParticipant extends ParticipantBase {
   async _publishFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._writes.publishBinaryFrame(frame, framed)
+  }
+
+  /** @internal A client's hold on this participant, which its inbox forwards to. */
+  _openStub({ end, publishShield }: Omit<RoomParticipantStubOptions, 'participant'>): ParticipantStubMetadata {
+    // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
+    assertUsage(
+      !this._isBound,
+      'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
+    )
+    this._setForwarder(new RoomParticipantStub({ participant: this, end, publishShield }))
+    return {
+      channelId: end.id,
+      roomId: this._room.id,
+      id: this.id,
+      meta: this.meta,
+      selfDelivery: this.selfDelivery,
+      identity: this.identity,
+      bufferLimit: getServerConfig().channel.bufferLimit,
+    }
   }
 
   /** @internal Each meta update this participant applies, and each failover rewind of its seq, which a client holding

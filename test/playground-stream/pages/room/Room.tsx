@@ -1,6 +1,7 @@
 export { Room }
 
 import React, { useEffect, useState, useSyncExternalStore } from 'react'
+import { abort, close } from 'telefunc/client'
 import { keepReachable } from '../keepReachable'
 import {
   onCreateRoom,
@@ -27,8 +28,10 @@ import {
   onCloseRoomWithMember,
   onBackgroundErrors,
   onRoomWhileAway,
+  onRoomMetaWhileAway,
   onRoomLeaveWhileJoining,
   onRoomOverflow,
+  onParticipantOverflow,
   onGetRoomOverflow,
   onRoomBurst,
   onGetWatchedCount,
@@ -73,6 +76,7 @@ import {
   onListWhileClosing,
   onRecreate,
   onJoinAnswering,
+  onSaveReply,
   onSeedAndChurn,
   onStopChurn,
   onPublishWhileEstablishing,
@@ -105,11 +109,60 @@ let startAwayJoin: (() => void) | null = null
 let checkKeptMember: (() => void) | null = null
 /** The check the `members-let-go` card runs when its second button is clicked. */
 let checkLetGo: (() => void) | null = null
+/** The chat the `ack-dm-close` card closes when its second button is clicked. */
+let closeChat: (() => void) | null = null
+/** The room view the `ack-dm-close-view` card closes when its second button is clicked. */
+let closeViewChat: (() => void) | null = null
+/** The call the `ack-dm-hang-up` card hangs up when its second button is clicked. */
+let hangUp: (() => void) | null = null
+
+const replyOf = (sent: Promise<{ response: unknown }>) =>
+  sent.then(
+    (receipt) => receipt.response,
+    (err: Error) => err.message,
+  )
+
+/** A reply that links back to its thread, which can't be sent. */
+function threadedReply() {
+  const thread: { replies: unknown[] } = { replies: [] }
+  const reply = { text: 'see thread', thread }
+  thread.replies.push(reply)
+  return reply
+}
 
 /** Joins through a room the page doesn't keep, and lets go of the member too, without leaving. */
 async function joinAndLetGo(roomId: string, leaves: string[]): Promise<void> {
   const me = await (await onGetRoom(roomId)).join({ meta: { name: 'Dropped' } })
   me.onLeave((cause) => leaves.push(cause.type))
+}
+
+/** Joins the room named in the URL as `Mallory`, then sends what no client library sends, as a hostile page can. */
+async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Promise<void> {
+  const roomId = new URLSearchParams(location.search).get('roomId')!
+  const room = await onGetRoom(roomId)
+  keepReachable(room)
+  // The room's own channel, past the API that checks what goes on it.
+  const { _end: end } = room as unknown as {
+    _end: {
+      send(data: unknown, options: { ack: true }): Promise<unknown>
+      publish(data: unknown): Promise<unknown>
+      _sendReply(reply: Promise<unknown>, failure: unknown): void
+    }
+  }
+  const me = await room.join({ meta: { name: 'Mallory' } })
+  if (kind === 'reply') {
+    const sendReply = end._sendReply.bind(end)
+    end._sendReply = (reply, failure) =>
+      sendReply(
+        reply.then((dmReply) => ({ ...(dmReply as object), reply: 'bogus' })),
+        failure,
+      )
+    me.listen(() => 'hi')
+    return
+  }
+  await (kind === 'request' ? end.send({ __r: 'req-bogus' }, { ack: true }) : end.publish({ __r: 'bogus' })).catch(
+    () => {},
+  )
 }
 
 /** The documented React adapter: the room's methods passed as they are. */
@@ -690,6 +743,44 @@ function Room() {
         setResult(JSON.stringify('joined'))
       })}
 
+      {scenario('malformed', 'Malformed requests', 'Join, and say goodbye to whoever leaves', async () => {
+        const [roomId, room] = await createRoom('malformed')
+        const events: string[] = []
+        const received: unknown[] = []
+        let dm: string | null = null
+        room.subscribe((data) => received.push(data))
+        room.onJoin((member) => {
+          events.push(`join:${member.meta.name}`)
+          if (member.meta.name !== 'Mallory') return
+          void me.send(member.id, 'hello?', { ack: true }).then(
+            () => (dm = 'answered'),
+            () => (dm = 'rejected'),
+          )
+        })
+        const me = await room.join({ meta: { name: 'Witness' } })
+        room.onLeave((member, cause) => {
+          events.push(`leave:${member.meta.name}:${cause.type}`)
+          void me.publish(`bye ${member.meta.name}`)
+        })
+        // The test joins `Mallory` from another tab, which then sends a malformed request, publish or DM reply.
+        await pollUntil(
+          () => ({ result: { roomId, events, received, dm }, done: received.length > 0 && dm !== null }),
+          150,
+        )
+      })}
+
+      {scenario('malformed-request', null, 'Join the room named in the URL, then send a malformed request', () =>
+        joinAndSendMalformed('request'),
+      )}
+
+      {scenario('malformed-publish', null, 'Join the room named in the URL, then send a malformed publish', () =>
+        joinAndSendMalformed('publish'),
+      )}
+
+      {scenario('malformed-reply', null, 'Join the room named in the URL, then reply to a DM malformed', () =>
+        joinAndSendMalformed('reply'),
+      )}
+
       {scenario(
         'own-meta-race',
         'Own meta under concurrent writes',
@@ -869,20 +960,111 @@ function Room() {
         const me = await room.join({ meta: { name: 'Asker' } })
         const peer = await room.join({ meta: { name: 'Peer' } })
         peer.listen((data) => ({ echo: data }))
+        const threaded = await room.join({ meta: { name: 'Threaded' } })
+        threaded.listen(threadedReply)
         const serverMember = await onJoinAnswering(roomId)
-        const reply = (sent: Promise<{ response: unknown }>) =>
-          sent.then(
-            (receipt) => receipt.response,
-            (err: Error) => err.message,
+        const held = await onJoinAsServer(roomId, 'Held')
+        held.listen(() => 'pong')
+        const heldThreaded = await onJoinAsServer(roomId, 'Held threaded')
+        heldThreaded.listen(threadedReply)
+        const unhandled: string[] = []
+        const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
+        window.addEventListener('unhandledrejection', recordUnhandled)
+        try {
+          setResult(
+            JSON.stringify({
+              fromPage: await replyOf(me.send(peer.id, 'hi', { ack: true })),
+              fromPageUnsendable: await replyOf(me.send(threaded.id, 'where?', { ack: true })),
+              fromServer: await replyOf(me.send(serverMember, 'hi', { ack: true })),
+              fromHeld: await replyOf(me.send(held.id, 'ping', { ack: true })),
+              fromHeldUnsendable: await replyOf(me.send(heldThreaded.id, 'where?', { ack: true })),
+              refused: await replyOf(me.send(serverMember, 'refuse', { ack: true })),
+              unhandled,
+            }),
           )
-        setResult(
-          JSON.stringify({
-            fromPage: await reply(me.send(peer.id, 'hi', { ack: true })),
-            fromServer: await reply(me.send(serverMember, 'hi', { ack: true })),
-            refused: await reply(me.send(serverMember, 'refuse', { ack: true })),
-          }),
-        )
+        } finally {
+          window.removeEventListener('unhandledrejection', recordUnhandled)
+        }
       })}
+
+      {scenario('ack-dm-close', null, 'Ask a member who saves their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm-close')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const leaving = await onJoinAsServer(roomId, 'Leaving')
+        leaving.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
+          return 'bye'
+        })
+        const answer = replyOf(me.send(leaving.id, 'thanks', { ack: true }))
+        const { promise: closeClicked, resolve } = Promise.withResolvers<void>()
+        closeChat = resolve
+        await closeClicked
+        const closing = close(leaving)
+        setResult(JSON.stringify({ roomId, closing: true }))
+        await closing
+        setResult(JSON.stringify({ answer: await answer, closed: true }))
+      })}
+      <button id="test-room-ack-dm-close-chat" onClick={() => closeChat?.()}>
+        Close the chat
+      </button>
+
+      {scenario('ack-dm-close-view', null, 'Ask a member a page joined, who saves their reply', async () => {
+        const [roomId, room] = await createRoom('ack-dm-close-view')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const chat = await onGetRoom(roomId)
+        const leaving = await chat.join({ meta: { name: 'Leaving' } })
+        leaving.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
+          return 'bye'
+        })
+        const answer = replyOf(me.send(leaving.id, 'thanks', { ack: true }))
+        const { promise: closeClicked, resolve } = Promise.withResolvers<void>()
+        closeViewChat = resolve
+        await closeClicked
+        const closing = close(chat)
+        setResult(JSON.stringify({ roomId, closing: true }))
+        await closing
+        setResult(JSON.stringify({ answer: await answer, closed: true }))
+      })}
+      <button id="test-room-ack-dm-close-view-chat" onClick={() => closeViewChat?.()}>
+        Close the chat
+      </button>
+
+      {scenario('ack-dm-hang-up', null, 'Ask a member who saves their reply, then hang up', async () => {
+        const [roomId, room] = await createRoom('ack-dm-hang-up')
+        const me = await room.join({ meta: { name: 'Asker' } })
+        const hangingUp = await onJoinAsServer(roomId, 'Hanging up')
+        const { promise: saved, resolve: onSaved } = Promise.withResolvers<void>()
+        hangingUp.listen(async () => {
+          setResult(JSON.stringify({ roomId, saving: true }))
+          await onSaveReply(roomId)
+          onSaved()
+          return 'bye'
+        })
+        const unhandled: string[] = []
+        const recordUnhandled = (event: PromiseRejectionEvent) => unhandled.push(String(event.reason))
+        window.addEventListener('unhandledrejection', recordUnhandled)
+        try {
+          const answer = replyOf(me.send(hangingUp.id, 'thanks', { ack: true }))
+          const { promise: hangUpClicked, resolve } = Promise.withResolvers<void>()
+          hangUp = resolve
+          await hangUpClicked
+          abort(hangingUp)
+          const fromHangingUp = await answer
+          setResult(JSON.stringify({ roomId, fromHangingUp }))
+          await saved
+          // The reply's rejection, if any, is reported by the next task.
+          await new Promise((next) => setTimeout(next))
+          setResult(JSON.stringify({ fromHangingUp, unhandled }))
+        } finally {
+          window.removeEventListener('unhandledrejection', recordUnhandled)
+        }
+      })}
+      <button id="test-room-ack-dm-hang-up-now" onClick={() => hangUp?.()}>
+        Hang up
+      </button>
 
       {scenario('ack-timeout', null, 'An acknowledged DM nobody answers', async () => {
         const [, room] = await createRoom('ack-timeout')
@@ -1594,6 +1776,26 @@ function Room() {
         )
       })}
 
+      {scenario('meta-away', 'Back from offline, twice', "The room's meta, each time", async () => {
+        const [roomId, view] = await createRoom('meta-away')
+        await view.join({ meta: { name: 'Me' } })
+        await onRoomMetaWhileAway(roomId)
+        keepReachable(view)
+        const update = () => {
+          const { meta, participants } = view.snapshot()
+          const srv = participants.find((member) => member.meta.name === 'Srv')
+          setResult(
+            JSON.stringify({
+              roomId,
+              topic: (meta as { topic?: string }).topic ?? null,
+              filler: (srv?.meta.filler as string | undefined)?.trim() ?? null,
+            }),
+          )
+        }
+        update()
+        view.onChange(update)
+      })}
+
       {scenario('overflow', 'Offline past bufferLimit', 'Let go with ChannelOverflowError', async () => {
         const [roomId, view] = await createRoom('overflow')
         const seen: string[] = []
@@ -1609,6 +1811,20 @@ function Room() {
         await pollUntil(() => ({ done: closed && myCause !== null }), 150)
         const leaves = await onGetRoomOverflow(roomId)
         setResult(JSON.stringify({ roomId, seen, myCause, closed, isClosed: view.isClosed, leaves }))
+      })}
+
+      {scenario('participant-overflow', null, 'A server-joined participant offline past bufferLimit', async () => {
+        const [roomId] = await createRoom('participant-overflow')
+        const me = await onJoinAsServer(roomId, 'Bob')
+        const got: string[] = []
+        me.listen((data) => got.push((data as string).trim()))
+        let myCause: unknown = null
+        me.onLeave((cause) => (myCause = cause))
+        await onParticipantOverflow(roomId, me.id)
+        await pollUntil(() => ({ done: got.includes('before') }))
+        setResult(JSON.stringify({ roomId }))
+        await pollUntil(() => ({ done: myCause !== null }), 150)
+        setResult(JSON.stringify({ roomId, got, myCause }))
       })}
 
       {scenario('slow-link', 'Slow link', '640 KB each way', async () => {
