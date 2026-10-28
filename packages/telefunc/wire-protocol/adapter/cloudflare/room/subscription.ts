@@ -1,4 +1,4 @@
-export { CloudflareRoomSessionManager, CloudflareRoomSubscriptionAttempt }
+export { CloudflareRoomSessionManager, CloudflareRoomSubscriptionAttempt, getRoomSessionManager }
 export type { RoomSessionDeliveryRequest }
 
 import type { BackendReceiver } from '../../../backend/subscription.js'
@@ -7,6 +7,8 @@ import type { RoomSubscriptionSource } from '../../../backend/room/contract.js'
 import { encodeLaneKey } from '../../../backend/room/laneKey.js'
 import { DriverAttempt } from '../../../backend/attempt.js'
 import { OrderedStubs } from '../OrderedStubs.js'
+import { hostLocal } from '../../../../node/server/__internal.js'
+import { assert } from '../../../../utils/assert.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RegisterWire } from './do.js'
 
@@ -18,6 +20,16 @@ type RoomSessionDeliveryRequest = {
 
 /** A call to the room's authority through the session's ordered stub for it. */
 type AuthorityCall = <T>(invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>) => Promise<T>
+
+const ROOM_SESSION_MANAGER = Symbol.for('telefunc.room.cloudflareSessionManager')
+
+/** The Room manager of the session DO whose call this is. */
+function getRoomSessionManager(): CloudflareRoomSessionManager {
+  return hostLocal(ROOM_SESSION_MANAGER, (host) => {
+    assert(host.id !== null)
+    return new CloudflareRoomSessionManager(host.id)
+  })
+}
 
 function entryKey(route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>): string {
   return JSON.stringify([route.roomId, route.inc, route.laneKey])

@@ -6,8 +6,12 @@ import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getRoomBackend } from '../../backend/install.js'
 import type { LaneId } from '../../backend/room/contract.js'
-import { getChannelMux, type ChannelMux } from '../../channel/server/mux.js'
-import { encodePublishBinary, encodePublishText, type WirePublishInfo } from '../../../node/server/__internal.js'
+import {
+  encodePublishBinary,
+  encodePublishText,
+  hostLocal,
+  type WirePublishInfo,
+} from '../../../node/server/__internal.js'
 import { ALL, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
 import { DemandReport, RoomDemand } from './demand.js'
 import { DM_FAILURE } from '../errors.js'
@@ -53,15 +57,19 @@ assertIsNotBrowser()
 /** What the control lane carries for the model: everything but another process's ask, which the report answers. */
 type PresenceEvent = Exclude<RoomCtrlEnvelope, { __r: 'demand-ask' }>
 
+const REPLICAS = Symbol.for('telefunc.room.replicas')
+
+/** Per channel host: a listener may do I/O only in its own Cloudflare session DO. */
+function replicasHere(): Map<string, WeakRef<RoomReplica>> {
+  return hostLocal(REPLICAS, () => new Map<string, WeakRef<RoomReplica>>())
+}
+
 /** This process's one view of a room incarnation, a Cloudflare session DO's own, whatever the number of its handles:
  *  the model, the lanes planned from the wants of every handle's holders, the demand, the session hosting the members
  *  and pages the handles hold, and the heartbeat that renews it and checks the authority again. Each handle keeps its
  *  guards, its tail, the stubs it opened and its listeners. A replica no handle observes, owns a member through or
  *  tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
 class RoomReplica {
-  /** Per channel host: a listener may do I/O only in its own Cloudflare session DO. */
-  private static readonly _byHost = new WeakMap<ChannelMux, Map<string, WeakRef<RoomReplica>>>()
-
   private static readonly _collected = new FinalizationRegistry<{
     replicas: Map<string, WeakRef<RoomReplica>>
     inc: string
@@ -71,7 +79,7 @@ class RoomReplica {
 
   /** The incarnation's replica on this channel host, while a handle or its own work holds it. */
   static of(inc: string): RoomReplica | undefined {
-    return RoomReplica._byHost.get(getChannelMux())?.get(inc)?.deref()
+    return replicasHere().get(inc)?.deref()
   }
 
   /** The incarnation's replica: the one held, else a new one seeded with what the caller read. */
@@ -85,12 +93,7 @@ class RoomReplica {
     if (held !== undefined) return held
     const incarnation = { id: roomId, inc: config.inc, hold: config.hold }
     const replica = new RoomReplica({ incarnation, stored, seed })
-    const mux = getChannelMux()
-    let replicas = RoomReplica._byHost.get(mux)
-    if (replicas === undefined) {
-      replicas = new Map()
-      RoomReplica._byHost.set(mux, replicas)
-    }
+    const replicas = replicasHere()
     replicas.set(config.inc, new WeakRef(replica))
     RoomReplica._collected.register(replica, { replicas, inc: config.inc })
     return replica

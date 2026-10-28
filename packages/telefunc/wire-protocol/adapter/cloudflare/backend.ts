@@ -33,6 +33,7 @@ import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { CloudflareBroadcast } from './broadcast.js'
 import type { CloudflareRoomAuthorityStub } from './room/do.js'
 import { currentCloudflareSession, requireCloudflareSession } from './session.js'
+import { getRoomSessionManager } from './room/subscription.js'
 
 // Room authorities share the Telefunc namespace with sessions and Broadcast, so a room id is always prefixed.
 const ROOM_AUTHORITY_PREFIX = '__telefunc_room__:'
@@ -60,7 +61,7 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
       partitionHere: (source) => {
         const session = currentCloudflareSession()
         if (session === undefined) return null
-        return 'roomId' in source ? session.room.partition : session.broadcast.partition
+        return 'roomId' in source ? getRoomSessionManager().partition : session.broadcast.partition
       },
     }
   }
@@ -104,7 +105,7 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
     // From a session DO, through its ordered stub, so its commits to a room keep the order Room sent them in.
     const session = currentCloudflareSession()
     const wire = await (session
-      ? session.room.callAuthority(roomId, () => this.#stub(roomId), commit)
+      ? getRoomSessionManager().callAuthority(roomId, () => this.#stub(roomId), commit)
       : commit(this.#stub(roomId)))
     if ('stale' in wire) return wire
     const receipt: CommitAccepted = {
@@ -164,10 +165,11 @@ class CloudflareBackend implements BroadcastDriver, RoomDriver {
   #bindSubscription(source: CloudflareSubscriptionSource): SubscriptionBinding {
     const session = requireCloudflareSession()
     if ('roomId' in source) {
+      const room = getRoomSessionManager()
       return {
-        partition: session.room.partition,
+        partition: room.partition,
         // A route call line opens a fresh stub, like a commit's: a stub that rejected may be broken.
-        open: (receiver) => session.room.openSubscription(source, () => this.#stub(source.roomId), receiver),
+        open: (receiver) => room.openSubscription(source, () => this.#stub(source.roomId), receiver),
       }
     }
     return {

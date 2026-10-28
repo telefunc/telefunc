@@ -19,3 +19,4 @@ export type { BroadcastEndOwner, ServerBroadcastEnd } from '../../wire-protocol/
 export type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'
 export { encodePublishBinary, encodePublishText } from '../../wire-protocol/wire/connectionFrame.js'
 export type { BroadcastKind, WirePublishInfo } from '../../wire-protocol/wire/connectionFrame.js'
+export { hostLocal } from '../../wire-protocol/channel/server/mux.js'

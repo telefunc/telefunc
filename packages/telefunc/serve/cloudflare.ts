@@ -39,7 +39,7 @@ import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routin
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/backend.js'
 import {
-  CloudflareRoomSessionManager,
+  getRoomSessionManager,
   type RoomSessionDeliveryRequest,
 } from '../wire-protocol/adapter/cloudflare/room/subscription.js'
 import { RoomAuthority } from '../wire-protocol/adapter/cloudflare/room/do.js'
@@ -140,9 +140,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       this.#authorityState = new CloudflareBroadcastAuthorityState(ctx)
       const id = ctx.id.toString()
       this.#session = {
-        room: new CloudflareRoomSessionManager(id),
         broadcast: broadcast.member(id, this.#broadcastCalls),
-        mux: new ChannelMux(),
+        mux: new ChannelMux({ hostId: id }),
       }
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
@@ -194,7 +193,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncRoomDeliver(request: RoomSessionDeliveryRequest) {
-      return this.#runInSession(() => this.#session.room.deliver(request))
+      return this.#runInSession(() => getRoomSessionManager().deliver(request))
     }
 
     #runInSession<T>(fn: () => T): T {
