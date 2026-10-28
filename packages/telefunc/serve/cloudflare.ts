@@ -138,6 +138,8 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     readonly #broadcastCalls: BroadcastCalls = new OrderedStubs()
     readonly #session: CloudflareSession
     readonly #roles = new Map<string, CloudflareExtensionRole>()
+    /** The role this Durable Object's storage is known to hold. */
+    #storedRole: string | undefined
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -201,7 +203,10 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const role = this.#role(name)
       const call = (role as Record<string, unknown>)[method]
       assertUsage(typeof call === 'function', `The Cloudflare extension ${name} has no role method ${method}()`)
-      if ((await this.ctx.storage.get(ROLE_STORAGE_KEY)) !== name) await this.ctx.storage.put(ROLE_STORAGE_KEY, name)
+      if (this.#storedRole !== name) {
+        if ((await this.ctx.storage.get(ROLE_STORAGE_KEY)) !== name) await this.ctx.storage.put(ROLE_STORAGE_KEY, name)
+        this.#storedRole = name
+      }
       return call.apply(role, args)
     }
 
@@ -215,6 +220,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     async alarm(): Promise<void> {
       const name = await this.ctx.storage.get<string>(ROLE_STORAGE_KEY)
       assert(name !== undefined)
+      this.#storedRole = name
       await this.#role(name).alarm?.()
     }
 
