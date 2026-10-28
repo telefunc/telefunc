@@ -106,6 +106,10 @@
       "types": "./dist/serve/cloudflare.d.ts",
       "default": "./dist/serve/cloudflare.js"
     },
+    "./__internal/cloudflare-extensions": {
+      "types": "./dist/serve/cloudflareExtensions.d.ts",
+      "default": "./dist/serve/cloudflareExtensions.js"
+    },
     "./__internal": {
       "browser": "./dist/client/__internal.js",
       "types": "./dist/node/server/__internal.d.ts",

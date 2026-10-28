@@ -40,6 +40,9 @@ import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/backend.js'
 import { getCloudflareExtension, type CloudflareExtensionRole } from '../wire-protocol/adapter/cloudflare/extensions.js'
 import '../wire-protocol/adapter/cloudflare/room/extension.js'
+// The installed extensions' server entries: Telefunc's Vite plugin fills this module in, found by its id. A bare
+// specifier, so that Vite's optimizer keeps it out of a pre-bundled telefunc.
+import 'telefunc/__internal/cloudflare-extensions'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
@@ -221,7 +224,10 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const built = this.#roles.get(name)
       if (built) return built
       const extension = getCloudflareExtension(name)
-      assertUsage(extension?.role, `The Cloudflare extension ${name} isn't registered`)
+      assertUsage(
+        extension?.role,
+        `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use Telefunc's Vite plugin?`,
+      )
       const role = extension.role(this.ctx as never, this.env as never, () => telefuncNamespace(this.env))
       this.#roles.set(name, role)
       return role
