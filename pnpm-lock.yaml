@@ -324,9 +324,31 @@ importers:
 
   packages/redis:
     devDependencies:
+      '@telefunc/room':
+        specifier: workspace:*
+        version: link:../room
       ioredis:
         specifier: 5.10.1
         version: 5.10.1
+      telefunc:
+        specifier: link:../telefunc
+        version: link:../telefunc
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+
+  packages/room:
+    dependencies:
+      '@brillout/json-serializer':
+        specifier: ^0.5.25
+        version: 0.5.25
+    devDependencies:
+      '@cloudflare/workers-types':
+        specifier: ^4.20260305.1
+        version: 4.20260615.1
+      '@types/node':
+        specifier: ^24.0.4
+        version: 24.0.10
       telefunc:
         specifier: link:../telefunc
         version: link:../telefunc
@@ -430,6 +452,9 @@ importers:
 
   test/@cloudflare_vite-plugin:
     dependencies:
+      '@telefunc/room':
+        specifier: workspace:*
+        version: link:../../packages/room
       '@vikejs/hono':
         specifier: ^0.2.0
         version: 0.2.0(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.10.4)(srvx@0.11.16)(vike@0.4.259(@cloudflare/workers-types@4.20260615.1)(@types/express@5.0.3)(hono@4.10.4)(react-streaming@0.4.17(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(srvx@0.11.16)(vite@8.0.16(@types/node@24.0.10)(esbuild@0.27.3)(jiti@2.7.0)))
@@ -530,6 +555,9 @@ importers:
       '@telefunc/redis':
         specifier: workspace:*
         version: link:../../packages/redis
+      '@telefunc/room':
+        specifier: workspace:*
+        version: link:../../packages/room
       '@telefunc/rxjs':
         specifier: workspace:*
         version: link:../../packages/rxjs

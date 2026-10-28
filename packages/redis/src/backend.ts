@@ -12,6 +12,10 @@ import type {
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
+  PublishResult,
+  OrderingInfo,
+} from 'telefunc/__internal'
+import type {
   CellsCx,
   CommitAccepted,
   CommitResult,
@@ -20,7 +24,6 @@ import type {
   HeadCxResult,
   HeadNext,
   LaneId,
-  PublishResult,
   RoomDriver,
   RoomHead,
   CellSelector,
@@ -30,9 +33,9 @@ import type {
   RetainedFrame,
   RetainedOf,
   DirectoryPage,
-  OrderingInfo,
-} from 'telefunc/__internal'
-import { DIRECTORY_PAGE_SIZE, decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
+} from '@telefunc/room/backend'
+import { decodeOrderingFrame } from 'telefunc/__internal'
+import { DIRECTORY_PAGE_SIZE, decodeLaneKey, encodeLaneKey } from '@telefunc/room/backend'
 import {
   directoryIndexKey,
   directoryTagsKey,

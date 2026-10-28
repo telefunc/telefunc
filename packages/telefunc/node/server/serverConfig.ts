@@ -15,7 +15,6 @@ export type {
   ChannelConfigUser,
   ChannelConfigResolved,
   BroadcastConfigUser,
-  RoomConfigUser,
 }
 
 import { assertUsage } from '../../utils/assert.js'
@@ -29,8 +28,6 @@ import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
 import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
 import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/transport.js'
-import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from '../../wire-protocol/room/server/constants.js'
-import { assertRoomTimeout } from '../../wire-protocol/room/model.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
@@ -67,23 +64,6 @@ type StreamConfigUser = {
 type BroadcastConfigUser = {
   /** Transport for cross-node `Broadcast` delivery. */
   transport?: BroadcastTransport
-}
-
-type RoomConfigUser = {
-  /**
-   * How long, in milliseconds, a room nobody joined stays once nothing holds it, before it closes. `Infinity` keeps it
-   * until `Room.close()`. A room's own `emptyTimeout` overrides it.
-   *
-   * @default 300000
-   */
-  emptyTimeout?: number
-  /**
-   * How long, in milliseconds, a room a member had joined stays once nothing holds it, before it closes. `Infinity`
-   * keeps it until `Room.close()`. A room's own `departureTimeout` overrides it.
-   *
-   * @default 20000
-   */
-  departureTimeout?: number
 }
 
 type ChannelConfigUser = {
@@ -220,8 +200,6 @@ type ConfigUser = {
   channel: ChannelConfigUser
   /** `Broadcast` configuration. */
   broadcast: BroadcastConfigUser
-  /** `Room` defaults. */
-  room: RoomConfigUser
   /** Registered server extensions. Use `config.extensions.push(ext)` to add. */
   extensions: TelefuncServerExtension[]
 }
@@ -240,12 +218,11 @@ type ConfigResolved = {
     transport: StreamTransport
   }
   channel: ChannelConfigResolved
-  room: Required<RoomConfigUser>
   extensions: TelefuncServerExtension[]
 }
 
 const globalObject = getGlobalObject('serverConfig.ts', {
-  config: { stream: {}, channel: {}, broadcast: {}, room: {}, extensions: [] } as ConfigUser,
+  config: { stream: {}, channel: {}, broadcast: {}, extensions: [] } as ConfigUser,
   /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
   adapterChannelTransports: new Set<ChannelTransports[number]>(),
   /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
@@ -312,18 +289,6 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         set(_t, subProp, val) {
           if (typeof subProp !== 'string') return true
           applyBroadcastConfig({ ...configState.broadcast, [subProp]: val })
-          return true
-        },
-      })
-    }
-    if (prop === 'room') {
-      return new Proxy({} as RoomConfigUser, {
-        get(_t, subProp) {
-          return configState.room[subProp as keyof RoomConfigUser]
-        },
-        set(_t, subProp, val) {
-          if (typeof subProp !== 'string') return true
-          applyRoomConfig({ ...configState.room, [subProp]: val })
           return true
         },
       })
@@ -395,10 +360,6 @@ function getServerConfig(): ConfigResolved {
       bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
-    },
-    room: {
-      emptyTimeout: configState.room.emptyTimeout ?? ROOM_EMPTY_TIMEOUT_MS,
-      departureTimeout: configState.room.departureTimeout ?? ROOM_DEPARTURE_TIMEOUT_MS,
     },
     extensions: configState.extensions,
   }
@@ -524,8 +485,6 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
     applyChannelConfig(val)
   } else if (prop === 'broadcast') {
     applyBroadcastConfig(val)
-  } else if (prop === 'room') {
-    applyRoomConfig(val)
   } else if (prop === 'extensions') {
     assertUsage(Array.isArray(val), 'config.extensions should be an array')
     configState.extensions = val as TelefuncServerExtension[]
@@ -611,18 +570,6 @@ function applyBroadcastConfig(val: unknown): void {
   }
   configState.broadcast = next
   if (next.transport) configureBroadcastTransport(next.transport)
-}
-
-function applyRoomConfig(val: unknown): void {
-  assertUsage(isObject(val), 'config.room should be an object')
-  const next: RoomConfigUser = {}
-  for (const [key, value] of Object.entries(val)) {
-    const configPath = `config.room.${key}`
-    assertUsage(key === 'emptyTimeout' || key === 'departureTimeout', `Unknown ${configPath}`)
-    assertRoomTimeout(value, configPath)
-    next[key] = value
-  }
-  configState.room = next
 }
 
 function validateStreamTransport(val: unknown, configPath: string): StreamTransport {

@@ -3,12 +3,11 @@ export type { RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
+import type { BroadcastPayload, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
 import {
   CELL_PAGE_SIZE,
   decodeLaneKey,
   encodeLaneKey,
-  type BroadcastPayload,
-  type BroadcastRoute,
   type CellCounter,
   type CellSelector,
   type CellsCx,
@@ -17,11 +16,10 @@ import {
   type HeadCxResult,
   type HeadNext,
   type LaneId,
-  type OrderingInfo,
   type RoomHead,
   type RoomSubscriptionSource,
   type CellsRead,
-} from 'telefunc/__internal'
+} from '@telefunc/room/backend'
 import { assert } from './assert.js'
 import {
   broadcastChannel,

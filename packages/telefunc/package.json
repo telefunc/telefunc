@@ -111,6 +111,7 @@
       "default": "./dist/serve/cloudflareExtensions.js"
     },
     "./__internal": {
+      "worker": "./dist/node/server/__internal.js",
       "browser": "./dist/client/__internal.js",
       "types": "./dist/node/server/__internal.d.ts",
       "default": "./dist/node/server/__internal.js"

@@ -3,7 +3,6 @@ export { MemoryBackend }
 // The in-process backend.
 
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
-import { nextOrderMark } from '../room/semantics.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/connectionFrame.js'
 import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
@@ -93,4 +92,9 @@ class MemoryBackend implements BroadcastDriver {
     else queueMicrotask(() => this._deliveries.deliver(() => sub.establish()))
     return sub
   }
+}
+
+/** `seq` strictly increases per key; `timestamp` is this process's time, clamped so it never goes back. */
+function nextOrderMark(previous: OrderingInfo | undefined, now: number): OrderingInfo {
+  return { seq: (previous?.seq ?? 0) + 1, timestamp: Math.max(now, previous?.timestamp ?? 0) }
 }

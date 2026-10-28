@@ -11,7 +11,8 @@ export {
   onMetaKeyOrder,
 }
 
-import { Broadcast, BroadcastChannel, Room } from 'telefunc'
+import { Broadcast, BroadcastChannel } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 async function onRoomRoundTrip() {
   const id = `telefunction-${crypto.randomUUID()}`

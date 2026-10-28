@@ -78,7 +78,8 @@ export {
 }
 
 import { Buffer } from 'node:buffer'
-import { Room, Abort, onBug, type LeaveCause, type LocalParticipant } from 'telefunc'
+import { Abort, onBug } from 'telefunc'
+import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import {

@@ -1,6 +1,6 @@
 export { onRoomToLoseFrom, onLoseLeave, onLoseMeta, onLoseClose }
 
-import { Room, type LocalParticipant } from 'telefunc'
+import { Room, type LocalParticipant } from '@telefunc/room'
 import { addBackendFault } from '../../failing-backend'
 
 // The server's members, kept until their room's test ends.

@@ -8,18 +8,8 @@ export type { HoldWeight, SendHold } from '../../wire-protocol/backend/Subscript
 export { heldSendWeight } from '../../wire-protocol/backend/heldSendWeight.js'
 export { assertDriverPosition } from '../../wire-protocol/backend/driverPosition.js'
 export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
-export {
-  decodeLaneKey,
-  encodeLaneKey,
-  everyMemberLaneKey,
-  everyTrackLaneKey,
-} from '../../wire-protocol/backend/room/laneKey.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
-export type * from '../../wire-protocol/backend/room/contract.js'
-export { CELL_PAGE_SIZE, DIRECTORY_PAGE_SIZE } from '../../wire-protocol/backend/room/contract.js'
-export { getRoomBackend } from '../../wire-protocol/backend/room/plane.js'
-export { MemoryRoomDriver } from '../../wire-protocol/backend/room/memory.js'
 export type * from '../../wire-protocol/backend/subscription.js'
 export type { BroadcastEndOwner, ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'
@@ -37,3 +27,16 @@ export type {
   TelefuncExtensionNamespace,
   TelefuncExtensionStub,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
+export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
+export {
+  MemoryDeliveries,
+  MemorySubscriptionAttempt,
+  copyBytes,
+  removeSubscription,
+  sumReceiverCounts,
+  type Subscriptions,
+} from '../../wire-protocol/backend/memory/deliveries.js'
+// The errors extension code shared with the browser rebuilds, from either half of telefunc/__internal.
+export { Abort } from './Abort.js'
+export { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
+export { ChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'

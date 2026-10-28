@@ -27,7 +27,8 @@ export type { CommitChannels }
 
 // Redis keys. Every per-room key shares `{rid}`, so a room is one Cluster slot.
 
-import { everyMemberLaneKey, everyTrackLaneKey, type BroadcastRoute, type LaneId } from 'telefunc/__internal'
+import type { BroadcastRoute } from 'telefunc/__internal'
+import { everyMemberLaneKey, everyTrackLaneKey, type LaneId } from '@telefunc/room/backend'
 
 /** A binary commit's lane, its member's every-track and its track's every-member channels;
  *  another commit's lane only. */

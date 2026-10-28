@@ -10,20 +10,22 @@ export type { BackendFault }
 
 import {
   installBackend,
-  getRoomBackend,
   createDeferred,
   DriverAttempt,
   MemoryBackend,
-  MemoryRoomDriver,
-  type CellsRead,
-  type RoomBackend,
   type BackendPayload,
   type BackendReceiver,
   type BroadcastRoute,
-  type RoomSubscriptionSource,
   type SubscriptionAttempt,
   type SubscriptionDriver,
 } from 'telefunc/__internal'
+import {
+  getRoomBackend,
+  MemoryRoomDriver,
+  type CellsRead,
+  type RoomBackend,
+  type RoomSubscriptionSource,
+} from '@telefunc/room/backend'
 
 /** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
  *  (the next matching subscription refuses to open) or 'deliver' (the next message a matching subscription gets is

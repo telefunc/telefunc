@@ -39,7 +39,6 @@ import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routin
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/backend.js'
 import { getCloudflareExtension, type CloudflareExtensionRole } from '../wire-protocol/adapter/cloudflare/extensions.js'
-import '../wire-protocol/adapter/cloudflare/room/extension.js'
 // The installed extensions' server entries: Telefunc's Vite plugin fills this module in, found by its id. A bare
 // specifier, so that Vite's optimizer keeps it out of a pre-bundled telefunc.
 import 'telefunc/__internal/cloudflare-extensions'
