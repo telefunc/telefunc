@@ -17,7 +17,7 @@ export {
 }
 
 import { assert } from '../../../utils/assert.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import { Slice } from '../Slice.js'
 import type { CellCount, CellCounter, CellMutation } from '../../backend/room/contract.js'
 import { isOpenIncarnation } from '../../backend/room/semantics.js'

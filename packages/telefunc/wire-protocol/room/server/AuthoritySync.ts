@@ -2,7 +2,7 @@ export { AuthoritySync }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_META_REPAIR_MS } from './constants.js'
 import type { RoomConfigRecord } from './protocol.js'
 import type { RoomModel } from '../state.js'

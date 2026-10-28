@@ -20,7 +20,7 @@ export {
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { raceTimeout } from '../../../utils/raceTimeout.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import type {
   CommitAccepted,
   CommitOptions,

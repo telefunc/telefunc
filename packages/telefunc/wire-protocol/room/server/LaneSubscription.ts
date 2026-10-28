@@ -2,7 +2,7 @@ export { LaneSubscription }
 
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { createDeferred, type Deferred } from '../../../utils/createDeferred.js'
-import type { BackendSubscription } from '../../backend/subscription.js'
+import type { BackendSubscription } from '../../../node/server/__internal.js'
 assertIsNotBrowser()
 
 function ignorePending(): void {}

@@ -7,7 +7,7 @@ export type { RoomIncarnation }
 import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import type { CellCount, CellCounter, RoomHead } from '../../backend/room/contract.js'
 import { decodeCellCounter, isOpenIncarnation } from '../../backend/room/semantics.js'
 import { TIMER_DELAY_MAX_MS } from '../../constants.js'

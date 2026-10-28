@@ -3,13 +3,16 @@ export { RoomSubscriptions }
 import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../../../utils/getOrCreate.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import type { RoomSubscriptionSource } from '../../backend/room/contract.js'
 import { encodeLaneKey } from '../../backend/room/laneKey.js'
-import { reportSubscriptionEnd } from '../../backend/SubscriptionManager.js'
-import type { BackendReceiver, BackendSubscription } from '../../backend/subscription.js'
 import { reportServerChannelError } from '../../channel/server/channel.js'
-import type { WirePublishInfo } from '../../../node/server/__internal.js'
+import {
+  reportSubscriptionEnd,
+  type BackendReceiver,
+  type BackendSubscription,
+  type WirePublishInfo,
+} from '../../../node/server/__internal.js'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from './constants.js'
 import { ALL, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
 import type { DemandReport } from './demand.js'

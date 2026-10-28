@@ -4,7 +4,7 @@ export type { PresenceEvent }
 import { parse } from '@brillout/json-serializer/parse'
 import { assert } from '../../../utils/assert.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import type { LaneId } from '../../backend/room/contract.js'
 import {
   encodePublishBinary,

@@ -3,7 +3,7 @@ export type { RoomGuardHooks, RoomStatic }
 
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { isObject } from '../../../utils/isObject.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import type { RoomBackend } from '../../backend/room/contract.js'
 import { RoomError, isRoomError, participantGoneError, roomClosedError } from '../errors.js'
 import {

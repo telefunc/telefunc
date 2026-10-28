@@ -4,7 +4,7 @@ export {
   getBroadcastBackend,
   followBroadcastPlane,
   unfollowBroadcastPlane,
-  getRoomBackend,
+  backendPlane,
   disposeBackend,
 }
 
@@ -13,19 +13,22 @@ import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { MemoryBackend } from './memory/backend.js'
-import type { RoomBackend, RoomDriver } from './room/contract.js'
-import { superviseRoomDriver } from './room/supervise.js'
 import { assertUsage } from '../../utils/assert.js'
+import { getOrCreate } from '../../utils/getOrCreate.js'
 
-/** A backend: one driver for both planes. */
-type BackendDriver = BroadcastDriver & RoomDriver
+/** A backend: Broadcast's driver, and the driver of each other plane it serves. */
+type BackendDriver = BroadcastDriver & {
+  /** The planes this backend serves, by extension key; each is built on its first `backendPlane()` call. */
+  readonly planes?: { readonly [key: symbol]: () => unknown }
+}
 
 type Installed = {
   readonly driver: BackendDriver
   readonly key: readonly unknown[]
   /** The memory backend a process falls back to when it installed none. */
   readonly fallback: boolean
-  readonly room: RoomBackend
+  /** The planes built so far, by extension key. */
+  readonly planes: Map<symbol, unknown>
   /** Built on first Broadcast use; `null` while a transport override owns the plane. */
   broadcast: BroadcastBackend | null
 }
@@ -51,12 +54,12 @@ function installBackend<Driver extends BackendDriver>(factory: () => Driver, key
   if (sameKey(installed.key, key)) return installed.driver as Driver
   assertUsage(
     !installed.fallback,
-    'Install the backend (for example with installRedis()) before the first Broadcast or Room use: an earlier use already started the in-memory backend',
+    'Install the backend (for example with installRedis()) before its first use: an earlier use already started the in-memory backend',
   )
   assertUsage(false, 'Install one backend per process: a different backend is already installed')
 }
 
-/** Installs the public broadcast-only override without displacing the full backend's Room plane. */
+/** Installs the public broadcast-only override without displacing the full backend's other planes. */
 function configureBroadcastTransport(transport: BroadcastTransport): void {
   const previous = state.broadcastOverride
   if (previous?.transport === transport) return
@@ -88,12 +91,20 @@ function getBroadcastBackend(): BroadcastBackend {
   return (installed.broadcast ??= superviseBroadcastDriver(installed.driver))
 }
 
-function getRoomBackend(): RoomBackend {
+/** The driver of the plane `key` on the installed backend, built once per installed backend; `fallback` builds the
+ *  in-memory one when the process installed none. */
+function backendPlane<Plane>(key: symbol, fallback: () => Plane): Plane {
   assertUsage(
     !(state.broadcastOverride && (state.installed?.fallback ?? true)),
-    'config.broadcast.transport configures Broadcast only. Room requires a full backend; install the Redis backend or use the Cloudflare adapter.',
+    'config.broadcast.transport configures Broadcast only, and this call needs a full backend: install the Redis backend or use the Cloudflare adapter.',
   )
-  return currentBackend().room
+  const installed = currentBackend()
+  return getOrCreate(installed.planes, key, () => {
+    if (installed.fallback) return fallback()
+    const build = installed.driver.planes?.[key]
+    assertUsage(build, `The installed backend doesn't serve ${String(key)}, which this call needs`)
+    return build()
+  }) as Plane
 }
 
 /** For tests: forgets the backend, the transport override and the plane's followers, and stops their subscriptions. */
@@ -103,7 +114,7 @@ async function disposeBackend(): Promise<void> {
   state.installed = null
   delete state.broadcastOverride
   state.planeFollowers.clear()
-  await Promise.all([overridePlane?.dispose(), installed?.broadcast?.dispose(), installed?.room.dispose()])
+  await Promise.all([overridePlane?.dispose(), installed?.broadcast?.dispose()])
 }
 
 function install(factory: () => BackendDriver, key: readonly unknown[], fallback: boolean): Installed {
@@ -112,7 +123,7 @@ function install(factory: () => BackendDriver, key: readonly unknown[], fallback
     driver,
     key,
     fallback,
-    room: superviseRoomDriver(driver),
+    planes: new Map(),
     broadcast: null,
   }
   state.installed = installed

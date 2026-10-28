@@ -1,7 +1,7 @@
 export { closeIncarnation, takeOverClose, cleanupFinalizedIncarnation }
 
 import { assert } from '../../../utils/assert.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from './constants.js'
 import { commitControl, configFromHead } from './lanes.js'

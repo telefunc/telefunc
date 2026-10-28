@@ -7,6 +7,7 @@ import {
   createDeferred,
   DriverAttempt,
   MemoryBackend,
+  MemoryRoomDriver,
   type CellsRead,
   type RoomBackend,
   type BackendPayload,
@@ -14,6 +15,7 @@ import {
   type BroadcastRoute,
   type RoomSubscriptionSource,
   type SubscriptionAttempt,
+  type SubscriptionDriver,
 } from 'telefunc/__internal'
 
 /** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
@@ -64,7 +66,15 @@ class FailingAttempt extends DriverAttempt {
 
 /** Installs the in-memory backend, failing what a test asks it to fail. */
 function installFailingBackend() {
-  const memory = new MemoryBackend()
+  const room = failing(new MemoryRoomDriver())
+  const backend = failing(
+    Object.assign(new MemoryBackend(), { planes: { [Symbol.for('telefunc.room.plane')]: () => room } }),
+  )
+  installBackend(() => backend, ['failing-backend'])
+}
+
+/** `memory`, failing what a test asks it to fail. */
+function failing<Driver extends { subscriptions: SubscriptionDriver<Source> }>(memory: Driver): Driver {
   const subscriptions = {
     bind(source: Source) {
       const call = callOf(source)
@@ -85,7 +95,7 @@ function installFailingBackend() {
     },
     partitionHere: (source: Source) => memory.subscriptions.partitionHere(source),
   }
-  const driver = new Proxy(memory, {
+  return new Proxy(memory, {
     get(target, op) {
       if (op === 'subscriptions') return subscriptions
       const value = Reflect.get(target, op)
@@ -101,7 +111,6 @@ function installFailingBackend() {
       }
     },
   })
-  installBackend(() => driver, ['failing-backend'])
 }
 
 function addBackendFault(fault: BackendFault) {

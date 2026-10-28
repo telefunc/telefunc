@@ -17,7 +17,7 @@ export {
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
 import { getOrCreate } from '../../../utils/getOrCreate.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import { CELL_PAGE_SIZE, type CellMutation, type CellsRead, type CxResult } from '../../backend/room/contract.js'
 import { decodeCellCounter } from '../../backend/room/semantics.js'
 import { Slice } from '../Slice.js'

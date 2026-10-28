@@ -58,6 +58,8 @@ type RedisBackendOptions = {
 
 class RedisBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: RedisSubscriptionDriver
+  /** Room's plane is this driver, on the subscriber socket Broadcast uses. */
+  readonly planes: { readonly [key: symbol]: () => RoomDriver } = { [Symbol.for('telefunc.room.plane')]: () => this }
 
   private readonly _publisher: RedisClient
   private readonly _prefix: string

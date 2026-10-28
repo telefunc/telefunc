@@ -2,7 +2,7 @@ export { GossipOutbox }
 
 import { Fifo } from '../../../utils/Fifo.js'
 import { assertIsNotBrowser } from '../../../utils/assertIsNotBrowser.js'
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import { ROOM_DEMAND_PAGE_ENTRIES, ROOM_GOSSIP_IN_FLIGHT_MAX } from './constants.js'
 import type { RoomDemandPage } from './protocol.js'
 import { reportRoomError } from './errors.js'

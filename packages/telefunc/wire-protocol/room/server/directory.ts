@@ -3,7 +3,7 @@ export { listRoom, repairRoomIndex, sweepLapsedRoomsSoon }
 // Each listed room is due once its head may have lapsed: a sweep then drops what a lapsed incarnation left, as
 // `Room.list()` does, so no lapsed room's data waits for a list call.
 
-import { getRoomBackend } from '../../backend/install.js'
+import { getRoomBackend } from '../../backend/room/plane.js'
 import type { RoomBackend, RoomHead } from '../../backend/room/contract.js'
 import { Slice } from '../Slice.js'
 import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SESSION_TTL_MS } from './constants.js'
