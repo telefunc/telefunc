@@ -147,7 +147,7 @@ type MemberMetaUpdate =
   | { seq: number; connected: boolean }
 type WholeMemberUpdate = Extract<MemberMetaUpdate, { meta: ParticipantMeta }>
 
-/** A safe Room failure, tagged as `classifyTelefuncError` names it: an Abort's value, or a caller-facing message. */
+/** A safe Room failure: an Abort's value, or a caller-facing message tagged with the error it rejects as. */
 type RoomFailure =
   | { ok: false; kind: 'abort'; abortValue: unknown }
   | { ok: false; kind: 'shield' | 'overflow' | 'error'; message: string }
