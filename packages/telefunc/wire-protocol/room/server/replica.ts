@@ -321,7 +321,9 @@ class RoomReplica {
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue
       const stored = await backend.readRetained(this.id, this._incarnation.inc, lane)
-      if (stored === null || !this.model.hasMember(lane.member)) continue
+      // An unsubscribe during the read leaves nothing to deliver to, and no receipt to keep.
+      if (stored === null || !holder._wantsBinary(lane.member, lane.track)) continue
+      if (!this.model.hasMember(lane.member)) continue
       const framed = stored.payload
       const frame = decodeBinaryFrame(framed)
       assert(frame)
