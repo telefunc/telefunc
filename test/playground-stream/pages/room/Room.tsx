@@ -1913,6 +1913,9 @@ function Room() {
 
         const capped = await onGetRoomTail(roomId)
         await Promise.all(Array.from({ length: 300 }, (_, n) => me.publish(`n${n}`)))
+        // A publish resolves once stored; the server hands it to every view here, `capped`'s tail too, by the time
+        // `tailed` gets it.
+        await pollUntil(() => ({ done: received.includes('n299') }))
         const kept: string[] = []
         capped.subscribe((data) => kept.push(data as string))
         await pollUntil(() => ({ done: kept.includes('n299') }))
