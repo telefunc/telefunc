@@ -70,7 +70,9 @@ function pluginDev(): Plugin[] {
 //   ```
 function fixOptimizeDeps(optimizeDeps: { exclude?: string[] }) {
   const deps = ['@brillout/json-serializer', '@brillout/import', '@brillout/vite-plugin-server-entry']
-  optimizeDeps.exclude = optimizeDeps.exclude?.filter((entry) => !deps.some((dep) => entry.startsWith(dep)))
+  optimizeDeps.exclude = optimizeDeps.exclude?.filter(
+    (entry) => !deps.some((dep) => entry === dep || entry.startsWith(dep + '/')),
+  )
 }
 
 async function determineFsAllowList(config: ResolvedConfig) {
