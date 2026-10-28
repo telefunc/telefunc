@@ -549,9 +549,9 @@ function Room() {
           const room = await onGetRoom(roomId)
           const member = await room.getParticipant(memberId)
           reads.push(which(room.meta), which(member?.meta ?? {}))
-          setResult(JSON.stringify({ reads }))
         }
         await onStopReplacingMeta(roomId)
+        setResult(JSON.stringify({ reads }))
       })}
 
       {scenario('meta-across-write', null, "Read a member's big meta across a write", async () => {

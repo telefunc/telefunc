@@ -616,26 +616,35 @@ async function onConcurrentMetaWrites(roomId: string) {
 /** A meta of 1,500 keys, `a0`… or `b0`…: more than one page of cells. */
 const bigMeta = (prefix: string) => Object.fromEntries(Array.from({ length: 1500 }, (_, i) => [`${prefix}${i}`, i]))
 
-const replacing = new Map<string, ReturnType<typeof setInterval>>()
+const replacing = new Map<string, { timer: ReturnType<typeof setInterval>; writes: Promise<unknown>[] }>()
 
 /** Sets a member's and the room's meta to the `a` meta, then replaces both with the `b` and `a` metas in turn every
- *  10 ms, each replace overlapping the ones before it, until `onStopReplacingMeta()`. */
+ *  10 ms, each replace overlapping the ones before it, until `onStopReplacingMeta()`. A store slower than that, as
+ *  Redis is, gets the next pair only while at most one pair is in flight, so what it queues stays bounded. */
 async function onReplaceMetaInLoop(roomId: string) {
   const me = await Room.join(roomId, { meta: { name: 'Big', ...bigMeta('a') } })
   await Room.setMeta(roomId, bigMeta('a'))
   let round = 0
+  let inFlight = 0
+  const writes: Promise<unknown>[] = []
   const timer = setInterval(() => {
+    if (inFlight > 2) return
     const prefix = round++ % 2 === 0 ? 'b' : 'a'
-    void me.setMeta({ name: 'Big', ...bigMeta(prefix) })
-    void Room.setMeta(roomId, bigMeta(prefix))
+    for (const write of [me.setMeta({ name: 'Big', ...bigMeta(prefix) }), Room.setMeta(roomId, bigMeta(prefix))]) {
+      inFlight++
+      writes.push(write.finally(() => inFlight--))
+    }
   }, 10)
-  replacing.set(roomId, timer)
+  replacing.set(roomId, { timer, writes })
   return me.id
 }
 
+/** Resolves once the replaces in flight are done, so the next test's writes don't queue behind them. */
 async function onStopReplacingMeta(roomId: string) {
-  clearInterval(replacing.get(roomId))
+  const { timer, writes } = replacing.get(roomId)!
+  clearInterval(timer)
   replacing.delete(roomId)
+  await Promise.allSettled(writes)
 }
 
 /** A member's `a` meta, set as its write `gen` (a replace from 9 or 99 writes keys one digit longer), read by the room's
