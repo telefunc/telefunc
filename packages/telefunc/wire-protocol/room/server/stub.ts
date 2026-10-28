@@ -225,6 +225,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (kind === 'binary' || on === this._wantsText) return
     const before = on ? { all: this._wantsText, members: new Map<string, boolean>() } : null
     this._wantsText = on
+    if (!on) this._replay.forgetUnwantedText((member) => this._wantsTextFrom(member))
     // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
     if (on) this._flushTail()
     this._room._onHolderTextChanged(this, before)
@@ -299,6 +300,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
       members.set(id, !wanted)
       toggle(this._textMemberWants, id, wanted)
     }
+    this._replay.forgetUnwantedText((member) => this._wantsTextFrom(member))
     this._announce = announce
     this._flushTail()
     this._room._onHolderTextChanged(this, { all: this._wantsText, members })

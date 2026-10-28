@@ -103,6 +103,11 @@ class ReplayGate {
     return true
   }
 
+  /** A sender no text want covers any more starts afresh: a later subscription gets its retained message again. */
+  forgetUnwantedText(wanted: (member: string) => boolean): void {
+    for (const key of this._high.keys()) if (key !== ANNOUNCE_KEY && !wanted(key)) this._high.delete(key)
+  }
+
   /** A lane no want covers any more starts afresh: a later subscription to it gets its retained frame again. */
   forgetUnwantedBinary(wanted: (member: string, track: string) => boolean): void {
     for (const [member, high] of this._binaryHigh) {
@@ -246,6 +251,7 @@ class LocalHolder implements LaneHolder {
     }
     const change = text.all !== this._textAll || before.size > 0 ? { all: this._textAll, members: before } : null
     this._textAll = text.all
+    if (change !== null) this._replay.forgetUnwantedText((member) => this._wantsTextFrom(member))
     return change
   }
 
