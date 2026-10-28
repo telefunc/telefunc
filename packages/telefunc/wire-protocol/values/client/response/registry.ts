@@ -11,7 +11,7 @@ import { promiseReviver } from './promise.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
-import type { ClientReviverContext, InternalClientReviverContext, ReviverType, TypeContract } from '../../types.js'
+import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { assert } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 
@@ -35,9 +35,9 @@ const clientTypes = [
  *  value — the first occurrence revives (side effects run once), duplicates resolve to the
  *  already-revived object, and server-side `===` holds on the client too. */
 function createStreamingReviver(
-  context: InternalClientReviverContext,
+  context: ClientReviverContext,
   handOut: (revived: ReturnType<ReviverType['revive']>) => unknown,
-  roomTypes: ReviverType<TypeContract, InternalClientReviverContext>[],
+  roomTypes: ReviverType<TypeContract, ClientReviverContext>[],
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
   const allTypes = [...clientTypes, ...roomTypes, ...extensionTypes]

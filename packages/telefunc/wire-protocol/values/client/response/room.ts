@@ -1,6 +1,6 @@
 export { roomRemoteReviver, roomTypes }
 
-import type { InternalClientReviverContext, ReviverType, TypeContract } from '../../types.js'
+import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { ClientRoom, ClientStandaloneParticipant } from '../../../room/client/room.js'
 import type { LocalParticipant, RemoteParticipant } from '../../../room/types.js'
 import type {
@@ -20,7 +20,7 @@ type RoomReviverContract = TypeContract<never, ClientRoom, RoomSnapshotMetadata>
 type RoomParticipantReviverContract = TypeContract<never, LocalParticipant, ParticipantStubMetadata>
 type RoomRemoteReviverContract = TypeContract<never, RemoteParticipant, RemoteParticipantMetadata>
 
-const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext> = {
+const roomReviver: ReviverType<RoomReviverContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   revive(metadata, context) {
     const end = context.createBroadcastChannel({
@@ -40,7 +40,7 @@ const roomReviver: ReviverType<RoomReviverContract, InternalClientReviverContext
   },
 }
 
-const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, InternalClientReviverContext> = {
+const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   revive(metadata, context) {
     const end = context.createBroadcastChannel({
@@ -62,7 +62,7 @@ const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, Intern
 
 /** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m`, and sharing its
  *  lifecycle. */
-const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, InternalClientReviverContext> = {
+const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   revive(metadata, context) {
     assert(metadata.room instanceof ClientRoom)

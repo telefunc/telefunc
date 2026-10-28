@@ -16,7 +16,7 @@ import {
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   SERIALIZER_PREFIX_ROOM_REMOTE,
 } from '../../../constants.js'
-import type { InternalServerReplacerContext, ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
+import type { ServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
 import type { AbortError } from '../../../../shared/Abort.js'
 import { assertUsage } from '../../../../utils/assert.js'
 import { isObjectOrFunction } from '../../../../utils/isObjectOrFunction.js'
@@ -26,8 +26,8 @@ assertIsNotBrowser()
 /** Room's own replacer once Room's server code is loaded; until then no value is a room's. */
 function roomServerReplacer(
   prefix: string,
-  own: (server: RoomServer) => ReplacerType<TypeContract, InternalServerReplacerContext>,
-): ReplacerType<TypeContract, InternalServerReplacerContext> {
+  own: (server: RoomServer) => ReplacerType<TypeContract, ServerReplacerContext>,
+): ReplacerType<TypeContract, ServerReplacerContext> {
   return {
     prefix,
     detect(value): value is unknown {
@@ -68,7 +68,7 @@ const serverTypes = [
  *  re-emit the first occurrence's replacement verbatim (wire format unchanged), and the client's
  *  mirror cache (createStreamingReviver) revives equal wire strings to one object. */
 function createStreamingReplacer(
-  getContext: (value: unknown) => InternalServerReplacerContext,
+  getContext: (value: unknown) => ServerReplacerContext,
   onReplaced: (replaced: { close: () => Promise<void> | void; abort: (abortError: AbortError) => void }) => void,
   extensionTypes: ReplacerType<TypeContract, ServerReplacerContext>[],
 ) {

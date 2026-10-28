@@ -7,11 +7,9 @@ export type {
   StreamingProducer,
   // ===== Contexts =====
   ClientReviverContext,
-  InternalClientReviverContext,
   ServerReviverContext,
   ClientReplacerContext,
   ServerReplacerContext,
-  InternalServerReplacerContext,
   StreamSource,
   StreamReadOptions,
   // ===== Supporting =====
@@ -156,10 +154,6 @@ type ClientReviverContext = {
     maxFrameBytes?: number
   }): ClientBroadcast<T>
   receiveStream(metadata: StreamingMetadata): StreamSource
-}
-
-/** The built-in revivers' context, which extensions don't get. */
-type InternalClientReviverContext = ClientReviverContext & {
   /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
   shareLifecycle(child: object, owner: object): void
 }
@@ -197,10 +191,6 @@ type ServerReplacerContext = {
    *  Replacers pick the names relevant to their data flow. Each returns `true` on success or an error
    *  string — call sites decide the action (throw, drop, ...). */
   validators: ShieldValidators
-}
-
-/** The built-in replacers' context, which extensions don't get. */
-type InternalServerReplacerContext = ServerReplacerContext & {
   /** One store per response, shared by every replacer in it; `init` runs on the first call for `key`. */
   responseState<T>(key: symbol, init: () => T): T
 }

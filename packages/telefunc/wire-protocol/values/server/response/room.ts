@@ -1,6 +1,6 @@
 export { roomReplacer, roomParticipantReplacer, roomRemoteReplacer }
 
-import type { InternalServerReplacerContext, ReplacerType, TypeContract } from '../../types.js'
+import type { ReplacerType, ServerReplacerContext, TypeContract } from '../../types.js'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
@@ -27,12 +27,12 @@ type RoomRemoteReplacerContract = TypeContract<RemoteParticipant, never, RemoteP
 const ROOM_GRANTS = Symbol.for('telefunc.RoomResponseGrants')
 
 /** Keyed by room id: `Room.join(id)` and `Room.get(id)` build separate instances of one room. */
-function responseRoomGrants(context: InternalServerReplacerContext, roomId: string): ResponseRoomGrants {
+function responseRoomGrants(context: ServerReplacerContext, roomId: string): ResponseRoomGrants {
   const byRoom = context.responseState(ROOM_GRANTS, () => new Map<string, ResponseRoomGrants>())
   return getOrCreate(byRoom, roomId, () => new ResponseRoomGrants())
 }
 
-const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerContext> = {
+const roomReplacer: ReplacerType<RoomReplacerContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM,
   detect(value): value is RoomReplacerContract['value'] {
     return ServerRoom.isServerRoom(value)
@@ -60,7 +60,7 @@ const roomReplacer: ReplacerType<RoomReplacerContract, InternalServerReplacerCon
 
 /** Rides its room's stub, so it has no lifecycle of its own; the recursive serializer replaces or dedupes the room it
  *  names. */
-const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServerReplacerContext> = {
+const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   detect(value): value is RoomRemoteReplacerContract['value'] {
     // A brand, not instanceof: a dev server can load two module graphs.
@@ -89,7 +89,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, InternalServe
   },
 }
 
-const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, InternalServerReplacerContext> = {
+const roomParticipantReplacer: ReplacerType<RoomParticipantReplacerContract, ServerReplacerContext> = {
   prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
   detect(value): value is RoomParticipantReplacerContract['value'] {
     return ServerLocalParticipant.isServerLocalParticipant(value)
