@@ -1,6 +1,6 @@
 export { pluginBuildEntry }
 
-import { serverEntryVirtualId, serverProductionEntryPlugin } from '@brillout/vite-plugin-server-entry/plugin'
+import { serverProductionEntryPlugin } from '@brillout/vite-plugin-server-entry/plugin'
 import type { Plugin } from 'vite'
 import { projectInfo } from '../../../utils/projectInfo.js'
 import { VIRTUAL_FILE_ENTRY_ID } from './pluginVirtualFileEntry/VIRTUAL_FILE_ENTRY_ID.js'
@@ -24,7 +24,8 @@ function pluginBuildEntry(): Plugin[] {
         filter: { id: /^\0virtual:cloudflare\/worker-entry$/ },
         handler(code, id) {
           const { magicString, getMagicStringResult } = getMagicString(code, id)
-          magicString.prepend(`import '${serverEntryVirtualId}';\n`)
+          // Only Telefunc's part: other parts of the server entry (e.g. Vike's) load the main Worker's app
+          magicString.prepend(getServerProductionEntryCode())
           return getMagicStringResult()
         },
       },
