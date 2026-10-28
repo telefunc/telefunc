@@ -18,10 +18,13 @@ A telefunction returns the room, and the client joins it:
 // Lobby.telefunc.ts
 // Environment: server
 
-import { Room } from '@telefunc/room'
+import { Room, type RoomMeta } from '@telefunc/room'
+
+type MemberMeta = { name: string }
+type Message = { text: string }
 
 export async function onGetLobby() {
-  return await Room.getOrCreate('lobby')
+  return await Room.getOrCreate<RoomMeta, MemberMeta, Message>('lobby')
 }
 ```
 
