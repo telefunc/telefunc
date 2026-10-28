@@ -103,7 +103,6 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
       // Mirror reviveResponse: the value handed out (and cached) is the GC wrapper.
       return wrapProxy(revived.value as object)
     },
-    [],
     extensionTypes,
   )
   const parseBody = (body: string) => parse(body, { reviver })
@@ -465,6 +464,7 @@ async function roundTrip(
         abortController,
         requestCloseHandlers: [],
         extensionResponseTypes: opts.clientExtensions ?? [],
+        extensionLazyResponseTypes: [],
       },
       { transports: ['sse'], telefuncUrl: 'http://localhost/_telefunc' },
     )) as { ret: unknown }

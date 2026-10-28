@@ -4,7 +4,7 @@ export { getStreamTransport }
 
 import { assertUsage, assertWarning } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
-import type { TelefuncClientExtension } from './extensions.js'
+import type { LazyResponseTypes, TelefuncClientExtension } from './extensions.js'
 import type {
   ReplacerType,
   ReviverType,
@@ -61,6 +61,7 @@ type ConfigResolved = {
   stream?: StreamConfigUser
   channel: { transports: ChannelTransports }
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
+  extensionLazyResponseTypes: LazyResponseTypes[]
   extensionRequestTypes: ReplacerType<TypeContract, ClientReplacerContext>[]
 }
 
@@ -128,6 +129,7 @@ function resolveClientConfig(): ConfigResolved {
     stream: configState.stream.transport ? { ...configState.stream } : undefined,
     channel: { transports: configState.channel.transports ?? [...DEFAULT_CLIENT_CHANNEL_TRANSPORTS] },
     extensionResponseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
+    extensionLazyResponseTypes: configState.extensions.flatMap((ext) => ext.lazyResponseTypes ?? []),
     extensionRequestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }
 }

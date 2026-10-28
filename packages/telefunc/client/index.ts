@@ -1,4 +1,5 @@
 import { config } from './clientConfig.js'
+import '../wire-protocol/values/client/response/roomExtension.js'
 export { config }
 // TO-DO/next-major: remove this redundant export
 export { config as telefuncConfig }

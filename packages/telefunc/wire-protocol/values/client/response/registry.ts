@@ -37,10 +37,9 @@ const clientTypes = [
 function createStreamingReviver(
   context: ClientReviverContext,
   handOut: (revived: ReturnType<ReviverType['revive']>) => unknown,
-  roomTypes: ReviverType<TypeContract, ClientReviverContext>[],
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
-  const allTypes = [...clientTypes, ...roomTypes, ...extensionTypes]
+  const allTypes = [...clientTypes, ...extensionTypes]
   const revivedByWireString = new Map<string, unknown>()
   const reviver: Reviver = (_path, value, parser) => {
     if (revivedByWireString.has(value)) return { replacement: revivedByWireString.get(value) }
