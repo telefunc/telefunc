@@ -366,6 +366,8 @@ class RoomSubscriptions {
         if (this._gone.size > 0) {
           await slice.next()
           await this._replanEach(slice, drain(this._gone), (holder) => this._indexHolder(holder, { gone: true }))
+          // Each slice synced the room-wide lanes before its holders' wants were dropped.
+          this.syncLanes()
         } else if (!isEmpty(plan)) {
           await this._planRound(slice, plan)
         } else if (this._demand.changed) {

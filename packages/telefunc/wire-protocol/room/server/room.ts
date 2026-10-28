@@ -265,7 +265,7 @@ class ServerRoom extends RoomStateView implements Room {
 
   /** @internal What the lane carried for this handle's own listeners, or for its tail while no stub took it. */
   _relayData(serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void {
-    this._local.relayText(event, info)
+    this._local.relayText(event, info, serialized)
     if (this._stubs.size === 0) this._tail?.push({ serialized, ord: info, from: event.from })
   }
 
@@ -392,6 +392,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._stubs.delete(stub)
     this._replica.detachStub(stub)
     stub._endTail()
+    stub._endReplayHolds()
     this._replica.track(this)
     this._replica.plan.holderGone(stub)
     for (const id of stub._heldMembers()) {

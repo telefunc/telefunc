@@ -33,7 +33,7 @@ import {
   isRoomRequest,
   type RoomDeclaration,
 } from './requests.js'
-import { ANNOUNCE_KEY, ReplayGate, type LaneHolder } from './replay.js'
+import { ANNOUNCE_KEY, ReplayGate, heldTextWeight, heldWeight, type LaneHolder, type ReplayHold } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
 import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
@@ -225,6 +225,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (kind === 'binary' || on === this._wantsText) return
     const before = on ? { all: this._wantsText, members: new Map<string, boolean>() } : null
     this._wantsText = on
+    if (!on) this._replay.forgetUnwantedText((member) => this._wantsTextFrom(member))
     // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
     if (on) this._flushTail()
     this._room._onHolderTextChanged(this, before)
@@ -288,6 +289,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (on && member !== ALL && !this._room._model.hasMember(member)) return
     if (!applyBinaryWantChange(this._binary, change)) return
     if (track !== ALL) this._trackWants += on ? 1 : -1
+    if (!on) this._replay.forgetUnwantedBinary((member, track) => this._wantsBinary(member, track))
     this._room._onHolderBinaryChanged(this, change)
   }
 
@@ -298,6 +300,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
       members.set(id, !wanted)
       toggle(this._textMemberWants, id, wanted)
     }
+    this._replay.forgetUnwantedText((member) => this._wantsTextFrom(member))
     this._announce = announce
     this._flushTail()
     this._room._onHolderTextChanged(this, { all: this._wantsText, members })
@@ -413,12 +416,29 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (this._tail !== null) {
       this._tail.push({ serialized, ord, from })
     } else if (this._wantsTextFrom(from)) {
+      const replay = this._replay
+      if (replay.holding) {
+        const relay = () => this._relayText(serialized, texts, from, ord)
+        if (replay.held(from, null, heldTextWeight(serialized), relay)) return
+      }
       this._relayTextLive(from, this._namesSender(from) ? texts.unstamped() : texts.stamped(), ord)
     }
   }
 
   _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
-    if (this._wantsBinary(from, track) && this._replay.admitBinary(from, track, info)) this._end.deliverBinary(wireData)
+    if (!this._wantsBinary(from, track)) return
+    const replay = this._replay
+    if (
+      replay.holding &&
+      replay.held(from, track, heldWeight(wireData), () => this._relayBinary(wireData, from, track, info))
+    ) {
+      return
+    }
+    if (replay.admitBinary(from, track, info)) this._end.deliverBinary(wireData)
+  }
+
+  _hold(change: BinaryWantChange | null): ReplayHold {
+    return this._replay.hold(change)
   }
 
   _relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
@@ -437,12 +457,12 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     )
   }
 
-  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void {
-    if (this._replay.admit(event.from, info)) this._end.deliver(encodePublishText(serialized, info))
+  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string, hold: ReplayHold): void {
+    if (this._replay.admitRetained(hold, event.from, null, info)) this._end.deliver(encodePublishText(serialized, info))
   }
 
-  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array): void {
-    if (this._replay.admitBinary(frame.from, frame.track, info)) {
+  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array, hold: ReplayHold): void {
+    if (this._replay.admitRetained(hold, frame.from, frame.track, info)) {
       this._end.deliverBinary(encodePublishBinary(framed, info))
     }
   }
@@ -488,6 +508,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   _endTail(): void {
     this._tail?.end()
     this._tail = null
+  }
+
+  _endReplayHolds(): void {
+    this._replay.dropHolds()
   }
 }
 

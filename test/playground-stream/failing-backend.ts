@@ -1,4 +1,11 @@
-export { installFailingBackend, addBackendFault, pendingBackendFaults, endBackendSubscriptions, holdCellPages }
+export {
+  installFailingBackend,
+  addBackendFault,
+  pendingBackendFaults,
+  endBackendSubscriptions,
+  holdCellPages,
+  holdRetainedReads,
+}
 export type { BackendFault }
 
 import {
@@ -25,19 +32,24 @@ type BackendFault = { op: string; roomId?: string; key?: string; times?: number 
 type Source = BroadcastRoute | RoomSubscriptionSource
 type Call = { roomId?: string; keys: string[] }
 type CellPagesHold = { roomId: string; key: string; pages: number; wait: () => Promise<void> }
+type RetainedReadsHold = { roomId: string; waiting: number; released: Promise<void> }
 
-const { faults, attempts, holds, holding } = ((globalThis as Record<symbol, unknown>)[
+const { faults, attempts, holds, holding, retainedHolds, holdingRetained } = ((globalThis as Record<symbol, unknown>)[
   Symbol.for('playground-stream:failingBackend')
 ] ??= {
   faults: [],
   attempts: new Set(),
   holds: [],
   holding: new WeakSet(),
+  retainedHolds: [],
+  holdingRetained: new WeakSet(),
 }) as {
   faults: (BackendFault & { times: number })[]
   attempts: Set<FailingAttempt>
   holds: CellPagesHold[]
   holding: WeakSet<RoomBackend>
+  retainedHolds: RetainedReadsHold[]
+  holdingRetained: WeakSet<RoomBackend>
 }
 
 class FailingAttempt extends DriverAttempt {
@@ -137,6 +149,34 @@ function holdCellPages(roomId: string, key: string, pages: number): { reached: P
     backend.readCellPages = (roomId, inc, prefix) => heldCellPages(read(roomId, inc, prefix), takeHold(roomId, prefix))
   }
   return { reached: reached.promise, release: released.resolve }
+}
+
+/** Holds every read of `roomId`'s retained binary frames until `release()`; `held()` counts the reads waiting. Works on
+ *  any installed backend, Redis included. */
+function holdRetainedReads(roomId: string): { held: () => number; release: () => void } {
+  const released = createDeferred()
+  const hold: RetainedReadsHold = { roomId, waiting: 0, released: released.promise }
+  retainedHolds.push(hold)
+  const backend = getRoomBackend()
+  if (!holdingRetained.has(backend)) {
+    holdingRetained.add(backend)
+    const read = backend.readRetained
+    backend.readRetained = async (roomId, inc, lane) => {
+      const hold = lane.kind === 'binary' ? retainedHolds.find((hold) => hold.roomId === roomId) : undefined
+      if (hold !== undefined) {
+        hold.waiting++
+        await hold.released
+      }
+      return read(roomId, inc, lane)
+    }
+  }
+  return {
+    held: () => hold.waiting,
+    release: () => {
+      retainedHolds.splice(retainedHolds.indexOf(hold), 1)
+      released.resolve()
+    },
+  }
 }
 
 function takeHold(roomId: string, prefix: string): CellPagesHold | undefined {
