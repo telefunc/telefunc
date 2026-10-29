@@ -797,6 +797,8 @@ function Room() {
           const [roomId, room] = await createRoom('own-meta-race')
           const me = await room.join({ meta: { name: 'Mine', round: -1 } })
           const other = await onGetRoom(roomId)
+          // A GC pass would close `other`, and `remote` would stop taking its meta updates.
+          const releaseOther = keepReachable(other)
           const remote = await getParticipantWhenJoined(other, me.id)
           await Promise.all(
             Array.from({ length: 20 }, (_, i) =>
@@ -807,6 +809,7 @@ function Room() {
             const state = { mine: Object.entries(me.meta), remote: Object.entries(remote.meta) }
             return { result: state, done: JSON.stringify(state.mine) === JSON.stringify(state.remote) }
           })
+          releaseOther()
         },
       )}
 
