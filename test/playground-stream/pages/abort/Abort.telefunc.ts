@@ -9,12 +9,13 @@ import { sleep } from '../../sleep'
 // immediately, not after waiting 1s for the next token.
 async function* onSlowAIGenerator(): AsyncGenerator<string> {
   try {
+    const startedAt = performance.now()
     cleanupState.slowAI = 'running'
-    cleanupState.slowAIClosedAt = ''
+    cleanupState.slowAIClosedAfterMs = ''
     const context = getContext()
     context.onClose(() => {
       cleanupState.slowAI = 'cleaned-up'
-      cleanupState.slowAIClosedAt = String(Date.now())
+      cleanupState.slowAIClosedAfterMs = String(performance.now() - startedAt)
     })
     yield 'token-0'
     for (let i = 1; i < 1000; i++) {
@@ -29,13 +30,14 @@ async function* onSlowAIGenerator(): AsyncGenerator<string> {
 // Simulates a slow ReadableStream: each chunk takes 1 second.
 // Client cancels after first chunk — onClose should fire quickly.
 const onSlowStreamForAbort = async (): Promise<ReadableStream<Uint8Array>> => {
+  const startedAt = performance.now()
   cleanupState.slowStream = 'running'
-  cleanupState.slowStreamClosedAt = ''
+  cleanupState.slowStreamClosedAfterMs = ''
   cleanupState.slowStreamCancelled = ''
   const context = getContext()
   context.onClose(() => {
     cleanupState.slowStream = 'cleaned-up'
-    cleanupState.slowStreamClosedAt = String(Date.now())
+    cleanupState.slowStreamClosedAfterMs = String(performance.now() - startedAt)
   })
   const encoder = new TextEncoder()
   let i = 0

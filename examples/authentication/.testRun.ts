@@ -1,4 +1,4 @@
-import { page, test, expect, run, getServerUrl, autoRetry, isLinux, sleep } from '@brillout/test-e2e'
+import { page, test, expect, run, getServerUrl, autoRetry, isLinux } from '@brillout/test-e2e'
 
 export { testRun }
 
@@ -38,12 +38,11 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run prod') {
       expect(await page.$('button >> text=Logout')).toBeTruthy()
       await page.waitForSelector('button:not([disabled]) >> text=Logout')
       await Promise.all([
-        // It is important to call waitForNavigation before click to set up waiting.
-        page.waitForNavigation(),
+        // Not `waitForNavigation()`: it resolves on Vike's `history.replaceState()` as the old page hides.
+        page.waitForEvent('load'),
         // Does a page reload
         page.click('button >> text=Logout'),
       ])
-      await sleep(3 * 1000) // Blind attempt to remove test flakiness
       expect(await page.$('button >> text=Logout')).toBeFalsy()
       expect(await page.$('button >> text=Create Account')).toBeTruthy()
       expect(await page.$('fieldset')).toBeTruthy()
@@ -62,8 +61,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run prod') {
       expect(await page.$('button:not([disabled]) >> text=Login as Seb')).toBeTruthy()
 
       await Promise.all([
-        // It is important to call waitForNavigation before click to set up waiting.
-        page.waitForNavigation(),
+        // Not `waitForNavigation()`: it resolves on Vike's `history.replaceState()` as the old page hides.
+        page.waitForEvent('load'),
         // Does a page reload
         page.click('button >> text=Login as Seb'),
       ])
