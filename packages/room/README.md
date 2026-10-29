@@ -8,7 +8,7 @@ Rooms for Telefunc: members, presence, meta, messages and media tracks, on one s
 npm install @telefunc/room
 ```
 
-That's it — the Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/room` in your dependencies and registers it automatically. Without a Telefunc bundler plugin, register it manually: `import '@telefunc/room/client'` in your client entry. The server needs no extra import: importing `Room` from `@telefunc/room` registers it.
+That's it — the Telefunc bundler plugin (Vite, webpack, Next.js, Babel) detects `@telefunc/room` in your dependencies and registers it automatically. Without a Telefunc bundler plugin, register it manually: `import '@telefunc/room/client'` in your client entry. The server needs no extra import: importing `Room` from `@telefunc/room` registers it. On Cloudflare, use Telefunc's Vite plugin.
 
 ## Usage
 
