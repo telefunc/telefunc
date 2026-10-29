@@ -1,6 +1,7 @@
-export { nodeReadableToWebRequest }
+export { nodeReadableToWebRequest, normalizeHeaders }
 
-import type { Readable } from 'node:stream'
+import type { EventEmitter } from 'node:events'
+import type { Readable, Writable } from 'node:stream'
 import { loadStreamNodeModule } from './loadStreamNodeModule.js'
 import { assertIsNotBrowser } from './assertIsNotBrowser.js'
 assertIsNotBrowser()
@@ -12,9 +13,12 @@ async function nodeReadableToWebRequest(
   url: string,
   method: string,
   headers: HeadersInput,
-): Promise<Request> {
+  response?: Writable,
+): Promise<{ request: Request; unwatch: () => void }> {
   const { Readable: ReadableClass } = await loadStreamNodeModule()
-  const body = ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>
+  // `new Request()` refuses a body for these methods.
+  const hasBody = !['GET', 'HEAD'].includes(method.toUpperCase())
+  const body = hasBody ? (ReadableClass.toWeb(readable) as ReadableStream<Uint8Array>) : null
 
   const headerPairs = normalizeHeaders(headers)
 
@@ -27,7 +31,7 @@ async function nodeReadableToWebRequest(
   readable.on('close', () => {
     if (readable.readableAborted && !abortController.signal.aborted) abortController.abort()
   })
-  return new Request(url, {
+  const request = new Request(url, {
     method,
     headers: headerPairs,
     body,
@@ -35,6 +39,19 @@ async function nodeReadableToWebRequest(
     // @ts-expect-error duplex required for streaming request bodies
     duplex: 'half',
   })
+  // A disconnect after the body was read shows on the response, else on `req.socket`, which HTTP/1 keep-alive reuses.
+  let unwatch = () => {}
+  const socket = (readable as { socket?: EventEmitter | null }).socket
+  if (response) {
+    response.once('close', () => {
+      if (!response.writableEnded) abortController.abort()
+    })
+  } else if (socket) {
+    const abort = () => abortController.abort()
+    socket.once('close', abort)
+    unwatch = () => socket.off('close', abort)
+  }
+  return { request, unwatch }
 }
 
 function normalizeHeaders(headers: HeadersInput): [string, string][] {

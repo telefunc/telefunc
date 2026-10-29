@@ -1,3 +1,47 @@
+# [0.3.0](https://github.com/telefunc/telefunc/compare/v0.2.24...v0.3.0) (2026-10-23)
+
+
+### Bug Fixes
+
+* abort context.signal when the client disconnects from a Node adapter ([#478](https://github.com/telefunc/telefunc/issues/478)) ([f841b24](https://github.com/telefunc/telefunc/commit/f841b244b7731dbd4e39d6cad586bdadd3f3897b)), closes [#473](https://github.com/telefunc/telefunc/issues/473)
+* accept channel messages up to 64 MiB over WebSocket on Bun ([#490](https://github.com/telefunc/telefunc/issues/490)) ([d577356](https://github.com/telefunc/telefunc/commit/d5773561079327bc10cb6cddf667a411da90c852))
+* nested File/Blob in a telefunction result arrive as File/Blob, not Promise ([#474](https://github.com/telefunc/telefunc/issues/474)) ([686fb3e](https://github.com/telefunc/telefunc/commit/686fb3e21f4ee9c1c626265d4b9d2dbcb41a486f)), closes [#472](https://github.com/telefunc/telefunc/issues/472)
+* reject telefunction calls that lack the `x-telefunc-request` header ([#502](https://github.com/telefunc/telefunc/issues/502)) ([297db13](https://github.com/telefunc/telefunc/commit/297db134cef1a1fc8f742c7a23f24f636bf4a4c2))
+* release idle inline generators on cancellation ([#465](https://github.com/telefunc/telefunc/issues/465)) ([c088d24](https://github.com/telefunc/telefunc/commit/c088d24fbdd316a3a230697a75629aa69350f5fe))
+* stop error responses from accumulating `Content-Type` headers ([#501](https://github.com/telefunc/telefunc/issues/501)) ([9bbc8bb](https://github.com/telefunc/telefunc/commit/9bbc8bb0acdffd4d6514c48e90c78f106c1eb5a0))
+
+
+### BREAKING CHANGES
+
+* Telefunc now rejects any telefunction call that lacks the `x-telefunc-request` header, answering `400 Malformed Telefunc Request`. This protects telefunctions against cross-site request forgery ([#500](https://github.com/telefunc/telefunc/issues/500)).  
+  **Migration.** The Telefunc client always sends this header, so most apps need no change. To migrate, apply each rule that matches your code:
+  - If you call `serve({ url, method, body })`, pass the request headers as well: `serve({ url, method, body, headers: req.headers })`. Without them, `serve()` throws "`serve({ headers })`: argument `headers` is missing.". `serve({ request })` and `serve({ url, method, readable, headers })` need no change.
+  - If you call telefunctions without the Telefunc client (a custom `fetch()`, curl, an end-to-end test), add the header `x-telefunc-request: txt` to the POST request.
+  - If a proxy or middleware in front of your server forwards only some request headers, make it forward `x-telefunc-request` too.
+
+
+
+## [0.2.24](https://github.com/telefunc/telefunc/compare/v0.2.23...v0.2.24) (2026-08-21)
+
+
+### Bug Fixes
+
+* @brillout/vite-plugin-server-entry@^0.7.20 ([16ccec6](https://github.com/telefunc/telefunc/commit/16ccec609e3ddf1797afd171d92e7119d91d6e02))
+* show usage error for re-exports in .telefunc files ([#462](https://github.com/telefunc/telefunc/issues/462)) ([#463](https://github.com/telefunc/telefunc/issues/463)) ([9407f08](https://github.com/telefunc/telefunc/commit/9407f08152835aafbd9a6765ff66700542824a74))
+
+
+
+## [0.2.23](https://github.com/telefunc/telefunc/compare/v0.2.22...v0.2.23) (2026-08-09)
+
+
+### Bug Fixes
+
+* reference-identity-preserving serialization ([#444](https://github.com/telefunc/telefunc/issues/444)) ([6f496b7](https://github.com/telefunc/telefunc/commit/6f496b72e4fb145399f1dc8c09b98c052ef390c5))
+* resolve extension types after telefunc loading ([#457](https://github.com/telefunc/telefunc/issues/457)) ([2e70d5b](https://github.com/telefunc/telefunc/commit/2e70d5be671243b5afaeae8b02c71c9f538f29a8))
+* support client Vite environment names other than `client` ([#459](https://github.com/telefunc/telefunc/issues/459)) ([18544d3](https://github.com/telefunc/telefunc/commit/18544d39cc6871edac72ebd6c91bc74d8652f894))
+
+
+
 ## [0.2.22](https://github.com/telefunc/telefunc/compare/v0.2.21...v0.2.22) (2026-07-08)
 
 

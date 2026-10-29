@@ -1,6 +1,6 @@
 export { Abort }
 
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import {
   onSlowAIGenerator,
   onSlowStreamForAbort,
@@ -13,6 +13,26 @@ import { Abort as TelefuncAbort, abort, withContext } from 'telefunc/client'
 function Abort() {
   const [hydrated, setHydrated] = useState(false)
   const [result, setResult] = useState<string>('')
+  // The e2e tests abort these calls with the buttons below, once the server has them.
+  const calls = useRef<Record<string, Promise<unknown>>>({})
+  const startAbortable = (name: string, call: Promise<unknown>) => {
+    calls.current[name] = call
+    call.then(
+      (res) => setResult(JSON.stringify({ result: res, error: null })),
+      (e: any) => setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort })),
+    )
+  }
+  const abortButton = (name: string, label: string) => (
+    <button
+      id={`test-${name}-abort`}
+      onClick={() => {
+        const call = calls.current[name]
+        if (call) abort(call)
+      }}
+    >
+      {label}
+    </button>
+  )
   useEffect(() => setHydrated(true), [])
 
   return (
@@ -169,66 +189,50 @@ function Abort() {
 
       <button
         id="test-slow-normal-telefunc"
-        onClick={async () => {
+        onClick={() => {
           setResult('')
-          const promise = onSlowNormalTelefunc()
-          setTimeout(() => abort(promise), 1500)
-          try {
-            const res = await promise
-            setResult(JSON.stringify({ result: res, error: null }))
-          } catch (e: any) {
-            setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort }))
-          }
+          startAbortable('slow-normal', onSlowNormalTelefunc())
         }}
       >
         Slow normal telefunc
       </button>
 
+      {abortButton('slow-normal', 'Abort slow normal telefunc')}
+
       <h2>Upload abort tests</h2>
 
       <button
         id="test-upload-abort-single"
-        onClick={async () => {
+        onClick={() => {
           setResult('')
           // 1MB file — fits in localhost TCP buffer, but the server-side sleep(100)
           // between reads stretches consumption to ~1.6s, giving abortion time to land
           const content = 'x'.repeat(1_000_000)
           const file = new File([content], 'abort-test.txt', { type: 'text/plain' })
-          const promise = onUploadAbortSingle(file)
-          setTimeout(() => abort(promise), 300)
-          try {
-            const res = await promise
-            setResult(JSON.stringify({ result: res, error: null }))
-          } catch (e: any) {
-            setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort }))
-          }
+          startAbortable('upload-abort-single', onUploadAbortSingle(file))
         }}
       >
         Upload abort (single file)
       </button>
 
+      {abortButton('upload-abort-single', 'Abort upload (single file)')}
+
       <button
         id="test-upload-abort-multiple"
-        onClick={async () => {
+        onClick={() => {
           setResult('')
           // 50MB per file — exceeds localhost TCP buffer (~4-16MB)
           const content = 'y'.repeat(50_000_000)
           const file1 = new File([content], 'file1.txt', { type: 'text/plain' })
           const file2 = new File([content], 'file2.txt', { type: 'text/plain' })
           const file3 = new File([content], 'file3.txt', { type: 'text/plain' })
-          const promise = onUploadAbortMultiple(file1, file2, file3)
-          // Abort after 3s — server reads file1 then sleeps 5s, abort fires during sleep
-          setTimeout(() => abort(promise), 3000)
-          try {
-            const res = await promise
-            setResult(JSON.stringify({ result: res, error: null }))
-          } catch (e: any) {
-            setResult(JSON.stringify({ error: e.message, isAbort: e instanceof TelefuncAbort }))
-          }
+          startAbortable('upload-abort-multiple', onUploadAbortMultiple(file1, file2, file3))
         }}
       >
         Upload abort (multiple files)
       </button>
+
+      {abortButton('upload-abort-multiple', 'Abort upload (multiple files)')}
     </div>
   )
 }

@@ -4,21 +4,27 @@ import { getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
-// Simulates a slow AI upstream: each "token" takes 1 second.
+/** Past what an abort takes to reach the server on a loaded machine; a generator's finally runs once it ends. */
+const TOKEN_MS = 3_000
+
+// Simulates a slow AI upstream: each "token" takes 3 seconds.
 // Client disconnects after first token — onClose should fire
-// immediately, not after waiting 1s for the next token.
+// while the generator waits for the next token, not once it comes.
 async function* onSlowAIGenerator(): AsyncGenerator<string> {
+  let waiting = false
   try {
     cleanupState.slowAI = 'running'
-    cleanupState.slowAIClosedAt = ''
+    cleanupState.slowAIClosedWaiting = ''
     const context = getContext()
     context.onClose(() => {
       cleanupState.slowAI = 'cleaned-up'
-      cleanupState.slowAIClosedAt = String(Date.now())
+      cleanupState.slowAIClosedWaiting = String(waiting)
     })
     yield 'token-0'
     for (let i = 1; i < 1000; i++) {
-      await sleep(1_000)
+      waiting = true
+      await sleep(TOKEN_MS)
+      waiting = false
       yield `token-${i}`
     }
   } finally {
@@ -26,23 +32,28 @@ async function* onSlowAIGenerator(): AsyncGenerator<string> {
   }
 }
 
-// Simulates a slow ReadableStream: each chunk takes 1 second.
-// Client cancels after first chunk — onClose should fire quickly.
+// Simulates a slow ReadableStream: each chunk takes 3 seconds.
+// Client cancels after first chunk — onClose should fire while the stream waits for the next chunk.
 const onSlowStreamForAbort = async (): Promise<ReadableStream<Uint8Array>> => {
+  let waiting = false
   cleanupState.slowStream = 'running'
-  cleanupState.slowStreamClosedAt = ''
+  cleanupState.slowStreamClosedWaiting = ''
   cleanupState.slowStreamCancelled = ''
   const context = getContext()
   context.onClose(() => {
     cleanupState.slowStream = 'cleaned-up'
-    cleanupState.slowStreamClosedAt = String(Date.now())
+    cleanupState.slowStreamClosedWaiting = String(waiting)
   })
   const encoder = new TextEncoder()
   let i = 0
   return new ReadableStream<Uint8Array>({
     async pull(controller) {
       if (i >= 1000) return controller.close()
-      if (i > 0) await sleep(1_000)
+      if (i > 0) {
+        waiting = true
+        await sleep(TOKEN_MS)
+        waiting = false
+      }
       controller.enqueue(encoder.encode(`chunk-${i}`))
       i++
     },
@@ -78,7 +89,7 @@ async function onSlowNormalTelefunc(): Promise<{ stepsCompleted: number }> {
 
 // Single file upload — read slowly so client has time to abort mid-upload.
 // The sleep(100) between reads stretches consumption to ~1.6s for ~16 chunks,
-// giving the client's 300ms abort time to arrive mid-read.
+// giving the client's abort time to arrive mid-read.
 async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; error: string | null }> {
   cleanupState.uploadAbortSingle = 'running'
   cleanupState.uploadAbortSingleError = ''
@@ -106,7 +117,6 @@ async function onUploadAbortSingle(file: File): Promise<{ bytesRead: number; err
 
 // Multiple file upload — read each file fully, sleep between files.
 // Client aborts during the sleep after file1. File2+file3 should error.
-// On localhost 50MB is consumed in well under 3s, so file1 completes fully.
 // The 5s sleep after file1 is where the abort lands. File2/file3 may have
 // leftover bytes in StreamReader's buffer from chunk boundaries.
 async function onUploadAbortMultiple(
@@ -133,6 +143,7 @@ async function onUploadAbortMultiple(
         if (done) break
         bytesRead += value.byteLength
       }
+      cleanupState.uploadAbortMultiFilesRead = String(results.length + 1)
       await sleep(5000)
       results.push({ name: file.name, bytesRead, error: null })
     } catch (e: any) {

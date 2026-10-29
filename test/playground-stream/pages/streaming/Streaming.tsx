@@ -22,6 +22,13 @@ import {
   onAbortOneOfManyStreamingValues,
   onChannelAbortAbortsSiblingStreamingValues,
   onUploadWithProgress,
+  onReturnTwoLargeStreams,
+  onReturnTwoStreamsOfSmallChunks,
+  onReturnOneLargeChunk,
+  onReturnFinishedAndEndlessStreams,
+  onReturnFailingStream,
+  onGeneratorFinallyThrows,
+  onReturnAsyncGenerator as onNextCall,
 } from './Streaming.telefunc'
 import { Abort as TelefuncAbort, abort } from 'telefunc/client'
 
@@ -32,6 +39,8 @@ function Streaming() {
     reader: ReadableStreamDefaultReader<Uint8Array>
     promiseDone: Promise<unknown>
   } | null>(null)
+  // The page keeps what a call returned, as an app holding its result does.
+  const returnedRef = useRef<unknown>(null)
   useEffect(() => setHydrated(true), [])
 
   return (
@@ -687,6 +696,119 @@ function Streaming() {
       >
         Upload with progress
       </button>
+      <h2>Streams read one after the other, cancelled, or failing</h2>
+
+      <button
+        id="test-two-large-streams-in-turn"
+        onClick={async () => {
+          setResult('')
+          const { first, second } = await onReturnTwoLargeStreams()
+          const firstBytes = await byteCount(first)
+          const secondBytes = await byteCount(second)
+          setResult(JSON.stringify({ firstBytes, secondBytes }))
+        }}
+      >
+        Two large streams, read in turn
+      </button>
+
+      <button
+        id="test-two-streams-to-worker"
+        onClick={async () => {
+          setResult('')
+          const worker = new Worker(new URL('./sumWorker.ts', import.meta.url), { type: 'module' })
+          try {
+            const { first, second } = await onReturnTwoStreamsOfSmallChunks()
+            await Promise.all([transferToWorker(worker, 'first', first), transferToWorker(worker, 'second', second)])
+            const sums = await new Promise((resolve) => {
+              worker.onmessage = (event) => resolve(event.data)
+              worker.postMessage('sums')
+            })
+            setResult(JSON.stringify({ sums }))
+          } catch (err: any) {
+            setResult(JSON.stringify({ error: err.message }))
+          } finally {
+            worker.terminate()
+          }
+        }}
+      >
+        Two streams, each chunk transferred to a Web Worker
+      </button>
+
+      <button
+        id="test-one-large-returned-chunk"
+        onClick={async () => {
+          setResult('')
+          const start = performance.now()
+          const bytes = await byteCount(await onReturnOneLargeChunk())
+          setResult(JSON.stringify({ bytes, ms: Math.round(performance.now() - start) }))
+        }}
+      >
+        One 256 MiB chunk
+      </button>
+
+      {(['finish-first', 'cancel-first'] as const).map((order) => (
+        <button
+          key={order}
+          id={`test-finished-and-cancelled-streams-${order}`}
+          onClick={async () => {
+            setResult('')
+            const returned = await onReturnFinishedAndEndlessStreams()
+            returnedRef.current = returned
+            const { key, finished, endless } = returned
+            if (order === 'finish-first') {
+              await byteCount(finished)
+              await endless.cancel()
+            } else {
+              await endless.cancel()
+              await byteCount(finished)
+            }
+            setResult(JSON.stringify({ key }))
+          }}
+        >
+          One stream finished, the other cancelled ({order})
+        </button>
+      ))}
+
+      <button
+        id="test-cancel-failed-streams"
+        onClick={async () => {
+          setResult('')
+          const errors: string[] = []
+          for (const chunksBeforeFailure of [0, 1]) {
+            try {
+              await byteCount(await onReturnFailingStream(chunksBeforeFailure))
+              errors.push('none')
+            } catch (err: any) {
+              errors.push(err?.name ?? 'unknown')
+            }
+          }
+          for await (const _ of onGeneratorFinallyThrows()) break
+          const nextCall: number[] = []
+          for await (const n of onNextCall()) nextCall.push(n)
+          setResult(JSON.stringify({ errors, nextCall }))
+        }}
+      >
+        Cancel failed streams, then call again
+      </button>
     </div>
   )
+}
+
+async function transferToWorker(worker: Worker, name: string, stream: ReadableStream<Uint8Array>) {
+  const reader = stream.getReader()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) return
+    worker.postMessage({ name, chunk: value }, [value.buffer])
+  }
+}
+
+async function byteCount(stream: ReadableStream<Uint8Array>): Promise<number> {
+  let bytes = 0
+  const reader = stream.getReader()
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) return bytes
+    bytes += value.byteLength
+  }
 }

@@ -1,12 +1,12 @@
-export { serve, telefunc }
+export { serve, serveNode, telefunc }
 
 import { runTelefunc, HttpResponse } from './runTelefunc.js'
 import { Telefunc } from './context/getContext.js'
 import { assertUsage, assertWarning } from '../../utils/assert.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
-import { nodeReadableToWebRequest } from '../../utils/nodeReadableToWebRequest.js'
-import type { Readable } from 'node:stream'
+import { nodeReadableToWebRequest, normalizeHeaders } from '../../utils/nodeReadableToWebRequest.js'
+import type { Readable, Writable } from 'node:stream'
 
 type HttpRequestResolved = {
   request: Request
@@ -26,6 +26,8 @@ type HttpRequest =
       method: string
       /** The body of HTTP Request. */
       body: string
+      /** The HTTP request headers */
+      headers: Record<string, string | string[] | undefined> | [string, string][]
       /** The context object, see https://telefunc.com/getContext  */
       context?: Telefunc.Context
     }
@@ -54,6 +56,21 @@ type HttpRequest =
 async function serve(httpRequest: HttpRequest): Promise<HttpResponse> {
   assertHttpRequest(httpRequest, arguments.length)
   const httpRequestResolved = await resolveHttpRequest(httpRequest)
+  try {
+    return await runTelefunc(httpRequestResolved)
+  } finally {
+    // Past this, `httpResponse.pipe(res)` ends a streaming response's body once the client is gone.
+    httpRequestResolved.unwatch?.()
+  }
+}
+
+/** `serve()` for adapters holding the Node.js `res`, so that a client disconnect aborts `request.signal`. */
+async function serveNode(
+  httpRequest: Extract<HttpRequest, { readable: Readable }>,
+  response: Writable,
+): Promise<HttpResponse> {
+  assertHttpRequest(httpRequest, 1)
+  const httpRequestResolved = await resolveHttpRequest(httpRequest, response)
   const httpResponse = await runTelefunc(httpRequestResolved)
   return httpResponse
 }
@@ -67,24 +84,28 @@ async function telefunc(httpRequest: HttpRequest): Promise<HttpResponse> {
   return serve(httpRequest)
 }
 
-async function resolveHttpRequest(httpRequest: HttpRequest): Promise<HttpRequestResolved> {
+async function resolveHttpRequest(
+  httpRequest: HttpRequest,
+  response?: Writable,
+): Promise<HttpRequestResolved & { unwatch?: () => void }> {
   if ('request' in httpRequest) {
     return { request: httpRequest.request, context: httpRequest.context }
   }
   if ('readable' in httpRequest) {
-    const request = await nodeReadableToWebRequest(
+    const { request, unwatch } = await nodeReadableToWebRequest(
       httpRequest.readable,
       'http://localhost' + httpRequest.url,
       httpRequest.method,
       httpRequest.headers,
+      response,
     )
-    return { request, readable: httpRequest.readable, context: httpRequest.context }
+    return { request, readable: httpRequest.readable, context: httpRequest.context, unwatch }
   }
   // Backward compat: construct a Request from primitives
   const request = new Request('http://localhost' + httpRequest.url, {
     method: httpRequest.method,
     body: httpRequest.body,
-    headers: { 'content-type': 'text/plain' },
+    headers: normalizeHeaders(httpRequest.headers),
   })
   return { request, context: httpRequest.context }
 }
@@ -112,6 +133,7 @@ function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {
     assertUsage(hasProp(httpRequest, 'method'), '`serve({ method })`: argument `method` is missing.')
     assertUsage(hasProp(httpRequest, 'method', 'string'), '`serve({ method })`: argument `method` should be a string.')
     assertUsage(hasProp(httpRequest, 'body'), '`serve({ body })`: argument `body` is missing.')
+    assertUsage(hasProp(httpRequest, 'headers'), '`serve({ headers })`: argument `headers` is missing.')
     assertUsage(
       hasProp(httpRequest, 'body', 'string'),
       '`serve({ body })`: argument `body` should be a string. Make sure `body` is the HTTP body string of the request. Note that with some server frameworks, such as Express.js, a server middleware is needed to parse the HTTP body of `Content-Type: text/plain` requests.',
@@ -125,7 +147,7 @@ function assertHttpRequest(httpRequest: unknown, numberOfArguments: number) {
     ? ['request', 'context']
     : hasReadable
       ? ['url', 'method', 'readable', 'headers', 'context']
-      : ['url', 'method', 'body', 'context']
+      : ['url', 'method', 'body', 'headers', 'context']
   Object.keys(httpRequest).forEach((key) => {
     assertUsage(allowedKeys.includes(key), '`serve({ ' + key + ' })`: Unknown argument `' + key + '`.')
   })

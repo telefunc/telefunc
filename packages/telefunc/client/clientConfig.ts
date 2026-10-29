@@ -11,7 +11,7 @@ import type {
   TypeContract,
   ClientReplacerContext,
   ClientReviverContext,
-} from '../wire-protocol/types.js'
+} from '../wire-protocol/values/types.js'
 import {
   DEFAULT_CLIENT_CHANNEL_TRANSPORTS,
   DEFAULT_STREAM_TRANSPORT,

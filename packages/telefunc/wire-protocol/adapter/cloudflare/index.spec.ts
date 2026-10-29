@@ -1,0 +1,326 @@
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
+import { OrderedStubs } from './OrderedStubs.js'
+
+const mocks = vi.hoisted(() => {
+  const crosswsAdapter = {
+    handleDurableInit: vi.fn(),
+    handleDurableUpgrade: vi.fn(),
+    handleDurableMessage: vi.fn(),
+    handleDurableClose: vi.fn(),
+  }
+
+  class MockCloudflareBroadcastAuthorityState {
+    readonly state: DurableObjectState
+
+    constructor(state: DurableObjectState) {
+      this.state = state
+      mocks.authorityInstances.push(this)
+    }
+  }
+
+  class MockCloudflareBroadcast {
+    readonly options: unknown
+    readonly publishToSubscribers = vi.fn()
+    readonly members: Array<{ id: string; locate: Mock; deliver: Mock }> = []
+    readonly member = vi.fn((id: string) => {
+      const member = { id, locate: vi.fn(), deliver: vi.fn() }
+      this.members.push(member)
+      return member
+    })
+    constructor(options: unknown) {
+      this.options = options
+      mocks.transportInstances.push(this)
+    }
+  }
+
+  return {
+    crosswsAdapter,
+    crosswsFactory: vi.fn(() => crosswsAdapter),
+    enableChannelTransports: vi.fn(),
+    setAdapterMaxFrameBytes: vi.fn(),
+    getServerConfig: vi.fn(() => ({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })),
+    telefuncMock: vi.fn(async () => ({
+      statusCode: 200,
+      headers: [['content-type', 'application/json']] as HeadersInit,
+      getReadableWebStream() {
+        return new ReadableStream()
+      },
+    })),
+    transportInstances: [] as MockCloudflareBroadcast[],
+    authorityInstances: [] as MockCloudflareBroadcastAuthorityState[],
+    MockCloudflareBroadcastAuthorityState,
+    MockCloudflareBroadcast,
+  }
+})
+
+vi.mock('cloudflare:workers', () => ({
+  DurableObject: class {
+    protected readonly ctx: DurableObjectState
+    protected readonly env: Cloudflare.Env
+
+    constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+      this.ctx = ctx
+      this.env = env
+    }
+  },
+}))
+
+vi.mock('crossws/adapters/cloudflare', () => ({
+  default: mocks.crosswsFactory,
+}))
+
+vi.mock('../../channel/server/ws.js', () => ({
+  getTelefuncChannelHooks: vi.fn(() => ({})),
+}))
+
+vi.mock('../../../node/server/serverConfig.js', () => ({
+  getServerConfig: mocks.getServerConfig,
+  enableChannelTransports: mocks.enableChannelTransports,
+  setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
+}))
+
+vi.mock('../../../node/server/telefunc.js', () => ({
+  serve: mocks.telefuncMock,
+}))
+
+vi.mock('./broadcast.js', () => ({
+  CloudflareBroadcastAuthorityState: mocks.MockCloudflareBroadcastAuthorityState,
+  CloudflareBroadcast: mocks.MockCloudflareBroadcast,
+}))
+
+vi.mock('./routing.js', async (importOriginal) => ({
+  readForwardedTarget: (await importOriginal<typeof import('./routing.js')>()).readForwardedTarget,
+  TELEFUNC_BROADCAST_BUCKET_HEADER: 'x-telefunc-broadcast-bucket',
+  TELEFUNC_SESSION_HEADER: 'x-telefunc-session',
+  TELEFUNC_SHARD_HEADER: 'x-telefunc-shard',
+  assertLocationFallbackIsScaled: vi.fn(),
+  resolveSessionRoutingTarget: vi.fn(
+    (baseInstanceName: string, scale: unknown, request: Request, locationFallback: string) => {
+      void scale
+      void request
+      void locationFallback
+      return {
+        sessionInstanceName: `${baseInstanceName}-shard-weur-0`,
+        locationBucket: 'weur',
+        shardOrdinal: 0,
+      }
+    },
+  ),
+}))
+
+import { Telefunc } from '../../../serve/cloudflare.js'
+import { resolveSessionRoutingTarget } from './routing.js'
+import { disposeBackend } from '../../backend/install.js'
+import type { BroadcastDeliverRequest, BroadcastPublishRequest } from './broadcast.js'
+
+function createMockKV(): KVNamespace {
+  const store = new Map<string, { value: string; expirationTtl?: number }>()
+  return {
+    async get(key: string, type?: string) {
+      const entry = store.get(key)
+      if (!entry) return null
+      return type === 'json' ? JSON.parse(entry.value) : entry.value
+    },
+    async put(key: string, value: string, options?: { expirationTtl?: number }) {
+      store.set(key, { value, expirationTtl: options?.expirationTtl })
+    },
+    async delete(key: string) {
+      store.delete(key)
+    },
+  } as unknown as KVNamespace
+}
+
+function createBinding() {
+  const fetch = vi.fn(async (request: Request) => new Response(request.headers.get('x-telefunc-shard') ?? 'missing'))
+  const get = vi.fn((id: { name: string }, options?: { locationHint: string }) => {
+    void id
+    void options
+    return { fetch }
+  })
+  const idFromName = vi.fn((name: string) => ({
+    name,
+    equals(other: { name: string }) {
+      return other.name === name
+    },
+  }))
+  const jurisdiction = vi.fn(() => binding)
+  const binding = { get, idFromName, jurisdiction }
+  return { binding, get, fetch, idFromName, jurisdiction }
+}
+
+beforeEach(() => {
+  mocks.crosswsFactory.mockClear()
+  mocks.crosswsAdapter.handleDurableInit.mockReset()
+  mocks.crosswsAdapter.handleDurableUpgrade.mockReset()
+  mocks.crosswsAdapter.handleDurableMessage.mockReset()
+  mocks.crosswsAdapter.handleDurableClose.mockReset()
+  mocks.enableChannelTransports.mockClear()
+  mocks.setAdapterMaxFrameBytes.mockClear()
+  mocks.getServerConfig.mockReset()
+  mocks.getServerConfig.mockReturnValue({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })
+  mocks.telefuncMock.mockClear()
+  mocks.telefuncMock.mockResolvedValue({
+    statusCode: 200,
+    headers: [['content-type', 'application/json']] as HeadersInit,
+    getReadableWebStream() {
+      return new ReadableStream()
+    },
+  })
+  mocks.transportInstances.length = 0
+  mocks.authorityInstances.length = 0
+})
+
+afterEach(async () => {
+  await disposeBackend()
+})
+
+describe('cloudflare adapter entrypoint', () => {
+  it('resolves shard from KV token and forwards routing headers', async () => {
+    const { binding, get, fetch } = createBinding()
+    const tf = new Telefunc()
+    const kv = createMockKV()
+    await kv.put('session:my-token', JSON.stringify({ s: 'telefunc-shard-weur-1', b: 'weur' }))
+    const request = new Request('https://telefunc.test/_telefunc?session=my-token', {
+      headers: { 'x-telefunc-request': 'txt' },
+    })
+
+    await tf.serve({
+      request,
+      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+    })
+
+    expect(mocks.enableChannelTransports).toHaveBeenCalled()
+    expect(mocks.transportInstances).toHaveLength(1)
+    expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-1' }), {
+      locationHint: 'weur',
+    })
+    expect(fetch).toHaveBeenCalledTimes(1)
+
+    const forwardedRequest = fetch.mock.calls[0]![0] as Request
+    expect(forwardedRequest.headers.get('x-telefunc-shard')).toBe('telefunc-shard-weur-1')
+    expect(forwardedRequest.headers.get('x-telefunc-broadcast-bucket')).toBe('weur')
+    expect(forwardedRequest.headers.get('x-telefunc-session')).toBe('my-token')
+  })
+
+  it('returns undefined for non-telefunc traffic', async () => {
+    const tf = new Telefunc()
+
+    await expect(
+      tf.serve({
+        request: new Request('https://telefunc.test/other'),
+        env: {} as Cloudflare.Env,
+      }),
+    ).resolves.toBeUndefined()
+  })
+
+  it('asserts when binding is missing for telefunc traffic', async () => {
+    const tf = new Telefunc()
+
+    await expect(
+      tf.serve({
+        request: new Request('https://telefunc.test/_telefunc'),
+        env: {} as Cloudflare.Env,
+      }),
+    ).rejects.toThrow('Missing Cloudflare Durable Object binding')
+  })
+
+  it('returns 400 for websocket upgrades when websocket transport is disabled', async () => {
+    const { binding } = createBinding()
+    mocks.getServerConfig.mockReturnValue({ telefuncUrl: '/_telefunc', channel: { transports: [] } })
+    const tf = new Telefunc()
+    const request = new Request('https://telefunc.test/_telefunc', { headers: { upgrade: 'websocket' } })
+
+    const response = await tf.serve({
+      request,
+      env: { TelefuncDurableObject: binding } as unknown as Cloudflare.Env,
+    })
+
+    expect(response?.status).toBe(400)
+  })
+
+  it('applies jurisdiction wrapping before binding lookups', async () => {
+    const { binding, jurisdiction } = createBinding()
+    const kv = createMockKV()
+    const tf = new Telefunc({ jurisdiction: 'eu' as DurableObjectJurisdiction })
+
+    await tf.serve({
+      request: new Request('https://telefunc.test/_telefunc'),
+      env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
+    })
+
+    expect(jurisdiction).toHaveBeenCalledWith('eu')
+  })
+
+  it('passes base transport options to the broadcast transport', () => {
+    new Telefunc()
+
+    expect(mocks.transportInstances[0]?.options).toEqual(
+      expect.objectContaining({ baseInstanceName: 'telefunc', scale: undefined }),
+    )
+  })
+
+  it('wires the durable object runtime and delegates fetch, websocket, and broadcast methods', async () => {
+    const { binding } = createBinding()
+    const tf = new Telefunc({ context: vi.fn(async () => ({ userId: 'user-1' })) })
+    const DurableClass = tf.TelefuncDurableObject
+    const ctx = { id: { name: 'telefunc-shard-weur-1' } } as DurableObjectState
+    const instance = new DurableClass(ctx, {
+      TelefuncDurableObject: binding,
+    } as unknown as Cloudflare.Env) as InstanceType<typeof DurableClass> & {
+      fetch(request: Request): Promise<Response>
+      webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void
+      webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean): void
+      telefuncBroadcastPublish(request: BroadcastPublishRequest): unknown
+      telefuncBroadcastDeliver(request: BroadcastDeliverRequest): void
+    }
+
+    expect(mocks.crosswsAdapter.handleDurableInit).toHaveBeenCalledWith(instance, ctx, {
+      TelefuncDurableObject: binding,
+    })
+
+    mocks.crosswsAdapter.handleDurableUpgrade.mockResolvedValue(new Response('upgrade'))
+    const upgradeResponse = await instance.fetch(
+      new Request('https://telefunc.test/_telefunc', { headers: { upgrade: 'websocket' } }),
+    )
+    expect(upgradeResponse).toBeInstanceOf(Response)
+    expect(mocks.crosswsAdapter.handleDurableUpgrade).toHaveBeenCalled()
+
+    const response = await instance.fetch(
+      new Request('https://telefunc.test/_telefunc', {
+        headers: { 'x-telefunc-shard': 'telefunc-shard-weur-1', 'x-telefunc-broadcast-bucket': 'weur' },
+      }),
+    )
+    expect(mocks.telefuncMock).toHaveBeenCalled()
+    const member = mocks.transportInstances[0]!.members[0]!
+    expect(member.locate).toHaveBeenCalledWith('weur')
+
+    instance.webSocketMessage({} as WebSocket, 'payload')
+    expect(mocks.crosswsAdapter.handleDurableMessage).toHaveBeenCalledWith(instance, expect.anything(), 'payload')
+
+    instance.webSocketClose({ close: vi.fn() } as unknown as WebSocket, 1000, 'done', true)
+    expect(mocks.crosswsAdapter.handleDurableClose).toHaveBeenCalledWith(
+      instance,
+      expect.anything(),
+      1000,
+      'done',
+      true,
+    )
+
+    const publish = { key: 'room:test', kind: 'text' as const, payload: '{"text":"hello"}' }
+    instance.telefuncBroadcastPublish(publish)
+    expect(mocks.transportInstances[0]?.publishToSubscribers).toHaveBeenCalledWith(
+      mocks.authorityInstances[0],
+      expect.any(OrderedStubs),
+      publish,
+    )
+
+    const delivery = {
+      key: 'room:test',
+      kind: 'text' as const,
+      payload: '{"text":"hello"}',
+      info: { seq: 1, timestamp: Date.now() },
+    }
+    instance.telefuncBroadcastDeliver(delivery)
+    expect(member.deliver).toHaveBeenCalledWith(delivery)
+  })
+})

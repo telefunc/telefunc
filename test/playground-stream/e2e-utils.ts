@@ -2,15 +2,41 @@ export {
   resetCleanupState,
   getCleanupState,
   forceServerGc,
+  serverHeapUsed,
+  cutWire,
+  dropNextWebSocket,
+  runServerAction,
+  failBackend,
+  holdNextSsePost,
+  holdNextSseWire,
+  holdNextSseOpen,
+  heldSsePosts,
+  refuseNextSsePost,
+  releaseHeldSsePosts,
   navigate,
   getResult,
   sleep,
   restartProxy,
   stopProxy,
   startProxy,
+  restartRedis,
+  killInstance,
+  startInstance,
+  dropRedisConnections,
+  getRedisChannels,
+  getRedisKeys,
+  snapshotRedis,
+  rewindRedis,
+  moveRedisSlot,
+  countConnections,
+  serverRuntime,
+  setServerRuntime,
+  canCutWire,
 }
 
 import { page, getServerUrl } from '@brillout/test-e2e'
+import type { Response, WebSocket } from 'playwright-chromium'
+import type { BackendFault } from './failing-backend'
 import { execSync } from 'node:child_process'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -38,6 +64,82 @@ function startProxy() {
   execSync('docker compose start proxy', { cwd: playgroundDir, stdio: 'pipe' })
 }
 
+/** Restarts the stack's Redis, which keeps no data across a restart. */
+function restartRedis() {
+  execSync('docker compose restart redis', { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+/** Kills a server instance at once, as a crash does: it leaves nothing behind cleanly. */
+function killInstance(instance: 'a' | 'b' | 'c' | 'd') {
+  execSync(`docker compose kill playground-${instance}`, { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+function startInstance(instance: 'a' | 'b' | 'c' | 'd') {
+  execSync(`docker compose start playground-${instance}`, { cwd: playgroundDir, stdio: 'pipe' })
+}
+
+/** Drops every connection to the stack's Redis, as a failover or a network cut does. */
+async function dropRedisConnections() {
+  const resp = await fetch(`${getServerUrl()}/api/redis/drop-connections`, { method: 'POST' })
+  const { dropped } = (await resp.json()) as { dropped: number }
+  if (dropped === 0) throw new Error('dropRedisConnections() found no connection to drop')
+}
+
+/** The Pub/Sub channels some connection to the stack's Redis subscribes to, matching a glob pattern. */
+async function getRedisChannels(pattern: string): Promise<string[]> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/channels?pattern=${encodeURIComponent(pattern)}`)
+  return ((await resp.json()) as { channels: string[] }).channels
+}
+
+/** The keys in the stack's Redis matching a glob pattern, each with its time to live in ms (-1: none). */
+async function getRedisKeys(pattern: string): Promise<{ key: string; ttl: number }[]> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/keys?pattern=${encodeURIComponent(pattern)}`)
+  return ((await resp.json()) as { keys: { key: string; ttl: number }[] }).keys
+}
+
+type RedisSnapshot = unknown
+
+async function snapshotRedis(): Promise<RedisSnapshot> {
+  const resp = await fetch(`${getServerUrl()}/api/redis/snapshot`)
+  return ((await resp.json()) as { snapshot: RedisSnapshot }).snapshot
+}
+
+/** Rewinds the stack's Redis to a snapshot and drops every connection, as a failover onto a replica that missed the
+ *  writes since does. */
+async function rewindRedis(snapshot: RedisSnapshot) {
+  const resp = await fetch(`${getServerUrl()}/api/redis/restore`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ snapshot }),
+  })
+  if (!resp.ok) throw new Error(`rewindRedis() failed: ${await resp.text()}`)
+  await dropRedisConnections()
+}
+
+/** Redis Cluster: moves the slot of `key` to another master one key at a time, as a reshard does. */
+async function moveRedisSlot(key: string) {
+  const resp = await fetch(`${getServerUrl()}/api/redis/move-slot?key=${encodeURIComponent(key)}`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`moveRedisSlot() failed: ${await resp.text()}`)
+  return (await resp.json()) as { moved: number }
+}
+
+type ServerRuntime = 'node' | 'bun' | 'deno'
+let runtime: ServerRuntime = 'node'
+
+/** The runtime serving the playground, as `runPlayground()` set it. */
+function serverRuntime(): ServerRuntime {
+  return runtime
+}
+
+function setServerRuntime(serving: ServerRuntime) {
+  runtime = serving
+}
+
+/** Whether `cutWire()` can drop the page's connections: it destroys the Node sockets the server tracked, and Bun.serve and Deno.serve hand a request no socket. */
+function canCutWire(): boolean {
+  return runtime === 'node'
+}
+
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function resetCleanupState() {
@@ -55,6 +157,69 @@ async function forceServerGc() {
   // Fail loudly on `gc not exposed` (server missing `--expose-gc`): silently ignoring it
   // degrades GC tests into waiting for natural GC, which times out with a misleading assertion.
   if (!resp.ok) throw new Error(`forceServerGc() failed: ${await resp.text()}`)
+}
+
+/** The server's `heapUsed`, in bytes. */
+async function serverHeapUsed(): Promise<number> {
+  const resp = await fetch(`${getServerUrl()}/api/heap-used`)
+  return ((await resp.json()) as { heapUsed: number }).heapUsed
+}
+
+/** Runs what a telefunction left under `key` with `onServerAction()` (server-actions.ts), also while the page is offline. */
+async function runServerAction(key: string) {
+  const resp = await fetch(`${getServerUrl()}/api/server-action?key=${encodeURIComponent(key)}`, { method: 'POST' })
+  if (!resp.ok) throw new Error(`runServerAction() failed: ${await resp.text()}`)
+}
+
+/** The server's store fails the call, or drops the message, `fault` names (failing-backend.ts). */
+async function failBackend(fault: BackendFault) {
+  const resp = await fetch(`${getServerUrl()}/api/backend/fault`, { method: 'POST', body: JSON.stringify(fault) })
+  if (!resp.ok) throw new Error(`failBackend() failed: ${await resp.text()}`)
+}
+
+/** Drops the page's WebSocket and SSE connections at the server, as a failing network would. */
+async function cutWire() {
+  const resp = await fetch(`${getServerUrl()}/api/wire/cut`, { method: 'POST' })
+  const { cut } = (await resp.json()) as { cut: number }
+  if (cut === 0) throw new Error('cutWire() found no connection to cut')
+}
+
+/** The server drops the page's next WebSocket before it opens, as a brief network drop would. */
+async function dropNextWebSocket() {
+  await fetch(`${getServerUrl()}/api/wire/next-websocket`, { method: 'POST' })
+}
+
+/** The server hands the page's next SSE batch POST to Telefunc only at `releaseHeldSsePosts()`, and answers it then. */
+async function holdNextSsePost() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold`, { method: 'POST' })
+}
+
+/** The POST that opens the page's next SSE wire is answered, and its first batch reaches Telefunc only at `releaseHeldSsePosts()`. */
+async function holdNextSseWire() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold-stream`, { method: 'POST' })
+}
+
+/** The server hands the POST that opens the page's next SSE wire to Telefunc only at `releaseHeldSsePosts()`. */
+async function holdNextSseOpen() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=hold-open`, { method: 'POST' })
+}
+
+/** How many SSE POSTs the server holds. */
+async function heldSsePosts(): Promise<number> {
+  const resp = await fetch(`${getServerUrl()}/api/wire/held`)
+  return ((await resp.json()) as { held: number }).held
+}
+
+/** The server answers the page's next SSE batch POST with 400, as it does for a wire it closed. */
+async function refuseNextSsePost() {
+  await fetch(`${getServerUrl()}/api/wire/next-sse-post?action=refuse`, { method: 'POST' })
+}
+
+/** The server reads and answers the SSE POSTs it held; returns how many. */
+async function releaseHeldSsePosts(): Promise<number> {
+  const resp = await fetch(`${getServerUrl()}/api/wire/release`, { method: 'POST' })
+  const { released } = (await resp.json()) as { released: number }
+  return released
 }
 
 /**
@@ -109,6 +274,8 @@ const transientNetworkErrors = [
   'ERR_INTERNET_DISCONNECTED',
   'ERR_ALPN_NEGOTIATION_FAILED',
   'ERR_SSL_PROTOCOL_ERROR',
+  // Chromium aborts a navigation that starts just after a test's setOffline(false).
+  'ERR_ABORTED',
 ]
 function isTransientNetworkError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
@@ -122,4 +289,24 @@ function isTransientNetworkError(err: unknown): boolean {
 
 async function getResult<T = any>(selector: string): Promise<T> {
   return JSON.parse((await page.textContent(selector))!)
+}
+
+/** Counts the WebSockets and SSE streams the page opens to Telefunc from now until `stop()`. */
+function countConnections() {
+  let opened = 0
+  const onWebSocket = (ws: WebSocket) => {
+    if (ws.url().includes('/_telefunc')) opened++
+  }
+  const onResponse = (response: Response) => {
+    if (response.headers()['content-type']?.startsWith('text/event-stream')) opened++
+  }
+  page.on('websocket', onWebSocket)
+  page.on('response', onResponse)
+  return {
+    stop() {
+      page.off('websocket', onWebSocket)
+      page.off('response', onResponse)
+      return opened
+    },
+  }
 }

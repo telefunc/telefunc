@@ -1,0 +1,46 @@
+import { Link } from '@brillout/docpress'
+import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
+
+**Environment**: server.
+
+<TelefuncStreamBeta />
+
+```ts
+// Environment: server
+
+import { config } from 'telefunc'
+
+config.broadcast = {
+  transport: myTransport, // A BroadcastTransport that carries Broadcast across servers
+}
+```
+
+`transport` is a `BroadcastTransport`:
+
+```ts ts-only
+type BroadcastTransport = {
+  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  sendBinary(key: string, payload: Uint8Array): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listenBinary(key: string, onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void): () => void
+}
+```
+
+> Without a `transport`, Broadcast uses the installed backend (such as <Link href="/redis"><code>@telefunc/redis</code></Link>) or, with none installed, stays in memory and reaches only subscribers on the same server. A configured `transport` takes precedence over both.
+
+> `send()` and `sendBinary()` return the `{ seq, timestamp }` they assigned, and `onMessage` gets the same pair, which <Link href="/channel#broadcast">`Broadcast.subscribe()`</Link> subscribers receive as `info`. A key's `seq` increases with each message, across all servers and for text and binary together; `timestamp` is like `Date.now()`.
+
+> `listen()` and `listenBinary()` return a function that stops listening. A message sent right after `listen()` returned must reach that listener.
+
+> When its connection drops, the transport reconnects on its own and keeps calling the `onMessage` it was given.
+
+> A transport that sends `sendBinary()`'s `payload` after `sendBinary()` returns (after an `await`, or from a queue) must send a copy: the publisher may reuse its buffer once <Link href="/channel#broadcast">`publishBinary()`</Link> returns.
+
+<ConfigWhereServer />
+
+
+## See also
+
+- <Link href="/stream/scale" />
+- <Link href="/channel" />
+- <Link href="/redis" />

@@ -3,12 +3,10 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta noLink />
 
-*Telefunc Stream* supports streaming (one-way streams) and real-time (two-way streams) with:
+*Telefunc Stream* enables streaming and real-time UIs via:
 - Primitives
 - Integrations
 - Seamless DX
-
-> The word *stream* means — broadly speaking, [as Wikipedia defines it](https://en.wikipedia.org/wiki/Stream_(computing)) — not just a `ReadableStream` but any sequence of data made available over time.
 
 #### Primitives
 
@@ -59,7 +57,7 @@ import { TelefuncStreamBeta } from '../../components'
    // Compress.telefunc.ts
    // Environment: server
 
-   export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+   export async function onCompress(data: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
      // A stream flows in, a transformed stream flows back out
      return data.pipeThrough(new CompressionStream('gzip'))
    }
@@ -283,7 +281,7 @@ Return a `ReadableStream`:
 import fs from 'node:fs'
 import { Readable } from 'node:stream'
 
-export function onDownload(fileName: string): ReadableStream<Uint8Array> {
+export async function onDownload(fileName: string): Promise<ReadableStream<Uint8Array>> {
   return Readable.toWeb(fs.createReadStream(`./files/${fileName}`)) as ReadableStream<Uint8Array>
 }
 ```
@@ -304,6 +302,8 @@ while (true) {
 ```
 
 > You can also return a `File` or `Blob` instead, see: <Link href="/file-download" />.
+
+> If a call returns several streams, the client holds the data of a stream your code isn't reading until your code reads or cancels that stream.
 
 
 #### Client → server
@@ -350,7 +350,7 @@ A simple example transform with gzip compression:
 // Compress.telefunc.ts
 // Environment: server
 
-export function onCompress(data: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export async function onCompress(data: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
   return data.pipeThrough(new CompressionStream('gzip'))
 }
 ```
@@ -375,7 +375,7 @@ import { getContext } from 'telefunc'
 import { spawn } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 
-export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export async function onCompressVideo(video: ReadableStream<Uint8Array>): Promise<ReadableStream<Uint8Array>> {
   const { onClose } = getContext()
 
   // Re-encode to a smaller H.264/MP4, on the fly
@@ -384,7 +384,8 @@ export function onCompressVideo(video: ReadableStream<Uint8Array>): ReadableStre
   // Kill the encoder if the client disconnects mid-stream — otherwise the process leaks
   onClose(() => ffmpeg.kill())
 
-  video.pipeTo(Writable.toWeb(ffmpeg.stdin))
+  // A client that drops mid-upload rejects the pipe: stop the encoder rather than leave the rejection unhandled
+  video.pipeTo(Writable.toWeb(ffmpeg.stdin)).catch(() => ffmpeg.kill())
   return Readable.toWeb(ffmpeg.stdout) as ReadableStream<Uint8Array>
 }
 ```
@@ -439,32 +440,6 @@ For multi-party use cases where *who is connected* matters — chat, game lobbie
 - <Link href="/room" />
 
 > Built on top of channels: a `Room` adds presence, participant metadata, private messages, and admin controls.
-
-```ts
-// Lobby.telefunc.ts
-// Environment: server
-
-import { Room } from 'telefunc'
-
-export async function onGetLobby() {
-  return await Room.get('lobby')
-}
-```
-
-```ts
-// Lobby.tsx
-// Environment: client
-
-import { onGetLobby } from './Lobby.telefunc'
-
-const lobby = await onGetLobby()
-lobby.onJoin((member) => console.log(`${member.meta.name} joined`))
-lobby.subscribe((data, info, from) => showMessage(from.meta.name, data))
-
-const me = await lobby.join({ meta: { name: 'Alice' } })
-await me.publish({ text: 'hello' })
-```
-
 
 ## Cleanup
 
@@ -548,7 +523,7 @@ onClose((err) => {
     // Either side called abort(value)
     console.log(err.abortValue)
   } else if (err instanceof NetworkError) {
-    // Connection lost (couldn't reconnect)
+    // Connection lost (couldn't reconnect, or missed too much while offline)
   }
 })
 ```
@@ -605,14 +580,14 @@ export async function* onSearch(query: string) {
 
 ## Scaling
 
-You can scale Telefunc horizontally (multiple server instances across multiple processes, containers, or machines) by adding sticky sessions and a cross-instance broadcast transport.
+You can scale Telefunc horizontally (multiple server instances across multiple processes, containers, or machines) by adding sticky sessions and a cross-instance backend.
 
 See: <Link href="/stream/scale" />.
 
 
 ## Cloudflare
 
-On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a broadcast transport is needed.
+On Cloudflare Workers, Telefunc routes channels through Durable Objects and fans out broadcasts across regions automatically — so neither a sticky load balancer nor a separately installed backend is needed.
 
 See: <Link href="/stream/cloudflare" />.
 

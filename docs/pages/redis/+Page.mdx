@@ -5,7 +5,7 @@ import { TelefuncStreamBeta } from '../../components'
 
 <TelefuncStreamBeta />
 
-Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance. <Link href="/room">Rooms</Link> work across instances too: room state lives in Redis keys, room events travel over Redis Pub/Sub.
+Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across server instances — a `publish()` on any instance reaches every `subscribe()` on every other instance. <Link href="/room">Rooms</Link> work across instances too.
 
 > You only need this if you scale horizontally — see <Link href="/stream/scale" />.
 
@@ -14,6 +14,8 @@ Redis-backed <Link href="/channel#broadcast">broadcast</Link> fan-out across ser
 ```bash
 npm install @telefunc/redis ioredis
 ```
+
+Requires Redis 5 or later.
 
 ```ts
 // Environment: server
@@ -25,11 +27,11 @@ const redis = new IORedis('redis://localhost:6379')
 installRedis(redis)
 ```
 
-That swaps the default in-memory broadcast transport for one backed by Redis Pub/Sub. All subscribers across the cluster observe the same publish order for a given key.
+That single call installs the Redis backend for both Broadcast and Room. Room state and events are then shared across server instances. Call `installRedis()` before your server first uses Broadcast or Room, for example in a module your server entry imports first.
 
 ### Sharing an existing client
 
-Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance when you want to share a connection or set custom options such as TLS or a retry strategy.
+Pass an existing [`ioredis`](https://github.com/redis/ioredis) Redis or Cluster instance to reuse its options, such as TLS or authentication.
 
 ```ts
 // Environment: server
@@ -41,7 +43,11 @@ const redis = new IORedis(process.env.REDIS_URL, { tls: {} })
 installRedis(redis)
 ```
 
-Internally, Telefunc calls `duplicate()` on the client to open a dedicated subscriber connection — your instance is never mutated or disconnected. You can continue to use it alongside Telefunc without interference.
+Telefunc duplicates the supplied client as needed without disconnecting it, so you can continue to use it alongside Telefunc.
+
+To prefix Telefunc's Redis keys, pass `installRedis(redis, { prefix })`.
+
+Room keeps its state in Redis: use `maxmemory-policy noeviction`, as any other policy can close a room.
 
 ## Channels
 

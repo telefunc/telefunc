@@ -21,9 +21,23 @@ export {
   onChannelNoListenerAckClient,
   onChannelShieldClient,
   onChannelShieldServerAck,
+  onChannelSelfRemovingListener,
+  onChannelUnserializableAnswer,
+  onChannelOversize,
+  onChannelHeldBinary,
+  onChannelUnattachedFlood,
+  onChannelEndedValues,
+  onChannelSlowLink,
+  onChannelUnawaitedBurst,
+  onChannelOpenBurst,
+  onChannelManyListeners,
+  onChannelLinkShare,
+  onChannelSlowUplink,
+  onChannelOpenAnswer,
+  onChannelOpenHello,
 }
 
-import { Channel, Abort } from 'telefunc'
+import { Channel, Abort, BroadcastChannel } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 
 type ServerMessage = { type: 'tick'; count: number } | { type: 'echo'; text: string } | { type: 'welcome' }
@@ -59,7 +73,7 @@ function formatCloseError(err: CloseError): string {
 async function onChannelInit() {
   const ch = new Channel<ClientToServer, ServerToClient>({ ack: true })
   const swallowClosedChannel = (err: any) => {
-    if (ch.isClosed && err?.name === 'ChannelClosedError') return
+    if (ch.isClosed && (err?.name === 'ChannelClosedError' || err instanceof Abort)) return
     throw err
   }
 
@@ -90,8 +104,7 @@ async function onChannelInit() {
       const ack = await ch.send({ type: 'tick', count: n })
       console.log(`[server] tick #${n} acked by client:`, ack)
     } catch (err: any) {
-      if (ch.isClosed && err?.name === 'ChannelClosedError') return
-      throw err
+      swallowClosedChannel(err)
     }
   }, 1000)
 
@@ -510,4 +523,205 @@ async function onChannelShieldServerAck() {
     },
     getOutcome: async (): Promise<{ ok: boolean; value?: string; error?: string } | null> => outcome,
   }
+}
+
+const WIRE_LIMIT_BYTES = 64 * 1024 * 1024
+
+function settle(promise: Promise<unknown>): Promise<string> {
+  return promise.then(
+    (value) => `ok:${String(value)}`,
+    (err: any) => `error:${err?.message}`,
+  )
+}
+
+/** Each end listens twice, and its first listener stops listening on its first message. */
+async function onChannelSelfRemovingListener() {
+  const ch = new Channel<(msg: string) => void, (msg: string) => void>()
+  const serverSeen: string[] = []
+  const unlisten = ch.listen((msg) => {
+    serverSeen.push(`once:${msg}`)
+    unlisten()
+  })
+  ch.listen((msg) => {
+    serverSeen.push(`other:${msg}`)
+  })
+  ch.onOpen(async () => {
+    await ch.send('one')
+    await ch.send('two')
+  })
+  return { channel: ch.client, getServerSeen: async () => serverSeen }
+}
+
+/** Each end answers 'cyclic' with an object that can't be serialized. */
+async function onChannelUnserializableAnswer() {
+  const ch = new Channel<(msg: string) => unknown, (msg: string) => unknown>()
+  const id = ch.id
+  ch.listen((msg) => {
+    if (msg !== 'cyclic') return `ack:${msg}`
+    const cyclic: { self?: unknown } = {}
+    cyclic.self = cyclic
+    return cyclic
+  })
+  ch.onOpen(async () => {
+    cleanupState[`unserializable_${id}_serverSend`] = await settle(ch.send('cyclic', { ack: true }))
+    cleanupState[`unserializable_${id}_serverFollowUp`] = await settle(ch.send('ok', { ack: true }))
+  })
+  return { channel: ch.client, channelId: id }
+}
+
+/** The server asks for an answer the page makes larger than the server takes; the page publishes as large on `broadcast`. */
+async function onChannelOversize() {
+  const ch = new Channel<(msg: string) => string, (msg: string) => string>()
+  const id = ch.id
+  ch.listen((msg) => `ack:${msg}`)
+  ch.onOpen(async () => {
+    cleanupState[`oversize_${id}_serverSend`] = await settle(ch.send('big', { ack: true }))
+    cleanupState[`oversize_${id}_serverFollowUp`] = await settle(ch.send('ok', { ack: true }))
+  })
+  return {
+    channel: ch.client,
+    channelId: id,
+    limit: WIRE_LIMIT_BYTES,
+    broadcast: new BroadcastChannel({ key: `oversize:${crypto.randomUUID()}` }),
+  }
+}
+
+/** Sends binary before the page attaches, reusing each buffer for the next send. */
+async function onChannelHeldBinary() {
+  const ch = new Channel()
+  const bytes = new Uint8Array(3)
+  const buffer = Buffer.alloc(3)
+  const sends: Array<[Uint8Array, number, boolean]> = [
+    [bytes, 1, false],
+    [bytes, 2, true],
+    [buffer, 3, false],
+    [buffer, 4, true],
+  ]
+  for (const [data, value, ack] of sends) {
+    data.fill(value)
+    void (ack ? ch.sendBinary(data, { ack: true }) : ch.sendBinary(data))
+  }
+  bytes.fill(9)
+  buffer.fill(9)
+  return { channel: ch.client }
+}
+
+/** Sends 100,000 empty messages of each kind to a channel no page attaches to, and counts the rejected ones by error name. */
+async function onChannelUnattachedFlood() {
+  const rejected: Record<'text' | 'binary', Record<string, number>> = { text: {}, binary: {} }
+  for (const kind of ['text', 'binary'] as const) {
+    const ch = new Channel<never, string>()
+    const counts: Record<string, number> = {}
+    for (let i = 0; i < 100_000; i++) {
+      const send = kind === 'text' ? ch.send('') : ch.sendBinary(new Uint8Array(0))
+      send.catch((err: Error) => {
+        counts[err.name] = (counts[err.name] ?? 0) + 1
+      })
+    }
+    await new Promise((resolve) => setImmediate(resolve))
+    rejected[kind] = { ...counts }
+    ch.abort()
+  }
+  return rejected
+}
+
+/** A channel, a broadcast and a generator, each for the page to end. */
+async function onChannelEndedValues() {
+  async function* numbers() {
+    yield 1
+    yield 2
+  }
+  return {
+    channel: new Channel().client,
+    broadcast: new BroadcastChannel({ key: `ended-values:${crypto.randomUUID()}` }),
+    generator: numbers(),
+  }
+}
+
+/** Sends the page as many bytes as its message asks for. */
+async function onChannelSlowLink() {
+  const ch = new Channel<(bytes: number) => Promise<void>, never>()
+  ch.listen(async (bytes) => {
+    await ch.sendBinary(new Uint8Array(bytes))
+  })
+  return { channel: ch.client }
+}
+
+/** At the page's message, sends that many 1 MiB messages without awaiting them, and answers with the rejected ones by error name. */
+async function onChannelUnawaitedBurst() {
+  const ch = new Channel<(count: number) => Promise<Record<string, number>>, never>()
+  ch.listen(async (count) => {
+    const rejected: Record<string, number> = {}
+    const sends = Array.from({ length: count }, () =>
+      ch.sendBinary(new Uint8Array(1024 * 1024)).catch((err: Error) => {
+        rejected[err.name] = (rejected[err.name] ?? 0) + 1
+      }),
+    )
+    await Promise.race([Promise.all(sends), new Promise((resolve) => setImmediate(resolve))])
+    return rejected
+  })
+  return { channel: ch.client }
+}
+
+/** As it opens, sends 500 small messages without awaiting them. */
+async function onChannelOpenBurst() {
+  const ch = new Channel<never, number>()
+  ch.onOpen(() => {
+    for (let seq = 0; seq < 500; seq++) void ch.send(seq).catch(() => {})
+  })
+  return { channel: ch.client }
+}
+
+/** At the page's message, adds that many listeners and removes them, and answers with the milliseconds it took. */
+async function onChannelManyListeners() {
+  const ch = new Channel<(count: number) => number, never>()
+  ch.listen((count) => {
+    const start = performance.now()
+    const removes = Array.from({ length: count }, () => ch.listen(() => 0))
+    for (const remove of removes) remove()
+    return Math.round(performance.now() - start)
+  })
+  return { channel: ch.client }
+}
+
+/** A download channel that sends the bytes the page asks for, awaiting each 64 KiB, and a channel that answers pings. */
+async function onChannelLinkShare() {
+  const download = new Channel<(bytes: number) => void, never>()
+  download.listen(async (bytes) => {
+    for (let sent = 0; sent < bytes && !download.isClosed; sent += 64 * 1024)
+      await download.sendBinary(new Uint8Array(64 * 1024))
+  })
+  const ping = new Channel<(msg: string) => string, never>()
+  ping.listen(() => 'pong')
+  return { download: download.client, ping: ping.client }
+}
+
+/** An upload channel that answers with the bytes it received, and a channel that ticks every 100 ms until the page closes it. */
+async function onChannelSlowUplink() {
+  const upload = new Channel<(msg: 'received') => number, never>()
+  let received = 0
+  upload.listenBinary((data) => {
+    received += data.byteLength
+  })
+  upload.listen(() => received)
+  const ticks = new Channel<never, (tick: number) => void>()
+  let tick = 0
+  const timer = setInterval(() => {
+    if (ticks.isClosed) return clearInterval(timer)
+    void ticks.send(tick++).catch(() => {})
+  }, 100)
+  return { upload: upload.client, ticks: ticks.client }
+}
+
+/** A channel that answers. */
+async function onChannelOpenAnswer() {
+  const ch = new Channel<(msg: string) => string, never>()
+  ch.listen(() => 'answer')
+  return { channel: ch.client }
+}
+
+async function onChannelOpenHello() {
+  const ch = new Channel<never, string>()
+  ch.onOpen(() => void ch.send('hello').catch(() => {}))
+  return { channel: ch.client }
 }

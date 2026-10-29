@@ -1,8 +1,8 @@
 {
   // spellcheck-ignore
-  "compatibility_flags": ["nodejs_als"],
+  "compatibility_flags": ["nodejs_als", "enable_request_signal"],
   "$schema": "node_modules/wrangler/config-schema.json",
-  "compatibility_date": "2025-08-06",
+  "compatibility_date": "2025-08-15",
   "name": "vike_test_cloudflare_vite-plugin",
   "vars": { "SOME_ENV_VAR": "some-value" },
   "main": "vike:server-entry",
@@ -27,8 +27,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TodoListDurableObject"],
-      "new_classes": ["TelefuncDurableObject"]
+      "new_sqlite_classes": ["TodoListDurableObject", "TelefuncDurableObject"]
     }
   ]
 }

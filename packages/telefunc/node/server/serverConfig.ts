@@ -1,7 +1,12 @@
 export { configUser as config }
 export { getServerConfig }
+export { getServerExtensionTypes }
 export { enableChannelTransports }
+export { setAdapterMaxFrameBytes }
+export { getAdapterMaxFrameBytes }
 export { setRootFromVite }
+export { pingDeadlineOf }
+export { reconnectWindow }
 export type {
   ConfigUser,
   ConfigResolved,
@@ -9,36 +14,30 @@ export type {
   ChannelConfigUser,
   ChannelConfigResolved,
   BroadcastConfigUser,
+  RoomConfigUser,
 }
 
 import { assertUsage } from '../../utils/assert.js'
+import { assertDuration } from '../../utils/assertDuration.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
 import type { TelefuncServerExtension } from './extensions.js'
-import type {
-  ReplacerType,
-  ReviverType,
-  TypeContract,
-  ServerReplacerContext,
-  ServerReviverContext,
-} from '../../wire-protocol/types.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
 import { toPosixPath, pathIsAbsolute, assertPosixPath } from '../../utils/path.js'
-import {
-  installBroadcastAdapter,
-  DefaultBroadcastAdapter,
-  type BroadcastTransport,
-} from '../../wire-protocol/server/broadcast.js'
+import { configureBroadcastTransport } from '../../wire-protocol/backend/install.js'
+import type { BroadcastTransport } from '../../wire-protocol/backend/broadcast/transport.js'
+import { ROOM_DEPARTURE_TIMEOUT_MS, ROOM_EMPTY_TIMEOUT_MS } from '../../wire-protocol/room/server/constants.js'
+import { assertRoomTimeout } from '../../wire-protocol/room/model.js'
 import {
   CHANNEL_BUFFER_LIMIT_BYTES,
   CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-  CHANNEL_MESSAGE_LIMIT_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_CONNECT_TTL_MS,
   CHANNEL_IDLE_TIMEOUT_MS,
+  CHANNEL_PING_INTERVAL_MIN_MS,
   CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
   CHANNEL_SERVER_REPLAY_BUFFER_BYTES,
@@ -49,7 +48,9 @@ import {
   SSE_POST_IDLE_FLUSH_DELAY_MS,
   type ChannelTransports,
   type StreamTransport,
+  TIMER_DELAY_MAX_MS,
 } from '../../wire-protocol/constants.js'
+import { pingDeadline } from '../../wire-protocol/wire/pingDeadline.js'
 
 type StreamConfigUser = {
   /**
@@ -65,6 +66,23 @@ type StreamConfigUser = {
 type BroadcastConfigUser = {
   /** Transport for cross-node `Broadcast` delivery. */
   transport?: BroadcastTransport
+}
+
+type RoomConfigUser = {
+  /**
+   * How long, in milliseconds, a room nobody joined stays once nothing holds it, before it closes. `Infinity` keeps it
+   * until `Room.close()`. A room's own `emptyTimeout` overrides it.
+   *
+   * @default 300000
+   */
+  emptyTimeout?: number
+  /**
+   * How long, in milliseconds, a room a member had joined stays once nothing holds it, before it closes. `Infinity`
+   * keeps it until `Room.close()`. A room's own `departureTimeout` overrides it.
+   *
+   * @default 20000
+   */
+  departureTimeout?: number
 }
 
 type ChannelConfigUser = {
@@ -95,18 +113,16 @@ type ChannelConfigUser = {
    */
   pingInterval?: number
   /**
-   * Per-channel replay buffer size, in bytes, kept on the server for
-   * reconnect recovery.
+   * The most bytes of text messages the server keeps per channel, of those it sent that the client hasn't acknowledged,
+   * to replay after a reconnect. If you `await` your sends, a reconnect loses nothing, as long as each message is at
+   * most half its replay buffer: 64 MiB with the defaults.
    */
   serverReplayBuffer?: number
-  /** Per-channel replay buffer size for binary frames, in bytes, kept on the server. */
+  /** As `serverReplayBuffer`, for binary messages. */
   serverReplayBufferBinary?: number
-  /**
-   * Per-channel replay buffer size, in bytes, advertised to the client so it
-   * can replay recent client-to-server frames after reconnect.
-   */
+  /** As `serverReplayBuffer`, for what the client sends: the client keeps that replay, sized as the server tells it. */
   clientReplayBuffer?: number
-  /** Per-channel replay buffer size for binary frames, in bytes, advertised to the client. */
+  /** As `clientReplayBuffer`, for binary messages. */
   clientReplayBufferBinary?: number
   /**
    * How long, in milliseconds, a newly created channel waits for the client to
@@ -120,15 +136,6 @@ type ChannelConfigUser = {
   bufferLimit?: number
   /** Maximum number of bytes buffered per channel for binary messages while no client peer is attached. */
   bufferLimitBinary?: number
-  /**
-   * Maximum size, in bytes, of a single inbound client→server message (channel sends,
-   * publishes, direct messages). Oversized messages are rejected without being buffered
-   * and the offending connection is terminated. The limit is advertised to the client,
-   * which fails oversized sends locally with a clear error. Large payloads should be
-   * streamed (`File`, `Blob`, `ReadableStream`) — streams move as bounded transport
-   * chunks and aren't subject to this cap.
-   */
-  messageLimit?: number
   /**
    * When using SSE channels, upstream client-to-server frames are batched for at
    * most this many milliseconds before Telefunc sends a POST.
@@ -159,7 +166,6 @@ type ChannelConfigResolved = {
   connectTtl: number
   bufferLimit: number
   bufferLimitBinary: number
-  messageLimit: number
   sseFlushThrottle: number
   ssePostIdleFlushDelay: number
 }
@@ -213,6 +219,8 @@ type ConfigUser = {
   channel: ChannelConfigUser
   /** `Broadcast` configuration. */
   broadcast: BroadcastConfigUser
+  /** `Room` defaults. */
+  room: RoomConfigUser
   /** Registered server extensions. Use `config.extensions.push(ext)` to add. */
   extensions: TelefuncServerExtension[]
 }
@@ -231,17 +239,18 @@ type ConfigResolved = {
     transport: StreamTransport
   }
   channel: ChannelConfigResolved
+  room: Required<RoomConfigUser>
   extensions: TelefuncServerExtension[]
-  extensionResponseTypes: ReplacerType<TypeContract, ServerReplacerContext>[]
-  extensionRequestTypes: ReviverType<TypeContract, ServerReviverContext>[]
 }
 
-const configState: ConfigUser = getGlobalObject('serverConfig.ts', {
-  stream: {},
-  channel: {},
-  broadcast: {},
-  extensions: [],
+const globalObject = getGlobalObject('serverConfig.ts', {
+  config: { stream: {}, channel: {}, broadcast: {}, room: {}, extensions: [] } as ConfigUser,
+  /** Transports a server adapter enables: kept apart from the user's config, which a later assignment replaces. */
+  adapterChannelTransports: new Set<ChannelTransports[number]>(),
+  /** The largest frame the adapter's runtime takes, where that is less than the server reads. */
+  adapterMaxFrameBytes: undefined as number | undefined,
 })
+const configState = globalObject.config
 
 const configUser: ConfigUser = new Proxy({} as ConfigUser, {
   get(_target, prop) {
@@ -306,6 +315,18 @@ const configUser: ConfigUser = new Proxy({} as ConfigUser, {
         },
       })
     }
+    if (prop === 'room') {
+      return new Proxy({} as RoomConfigUser, {
+        get(_t, subProp) {
+          return configState.room[subProp as keyof RoomConfigUser]
+        },
+        set(_t, subProp, val) {
+          if (typeof subProp !== 'string') return true
+          applyRoomConfig({ ...configState.room, [subProp]: val })
+          return true
+        },
+      })
+    }
     return configState[prop as keyof typeof configState]
   },
   set(_target, prop, val) {
@@ -355,7 +376,10 @@ function getServerConfig(): ConfigResolved {
       transport: configState.stream.transport || DEFAULT_STREAM_TRANSPORT,
     },
     channel: {
-      transports: configState.channel.transports ?? [...DEFAULT_SERVER_CHANNEL_TRANSPORTS],
+      transports: configState.channel.transports ?? [
+        ...DEFAULT_SERVER_CHANNEL_TRANSPORTS,
+        ...globalObject.adapterChannelTransports,
+      ],
       reconnectTimeout: configState.channel.reconnectTimeout ?? CHANNEL_RECONNECT_TIMEOUT_MS,
       idleTimeout: configState.channel.idleTimeout ?? CHANNEL_IDLE_TIMEOUT_MS,
       pingInterval: configState.channel.pingInterval ?? CHANNEL_PING_INTERVAL_MS,
@@ -368,23 +392,49 @@ function getServerConfig(): ConfigResolved {
       connectTtl: configState.channel.connectTtl ?? CHANNEL_CONNECT_TTL_MS,
       bufferLimit: configState.channel.bufferLimit ?? CHANNEL_BUFFER_LIMIT_BYTES,
       bufferLimitBinary: configState.channel.bufferLimitBinary ?? CHANNEL_BUFFER_LIMIT_BINARY_BYTES,
-      messageLimit: configState.channel.messageLimit ?? CHANNEL_MESSAGE_LIMIT_BYTES,
       sseFlushThrottle: configState.channel.sseFlushThrottle ?? SSE_FLUSH_THROTTLE_MS,
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
+    room: {
+      emptyTimeout: configState.room.emptyTimeout ?? ROOM_EMPTY_TIMEOUT_MS,
+      departureTimeout: configState.room.departureTimeout ?? ROOM_DEPARTURE_TIMEOUT_MS,
+    },
     extensions: configState.extensions,
-    extensionResponseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
-    extensionRequestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }
 }
 
-/** @internal Push additional transports into the default only if the user hasn't set one. */
-function enableChannelTransports(transports: ChannelTransports): void {
-  if (!configState.channel.transports) {
-    configState.channel.transports = [
-      ...new Set([...DEFAULT_SERVER_CHANNEL_TRANSPORTS, ...transports]),
-    ] as ChannelTransports
+/** How long a wire may deliver nothing before it is taken for dead: two ping intervals, each of at least a second. */
+function pingDeadlineOf({ pingInterval }: Pick<ChannelConfigResolved, 'pingInterval'>): number {
+  return pingDeadline(Math.max(pingInterval, CHANNEL_PING_INTERVAL_MIN_MS))
+}
+
+/** How long a gone client is still held: until its drop is noticed at the ping deadline, then for `reconnectTimeout`. */
+function reconnectWindow(): number {
+  const c = getServerConfig().channel
+  return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
+}
+
+/** Extension wire types are consumed after user modules may have registered more extensions.
+ * Keep them out of the request-start config snapshot and resolve only at the operation that uses them. */
+function getServerExtensionTypes() {
+  return {
+    responseTypes: configState.extensions.flatMap((ext) => ext.responseTypes ?? []),
+    requestTypes: configState.extensions.flatMap((ext) => ext.requestTypes ?? []),
   }
+}
+
+/** @internal Adds transports to the defaults, which apply while the user sets none. */
+function enableChannelTransports(transports: ChannelTransports): void {
+  for (const transport of transports) globalObject.adapterChannelTransports.add(transport)
+}
+
+/** @internal The runtime ends a WebSocket on a larger message: the page refuses one, told by each channel the server makes and by each RECONCILED. */
+function setAdapterMaxFrameBytes(bytes: number | undefined): void {
+  globalObject.adapterMaxFrameBytes = bytes
+}
+
+function getAdapterMaxFrameBytes(): number | undefined {
+  return globalObject.adapterMaxFrameBytes
 }
 
 function applyUserConfig(prop: string | symbol, val: unknown) {
@@ -464,6 +514,8 @@ function applyUserConfig(prop: string | symbol, val: unknown) {
     applyChannelConfig(val)
   } else if (prop === 'broadcast') {
     applyBroadcastConfig(val)
+  } else if (prop === 'room') {
+    applyRoomConfig(val)
   } else if (prop === 'extensions') {
     assertUsage(Array.isArray(val), 'config.extensions should be an array')
     configState.extensions = val as TelefuncServerExtension[]
@@ -494,21 +546,33 @@ function applyChannelConfig(val: unknown): void {
       case 'transports':
         next.transports = validateChannelTransports(value, configPath)
         break
+      case 'pingInterval':
+        assertDuration(
+          value,
+          configPath,
+          Math.floor(TIMER_DELAY_MAX_MS / 2),
+          'as its deadline, twice it, is at most the longest a timer waits',
+        )
+        next[key] = value
+        break
       case 'reconnectTimeout':
       case 'idleTimeout':
-      case 'pingInterval':
+      case 'connectTtl':
+      case 'sseFlushThrottle':
+      case 'ssePostIdleFlushDelay':
+        assertDuration(value, configPath, TIMER_DELAY_MAX_MS, 'the longest a timer waits')
+        next[key] = value
+        break
       case 'serverReplayBuffer':
       case 'serverReplayBufferBinary':
       case 'clientReplayBuffer':
       case 'clientReplayBufferBinary':
-      case 'connectTtl':
       case 'bufferLimit':
       case 'bufferLimitBinary':
-      case 'messageLimit':
-      case 'sseFlushThrottle':
-      case 'ssePostIdleFlushDelay':
-        assertUsage(typeof value === 'number', `\`${configPath}\` should be a number`)
-        assertUsage(value >= 0, `\`${configPath}\` should be a non-negative number`)
+        assertUsage(
+          typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
+          `\`${configPath}\` should be a non-negative safe integer`,
+        )
         ;(next as Record<string, unknown>)[key] = value
         break
       default:
@@ -520,18 +584,35 @@ function applyChannelConfig(val: unknown): void {
 
 function applyBroadcastConfig(val: unknown): void {
   assertUsage(isObject(val), 'config.broadcast should be an object')
+  const next: BroadcastConfigUser = {}
   for (const [key, value] of Object.entries(val)) {
     if (key === 'transport') {
       assertUsage(
-        isObject(value) && typeof (value as any).send === 'function' && typeof (value as any).listen === 'function',
-        'config.broadcast.transport must be a BroadcastTransport with send() and listen() methods',
+        isObject(value) &&
+          (['send', 'listen', 'sendBinary', 'listenBinary'] as const).every(
+            (method) => typeof value[method] === 'function',
+          ),
+        'config.broadcast.transport must be a BroadcastTransport with send(), listen(), sendBinary() and listenBinary() methods',
       )
-      configState.broadcast.transport = value as BroadcastTransport
-      installBroadcastAdapter(() => new DefaultBroadcastAdapter(value as BroadcastTransport))
+      next.transport = value as BroadcastTransport
     } else {
       assertUsage(false, `Unknown config.broadcast.${key}`)
     }
   }
+  configState.broadcast = next
+  if (next.transport) configureBroadcastTransport(next.transport)
+}
+
+function applyRoomConfig(val: unknown): void {
+  assertUsage(isObject(val), 'config.room should be an object')
+  const next: RoomConfigUser = {}
+  for (const [key, value] of Object.entries(val)) {
+    const configPath = `config.room.${key}`
+    assertUsage(key === 'emptyTimeout' || key === 'departureTimeout', `Unknown ${configPath}`)
+    assertRoomTimeout(value, configPath)
+    next[key] = value
+  }
+  configState.room = next
 }
 
 function validateStreamTransport(val: unknown, configPath: string): StreamTransport {

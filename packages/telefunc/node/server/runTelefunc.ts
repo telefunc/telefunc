@@ -86,11 +86,9 @@ function createHttpResponse({
   body: ResponseBody
   err?: unknown
 }): HttpResponse {
-  headers.push(['Content-Type', contentType])
-
   return {
     statusCode,
-    headers,
+    headers: [...headers, ['Content-Type', contentType]],
     get contentType() {
       // TO-DO/next-major-release: remove
       assertWarning(
@@ -157,8 +155,8 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
   try {
     if (typeof responseBody === 'string') {
       const writer = writable.getWriter()
-      writer.write(encodeForWebStream(responseBody))
-      writer.close()
+      await writer.write(encodeForWebStream(responseBody))
+      await writer.close()
       return
     }
     // Body is typically a Web `ReadableStream` here (Web-adapter producer);
@@ -174,12 +172,14 @@ async function pipeToStreamWritableWeb(responseBody: ResponseBody, writable: Str
 
 async function pipeToStreamWritableNode(responseBody: ResponseBody, writable: StreamWritableNode): Promise<void> {
   try {
+    const { Readable, pipeline, finished } = getStreamNodeModule()
     if (typeof responseBody === 'string') {
-      writable.write(responseBody)
-      writable.end()
+      // Unlike `end()`'s callback, settles when the client disconnects, and observes the destination's `error` event.
+      const done = finished(writable, { readable: false, cleanup: true })
+      writable.end(responseBody)
+      await done
       return
     }
-    const { Readable, pipeline } = getStreamNodeModule()
     // Body is typically a Node `Readable` here (Node-adapter producer); fall
     // back to `Readable.fromWeb` for the cross-runtime case where a Web body
     // is piped to a Node `Writable`.
@@ -315,14 +315,12 @@ async function runTelefunc_({
     if (parsed.isSseRequest) {
       return createHttpResponse(parsed.sseResponse)
     }
-    const { telefunctionKey, telefuncFilePath, telefunctionName, streamTransport, requestExtensions } = parsed
+    const { telefunctionKey, telefuncFilePath, telefunctionName } = parsed
     objectAssign(runContext, {
       telefunctionKey,
       telefuncFilePath,
       telefunctionName,
-      streamTransport,
-      requestExtensions,
-      reviveArgs: parsed.reviveArgs,
+      resolveRequest: parsed.resolveRequest,
     })
   }
 
@@ -340,10 +338,16 @@ async function runTelefunc_({
     objectAssign(runContext, { telefunction })
   }
 
-  // Revive arguments now that we know the telefunction — per-value ServerReviverContext carries the
-  // shield validators built from the telefunction's argumentShields metadata, so revivers have them
-  // at revive time and can wire inline validation symmetric to the response-side replacers.
-  objectAssign(runContext, { telefunctionArgs: runContext.reviveArgs(runContext.telefunction) })
+  // Transform and revive the preserved envelope only after the target module has registered its
+  // request types. Per-value contexts also carry the telefunction's shield validators.
+  {
+    const resolved = runContext.resolveRequest(runContext.telefunction)
+    if (resolved.isMalformedRequest) {
+      return createHttpResponse({ ...malformedRequest })
+    }
+    const { telefunctionArgs, streamTransport, requestExtensions } = resolved
+    objectAssign(runContext, { telefunctionArgs, streamTransport, requestExtensions })
+  }
 
   {
     const { isValidRequest } = applyShield(runContext)

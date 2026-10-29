@@ -1,16 +1,22 @@
 export {
   onMixedForClose,
   onCloseGen,
+  onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onKeptChannel,
+  onAbortedChannel,
+  onCloseUnreturned,
   onCloseFn,
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
   onGcPassedFnOnClose,
+  onEditDocument,
 }
 
-import { Channel, getContext } from 'telefunc'
+import { EventEmitter } from 'node:events'
+import { BroadcastChannel, Channel, getContext } from 'telefunc'
 import { cleanupState } from '../../cleanup-state'
 import { sleep } from '../../sleep'
 
@@ -27,6 +33,47 @@ async function* onCloseGen(): AsyncGenerator<string> {
   } finally {
     cleanupState.closeGenFinallyRan = 'true'
   }
+}
+
+const updates = new EventEmitter()
+
+async function onIdleGen(wakeOn: 'onClose' | 'signal', withChannel: boolean) {
+  const context = getContext()
+  let wake!: () => void
+  const nextUpdate = new Promise<void>((resolve) => (wake = resolve))
+  cleanupState.idleGenOnClose = '0'
+  cleanupState.idleGenSignal = 'false'
+  context.onClose(() => {
+    cleanupState.idleGenOnClose = String(Number(cleanupState.idleGenOnClose) + 1)
+    if (wakeOn === 'onClose') wake()
+  })
+  context.signal.addEventListener(
+    'abort',
+    () => {
+      cleanupState.idleGenSignal = 'true'
+      if (wakeOn === 'signal') wake()
+    },
+    { once: true },
+  )
+
+  const generator = (async function* () {
+    updates.on('update', wake)
+    cleanupState.idleGenListeners = String(updates.listenerCount('update'))
+    try {
+      yield 'snapshot'
+      cleanupState.idleGenWaiting = 'true'
+      // No timer or test-triggered update: only context closure can wake this wait.
+      await nextUpdate
+    } finally {
+      updates.off('update', wake)
+      cleanupState.idleGenListeners = String(updates.listenerCount('update'))
+      cleanupState.idleGenFinally = 'true'
+    }
+  })()
+
+  const channel = withChannel ? new Channel<(message: 'ping') => boolean, never>({ ack: true }) : null
+  channel?.listen(() => context.signal.aborted)
+  return { generator, channel: channel?.client ?? null }
 }
 
 async function onCloseStream(): Promise<ReadableStream<Uint8Array>> {
@@ -54,6 +101,43 @@ async function onCloseChannel() {
     cleanupState.closeChannel_onCloseErr = err ? ((err as any).message ?? 'error') : 'none'
   })
   return ch.client
+}
+
+/** cleanupState: keptChannel = 'open' once its page's wire reached the server, then its onClose error's message, or 'none'. */
+async function onKeptChannel() {
+  const ch = new Channel<never, never>()
+  cleanupState.keptChannel = 'pending'
+  ch.onOpen(() => {
+    cleanupState.keptChannel = 'open'
+  })
+  ch.onClose((err) => {
+    cleanupState.keptChannel = err ? err.message : 'none'
+  })
+  return ch.client
+}
+
+async function onAbortedChannel() {
+  const ch = new Channel<never, never>()
+  ch.abort('before-return')
+  return ch.client
+}
+
+/** Closes a `Channel` and a `BroadcastChannel` this telefunction never returns: how long each `close()` takes, and
+ *  what its `onClose` receives. */
+async function onCloseUnreturned() {
+  const closeOf = async (channel: Channel<never, never> | BroadcastChannel) => {
+    let onCloseErr = 'not-fired'
+    channel.onClose((err) => {
+      onCloseErr = err ? err.message : 'none'
+    })
+    const start = performance.now()
+    await channel.close()
+    return { ms: Math.round(performance.now() - start), onCloseErr }
+  }
+  return {
+    channel: await closeOf(new Channel<never, never>()),
+    broadcast: await closeOf(new BroadcastChannel({ key: `close-unreturned:${crypto.randomUUID()}` })),
+  }
 }
 
 async function onCloseFn(callback: () => void) {
@@ -188,4 +272,17 @@ async function onMixedForClose(callback: (msg: string) => void) {
   }
 
   return { generator, stream, channel: ch.client, fn }
+}
+
+/** Opens the document for editing, releasing its lock once the request is over. */
+async function onEditDocument() {
+  getContext().onClose(async () => {
+    await releaseLock()
+  })
+  return { text: 'Draft' }
+}
+
+/** The lock server is down. */
+async function releaseLock() {
+  throw new Error('Could not release the lock')
 }

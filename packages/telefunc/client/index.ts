@@ -10,23 +10,24 @@ export { ShieldValidationError, isShieldValidationError } from '../shared/Shield
 export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'
 export { NetworkError } from '../shared/NetworkError.js'
-export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel-errors.js'
+export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel/channelErrors.js'
 export type {
-  Room,
+  ClientRoom as Room,
   RoomInfo,
-  RoomOptions,
   RoomMeta,
-  JoinOptions,
+  ClientJoinOptions as JoinOptions,
+  PublishOptions,
   ParticipantMeta,
   LocalParticipant,
   RemoteParticipant,
   Sender,
+  RoomSendReceipt,
+  RoomAckReceipt,
   LeaveCause,
+  BinaryFrameInfo,
+  BinaryPublishOptions,
   RoomSnapshotView,
   ParticipantSnapshotView,
-  RoomIdentitySnapshotView,
-  IdentityGroupView,
-  BinaryFrameInfo,
 } from '../wire-protocol/room/types.js'
 
 export type { TelefuncClientExtension } from './extensions.js'
@@ -36,6 +37,6 @@ export type {
   ReviverType,
   ClientReplacerContext,
   ClientReviverContext,
-} from '../wire-protocol/types.js'
+} from '../wire-protocol/values/types.js'
 
 export { remoteTelefunctionCall as __remoteTelefunctionCall } from './remoteTelefunctionCall.js'
