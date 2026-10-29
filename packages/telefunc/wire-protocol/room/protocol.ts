@@ -1,266 +1,66 @@
-// The room wire protocol — everything both sides must agree on and nothing that behaves:
-// pub/sub + KV keys, stored records, wire envelopes, the binary frame format, and want
-// declarations. `RoomState` (state.ts) applies these events; `ServerRoom`/`ClientRoom` move them.
-
-export {
-  ROOM_KEY_NAMESPACE,
-  roomCtrlKey,
-  roomTextKey,
-  roomMemberDataKey,
-  roomMemberTrackKey,
-  roomDmKey,
-  roomRetainedTextKey,
-  roomRetainedBinaryKey,
-  roomRetainedBinaryPrefix,
-  bytesToBase64,
-  base64ToBytes,
-  roomConfigKvKey,
-  roomIdFromConfigKey,
-  roomMemberKvKey,
-  roomMemberKvPrefix,
-  roomIdentityMemberKvKey,
-  roomIdentityKvPrefix,
-  roomIdentityRoomKvPrefix,
-  sizeToWire,
-  sizeFromWire,
-  stampNewer,
-  uuidToBytes,
-  frameWithMemberId,
-  unframeMemberId,
-  hasRoomTag,
-  normalizeJoinOptions,
-  mergeAttributes,
-  errorMessage,
-  leaveCauseFromWire,
-  leaveCauseToWire,
-  DEFAULT_TRACK,
-  SUB_BINARY_MEMBERS_MAX,
-  SUB_BINARY_TRACKS_MAX,
-  emptyTrackWants,
-  mergeTrackWants,
-  wantsTrack,
-  wantsAnyBinary,
-  binaryWantsCovers,
-  sanitizeBinaryWants,
-}
+// Room wire envelopes, requests and notices, shared by client and server.
+export { hasRoomTag, joinedMember, inboxMessageFromWire, dmNotice, leaveCauseFromWire, leaveCauseToWire }
 export type {
-  RoomConfigRecord,
-  RoomMemberRecord,
   MemberSnapshot,
   RoomSnapshotMetadata,
   ParticipantStubMetadata,
+  RemoteParticipantMetadata,
   RoomEnvelope,
   RoomRosterEvent,
+  RoomJoinedEvent,
   RoomDemandEvent,
   RoomCtrlEnvelope,
-  RoomDataEnvelope,
+  RoomMetaEntry,
+  RoomMetaUpdate,
+  RoomDataEvent,
+  SenderStamp,
   RoomDataPublish,
-  RoomAnnounceEnvelope,
   RoomDmEnvelope,
-  RoomDmAckEnvelope,
-  DmReply,
+  MemberMetaUpdate,
+  WholeMemberUpdate,
+  RoomFailure,
+  RoomResult,
   RoomStubRequest,
   ParticipantStubRequest,
+  MemberMutationRequest,
   ParticipantStubNotice,
-  ReqOkAck,
-  ReqJoinAck,
-  ReqPublishAck,
-  ReqDmAck,
   MemberWants,
-  TrackWants,
-  BinaryWants,
+  InboxMessage,
+  WireLeaveCause,
 }
 
-import { assert, assertUsage } from '../../utils/assert.js'
-import { isObject } from '../../utils/isObject.js'
-import type { ChannelPublishInfo } from '../channel.js'
-import type {
-  BinaryPublishOptions,
-  JoinOptions,
-  LeaveCause,
-  ParticipantMeta,
-  RoomMeta,
-  RoomSendReceipt,
-} from './types.js'
-
-// ---------------------------------------------------------------------------
-// Keys & records
-// ---------------------------------------------------------------------------
-
-/** Reserved pub/sub + KV namespace for rooms. Don't use it for `BroadcastChannel` keys. */
-const ROOM_KEY_NAMESPACE = 'telefunc:room:'
-
-/** Pub/sub key carrying a room's control lane: presence & lifecycle events plus room-authored
- *  announcements. Low-rate, subscribed by every observer — never carries participant data. */
-function roomCtrlKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}`
-}
-/** Pub/sub key carrying the room's text data in shared mode — its own lane, so holders that
- *  only observe presence never receive it. */
-function roomTextKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:t`
-}
-/** Pub/sub key carrying one member's data: default-track binary always (per-publisher keys
- *  make delivery member-selective at the source), text too in isolated mode. */
-function roomMemberDataKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
-}
-/** Pub/sub key carrying one member's named binary track. Per-(member, track) keys make delivery
- *  track-selective at the source: a holder that stops watching a track drops this subscription,
- *  and the publisher's `receivers` hits 0 when nobody anywhere holds it — bytes stop flowing at
- *  every hop, not just at delivery. */
-function roomMemberTrackKey(roomId: string, memberId: string, track: string): string {
-  return `${roomMemberDataKey(roomId, memberId)}:t:${track}`
-}
-/** Pub/sub key carrying one member's private inbox — only the member's owning node subscribes. */
-function roomDmKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:dm:${memberId}`
-}
-/** KV key holding the room's last `publish(data, { retain: true })` — replayed to new text subscribers. */
-function roomRetainedTextKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:rt`
-}
-/** KV key holding the last `publishBinary(data, { retain: true })` on one (member, track) — replayed
- *  (base64-encoded, since KV values are strings) to a new subscriber before live frames. Track is
- *  `DEFAULT_TRACK` (`''`) for the unnamed lane. */
-function roomRetainedBinaryKey(roomId: string, memberId: string, track: string): string {
-  return `${roomRetainedBinaryPrefix(roomId)}${memberId}:${track}`
-}
-/** KV prefix under which all of a room's retained binary frames live (`keys()` enumerates them). */
-function roomRetainedBinaryPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:rb:`
-}
-
-/** Uint8Array ⇄ base64, for stashing binary frames in string-only KV. `btoa`/`atob` are global on
- *  Node 16+ and edge runtimes; the chunked build avoids the call-stack limit on large keyframes. */
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-  return btoa(binary)
-}
-function base64ToBytes(b64: string): Uint8Array {
-  const binary = atob(b64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
-  return bytes
-}
-/** KV key of the room's config record. */
-function roomConfigKvKey(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:config`
-}
-/** Inverse of `roomConfigKvKey` — `null` for keys that aren't room config records. */
-function roomIdFromConfigKey(key: string): string | null {
-  if (!key.startsWith(ROOM_KEY_NAMESPACE) || !key.endsWith(':config')) return null
-  return key.slice(ROOM_KEY_NAMESPACE.length, -':config'.length)
-}
-/** KV key of one member record. */
-function roomMemberKvKey(roomId: string, memberId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:m:${memberId}`
-}
-/** KV prefix under which all of a room's member records live. Member IDs are UUIDs, which is
- *  how member records are told apart from keys of other rooms whose ID shares the prefix. */
-function roomMemberKvPrefix(roomId: string): string {
-  return `${ROOM_KEY_NAMESPACE}${roomId}:m:`
-}
-
-/** Reserved KV namespace for the identity→membership index — kept separate from
- *  `ROOM_KEY_NAMESPACE` so a room's member-record scan (`roomMemberKvPrefix`) never sweeps it. */
-const IDENTITY_KEY_NAMESPACE = 'telefunc:identity:'
-
-/** KV key marking one membership of an app identity: one key per (room, identity, member), so
- *  concurrent joins of the same identity never clobber each other (a list value would — the KV has
- *  no compare-and-set). The index is a hint — written before the member record and cleared after
- *  it, so it may transiently over-include but never silently under-includes; readers confirm each
- *  member ID against its record (identity match), which makes phantoms impossible. Room and identity
- *  are encoded so a `:` in either can't collide across pairs; the member ID is a delimiter-free UUID. */
-function roomIdentityMemberKvKey(roomId: string, identity: string, memberId: string): string {
-  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:${encodeURIComponent(identity)}:${memberId}`
-}
-/** KV prefix enumerating every membership of one identity in one room (`keys()` → member IDs). */
-function roomIdentityKvPrefix(roomId: string, identity: string): string {
-  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:${encodeURIComponent(identity)}:`
-}
-/** KV prefix enumerating every identity-index key of a room — for wholesale cleanup on close. */
-function roomIdentityRoomKvPrefix(roomId: string): string {
-  return `${IDENTITY_KEY_NAMESPACE}${encodeURIComponent(roomId)}:`
-}
-
-/** Stored at `roomConfigKvKey`. `size: null` encodes `Infinity` (not JSON-safe). `at`/`by` is
- *  the last-writer-wins stamp of the latest `Room.update()` (see `applyRoomUpdate`). */
-type RoomConfigRecord = {
-  meta: RoomMeta
-  size: number | null
-  isolated: boolean
-  at: number
-  by: string
-}
-
-/** Later timestamp wins; equal timestamps break deterministically by writer ID. */
-function stampNewer(a: { at: number; by: string }, b: { at: number; by: string }): boolean {
-  return a.at > b.at || (a.at === b.at && a.by > b.by)
-}
-
-/** Stored at `roomMemberKvKey`. `seenAt` is the liveness timestamp: the owning node refreshes
- *  it every `ROOM_HEARTBEAT_INTERVAL_MS`; records older than `ROOM_MEMBER_TTL_MS` are reaped. */
-type RoomMemberRecord = {
-  meta: ParticipantMeta
-  joinedAt: number
-  seenAt: number
-  /** Monotonic meta revision, issued by the member's single owner — orders `p-meta` events. */
-  metaSeq: number
-  /** App identity stamped at (server-side) join — absent: none. Immutable per member. */
-  identity?: string
-  /** Named binary tracks this member has published — appended by the owner before the first
-   *  frame of each track, so late observers can subscribe every track they can't name. */
-  tracks?: string[]
-  /** An off-presence participant (`join({ hidden: true })`) — a member for routing/discovery but
-   *  excluded from presence (count, roster, `onJoin`/`onLeave`/`onEmpty`). Read via
-   *  `getParticipants({ hidden: true })`. */
-  hidden?: boolean
-}
-
-function sizeToWire(size: number): number | null {
-  return Number.isFinite(size) ? size : null
-}
-function sizeFromWire(size: number | null): number {
-  return size ?? Infinity
-}
-
-// ---------------------------------------------------------------------------
-// Wire shapes
-// ---------------------------------------------------------------------------
+import { isRecord, ownLeaveCause, removedCause } from './model.js'
+import type { TrackKey } from './binary.js'
+import type { LeaveCause, ParticipantMeta } from './types.js'
 
 type MemberSnapshot = {
   id: string
   meta: ParticipantMeta
   joinedAt: number
   metaSeq: number
-  /** App identity stamped at (server-side) join — `null`/absent: none. Immutable per member. */
   identity?: string | null
-  /** Named binary tracks the member has published (see `RoomMemberRecord.tracks`). */
-  tracks?: string[]
-  /** Whether this participant is off-presence — carried on the roster so observers exclude it from
-   *  presence and can surface it via `getParticipants({ hidden: true })` (see `RoomMemberRecord.hidden`). */
   hidden?: boolean
+  /** The page holding the member can't be reached, and the room waits for it. */
+  disconnected?: true
 }
 
-/** Serializer metadata of a `Room` crossing the wire. Carries only scalars — the roster itself
- *  streams as a `RoomRosterEvent` once the stub's peer attaches, so serialization stays O(1)
- *  no matter how many members the room has. */
+/** Scalars only: the roster streams once the stub's peer attaches, so serializing a room is O(1) in members. */
 type RoomSnapshotMetadata = {
   channelId: string
   roomId: string
-  meta: RoomMeta
-  size: number | null
-  isolated: boolean
+  meta: RoomMetaEntry[]
   closed: boolean
   count: number
-  /** LWW stamp of the config the snapshot reflects — seeds `applyRoomUpdate` ordering. */
-  stamp: { at: number; by: string }
-  /** Tail mode (`Room.get(id, { tail: true })`): the client holds relayed text until its first
-   *  `subscribe()`, so history read after serialization can be stitched to the live stream. */
-  tail?: boolean
+  /** How many meta writes `meta` reflects, which orders later updates. */
+  metaSeq: number
+  /** The server's `config.channel.bufferLimit`, which bounds the DMs a participant holds before its first
+   *  `listen()`. */
+  bufferLimit: number
+  maxFrameBytes?: number
 }
+
+/** Serializer metadata of a `RemoteParticipant` crossing the wire: its room, revived first, and the member snapshot. */
+type RemoteParticipantMetadata = MemberSnapshot & { room: unknown; identity: string | null }
 
 /** Serializer metadata of a `LocalParticipant` crossing the wire. */
 type ParticipantStubMetadata = {
@@ -268,320 +68,192 @@ type ParticipantStubMetadata = {
   roomId: string
   id: string
   meta: ParticipantMeta
-  joinedAt: number
   selfDelivery: boolean
   identity: string | null
+  /** As `RoomSnapshotMetadata.bufferLimit`. */
+  bufferLimit: number
+  maxFrameBytes?: number
 }
 
-/** Presence & lifecycle events, published on the room's control key by whichever node caused them.
- *
- *  The origin applies its own event locally (for deterministic same-node semantics) and then
- *  receives it back via the pub/sub echo. `join`/`leave`/`closed` are naturally idempotent;
- *  `p-meta` orders by the owner-issued `seq`, `update` by its `at`/`by` stamp — echoes and
- *  concurrent writers converge to the same winner on every node, whatever the arrival order. */
+/** Control-lane events. The origin applies its own event and later absorbs the echo: `join`/`leave`/`closed` are
+ *  idempotent, `p-meta` and `update` order by `seq`, so every instance converges. */
 type RoomCtrlEnvelope =
   | { __r: 'join'; id: string; meta: ParticipantMeta; joinedAt: number; identity?: string; hidden?: boolean }
-  | { __r: 'leave'; id: string; cause?: 'removed' | 'disconnected'; reason?: unknown }
-  | { __r: 'p-meta'; id: string; meta: ParticipantMeta; prev: ParticipantMeta; seq: number }
-  | { __r: 'update'; meta: RoomMeta; prev: RoomMeta; size: number | null; at: number; by: string }
-  // A member's first publish on a new named track — announced before the frame, so live
-  // all-track subscribers bring up the track-key subscription (idempotent, like join).
-  | { __r: 'track'; id: string; track: string }
-  // Track-demand gossip (`onDemand`): a node announces that its local demand for one member's
-  // (member, track) stream turned on/off, tagged with its instance id. The member's owning node
-  // aggregates these across nodes into a global demand count — node-to-node only, never relayed
-  // to clients. `track` is `DEFAULT_TRACK` for the plain `publishBinary()` lane.
-  | { __r: 'want'; member: string; track: string; node: string; on: boolean }
+  | ({ __r: 'leave'; id: string; hidden?: boolean } & WireLeaveCause)
+  | ({ __r: 'p-meta'; id: string; hidden?: boolean } & MemberMetaUpdate)
+  | RoomMetaUpdate
+  // An instance whose demand lane delivers, from now on or again, asks every other one for its demand; one that missed
+  // a page of another's asks that one (`of`).
+  | { __r: 'demand-ask'; instance: string; of?: string }
   | { __r: 'closed' }
 
-/** A participant's message. Published on the room's text key (shared mode) or the member's own
- *  key (isolated mode). `fromMeta` is the sender's meta as verified by the sender's own node —
- *  never client-supplied — so any receiver can surface a correct sender even before its roster
- *  view catches up (see `RoomState.applyData`). */
-type RoomDataEnvelope = { __r: 'data'; from: string; fromMeta: ParticipantMeta; fromIdentity?: string; data: unknown }
+/** A room meta key with its place: the `meta:seq` the write that added it read, and its index in that write. */
+type RoomMetaEntry = [key: string, value: unknown, placeSeq: number, placeIndex: number]
 
-/** What a client sends upward to publish — its node verifies membership and stamps `fromMeta`. */
+/** The room meta at `seq`, whole, or as the write at `seq` changed it: a key it removed as `[key]`. */
+type RoomMetaUpdate =
+  | { __r: 'update'; seq: number; meta: RoomMetaEntry[] }
+  | { __r: 'update'; seq: number; changes: (RoomMetaEntry | [key: string])[] }
+
+/** A `LeaveCause` on the wire: no `cause` means the member left on its own. */
+type WireLeaveCause = { cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
+/** The sender as its instance knew it at the send: its meta at `fromMetaSeq`, stamped by that instance, never the
+ *  client. */
+type SenderStamp = { fromMeta: ParticipantMeta; fromMetaSeq: number; fromIdentity?: string; fromDisconnected?: true }
+/** A member's message as a client gets it: stamped only while the client can't name the sender yet. */
+type RoomDataEvent = { __r: 'data'; from: string; data: unknown } & Partial<SenderStamp>
+/** What a client sends upward to publish. Its instance verifies membership and stamps `fromMeta`. */
 type RoomDataPublish = { __r: 'data'; from: string; data: unknown; retain?: boolean }
-
-/** A room-authored message (`Room.announce()`) — no sender, delivered to `onAnnounce()`. */
+/** A room-authored message (`Room.announce()`), on the semantic lane so it shares one order with member text. */
 type RoomAnnounceEnvelope = { __r: 'announce'; data: unknown }
+type RoomEnvelope = RoomCtrlEnvelope | RoomDataEvent | RoomAnnounceEnvelope
 
-type RoomEnvelope = RoomCtrlEnvelope | RoomDataEnvelope | RoomAnnounceEnvelope
+/** Sent when a stub opens, a part per frame, numbered from 0, each part reflecting every event relayed before it;
+ *  `more` on all but the last. A failed read says so, so roster getters don't wait forever. `rewound`: a failover
+ *  rewound the room's meta seqs, so the next whole meta of the room and of each member applies, whatever its seq. */
+type RoomRosterEvent =
+  | { __r: 'roster'; members: MemberSnapshot[]; part: number; more?: true }
+  | { __r: 'roster-error' }
+  | { __r: 'rewound' }
 
-/** The authoritative roster, pushed once per stub after its peer attaches — never published on
- *  the adapter. Position-in-stream consistency: every event relayed before it is already
- *  reflected in it; later events apply incrementally on top. */
-type RoomRosterEvent = { __r: 'roster'; members: MemberSnapshot[] }
+/** To the client whose `req-join` (`reqId`) admitted the member, before any event naming it. */
+type RoomJoinedEvent = { __r: 'joined'; reqId: number; id: string }
 
-/** Global demand for one of a member's own published tracks, pushed to that member's stub
- *  (`onDemand`) whenever the owning node's aggregate count changes. `track` is `null` for the
- *  default `publishBinary()` lane. `count` is the approximate number of interested subscribers. */
-type RoomDemandEvent = { __r: 'demand'; member: string; track: string | null; count: number }
+/** Global demand for one of a member's own published tracks, pushed on aggregate state changes; a reattached client
+ *  gets the member's whole wanted set, since its offline buffer may have dropped changes. */
+type RoomDemandEvent =
+  | { __r: 'demand'; member: string; track: TrackKey; wanted: boolean }
+  | { __r: 'demand-state'; member: string; tracks: TrackKey[] }
 
-/** A direct message, published on the target's inbox key (`roomDmKey`) — transport-level
- *  privacy: only the target's owning node subscribes, only its holder receives the relay.
- *  `to` lets a holder of several participants route the message to the right one. `ackId` is
- *  present iff the sender wants a reply (`send(…, { ack: true })`) — the recipient's node routes
- *  the handler's result back as a `RoomDmAckEnvelope` on the sender's inbox. */
+/** On the recipient's inbox lane, which only its owner subscribes. `ackId` asks for a reply on the sender's inbox. A
+ *  room-authored one has no sender (`from: ''`, `fromMeta: null`); a client that names the sender gets it unstamped. */
 type RoomDmEnvelope = {
   __r: 'dm'
   to: string
   from: string
-  fromMeta: ParticipantMeta | null
+  fromMeta?: ParticipantMeta | null
+  fromMetaSeq?: number
   fromIdentity?: string
+  fromDisconnected?: true
   data: unknown
   ackId?: string
 }
 
-/** The reply to an `{ ack: true }` DM, published back on the *sender's* inbox key (`roomDmKey`) —
- *  which the sender's own node already subscribes to. `to` is the original sender; `ackId`
- *  correlates it to the pending `send`. Carries the recipient's handler return, or its error. */
-type RoomDmAckEnvelope = { __r: 'dm-ack'; to: string; ackId: string } & DmReply
+/** A member's meta and connection at `seq`, whole, or as the write at `seq` changed them: a merge, with a key it
+ *  removed as `undefined`, or the connection of the page holding the member. */
+type MemberMetaUpdate =
+  | { seq: number; meta: ParticipantMeta; disconnected?: true }
+  | { seq: number; attrs: ParticipantMeta }
+  | { seq: number; connected: boolean }
+type WholeMemberUpdate = Extract<MemberMetaUpdate, { meta: ParticipantMeta }>
 
-/** The result of handling an `{ ack: true }` DM: the recipient's `listen` return, or its throw. */
-type DmReply = { ok: true; result: unknown } | { ok: false; err: string }
+/** A safe Room failure: an Abort's value, or a caller-facing message tagged with the error it rejects as. */
+type RoomFailure =
+  | { ok: false; kind: 'abort'; abortValue: unknown }
+  | { ok: false; kind: 'shield' | 'overflow' | 'error'; message: string }
 
-/** Client→server requests on a `Room` stub channel. `id` identifies the sending participant.
- *  `sub-binary` declares the client's binary wants (full replace, see `BinaryWants`);
- *  `sub-text` declares member-scoped text wants — the room-level (all) text want rides the
- *  standard broadcast-subscription ctrl instead, keeping its synchronous-declaration fence. */
-type RoomStubRequest =
-  | { __r: 'req-join'; meta: ParticipantMeta; selfDelivery: boolean }
-  | { __r: 'req-leave'; id: string }
-  | { __r: 'req-set-meta'; id: string; meta: ParticipantMeta }
-  | { __r: 'req-set-attrs'; id: string; attrs: ParticipantMeta }
-  | { __r: 'req-dm'; id: string; to: string; data: unknown; ack?: boolean }
-  // A client-held member's reply to an `{ ack: true }` DM it received — routed back to the sender.
-  | ({ __r: 'dm-reply'; id: string; ackId: string } & DmReply)
-  | { __r: 'sub-binary'; wants: BinaryWants }
-  | { __r: 'sub-text'; members: string[] }
+/** A Room answer: to a request or publish, or an ack DM's reply; the value the call resolves to, or what it rejects with. */
+type RoomResult = { ok: true; value: unknown } | RoomFailure
 
-/** Client→server requests on a standalone `LocalParticipant` stub channel. (An ack DM this
- *  participant receives replies through the channel's own ack, so there is no `dm-reply` here —
- *  unlike the shared room stub, which multiplexes many members and needs the explicit reply.) */
-type ParticipantStubRequest =
-  | { __r: 'req-publish'; data: unknown; retain?: boolean }
+/** A member's meta, attributes and DM requests, as a participant stub carries them. */
+type MemberMutationRequest =
   | { __r: 'req-set-meta'; meta: ParticipantMeta }
   | { __r: 'req-set-attrs'; attrs: ParticipantMeta }
   | { __r: 'req-dm'; to: string; data: unknown; ack?: boolean }
+
+/** Client→server requests on a room stub; `id` is the acting member. The room-wide text want rides the Broadcast
+ *  subscription, which reattaches before `onOpen`. */
+type RoomStubRequest =
+  | { __r: 'req-join'; reqId: number; meta: ParticipantMeta; selfDelivery: boolean }
+  | { __r: 'req-leave'; id: string }
+  | (MemberMutationRequest & { id: string })
+  | { __r: 'dm-reply'; ackId: string; reply: RoomResult }
+  /** A `BinaryWantChange`, with `null` for `ALL`. */
+  | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
+  /** Changes only: announcements, and each member whose own want changed. */
+  | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }
+
+/** Client→server requests on a participant stub; an ack DM's reply is a `dm-reply`, as on a room stub. */
+type ParticipantStubRequest =
+  | { __r: 'req-publish'; data: unknown; retain?: boolean }
+  | MemberMutationRequest
   | { __r: 'req-leave' }
 
-/** Server→client notices on a standalone `LocalParticipant` stub channel. `dm`'s `ackId`, when
- *  present, asks the client to reply (`send(…, { ack: true })`) — see `RoomDmEnvelope`. */
+/** Server→client notices on a participant stub. `rewound`: a failover rewound the participant's meta seq, so its next
+ *  whole meta applies, whatever its seq. */
 type ParticipantStubNotice =
-  | { __r: 'left'; cause?: 'removed' | 'disconnected' | 'closed'; reason?: unknown }
-  | { __r: 'p-meta'; meta: ParticipantMeta }
+  | ({ __r: 'left' } & WireLeaveCause)
+  | ({ __r: 'p-meta' } & MemberMetaUpdate)
+  | { __r: 'rewound' }
   | { __r: 'dm'; from: string; fromMeta: ParticipantMeta | null; fromIdentity?: string; data: unknown; ackId?: string }
-  | { __r: 'demand'; track: string | null; count: number }
+  | { __r: 'demand'; track: TrackKey; wanted: boolean }
+  | { __r: 'demand-state'; tracks: TrackKey[] }
 
-/** Which members' streams a holder wants on the text lane — `all` for room-level listeners,
- *  or a specific member set for participant-scoped ones. */
-type MemberWants = { all: boolean; members: string[] }
+/** Which members' streams a holder wants on the text lane: `all` for room-level listeners, or a specific member set for
+ *  participant-scoped ones. */
+type MemberWants = { all: boolean; members: ReadonlySet<string> }
 
-type ReqOkAck = { ok: true } | { ok: false; err: string }
-type ReqJoinAck = { ok: true; id: string; joinedAt: number } | { ok: false; err: string }
-type ReqPublishAck = { ok: true; ack: ChannelPublishInfo } | { ok: false; err: string }
-/** The stub's answer to a client `req-dm`: a delivery receipt for a plain send, or the recipient's
- *  reply for `{ ack: true }`, or an error. */
-type ReqDmAck = { ok: true; ack: RoomSendReceipt } | { ok: true; reply: unknown } | { ok: false; err: string }
-
-/** Decode a leave event's cause — an absent wire cause means a voluntary leave. */
-function leaveCauseFromWire(event: { cause?: 'removed' | 'disconnected'; reason?: unknown }): LeaveCause {
-  if (event.cause === 'removed') {
-    return event.reason === undefined ? { type: 'removed' } : { type: 'removed', reason: event.reason }
-  }
-  return { type: event.cause === 'disconnected' ? 'disconnected' : 'left' }
+/** A delivered private message, as stamped by the sender's instance. `ackId` is present when the sender awaits a reply
+ *  (`send(…, { ack: true })`). */
+type InboxMessage = {
+  from: string
+  fromMeta: ParticipantMeta | null
+  fromIdentity: string | null
+  data: unknown
+  ackId?: string
 }
 
-/** Encode a cause into leave-event fields — `'left'` is the wire default and travels as nothing. */
-function leaveCauseToWire(cause: LeaveCause): { cause?: 'removed' | 'disconnected'; reason?: unknown } {
-  if (cause.type === 'removed')
+type WireDm = Omit<RoomDmEnvelope, '__r' | 'to'>
+
+function inboxMessageFromWire(dm: WireDm): InboxMessage {
+  const msg: InboxMessage = {
+    from: dm.from,
+    fromMeta: dm.fromMeta ?? null,
+    fromIdentity: dm.fromIdentity ?? null,
+    data: dm.data,
+  }
+  if (dm.ackId) msg.ackId = dm.ackId
+  return msg
+}
+
+function dmNotice(msg: InboxMessage): Extract<ParticipantStubNotice, { __r: 'dm' }> {
+  const notice: Extract<ParticipantStubNotice, { __r: 'dm' }> = {
+    __r: 'dm',
+    from: msg.from,
+    fromMeta: msg.fromMeta,
+    data: msg.data,
+  }
+  if (msg.fromIdentity !== null) notice.fromIdentity = msg.fromIdentity
+  if (msg.ackId) notice.ackId = msg.ackId
+  return notice
+}
+
+function leaveCauseFromWire(event: WireLeaveCause): LeaveCause {
+  if (event.cause === 'removed') return removedCause(event.reason)
+  return ownLeaveCause({ type: event.cause ?? 'left' })
+}
+
+function leaveCauseToWire(cause: LeaveCause): WireLeaveCause {
+  if (cause.type === 'removed') {
     return cause.reason === undefined ? { cause: 'removed' } : { cause: 'removed', reason: cause.reason }
-  if (cause.type === 'disconnected') return { cause: 'disconnected' }
-  return {}
+  }
+  return cause.type === 'left' ? {} : { cause: cause.type }
 }
 
-/** All room messages are tagged with `__r` — envelopes, requests, and notices alike. */
+/** The member a `join` event announces, before any meta write or track. */
+function joinedMember(event: Extract<RoomCtrlEnvelope, { __r: 'join' }>): MemberSnapshot {
+  const member: MemberSnapshot = {
+    id: event.id,
+    meta: event.meta,
+    joinedAt: event.joinedAt,
+    metaSeq: 0,
+    identity: event.identity ?? null,
+  }
+  if (event.hidden) member.hidden = true
+  return member
+}
+
+/** All room messages are tagged with `__r`: envelopes, requests, and notices alike. */
 function hasRoomTag(value: unknown): value is { __r: string } {
-  return isObject(value) && typeof value.__r === 'string'
-}
-
-/** Merge `attrs` into `meta` per key, returning a new object — the `setAttributes()` semantics.
- *  A value of `undefined` deletes its key (the serializer preserves `undefined` on the wire). */
-function mergeAttributes(meta: ParticipantMeta, attrs: ParticipantMeta): ParticipantMeta {
-  const next: ParticipantMeta = { ...meta }
-  for (const [key, value] of Object.entries(attrs)) {
-    if (value === undefined) delete next[key]
-    else next[key] = value
-  }
-  return next
-}
-
-/** Validates `join(meta, options)` arguments; returns the resolved `selfDelivery`. */
-function normalizeJoinOptions(meta: unknown, options: JoinOptions | undefined): boolean {
-  assertUsage(isObject(meta), 'join() meta should be an object')
-  assertUsage(options === undefined || isObject(options), 'join() options should be an object')
-  return options?.selfDelivery !== false
-}
-
-/** How errors travel inside `ok: false` acks. */
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
-// ---------------------------------------------------------------------------
-// Member IDs — UUIDs, framed as a fixed 16-byte prefix on binary messages
-// ---------------------------------------------------------------------------
-
-const MEMBER_ID_BYTE_LENGTH = 16
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const BYTE_TO_HEX: string[] = []
-for (let byte = 0; byte < 256; byte++) BYTE_TO_HEX.push(byte.toString(16).padStart(2, '0'))
-
-/** Canonical UUID string → 16 bytes. Returns `null` for anything else. */
-function uuidToBytes(uuid: string): Uint8Array | null {
-  if (!UUID_REGEX.test(uuid)) return null
-  const hex = uuid.split('-').join('')
-  const bytes = new Uint8Array(MEMBER_ID_BYTE_LENGTH)
-  for (let i = 0; i < MEMBER_ID_BYTE_LENGTH; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-  return bytes
-}
-
-/** First 16 bytes → canonical lowercase UUID string. */
-function bytesToUuid(bytes: Uint8Array): string {
-  let uuid = ''
-  for (let i = 0; i < MEMBER_ID_BYTE_LENGTH; i++) {
-    if (i === 4 || i === 6 || i === 8 || i === 10) uuid += '-'
-    uuid += BYTE_TO_HEX[bytes[i]!]!
-  }
-  return uuid
-}
-
-/** Binary frame flags (one byte after the member ID). */
-const FRAME_FLAG_KEY = 0b0000_0001
-const FRAME_FLAG_TRACK = 0b0000_0010
-const FRAME_FLAG_RETAIN = 0b0000_0100
-/** Track names stay tiny — they ride every frame. */
-const TRACK_MAX_BYTES = 64
-const frameTextEncoder = /* @__PURE__ */ new TextEncoder()
-const frameTextDecoder = /* @__PURE__ */ new TextDecoder()
-
-/** Binary relay format: `[16-byte member UUID][1-byte flags][?1-byte track length + track][payload]`.
- *  A plain publish costs one flag byte; named tracks (mic/camera/screen on one member lane) and
- *  the keyframe bit make media multiplexing first-class — no hand-rolled envelopes. */
-function frameWithMemberId(memberId: string, payload: Uint8Array, opts?: BinaryPublishOptions): Uint8Array {
-  const idBytes = uuidToBytes(memberId)
-  assert(idBytes, 'room member IDs are UUIDs')
-  let flags = opts?.keyFrame === true ? FRAME_FLAG_KEY : 0
-  if (opts?.retain === true) flags |= FRAME_FLAG_RETAIN
-  let trackBytes: Uint8Array | null = null
-  if (opts?.track !== undefined) {
-    assertUsage(typeof opts.track === 'string' && opts.track.length > 0, 'track should be a non-empty string')
-    trackBytes = frameTextEncoder.encode(opts.track)
-    assertUsage(trackBytes.byteLength <= TRACK_MAX_BYTES, `track should be at most ${TRACK_MAX_BYTES} bytes`)
-    flags |= FRAME_FLAG_TRACK
-  }
-  const headerLength = MEMBER_ID_BYTE_LENGTH + 1 + (trackBytes ? 1 + trackBytes.byteLength : 0)
-  const framed = new Uint8Array(headerLength + payload.byteLength)
-  framed.set(idBytes, 0)
-  framed[MEMBER_ID_BYTE_LENGTH] = flags
-  if (trackBytes) {
-    framed[MEMBER_ID_BYTE_LENGTH + 1] = trackBytes.byteLength
-    framed.set(trackBytes, MEMBER_ID_BYTE_LENGTH + 2)
-  }
-  framed.set(payload, headerLength)
-  return framed
-}
-
-/** Split a binary relay frame into sender, track, keyframe bit, and payload. `null` on truncation. */
-function unframeMemberId(
-  data: Uint8Array,
-): { from: string; payload: Uint8Array; track: string | null; keyFrame: boolean; retain: boolean } | null {
-  if (data.byteLength < MEMBER_ID_BYTE_LENGTH + 1) return null
-  const flags = data[MEMBER_ID_BYTE_LENGTH]!
-  const keyFrame = (flags & FRAME_FLAG_KEY) !== 0
-  const retain = (flags & FRAME_FLAG_RETAIN) !== 0
-  let track: string | null = null
-  let offset = MEMBER_ID_BYTE_LENGTH + 1
-  if (flags & FRAME_FLAG_TRACK) {
-    if (data.byteLength < offset + 1) return null
-    const trackLength = data[offset]!
-    offset += 1
-    if (data.byteLength < offset + trackLength) return null
-    track = frameTextDecoder.decode(data.subarray(offset, offset + trackLength))
-    offset += trackLength
-  }
-  return { from: bytesToUuid(data), payload: data.subarray(offset), track, keyFrame, retain }
-}
-
-// ---------------------------------------------------------------------------
-// Binary wants — per member, per track
-// ---------------------------------------------------------------------------
-
-/** The default (unnamed) track's slot in want sets and key routing — track names are non-empty
- *  by contract (`frameWithMemberId`), so `''` is unambiguous. */
-const DEFAULT_TRACK = ''
-
-/** Which of a publisher's tracks a holder wants: every track, or an exact set
- *  (`DEFAULT_TRACK` selects the unnamed lane). */
-type TrackWants = { all: boolean; tracks: string[] }
-
-/** A holder's complete binary wants. `everyMember` comes from room-level listeners and applies
- *  to all members; `members` adds participant-scoped wants on top. This one shape drives all
- *  three gates: the client's declaration, the server's upstream key set, and the per-stub relay. */
-type BinaryWants = { everyMember: TrackWants; members: Record<string, TrackWants> }
-
-/** Abuse bounds on a client's `sub-binary` declaration — generous for real apps (a media app
- *  uses a handful of tracks), fatal for hostile blowups (tracks multiply upstream keys). */
-const SUB_BINARY_MEMBERS_MAX = 4096
-const SUB_BINARY_TRACKS_MAX = 64
-
-function emptyTrackWants(): TrackWants {
-  return { all: false, tracks: [] }
-}
-
-function mergeTrackWants(a: TrackWants, b: TrackWants): TrackWants {
-  if (a.all || b.all) return { all: true, tracks: [] }
-  return { all: false, tracks: [...new Set([...a.tracks, ...b.tracks])] }
-}
-
-function wantsTrack(wants: TrackWants, track: string): boolean {
-  return wants.all || wants.tracks.includes(track)
-}
-
-/** Does a complete binary want cover one (member, track)? The one predicate behind both the live
- *  relay gate (`RoomStubChannel._wantsBinary`) and retained-frame replay: `everyMember` applies to
- *  all members, `members` adds participant-scoped wants on top. */
-function binaryWantsCovers(wants: BinaryWants, memberId: string, track: string): boolean {
-  if (wantsTrack(wants.everyMember, track)) return true
-  const memberWants = wants.members[memberId]
-  return memberWants !== undefined && wantsTrack(memberWants, track)
-}
-
-function wantsAnyBinary(wants: BinaryWants): boolean {
-  return wants.everyMember.all || wants.everyMember.tracks.length > 0 || Object.keys(wants.members).length > 0
-}
-
-/** Validate a client-declared `sub-binary` want (untrusted input) — bounded and well-formed,
- *  or `null` to reject the declaration. */
-function sanitizeBinaryWants(wants: unknown): BinaryWants | null {
-  if (!isObject(wants)) return null
-  const everyMember = sanitizeTrackWants(wants.everyMember)
-  if (!everyMember || !isObject(wants.members)) return null
-  const members: Record<string, TrackWants> = {}
-  const entries = Object.entries(wants.members)
-  if (entries.length > SUB_BINARY_MEMBERS_MAX) return null
-  for (const [memberId, trackWants] of entries) {
-    const sanitized = sanitizeTrackWants(trackWants)
-    if (!sanitized) return null
-    members[memberId] = sanitized
-  }
-  return { everyMember, members }
-}
-
-function sanitizeTrackWants(wants: unknown): TrackWants | null {
-  if (!isObject(wants) || typeof wants.all !== 'boolean' || !Array.isArray(wants.tracks)) return null
-  if (wants.tracks.length > SUB_BINARY_TRACKS_MAX) return null
-  if (!wants.tracks.every((track) => typeof track === 'string' && track.length <= TRACK_MAX_BYTES)) return null
-  return { all: wants.all, tracks: wants.tracks as string[] }
+  return isRecord(value) && typeof value.__r === 'string'
 }

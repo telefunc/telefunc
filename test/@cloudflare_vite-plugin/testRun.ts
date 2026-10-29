@@ -2,21 +2,60 @@ export { testRun }
 export { testCloudflareBindings }
 
 import { autoRetry, expect, getServerUrl, page, test } from '@brillout/test-e2e'
-import { testCounter, testRunClassic } from '../../test/utils'
+import type { WebSocket } from 'playwright-chromium'
+import { testCounter, testRunClassic, withNetworkConditions } from '../../test/utils'
 
 function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
+  const isDev = cmd === 'pnpm run dev'
+  // First, so no session Durable Object exists in the isolate yet.
+  testBroadcastPublishFromWorker()
+  testSubscribeOutsideSession()
   testCloudflareBindings()
   testRunClassic(cmd, {
+    // testResubscribe() waits out a presence's TTL.
+    additionalTimeout: 60_000,
     tolerateError: (log) =>
       log.logText.includes('Detected multiple renderers concurrently rendering') ||
       // The Channel/Chat streaming (SSE) connection surfaces a benign
       // `net::ERR_ALPN_NEGOTIATION_FAILED` browser error; the channel still works
       // (the message flow is asserted by testChannel()/testChat()).
-      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED'),
+      log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
+      // workerd logs a response it wrote to a connection the browser closed as it navigated away,
+      // before the request's signal could report it.
+      (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')) ||
+      // testRefusedPresence()'s authority refuses a presence, and the subscription it ended is reported.
+      log.logText.includes('Backend subscription closed: text:refused-presence'),
   })
   testTodolist()
   testChannel()
+  testChannelOversized()
+  testBacklog()
   testChat()
+  testChatMembers()
+  testUnsubscribeTwice()
+  testResubscribe()
+  testRefusedPresence()
+  testRoom()
+  // Under `vite dev`, @cloudflare/vite-plugin awaits each Durable Object call apart, so one stub's calls can run out of order.
+  if (!isDev) testRoomOrderAcrossSessions()
+  testRoomAcrossSessions()
+  testRoomStorage()
+}
+
+function testBroadcastPublishFromWorker() {
+  test('Broadcast.publish() from the Worker, outside any session', async () => {
+    const response = await fetch(getServerUrl() + '/__broadcast-publish-from-worker')
+    expect(response.status).toBe(204)
+  })
+}
+
+function testSubscribeOutsideSession() {
+  test('Broadcast.subscribe() from the Worker, outside any session, throws a usage error naming what it needs', async () => {
+    const response = await fetch(getServerUrl() + '/__broadcast-subscribe-from-worker')
+    expect(await response.text()).toContain(
+      'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
+    )
+  })
 }
 
 function testCloudflareBindings() {
@@ -36,6 +75,17 @@ function testTodolist() {
     await autoRetry(async () => {
       expect(await page.locator('#hydrated').count()).toBe(1)
     })
+    // Reset only changes the DOM if the list differs from its initial 2 items, so its response is observable
+    const todoItemOld = `Buy eggs ${Math.random()}`
+    const numberOfItemsBefore = await getNumberOfItems()
+    await page.fill('input[type="text"]', todoItemOld)
+    await page.click('button[type="submit"]')
+    await autoRetry(
+      async () => {
+        expect(await getNumberOfItems()).toBe(numberOfItemsBefore + 1)
+      },
+      { timeout: 5000 },
+    )
     await page.locator('button', { hasText: 'Reset' }).click()
     await autoRetry(
       async () => {
@@ -75,6 +125,9 @@ function testChannel() {
       },
       { timeout: 5000 },
     )
+    const webSockets: string[] = []
+    const onWebSocket = (ws: WebSocket) => webSockets.push(ws.url())
+    page.on('websocket', onWebSocket)
     await page.click('#connect-btn')
     // The client sends a `ping` on connect and the server replies with a `welcome`.
     await autoRetry(
@@ -85,6 +138,9 @@ function testChannel() {
       },
       { timeout: 10000 },
     )
+    page.off('websocket', onWebSocket)
+    // The channel goes over WebSocket, though +server.ts assigns config.channel after the adapter.
+    expect(webSockets.some((url) => new URL(url).pathname === '/_telefunc')).toBe(true)
     // The server pushes a `tick` message every second.
     await autoRetry(
       async () => {
@@ -115,6 +171,29 @@ function testChannel() {
   })
 }
 
+function testChannelOversized() {
+  test('Channel: a 32 MiB message is refused, and the channel keeps working', async () => {
+    await page.goto(getServerUrl() + '/channel')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#connect-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain('{"type":"welcome"}')
+    })
+    await page.click('#send-oversized-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain('Channel message too large')
+    })
+    const echoText = `echo-${Math.random()}`
+    await page.fill('#echo-input', echoText)
+    await page.click('#send-echo-btn')
+    await autoRetry(async () => {
+      expect(await page.textContent('#log')).toContain(`{"type":"echo","text":"${echoText}"}`)
+    })
+  })
+}
+
 // Tests the `BroadcastChannel` pub/sub use case (pages/chat): joining subscribes to
 // the channel, whose server-side `onOpen` publishes a "joined" system message that is
 // broadcast back to the subscribed client. This exercises the full BroadcastChannel
@@ -139,7 +218,275 @@ function testChat() {
       },
       { timeout: 10000 },
     )
+    // `onOpen` also publishes two binary greetings from one reused buffer: each arrives as published.
+    await autoRetry(async () => {
+      const text = (await page.textContent('#root'))!
+      expect(text).toContain(`welcome ${username}`)
+      expect(text).toContain(`${username} is online`)
+      expect(text.indexOf(`welcome ${username}`)).lessThan(text.indexOf(`${username} is online`))
+    })
   })
+}
+
+function testBacklog() {
+  test('Backlog: sends nobody awaits to a page that stops reading are refused with ChannelOverflowError, and what was taken arrives in order once it reads', async () => {
+    await page.goto(getServerUrl() + '/backlog')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#backlog-open')
+    let channelId: string | null = null
+    await autoRetry(async () => {
+      channelId = JSON.parse((await page.textContent('#backlog-state'))!).channelId
+      expect(channelId).not.toBe(null)
+    })
+    const runUrl = `${getServerUrl()}/backlog-run?channel=${channelId}`
+    await page.click('#backlog-run')
+    await autoRetry(async () => {
+      expect(await (await fetch(runUrl)).json()).deep.equal({ started: true })
+    })
+    // A page that reads nothing: what the server sends waits on the way. The page can't see the run while stalled.
+    const { sent, refused } = await withNetworkConditions({ downloadThroughput: 1, uploadThroughput: -1 }, async () => {
+      await fetch(runUrl, { method: 'POST' })
+      let run: { sent: number; refused: string[] } | undefined
+      await autoRetry(async () => {
+        run = await (await fetch(runUrl)).json()
+        expect(run!.sent).toBe(6000)
+      })
+      return run!
+    })
+    expect(refused.length).greaterThan(0)
+    expect(new Set(refused)).deep.equal(new Set(['ChannelOverflowError']))
+    await autoRetry(
+      async () => {
+        const state = JSON.parse((await page.textContent('#backlog-state'))!)
+        expect(state.received).toBe(sent - refused.length)
+        expect(state.outOfOrder).toBe(0)
+      },
+      { timeout: 30_000 },
+    )
+  })
+}
+
+function testChatMembers() {
+  test('Chat: members in separate browsers each get every message published after they joined, once', async () => {
+    const browser = page.context().browser()!
+    const names = ['member-1', 'member-2', 'member-3'].map((name) => `${name}-${Math.floor(Math.random() * 1e6)}`)
+    const members: (typeof page)[] = []
+    for (const name of names) {
+      const member = await (await browser.newContext()).newPage()
+      members.push(member)
+      await member.goto(getServerUrl() + '/chat')
+      await autoRetry(async () => {
+        expect(await member.locator('#hydrated').count()).toBe(1)
+      })
+      await member.fill('input[placeholder="Pick a username..."]', name)
+      await member.locator('button', { hasText: 'Join' }).click()
+      await autoRetry(async () => {
+        expect(await member.locator('#messages').textContent()).toContain(`${name} joined`)
+      })
+    }
+    // Each member's onOpen publishes `<name> joined` and two binary greetings.
+    await autoRetry(async () => {
+      for (const [i, member] of members.entries()) {
+        const messages = await member.locator('#messages > div').allTextContents()
+        const later = names.slice(i)
+        expect(messages.filter((text) => text.endsWith(' joined'))).deep.equal(later.map((name) => `${name} joined`))
+        expect(messages.filter((text) => text.startsWith('welcome ')).sort()).deep.equal(
+          later.map((name) => `welcome ${name}`).sort(),
+        )
+      }
+    })
+    for (const member of members) await member.context().close()
+  })
+}
+
+function testUnsubscribeTwice() {
+  test("Broadcast: a subscriber whose sibling's unsubscribe ran twice still gets what a page in another session publishes", async () => {
+    const url = `${getServerUrl()}/unsubscribe-twice?key=unsubscribe-twice:${Math.random()}`
+    await page.goto(url)
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#subscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#unsubscribe-twice-state'))!).subscribed).toBe(true)
+    })
+    // Another browser context is another session, routed by its own token.
+    const publisher = await (await page.context().browser()!.newContext()).newPage()
+    await publisher.goto(url)
+    await autoRetry(async () => {
+      expect(await publisher.locator('#hydrated').count()).toBe(1)
+    })
+    // Each try publishes again: the subscriber's presence may still be on its way to KV.
+    await autoRetry(
+      async () => {
+        await publisher.click('#publish')
+        await page.click('#read')
+        expect(JSON.parse((await page.textContent('#unsubscribe-twice-state'))!).received).include('hello')
+      },
+      { timeout: 10_000 },
+    )
+    await publisher.context().close()
+  })
+}
+
+function testResubscribe() {
+  test("Broadcast: a subscriber that arrives as its key's last one leaves keeps getting publishes past the presence TTL", async () => {
+    await page.goto(getServerUrl() + '/resubscribe')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#resubscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#resubscribe-state'))!).subscribed).toBe(true)
+    })
+    // A presence lasts 90 s unless refreshed.
+    await page.waitForTimeout(95_000)
+    await page.click('#publish')
+    await autoRetry(
+      async () => {
+        expect(JSON.parse((await page.textContent('#resubscribe-state'))!).received).deep.equal(['hello'])
+      },
+      { timeout: 5000 },
+    )
+  })
+}
+
+function testRefusedPresence() {
+  test("Broadcast: a publish made while the key's authority refuses its subscriber's presence settles, and the subscription that replaces it receives the next publish", async () => {
+    await page.goto(getServerUrl() + '/refused-presence')
+    await autoRetry(async () => {
+      expect(await page.locator('#hydrated').count()).toBe(1)
+    })
+    await page.click('#subscribe')
+    await autoRetry(async () => {
+      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).published).toBe(true)
+    })
+    // Each try publishes again, until the replacing subscription's presence is recorded.
+    await autoRetry(async () => {
+      await page.click('#publish')
+      expect(JSON.parse((await page.textContent('#refused-presence-state'))!).received).toContain('again')
+    })
+  })
+}
+
+function testRoom() {
+  test('Room inside a telefunction', async () => {
+    await page.goto(getServerUrl() + '/room')
+    await autoRetry(
+      async () => {
+        expect(await page.textContent('#room-result')).toBe(JSON.stringify({ joined: 1, received: ['hello'] }))
+      },
+      { timeout: 10000 },
+    )
+  })
+}
+
+function testRoomOrderAcrossSessions() {
+  test('Room and Broadcast: what two sessions publish at once reaches each in the order each called it, and both in the same order', async () => {
+    const id = crypto.randomUUID()
+    const pages = await openSessions(id, ['p1', 'p2'])
+    for (const page of pages) expect(await clickRoomCard(page, 'order-subscribe')).toBe('subscribed')
+    await Promise.all(pages.map((page) => clickRoomCard(page, 'order-publish')))
+    const calls = Array.from({ length: 30 }, (_, i) => i + 1)
+    await autoRetry(async () => {
+      const [first, second] = await Promise.all(pages.map((page) => clickRoomCard(page, 'order-received')))
+      for (const lane of ['broadcast', 'room'] as const) {
+        for (const from of ['p1', 'p2']) {
+          const own = first[lane].filter((message: string) => message.startsWith(`${from}:`))
+          expect({ lane, own }).deep.equal({ lane, own: calls.map((n) => `${from}:${n}`) })
+        }
+        expect({ lane, second: second[lane] }).deep.equal({ lane, second: first[lane] })
+      }
+    })
+    for (const page of pages) await page.context().close()
+  })
+}
+
+function testRoomAcrossSessions() {
+  test('Room and Broadcast: two sessions listening in one isolate each get a message once, on their own listeners', async () => {
+    const id = crypto.randomUUID()
+    const pages = await openSessions(id, ['p1', 'p2'])
+    for (const page of pages) await clickRoomCard(page, 'listen')
+    await clickRoomCard(pages[0]!, 'publish')
+    await autoRetry(async () => {
+      for (const page of pages) {
+        expect((await clickRoomCard(page, 'received')).sort()).deep.equal(['broadcast:hello', 'room:hello'])
+      }
+    })
+    for (const page of pages) await page.context().close()
+  })
+
+  test('Broadcast: a publish right after a subscribe reaches it', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'subscribe-then-publish')).deep.equal(['at-once'])
+  })
+}
+
+function testRoomStorage() {
+  test('Room.list(): lists rooms in code point order', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'list')).deep.equal(['B', 'a', 'b', 'z', 'é', '！', '😀'])
+  })
+
+  test('Room: a retained frame larger than a SQLite row reaches a later subscriber whole', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'retain-large')).deep.equal({ size: 3 * 1024 * 1024, intact: true })
+  })
+
+  test('Room: a room closes by itself once its last member left, and is no longer listed', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'close-when-left')).deep.equal({ listed: 0 })
+  })
+
+  test('Room: its meta keeps the key order its writes gave it', async () => {
+    await openRoomPage()
+    expect(await clickRoomCard(page, 'meta-key-order')).deep.equal({
+      merged: [
+        ['b', 1],
+        ['a', 4],
+        ['c', 3],
+      ],
+      replaced: [
+        ['z', 1],
+        ['y', 2],
+      ],
+    })
+  })
+}
+
+async function openRoomPage() {
+  await page.goto(getServerUrl() + '/room')
+  await autoRetry(async () => {
+    expect(await page.locator('#hydrated').count()).toBe(1)
+  })
+}
+
+/** Pages in browsers of their own, so each has its own Telefunc session. */
+async function openSessions(id: string, names: string[]) {
+  const browser = page.context().browser()!
+  return await Promise.all(
+    names.map(async (name) => {
+      const session = await (await browser.newContext()).newPage()
+      await session.goto(`${getServerUrl()}/room?id=${id}&page=${name}`)
+      await autoRetry(async () => {
+        expect(await session.locator('#hydrated').count()).toBe(1)
+      })
+      return session
+    }),
+  )
+}
+
+async function clickRoomCard(target: typeof page, id: string): Promise<any> {
+  await target.locator('#room-card-result').evaluate((element) => {
+    element.textContent = ''
+  })
+  await target.click(`#room-${id}`)
+  await target.waitForFunction(() => document.querySelector('#room-card-result')!.textContent !== '', undefined, {
+    timeout: 30_000,
+  })
+  return JSON.parse((await target.textContent('#room-card-result'))!)
 }
 
 async function getNumberOfItems() {

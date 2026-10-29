@@ -10,7 +10,7 @@
     "next": "^15.3.3",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "telefunc": "0.2.22"
+    "telefunc": "0.3.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.1",
@@ -18,6 +18,6 @@
     "@types/react-dom": "^19.2.3",
     "eslint": "^9.28.0",
     "eslint-config-next": "^15.3.3",
-    "typescript": "^5.8.3"
+    "typescript": "^6.0.3"
   }
 }

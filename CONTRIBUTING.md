@@ -124,7 +124,7 @@ pnpm run dev
 
 ## System requirements
 
-- Node.js `>=20.0.0`
+- Node.js `>=22.12.0`
 - [pnpm](https://pnpm.io)
 
 > [!NOTE]

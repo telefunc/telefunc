@@ -5,9 +5,10 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { assert, assertUsage } from '../../../utils/assert.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { lowercaseFirstLetter } from '../../../utils/lowercaseFirstLetter.js'
-import { createStreamingReplacer } from '../../../wire-protocol/server/response/registry.js'
-import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/server/mux.js'
+import { createStreamingReplacer } from '../../../wire-protocol/values/server/response/registry.js'
+import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
+import { ServerBroadcastEnd } from '../../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
 import {
   buildShieldValidators,
   type ShieldValidators,
@@ -16,16 +17,20 @@ import {
   type ShieldValidatorCtx,
 } from '../shield.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
-import { buildInlineResponseBody } from '../../../wire-protocol/server/response/StreamingResponseBody.js'
-import { pumpProducerToChannel } from '../../../wire-protocol/server/response/ChannelResponseBody.js'
+import { buildInlineResponseBody } from '../../../wire-protocol/values/server/response/StreamingResponseBody.js'
+import { pumpProducerToChannel } from '../../../wire-protocol/values/server/response/ChannelResponseBody.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { textEncoder } from '../../../wire-protocol/frame.js'
-import { uint8ArrayToBase64url } from '../../../wire-protocol/base64url.js'
-import type { StreamingProducer, StreamingValueServer } from '../../../wire-protocol/types.js'
+import { textEncoder } from '../../../wire-protocol/wire/frame.js'
+import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
+import type {
+  InternalServerReplacerContext,
+  StreamingProducer,
+  StreamingValueServer,
+} from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
-import type { ReplacerType, TypeContract, ServerReplacerContext } from '../../../wire-protocol/types.js'
 import type { Readable } from 'node:stream'
+import { getServerExtensionTypes } from '../serverConfig.js'
 
 /** Look up the shields for a revived value and build its auto-logging validator map.
  *  Empty map when the value isn't tracked in `valueShields` or has no registered shields. */
@@ -64,13 +69,12 @@ function serializeTelefunctionResult(runContext: {
   streamTransport: StreamTransport
   useNodeStream: boolean
   serverConfig: {
-    extensionResponseTypes: ReplacerType<TypeContract, ServerReplacerContext>[]
     log: { shieldErrors: ShieldLogConfig }
   }
   valueShields?: ValueShields
 }): SerializeResult {
   const { requestContext } = runContext
-  const { extensionResponseTypes } = runContext.serverConfig
+  const { responseTypes } = getServerExtensionTypes()
 
   const bodyValue = runContext.telefunctionAborted
     ? { ret: runContext.telefunctionReturn, abort: true }
@@ -116,23 +120,31 @@ function serializeTelefunctionResult(runContext: {
     registerChannel(channel)
     return channel
   }
-  // One coordination scope per response — shared by every value serialized in this pass (getContext
-  // runs per value, so it must close over a scope minted once here, not inside).
-  const passScope = new Map<symbol, unknown>()
+  function createBroadcastChannel() {
+    const end = new ServerBroadcastEnd()
+    registerChannel(end)
+    return end
+  }
+  const responseStates = new Map<symbol, unknown>()
+  function responseState<T>(key: symbol, init: () => T): T {
+    if (!responseStates.has(key)) responseStates.set(key, init())
+    return responseStates.get(key) as T
+  }
   const replacer = createStreamingReplacer(
-    function getContext(value: unknown) {
+    function getContext(value: unknown): InternalServerReplacerContext {
       return {
         createChannel,
         registerChannel,
+        createBroadcastChannel,
         sendStream,
+        responseState,
         validators: makeValidators(value, valueShields, shieldCtx),
-        passScope,
       }
     },
     function onReplaced({ abort }) {
       requestContext.responseAbort.onAbort(abort)
     },
-    extensionResponseTypes,
+    responseTypes,
   )
 
   let httpResponseBody: string

@@ -1,6 +1,6 @@
 {
   "name": "telefunc",
-  "version": "0.2.22",
+  "version": "0.3.0",
   "scripts": {
     "build": "rm -rf dist/ && tsc --build",
     "dev": "tsc --watch",
@@ -14,7 +14,7 @@
     "@brillout/import": "^0.2.6",
     "@brillout/json-serializer": "^0.5.25",
     "@brillout/picocolors": "^1.0.28",
-    "@brillout/vite-plugin-server-entry": "0.7.18",
+    "@brillout/vite-plugin-server-entry": "^0.7.20",
     "crossws": "^0.4.4",
     "es-module-lexer": "^1.7.0",
     "magic-string": "^0.30.17",
@@ -116,7 +116,7 @@
     "@babel/core": "7.29.0",
     "@babel/parser": "7.29.0",
     "@babel/types": "7.29.0",
-    "@brillout/release-me": "^0.4.16",
+    "@brillout/release-me": "^0.4.18",
     "@cloudflare/workers-types": "^4.20260305.1",
     "@nuxt/types": "^2.18.1",
     "@types/express": "^5.0.3",
@@ -125,7 +125,7 @@
     "next": "^15.3.4",
     "react": "^19.2.4",
     "react-streaming": "^0.4.17",
-    "typescript": "^5.8.3",
+    "typescript": "^7.0.2",
     "vite": "^8.0.16"
   },
   "peerDependencies": {
@@ -157,7 +157,7 @@
     }
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "files": [
     "dist/",

@@ -1,40 +1,61 @@
 export { testFileDownload }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import { navigate, getResult, serverRuntime } from '../../e2e-utils'
 
 const TEXT = 'Hello, file download!'
 const TEXT_BYTES = TEXT.length // ASCII — 1 byte per char
 const FIXED_LAST_MODIFIED = 1700000000000
 
 function testFileDownload() {
-  test('file download: native File auto-materializes on client', async () => {
-    await navigate(`${getServerUrl()}/file-download`)
+  // Bun gives a File or Blob made with type 'text/plain' the type 'text/plain;charset=utf-8'.
+  const typeKept = serverRuntime() !== 'bun'
 
-    await page.click('#test-file-eager')
-    await autoRetry(async () => {
-      const result = await getResult('#download-result')
-      expect(result).deep.equal({
-        isFile: true,
-        name: 'eager.txt',
-        size: TEXT_BYTES,
-        type: 'text/plain',
-        lastModified: FIXED_LAST_MODIFIED,
-        content: TEXT,
+  if (typeKept)
+    test('file download: native File auto-materializes on client', async () => {
+      await navigate(`${getServerUrl()}/file-download`)
+
+      await page.click('#test-file-eager')
+      await autoRetry(async () => {
+        const result = await getResult('#download-result')
+        expect(result).deep.equal({
+          isFile: true,
+          name: 'eager.txt',
+          size: TEXT_BYTES,
+          type: 'text/plain',
+          lastModified: FIXED_LAST_MODIFIED,
+          content: TEXT,
+        })
       })
     })
-  })
 
-  test('file download: native Blob auto-materializes on client', async () => {
-    await page.click('#test-blob-eager')
+  if (typeKept)
+    test('file download: native Blob auto-materializes on client', async () => {
+      await page.click('#test-blob-eager')
+      await autoRetry(async () => {
+        const result = await getResult('#download-result')
+        expect(result).deep.equal({
+          isBlob: true,
+          isFile: false,
+          size: TEXT_BYTES,
+          type: 'text/plain',
+          content: TEXT,
+        })
+      })
+    })
+
+  test('file download: nested native File/Blob materialize on client', async () => {
+    await navigate(`${getServerUrl()}/file-download`)
+    await page.click('#test-eager-nested')
     await autoRetry(async () => {
       const result = await getResult('#download-result')
       expect(result).deep.equal({
+        title: 'report',
+        isFile: true,
+        name: 'nested-eager.txt',
         isBlob: true,
-        isFile: false,
-        size: TEXT_BYTES,
-        type: 'text/plain',
-        content: TEXT,
+        fileObjectUrlContent: TEXT,
+        blobObjectUrlContent: TEXT,
       })
     })
   })
@@ -113,41 +134,43 @@ function testFileDownload() {
     })
   })
 
-  test('file download: download(file) wraps native File', async () => {
-    await page.click('#test-download-wrap-file')
-    await autoRetry(async () => {
-      const result = await getResult('#download-result')
-      expect(result).deep.equal({
-        isFile: true,
-        name: 'wrapped.txt',
-        size: TEXT_BYTES,
-        type: 'text/plain',
-        lastModified: FIXED_LAST_MODIFIED,
-        content: TEXT,
-        // download(File) inherits all metadata from the wrapped native File — must match.
-        dl: {
+  if (typeKept)
+    test('file download: download(file) wraps native File', async () => {
+      await page.click('#test-download-wrap-file')
+      await autoRetry(async () => {
+        const result = await getResult('#download-result')
+        expect(result).deep.equal({
+          isFile: true,
           name: 'wrapped.txt',
-          type: 'text/plain',
           size: TEXT_BYTES,
+          type: 'text/plain',
           lastModified: FIXED_LAST_MODIFIED,
-        },
+          content: TEXT,
+          // download(File) inherits all metadata from the wrapped native File — must match.
+          dl: {
+            name: 'wrapped.txt',
+            type: 'text/plain',
+            size: TEXT_BYTES,
+            lastModified: FIXED_LAST_MODIFIED,
+          },
+        })
       })
     })
-  })
 
-  test('file download: download(blob) wraps native Blob', async () => {
-    await page.click('#test-download-wrap-blob')
-    await autoRetry(async () => {
-      const result = await getResult('#download-result')
-      expect(result).deep.equal({
-        isBlob: true,
-        size: TEXT_BYTES,
-        type: 'text/plain',
-        content: TEXT,
-        dl: { type: 'text/plain', size: TEXT_BYTES },
+  if (typeKept)
+    test('file download: download(blob) wraps native Blob', async () => {
+      await page.click('#test-download-wrap-blob')
+      await autoRetry(async () => {
+        const result = await getResult('#download-result')
+        expect(result).deep.equal({
+          isBlob: true,
+          size: TEXT_BYTES,
+          type: 'text/plain',
+          content: TEXT,
+          dl: { type: 'text/plain', size: TEXT_BYTES },
+        })
       })
     })
-  })
 
   test('file download: download → onProgress with known total', async () => {
     await page.click('#test-progress-known')

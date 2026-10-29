@@ -1,24 +1,30 @@
 export { Close }
 
 import React, { useEffect, useRef, useState } from 'react'
-import { close } from 'telefunc/client'
+import { Abort, close } from 'telefunc/client'
 import type { ClientChannel } from 'telefunc'
 import {
   onMixedForClose,
   onCloseGen,
+  onIdleGen,
   onCloseStream,
   onCloseChannel,
+  onKeptChannel,
+  onAbortedChannel,
+  onCloseUnreturned,
   onCloseFn,
   onCloseChannelOnClose,
   onCloseStreamAndChannelOnClose,
   onClosePassedFnOnClose,
   onGcPassedFnOnClose,
+  onEditDocument,
 } from './Close.telefunc'
 
 function Close() {
   const [hydrated, setHydrated] = useState(false)
   const [result, setResult] = useState<string>('')
   const pendingChannelRef = useRef<ClientChannel | null>(null)
+  const keptChannelRef = useRef<ClientChannel | null>(null)
   const pendingPassedFnRef = useRef<object | null>(null)
   useEffect(() => setHydrated(true), [])
 
@@ -26,6 +32,8 @@ function Close() {
     <div>
       {hydrated && <span id="hydrated" />}
       <pre id="close-result">{result}</pre>
+
+      <IdleGenerator />
 
       <h2>Generator</h2>
 
@@ -101,6 +109,45 @@ function Close() {
         Channel: close(channel)
       </button>
 
+      <button
+        id="test-keep-channel"
+        onClick={async () => {
+          setResult('')
+          keptChannelRef.current = await onKeptChannel()
+          setResult(JSON.stringify({ method: 'keep(channel)' }))
+        }}
+      >
+        Channel: keep it open
+      </button>
+
+      <button
+        id="test-aborted-channel"
+        onClick={async () => {
+          setResult('')
+          const channel = await onAbortedChannel()
+          channel.onClose((err) => {
+            setResult(
+              JSON.stringify({
+                method: 'aborted channel',
+                abortValue: err instanceof Abort ? err.abortValue : (err?.name ?? 'none'),
+              }),
+            )
+          })
+        }}
+      >
+        Channel: aborted before it was returned
+      </button>
+
+      <button
+        id="test-close-unreturned"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify({ method: 'close() unreturned', ...(await onCloseUnreturned()) }))
+        }}
+      >
+        Channel: close() of one never returned
+      </button>
+
       <h2>Function</h2>
 
       <button
@@ -122,6 +169,18 @@ function Close() {
         }}
       >
         Fn: close(fn)
+      </button>
+
+      <h2>Edit a document</h2>
+
+      <button
+        id="test-edit-document"
+        onClick={async () => {
+          setResult('')
+          setResult(JSON.stringify(await onEditDocument()))
+        }}
+      >
+        Edit the document
       </button>
 
       <h2>Channel onClose ordering</h2>
@@ -312,6 +371,57 @@ function Close() {
         }}
       >
         Mixed: close(result)
+      </button>
+    </div>
+  )
+}
+
+function IdleGenerator() {
+  const pending = useRef<Awaited<ReturnType<typeof onIdleGen>> | null>(null)
+  const [result, setResult] = useState('')
+
+  async function start(wakeOn: 'onClose' | 'signal', withChannel = false) {
+    setResult('')
+    pending.current = await onIdleGen(wakeOn, withChannel)
+    const first = await pending.current.generator.next()
+    setResult(JSON.stringify({ phase: 'started', first }))
+  }
+
+  return (
+    <div>
+      <h2>Idle generator cleanup</h2>
+      <pre id="idle-gen-result">{result}</pre>
+      <button id="test-idle-gen-onClose" onClick={() => start('onClose')}>
+        Start generator waiting for onClose
+      </button>
+      <button id="test-idle-gen-signal" onClick={() => start('signal')}>
+        Start generator waiting for signal
+      </button>
+      <button id="test-idle-gen-channel" onClick={() => start('signal', true)}>
+        Start generator with an active channel
+      </button>
+      <button
+        id="test-idle-gen-cancel"
+        onClick={async () => {
+          if (!pending.current) return
+          const { generator, channel } = pending.current
+          const last = await generator.return(undefined)
+          // A reply proves the channel still works after cancelling the generator.
+          const signalAborted = channel ? await channel.send('ping') : null
+          setResult(JSON.stringify({ phase: 'cancelled', last, signalAborted }))
+        }}
+      >
+        Cancel generator
+      </button>
+      <button
+        id="test-idle-gen-close-channel"
+        onClick={async () => {
+          await pending.current?.channel?.close()
+          pending.current = null
+          setResult(JSON.stringify({ phase: 'channel-closed' }))
+        }}
+      >
+        Close channel
       </button>
     </div>
   )

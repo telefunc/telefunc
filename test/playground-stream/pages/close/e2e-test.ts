@@ -1,9 +1,53 @@
 export { testClose }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import type { WebSocket } from 'playwright-chromium'
 import { resetCleanupState, getCleanupState, forceServerGc, navigate, getResult, sleep } from '../../e2e-utils'
 
-function testClose() {
+function testClose(inDocker = false) {
+  for (const wakeOn of ['onClose', 'signal', 'channel'] as const) {
+    test(`close: idle generator releases its subscription via ${wakeOn}`, async () => {
+      await navigate(`${getServerUrl()}/close`)
+      await resetCleanupState()
+      await page.click(`#test-idle-gen-${wakeOn}`)
+
+      await autoRetry(async () => {
+        const result = await getResult('#idle-gen-result')
+        expect(result.first).deep.equal({ value: 'snapshot', done: false })
+        const state = await getCleanupState()
+        expect(state.idleGenWaiting).toBe('true')
+        expect(state.idleGenListeners).toBe('1')
+        expect(state.idleGenOnClose).toBe('0')
+        expect(state.idleGenSignal).toBe('false')
+      })
+
+      await page.click('#test-idle-gen-cancel')
+      await autoRetry(async () => {
+        const result = await getResult('#idle-gen-result')
+        expect(result.phase).toBe('cancelled')
+        expect(result.last).deep.equal({ done: true })
+        if (wakeOn === 'channel') expect(result.signalAborted).toBe(false)
+      })
+
+      if (wakeOn === 'channel') {
+        // Cancelling the HTTP body must release only the inline stream's hold.
+        const state = await getCleanupState()
+        expect(state.idleGenOnClose).toBe('0')
+        expect(state.idleGenSignal).toBe('false')
+        expect(state.idleGenListeners).toBe('1')
+        await page.click('#test-idle-gen-close-channel')
+      }
+
+      await autoRetry(async () => {
+        const state = await getCleanupState()
+        expect(state.idleGenOnClose).toBe('1')
+        expect(state.idleGenSignal).toBe('true')
+        expect(state.idleGenFinally).toBe('true')
+        expect(state.idleGenListeners).toBe('0')
+      })
+    })
+  }
+
   // ── Targeted: generator ──────────────────────────────────────────────
 
   test('close: generator — close(gen) terminates cleanly; done=true, no error, finally block runs', async () => {
@@ -65,6 +109,85 @@ function testClose() {
     })
   })
 
+  test('close: a page that reloads ends its open channel on the server at once', async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await resetCleanupState()
+    await page.click('#test-keep-channel')
+    await autoRetry(async () => {
+      expect((await getCleanupState()).keptChannel).toBe('open')
+    })
+    await page.reload()
+    await autoRetry(
+      async () => {
+        expect((await getCleanupState()).keptChannel).toBe('none')
+      },
+      { timeout: 3_000 },
+    )
+  })
+
+  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS ?? '[]').join() === 'sse,ws') {
+    test('close: a page that reloads while its connection moves to a WebSocket ends its open channel on the server at once', async () => {
+      await navigate(`${getServerUrl()}/close`)
+      await resetCleanupState()
+      // Its POSTs are answered a second late, as on a slow network: the server moves the channel to the WebSocket
+      // before the page hears that it did.
+      await page.evaluate(() => {
+        const fetch = globalThis.fetch
+        globalThis.fetch = async (input, init) => {
+          const response = await fetch(input, init)
+          if ((init?.headers as Record<string, string> | undefined)?.Accept !== 'text/event-stream') {
+            await new Promise((resolve) => setTimeout(resolve, 1_000))
+          }
+          return response
+        }
+      })
+      let onMoved!: () => void
+      const moved = new Promise<void>((resolve) => (onMoved = resolve))
+      const onWebSocket = (ws: WebSocket) => {
+        // RECONCILED: the server moved the page's channels to this WebSocket.
+        ws.on('framereceived', ({ payload }) => typeof payload !== 'string' && payload[0] === 0x05 && onMoved())
+      }
+      page.on('websocket', onWebSocket)
+      try {
+        await page.click('#test-keep-channel')
+        await moved
+      } finally {
+        page.off('websocket', onWebSocket)
+      }
+      expect((await getCleanupState()).keptChannel).toBe('open')
+      await page.reload()
+      await autoRetry(
+        async () => {
+          expect((await getCleanupState()).keptChannel).toBe('none')
+        },
+        { timeout: 3_000 },
+      )
+    })
+  }
+
+  test('close: a channel the server aborted before returning it reaches the client aborted', async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await page.click('#test-aborted-channel')
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('aborted channel')
+      expect(result.abortValue).toBe('before-return')
+    })
+  })
+
+  test('close: a Channel and a BroadcastChannel the server never returned close at once, with a clean onClose', async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await page.click('#test-close-unreturned')
+    await autoRetry(async () => {
+      const result = await getResult('#close-result')
+      expect(result.method).toBe('close() unreturned')
+      for (const closed of [result.channel, result.broadcast]) {
+        expect(closed.onCloseErr).toBe('none')
+        expect(closed.ms).below(1000)
+      }
+    })
+  })
+
   // ── Targeted: fn ─────────────────────────────────────────────────────
 
   test('close: fn — close(fn) closes backing channel; call after close throws ChannelClosedError', async () => {
@@ -82,6 +205,33 @@ function testClose() {
       const state = await getCleanupState()
       // retFn() was called before close
       expect(state.closeFn_retFnCalled).toBe('true')
+    })
+  })
+
+  test("close: a document's lock that fails to release in context.onClose is reported, and the document opens again", async () => {
+    await navigate(`${getServerUrl()}/close`)
+    await resetCleanupState()
+
+    await page.click('#test-edit-document')
+    await autoRetry(async () => {
+      expect(await getResult('#close-result')).deep.equal({ text: 'Draft' })
+    })
+    await autoRetry(async () => {
+      expect((await getCleanupState())['bug:Could not release the lock']).toBe('reported')
+    })
+    await page.click('#test-edit-document')
+    await autoRetry(async () => {
+      expect(await getResult('#close-result')).deep.equal({ text: 'Draft' })
+    })
+    expectLog('Could not release the lock', {
+      // docker compose prints a server's stderr on its stdout, each line prefixed with the container's name.
+      filter: (log) =>
+        inDocker
+          ? log.logSource === 'stdout' &&
+            log.logText
+              .split('\n')
+              .some((line) => line.includes('Could not release the lock') && /^playground-[a-z]-\d+ +\| /.test(line))
+          : log.logSource === 'stderr',
     })
   })
 

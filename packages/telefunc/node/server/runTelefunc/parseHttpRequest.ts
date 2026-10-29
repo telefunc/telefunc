@@ -1,38 +1,28 @@
 export { parseHttpRequest }
 
 import type { Readable } from 'node:stream'
-import { parse, type Reviver } from '@brillout/json-serializer/parse'
+import { parseTransform, type Reviver } from '@brillout/json-serializer/parse'
 import { assertUsage, getProjectError, assert } from '../../../utils/assert.js'
 import { getTelefunctionKey } from '../../../utils/getTelefunctionKey.js'
 import { getUrlPathname } from '../../../utils/getUrlPathname.js'
 import { hasProp } from '../../../utils/hasProp.js'
 import { isProduction } from '../../../utils/isProduction.js'
-import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/server/request/registry.js'
-import { StreamReader } from '../../../wire-protocol/server/request/StreamReader.js'
-import { REQUEST_KIND, getRequestKind } from '../../../wire-protocol/request-kind.js'
+import { createRequestReviver, resolveDeferredRevivals } from '../../../wire-protocol/values/server/request/registry.js'
+import { StreamReader } from '../../../wire-protocol/wire/StreamReader.js'
+import { REQUEST_KIND, REQUEST_KIND_HEADER, getRequestKind } from '../../../wire-protocol/wire/requestKind.js'
 import type { RequestContext } from '../context/requestContext.js'
-import { ServerChannel } from '../../../wire-protocol/server/channel.js'
-import { getChannelMux } from '../../../wire-protocol/server/mux.js'
-import { ChannelStreamSource } from '../../../wire-protocol/ChannelStreamSource.js'
-import { GcRegistry } from '../../../wire-protocol/gcRegistry.js'
-import { wrapProxy } from '../../../wire-protocol/wrapProxy.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
+import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
+import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
+import { wrapProxy } from '../../../utils/wrapProxy.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
-import type { ReviverType, TypeContract, ServerReviverContext } from '../../../wire-protocol/types.js'
+import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/server/sse.js'
+import { handleSseChannelRequest, type SseChannelHttpResponse } from '../../../wire-protocol/channel/server/sse.js'
 import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from '../shield.js'
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
-
-// Holder-side GC tracking of revived request stubs (callback channels, streams). One shared
-// instance: it's a passive FinalizationRegistry, and its scan timer runs only while stubs are
-// tracked (see GcRegistry) — so it keeps nothing alive and doesn't block hibernation when idle.
-// It must NOT be created per-request: a per-request closure hung on the (rooted) request context
-// pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
-const globalObject = getGlobalObject('node/server/runTelefunc/parseHttpRequest.ts', {
-  gcRegistry: new GcRegistry(),
-})
+import { getServerExtensionTypes } from '../serverConfig.js'
 
 type RunContext = {
   request: Request
@@ -45,20 +35,25 @@ type RunContext = {
   serverConfig: {
     telefuncUrl: string
     stream: { transport: StreamTransport }
-    channel: { messageLimit: number }
-    extensionRequestTypes: ReviverType<TypeContract, ServerReviverContext>[]
     log: { shieldErrors: ShieldLogConfig }
   }
 }
+
+type ResolvedRequest =
+  | {
+      isMalformedRequest: false
+      telefunctionArgs: unknown[]
+      streamTransport: StreamTransport
+      requestExtensions: Record<string, Record<string, unknown>>
+    }
+  | { isMalformedRequest: true }
 
 type ParseResult =
   | {
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
-      reviveArgs: (telefunction: Telefunction) => unknown[]
-      streamTransport: StreamTransport
-      requestExtensions: Record<string, Record<string, unknown>>
+      resolveRequest: (telefunction: Telefunction) => ResolvedRequest
       isSseRequest: false
       isMalformedRequest: false
     }
@@ -72,7 +67,13 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   const { request, readable, requestContext, serverConfig } = runContext
   const requestKind = getRequestKind(request, serverConfig.telefuncUrl)
 
-  if (requestKind === REQUEST_KIND.MISMATCH) return { isMalformedRequest: true }
+  if (requestKind === REQUEST_KIND.INVALID) {
+    logParseError(
+      `The \`${REQUEST_KIND_HEADER}\` header of the HTTP request is missing, invalid, or contradicts the \`_telefunc\` URL parameter.`,
+      runContext,
+    )
+    return { isMalformedRequest: true }
+  }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
     return sseResponse ? { isMalformedRequest: false, isSseRequest: true, sseResponse } : { isMalformedRequest: true }
@@ -87,16 +88,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     channel.onClose(requestContext.trackPending())
     return channel
   }
-  // A hostile body (oversized declared metadata) or a mid-read disconnect is the requester's
-  // fault, not a server bug — answer 400 instead of feeding the bug-handling path.
-  let body: Awaited<ReturnType<typeof readBody>>
-  try {
-    body = await readBody(request, readable, requestKind, serverConfig.channel.messageLimit)
-  } catch (err) {
-    logParseError(String(err), runContext)
-    return { isMalformedRequest: true }
-  }
-  const { text, registerFile, consumeFile } = body
+  const { text, registerFile, consumeFile } = await readBody(request, readable, requestKind)
   const baseContext: Omit<ServerReviverContext, 'validators'> = {
     registerFile,
     consumeFile,
@@ -104,53 +96,55 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
     receiveStream: ({ channelId }) => ChannelStreamSource.create(createChannel({ id: channelId })),
   }
 
-  // Parse the envelope; each reviver-prefixed string becomes a deferred placeholder that
-  // `reviveArgs(telefunction)` will resolve post-findTelefunction with shield-aware validators.
-  const { reviver, deferreds } = createRequestReviver(serverConfig.extensionRequestTypes)
-  const envelope = parseEnvelope(text, reviver, runContext)
+  // Routing must be known before the target telefunc module can load. Parse JSON structure only;
+  // leave serializer-encoded values untouched until that module has registered its wire types.
+  const envelope = parseEnvelope(text, runContext)
   if (envelope.isMalformedRequest) return envelope
 
   return {
-    ...envelope,
+    telefuncFilePath: envelope.telefuncFilePath,
+    telefunctionName: envelope.telefunctionName,
+    telefunctionKey: envelope.telefunctionKey,
     isSseRequest: false,
     isMalformedRequest: false,
-    reviveArgs(telefunction) {
+    resolveRequest(telefunction) {
+      const { requestTypes } = getServerExtensionTypes()
+      const { reviver, deferreds } = createRequestReviver(requestTypes)
+      const resolvedEnvelope = transformEnvelope(envelope.raw, reviver, runContext)
+      if (resolvedEnvelope.isMalformedRequest) return resolvedEnvelope
       // Shield metadata is attached by the generated code at module load. It's absent only when
       // the telefunction has no declared shields — in that case we revive without validators.
       const shields = getArgumentShields(telefunction) ?? {}
       const shieldCtx = {
-        telefunctionName: envelope.telefunctionName,
-        telefuncFilePath: envelope.telefuncFilePath,
+        telefunctionName: resolvedEnvelope.telefunctionName,
+        telefuncFilePath: resolvedEnvelope.telefuncFilePath,
         shieldErrors: runContext.serverConfig.log.shieldErrors,
       }
       resolveDeferredRevivals(
-        envelope.args,
+        resolvedEnvelope.args,
         deferreds,
         (segments) => ({
           ...baseContext,
           validators: buildShieldValidators(shields[toPathKey(segments)] ?? {}, shieldCtx),
         }),
-        (revived) => {
-          {
-            // Destructure into locals so nothing here closes over `revived` — a closure over it
-            // would pin `revived.value` (the wrapper) and defeat the GC-close. Same discipline as
-            // the client response path.
-            const { value, close } = revived
-            assert(isObjectOrFunction(value))
-            // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
-            // underlying channel/stream closes and the client releases the original.
-            const wrapper = wrapProxy(value)
-            globalObject.gcRegistry.register(wrapper, close)
-            revived.value = wrapper
-          }
-          {
-            const { close, abort } = revived
-            requestContext.onTopLevelError(close)
-            requestContext.responseAbort.onAbort(abort)
-          }
+        ({ value, close, abort }) => {
+          assert(isObjectOrFunction(value))
+          // Holder side: the telefunction gets a GC-anchor wrapper; once it drops it, the
+          // underlying channel/stream closes and the client releases the original.
+          const wrapper = wrapProxy(value)
+          // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
+          requestContext.onClose(mux.gcRegistry.register(wrapper, close))
+          requestContext.onTopLevelError(close)
+          requestContext.responseAbort.onAbort(abort)
+          return wrapper
         },
       )
-      return envelope.args
+      return {
+        isMalformedRequest: false,
+        telefunctionArgs: resolvedEnvelope.args,
+        streamTransport: resolvedEnvelope.streamTransport,
+        requestExtensions: resolvedEnvelope.requestExtensions,
+      }
     },
   }
 }
@@ -160,8 +154,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
 async function readBody(
   request: Request,
   readable: Readable | undefined,
-  requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT | null,
-  messageLimit: number,
+  requestKind: typeof REQUEST_KIND.BINARY | typeof REQUEST_KIND.TEXT,
 ): Promise<{
   text: string
   registerFile: ServerReviverContext['registerFile']
@@ -170,10 +163,9 @@ async function readBody(
   if (requestKind === REQUEST_KIND.BINARY) {
     const source = readable ?? request.body
     assert(source)
-    // The metadata (call envelope) is size-capped; the file bytes behind it stream unbounded.
-    const reader = new StreamReader(source, messageLimit)
+    const reader = new StreamReader(source)
     return {
-      text: await reader.readMetadata(),
+      text: await reader.readMetadata(Number.POSITIVE_INFINITY),
       registerFile: (i, s) => reader.registerFile(i, s),
       consumeFile: (i, s) => reader.consumeFile(i, s),
     }
@@ -196,29 +188,40 @@ type Envelope =
       telefuncFilePath: string
       telefunctionName: string
       telefunctionKey: string
+      raw: object
       args: unknown[]
       streamTransport: StreamTransport
       requestExtensions: Record<string, Record<string, unknown>>
     }
   | { isMalformedRequest: true }
 
-/** Parse the request envelope and validate its shape. Each reviver-prefixed string in `args` becomes
- *  a deferred placeholder (see `createRequestReviver`) — actual value construction is deferred until
- *  `reviveArgs(telefunction)` runs in the caller, when shield metadata is available. */
-function parseEnvelope(text: string, reviver: Reviver, runContext: RunContext): Envelope {
+/** Parse only enough of the request envelope to route it. Serializer transformation happens after
+ *  the target module loads, using the extension types registered by that module. */
+function parseEnvelope(text: string, runContext: RunContext): Envelope {
   let parsed: unknown
   try {
-    parsed = parse(text, { reviver })
+    parsed = JSON.parse(text)
   } catch (err: unknown) {
-    logParseError(
-      ["Telefunc request body couldn't be parsed.", !hasProp(err, 'message') ? null : `Parse error: ${err.message}.`]
-        .filter(Boolean)
-        .join(' '),
-      runContext,
-    )
+    logParseException(err, runContext)
     return { isMalformedRequest: true }
   }
 
+  return envelopeFrom(parsed, runContext)
+}
+
+function transformEnvelope(raw: object, reviver: Reviver, runContext: RunContext): Envelope {
+  let parsed: unknown
+  try {
+    parsed = parseTransform(raw, { reviver })
+  } catch (err: unknown) {
+    logParseException(err, runContext)
+    return { isMalformedRequest: true }
+  }
+
+  return envelopeFrom(parsed, runContext)
+}
+
+function envelopeFrom(parsed: unknown, runContext: RunContext): Envelope {
   if (!hasProp(parsed, 'file', 'string') || !hasProp(parsed, 'name', 'string') || !hasProp(parsed, 'args', 'array')) {
     logParseError('Telefunc request body has unexpected content', runContext)
     return { isMalformedRequest: true }
@@ -229,6 +232,7 @@ function parseEnvelope(text: string, reviver: Reviver, runContext: RunContext): 
     telefuncFilePath: parsed.file,
     telefunctionName: parsed.name,
     telefunctionKey: getTelefunctionKey(parsed.file, parsed.name),
+    raw: parsed,
     args: parsed.args,
     streamTransport: resolveStreamTransport(parsed, runContext.serverConfig.stream.transport),
     requestExtensions:
@@ -236,6 +240,15 @@ function parseEnvelope(text: string, reviver: Reviver, runContext: RunContext): 
         ? (parsed.extensions as Record<string, Record<string, unknown>>)
         : {},
   }
+}
+
+function logParseException(err: unknown, runContext: RunContext) {
+  logParseError(
+    ["Telefunc request body couldn't be parsed.", !hasProp(err, 'message') ? null : `Parse error: ${err.message}.`]
+      .filter(Boolean)
+      .join(' '),
+    runContext,
+  )
 }
 
 const VALID_STREAM_TRANSPORTS: StreamTransport[] = [

@@ -1,7 +1,7 @@
 export { ChannelDemo }
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Abort as TelefuncAbort, abort, ConnectionError } from 'telefunc/client'
+import { Abort as TelefuncAbort, abort, ConnectionError, withContext } from 'telefunc/client'
 import {
   onChannelInit,
   onChannelAbortTest,
@@ -25,6 +25,20 @@ import {
   onChannelNoListenerAckClient,
   onChannelShieldClient,
   onChannelShieldServerAck,
+  onChannelSelfRemovingListener,
+  onChannelUnserializableAnswer,
+  onChannelOversize,
+  onChannelHeldBinary,
+  onChannelUnattachedFlood,
+  onChannelEndedValues,
+  onChannelSlowLink,
+  onChannelUnawaitedBurst,
+  onChannelOpenBurst,
+  onChannelManyListeners,
+  onChannelLinkShare,
+  onChannelSlowUplink,
+  onChannelOpenAnswer,
+  onChannelOpenHello,
 } from './Channel.telefunc'
 
 /**
@@ -131,6 +145,28 @@ type ChannelState = {
   shieldServerAckValid: { ok: boolean; value?: string; error?: string } | null
   /** C2: server.send(valid, {ack:true}), client listener returns invalid → rejects. */
   shieldServerAckInvalid: { ok: boolean; value?: string; error?: string } | null
+  selfRemovingListener: { pageSeen: string[]; serverSeen: string[] } | null
+  unserializableAnswer: { channelId: string; pageSend: string; pageFollowUp: string; isClosed: boolean } | null
+  oversize: {
+    channelId: string
+    thrown: string[]
+    followUp: string
+    isClosed: boolean
+    broadcastIsClosed: boolean
+  } | null
+  heldBinary: number[][] | null
+  unattachedFlood: Record<'text' | 'binary', Record<string, number>> | null
+  durationLimits: { withContext: string; close: string; ack: string } | null
+  endedValuesReady: boolean
+  endedValuesCollected: boolean[] | null
+  slowLinkReceived: number | null
+  unawaitedBurst: { rejected: Record<string, number>; received: number; isClosed: boolean } | null
+  openBurstReceived: number | null
+  freshBinaryEchoed: number | null
+  helloBesideBurst: boolean
+  manyListenersMs: { page: number; server: number | null } | null
+  linkShare: { pingMs: number[]; downloaded: number } | null
+  slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
 }
 
 const initialState: ChannelState = {
@@ -187,6 +223,22 @@ const initialState: ChannelState = {
   shieldClientSendAckInvalidError: null,
   shieldServerAckValid: null,
   shieldServerAckInvalid: null,
+  selfRemovingListener: null,
+  unserializableAnswer: null,
+  oversize: null,
+  heldBinary: null,
+  unattachedFlood: null,
+  durationLimits: null,
+  endedValuesReady: false,
+  endedValuesCollected: null,
+  slowLinkReceived: null,
+  unawaitedBurst: null,
+  openBurstReceived: null,
+  freshBinaryEchoed: null,
+  helloBesideBurst: false,
+  manyListenersMs: null,
+  linkShare: null,
+  slowUplink: null,
 }
 
 function timestamp() {
@@ -246,6 +298,10 @@ function ChannelDemo() {
     null,
   )
   const upstreamReconnectSeqRef = useRef(0)
+  const noListenerAckServerChannelRef = useRef<
+    Awaited<ReturnType<typeof onChannelNoListenerAckServer>>['channel'] | null
+  >(null)
+  const endedValuesRef = useRef<WeakRef<object>[]>([])
 
   useEffect(() => setHydrated(true), [])
 
@@ -461,7 +517,7 @@ function ChannelDemo() {
   const testClientAbortServer = useCallback(async () => {
     if (clientAbortServerChannelRef.current && !clientAbortServerChannelRef.current.isClosed) {
       const channelId = channelState.clientAbortServerChannelId
-      clientAbortServerChannelRef.current.abort()
+      clientAbortServerChannelRef.current.abort({ reason: 'client-abort' })
       clientAbortServerChannelRef.current = null
       addLog('system', `client abort() sent for channel ${channelId}`)
       return
@@ -471,7 +527,7 @@ function ChannelDemo() {
     const { channel, channelId } = await openChannel(onChannelClientAbortInstrument)
     clientAbortServerChannelRef.current = channel
     setChannelState((s) => ({ ...s, clientAbortServerChannelId: channelId }))
-    channel.abort()
+    channel.abort({ reason: 'client-abort' })
     clientAbortServerChannelRef.current = null
     addLog('system', `client abort() sent for channel ${channelId}`)
   }, [addLog, channelState.clientAbortServerChannelId])
@@ -723,6 +779,7 @@ function ChannelDemo() {
   const testNoListenerAckServer = useCallback(async () => {
     addLog('system', 'Starting no-listener-ack-server test...')
     const { channel, channelId } = await openChannel(onChannelNoListenerAckServer)
+    noListenerAckServerChannelRef.current = channel
     setChannelState((s) => ({ ...s, noListenerAckServerChannelId: channelId }))
     // No listener — server's send({ ack: true }) should reject
     channel.onClose(() => {
@@ -790,6 +847,8 @@ function ChannelDemo() {
       await trigger()
       const outcome = await getOutcome()
       setChannelState((s) => ({ ...s, shieldServerAckValid: outcome }))
+      // The channel stays reachable until the server's send is answered: a GC pass would close it.
+      void channel
     }
 
     // ── C2 — server sends, client listener returns invalid (wrong type) ───────
@@ -799,10 +858,253 @@ function ChannelDemo() {
       await trigger()
       const outcome = await getOutcome()
       setChannelState((s) => ({ ...s, shieldServerAckInvalid: outcome }))
+      void channel
     }
 
     addLog('system', 'Shield tests complete.')
   }, [addLog])
+
+  const testSelfRemovingListener = useCallback(async () => {
+    const { channel, getServerSeen } = await openChannel(onChannelSelfRemovingListener)
+    const pageSeen: string[] = []
+    const unlisten = channel.listen((msg) => {
+      pageSeen.push(`once:${msg}`)
+      unlisten()
+    })
+    channel.listen((msg) => {
+      pageSeen.push(`other:${msg}`)
+    })
+    await new Promise<void>((resolve) => channel.onOpen(resolve))
+    await channel.send('one')
+    await channel.send('two')
+    for (let poll = 0; poll < 50; poll++) {
+      const serverSeen = await getServerSeen()
+      setChannelState((s) => ({ ...s, selfRemovingListener: { pageSeen: [...pageSeen], serverSeen } }))
+      if (pageSeen.length >= 3 && serverSeen.length >= 3) break
+      await new Promise((r) => setTimeout(r, 200))
+    }
+    channel.close()
+  }, [])
+
+  const testUnserializableAnswer = useCallback(async () => {
+    const { channel, channelId } = await openChannel(onChannelUnserializableAnswer)
+    channel.listen((msg) => {
+      if (msg !== 'cyclic') return `client-ack:${msg}`
+      const cyclic: { self?: unknown } = {}
+      cyclic.self = cyclic
+      return cyclic
+    })
+    const settle = (promise: Promise<unknown>) =>
+      promise.then(
+        (value) => `ok:${String(value)}`,
+        (err: any) => `error:${err?.message}`,
+      )
+    const pageSend = await settle(channel.send('cyclic', { ack: true }))
+    const pageFollowUp = await settle(channel.send('ok', { ack: true }))
+    setChannelState((s) => ({
+      ...s,
+      unserializableAnswer: { channelId, pageSend, pageFollowUp, isClosed: channel.isClosed },
+    }))
+  }, [])
+
+  const testOversize = useCallback(async () => {
+    const { channel, channelId, limit, broadcast } = await openChannel(onChannelOversize)
+    channel.listen((msg) => (msg === 'big' ? 'x'.repeat(limit + 1) : `client-ack:${msg}`))
+    const thrown: string[] = []
+    for (const send of [
+      () => channel.sendBinary(new Uint8Array(limit + 1)),
+      () => channel.send('x'.repeat(limit + 1)),
+      () => broadcast.publishBinary(new Uint8Array(limit + 1)),
+      () => broadcast.publish('x'.repeat(limit + 1)),
+    ]) {
+      try {
+        void send()
+        thrown.push('none')
+      } catch (err: any) {
+        thrown.push(err?.message ?? 'unknown')
+      }
+    }
+    const followUp = String(await channel.send('ok', { ack: true }))
+    const oversize = { channelId, thrown, followUp, isClosed: channel.isClosed, broadcastIsClosed: broadcast.isClosed }
+    setChannelState((s) => ({ ...s, oversize }))
+  }, [])
+
+  const testHeldBinary = useCallback(async () => {
+    const { channel } = await openChannel(onChannelHeldBinary)
+    const received: number[][] = []
+    channel.listenBinary((data) => {
+      received.push([...data])
+      if (received.length === 4) {
+        setChannelState((s) => ({ ...s, heldBinary: received }))
+        channel.close()
+      }
+    })
+  }, [])
+
+  const testUnattachedFlood = useCallback(async () => {
+    const unattachedFlood = await onChannelUnattachedFlood()
+    setChannelState((s) => ({ ...s, unattachedFlood }))
+  }, [])
+
+  const testDurationLimits = useCallback(async () => {
+    const thrown = (run: () => unknown) =>
+      Promise.resolve()
+        .then(run)
+        .then(
+          () => 'none',
+          (err: any) => err?.name ?? 'unknown',
+        )
+    const longest = 2 ** 31 - 1
+    const withContextThrown = await thrown(() =>
+      withContext(onChannelPerSendAck, { channel: { idleTimeout: longest + 1 } }),
+    )
+    const { channel } = await openChannel(onChannelPerSendAck)
+    const closeThrown = await thrown(() => channel.close({ timeout: longest + 1 }))
+    const ack = String(await channel.send('still-open', { ack: true }))
+    setChannelState((s) => ({ ...s, durationLimits: { withContext: withContextThrown, close: closeThrown, ack } }))
+    channel.close()
+  }, [])
+
+  const testEndedValues = useCallback(async () => {
+    const { channel, broadcast, generator } = await openChannel(onChannelEndedValues)
+    await Promise.all([channel.close(), broadcast.close()])
+    for await (const _ of generator);
+    endedValuesRef.current = [new WeakRef(channel), new WeakRef(broadcast), new WeakRef(generator)]
+    setChannelState((s) => ({ ...s, endedValuesReady: true }))
+  }, [])
+
+  const checkEndedValues = useCallback(() => {
+    const endedValuesCollected = endedValuesRef.current.map((ref) => ref.deref() === undefined)
+    setChannelState((s) => ({ ...s, endedValuesCollected }))
+  }, [])
+
+  const testSlowLink = useCallback(async () => {
+    const { channel } = await openChannel(onChannelSlowLink)
+    channel.listenBinary((data) => {
+      setChannelState((s) => ({ ...s, slowLinkReceived: data.byteLength }))
+      channel.close()
+    })
+    await channel.send(1_000_000)
+  }, [])
+
+  const testUnawaitedBurst = useCallback(async (count: number) => {
+    setChannelState((s) => ({ ...s, unawaitedBurst: null }))
+    const { channel } = await openChannel(onChannelUnawaitedBurst)
+    let received = 0
+    channel.listenBinary(() => {
+      received++
+    })
+    const rejected = await channel.send(count, { ack: true })
+    const sent = count - Object.values(rejected).reduce((sum, n) => sum + n, 0)
+    while (received < sent) await new Promise((r) => setTimeout(r, 100))
+    const unawaitedBurst = { rejected, received, isClosed: channel.isClosed }
+    setChannelState((s) => ({ ...s, unawaitedBurst }))
+    channel.close()
+  }, [])
+
+  const testOpenBurst = useCallback(async () => {
+    setChannelState((s) => ({ ...s, openBurstReceived: null }))
+    const { channel } = await openChannel(onChannelOpenBurst)
+    let received = 0
+    channel.listen(() => {
+      if (++received < 500) return
+      setChannelState((s) => ({ ...s, openBurstReceived: received }))
+      channel.close()
+    })
+  }, [])
+
+  const testFreshBinary = useCallback(async () => {
+    setChannelState((s) => ({ ...s, freshBinaryEchoed: null }))
+    const { channel } = await openChannel(onChannelBinary)
+    channel.listenBinary((received) => {
+      setChannelState((s) => ({ ...s, freshBinaryEchoed: received.length }))
+      channel.close()
+    })
+    channel.sendBinary(new Uint8Array(32 * 1024))
+  }, [])
+
+  const testHelloBesideBurst = useCallback(async () => {
+    setChannelState((s) => ({ ...s, helloBesideBurst: false }))
+    const { channel: burst } = await openChannel(onChannelUnawaitedBurst)
+    const firstChunk = new Promise<void>((resolve) => burst.listenBinary(() => resolve()))
+    void burst.send(4, { ack: true }).catch(() => {})
+    await firstChunk
+    const { channel } = await openChannel(onChannelOpenHello)
+    channel.listen(() => {
+      setChannelState((s) => ({ ...s, helloBesideBurst: true }))
+      channel.close()
+      burst.close()
+    })
+  }, [])
+
+  const testManyListeners = useCallback(async () => {
+    setChannelState((s) => ({ ...s, manyListenersMs: null }))
+    const { channel } = await openChannel(onChannelManyListeners)
+    const start = performance.now()
+    const removes = Array.from({ length: 100_000 }, () => channel.listen(() => {}))
+    for (const remove of removes) remove()
+    const page = Math.round(performance.now() - start)
+    setChannelState((s) => ({ ...s, manyListenersMs: { page, server: null } }))
+    const server = await channel.send(100_000, { ack: true })
+    setChannelState((s) => ({ ...s, manyListenersMs: { page, server } }))
+    channel.close()
+  }, [])
+
+  const testLinkShare = useCallback(async () => {
+    setChannelState((s) => ({ ...s, linkShare: null }))
+    const { download, ping } = await openChannel(onChannelLinkShare)
+    let downloaded = 0
+    let resolveStarted!: () => void
+    const started = new Promise<void>((resolve) => (resolveStarted = resolve))
+    download.listenBinary((data) => {
+      downloaded += data.byteLength
+      if (downloaded >= 2_000_000) resolveStarted()
+    })
+    void download.send(100_000_000)
+    await started
+    const pingMs: number[] = []
+    for (let i = 0; i < 3; i++) {
+      const start = performance.now()
+      await ping.send('ping', { ack: true })
+      pingMs.push(Math.round(performance.now() - start))
+    }
+    setChannelState((s) => ({ ...s, linkShare: { pingMs, downloaded } }))
+    download.close()
+    ping.close()
+  }, [])
+
+  const testSlowUplink = useCallback(async () => {
+    setChannelState((s) => ({ ...s, slowUplink: null }))
+    const { upload, ticks } = await openChannel(onChannelSlowUplink)
+    let lastTick = performance.now()
+    let longestTickGapMs = 0
+    ticks.listen(() => {
+      const now = performance.now()
+      longestTickGapMs = Math.max(longestTickGapMs, now - lastTick)
+      lastTick = now
+    })
+    let midUpload!: () => void
+    const answered = (async () => {
+      await new Promise<void>((resolve) => {
+        midUpload = resolve
+      })
+      const { channel } = await openChannel(onChannelOpenAnswer)
+      const answer = await channel.send('hi', { ack: true })
+      channel.close()
+      return answer
+    })()
+    const chunk = new Uint8Array(16 * 1024)
+    for (let sent = 0; sent < 2 * 1024 * 1024; sent += chunk.byteLength) {
+      // The second channel opens while 1.75 MiB is still to send.
+      if (sent === 256 * 1024) midUpload()
+      await upload.sendBinary(chunk)
+    }
+    const uploaded = await upload.send('received', { ack: true })
+    const slowUplink = { uploaded, opened: await answered, longestTickGapMs: Math.round(longestTickGapMs) }
+    setChannelState((s) => ({ ...s, slowUplink }))
+    upload.close()
+    ticks.close()
+  }, [])
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -1044,6 +1346,137 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-amber-700 text-white hover:bg-amber-800"
           >
             Shield Validation
+          </button>
+          <button
+            id="channel-test-self-removing-listener"
+            type="button"
+            onClick={testSelfRemovingListener}
+            className="px-3 py-1.5 text-sm rounded bg-emerald-700 text-white hover:bg-emerald-800"
+          >
+            Self-removing Listener
+          </button>
+          <button
+            id="channel-test-unserializable-answer"
+            type="button"
+            onClick={testUnserializableAnswer}
+            className="px-3 py-1.5 text-sm rounded bg-red-700 text-white hover:bg-red-800"
+          >
+            Unserializable Ack Answer
+          </button>
+          <button
+            id="channel-test-oversize"
+            type="button"
+            onClick={testOversize}
+            className="px-3 py-1.5 text-sm rounded bg-orange-700 text-white hover:bg-orange-800"
+          >
+            Send Over 64 MiB
+          </button>
+          <button
+            id="channel-test-held-binary"
+            type="button"
+            onClick={testHeldBinary}
+            className="px-3 py-1.5 text-sm rounded bg-cyan-800 text-white hover:bg-cyan-900"
+          >
+            Binary Sent Before Attach
+          </button>
+          <button
+            id="channel-test-duration-limits"
+            type="button"
+            onClick={testDurationLimits}
+            className="px-3 py-1.5 text-sm rounded bg-stone-700 text-white hover:bg-stone-800"
+          >
+            Durations Past 2^31 ms
+          </button>
+          <button
+            id="channel-test-ended-values"
+            type="button"
+            onClick={testEndedValues}
+            className="px-3 py-1.5 text-sm rounded bg-neutral-600 text-white hover:bg-neutral-700"
+          >
+            End a Channel, Broadcast and Generator
+          </button>
+          <button
+            id="channel-test-ended-values-check"
+            type="button"
+            onClick={checkEndedValues}
+            className="px-3 py-1.5 text-sm rounded bg-neutral-700 text-white hover:bg-neutral-800"
+          >
+            Check They Were Collected
+          </button>
+          <button
+            id="channel-test-slow-link"
+            type="button"
+            onClick={testSlowLink}
+            className="px-3 py-1.5 text-sm rounded bg-sky-800 text-white hover:bg-sky-900"
+          >
+            1 MB Download
+          </button>
+          {[32, 100].map((count) => (
+            <button
+              key={count}
+              id={`channel-test-unawaited-burst-${count}`}
+              type="button"
+              onClick={() => testUnawaitedBurst(count)}
+              className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+            >
+              Server Bursts {count} MiB Unawaited
+            </button>
+          ))}
+          <button
+            id="channel-test-open-burst"
+            type="button"
+            onClick={testOpenBurst}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Server Sends 500 Small Messages as It Opens
+          </button>
+          <button
+            id="channel-test-fresh-binary"
+            type="button"
+            onClick={testFreshBinary}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Page Sends 32 KiB First
+          </button>
+          <button
+            id="channel-test-hello-beside-burst"
+            type="button"
+            onClick={testHelloBesideBurst}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Server Says Hello as a Channel Opens Beside a 4 MiB Burst
+          </button>
+          <button
+            id="channel-test-link-share"
+            type="button"
+            onClick={testLinkShare}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Ping Beside a Download
+          </button>
+          <button
+            id="channel-test-slow-uplink"
+            type="button"
+            onClick={testSlowUplink}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Upload 2 MiB Beside Ticks
+          </button>
+          <button
+            id="channel-test-many-listeners"
+            type="button"
+            onClick={testManyListeners}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            100k Listeners Added and Removed
+          </button>
+          <button
+            id="channel-test-unattached-flood"
+            type="button"
+            onClick={testUnattachedFlood}
+            className="px-3 py-1.5 text-sm rounded bg-stone-600 text-white hover:bg-stone-700"
+          >
+            Flood Unattached Channel
           </button>
         </div>
       </div>

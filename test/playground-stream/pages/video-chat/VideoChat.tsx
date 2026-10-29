@@ -1,152 +1,217 @@
 export { VideoChat }
 
-import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { onJoinRoom } from './VideoChat.telefunc'
+import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { onGetCall, onJoinCall, onSwitchHere } from './VideoChat.telefunc'
+
+type Call = Awaited<ReturnType<typeof onGetCall>>
+type Me = Awaited<ReturnType<typeof onJoinCall>>
 
 declare const MediaStreamTrackProcessor: {
   new (opts: { track: MediaStreamTrack }): { readable: ReadableStream<VideoFrame> }
 }
 
 function VideoChat() {
+  const [call, setCall] = useState<Call | null>(null)
+  useEffect(() => void onGetCall().then(setCall), [])
+  if (!call) return null
   return (
-    <div style={{ display: 'flex', height: '100vh' }}>
-      <Participant name="Alice" />
-      <div style={{ width: 1, background: '#e5e7eb' }} />
-      <Participant name="Bob" />
-    </div>
+    <>
+      <InTheCall call={call} />
+      <div style={{ display: 'flex' }}>
+        <Person call={call} name="Alice" />
+        <div style={{ width: 1, background: '#e5e7eb' }} />
+        <Person call={call} name="Bob" />
+      </div>
+    </>
   )
 }
 
-function Participant({ name }: { name: string }) {
-  const [joined, setJoined] = useState(false)
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const remoteRef = useRef<HTMLCanvasElement>(null)
-  const cleanupRef = useRef<(() => void) | null>(null)
+function InTheCall({ call }: { call: Call }) {
+  const { participants } = useSyncExternalStore(call.onChange, call.snapshot)
+  const names = participants.map((p) => (p.isConnected ? p.meta.name : `${p.meta.name} (reconnecting…)`))
+  return <p style={{ margin: 20 }}>In the call: {names.join(', ')}</p>
+}
 
-  const join = useCallback(async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, frameRate: 15 } })
-    videoRef.current!.srcObject = stream
-    videoRef.current!.play()
+function Person({ call, name }: { call: Call; name: string }) {
+  const { participants } = useSyncExternalStore(call.onChange, call.snapshot)
+  const [me, setMe] = useState<Me | null>(null)
+  const [movedAway, setMovedAway] = useState(false)
+  const [messages, setMessages] = useState<Array<{ name: string; text: string }>>([])
+  const [draft, setDraft] = useState('')
+  const localVideo = useRef<HTMLVideoElement>(null)
+  const remoteVideo = useRef<HTMLCanvasElement>(null)
+  const inOtherTab = !me && participants.some((p) => p.identity === name)
+  const others = participants.filter((p) => p.id !== me?.id)
+  const remoteNotice = !me
+    ? null
+    : others.length === 0
+      ? 'Waiting for someone to join…'
+      : others.every((p) => !p.isConnected)
+        ? `${others[0]!.meta.name} is reconnecting…`
+        : null
 
-    const channel = await onJoinRoom('demo')
+  async function join() {
+    const camera = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240, frameRate: 15 } })
+    localVideo.current!.srcObject = camera
+    const me = inOtherTab ? await onSwitchHere(name) : await onJoinCall(name)
 
-    // Receive: decode VP8 → draw to canvas (with 300ms jitter buffer)
-    const decoder = createDecoder(remoteRef.current!)
-    const jitter = createJitterBuffer(decoder, 300, 15)
-    channel.subscribeBinary(jitter.push)
+    const stopReceiving = showVideo(call, me.id, remoteVideo.current!)
+    const stopSending = sendVideo(camera, me)
+    setMessages([])
+    const stopChat = call.subscribe((message, _info, from) => {
+      setMessages((messages) => [...messages.slice(-49), { name: from.meta.name, text: message.text }])
+    })
 
-    // Send: camera → VP8 encode → publish
-    const stop = captureAndPublish(stream, channel)
+    me.onLeave((cause) => {
+      stopChat()
+      stopSending()
+      stopReceiving()
+      for (const track of camera.getTracks()) track.stop()
+      setMovedAway(cause.type === 'removed')
+      setMe(null)
+    })
+    setMovedAway(false)
+    setMe(me)
+  }
 
-    cleanupRef.current = () => {
-      stop()
-      jitter.stop()
-      decoder.close()
-      stream.getTracks().forEach((t) => t.stop())
-      channel.close()
-    }
-    setJoined(true)
-  }, [])
-
-  useEffect(() => () => cleanupRef.current?.(), [])
+  async function send(event: React.FormEvent) {
+    event.preventDefault()
+    setDraft('')
+    await me!.publish({ text: draft })
+  }
 
   return (
-    <div style={{ flex: 1, padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <section style={{ flex: 1, padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>{name}</h2>
       <div style={{ display: 'flex', gap: 12 }}>
-        <div>
-          <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>Local</div>
-          <video
-            ref={videoRef}
-            width={320}
-            height={240}
-            muted
-            playsInline
-            style={{ background: '#111', borderRadius: 6, display: 'block' }}
-          />
-        </div>
-        <div>
-          <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>Remote</div>
-          <canvas
-            ref={remoteRef}
-            width={320}
-            height={240}
-            style={{ background: '#111', borderRadius: 6, display: 'block' }}
-          />
-        </div>
+        <Video label="Local">
+          <video ref={localVideo} width={320} height={240} autoPlay muted playsInline style={videoStyle} />
+        </Video>
+        <Video label="Remote" notice={remoteNotice}>
+          <canvas ref={remoteVideo} width={320} height={240} style={videoStyle} />
+        </Video>
       </div>
-      {!joined ? (
-        <button onClick={join} style={{ alignSelf: 'flex-start', padding: '8px 20px' }}>
-          Join as {name}
-        </button>
-      ) : (
-        <button
-          onClick={() => {
-            cleanupRef.current?.()
-            cleanupRef.current = null
-            setJoined(false)
-          }}
-          style={{ alignSelf: 'flex-start', padding: '8px 20px', color: '#dc2626' }}
-        >
+      {movedAway && <p style={{ margin: 0 }}>{name} moved to another tab</p>}
+      {!movedAway && inOtherTab && <p style={{ margin: 0 }}>{name} is already in the call in another tab</p>}
+      {me ? (
+        <button onClick={() => me.leave()} style={{ ...buttonStyle, color: '#dc2626' }}>
           Leave
         </button>
+      ) : (
+        <button onClick={join} style={buttonStyle}>
+          {inOtherTab ? 'Switch here' : `Join as ${name}`}
+        </button>
       )}
+      <ul aria-label="Chat" style={{ margin: 0, padding: 8, height: 160, overflowY: 'auto', background: '#f9fafb' }}>
+        {messages.map((message, i) => (
+          <li key={i} style={{ listStyle: 'none' }}>
+            <b>{message.name}:</b> {message.text}
+          </li>
+        ))}
+      </ul>
+      <form onSubmit={send} style={{ display: 'flex', gap: 8 }}>
+        <input value={draft} onChange={(e) => setDraft(e.target.value)} disabled={!me} placeholder="Message" />
+        <button disabled={!me || !draft}>Send</button>
+      </form>
+    </section>
+  )
+}
+
+function Video({ label, notice, children }: { label: string; notice?: string | null; children: React.ReactNode }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: '#9ca3af', marginBottom: 4 }}>{label}</div>
+      <div style={{ position: 'relative' }}>
+        {children}
+        {notice && <div style={noticeStyle}>{notice}</div>}
+      </div>
     </div>
   )
 }
 
-// --- Helpers (could be a library) ---
+const videoStyle = { background: '#111', borderRadius: 6, display: 'block' }
+const buttonStyle = { alignSelf: 'flex-start', padding: '8px 20px' }
+const noticeStyle = {
+  position: 'absolute',
+  inset: 0,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  color: '#e5e7eb',
+  background: 'rgba(17, 17, 17, 0.8)',
+  borderRadius: 6,
+} as const
 
-function createDecoder(canvas: HTMLCanvasElement) {
+// Draws the other person's video.
+function showVideo(call: Call, myId: string, canvas: HTMLCanvasElement) {
   const ctx = canvas.getContext('2d')!
+  // One player per sender: VP8 frames of two senders through one decoder corrupt the picture
+  const players = new Map<string, ReturnType<typeof createPlayer>>()
+  const stopFrames = call.subscribeBinary(
+    (frame, info, from) => {
+      if (from.id === myId) return
+      const isKeyframe = info.meta?.isKeyframe === true
+      let player = players.get(from.id)
+      if (!player) {
+        if (!isKeyframe) return
+        player = createPlayer(ctx)
+        players.set(from.id, player)
+      }
+      player.push(new EncodedVideoChunk({ type: isKeyframe ? 'key' : 'delta', timestamp: 0, data: frame }))
+    },
+    { track: 'camera' },
+  )
+  const stopLeaves = call.onLeave((member) => {
+    players.get(member.id)?.stop()
+    players.delete(member.id)
+  })
+  return () => {
+    stopFrames()
+    stopLeaves()
+    for (const player of players.values()) player.stop()
+  }
+}
+
+// A jitter buffer: plays a sender's frames 300 ms behind, one every 1/15 s, so network bursts and gaps don't stutter
+function createPlayer(ctx: CanvasRenderingContext2D) {
   const decoder = new VideoDecoder({
-    output(frame) {
-      ctx.drawImage(frame, 0, 0, 320, 240)
-      frame.close()
+    output(videoFrame) {
+      ctx.drawImage(videoFrame, 0, 0, 320, 240)
+      videoFrame.close()
     },
     error(err) {
       console.error('decode error:', err)
     },
   })
   decoder.configure({ codec: 'vp8', codedWidth: 320, codedHeight: 240 })
-  return decoder
-}
-
-function createJitterBuffer(decoder: VideoDecoder, bufferMs: number, fps: number) {
-  const queue: Uint8Array[] = []
-  let timer: ReturnType<typeof setInterval> | null = null
-  let started = false
-  const drain = () => {
-    const f = queue.shift()
-    if (f) decodeFrame(decoder, f)
-  }
+  const queue: EncodedVideoChunk[] = []
+  let playing: ReturnType<typeof setInterval> | undefined
+  const starting = setTimeout(() => {
+    playing = setInterval(() => {
+      // More than a second behind (a backgrounded tab plays slower): catch up instead of falling further behind
+      while (queue.length > 15) decoder.decode(queue.shift()!)
+      const chunk = queue.shift()
+      if (chunk) decoder.decode(chunk)
+    }, 1000 / 15)
+  }, 300)
   return {
-    push(data: Uint8Array) {
-      queue.push(data)
-      if (!started) {
-        started = true
-        setTimeout(() => {
-          timer = setInterval(drain, 1000 / fps)
-        }, bufferMs)
-      }
-    },
+    push: (chunk: EncodedVideoChunk) => queue.push(chunk),
     stop() {
-      if (timer) clearInterval(timer)
+      clearTimeout(starting)
+      clearInterval(playing)
+      decoder.close()
     },
   }
 }
 
-function decodeFrame(decoder: VideoDecoder, data: Uint8Array) {
-  decoder.decode(new EncodedVideoChunk({ type: data[0] === 1 ? 'key' : 'delta', timestamp: 0, data: data.subarray(1) }))
-}
-
-function captureAndPublish(stream: MediaStream, channel: { publishBinary(data: Uint8Array): any }) {
+function sendVideo(camera: MediaStream, me: Me) {
   const encoder = new VideoEncoder({
     output(chunk) {
-      const buf = new Uint8Array(1 + chunk.byteLength)
-      buf[0] = chunk.type === 'key' ? 1 : 0
-      chunk.copyTo(buf.subarray(1))
-      channel.publishBinary(buf)
+      const frame = new Uint8Array(chunk.byteLength)
+      chunk.copyTo(frame)
+      const isKeyframe = chunk.type === 'key'
+      // Live video: not awaited, or each frame waits a round trip for the previous one
+      void me.publishBinary(frame, { track: 'camera', meta: { isKeyframe }, retain: isKeyframe })
     },
     error(err) {
       console.error('encode error:', err)
@@ -154,26 +219,15 @@ function captureAndPublish(stream: MediaStream, channel: { publishBinary(data: U
   })
   encoder.configure({ codec: 'vp8', width: 320, height: 240, bitrate: 500_000, framerate: 15 })
 
-  const processor = new MediaStreamTrackProcessor({ track: stream.getVideoTracks()[0]! })
-  const reader = processor.readable.getReader()
-  const abort = new AbortController()
-  let i = 0
-
+  const frames = new MediaStreamTrackProcessor({ track: camera.getVideoTracks()[0]! }).readable.getReader()
   void (async () => {
-    while (!abort.signal.aborted) {
-      const { done, value: frame } = await reader.read()
-      if (done || abort.signal.aborted) {
-        frame?.close()
-        break
-      }
-      encoder.encode(frame, { keyFrame: i++ % 30 === 0 })
+    // Ends when the camera stops
+    for (let i = 0; ; i++) {
+      const { done, value: frame } = await frames.read()
+      if (done) return
+      if (encoder.state === 'configured') encoder.encode(frame, { keyFrame: i % 30 === 0 })
       frame.close()
     }
-    reader.cancel()
   })()
-
-  return () => {
-    abort.abort()
-    encoder.close()
-  }
+  return () => encoder.close()
 }

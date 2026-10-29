@@ -1,5 +1,7 @@
 export { testCounter }
 export { testRunClassic }
+export { withNetworkConditions }
+export { newCDPSession }
 
 import {
   page,
@@ -13,6 +15,29 @@ import {
   editFile,
   editFileRevert,
 } from '@brillout/test-e2e'
+
+function newCDPSession() {
+  // test-e2e's `page` is a proxy, and a CDP session needs the page itself.
+  return page.context().newCDPSession(page.mainFrame().page())
+}
+
+/** In bytes per second each way, -1 for none. */
+type NetworkConditions = { downloadThroughput: number; uploadThroughput: number }
+
+/** Runs `run` with the page's link throttled as Chrome's DevTools throttle it, WebSockets included; lifted after, however `run` ends. */
+async function withNetworkConditions<T>(conditions: NetworkConditions, run: () => Promise<T>): Promise<T> {
+  const cdp = await newCDPSession()
+  const emulate = ({ downloadThroughput, uploadThroughput }: NetworkConditions) =>
+    cdp.send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput, uploadThroughput })
+  try {
+    await cdp.send('Network.enable')
+    await emulate(conditions)
+    return await run()
+  } finally {
+    await emulate({ downloadThroughput: -1, uploadThroughput: -1 })
+    await cdp.detach()
+  }
+}
 
 async function testCounter(currentValue = 0) {
   await autoRetry(
@@ -33,6 +58,7 @@ function testRunClassic(
     skipAboutPage,
     skipViteEcosystemCi,
     tolerateError,
+    additionalTimeout,
     testHmr,
     isVue,
   }: {
@@ -41,6 +67,7 @@ function testRunClassic(
     testHmr?: false | string
     isVue?: true
     tolerateError?: NonNullable<Parameters<typeof run>[1]>['tolerateError']
+    additionalTimeout?: number
   } = {},
 ) {
   const isDev = cmd === 'pnpm run dev'
@@ -50,7 +77,7 @@ function testRunClassic(
     return
   }
 
-  run(cmd, { tolerateError })
+  run(cmd, { tolerateError, additionalTimeout })
 
   test('page content is rendered to HTML', async () => {
     const html = await fetchHtml('/')
@@ -77,6 +104,9 @@ function testRunClassic(
         },
         { timeout: 5000 },
       )
+      // Vite's file watcher drops a change of a file within 50 ms of the one before, which a revert as soon as the edit
+      // shows can be on a busy runner.
+      await new Promise((resolve) => setTimeout(resolve, 500))
       editFileRevert()
       await autoRetry(
         async () => {

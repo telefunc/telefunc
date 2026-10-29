@@ -1,9 +1,11 @@
 export { testFunction }
 
 import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import { navigate, getResult } from '../../e2e-utils'
+import * as http from 'node:http'
+import * as os from 'node:os'
+import { navigate, getResult, forceServerGc, serverRuntime } from '../../e2e-utils'
 
-function testFunction() {
+function testFunction(isDev: boolean, inDocker = false) {
   test('function: simple greeter returns correct string', async () => {
     await navigate(`${getServerUrl()}/function`)
 
@@ -103,5 +105,110 @@ function testFunction() {
         expect(progress[i]!).greaterThanOrEqual(progress[i - 1]!)
       }
     })
+  })
+
+  test("function: a search box's call answers at once, though the last keystroke's call, aborted before it left, passed a callback the server never got", async () => {
+    await page.click('#search-run')
+
+    await autoRetry(async () => {
+      const search = await getResult<{ result: string; ms: number }>('#search-result')
+      expect(search.result).toBe('<b>ab</b>')
+      // Not held for the server's connectTtl, which waits for the aborted call's callback.
+      expect(search.ms).lessThan(3000)
+    })
+  })
+
+  if (JSON.parse(process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS!).includes('ws')) {
+    test("function: a call's channel.idleTimeout of 0 closes its connection once the callback it passed is let go", async () => {
+      await navigate(`${getServerUrl()}/function`)
+      const webSocket = page.waitForEvent('websocket', { predicate: (ws) => ws.url().includes('/_telefunc') })
+      await page.click('#idle-timeout-run')
+      const ws = await webSocket
+
+      await autoRetry(async () => {
+        expect(await getResult<number[]>('#idle-timeout-result')).deep.equal([2, 4])
+      })
+      await forceServerGc()
+      await autoRetry(async () => {
+        expect(ws.isClosed()).toBe(true)
+      })
+    })
+  }
+
+  // Node only: Bun.serve and Deno.serve hand this upgrade to the app's fetch handler (Node emits an 'upgrade' event): Deno's Vike logs a [Bug] rendering `//`, Bun gets no Response.
+  if (serverRuntime() === 'node')
+    test("function: the server keeps answering after a WebSocket upgrade whose path isn't a URL", async () => {
+      await navigate(`${getServerUrl()}/function`)
+      await requestPath('//', {
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Version': '13',
+        'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==',
+      })
+      await page.click('#greeter-run')
+      await autoRetry(async () => {
+        expect(await getResult<string>('#greeter-result')).toBe('Hello, World! (from server)')
+      })
+    })
+
+  // Preview only: in development, telefunc logs a GET or HEAD as a malformed request.
+  for (const method of isDev ? [] : ['GET', 'HEAD']) {
+    test(`function: a ${method} request to /_telefunc gets an answer`, async () => {
+      const response = await fetch(`${getServerUrl()}/_telefunc`, { method })
+      expect(response.status).toBe(400)
+      expect(await response.text()).toBe(method === 'GET' ? 'Malformed Telefunc Request' : '')
+    })
+  }
+
+  test('function: a callback the server calls without awaiting it, which fails, leaves the server clean', async () => {
+    await navigate(`${getServerUrl()}/function`)
+    await page.click('#unawaited-run')
+    await autoRetry(async () => {
+      expect(await getResult<string>('#unawaited-result')).toBe('answered')
+    })
+  })
+
+  // A browser gives crypto.randomUUID() only to secure origins: HTTPS or localhost.
+  const lanAddress = Object.values(os.networkInterfaces())
+    .flat()
+    .find((address) => address?.family === 'IPv4' && !address.internal)?.address
+  // Preview only: Vite's dev server listens on localhost; Docker serves HTTPS.
+  // Not on Deno: Deno's node:zlib fails to gzip the page's assets (TypeError: invalid output range), which Chrome asks for on a plain-http page away from localhost (on localhost it asks for br).
+  if (!isDev && !inDocker && lanAddress && serverRuntime() !== 'deno') {
+    test('function: a page served over plain http from an address other than localhost opens a channel and passes a callback', async () => {
+      const url = new URL(getServerUrl())
+      url.hostname = lanAddress
+      await navigate(`${url.origin}/channel`)
+      await page.click('#channel-connect')
+      await autoRetry(async () => {
+        expect((await getResult<{ welcomeReceived: boolean }>('#channel-state')).welcomeReceived).toBe(true)
+      })
+      await navigate(`${url.origin}/function`)
+      await page.click('#map-run')
+      await autoRetry(async () => {
+        expect(await getResult<number[]>('#map-result')).to.deep.equal([1, 4, 9, 16, 25])
+      })
+    })
+  }
+}
+
+/** Sends a raw request for `path`, and resolves once the server answered or hung up. */
+function requestPath(path: string, headers: Record<string, string>) {
+  const { hostname, port } = new URL(getServerUrl())
+  return new Promise<void>((resolve) => {
+    const req = http.request({ hostname, port, path, headers, timeout: 2000 })
+    const done = () => {
+      req.destroy()
+      resolve()
+    }
+    req.on('response', (res) => {
+      res.resume()
+      res.on('end', done)
+    })
+    req.on('upgrade', done)
+    req.on('timeout', done)
+    req.on('error', done)
+    req.on('close', done)
+    req.end()
   })
 }

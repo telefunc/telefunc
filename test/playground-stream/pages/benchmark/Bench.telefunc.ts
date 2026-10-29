@@ -41,15 +41,34 @@ async function onBenchBinaryEchoLatency() {
   return { channel: ch.client, instance: INSTANCE_ID }
 }
 
+/** Counts received messages and samples the running total on the server's clock: as the first arrives, then every `sampleMs`. */
+function countReceived(sampleMs: number) {
+  let total = 0
+  let timer: ReturnType<typeof setInterval> | undefined
+  const samples: { at: number; total: number }[] = []
+  return {
+    samples,
+    total: () => total,
+    count() {
+      if (timer === undefined) {
+        samples.push({ at: performance.now(), total })
+        timer = setInterval(() => samples.push({ at: performance.now(), total }), sampleMs)
+      }
+      total++
+    },
+    stop: () => clearInterval(timer),
+  }
+}
+
 type CtrlMsg = { ctrl: 'start' | 'stop' }
 type TextInbound = TextMsg | CtrlMsg
 
 /** Pure-direction throughput (text). Two independent measurements over one channel:
- *   - TX: client floods text data; server counts via `getServerReceived` (no echoes).
+ *   - TX: client floods text data; server counts and samples its received total (no echoes).
  *   - RX: client sends `{ctrl:'start'}`; server fires text data fire-and-forget until `{ctrl:'stop'}`.
  *  Avoids the echo round-trip — each direction's rate reflects wire-level one-way capacity. */
-async function onBenchTextThroughput(payloadSize: number) {
-  let serverReceived = 0
+async function onBenchTextThroughput(payloadSize: number, sampleMs: number) {
+  const received = countReceived(sampleMs)
   let pushing = false
   const payload = 'x'.repeat(payloadSize)
   const ch = new Channel<(msg: TextInbound) => void, (msg: TextMsg) => void>()
@@ -74,19 +93,21 @@ async function onBenchTextThroughput(payloadSize: number) {
         pushing = false
       }
     } else {
-      serverReceived++
+      received.count()
     }
   })
+  ch.onClose(received.stop)
   return {
     channel: ch.client,
     instance: INSTANCE_ID,
-    getServerReceived: async () => serverReceived,
+    getServerReceived: async () => received.total(),
+    getReceivedSamples: async () => received.samples,
   }
 }
 
 /** Pure-direction throughput (binary). Control via text (`{ctrl:'start'|'stop'}`), data via binary. */
-async function onBenchBinaryThroughput(payloadSize: number) {
-  let serverReceived = 0
+async function onBenchBinaryThroughput(payloadSize: number, sampleMs: number) {
+  const received = countReceived(sampleMs)
   let pushing = false
   const payload = new Uint8Array(payloadSize).fill(0xab)
   const ch = new Channel<(msg: CtrlMsg) => void, never>()
@@ -109,12 +130,14 @@ async function onBenchBinaryThroughput(payloadSize: number) {
     }
   })
   ch.listenBinary(() => {
-    serverReceived++
+    received.count()
   })
+  ch.onClose(received.stop)
   return {
     channel: ch.client,
     instance: INSTANCE_ID,
-    getServerReceived: async () => serverReceived,
+    getServerReceived: async () => received.total(),
+    getReceivedSamples: async () => received.samples,
   }
 }
 

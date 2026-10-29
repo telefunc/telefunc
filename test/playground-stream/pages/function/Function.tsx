@@ -1,6 +1,7 @@
 export { FunctionDemo }
 
 import React, { useEffect, useState } from 'react'
+import { withContext } from 'telefunc/client'
 import {
   onGetGreeter,
   onGetAdder,
@@ -10,6 +11,8 @@ import {
   onUpload,
   onGetTypedAdder,
   onCallBack,
+  onSearch,
+  onCallBackUnawaited,
 } from './Function.telefunc'
 
 type FunctionState = {
@@ -24,6 +27,10 @@ type FunctionState = {
   shieldReturnError: string | null
   shieldCallbackOk: number | null
   shieldCallbackError: string | null
+  /** ms: how long the second keystroke's call took. */
+  searchResult: { result: string; ms: number } | null
+  idleTimeoutResult: number[] | null
+  unawaitedResult: string | null
 }
 
 function FunctionDemo() {
@@ -39,11 +46,25 @@ function FunctionDemo() {
     shieldReturnError: null,
     shieldCallbackOk: null,
     shieldCallbackError: null,
+    searchResult: null,
+    idleTimeoutResult: null,
+    unawaitedResult: null,
   })
   const [log, setLog] = useState<string[]>([])
 
   function addLog(msg: string) {
     setLog((prev) => [...prev, msg])
+  }
+
+  // Two keystrokes in one go: the second aborts the first's call before its request leaves.
+  async function runSearch() {
+    const highlight = async (query: string) => `<b>${query}</b>`
+    const firstKeystroke = new AbortController()
+    withContext(onSearch, { signal: firstKeystroke.signal })('a', highlight).catch(() => {})
+    firstKeystroke.abort()
+    const start = performance.now()
+    const result = await onSearch('ab', highlight)
+    setState((s) => ({ ...s, searchResult: { result, ms: performance.now() - start } }))
   }
 
   async function runGreeter() {
@@ -74,6 +95,20 @@ function FunctionDemo() {
     const r2 = await echo('world')
     addLog(`echo("world") → ${JSON.stringify(r2)}`)
     setState((s) => ({ ...s, echoResults: [r1, r2] }))
+  }
+
+  async function runIdleTimeout() {
+    const map = withContext(onMap, { channel: { idleTimeout: 0, connectionKey: 'idle-timeout' } })
+    const idleTimeoutResult = await map([1, 2], async (n) => n * 2)
+    setState((s) => ({ ...s, idleTimeoutResult }))
+  }
+
+  async function runUnawaited() {
+    const unawaitedResult = await onCallBackUnawaited(async (fail) => {
+      if (fail) throw new Error('callback-failure')
+      return 'answered'
+    })
+    setState((s) => ({ ...s, unawaitedResult }))
   }
 
   async function runMap() {
@@ -189,6 +224,32 @@ function FunctionDemo() {
         </pre>
       </section>
 
+      {/* Per-call idleTimeout */}
+      <section className="space-y-2">
+        <h2 className="font-medium">Per-call idleTimeout reaches a callback's channel</h2>
+        <p className="text-xs text-zinc-500">
+          <code>withContext(onMap, {'{ channel: { idleTimeout: 0 } }'})</code>: its connection closes once the
+          callback's channel does
+        </p>
+        <button id="idle-timeout-run" onClick={runIdleTimeout} className="px-3 py-1 border rounded text-sm">
+          Run
+        </button>
+        <pre id="idle-timeout-result" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.idleTimeoutResult)}
+        </pre>
+      </section>
+
+      {/* Unawaited callback */}
+      <section className="space-y-2">
+        <h2 className="font-medium">The server calls a failing callback without awaiting it</h2>
+        <button id="unawaited-run" onClick={runUnawaited} className="px-3 py-1 border rounded text-sm">
+          Run
+        </button>
+        <pre id="unawaited-result" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.unawaitedResult)}
+        </pre>
+      </section>
+
       {/* Reduce */}
       <section className="space-y-2">
         <h2 className="font-medium">Pass function as argument — reduce</h2>
@@ -234,6 +295,20 @@ function FunctionDemo() {
         </pre>
         <pre id="shield-callback-error" className="text-sm bg-zinc-50 p-2 rounded">
           {JSON.stringify(state.shieldCallbackError)}
+        </pre>
+      </section>
+
+      {/* Search box */}
+      <section className="space-y-2">
+        <h2 className="font-medium">Search box: each keystroke aborts the last one's call</h2>
+        <p className="text-xs text-zinc-500">
+          Each call passes a callback; the first call is aborted before its request leaves
+        </p>
+        <button id="search-run" onClick={runSearch} className="px-3 py-1 border rounded text-sm">
+          Run
+        </button>
+        <pre id="search-result" className="text-sm bg-zinc-50 p-2 rounded">
+          {JSON.stringify(state.searchResult)}
         </pre>
       </section>
 
