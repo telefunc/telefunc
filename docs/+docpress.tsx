@@ -9,11 +9,12 @@ import iconDeno from './icons/runtime/deno.svg'
 import iconCloudflare from './icons/runtime/cloudflare.svg'
 import { categories, headings, headingsDetached } from './headings'
 import { PROJECT_VERSION } from './utils/PROJECT_VERSION.js'
-import { TopNavigation } from './TopNavigation'
-import React from 'react'
 
 const config: Config = {
   name: 'Telefunc',
+  darkMode: true,
+  tocProgress: true,
+  categoryTabs: true,
   version: PROJECT_VERSION,
   url: 'https://telefunc.com',
   tagline: 'Remote Functions.',
@@ -40,16 +41,15 @@ const config: Config = {
     runtime: {
       choices: [
         { name: 'Node', icon: iconNode },
-        { name: 'Express', icon: iconExpress },
+        { name: 'Express', icon: iconExpress, iconMono: true },
         { name: 'Bun', icon: iconBun },
-        { name: 'Deno', icon: iconDeno },
+        { name: 'Deno', icon: iconDeno, iconMono: true },
         { name: 'Cloudflare', icon: iconCloudflare },
       ],
       default: 'Node',
     },
   },
 
-  topNavigation: <TopNavigation />,
   navMaxWidth: 950 + 20 * 2,
   navLogoSize: 36,
   navLogoStyle: {

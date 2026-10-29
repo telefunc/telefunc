@@ -27,7 +27,6 @@ function Header() {
               width: '100%',
               lineHeight: 1.35,
               fontWeight: 450,
-              color: '#878787',
               maxWidth: 800,
             }}
           >
@@ -68,13 +67,11 @@ function Replaces() {
         marginBottom: 6,
         borderRadius: 6,
         overflow: 'hidden',
-        boxShadow: '0 1px 3px rgba(0, 0, 0, 0.12)',
-        border: '1px solid #d1d5db',
       }}
     >
       <div
+        id="hero-badge-label"
         style={{
-          backgroundColor: '#eee',
           paddingRight: 8,
           paddingLeft: 10,
           display: 'flex',
@@ -86,9 +83,8 @@ function Replaces() {
         REPLACES
       </div>
       <div
+        id="hero-badge-value"
         style={{
-          backgroundColor: '#8d8d8d',
-          color: 'white',
           padding: '4px 0',
           paddingLeft: 8,
           paddingRight: 11,
