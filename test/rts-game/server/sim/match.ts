@@ -127,15 +127,17 @@ class Match {
     // force-keyframe: one joiner no longer forces a full keyframe onto the other 9 subscribers of a
     // team track; only the joiner pays, via its own retained-frame replay. The residual gap (deltas
     // between the retained keyframe and subscribe time) self-heals at the next periodic keyframe.
-    // The on-demand `full` track can't lean on this — a never-published track has no retained frame —
-    // so it keeps `onDemand` (see the demand handler). Deltas are never retained (unusable alone).
+    // The on-demand `full` track retains too, which seeds every spectator after the first; the first
+    // watcher still needs `onDemand` (see the demand handler), as nothing is published while unwatched
+    // and a retained frame may be stale from a prior spectator session.
+    // Deltas are never retained (unusable alone).
     //
     // ── finding #12 (no lossy/latest-only binary) — deferred to the datagram lane (#449) ─────────
     // The lane is reliable + ordered, so a slow client accumulates a state-frame backlog when only
     // the newest frame matters. An app/coalesce "latest-only" can't fix it: you can't evict the
     // transport send-buffer, so it's a false promise on a reliable lane — the honest fix is the
     // unreliable datagram lane scoped in #449. We stay at 10 Hz with small frames to live under it.
-    const retain = frame.keyframe && track !== TRACK.full
+    const retain = frame.keyframe
     this.seat.publishBinary(encodeFrame(frame), { track, retain }).catch(() => {})
   }
 
