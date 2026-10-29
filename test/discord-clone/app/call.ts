@@ -3,12 +3,12 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 // Voice & video calls, on one Room per voice channel.
 //
 // Round 2 of the stress test: media multiplexing is first-class now — mic/camera/screen ride
-// *named binary tracks* (`publishBinary(data, { track, keyFrame })`, `subscribeBinary(cb,
-// { track })`, `info.keyFrame`), which deleted this app's hand-rolled `[kind][flags]` frame
+// *named binary tracks* (`publishBinary(data, { track, meta: { keyFrame } })`, `subscribeBinary(cb,
+// { track })`, `info.meta.keyFrame`), which deleted this app's hand-rolled `[kind][flags]` frame
 // envelope and demux switch (README finding 6, fixed upstream).
 //
 // Rounds 3–4: tracks are source-selective. An unwatched stream pauses its encoder — the publish
-// ack's `receivers` count pauses it while it's still publishing, and `me.onDemand((track, count))`
+// ack's `receivers` count pauses it while it's still publishing, and `me.onDemand((track, wanted))`
 // wakes it the moment a viewer returns. That first-class demand event replaced the hand-rolled
 // keyframe-probe loop this app used to poll with (`demandGate` below). Alone in a voice channel,
 // nothing is encoded or uploaded.
@@ -152,8 +152,8 @@ async function joinCall(channelId: string): Promise<void> {
     // relays per (member, track). No frame envelope, no demux switch.
     const unsubscribes = [
       member.subscribeBinary((data) => audio.push(data), { track: 'mic' }),
-      member.subscribeBinary((data, info) => camera.push(data, info.keyFrame), { track: 'camera' }),
-      member.subscribeBinary((data, info) => screen.push(data, info.keyFrame), { track: 'screen' }),
+      member.subscribeBinary((data, info) => camera.push(data, info.meta?.keyFrame === true), { track: 'camera' }),
+      member.subscribeBinary((data, info) => screen.push(data, info.meta?.keyFrame === true), { track: 'screen' }),
     ]
 
     // A member turning a stream off should blank its decoder (fresh keyframe wait on re-on).
@@ -388,7 +388,9 @@ function videoPipeline(
       // Retain keyframes so a late subscriber is seeded with one before any delta (see file header).
       // `takeResumed` still forces a fresh keyframe on resume — a retained frame is stale after a pause.
       const keyFrame = chunk.type === 'key'
-      void current.membership.publishBinary(bytes, { track, keyFrame, retain: keyFrame }).then(gate.onAck, () => {})
+      void current.membership
+        .publishBinary(bytes, { track, meta: { keyFrame }, retain: keyFrame })
+        .then(gate.onAck, () => {})
     },
     error(err) {
       console.error('[discord:call] video encode error', err)
@@ -473,10 +475,10 @@ function demandGate(
 } {
   let paused = false
   let justResumed = false
-  const stop = me.onDemand((t, count) => {
+  const stop = me.onDemand((t, wanted) => {
     if (t !== track) return
-    if (count > 0 && paused) justResumed = true
-    paused = count === 0
+    if (wanted && paused) justResumed = true
+    paused = !wanted
   })
   return {
     get paused() {

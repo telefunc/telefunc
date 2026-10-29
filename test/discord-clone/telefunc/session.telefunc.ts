@@ -20,10 +20,10 @@ async function onEnterGuild() {
 
   await ensureLiveWorld()
   const guild = await getGuardedGuild()
-  const me = await guild.join(
-    { name: user.name, color: user.color, status: 'online', admin: user.isAdmin },
-    { identity: user.id },
-  )
+  const me = await guild.join({
+    meta: { name: user.name, color: user.color, status: 'online', admin: user.isAdmin },
+    identity: user.id,
+  })
 
   const channelRooms = await Promise.all(q.listChannels().map((row) => getGuardedChannel(channelRoomId(row.id))))
   return { ok: true as const, user, guild, me, channels: channelRooms }

@@ -19,7 +19,7 @@ async function startBot(): Promise<void> {
   const meta: MemberMeta = { name: BOT_NAME, color: BOT_COLOR, status: 'online', bot: true }
 
   const guild = await getGuardedGuild()
-  await guild.join(meta, { identity: botUser.id })
+  await guild.join({ meta, identity: botUser.id })
 
   // Watch every text channel — current ones now (awaited: the first user's join event must
   // find the bot already able to speak in #general), future ones as the guild announces them.
@@ -55,7 +55,7 @@ async function watchChannel(roomId: string, guild: GuildRoom, botUserId: string,
   // occupy a seat in the channel's count/roster. Exactly the "a bot, a command sink" case hidden
   // participants are for. The bot stays a *visible* member of the guild room (its guild join is a
   // normal identity join) — Discord shows bots in the member list.
-  const botMe = await channel.join(meta, { identity: botUserId, hidden: true })
+  const botMe = await channel.join({ meta, identity: botUserId, hidden: true })
   channelBots.set(roomId, botMe)
   channel.onClose(() => channelBots.delete(roomId)) // channel deleted
 

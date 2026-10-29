@@ -6,10 +6,10 @@ export { BANNED_WORDS, getGuardedChannel, getGuardedGuild }
 // room-global guard — so policy must be attached to every instance that hands out memberships.
 // These factories are the only place rooms are fetched (README finding 3, still open upstream).
 
-import { Room } from 'telefunc'
+import { Abort, Room } from 'telefunc'
 import * as q from '../database/queries'
 import type { ChannelMeta, ChannelPublish, GuildRoom, MemberMeta } from '../shared/types'
-import { dbChannelIdOf, GUILD_ROOM_ID } from './rooms'
+import { dbChannelIdOf, GUILD_ROOM_ID, VOICE_CHANNEL_SIZE } from './rooms'
 
 const BANNED_WORDS = ['darn', 'heck'] // it's a family-friendly server
 
@@ -20,7 +20,7 @@ async function getGuardedGuild(): Promise<GuildRoom> {
     // DMs are server-delivered (DB-first, offline-capable — see dms.telefunc.ts), so the
     // member-to-member lane is closed outright: policy by guard, not by hoping clients behave.
     onBeforeSend: () => {
-      throw new Error('Direct participant messages are disabled — DMs are delivered by the server')
+      throw Abort('Direct participant messages are disabled — DMs are delivered by the server')
     },
   })
   return guild
@@ -42,11 +42,10 @@ async function getGuardedChannel(
 
   if (channel.meta.kind === 'voice') {
     Room.guard(channel, {
-      // Admission control — `size` alone is a hint, but the join guard makes it real: every
-      // join granted through this instance (the onJoinVoice telefunction) is capacity-checked
-      // on the server.
+      // Admission control: every join granted through this instance (the onJoinVoice telefunction)
+      // is capacity-checked on the server.
       onBeforeJoin: () => {
-        if (channel.isFull) throw new Error('That voice channel is full')
+        if (channel.count >= VOICE_CHANNEL_SIZE) throw Abort('That voice channel is full')
       },
     })
     return channel
@@ -58,10 +57,10 @@ async function getGuardedChannel(
     onBeforePublish: (from, data) => {
       const published = data as ChannelPublish
       if (published.kind !== 'chat') return // typing signals are ephemeral: not moderated, never stored
-      if (published.text.trim() === '') throw new Error('Empty message')
-      if (published.text.length > 2000) throw new Error('Message too long (2000 characters max)')
+      if (published.text.trim() === '') throw Abort('Empty message')
+      if (published.text.length > 2000) throw Abort('Message too long (2000 characters max)')
       const banned = BANNED_WORDS.find((word) => published.text.toLowerCase().includes(word))
-      if (banned) throw new Error(`Watch your language — "${banned}" is not allowed here`)
+      if (banned) throw Abort(`Watch your language — "${banned}" is not allowed here`)
       if (from.identity === null) throw new Error('Membership carries no identity') // never: all joins are server-side
     },
     // Persistence runs *after* the message is sequenced and delivered — so it carries the

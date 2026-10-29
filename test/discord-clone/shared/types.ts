@@ -14,8 +14,11 @@ export type {
   MemberMeta,
   SystemNotice,
 }
+export { VOICE_CHANNEL_SIZE }
 
 import type { Room } from 'telefunc'
+
+const VOICE_CHANNEL_SIZE = 8
 
 /**
  * A member's display state, carried by participant metadata. The durable identity (`userId`)

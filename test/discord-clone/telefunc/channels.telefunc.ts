@@ -5,7 +5,7 @@ import { Abort, getContext, Room, type LocalParticipant } from 'telefunc'
 import type { MessageRow } from '../database/schema'
 import * as q from '../database/queries'
 import { getGuardedChannel } from '../server/guards'
-import { channelRoomId, dbChannelIdOf, ensureLiveWorld, GUILD_ROOM_ID, VOICE_CHANNEL_SIZE } from '../server/rooms'
+import { channelRoomId, dbChannelIdOf, ensureLiveWorld, GUILD_ROOM_ID } from '../server/rooms'
 import type { ChannelPublish, ChannelRoom, ChatMessage, MemberMeta } from '../shared/types'
 
 // Page size is env-tunable so the e2e suite can exercise "Load older" without 50 sends.
@@ -60,12 +60,7 @@ async function onCreateChannel(kind: 'text' | 'voice', rawName: string) {
   }
   const roomId = channelRoomId(id)
   try {
-    await Room.create(
-      roomId,
-      kind === 'voice'
-        ? { meta: { kind, name }, size: VOICE_CHANNEL_SIZE, isolated: true }
-        : { meta: { kind, name, topic: '' } },
-    )
+    await Room.create(roomId, kind === 'voice' ? { meta: { kind, name } } : { meta: { kind, name, topic: '' } })
   } catch (err) {
     q.deleteChannel(id) // don't leave a ghost row with no live room behind
     throw err
@@ -99,7 +94,10 @@ async function onOpenChannel(
   const dbChannelId = requireDbChannelId(roomId)
   const channel = await getGuardedChannel(roomId, { tail: true })
   if (channel.meta.kind !== 'text') throw Abort('Not a text channel')
-  const membership = await channel.join({ name: user.name, color: user.color, status: 'online' }, { identity: user.id })
+  const membership = await channel.join({
+    meta: { name: user.name, color: user.color, status: 'online' },
+    identity: user.id,
+  })
   const { messages, hasMore } = readHistory(dbChannelId) // read after tailing began — see above
   return { membership, history: messages, hasMore }
 }
@@ -114,10 +112,11 @@ async function onJoinVoice(roomId: string): Promise<LocalParticipant<MemberMeta>
   const channel = await getGuardedChannel(roomId)
   if (channel.meta.kind !== 'voice') throw Abort('Not a voice channel')
   try {
-    return await channel.join(
-      { name: user.name, color: user.color, status: 'online', muted: false, camera: false, screen: false },
-      { identity: user.id, selfDelivery: false },
-    )
+    return await channel.join({
+      meta: { name: user.name, color: user.color, status: 'online', muted: false, camera: false, screen: false },
+      identity: user.id,
+      selfDelivery: false,
+    })
   } catch (err) {
     throw Abort(err instanceof Error ? err.message : String(err)) // e.g. the capacity guard
   }

@@ -44,7 +44,9 @@ export {
 }
 
 import type { LeaveCause, LocalParticipant, ParticipantSnapshotView } from 'telefunc'
+import { Abort } from 'telefunc/client'
 import { create } from 'zustand'
+import { VOICE_CHANNEL_SIZE } from '../shared/types'
 import type {
   ChannelPublish,
   ChannelRoom,
@@ -296,9 +298,11 @@ function wireGuild(guildRoom: GuildRoom, myself: LocalParticipant<MemberMeta>): 
   // with a Map (finding 19). Reference-stable + `onChange()` is still the whole adapter (finding 9).
   const pushMembers = () => {
     const members: Member[] = []
-    for (const group of guildRoom.snapshot({ by: 'identity' }).identities) {
-      const rep = group.participants[0] // a group always has ≥1 membership; the tabs share a user
-      if (rep !== undefined) members.push(toMember(rep))
+    const seen = new Set<string | null>()
+    for (const p of guildRoom.snapshot().participants) {
+      if (p.identity !== null && seen.has(p.identity)) continue // the tabs share a user
+      seen.add(p.identity)
+      members.push(toMember(p))
     }
     setState({ members: members.sort(byName) })
   }
@@ -709,8 +713,8 @@ function toChannelSnapshot(room: ChannelRoom): ChannelSnapshot {
     topic: room.meta.topic ?? '',
     memberCount: room.count, // live — the event stream keeps the getter fresh
     occupants: room.meta.kind === 'voice' ? room.snapshot().participants.map(toMember) : [],
-    size: room.size,
-    isFull: room.isFull,
+    size: VOICE_CHANNEL_SIZE,
+    isFull: room.count >= VOICE_CHANNEL_SIZE,
   }
 }
 
@@ -723,7 +727,7 @@ function byName(a: Member, b: Member): number {
 }
 
 function errorMessage(err: unknown): string {
-  // A telefunction `Abort('…')` now surfaces its own message on `err.message` (finding 7, fixed
-  // upstream), so expected failures read straight off the Error — no digging in `err.abortValue`.
+  // A telefunction `Abort('…')` carries its message on `err.abortValue`; `err.message` names the call.
+  if (err instanceof Abort) return String(err.abortValue)
   return err instanceof Error ? err.message : String(err)
 }

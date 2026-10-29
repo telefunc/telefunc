@@ -6,11 +6,10 @@ export { BOT_COLOR, BOT_NAME, channelRoomId, dbChannelIdOf, ensureLiveWorld, GUI
 import { randomUUID } from 'node:crypto'
 import { Room } from 'telefunc'
 import * as q from '../database/queries'
-import type { ChannelMeta, MemberMeta } from '../shared/types'
+import { type ChannelMeta, type MemberMeta, VOICE_CHANNEL_SIZE } from '../shared/types'
 
 const GUILD_ROOM_ID = 'discord:guild'
 const CHANNEL_ROOM_PREFIX = 'discord:channel:'
-const VOICE_CHANNEL_SIZE = 8
 const BOT_NAME = 'RoomBot'
 const BOT_COLOR = '#5865f2'
 
@@ -44,9 +43,8 @@ async function boot(): Promise<void> {
     await Room.getOrCreate<ChannelMeta, MemberMeta>(
       channelRoomId(channel.id),
       channel.kind === 'voice'
-        ? // `size` is enforced by the voice rooms' `onJoin` guard (see guards.ts); `isolated`
-          // gives each member their own upstream key (removes publish contention on Cloudflare).
-          { meta: { kind: 'voice', name: channel.name }, size: VOICE_CHANNEL_SIZE, isolated: true }
+        ? // Capacity (VOICE_CHANNEL_SIZE) is enforced by the voice rooms' `onBeforeJoin` guard (see guards.ts).
+          { meta: { kind: 'voice', name: channel.name } }
         : { meta: { kind: 'text', name: channel.name, topic: channel.topic } },
     )
   }

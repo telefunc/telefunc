@@ -28,9 +28,7 @@ async function onKickUser(targetUserId: string): Promise<void> {
   // itself finding 18.)
   const rooms = [GUILD_ROOM_ID, ...q.listChannels().map((row) => channelRoomId(row.id))]
   await Promise.all(
-    rooms.map((roomId) =>
-      Room.removeParticipant(roomId, { identity: target.id }, { reason: actor.name }).catch(() => {}),
-    ),
+    rooms.map((roomId) => Room.removeParticipant(roomId, { identity: target.id, reason: actor.name }).catch(() => {})),
   )
 
   // Tell everyone (room-authored, on the guild's announce lane).
