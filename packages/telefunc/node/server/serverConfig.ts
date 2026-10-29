@@ -375,13 +375,12 @@ function reconnectWindow(c = getServerConfig().channel): number {
   return Math.min(TIMER_DELAY_MAX_MS, pingDeadlineOf(c) + c.reconnectTimeout)
 }
 
-/** What a channel to a page may hold, how long it waits for its page to come back, and the adapter's frame cap. */
-function getChannelLimits(): { bufferLimit: number; reconnectWindow: number; maxFrameBytes: number | undefined } {
+/** What a channel to a page may hold, and how long it waits for its page to come back. */
+function getChannelLimits(): { bufferLimit: number; reconnectWindow: number } {
   const { channel } = getServerConfig()
   return {
     bufferLimit: channel.bufferLimit,
     reconnectWindow: reconnectWindow(channel),
-    maxFrameBytes: getAdapterMaxFrameBytes(),
   }
 }
 

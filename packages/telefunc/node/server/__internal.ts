@@ -17,7 +17,7 @@ export { encodePublishBinary, encodePublishText } from '../../wire-protocol/wire
 export type { BroadcastKind, WirePublishInfo } from '../../wire-protocol/wire/connectionFrame.js'
 export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
 export { reportBug } from '../../wire-protocol/channel/server/channel.js'
-export { getChannelLimits } from './serverConfig.js'
+export { getAdapterMaxFrameBytes, getChannelLimits } from './serverConfig.js'
 export { untether } from '../../utils/wrapProxy.js'
 export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
 export { registerCloudflareExtension } from '../../wire-protocol/adapter/cloudflare/extensions.js'
