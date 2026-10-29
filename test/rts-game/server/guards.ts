@@ -1,7 +1,7 @@
 export { guardMatchRoom }
 
 import { Room } from 'telefunc'
-import type { MatchRoom } from '../shared/types'
+import { MATCH_SIZE, type MatchRoom } from '../shared/types'
 
 // Server-side policy for a match room. Attached to every instance that hands out memberships.
 //
@@ -19,10 +19,9 @@ import type { MatchRoom } from '../shared/types'
 function guardMatchRoom(room: MatchRoom): void {
   Room.guard(room, {
     onBeforeJoin: () => {
-      // Capacity: `size` is only a hint (Telefunc tracks it but never enforces it), so the app
-      // rejects the over-capacity join itself. `count` excludes the hidden authority, so this is the
-      // true player count.
-      if (room.count >= room.size) throw new Error('This match is full')
+      // Capacity: a room has no size limit of its own, so the app rejects the over-capacity join
+      // itself. `count` excludes the hidden authority, so this is the true player count.
+      if (room.count >= MATCH_SIZE) throw new Error('This match is full')
     },
   })
 }

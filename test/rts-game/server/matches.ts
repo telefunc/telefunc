@@ -3,11 +3,17 @@ export { createMatch, getMatchRoom, listMatches, startMatch, getPlayerTeam, MATC
 import { randomUUID } from 'node:crypto'
 import { Room } from 'telefunc'
 import { BLUE, RED, type Team } from '../shared/constants'
-import type { ChatMsg, MatchListing, MatchMeta, MatchRoom, PlayerMeta } from '../shared/types'
+import {
+  type ChatMsg,
+  MATCH_SIZE,
+  type MatchListing,
+  type MatchMeta,
+  type MatchRoom,
+  type PlayerMeta,
+} from '../shared/types'
 import { Match } from './sim/match'
 
 const MATCH_PREFIX = 'rts:match:'
-const MATCH_SIZE = 20 // 10v10 — the server seat is not counted (excluded from presence)
 
 // ── FINDING #7 (per-room sim loop lifecycle) — resolved as DOCS in 51b4613 ─────────────────────
 // The Room API is request/event-driven, with no "room active/idle" hook to hang a 10 Hz
@@ -42,7 +48,7 @@ async function createMatch(name: string, hostId: string): Promise<MatchRoom> {
     mapSeed: (Math.random() * 1e9) | 0,
     winner: 0,
   }
-  const room = await Room.create<MatchMeta, PlayerMeta, ChatMsg>(roomId, { meta, size: MATCH_SIZE })
+  const room = await Room.create<MatchMeta, PlayerMeta, ChatMsg>(roomId, { meta })
 
   // Seat the hidden authority *now*, at room creation, so it's present before any client enters:
   // `onEnterMatch` hands each client the authority directly (`getParticipants({ hidden: true })`).
@@ -69,7 +75,7 @@ async function getMatchRoom(roomId: string): Promise<MatchRoom> {
 async function listMatches(): Promise<MatchListing[]> {
   const rooms = await Room.list<MatchMeta>({ prefix: MATCH_PREFIX })
   return rooms
-    .map((r) => ({ id: r.id, name: r.meta.name, phase: r.meta.phase, players: r.count, size: r.size }))
+    .map((r) => ({ id: r.id, name: r.meta.name, phase: r.meta.phase, players: r.count, size: MATCH_SIZE }))
     .filter((m) => m.phase === 'lobby')
     .sort((a, b) => a.name.localeCompare(b.name))
 }

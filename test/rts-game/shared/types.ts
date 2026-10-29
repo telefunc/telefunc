@@ -4,6 +4,8 @@
 import type { RemoteParticipant, Room } from 'telefunc'
 import type { Team } from './constants'
 
+export const MATCH_SIZE = 20 // 10v10 — the server seat is not counted (excluded from presence)
+
 export type MatchPhase = 'lobby' | 'playing' | 'ended'
 
 /** Room metadata for a match room. One room serves a match's whole life — lobby, play, result —

@@ -2,7 +2,7 @@
 //
 // Live handles (the room, my participant) live in module variables, never in the
 // store — and every subscription is set up from user events (sign-in, join, start), never from
-// render, so nothing double-subscribes. The member list is `snapshot({ by: 'identity' })`, so two
+// render, so nothing double-subscribes. The member list keeps one row per identity, so two
 // tabs of one player collapse to one lobby row; the match's high-frequency world does NOT flow
 // through here — it rides the binary lane into `net`/`engine` (see app/net.ts).
 
@@ -27,7 +27,7 @@ export {
   showToast,
 }
 
-import type { LocalParticipant, RoomIdentitySnapshotView, RoomSnapshotView } from 'telefunc'
+import type { LocalParticipant, RoomSnapshotView } from 'telefunc'
 import { create } from 'zustand'
 import { BLUE, NEUTRAL, RED, type Team } from '../shared/constants'
 import type { ChatMsg, MatchAuthority, MatchListing, MatchMeta, MatchRoom, PlayerMeta } from '../shared/types'
@@ -224,17 +224,15 @@ function syncRoom(): void {
   if (meta.phase === 'playing' && !streaming) beginStream()
 }
 
-/** Collapse tabs to one row per identity. `RoomIdentitySnapshotView` / `IdentityGroupView` are now
- *  exported from the public barrel (finding 9 adopted in 51b4613), so the view is named directly —
- *  no structural derivation. The server seat isn't in the roster, so there's nothing to filter. */
+/** Collapse tabs to one row per identity. The server seat isn't in the roster, so there's nothing to filter. */
 function rosterFromSnapshot(): LobbyPlayer[] {
   if (!room) return []
-  const view: RoomIdentitySnapshotView<MatchMeta, PlayerMeta> = room.snapshot({ by: 'identity' })
   const out: LobbyPlayer[] = []
-  for (const g of view.identities) {
-    const p = g.participants[0]
-    if (!p || g.identity === null) continue
-    out.push({ identity: g.identity, name: p.meta.name, color: p.meta.color, team: p.meta.team, ready: p.meta.ready })
+  const seen = new Set<string>()
+  for (const p of room.snapshot().participants) {
+    if (p.identity === null || seen.has(p.identity)) continue
+    seen.add(p.identity)
+    out.push({ identity: p.identity, name: p.meta.name, color: p.meta.color, team: p.meta.team, ready: p.meta.ready })
   }
   return out.sort((a, b) => a.team - b.team || a.name.localeCompare(b.name))
 }

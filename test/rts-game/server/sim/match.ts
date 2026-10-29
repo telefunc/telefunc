@@ -33,7 +33,7 @@ class Match {
   private seat: LocalParticipant<PlayerMeta> | null = null
   private timer: ReturnType<typeof setInterval> | null = null
   private playerTeam = new Map<string, Team>() // identity → team, snapshotted server-side at start (trusted)
-  private demand = new Map<string, number>() // track → live subscriber count (from onDemand)
+  private demand = new Set<string>() // tracks someone watches (from onDemand)
   private ended = false
   private disposeTimer: ReturnType<typeof setTimeout> | null = null
   onDispose: (() => void) | null = null
@@ -84,13 +84,13 @@ class Match {
     })
 
     // Track demand for the on-demand spectator `full` track: it's published only while watched, so a
-    // fresh watcher (count rose) still needs a forced keyframe — there may be no retained frame yet,
+    // first watcher (wanted turned on) still needs a forced keyframe — there may be no retained frame yet,
     // or only a stale one from a prior spectator session. The always-on team tracks need nothing
     // here: they retain their keyframes (see `publish`), so retention seeds a (re)subscriber for free.
-    this.seat.onDemand((track, count) => {
-      const prev = this.demand.get(track ?? '') ?? 0
-      if (track === TRACK.full && count > prev) this.snaps.forceKeyframe(TRACK.full)
-      this.demand.set(track ?? '', count)
+    this.seat.onDemand((track, wanted) => {
+      if (track === TRACK.full && wanted && !this.demand.has(TRACK.full)) this.snaps.forceKeyframe(TRACK.full)
+      if (wanted) this.demand.add(track ?? '')
+      else this.demand.delete(track ?? '')
     })
   }
 
@@ -112,7 +112,7 @@ class Match {
 
     // Team tracks always broadcast; the spectator `full` track only while it has watchers.
     for (const track of [TRACK.red, TRACK.blue] as const) this.publish(track, periodic, clockSec)
-    if ((this.demand.get(TRACK.full) ?? 0) > 0) this.publish(TRACK.full, periodic, clockSec)
+    if (this.demand.has(TRACK.full)) this.publish(TRACK.full, periodic, clockSec)
 
     if (this.world.winner !== NEUTRAL) this.finish(this.world.winner)
   }
@@ -136,7 +136,7 @@ class Match {
     // transport send-buffer, so it's a false promise on a reliable lane — the honest fix is the
     // unreliable datagram lane scoped in #449. We stay at 10 Hz with small frames to live under it.
     const retain = frame.keyframe && track !== TRACK.full
-    this.seat.publishBinary(encodeFrame(frame), { track, keyFrame: frame.keyframe, retain }).catch(() => {})
+    this.seat.publishBinary(encodeFrame(frame), { track, retain }).catch(() => {})
   }
 
   private async finish(winner: Team): Promise<void> {
@@ -148,7 +148,7 @@ class Match {
     // screen — no reliance on the announce arriving).
     const clockSec = Math.floor(this.world.tickCount / TICK_HZ)
     for (const track of [TRACK.red, TRACK.blue, TRACK.full] as const) {
-      if (track === TRACK.full && (this.demand.get(TRACK.full) ?? 0) === 0) continue
+      if (track === TRACK.full && !this.demand.has(TRACK.full)) continue
       this.publish(track, true, clockSec)
     }
     // `Room.setAttributes`/`announce` are statics (admin ops don't live on the instance), so they
