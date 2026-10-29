@@ -17,16 +17,15 @@ function pluginBuildEntry(): Plugin[] {
       libraryName: projectInfo.projectName,
     }),
     {
-      name: 'telefunc:pluginBuildEntry:cloudflare',
+      name: 'telefunc:pluginBuildEntry:bundled',
       apply: 'build',
       transform: {
-        // The auto importer can't load the server entry inside a Cloudflare Worker: it imports a file path
-        // Telefunc's loader, not the Worker entry: only a Worker that uses Telefunc imports the telefunctions
+        // Runs only where Vite bundles Telefunc, which then loads the telefunctions without the auto importer
+        // Telefunc's loader, not the app's entry: only an environment that uses Telefunc imports the telefunctions
         filter: { id: /\/telefunc\/dist\/node\/server\/runTelefunc\/loadTelefuncFilesUsingVite\.js$/ },
         handler(code, id) {
-          if (!this.environment.config.plugins.some((p) => p.name === 'vite-plugin-cloudflare')) return
           const { magicString, getMagicStringResult } = getMagicString(code, id)
-          // Only Telefunc's part: other parts of the server entry (e.g. Vike's) load the main Worker's app
+          // Only Telefunc's part: other parts of the server entry (e.g. Vike's) load the app's server
           magicString.prepend(getServerProductionEntryCode())
           return getMagicStringResult()
         },
