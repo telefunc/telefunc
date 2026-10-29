@@ -8,9 +8,15 @@ import { config } from '../../server/serverConfig.js'
 import { assertManifest, type Manifest } from '../../server/runTelefunc/loadTelefuncFilesUsingVite/assertManifest.js'
 import { getMagicString } from '../../shared/getMagicString.js'
 import { escapeRegex } from '../../../utils/escapeRegex.js'
-import { readFileSync } from 'node:fs'
+import { DYNAMIC_IMPORT } from './non-runnable-dev/pluginReplaceConstantsNonRunnableDev.js'
 
-const loaderFileSuffix = '/dist/node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
+const IS_BUNDLED = 'globalThis.__TELEFUNC__IS_BUNDLED'
+const VIRTUAL_FILE_SERVER_PRODUCTION_ENTRY_ID = 'virtual:vite:telefunc:server-production-entry'
+const resolvedId = '\0' + VIRTUAL_FILE_SERVER_PRODUCTION_ENTRY_ID
+
+declare global {
+  var __TELEFUNC__IS_BUNDLED: undefined | true
+}
 
 function pluginBuildEntry(): Plugin[] {
   return [
@@ -25,16 +31,25 @@ function pluginBuildEntry(): Plugin[] {
       apply: 'build',
       transform: {
         // Runs only where Vite bundles Telefunc, which then loads the telefunctions without the auto importer
-        // Telefunc's loader, not the app's entry: only an environment that uses Telefunc imports the telefunctions
-        filter: { id: new RegExp(`${escapeRegex(loaderFileSuffix)}$`) },
+        filter: { code: { include: IS_BUNDLED } },
         handler(code, id) {
-          // Any installed Telefunc's loader, whatever folder it's in (the plugin may come from another Telefunc copy)
-          const packageJson = JSON.parse(readFileSync(`${id.slice(0, -loaderFileSuffix.length)}/package.json`, 'utf-8'))
-          if (packageJson.name !== 'telefunc') return
           const { magicString, getMagicStringResult } = getMagicString(code, id)
-          // Only Telefunc's part: other parts of the server entry (e.g. Vike's) load the app's server
-          magicString.prepend(getServerProductionEntryCode())
+          magicString.replaceAll(IS_BUNDLED, JSON.stringify(true))
+          magicString.replaceAll(DYNAMIC_IMPORT, 'import')
           return getMagicStringResult()
+        },
+      },
+      resolveId: {
+        filter: { id: new RegExp(`^${escapeRegex(VIRTUAL_FILE_SERVER_PRODUCTION_ENTRY_ID)}$`) },
+        handler() {
+          return resolvedId
+        },
+      },
+      load: {
+        filter: { id: new RegExp(`^${escapeRegex(resolvedId)}$`) },
+        handler() {
+          // Only Telefunc's part: other parts of the server entry (e.g. Vike's) load the app's server
+          return getServerProductionEntryCode()
         },
       },
     },

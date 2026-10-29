@@ -40,6 +40,9 @@ async function loadVirtualFile(failOnFailure: boolean) {
     const moduleExports = await viteDevServer.ssrLoadModule(VIRTUAL_FILE_ENTRY_ID, { fixStacktrace: true })
     return { moduleExports, viteProvider: 'Vite with `ssrLoadModule()`' as const }
   } else {
+    // `true` only where Vite bundles Telefunc: neither Node nor another bundler sees this import
+    if (globalThis.__TELEFUNC__IS_BUNDLED)
+      await __TELEFUNC__DYNAMIC_IMPORT('virtual:vite:telefunc:server-production-entry')
     let moduleExports: unknown
     moduleExports = await loadTelefuncFilesWithImportBuild()
     if (moduleExports === null) {
