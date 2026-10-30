@@ -1,4 +1,5 @@
 export { loadTelefuncFilesUsingVite }
+export { loadServerProductionEntry }
 
 import { importServerProductionEntry } from '@brillout/vite-plugin-server-entry/runtime'
 import { assert, assertWarning } from '../../../utils/assert.js'
@@ -8,7 +9,12 @@ import { getNodeEnv, isProduction } from '../../../utils/isProduction.js'
 import { isTelefuncFilePath } from '../../../utils/isTelefuncFilePath.js'
 import { loadTelefuncFilesWithImportBuild } from './loadTelefuncFilesUsingVite/loadBuildEntry.js'
 import { getViteDevServer } from '../globalContext.js'
+import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { VIRTUAL_FILE_ENTRY_ID } from '../../vite/plugins/pluginVirtualFileEntry/VIRTUAL_FILE_ENTRY_ID.js'
+
+const globalObject = getGlobalObject<{
+  serverProductionEntryLoaded?: Promise<unknown>
+}>('loadTelefuncFilesUsingVite.ts', {})
 
 async function loadTelefuncFilesUsingVite(runContext: { telefuncFilePath: string }, failOnFailure: boolean) {
   const res = await loadVirtualFile(failOnFailure)
@@ -20,6 +26,13 @@ async function loadTelefuncFilesUsingVite(runContext: { telefuncFilePath: string
   const { telefuncFilesLoaded, telefuncFilesAll } = await loadViteGlobbedFiles(telefuncFilesGlob, runContext)
   assert(isObjectOfObjects(telefuncFilesLoaded))
   return { telefuncFilesLoaded, viteProvider, telefuncFilesAll }
+}
+
+// The entry applies the build's config (e.g. `telefuncUrl`), which the request reads before it loads the telefunc files
+async function loadServerProductionEntry(): Promise<void> {
+  if (globalThis.__TELEFUNC__IS_NON_RUNNABLE_DEV || getViteDevServer()) return
+  globalObject.serverProductionEntryLoaded ??= loadVirtualFile(false)
+  await globalObject.serverProductionEntryLoaded
 }
 
 async function loadVirtualFile(failOnFailure: boolean) {
