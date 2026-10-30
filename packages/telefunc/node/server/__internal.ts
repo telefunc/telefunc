@@ -46,9 +46,7 @@ export {
   sumReceiverCounts,
   type Subscriptions,
 } from '../../wire-protocol/backend/memory/deliveries.js'
-// The errors extension code shared with the browser rebuilds, from either half of telefunc/__internal.
-export { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
-export { ChannelOverflowError, isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
 import type { ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 import type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'

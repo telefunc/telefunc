@@ -12,13 +12,8 @@ export {
   DM_FAILURE,
 }
 
-import { Abort } from 'telefunc/client'
-import {
-  ChannelOverflowError,
-  ShieldValidationError,
-  isChannelOverflowError,
-  isShieldValidationError,
-} from 'telefunc/__internal'
+import { Abort, ChannelOverflowError, ShieldValidationError, isShieldValidationError } from 'telefunc/client'
+import { isChannelOverflowError } from 'telefunc/__internal'
 import type { RoomFailure, RoomResult } from './protocol.js'
 
 // Error contract: Abort carries its value, RoomError carries a safe message, and bugs are reported

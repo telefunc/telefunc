@@ -15,9 +15,8 @@ import {
   type PageEnd,
   type OrderingInfo,
   type ChannelPublishAck,
-  ShieldValidationError,
 } from 'telefunc/__internal'
-import type { ShieldValidator } from 'telefunc'
+import { ShieldValidationError, type ShieldValidator } from 'telefunc'
 import type { ServerLocalParticipant, ServerRoom } from './room.js'
 import { reportRoomError } from './errors.js'
 import {
