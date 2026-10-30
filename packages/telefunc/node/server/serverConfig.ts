@@ -1,5 +1,7 @@
 export { configUser as config }
 export { getServerConfig }
+export { getManifestConfig }
+export { applyManifestConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
@@ -16,6 +18,7 @@ import { assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
+import { isPlainObject } from '../../utils/isPlainObject.js'
 import type { TelefuncServerExtension } from './extensions.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
@@ -354,6 +357,27 @@ function getServerConfig(): ConfigResolved {
     },
     extensions: configState.extensions,
   }
+}
+
+/** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
+function getManifestConfig(): Record<string, unknown> {
+  const { extensions, broadcast, root, telefuncFiles, ...manifestConfig } = configState
+  return manifestConfig
+}
+
+/** Nested settings are merged key by key: production may apply the manifest after the app's server code set some. */
+function applyManifestConfig(manifestConfig: Record<string, unknown>): void {
+  for (const [prop, val] of Object.entries(manifestConfig)) {
+    const current = configState[prop as keyof ConfigUser]
+    applyUserConfig(prop, mergeConfig(current, val))
+  }
+}
+
+function mergeConfig(current: unknown, val: unknown): unknown {
+  if (!isPlainObject(val) || !isPlainObject(current)) return val
+  const merged = { ...current }
+  for (const [key, valNested] of Object.entries(val)) merged[key] = mergeConfig(current[key], valNested)
+  return merged
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.
