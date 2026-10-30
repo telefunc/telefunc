@@ -1,13 +1,17 @@
-export { MemoryDeliveries, MemorySubscriptionAttempt, removeSubscription, sumReceiverCounts, copyBytes }
+export { MemoryPubSub }
 export type { Subscriptions }
 
 import { Fifo } from '../../../utils/Fifo.js'
 import type { BackendPayload, BackendReceiver } from '../subscription.js'
+import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import { DriverAttempt } from '../attempt.js'
 import { nextTurn } from '../../flowControl/macrotaskYield.js'
 
 /** Subscriptions by key; a change replaces a key's array, so an array read at a publish or commit is its targets. */
 type Subscriptions = Map<string, readonly MemorySubscriptionAttempt[]>
+
+/** A publish's position and the local consumers it reached. */
+type Receipt = OrderingInfo & { receivers: number }
 
 /** Deliveries one event-loop turn runs; the rest wait for the next, so a listener answering itself
  *  can't starve the loop. */
@@ -116,5 +120,82 @@ class MemoryDeliveries {
   private _nextTurn(): void {
     this._deliveredThisTurn = 0
     this._drain()
+  }
+}
+
+/** An in-process driver's pub/sub: subscriptions by key, delivered in order, a turn's worth at a time. */
+class MemoryPubSub {
+  private readonly _deliveries = new MemoryDeliveries()
+  /** Deliveries a microtask is yet to queue. */
+  private _queuing = 0
+
+  /** Subscribes `receiver` to `key` of `subs`; `onDetach` runs once it is removed. */
+  subscribe({
+    subs,
+    key,
+    receiver,
+    localReceiverCount,
+    onDetach,
+  }: {
+    subs: Subscriptions
+    key: string
+    receiver: BackendReceiver<BackendPayload>
+    localReceiverCount: () => number
+    onDetach?: () => void
+  }): MemorySubscriptionAttempt {
+    const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt({
+      receiver,
+      localReceiverCount,
+      detach: () => {
+        removeSubscription(subs, key, sub)
+        onDetach?.()
+      },
+    })
+    subs.set(key, [...(subs.get(key) ?? []), sub])
+    // Ready once what was published before it is delivered, as a network subscriber hears its confirmation after the
+    // messages sent before it.
+    if (this._queuing === 0 && this._deliveries.length === 0) sub.establish()
+    else queueMicrotask(() => this._deliveries.deliver(() => sub.establish()))
+    return sub
+  }
+
+  /** How many local consumers `targets` reach. */
+  receivers(...targets: (readonly MemorySubscriptionAttempt[])[]): number {
+    return targets.reduce((total, of) => total + sumReceiverCounts(of), 0)
+  }
+
+  /** Delivers `payload` to `targets` at once while nothing is queued; else queues it. */
+  publish(
+    targets: readonly MemorySubscriptionAttempt[],
+    payload: BackendPayload,
+    mark: OrderingInfo,
+  ): Receipt | Promise<Receipt> {
+    // Counted before delivery, which may unsubscribe or subscribe.
+    const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
+    if (this._deliveries.deliversNow()) {
+      this._deliveries.deliverNow(() => {
+        for (const target of targets) target.deliver(payload, mark)
+      })
+      return receipt
+    }
+    const held = typeof payload === 'string' ? payload : copyBytes(payload)
+    // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
+    return new Promise((resolve) => {
+      this._deliveries.deliver(() => {
+        for (const target of targets) target.deliver(held, mark)
+        resolve(receipt)
+      })
+    })
+  }
+
+  /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. Past a turn's deliveries,
+   *  returns the next turn, which the caller waits for as for a network write, so it can't outrun them. */
+  deliverSoon(delivery: () => void): Promise<void> | null {
+    this._queuing++
+    queueMicrotask(() => {
+      this._queuing--
+      this._deliveries.deliver(delivery)
+    })
+    return this._deliveries.isFull ? new Promise<void>(nextTurn) : null
   }
 }

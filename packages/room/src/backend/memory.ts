@@ -39,18 +39,14 @@ import {
   type BackendPayload,
   type BackendReceiver,
   type OrderingInfo,
+  type SubscriptionAttempt,
   type SubscriptionDriver,
-  MemoryDeliveries,
-  MemorySubscriptionAttempt,
-  copyBytes,
-  removeSubscription,
-  sumReceiverCounts,
+  MemoryPubSub,
   type Subscriptions,
 } from 'telefunc/__internal'
 import { createDeferred } from '../utils/createDeferred.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
-import { nextTurn } from '../utils/nextTurn.js'
 
 type Expiring = { expiresAt: number | null }
 type StoredCell = { bytes: Uint8Array; version: string }
@@ -84,7 +80,11 @@ type DirectoryEntry = { incTag: string; checkAt: number }
 /** A directory entry's check, current while its entry is still due at `at`. */
 type DirectoryCheck = { at: number; roomId: string }
 
-const NO_TARGETS: readonly MemorySubscriptionAttempt[] = []
+const NO_TARGETS = [] as const
+
+function copyBytes(bytes: Uint8Array): Uint8Array {
+  return new Uint8Array(bytes)
+}
 
 function copyLane(lane: LaneId): LaneId {
   return { ...lane }
@@ -202,9 +202,7 @@ class MemoryRoomDriver implements RoomDriver {
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly _directoryChecks: DirectoryCheck[] = []
   private _revSeq = 0
-  private readonly _deliveries = new MemoryDeliveries()
-  /** Lane commits whose delivery is not queued yet. */
-  private _committing = 0
+  private readonly _pubSub = new MemoryPubSub()
 
   constructor() {
     this.subscriptions = {
@@ -323,22 +321,16 @@ class MemoryRoomDriver implements RoomDriver {
     const everyMember = binary ? (gen.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
     const delivered = lane.kind === 'inbox' || lane.kind === 'control' ? createDeferred() : null
     // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
-    this._committing++
-    queueMicrotask(() => {
-      this._committing--
-      this._deliveries.deliver(() => {
-        // A subscriber may write into the bytes it is given, which a retained frame must not share.
-        const shared = opts?.retain ? copyBytes(frame) : frame
-        for (const target of targets) target.deliver(shared, mark)
-        for (const target of everyTrack) target.deliver(shared, mark)
-        for (const target of everyMember) target.deliver(shared, mark)
-        delivered?.resolve()
-      })
+    const nextTurn = this._pubSub.deliverSoon(() => {
+      // A subscriber may write into the bytes it is given, which a retained frame must not share.
+      const shared = opts?.retain ? copyBytes(frame) : frame
+      for (const target of targets) target.deliver(shared, mark)
+      for (const target of everyTrack) target.deliver(shared, mark)
+      for (const target of everyMember) target.deliver(shared, mark)
+      delivered?.resolve()
     })
-    const receivers = sumReceiverCounts(targets) + sumReceiverCounts(everyTrack) + sumReceiverCounts(everyMember)
-    // A commit past a turn's deliveries waits for the next turn, as a network write would,
-    // so commits can't outrun them.
-    if (this._deliveries.isFull) await new Promise<void>(nextTurn)
+    const receivers = this._pubSub.receivers(targets, everyTrack, everyMember)
+    if (nextTurn !== null) await nextTurn
     if (delivered === null) return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers }
     return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
   }
@@ -382,7 +374,7 @@ class MemoryRoomDriver implements RoomDriver {
     { roomId, inc, lane }: RoomSubscriptionSource,
     receiver: BackendReceiver<BackendPayload>,
     localReceiverCount: () => number,
-  ): MemorySubscriptionAttempt {
+  ): SubscriptionAttempt {
     const room = this._rooms.get(roomId)
     const head = this._liveHead(room)
     if (room === undefined || !isOpenIncarnation(head, inc)) {
@@ -402,17 +394,8 @@ class MemoryRoomDriver implements RoomDriver {
       subs = gen.subs
       key = encodeLaneKey(lane)
     }
-    const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt({
-      receiver,
-      localReceiverCount,
-      detach: () => removeSubscription(subs, key, sub),
-    })
-    subs.set(key, [...(subs.get(key) ?? []), sub])
-    // Ready once what was committed before it is delivered, as a network subscriber hears its confirmation after the
-    // messages sent before it: a lane it replaces delivers those first.
-    if (this._committing === 0 && this._deliveries.length === 0) sub.establish()
-    else queueMicrotask(() => this._deliveries.deliver(() => sub.establish()))
-    return sub
+    // Ready once what was committed before it is delivered: a lane it replaces delivers those first.
+    return this._pubSub.subscribe({ subs, key, receiver, localReceiverCount })
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {

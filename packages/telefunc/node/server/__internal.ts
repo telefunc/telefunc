@@ -38,14 +38,7 @@ export type {
   TelefuncExtensionStub,
 } from '../../wire-protocol/adapter/cloudflare/extensions.js'
 export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/channel/channel.js'
-export {
-  MemoryDeliveries,
-  MemorySubscriptionAttempt,
-  copyBytes,
-  removeSubscription,
-  sumReceiverCounts,
-  type Subscriptions,
-} from '../../wire-protocol/backend/memory/deliveries.js'
+export { MemoryPubSub, type Subscriptions } from '../../wire-protocol/backend/memory/deliveries.js'
 export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
 import type { ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'

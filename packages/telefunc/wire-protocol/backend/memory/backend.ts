@@ -5,15 +5,8 @@ export { MemoryBackend }
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
 import type { BroadcastKind } from '../../wire/connectionFrame.js'
-import type { BackendPayload, BackendReceiver, SubscriptionDriver } from '../subscription.js'
-import {
-  MemoryDeliveries,
-  MemorySubscriptionAttempt,
-  copyBytes,
-  removeSubscription,
-  sumReceiverCounts,
-  type Subscriptions,
-} from './deliveries.js'
+import type { BackendPayload, BackendReceiver, SubscriptionAttempt, SubscriptionDriver } from '../subscription.js'
+import { MemoryPubSub, type Subscriptions } from './deliveries.js'
 
 class MemoryBackend implements BroadcastDriver {
   readonly subscriptions: SubscriptionDriver<BroadcastRoute>
@@ -23,7 +16,7 @@ class MemoryBackend implements BroadcastDriver {
   /** The highest `seq` and `timestamp` a Broadcast publish was given. */
   private readonly _broadcastHighest: OrderingInfo = { seq: 0, timestamp: 0 }
   private readonly _broadcastSubs: Record<BroadcastKind, Subscriptions> = { text: new Map(), binary: new Map() }
-  private readonly _deliveries = new MemoryDeliveries()
+  private readonly _pubSub = new MemoryPubSub()
 
   constructor() {
     this.subscriptions = {
@@ -43,23 +36,7 @@ class MemoryBackend implements BroadcastDriver {
     const highest = this._broadcastHighest
     if (mark.seq > highest.seq) highest.seq = mark.seq
     if (mark.timestamp > highest.timestamp) highest.timestamp = mark.timestamp
-    const targets = this._broadcastSubs[route.kind].get(route.key) ?? []
-    // Counted before delivery, which may unsubscribe or subscribe.
-    const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
-    if (this._deliveries.deliversNow()) {
-      this._deliveries.deliverNow(() => {
-        for (const target of targets) target.deliver(payload, mark)
-      })
-      return receipt
-    }
-    const held = typeof payload === 'string' ? payload : copyBytes(payload)
-    // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
-    return new Promise((resolve) => {
-      this._deliveries.deliver(() => {
-        for (const target of targets) target.deliver(held, mark)
-        resolve(receipt)
-      })
-    })
+    return this._pubSub.publish(this._broadcastSubs[route.kind].get(route.key) ?? [], payload, mark)
   }
 
   published(key: string): number {
@@ -71,26 +48,19 @@ class MemoryBackend implements BroadcastDriver {
   }
 
   private _openSubscription(
-    source: BroadcastRoute,
+    { kind, key }: BroadcastRoute,
     receiver: BackendReceiver<BackendPayload>,
     localReceiverCount: () => number,
-  ): MemorySubscriptionAttempt {
-    const subs = this._broadcastSubs[source.kind]
-    const key = source.key
-    const sub: MemorySubscriptionAttempt = new MemorySubscriptionAttempt({
+  ): SubscriptionAttempt {
+    return this._pubSub.subscribe({
+      subs: this._broadcastSubs[kind],
+      key,
       receiver,
       localReceiverCount,
-      detach: () => {
-        removeSubscription(subs, key, sub)
+      onDetach: () => {
         if (!this._broadcastSubscribed(key)) this._broadcastOrder.delete(key)
       },
     })
-    subs.set(key, [...(subs.get(key) ?? []), sub])
-    // Ready once what was published before it is delivered, as a network subscriber hears its confirmation after the
-    // messages sent before it.
-    if (this._deliveries.length === 0) sub.establish()
-    else queueMicrotask(() => this._deliveries.deliver(() => sub.establish()))
-    return sub
   }
 }
 
