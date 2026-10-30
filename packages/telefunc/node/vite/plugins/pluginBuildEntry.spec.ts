@@ -30,6 +30,17 @@ it("the production entry keeps the channel settings of the app's server code", (
   expect(config.channel.reconnectTimeout).toBe(12345)
 })
 
+it("the production entry keeps the app's own root and telefunc files", () => {
+  config.root = '/build/app'
+  config.telefuncFiles = ['/build/app/pages/a.telefunc.ts']
+  const manifest = getManifest()
+  config.root = '/srv/app'
+  config.telefuncFiles = ['/srv/app/pages/a.telefunc.js']
+  setTelefuncLoaders({ loadTelefuncFiles: async () => ({}), loadManifest: () => manifest })
+  expect(config.root).toBe('/srv/app')
+  expect(config.telefuncFiles).toEqual(['/srv/app/pages/a.telefunc.js'])
+})
+
 function getManifest() {
   pluginBuildEntry()
   const entryCode = mocks.getServerProductionEntry!()

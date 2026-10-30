@@ -359,9 +359,9 @@ function getServerConfig(): ConfigResolved {
   }
 }
 
-/** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects.) */
+/** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects; `root` and `telefuncFiles` are paths on the build machine.) */
 function getManifestConfig(): Record<string, unknown> {
-  const { extensions, broadcast, ...manifestConfig } = configState
+  const { extensions, broadcast, root, telefuncFiles, ...manifestConfig } = configState
   return manifestConfig
 }
 
