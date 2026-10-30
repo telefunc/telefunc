@@ -6,6 +6,7 @@ export type {
   PublishResult,
 } from '../../wire-protocol/backend/broadcast/contract.js'
 export { installBackend, backendPlane } from '../../wire-protocol/backend/install.js'
+export type { BackendDriver } from '../../wire-protocol/backend/install.js'
 export { DriverAttempt } from '../../wire-protocol/backend/attempt.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/backend.js'
 export { SubscriptionManager, reportSubscriptionEnd } from '../../wire-protocol/backend/SubscriptionManager.js'

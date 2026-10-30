@@ -10,6 +10,7 @@ import {
   type RedisClient,
 } from './ioredis.js'
 import type {
+  BackendDriver,
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
@@ -63,12 +64,12 @@ type RedisBackendOptions = {
 class RedisBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: RedisSubscriptionDriver
   /** Room's plane is this driver, on the subscriber socket Broadcast uses. */
-  readonly planes: { readonly [key: symbol]: (kit: RoomPlaneKit) => RoomDriver } = {
-    [Symbol.for('telefunc.room.plane')]: (kit) => {
+  readonly planes = {
+    [Symbol.for('telefunc.room.plane')]: (kit: RoomPlaneKit): RoomDriver => {
       setRoomKit(kit)
       return this
     },
-  }
+  } satisfies BackendDriver['planes']
 
   private readonly _publisher: RedisClient
   private readonly _prefix: string
