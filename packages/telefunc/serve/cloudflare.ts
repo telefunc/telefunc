@@ -42,14 +42,15 @@ import {
   getCloudflareExtension,
   type CloudflareExtensionDurableObject,
 } from '../wire-protocol/adapter/cloudflare/extensions.js'
-// The installed extensions' server entries: Telefunc's Vite plugin fills this module in, found by its id. A bare
-// specifier, so that Vite's optimizer keeps it out of a pre-bundled telefunc.
-import 'telefunc/__internal/cloudflare-extensions'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
+
+// The installed extensions' server entries, which Telefunc's Vite plugin imports (pluginCloudflareExtensions.ts).
+// `true` only where Vite bundles telefunc/cloudflare: neither another bundler nor Node sees this import.
+if (globalThis.__TELEFUNC__IS_BUNDLED) await __TELEFUNC__DYNAMIC_IMPORT('virtual:telefunc:cloudflare-extensions')
 
 /** The extension a Durable Object belongs to, kept in its storage so that its alarm() finds the extension after an
  *  eviction. */

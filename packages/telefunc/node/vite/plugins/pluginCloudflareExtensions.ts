@@ -6,15 +6,19 @@ import { join, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
 import { iterateExtensions } from '../../shared/discoverExtensions.js'
 import { escapeRegex } from '../../../utils/escapeRegex.js'
+import { getMagicString } from '../../shared/getMagicString.js'
+import { DYNAMIC_IMPORT } from './non-runnable-dev/pluginReplaceConstantsNonRunnableDev.js'
 
-// telefunc/cloudflare imports `telefunc/__internal/cloudflare-extensions` (serve/cloudflare.ts), an empty module. This
+// telefunc/cloudflare imports `virtual:telefunc:cloudflare-extensions` where Vite bundles it (serve/cloudflare.ts). This
 // plugin fills it with an import of each extension's server entry, the imports it prepends to every .telefunc file, so
 // that the entries run when the Worker starts, before a Durable Object's first alarm() or call.
-const HOST_SPECIFIER = 'telefunc/__internal/cloudflare-extensions'
-const HOST_FILE = /[\\/]telefunc[\\/]dist[\\/]serve[\\/]cloudflareExtensions\.js(\?.*)?$/
-// The entries are imported from a virtual module, so that they resolve from the app's root, as a .telefunc file's do.
+const IS_BUNDLED = 'globalThis.__TELEFUNC__IS_BUNDLED'
 const VIRTUAL_ID = 'virtual:telefunc:cloudflare-extensions'
 const RESOLVED_VIRTUAL_ID = '\0' + VIRTUAL_ID
+
+declare global {
+  var __TELEFUNC__IS_BUNDLED: undefined | true
+}
 
 function pluginCloudflareExtensions(): Plugin[] {
   let root: string
@@ -33,13 +37,21 @@ function pluginCloudflareExtensions(): Plugin[] {
         order: 'post',
         handler(name, config) {
           if (name === 'client' || config.consumer === 'client') return
-          // Excluded, a pre-bundled telefunc keeps the import, which then goes through load() as in a build.
-          const exclude = [HOST_SPECIFIER]
-          if (config.resolve?.noExternal !== true || specifiers.length === 0) return { optimizeDeps: { exclude } }
+          if (config.resolve?.noExternal !== true || specifiers.length === 0) return
           // In the Worker's first optimizer run: a dependency found later reloads the Worker, which runs the entries
           // again. A linked package isn't pre-bundled, as Vite does for those it finds, else it'd load twice.
           const include = ['telefunc', ...specifiers].filter((specifier) => isInNodeModules(root, specifier))
-          return { optimizeDeps: { exclude, include, entries: ['**/*.telefunc.{js,ts,mjs,mts,jsx,tsx}'] } }
+          return { optimizeDeps: { include, entries: ['**/*.telefunc.{js,ts,mjs,mts,jsx,tsx}'] } }
+        },
+      },
+      transform: {
+        // By content: Vite's optimizer bundles telefunc/cloudflare into a chunk of its own name in dev.
+        filter: { code: { include: IS_BUNDLED } },
+        handler(code, id) {
+          const { magicString, getMagicStringResult } = getMagicString(code, id)
+          magicString.replaceAll(IS_BUNDLED, JSON.stringify(true))
+          magicString.replaceAll(DYNAMIC_IMPORT, 'import')
+          return getMagicStringResult()
         },
       },
       resolveId: {
@@ -49,9 +61,8 @@ function pluginCloudflareExtensions(): Plugin[] {
         },
       },
       load: {
-        filter: { id: [HOST_FILE, new RegExp(`^${escapeRegex(RESOLVED_VIRTUAL_ID)}$`)] },
-        handler(id) {
-          if (id !== RESOLVED_VIRTUAL_ID) return `import ${JSON.stringify(VIRTUAL_ID)};\n`
+        filter: { id: new RegExp(`^${escapeRegex(RESOLVED_VIRTUAL_ID)}$`) },
+        handler() {
           return specifiers.map((specifier) => `import ${JSON.stringify(specifier)};\n`).join('')
         },
       },
