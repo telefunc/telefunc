@@ -10,6 +10,7 @@ import { isTelefuncFilePath } from '../../../utils/isTelefuncFilePath.js'
 import { loadTelefuncFilesWithImportBuild } from './loadTelefuncFilesUsingVite/loadBuildEntry.js'
 import { getViteDevServer } from '../globalContext.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { config } from '../serverConfig.js'
 import { VIRTUAL_FILE_ENTRY_ID } from '../../vite/plugins/pluginVirtualFileEntry/VIRTUAL_FILE_ENTRY_ID.js'
 
 const globalObject = getGlobalObject<{
@@ -31,6 +32,8 @@ async function loadTelefuncFilesUsingVite(runContext: { telefuncFilePath: string
 // The entry applies the build's config (e.g. `telefuncUrl`), which the request reads before it loads the telefunc files
 async function loadServerProductionEntry(): Promise<void> {
   if (globalThis.__TELEFUNC__IS_NON_RUNNABLE_DEV || getViteDevServer()) return
+  // Like loadTelefuncFiles(), the server's `config.telefuncFiles` take precedence over the build
+  if (config.telefuncFiles) return
   globalObject.serverProductionEntryLoaded ??= loadVirtualFile(false)
   await globalObject.serverProductionEntryLoaded
 }
