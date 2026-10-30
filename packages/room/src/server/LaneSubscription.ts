@@ -17,7 +17,7 @@ class LaneSubscription {
   private _pendingReady: Deferred<void> | null = null
   private _delivering = false
 
-  private readonly _onTerminal: (slot: LaneSubscription, error?: unknown) => void
+  private readonly _onTerminal: (slot: LaneSubscription) => void
   private readonly _onRecovered: () => void
   private readonly _onPending: (slot: LaneSubscription, pending: boolean) => void
 
@@ -26,7 +26,7 @@ class LaneSubscription {
     onRecovered,
     onPending = ignorePending,
   }: {
-    onTerminal: (slot: LaneSubscription, error?: unknown) => void
+    onTerminal: (slot: LaneSubscription) => void
     onRecovered: () => void
     onPending?: (slot: LaneSubscription, pending: boolean) => void
   }) {
@@ -107,13 +107,13 @@ class LaneSubscription {
     if (previous) void previous.unsubscribe()
   }
 
-  /** A terminal end rejects `ready` with the driver's reason right after announcing `closed`; a stop resolves it. */
+  /** A terminal end rejects `ready` right after announcing `closed`, and the backend reports it; a stop resolves it. */
   private _ended(subscription: BackendSubscription): void {
     this._ensurePendingReady()
-    const end = (error?: unknown) => {
-      if (this._subscription === subscription) this._onTerminal(this, error)
+    const end = () => {
+      if (this._subscription === subscription) this._onTerminal(this)
     }
-    void subscription.ready.then(() => end(), end)
+    void subscription.ready.then(end, end)
   }
 
   stop(): void {

@@ -20,7 +20,6 @@ import { assertPublishShield, type ShieldValidator } from '../../node/server/shi
 import type { BroadcastPayload, BroadcastRoute } from '../backend/broadcast/contract.js'
 import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
-import { reportSubscriptionEnd } from '../backend/SubscriptionManager.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'
@@ -332,10 +331,10 @@ class RouteSubscription<Kind extends BroadcastKind> {
     const subscription = getBroadcastBackend().subscribe(this._route, this._receiver)
     this._current = subscription
     let wasReady = subscription.state() === 'ready'
-    // Only a terminal end rejects `ready`, after the manager retired the subscription; an unsubscribe resolves it.
+    // Only a terminal end rejects `ready`, after the manager retired and reported the subscription; an unsubscribe
+    // resolves it.
     const ended = () =>
-      void subscription.ready.catch((error: unknown) => {
-        reportSubscriptionEnd(error, reportBug)
+      void subscription.ready.catch(() => {
         if (this._current !== subscription) return
         this._current = null
         if (!replacing || wasReady) this._subscribe(true)

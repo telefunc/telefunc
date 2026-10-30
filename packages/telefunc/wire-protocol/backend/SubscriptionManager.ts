@@ -1,10 +1,14 @@
-export { SubscriptionManager, reportSubscriptionEnd }
-export type { HoldWeight, SendHold }
+export { SubscriptionManager }
+export type { HoldWeight, SendHold, PlaneSubscriptions }
 
 import { assert } from '../../utils/assert.js'
 import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { ESTABLISH_HOLD_MS } from '../constants.js'
+import { reportBug } from '../channel/server/channel.js'
+import { assertDriverPosition } from './driverPosition.js'
+import { heldSendWeight } from './heldSendWeight.js'
+import type { OrderingInfo } from '../wire/orderingFrame.js'
 import type {
   BackendPayload,
   BackendReceiver,
@@ -17,17 +21,6 @@ import type {
 
 type StateListener = (state: SubscriptionState) => void
 
-// Every consumer of a shared subscription gets its end as one failure object, reported once.
-const reportedEnds = new WeakSet<object>()
-
-function reportSubscriptionEnd(error: unknown, report: (error: unknown) => void): void {
-  if (typeof error === 'object' && error !== null) {
-    if (reportedEnds.has(error)) return
-    reportedEnds.add(error)
-  }
-  report(error)
-}
-
 /** Sends on one key waiting for this instance's establishing subscriptions. */
 type Hold = { readonly established: Promise<void>; sends: number }
 
@@ -35,13 +28,25 @@ type Hold = { readonly established: Promise<void>; sends: number }
  *  share; a send its budget can't fit is refused with `overflow()`. */
 type HoldWeight = { budget: string; bytes(): number; fits(bytes: number): boolean; overflow(): Error }
 
-/** What a send waits for, read only while some subscription could be establishing; `sources` share a partition.
- *  `onHeld` runs once the send is held, before `afterEstablished` returns. */
-type SendHold<Source> = { key: string; sources: readonly [Source, ...Source[]]; weight?: HoldWeight; onHeld?(): void }
+/** What a send waits for, read only while some subscription could be establishing; `sources` share a partition. A held
+ *  send's `bytes()` count against `budget`'s `kind` buffer limit, and `label` names the overflow. `onHeld` runs once
+ *  the send is held, before `afterEstablished` returns. */
+type SendHold<Source> = {
+  key: string
+  sources: readonly [Source, ...Source[]]
+  kind: 'text' | 'binary'
+  budget: string
+  bytes(): number
+  label: string
+  onHeld?(): void
+}
 
-/** Checks a delivery against the driver contract, once for all its consumers; one it throws for
- *  is reported and dropped. */
-type DeliveryCheck<Source> = (source: Source, payload: BackendPayload, info: { seq: number; timestamp: number }) => void
+/** What a plane's supervisor gets from `backendPlane()`: its driver's subscriptions, shared by source and checked once
+ *  for all their consumers, and the hold of sends on them. */
+type PlaneSubscriptions<Source> = Pick<
+  SubscriptionManager<Source>,
+  'subscribe' | 'holding' | 'afterEstablished' | 'checkPosition' | 'dispose'
+>
 
 type SubscriptionSlotConfig = {
   binding: SubscriptionBinding
@@ -62,20 +67,33 @@ class SubscriptionManager<Source> {
   private _establishing = 0
   private readonly _driver: SubscriptionDriver<Source>
   private readonly _sourceKey: (source: Source) => string
-  private readonly _checkDelivery: DeliveryCheck<Source>
+  private readonly _payloadKind: (source: Source) => 'text' | 'binary'
 
+  /** `payloadKind` is what a source carries: a string for 'text', bytes for 'binary'. */
   constructor({
     driver,
     sourceKey,
-    checkDelivery,
+    payloadKind,
   }: {
     driver: SubscriptionDriver<Source>
     sourceKey: (source: Source) => string
-    checkDelivery: DeliveryCheck<Source>
+    payloadKind: (source: Source) => 'text' | 'binary'
   }) {
     this._driver = driver
     this._sourceKey = sourceKey
-    this._checkDelivery = checkDelivery
+    this._payloadKind = payloadKind
+  }
+
+  /** Checks an ordering position a driver returned. */
+  checkPosition(info: OrderingInfo): void {
+    assertDriverPosition(info)
+  }
+
+  /** Checks a delivery against the driver contract, once for all its consumers; one it throws for is reported and
+   *  dropped. */
+  private _checkDelivery(source: Source, payload: BackendPayload, info: OrderingInfo): void {
+    assertDriverPosition(info)
+    assert((this._payloadKind(source) === 'text') === (typeof payload === 'string'))
   }
 
   subscribe(source: Source, receiver: BackendReceiver<BackendPayload>): BackendSubscription {
@@ -125,7 +143,7 @@ class SubscriptionManager<Source> {
    *  `describeHold` runs only while `holding`. */
   afterEstablished<T>(send: () => T | Promise<T>, describeHold: () => SendHold<Source>): T | Promise<T> {
     if (!this.holding) return send()
-    const { key, sources, weight, onHeld } = describeHold()
+    const { key, sources, kind, budget: budgetKey, bytes: payloadBytes, label, onHeld } = describeHold()
     // Another partition's subscription (another Cloudflare session's) is not ordered before this send.
     const partition = this._driver.partitionHere(sources[0])
     if (partition === null) return send()
@@ -137,21 +155,19 @@ class SubscriptionManager<Source> {
       hold = { established, sends: 0 }
     }
     const current = hold
-    let budget: string | null = null
-    const bytes = weight?.bytes() ?? 0
-    if (weight !== undefined) {
-      budget = JSON.stringify([partition, weight.budget])
-      const held = (this._held.get(budget) ?? 0) + bytes
-      if (!weight.fits(held)) return Promise.reject(weight.overflow())
-      this._held.set(budget, held)
-    }
+    const weight = heldSendWeight(kind, budgetKey, payloadBytes, label)
+    const bytes = weight.bytes()
+    const budget = JSON.stringify([partition, weight.budget])
+    const held = (this._held.get(budget) ?? 0) + bytes
+    if (!weight.fits(held)) return Promise.reject(weight.overflow())
+    this._held.set(budget, held)
     onHeld?.()
     this._holds.set(holdKey, current)
     current.sends++
     // Sent inside the reaction, so a send that finds the hold gone can't reach the driver first.
     return current.established.then(() => {
       if (--current.sends === 0) this._holds.delete(holdKey)
-      if (budget !== null) this._unhold(budget, bytes)
+      this._unhold(budget, bytes)
       return send()
     })
   }
@@ -300,6 +316,8 @@ class SubscriptionSlot {
     if (this._state === 'ready') this._readiness = createReadiness()
     this._transition('closed')
     this._readiness.reject(failure)
+    // Reported here, once, however many consumers share the subscription.
+    void this._readiness.promise.catch(reportBug)
   }
 
   private _markUnavailable(state: 'establishing' | 'lost'): void {

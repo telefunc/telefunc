@@ -6,13 +6,7 @@ import { getOrCreate } from '../utils/getOrCreate.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import {
-  reportBug,
-  reportSubscriptionEnd,
-  type BackendReceiver,
-  type BackendSubscription,
-  type OrderingInfo,
-} from 'telefunc/__internal'
+import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from './constants.js'
 import { ALL, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
 import type { DemandReport } from './demand.js'
@@ -72,7 +66,7 @@ type BinaryPlan = { all: boolean; members: Set<string>; tracks: Set<string>; pai
 class RoomSubscriptions {
   private readonly _wants = new WantsIndex((track) => this._queued.tracks.add(track))
   // Every lane shares these, so an owned member's inbox lane makes none; declared before the lanes made here.
-  private readonly _onLaneTerminal = (slot: LaneSubscription, error?: unknown) => this._onTerminal(slot, error)
+  private readonly _onLaneTerminal = (slot: LaneSubscription) => this._onTerminal(slot)
   private readonly _onLaneRecovered = () => void this._host.sync.reconcileAuthority().catch(reportRoomError)
   /** Whether some handle observes the room, which the control lane serves. */
   private _observing = false
@@ -791,10 +785,9 @@ class RoomSubscriptions {
     this._binaryReady = null
   }
 
-  private _onTerminal(slot: LaneSubscription, failure?: unknown): void {
-    // A replacement that ends is its recovery's failure, which the recovery reports.
+  private _onTerminal(slot: LaneSubscription): void {
+    // A replacement that ends is its recovery's failure.
     if (this._recovering.has(slot)) return
-    if (failure !== undefined) reportSubscriptionEnd(failure, reportBug)
     this._recovering.add(slot)
     void this._recover(slot).catch(reportRoomError)
   }
@@ -802,16 +795,20 @@ class RoomSubscriptions {
   /** A still-wanted terminal lane gets one replacement after a head read; if that fails too, the heartbeat subscribes
    *  it again. */
   private async _recover(slot: LaneSubscription): Promise<void> {
+    let replaced = false
     try {
       const config = await withinRoomHorizon(this._host._readOpenConfig())
       if (config === null) return this._host._closeFromAuthority()
       slot.retry()
+      replaced = true
       await withinRoomHorizon(slot.attemptReady)
     } catch (error) {
       if (slot.wanted) {
         slot.dropAttempt()
         this._dropped.add(slot)
       }
+      // The backend reported the replacement's end; the horizon's RoomError goes unreported.
+      if (replaced) return
       throw error
     } finally {
       this._recovering.delete(slot)

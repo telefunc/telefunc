@@ -9,10 +9,7 @@ export { installBackend, backendPlane } from '../../wire-protocol/backend/instal
 export type { BackendDriver } from '../../wire-protocol/backend/install.js'
 export { DriverAttempt } from '../../wire-protocol/backend/attempt.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/backend.js'
-export { SubscriptionManager, reportSubscriptionEnd } from '../../wire-protocol/backend/SubscriptionManager.js'
-export type { SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'
-export { heldSendWeight } from '../../wire-protocol/backend/heldSendWeight.js'
-export { assertDriverPosition } from '../../wire-protocol/backend/driverPosition.js'
+export type { PlaneSubscriptions, SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export type {

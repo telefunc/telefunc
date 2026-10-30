@@ -1,50 +1,35 @@
 export { superviseRoomDriver }
 
-import {
-  SubscriptionManager,
-  assertDriverPosition,
-  heldSendWeight,
-  type BackendPayload,
-  type BackendReceiver,
-  type OrderingInfo,
-  type SendHold,
-} from 'telefunc/__internal'
+import { type BackendPayload, type BackendReceiver, type PlaneSubscriptions, type SendHold } from 'telefunc/__internal'
 import type { CommitTarget, HeadNext, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
 import { assert } from '../utils/assert.js'
-
-/** A lane carries bytes. */
-function checkDelivery(_source: RoomSubscriptionSource, payload: BackendPayload, info: OrderingInfo): void {
-  assertDriverPosition(info)
-  assert(typeof payload !== 'string')
-}
 
 /** What a commit holds while this instance's subscriptions on its lanes establish. A binary commit also reaches its
  *  member's every-track lane and its track's every-member lane, and its held bytes count against its member's. */
 function describeCommitHold(target: CommitTarget, payload: Uint8Array): SendHold<RoomSubscriptionSource> {
   const { roomId, inc, lane } = target
   const key = roomSubscriptionSourceKey(target)
-  if (lane.kind !== 'binary') {
-    return { key, sources: [target], weight: heldSendWeight('text', key, () => payload.byteLength, 'Room') }
-  }
+  const bytes = () => payload.byteLength
+  if (lane.kind !== 'binary') return { key, sources: [target], kind: 'text', budget: key, bytes, label: 'Room' }
   const everyTrack = { roomId, inc, lane: { kind: 'binary-all', member: lane.member } } as const
   const everyMember = { roomId, inc, lane: { kind: 'binary-track', track: lane.track } } as const
   return {
     key,
     sources: [target, everyTrack, everyMember],
-    weight: heldSendWeight('binary', roomSubscriptionSourceKey(everyTrack), () => payload.byteLength, 'Room'),
+    kind: 'binary',
+    budget: roomSubscriptionSourceKey(everyTrack),
+    bytes,
+    label: 'Room',
   }
 }
 
-/** Owns the Room subscription manager, holds a lane's commits while this instance's subscription on it establishes,
- *  and checks what the driver is given and returns. */
-function superviseRoomDriver(driver: RoomDriver): RoomBackend {
-  const subscriptions = new SubscriptionManager({
-    driver: driver.subscriptions,
-    sourceKey: roomSubscriptionSourceKey,
-    checkDelivery,
-  })
-
+/** Holds a lane's commits while this instance's subscription on it establishes, and checks what the driver is given
+ *  and returns. */
+function superviseRoomDriver(
+  driver: RoomDriver,
+  subscriptions: PlaneSubscriptions<RoomSubscriptionSource>,
+): RoomBackend {
   return {
     readHead: (roomId) => driver.readHead(roomId),
     compareExchangeHead: async (roomId, cx, next) => {
@@ -61,23 +46,23 @@ function superviseRoomDriver(driver: RoomDriver): RoomBackend {
         opts?.closingLease === undefined
           ? await subscriptions.afterEstablished(commit, () => describeCommitHold(target, payload))
           : await commit()
-      if ('accepted' in result) assertDriverPosition(result)
+      if ('accepted' in result) subscriptions.checkPosition(result)
       return result
     },
     readLaneOrder: async (roomId, inc, lane) => {
       const order = await driver.readLaneOrder(roomId, inc, lane)
-      if (order !== null) assertDriverPosition(order)
+      if (order !== null) subscriptions.checkPosition(order)
       return order
     },
     readRetained: async (roomId, inc, lane) => {
       const retained = await driver.readRetained(roomId, inc, lane)
-      if (retained !== null) assertDriverPosition(retained)
+      if (retained !== null) subscriptions.checkPosition(retained)
       return retained
     },
     listRetained: (roomId, inc, of) => driver.listRetained(roomId, inc, of),
     deleteRetained: (roomId, inc, lane, opts) => driver.deleteRetained(roomId, inc, lane, opts),
     dropLaneOrders: (roomId, inc, member) => driver.dropLaneOrders(roomId, inc, member),
-    // The manager hands a lane's consumers only the deliveries checkDelivery passed.
+    // The plane hands a lane's consumers only the deliveries it checked.
     subscribeLane: (roomId, inc, lane, receiver) =>
       subscriptions.subscribe({ roomId, inc, lane }, receiver as BackendReceiver<BackendPayload>),
     dropGeneration: (roomId, inc) => driver.dropGeneration(roomId, inc),

@@ -14,6 +14,8 @@ import type { BroadcastBackend, BroadcastDriver } from './broadcast/contract.js'
 import { superviseBroadcastDriver } from './broadcast/supervise.js'
 import { createBroadcastTransportDriver, type BroadcastTransport } from './broadcast/transport.js'
 import { MemoryBackend } from './memory/backend.js'
+import { SubscriptionManager, type PlaneSubscriptions } from './SubscriptionManager.js'
+import type { SubscriptionDriver } from './subscription.js'
 import { assertUsage } from '../../utils/assert.js'
 import { getOrCreate } from '../../utils/getOrCreate.js'
 
@@ -98,10 +100,26 @@ function getBroadcastBackend(): BroadcastBackend {
 
 /** The plane `key` of the installed backend, built once per installed backend: `supervise` wraps the driver the
  *  backend serves, built with the extension's `kit`, or the in-memory one `fallback` builds when the process installed
- *  none. */
-function backendPlane<Driver, Plane extends BackendPlane>(
+ *  none, given the driver's subscriptions keyed by `sourceKey`, whose deliveries carry `payloadKind`. */
+function backendPlane<
+  Source,
+  Driver extends { readonly subscriptions: SubscriptionDriver<Source> },
+  Plane extends BackendPlane,
+>(
   key: symbol,
-  { fallback, supervise, kit }: { fallback: () => Driver; supervise: (driver: Driver) => Plane; kit?: unknown },
+  {
+    fallback,
+    supervise,
+    kit,
+    sourceKey,
+    payloadKind,
+  }: {
+    fallback: () => Driver
+    supervise: (driver: Driver, subscriptions: PlaneSubscriptions<Source>) => Plane
+    kit?: unknown
+    sourceKey: (source: Source) => string
+    payloadKind: (source: Source) => 'text' | 'binary'
+  },
 ): Plane {
   assertUsage(
     !(state.broadcastOverride && (state.installed?.fallback ?? true)),
@@ -109,10 +127,14 @@ function backendPlane<Driver, Plane extends BackendPlane>(
   )
   const installed = currentBackend()
   return getOrCreate(installed.planes, key, () => {
-    if (installed.fallback) return supervise(fallback())
-    const build = installed.driver.planes?.[key]
-    assertUsage(build, `The installed backend doesn't serve ${String(key)}, which this call needs`)
-    return supervise(build(kit as never) as Driver)
+    let driver: Driver
+    if (installed.fallback) driver = fallback()
+    else {
+      const build = installed.driver.planes?.[key]
+      assertUsage(build, `The installed backend doesn't serve ${String(key)}, which this call needs`)
+      driver = build(kit as never) as Driver
+    }
+    return supervise(driver, new SubscriptionManager({ driver: driver.subscriptions, sourceKey, payloadKind }))
   }) as Plane
 }
 
