@@ -4,7 +4,7 @@ export type { LaneHolder, TextWantsChange }
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { makePublishInfo } from '../channel.js'
-import type { ChannelPublishInfo, WirePublishInfo } from 'telefunc/__internal'
+import type { ChannelPublishInfo, OrderingInfo } from 'telefunc/__internal'
 import { ALL, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
 import type { MemberWants } from '../protocol.js'
@@ -39,7 +39,7 @@ class ReplayHold {
   holding = true
   /** Once flushed early: each lane's first live frame the holder got, which a retained frame read later is older than
    *  only if the holder never got it. */
-  readonly firstLive = new Map<string, Map<string, WirePublishInfo>>()
+  readonly firstLive = new Map<string, Map<string, OrderingInfo>>()
 
   constructor(
     readonly change: BinaryWantChange | null,
@@ -71,9 +71,9 @@ class ReplayHold {
  *  older than the sender's live stream, unless its replay let its held frames go early. Another sender's frames are
  *  never dropped by it. */
 class ReplayGate {
-  private readonly _high = new Map<string, WirePublishInfo>()
+  private readonly _high = new Map<string, OrderingInfo>()
   /** Binary lanes by sender, then track, so a sender's leave forgets only its own. */
-  private readonly _binaryHigh = new Map<string, Map<string, WirePublishInfo>>()
+  private readonly _binaryHigh = new Map<string, Map<string, OrderingInfo>>()
   /** The binary replays whose reads haven't settled. */
   private readonly _replays = new Set<ReplayHold>()
   /** The late retained frames the holder got while some replay is pending: overlapping replays read the same one. */
@@ -81,14 +81,14 @@ class ReplayGate {
   private _holding = 0
   private _heldBytes = 0
 
-  admit(key: string, info: WirePublishInfo): boolean {
+  admit(key: string, info: OrderingInfo): boolean {
     const first = !this._high.has(key)
     if (!admitInto(this._high, key, info)) return false
     if (first && key !== ANNOUNCE_KEY) this._firstLive(key, null, info)
     return true
   }
 
-  admitBinary(member: string, track: string, info: WirePublishInfo): boolean {
+  admitBinary(member: string, track: string, info: OrderingInfo): boolean {
     const high = getOrCreate(this._binaryHigh, member, () => new Map())
     const first = !high.has(track)
     if (!admitInto(high, track, info)) return false
@@ -98,7 +98,7 @@ class ReplayGate {
 
   /** A retained frame `hold` read, or with `track` null its retained message: once the hold let its frames go early, it
    *  follows them unless the holder got it live already, or from an overlapping replay. */
-  admitRetained(hold: ReplayHold, member: string, track: string | null, info: WirePublishInfo): boolean {
+  admitRetained(hold: ReplayHold, member: string, track: string | null, info: OrderingInfo): boolean {
     if (track === null) {
       if (hold.holding || !this._high.has(member)) return this.admit(member, info)
     } else if (hold.holding || !this._binaryHigh.get(member)?.has(track)) {
@@ -194,7 +194,7 @@ class ReplayGate {
   }
 
   /** A lane's first receipt, for each replay covering it that let its frames go early. */
-  private _firstLive(member: string, track: string | null, info: WirePublishInfo): void {
+  private _firstLive(member: string, track: string | null, info: OrderingInfo): void {
     for (const hold of this._replays) {
       if (hold.holding || !hold.covers(member, track)) continue
       const lanes = getOrCreate(hold.firstLive, member, () => new Map())
@@ -210,11 +210,11 @@ class ReplayGate {
 
 /** A later time is newer whatever the seq: a commit never sets its lane's time back,
  *  and a failover may rewind its seq. */
-function isNewer(info: WirePublishInfo, than: WirePublishInfo): boolean {
+function isNewer(info: OrderingInfo, than: OrderingInfo): boolean {
   return info.timestamp > than.timestamp || (info.timestamp === than.timestamp && info.seq > than.seq)
 }
 
-function admitInto(high: Map<string, WirePublishInfo>, key: string, info: WirePublishInfo): boolean {
+function admitInto(high: Map<string, OrderingInfo>, key: string, info: OrderingInfo): boolean {
   const last = high.get(key)
   if (last !== undefined && !isNewer(info, last)) return false
   high.set(key, info)
@@ -239,8 +239,8 @@ interface LaneHolder {
   /** The members whose own frames the holder doesn't get back. */
   _suppressedMembers(): ReadonlySet<string>
   /** A retained frame decoded, then in its wire form, which only a holder that forwards it takes. */
-  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string, hold: ReplayHold): void
-  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array, hold: ReplayHold): void
+  _emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void
+  _emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void
 }
 
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they
@@ -300,7 +300,7 @@ class LocalHolder implements LaneHolder {
     return !this._suppressed.has(member) && binaryWantsCovers(this._binaryWants, member, track)
   }
 
-  relayText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string): void {
+  relayText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string): void {
     if (!this._wantsTextFrom(event.from)) return
     const replay = this._replay
     if (replay.holding) {
@@ -310,13 +310,13 @@ class LocalHolder implements LaneHolder {
     if (replay.admit(event.from, info)) this._applyText(event, info)
   }
 
-  relayAnnouncement(data: unknown, info: WirePublishInfo): void {
+  relayAnnouncement(data: unknown, info: OrderingInfo): void {
     if (this._state.wantsAnnounce && this._replay.admit(ANNOUNCE_KEY, info)) {
       this._state.applyAnnounce(data, this._publishInfo(info))
     }
   }
 
-  relayBinary(frame: BinaryFrame, info: WirePublishInfo): void {
+  relayBinary(frame: BinaryFrame, info: OrderingInfo): void {
     if (!this._wantsBinary(frame.from, frame.track)) return
     const { from, track } = frame
     const replay = this._replay
@@ -332,11 +332,11 @@ class LocalHolder implements LaneHolder {
     return this._replay.hold(change)
   }
 
-  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, _serialized: string, hold: ReplayHold): void {
+  _emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, _serialized: string, hold: ReplayHold): void {
     if (this._replay.admitRetained(hold, event.from, null, info)) this._applyText(event, info)
   }
 
-  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, _framed: Uint8Array, hold: ReplayHold): void {
+  _emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, _framed: Uint8Array, hold: ReplayHold): void {
     if (this._replay.admitRetained(hold, frame.from, frame.track, info)) this._applyBinary(frame, info)
   }
 
@@ -344,15 +344,15 @@ class LocalHolder implements LaneHolder {
     this._replay.forgetMember(member)
   }
 
-  private _applyText(event: RoomDataEnvelope, info: WirePublishInfo): void {
+  private _applyText(event: RoomDataEnvelope, info: OrderingInfo): void {
     this._state.applyData(event, this._publishInfo(info))
   }
 
-  private _applyBinary(frame: BinaryFrame, info: WirePublishInfo): void {
+  private _applyBinary(frame: BinaryFrame, info: OrderingInfo): void {
     this._state.applyBinary(frame, this._publishInfo(info))
   }
 
-  private _publishInfo(info: WirePublishInfo): ChannelPublishInfo {
+  private _publishInfo(info: OrderingInfo): ChannelPublishInfo {
     return makePublishInfo(this._state.roomId, info.seq, info.timestamp)
   }
 }

@@ -6,7 +6,7 @@ import {
   type ChannelPublishAck,
   getChannelLimits,
   reportBug,
-  type WirePublishInfo,
+  type OrderingInfo,
 } from 'telefunc/__internal'
 import { assert, assertUsage } from '../utils/assert.js'
 import { markHandled } from '../utils/markHandled.js'
@@ -266,7 +266,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal What the lane carried for this handle's own listeners, or for its tail while no stub took it. */
-  _relayData(serialized: string, event: RoomDataEnvelope, info: WirePublishInfo): void {
+  _relayData(serialized: string, event: RoomDataEnvelope, info: OrderingInfo): void {
     this._local.relayText(event, info, serialized)
     if (this._stubs.size === 0) this._tail?.push({ serialized, ord: info, from: event.from })
   }
@@ -303,7 +303,7 @@ class ServerRoom extends RoomStateView implements Room {
   }
 
   /** @internal A DM for a member this handle owns, routed to its holder: a server participant or its client stub. */
-  _onDm(envelope: RoomDmEnvelope, serialized: string, info: WirePublishInfo): void {
+  _onDm(envelope: RoomDmEnvelope, serialized: string, info: OrderingInfo): void {
     const holder = this._holderOf(envelope.to)
     // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
     if (holder instanceof RoomStub) {

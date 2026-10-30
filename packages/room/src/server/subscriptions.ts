@@ -11,7 +11,7 @@ import {
   reportSubscriptionEnd,
   type BackendReceiver,
   type BackendSubscription,
-  type WirePublishInfo,
+  type OrderingInfo,
 } from 'telefunc/__internal'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from './constants.js'
 import { ALL, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
@@ -47,10 +47,10 @@ type SubscriptionHost = {
   _ownsAnyMember(): boolean
   /** Live. A pending admission owns its inbox. */
   _ownedMembers(): Iterable<string>
-  _onControl(serialized: string, info: WirePublishInfo): void
-  _onTextData(serialized: string, info: WirePublishInfo): void
-  _onBinary(framed: Uint8Array, info: WirePublishInfo): void
-  _onDm(serialized: string, info: WirePublishInfo): void
+  _onControl(serialized: string, info: OrderingInfo): void
+  _onTextData(serialized: string, info: OrderingInfo): void
+  _onBinary(framed: Uint8Array, info: OrderingInfo): void
+  _onDm(serialized: string, info: OrderingInfo): void
   _onDemand(serialized: string): void
   /** The demand lane delivers, first or again: the other processes tell their demand, which it may have missed. */
   _askDemand(): void

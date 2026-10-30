@@ -6,7 +6,7 @@ import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
-import { encodePublishBinary, encodePublishText, hostLocal, type WirePublishInfo } from 'telefunc/__internal'
+import { encodePublishBinary, encodePublishText, hostLocal, type OrderingInfo } from 'telefunc/__internal'
 import { ALL, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
 import { DemandReport, RoomDemand } from './demand.js'
 import { DM_FAILURE } from '../errors.js'
@@ -481,7 +481,7 @@ class RoomReplica {
   }
 
   /** @internal */
-  _onControl(serialized: string, info: WirePublishInfo): void {
+  _onControl(serialized: string, info: OrderingInfo): void {
     this.sync.controlDelivered(info.seq)
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') {
@@ -493,7 +493,7 @@ class RoomReplica {
   }
 
   /** @internal */
-  _onTextData(serialized: string, info: WirePublishInfo): void {
+  _onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
       for (const handle of this._receivers) handle._local.relayAnnouncement(envelope.data, info)
@@ -513,7 +513,7 @@ class RoomReplica {
   }
 
   /** @internal */
-  _onBinary(framed: Uint8Array, info: WirePublishInfo): void {
+  _onBinary(framed: Uint8Array, info: OrderingInfo): void {
     const unframed = decodeBinaryFrame(framed)
     assert(unframed)
     for (const handle of this._receivers) handle._local.relayBinary(unframed, info)
@@ -523,7 +523,7 @@ class RoomReplica {
   }
 
   /** @internal A DM for a member a handle here owns, routed to that handle. */
-  _onDm(serialized: string, info: WirePublishInfo): void {
+  _onDm(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
     this._inboxFrame(envelope.to, info.seq)
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.

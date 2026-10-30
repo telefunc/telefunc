@@ -13,7 +13,7 @@ import {
   type BroadcastEndOwner,
   type BroadcastKind,
   type ServerBroadcastEnd,
-  type WirePublishInfo,
+  type OrderingInfo,
   type ChannelPublishAck,
   ShieldValidationError,
 } from 'telefunc/__internal'
@@ -90,7 +90,7 @@ class MemberMessageTexts {
   private _unstamped: string | null = null
 
   private readonly _serialized: string
-  private readonly _info: WirePublishInfo
+  private readonly _info: OrderingInfo
   private readonly _unstampedEvent: () => object
 
   constructor({
@@ -99,7 +99,7 @@ class MemberMessageTexts {
     unstampedEvent,
   }: {
     serialized: string
-    info: WirePublishInfo
+    info: OrderingInfo
     unstampedEvent: () => object
   }) {
     this._serialized = serialized
@@ -407,11 +407,11 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (hiddenMember === null || this._grantedHidden.has(hiddenMember)) this._end.deliver(wireText, opts)
   }
 
-  _relayAnnouncement(wireText: string, ord: WirePublishInfo): void {
+  _relayAnnouncement(wireText: string, ord: OrderingInfo): void {
     if (this._announce) this._relayTextLive(ANNOUNCE_KEY, wireText, ord)
   }
 
-  _relayText(serialized: string, texts: MemberMessageTexts, from: string, ord: WirePublishInfo): void {
+  _relayText(serialized: string, texts: MemberMessageTexts, from: string, ord: OrderingInfo): void {
     if (this._tail !== null) {
       this._tail.push({ serialized, ord, from })
     } else if (this._wantsTextFrom(from)) {
@@ -424,7 +424,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     }
   }
 
-  _relayBinary(wireData: Uint8Array, from: string, track: string, info: WirePublishInfo): void {
+  _relayBinary(wireData: Uint8Array, from: string, track: string, info: OrderingInfo): void {
     if (!this._wantsBinary(from, track)) return
     const replay = this._replay
     if (
@@ -456,17 +456,17 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     )
   }
 
-  _emitRetainedText(event: RoomDataEnvelope, info: WirePublishInfo, serialized: string, hold: ReplayHold): void {
+  _emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
     if (this._replay.admitRetained(hold, event.from, null, info)) this._end.deliver(encodePublishText(serialized, info))
   }
 
-  _emitRetainedBinary(frame: BinaryFrame, info: WirePublishInfo, framed: Uint8Array, hold: ReplayHold): void {
+  _emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void {
     if (this._replay.admitRetained(hold, frame.from, frame.track, info)) {
       this._end.deliverBinary(encodePublishBinary(framed, info))
     }
   }
 
-  private _relayTextLive(key: string, wireText: string, ord: WirePublishInfo): void {
+  private _relayTextLive(key: string, wireText: string, ord: OrderingInfo): void {
     if (this._replay.admit(key, ord)) this._end.deliver(wireText)
   }
 

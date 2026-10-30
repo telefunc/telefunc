@@ -26,7 +26,7 @@ export type {
 export type { BroadcastEndOwner, ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'
 export { encodePublishBinary, encodePublishText } from '../../wire-protocol/wire/connectionFrame.js'
-export type { BroadcastKind, WirePublishInfo } from '../../wire-protocol/wire/connectionFrame.js'
+export type { BroadcastKind } from '../../wire-protocol/wire/connectionFrame.js'
 export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
 export { reportBug } from '../../wire-protocol/channel/server/channel.js'
 export { getAdapterMaxFrameBytes, getChannelLimits } from './serverConfig.js'
