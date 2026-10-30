@@ -13,7 +13,6 @@ export { SubscriptionManager, reportSubscriptionEnd } from '../../wire-protocol/
 export type { SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'
 export { heldSendWeight } from '../../wire-protocol/backend/heldSendWeight.js'
 export { assertDriverPosition } from '../../wire-protocol/backend/driverPosition.js'
-export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
 export type {

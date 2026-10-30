@@ -11,7 +11,6 @@ export type { BackendFault }
 
 import {
   installBackend,
-  createDeferred,
   DriverAttempt,
   MemoryBackend,
   type BackendPayload,
@@ -27,6 +26,7 @@ import {
   type RoomBackend,
   type RoomSubscriptionSource,
 } from '@telefunc/room/backend'
+import { createDeferred } from './createDeferred'
 
 /** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
  *  (the next matching subscription refuses to open) or 'deliver' (the next message a matching subscription gets is

@@ -7,14 +7,14 @@ import type {
   BackendPayload,
   BackendReceiver,
   BroadcastRoute,
-  Deferred,
   OrderingInfo,
   SubscriptionAttempt,
   SubscriptionBinding,
   SubscriptionDriver,
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '@telefunc/room/backend'
-import { DriverAttempt, createDeferred, decodeOrderingFrame } from 'telefunc/__internal'
+import { DriverAttempt, decodeOrderingFrame } from 'telefunc/__internal'
+import { createDeferred, type Deferred } from './createDeferred.js'
 import { broadcastChannel, channelKey, generationInvalidationChannel, type CommitChannels } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
