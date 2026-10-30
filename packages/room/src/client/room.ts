@@ -5,7 +5,7 @@ import { assert, assertUsage } from '../utils/assert.js'
 import { markHandled } from '../utils/markHandled.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
-import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
+import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, PageClient } from 'telefunc/__internal'
 import { makePublishInfo } from '../channel.js'
 import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../binary.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../model.js'
@@ -54,7 +54,7 @@ import type {
 type ClientRoomEvent = RoomEnvelope | RoomDmEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent
 
 /** A reply that can't be sent is reported, and the sender gets an error instead. */
-function sendDmReply(end: ClientBroadcast, ackId: string, reply: Promise<RoomResult>): void {
+function sendDmReply(end: PageClient, ackId: string, reply: Promise<RoomResult>): void {
   const declare = (answer: RoomResult): RoomStubRequest => ({ __r: 'dm-reply', ackId, reply: answer })
   end._sendReply(reply.then(declare), declare({ ok: false, kind: 'error', message: CLIENT_ROOM_BUG_MESSAGE }))
 }
@@ -122,7 +122,7 @@ function heldConnectionChanged(id: string, wasConnected: boolean | null): void {
 class ClientRoom extends RoomStateView implements Room {
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
-  private readonly _end: ClientBroadcast
+  private readonly _end: PageClient
   private readonly _model: RoomModel
   protected readonly _state: RoomState
   private readonly _localParticipants = new Map<string, ClientRoomParticipant>()
@@ -140,7 +140,7 @@ class ClientRoom extends RoomStateView implements Room {
   /** @internal */
   readonly _bufferLimit: number
 
-  constructor(end: ClientBroadcast, snapshot: RoomSnapshotMetadata) {
+  constructor(end: PageClient, snapshot: RoomSnapshotMetadata) {
     super()
     this._end = end
     this._bufferLimit = snapshot.bufferLimit
@@ -730,10 +730,10 @@ class ClientRoomParticipant extends ClientParticipantBase {
 
 /** `LocalParticipant` revived from a serialized `ServerLocalParticipant`. Owns its channel. */
 class ClientStandaloneParticipant extends ClientParticipantBase {
-  private readonly _end: ClientBroadcast
+  private readonly _end: PageClient
   private readonly _request: (req: ParticipantStubRequest) => Promise<unknown>
 
-  constructor(end: ClientBroadcast, metadata: ParticipantStubMetadata) {
+  constructor(end: PageClient, metadata: ParticipantStubMetadata) {
     const request = async (req: ParticipantStubRequest) => roomResultValue(end.send(req, { ack: true }))
     // Its own: the `rewound` notice forgets its seq.
     super({ participant: metadata, rewinds: { count: 0 }, request })

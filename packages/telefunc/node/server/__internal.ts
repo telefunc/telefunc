@@ -25,6 +25,7 @@ export type {
 } from '../../wire-protocol/backend/subscription.js'
 export type { BroadcastEndOwner, ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'
+export type { PageEnd, PageClient }
 export { encodePublishBinary, encodePublishText } from '../../wire-protocol/wire/connectionFrame.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/connectionFrame.js'
 export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
@@ -50,3 +51,43 @@ export {
 export { Abort } from './Abort.js'
 export { ShieldValidationError, isShieldValidationError } from '../../shared/ShieldValidationError.js'
 export { ChannelOverflowError, isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
+
+import type { ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+import type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'
+
+/** The members of a page's broadcast end that an add-on drives. */
+type PageEnd = Pick<
+  ServerBroadcastEnd,
+  | 'id'
+  | '_setOwner'
+  | '_terminateWire'
+  | '_trackAck'
+  | 'isAttached'
+  | 'isClosed'
+  | 'isConnected'
+  | 'deliver'
+  | 'deliverBinary'
+  | 'listen'
+  | 'onClose'
+  | 'onDisconnect'
+  | 'onReconnect'
+  | 'close'
+>
+
+/** The members of a page's `ClientBroadcast` that an add-on drives. */
+type PageClient = Pick<
+  ClientBroadcast,
+  | '_publishUnreported'
+  | '_publishBinaryUnreported'
+  | '_setSubscribed'
+  | '_sendReply'
+  | '_subscribeLocal'
+  | 'isClosed'
+  | 'isConnected'
+  | 'send'
+  | 'onOpen'
+  | 'onClose'
+  | 'onDisconnect'
+  | 'onReconnect'
+  | 'close'
+>
