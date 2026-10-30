@@ -4,6 +4,7 @@ import crossws from 'crossws/adapters/bun'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
+import { loadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { CHANNEL_TRANSPORT, WIRE_MAX_RAW_FRAME_BYTES } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
@@ -37,6 +38,7 @@ function telefunc(): TelefuncServe {
     // Bun closes the socket on a message over 16 MiB by default, below the frames telefunc accepts.
     websocket: { ...ws.websocket, maxPayloadLength: WIRE_MAX_RAW_FRAME_BYTES },
     async serve({ request, server, context }: ServeInput): Promise<Response | undefined> {
+      await loadServerProductionEntry()
       const url = new URL(request.url)
       const config = getServerConfig()
       if (url.pathname === config.telefuncUrl && request.headers.get('upgrade') === 'websocket') {

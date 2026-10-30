@@ -4,6 +4,7 @@ import crossws from 'crossws/adapters/deno'
 import { serve as serveTelefunc } from '../node/server/telefunc.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import { getServerConfig, enableChannelTransports } from '../node/server/serverConfig.js'
+import { loadServerProductionEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 import { getTelefuncChannelHooks } from '../wire-protocol/server/ws.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
@@ -34,6 +35,7 @@ function telefunc(): TelefuncServe {
 
   return {
     async serve({ request, info, context }: ServeInput): Promise<Response | undefined> {
+      await loadServerProductionEntry()
       const url = new URL(request.url)
       const config = getServerConfig()
       if (url.pathname === config.telefuncUrl && request.headers.get('upgrade') === 'websocket') {
