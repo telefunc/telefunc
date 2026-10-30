@@ -30,7 +30,7 @@ import type {
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
-import { getServerExtensionTypes } from '../serverConfig.js'
+import { getAdapterMaxFrameBytes, getServerExtensionTypes } from '../serverConfig.js'
 
 /** Look up the shields for a revived value and build its auto-logging validator map.
  *  Empty map when the value isn't tracked in `valueShields` or has no registered shields. */
@@ -139,6 +139,7 @@ function serializeTelefunctionResult(runContext: {
         sendStream,
         responseState,
         validators: makeValidators(value, valueShields, shieldCtx),
+        maxFrameBytes: getAdapterMaxFrameBytes(),
       }
     },
     function onReplaced({ abort }) {

@@ -193,6 +193,9 @@ type ServerReplacerContext = {
   validators: ShieldValidators
   /** One store per response, shared by every replacer in it; `init` runs on the first call for `key`. */
   responseState<T>(key: symbol, init: () => T): T
+  /** The largest WebSocket message the runtime accepts, where it caps them (Cloudflare); a channel's metadata tells the
+   *  page. */
+  maxFrameBytes: number | undefined
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */
