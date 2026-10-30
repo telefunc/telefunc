@@ -1,16 +1,28 @@
 export type { TELEFUNC_SHIELDS } from '../shared/transformer/generateShield/shieldKey.js'
-export type * from '../../wire-protocol/backend/broadcast/contract.js'
+export type {
+  BroadcastDriver,
+  BroadcastPayload,
+  BroadcastRoute,
+  PublishResult,
+} from '../../wire-protocol/backend/broadcast/contract.js'
 export { installBackend, backendPlane } from '../../wire-protocol/backend/install.js'
 export { DriverAttempt } from '../../wire-protocol/backend/attempt.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/backend.js'
 export { SubscriptionManager, reportSubscriptionEnd } from '../../wire-protocol/backend/SubscriptionManager.js'
-export type { HoldWeight, SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'
+export type { SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'
 export { heldSendWeight } from '../../wire-protocol/backend/heldSendWeight.js'
 export { assertDriverPosition } from '../../wire-protocol/backend/driverPosition.js'
 export { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 export { decodeOrderingFrame } from '../../wire-protocol/wire/orderingFrame.js'
 export type { OrderingInfo } from '../../wire-protocol/wire/orderingFrame.js'
-export type * from '../../wire-protocol/backend/subscription.js'
+export type {
+  BackendPayload,
+  BackendReceiver,
+  BackendSubscription,
+  SubscriptionAttempt,
+  SubscriptionBinding,
+  SubscriptionDriver,
+} from '../../wire-protocol/backend/subscription.js'
 export type { BroadcastEndOwner, ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'
 export { encodePublishBinary, encodePublishText } from '../../wire-protocol/wire/connectionFrame.js'
