@@ -7,6 +7,7 @@ export type { RoomIncarnation }
 import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { unrefTimer } from '../utils/unrefTimer.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { CellCount, CellCounter, RoomHead } from '../backend/contract.js'
 import { decodeCellCounter, isOpenIncarnation } from '../backend/semantics.js'
@@ -177,7 +178,9 @@ async function extendLapse(
 
 /** One close timer per room in this process, with the incarnation it closes; it checks the record again when it
  *  fires. */
-const closeTimers = new Map<string, { inc: string; timer: ReturnType<typeof setTimeout> }>()
+const { closeTimers } = getGlobalObject('server/lifecycle.ts', () => ({
+  closeTimers: new Map<string, { inc: string; timer: ReturnType<typeof setTimeout> }>(),
+}))
 
 function scheduleClose(room: RoomIncarnation, closesIn: number): void {
   clearTimeout(closeTimers.get(room.id)?.timer)

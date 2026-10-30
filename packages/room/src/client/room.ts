@@ -4,6 +4,7 @@ import { createDeferred } from '../utils/createDeferred.js'
 import { assert, assertUsage } from '../utils/assert.js'
 import { markHandled } from '../utils/markHandled.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, ClientBroadcast } from 'telefunc/__internal'
 import { makePublishInfo } from '../channel.js'
 import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../binary.js'
@@ -96,10 +97,14 @@ type RosterStream = {
   applied: Promise<void>
 }
 
-/** The members the page holds, joined through any of its room views or held through their own channel, by id. */
-const heldMembers = new Map<string, ClientParticipantBase>()
-/** The page's room views, each showing a member the page holds as the page's own connection to it. */
-const roomViews = new Set<WeakRef<ClientRoom>>()
+const { heldMembers, roomViews, roomHolds } = getGlobalObject('client/room.ts', () => ({
+  /** The members the page holds, joined through any of its room views or held through their own channel, by id. */
+  heldMembers: new Map<string, ClientParticipantBase>(),
+  /** The page's room views, each showing a member the page holds as the page's own connection to it. */
+  roomViews: new Set<WeakRef<ClientRoom>>(),
+  /** Each member handle's `join()` promise, which keeps a room a telefunction returned open while reachable. */
+  roomHolds: new WeakMap<LocalParticipant, Promise<LocalParticipant>>(),
+}))
 
 function heldConnection(id: string): boolean | null {
   return heldMembers.get(id)?.isConnected ?? null
@@ -643,9 +648,6 @@ abstract class ClientParticipantBase extends ParticipantBase {
     return this._bufferLimit
   }
 }
-
-/** Each member handle's `join()` promise, which keeps a room a telefunction returned open while reachable. */
-const roomHolds = new WeakMap<LocalParticipant, Promise<LocalParticipant>>()
 
 /** `LocalParticipant` returned by `ClientRoom.join()`. Operates through the room's channel. */
 class ClientRoomParticipant extends ClientParticipantBase {

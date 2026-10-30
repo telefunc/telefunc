@@ -10,6 +10,7 @@ import { ROOM_HEARTBEAT_INTERVAL_MS, ROOM_SESSION_TTL_MS } from './constants.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { configFromHead, openConfig } from './lanes.js'
 import { reportRoomError } from './errors.js'
+import { getGlobalObject } from '../utils/getGlobalObject.js'
 
 /** Lists the room, to be looked at again once its head lapses, and a heartbeat from now at the earliest. A room
  *  without hold timeouts never lapses; one with them but no lapse yet gets one once held, so it is looked at again a
@@ -39,13 +40,15 @@ async function repairRoomIndex(
   else await backend.directoryDelete(id, listedInc)
 }
 
-/** When this process may sweep again: once a heartbeat interval at most, as a room is created or a heartbeat ticks. */
-let nextSweepAt = 0
+const globalObject = getGlobalObject('server/directory.ts', {
+  /** When this process may sweep again: once a heartbeat interval at most, as a room is created or a heartbeat ticks. */
+  nextSweepAt: 0,
+})
 
 function sweepLapsedRoomsSoon(): void {
   const now = performance.now()
-  if (now < nextSweepAt) return
-  nextSweepAt = now + ROOM_HEARTBEAT_INTERVAL_MS
+  if (now < globalObject.nextSweepAt) return
+  globalObject.nextSweepAt = now + ROOM_HEARTBEAT_INTERVAL_MS
   void sweepLapsedRooms(getRoomBackend()).catch(reportRoomError)
 }
 
