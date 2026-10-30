@@ -12,8 +12,8 @@ export {
   DM_FAILURE,
 }
 
+import { Abort } from 'telefunc/client'
 import {
-  Abort,
   ChannelOverflowError,
   ShieldValidationError,
   isChannelOverflowError,
