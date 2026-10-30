@@ -1,6 +1,7 @@
 export { configUser as config }
 export { getServerConfig }
 export { getManifestConfig }
+export { applyManifestConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
@@ -17,6 +18,7 @@ import { assertUsage } from '../../utils/assert.js'
 import { getGlobalObject } from '../../utils/getGlobalObject.js'
 import { hasProp } from '../../utils/hasProp.js'
 import { isObject } from '../../utils/isObject.js'
+import { isPlainObject } from '../../utils/isPlainObject.js'
 import type { TelefuncServerExtension } from './extensions.js'
 import { registerShieldType } from './shield.js'
 import { isTelefuncFilePath } from '../../utils/isTelefuncFilePath.js'
@@ -359,12 +361,15 @@ function getServerConfig(): ConfigResolved {
 
 /** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects.) */
 function getManifestConfig(): Record<string, unknown> {
-  const { extensions, broadcast, stream, channel, ...manifestConfig } = configState
-  // Skip unset `stream` and `channel`: production may apply the manifest after the app's server code sets them
-  return {
-    ...manifestConfig,
-    ...(Object.keys(stream).length > 0 && { stream }),
-    ...(Object.keys(channel).length > 0 && { channel }),
+  const { extensions, broadcast, ...manifestConfig } = configState
+  return manifestConfig
+}
+
+/** Nested settings are merged key by key: production may apply the manifest after the app's server code set some. */
+function applyManifestConfig(manifestConfig: Record<string, unknown>): void {
+  for (const [prop, val] of Object.entries(manifestConfig)) {
+    const current = configState[prop as keyof ConfigUser]
+    applyUserConfig(prop, isPlainObject(val) && isPlainObject(current) ? { ...current, ...val } : val)
   }
 }
 

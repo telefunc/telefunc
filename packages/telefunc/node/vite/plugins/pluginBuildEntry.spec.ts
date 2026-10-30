@@ -1,5 +1,6 @@
 import { expect, it, vi } from 'vitest'
 import { config } from '../../server/serverConfig.js'
+import { setTelefuncLoaders } from '../../server/runTelefunc/loadTelefuncFilesUsingVite/loadBuildEntry.js'
 import { pluginBuildEntry } from './pluginBuildEntry.js'
 
 const mocks = vi.hoisted(() => ({ getServerProductionEntry: null as null | (() => string) }))
@@ -14,8 +15,23 @@ vi.mock('@brillout/vite-plugin-server-entry/plugin', () => ({
 it('the production entry carries the config set at build time', () => {
   config.telefuncUrl = '/api/tf'
   config.channel.pingInterval = 999
+  const manifest = getManifest()
+  expect(manifest.config).toMatchObject({ telefuncUrl: '/api/tf', channel: { pingInterval: 999 } })
+  expect(manifest.config).not.toHaveProperty('extensions')
+})
+
+it("the production entry keeps the channel settings of the app's server code", () => {
+  config.channel.pingInterval = 999
+  const manifest = getManifest()
+  config.channel = { transports: ['sse', 'ws'], reconnectTimeout: 12345 }
+  setTelefuncLoaders({ loadTelefuncFiles: async () => ({}), loadManifest: () => manifest })
+  expect(config.channel.pingInterval).toBe(999)
+  expect(config.channel.transports).toEqual(['sse', 'ws'])
+  expect(config.channel.reconnectTimeout).toBe(12345)
+})
+
+function getManifest() {
   pluginBuildEntry()
   const entryCode = mocks.getServerProductionEntry!()
-  const manifest = JSON.parse(entryCode.match(/loadManifest: \(\) => \((.*)\)\n\}\);/s)![1]!)
-  expect(manifest.config).toEqual({ telefuncUrl: '/api/tf', channel: { pingInterval: 999 } })
-})
+  return JSON.parse(entryCode.match(/loadManifest: \(\) => \((.*)\)\n\}\);/s)![1]!)
+}
