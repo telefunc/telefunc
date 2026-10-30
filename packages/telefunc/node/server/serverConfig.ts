@@ -369,8 +369,15 @@ function getManifestConfig(): Record<string, unknown> {
 function applyManifestConfig(manifestConfig: Record<string, unknown>): void {
   for (const [prop, val] of Object.entries(manifestConfig)) {
     const current = configState[prop as keyof ConfigUser]
-    applyUserConfig(prop, isPlainObject(val) && isPlainObject(current) ? { ...current, ...val } : val)
+    applyUserConfig(prop, mergeConfig(current, val))
   }
+}
+
+function mergeConfig(current: unknown, val: unknown): unknown {
+  if (!isPlainObject(val) || !isPlainObject(current)) return val
+  const merged = { ...current }
+  for (const [key, valNested] of Object.entries(val)) merged[key] = mergeConfig(current[key], valNested)
+  return merged
 }
 
 /** Extension wire types are consumed after user modules may have registered more extensions.

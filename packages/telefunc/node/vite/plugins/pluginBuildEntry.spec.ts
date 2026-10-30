@@ -41,6 +41,14 @@ it("the production entry keeps the app's own root and telefunc files", () => {
   expect(config.telefuncFiles).toEqual(['/srv/app/pages/a.telefunc.js'])
 })
 
+it("the production entry keeps the nested log settings of the app's server code", () => {
+  config.log = { shieldErrors: { dev: false } }
+  const manifest = getManifest()
+  config.log = { shieldErrors: { prod: false } }
+  setTelefuncLoaders({ loadTelefuncFiles: async () => ({}), loadManifest: () => manifest })
+  expect(config.log).toEqual({ shieldErrors: { dev: false, prod: false } })
+})
+
 function getManifest() {
   pluginBuildEntry()
   const entryCode = mocks.getServerProductionEntry!()
