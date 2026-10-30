@@ -66,7 +66,7 @@ type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
 
 const ROOM_MAINTENANCE_RETRY_MS = 30_000
 
-/** The role of a Durable Object that is a room authority, or the room directory, fanning out to the session DOs of
+/** Room's part of a Durable Object that is a room authority, or the room directory, fanning out to the session DOs of
  *  `sessions`. Its tables are created on first use. */
 class RoomAuthority {
   readonly #ctx: DurableObjectState

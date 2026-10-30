@@ -162,12 +162,12 @@ class CloudflareRoomDriver implements RoomDriver {
   }
 }
 
-/** A room authority's methods, called through its Durable Object's `telefuncRole()`. */
+/** A room authority's methods, called through its Durable Object's `telefuncDurableObjectCall()`. */
 function roomAuthorityStub(stub: TelefuncExtensionStub): CloudflareRoomAuthorityStub {
   return new Proxy({} as CloudflareRoomAuthorityStub, {
     get:
       (_, method: string) =>
       (...args: unknown[]) =>
-        stub.telefuncRole(ROOM_CLOUDFLARE_EXTENSION, method, args),
+        stub.telefuncDurableObjectCall(ROOM_CLOUDFLARE_EXTENSION, method, args),
   })
 }

@@ -61,5 +61,5 @@ const ROOM_TOMBSTONE_TTL_MS = 60_000
 const ROOM_CLOSE_LEASE_MS = 15_000
 /** How long past an unheld room's close its head lapses: the close that server's timer starts lands well before. */
 const ROOM_LAPSE_AFTER_CLOSE_MS = 5_000
-/** The name Room's Cloudflare extension registers its role and session calls under. */
+/** The name Room's Cloudflare extension registers its `durableObject` and session calls under. */
 const ROOM_CLOUDFLARE_EXTENSION = 'room'

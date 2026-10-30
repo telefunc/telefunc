@@ -61,8 +61,8 @@ function testSubscribeOutsideSession() {
 }
 
 function testRoomRoleFromWorker() {
-  test('a Room role call from the Worker, before any .telefunc file loads', async () => {
-    const response = await fetch(getServerUrl() + '/__room-role-from-worker')
+  test('a Room Durable Object call from the Worker, before any .telefunc file loads', async () => {
+    const response = await fetch(getServerUrl() + '/__room-call-from-worker')
     expect(response.status).toBe(204)
   })
 }

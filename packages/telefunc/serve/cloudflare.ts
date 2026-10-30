@@ -38,7 +38,10 @@ import type { Telefunc as TelefuncNamespace } from '../node/server/context/getCo
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/backend.js'
-import { getCloudflareExtension, type CloudflareExtensionRole } from '../wire-protocol/adapter/cloudflare/extensions.js'
+import {
+  getCloudflareExtension,
+  type CloudflareExtensionDurableObject,
+} from '../wire-protocol/adapter/cloudflare/extensions.js'
 // The installed extensions' server entries: Telefunc's Vite plugin fills this module in, found by its id. A bare
 // specifier, so that Vite's optimizer keeps it out of a pre-bundled telefunc.
 import 'telefunc/__internal/cloudflare-extensions'
@@ -48,9 +51,9 @@ import { isTelefuncRequest, toResponse } from './shared.js'
 import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
 
-/** The extension whose role a Durable Object has, kept in its storage so that its alarm() finds the role after an
+/** The extension a Durable Object belongs to, kept in its storage so that its alarm() finds the extension after an
  *  eviction. */
-const ROLE_STORAGE_KEY = 'telefunc:extension-role'
+const EXTENSION_STORAGE_KEY = 'telefunc:extension'
 
 /** A Durable Object takes a WebSocket message of 32 MiB at most. */
 const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -132,14 +135,14 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const getContext = options?.context
 
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
-  // coordinator, or an extension's role.
+  // coordinator, or an extension's `durableObject`.
   const TelefuncDurableObject = class extends DurableObject<Cloudflare.Env> {
     readonly #authorityState: CloudflareBroadcastAuthorityState
     readonly #broadcastCalls: BroadcastCalls = new OrderedStubs()
     readonly #session: CloudflareSession
-    readonly #roles = new Map<string, CloudflareExtensionRole>()
-    /** The role this Durable Object's storage is known to hold. */
-    #storedRole: string | undefined
+    readonly #durableObjects = new Map<string, CloudflareExtensionDurableObject>()
+    /** The extension this Durable Object's storage is known to hold. */
+    #storedExtension: string | undefined
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -198,16 +201,21 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.#authorityState.setPresence(request)
     }
 
-    /** The RPC method every extension's role is called through. */
-    async telefuncRole(name: string, method: string, args: unknown[]): Promise<unknown> {
-      const role = this.#role(name)
-      const call = (role as Record<string, unknown>)[method]
-      assertUsage(typeof call === 'function', `The Cloudflare extension ${name} has no role method ${method}()`)
-      if (this.#storedRole !== name) {
-        if ((await this.ctx.storage.get(ROLE_STORAGE_KEY)) !== name) await this.ctx.storage.put(ROLE_STORAGE_KEY, name)
-        this.#storedRole = name
+    /** The RPC method every extension's `durableObject` is called through. */
+    async telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown> {
+      const durableObject = this.#durableObject(name)
+      const call = (durableObject as Record<string, unknown>)[method]
+      assertUsage(
+        typeof call === 'function',
+        `The Cloudflare extension ${name} has no Durable Object method ${method}()`,
+      )
+      if (this.#storedExtension !== name) {
+        if ((await this.ctx.storage.get(EXTENSION_STORAGE_KEY)) !== name) {
+          await this.ctx.storage.put(EXTENSION_STORAGE_KEY, name)
+        }
+        this.#storedExtension = name
       }
-      return call.apply(role, args)
+      return call.apply(durableObject, args)
     }
 
     telefuncSessionCall(name: string, method: string, args: unknown[]): unknown {
@@ -216,26 +224,28 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.#runInSession(() => call(...args))
     }
 
-    /** Only a role schedules alarms. */
+    /** Only an extension's `durableObject` schedules alarms. */
     async alarm(): Promise<void> {
-      const name = await this.ctx.storage.get<string>(ROLE_STORAGE_KEY)
+      const name = await this.ctx.storage.get<string>(EXTENSION_STORAGE_KEY)
       assert(name !== undefined)
-      this.#storedRole = name
-      await this.#role(name).alarm?.()
+      this.#storedExtension = name
+      await this.#durableObject(name).alarm?.()
     }
 
     /** Built once, synchronously, so that concurrent first calls share it. */
-    #role(name: string): CloudflareExtensionRole {
-      const built = this.#roles.get(name)
+    #durableObject(name: string): CloudflareExtensionDurableObject {
+      const built = this.#durableObjects.get(name)
       if (built) return built
       const extension = getCloudflareExtension(name)
       assertUsage(
-        extension?.role,
+        extension?.durableObject,
         `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use Telefunc's Vite plugin?`,
       )
-      const role = extension.role(this.ctx as never, this.env as never, () => telefuncNamespace(this.env))
-      this.#roles.set(name, role)
-      return role
+      const durableObject = extension.durableObject(this.ctx as never, this.env as never, () =>
+        telefuncNamespace(this.env),
+      )
+      this.#durableObjects.set(name, durableObject)
+      return durableObject
     }
 
     #runInSession<T>(fn: () => T): T {
