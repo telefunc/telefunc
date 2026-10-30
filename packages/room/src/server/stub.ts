@@ -7,8 +7,7 @@ import { ROOM_TRACK_WANTS_MAX, ROOM_VIEW_MEMBERS_MAX } from '../constants.js'
 import { ROOM_DM_ACK_TIMEOUT_MS } from './constants.js'
 import { assertProtocol, isProtocolViolationError, parsePeerText, ProtocolViolationError } from './protocolViolation.js'
 import {
-  encodePublishBinary,
-  encodePublishText,
+  encodePublish,
   getChannelLimits,
   type BroadcastEndOwner,
   type BroadcastKind,
@@ -80,7 +79,7 @@ class ResponseRoomGrants {
 function unorderedEventText(
   event: RoomCtrlEnvelope | RoomRosterEvent | RoomJoinedEvent | RoomDemandEvent | ParticipantStubNotice,
 ): string {
-  return encodePublishText(stringify(event), { seq: 0, timestamp: Date.now() })
+  return encodePublish(stringify(event), null)
 }
 
 /** A member's message as its lane carried it, stamped, and without the stamp, each made once for every client. */
@@ -107,11 +106,11 @@ class MemberMessageTexts {
   }
 
   stamped(): string {
-    return (this._stamped ??= encodePublishText(this._serialized, this._info))
+    return (this._stamped ??= encodePublish(this._serialized, this._info))
   }
 
   unstamped(): string {
-    return (this._unstamped ??= encodePublishText(stringify(this._unstampedEvent()), this._info))
+    return (this._unstamped ??= encodePublish(stringify(this._unstampedEvent()), this._info))
   }
 }
 
@@ -456,12 +455,12 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   }
 
   _emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
-    if (this._replay.admitRetained(hold, event.from, null, info)) this._end.deliver(encodePublishText(serialized, info))
+    if (this._replay.admitRetained(hold, event.from, null, info)) this._end.deliver(encodePublish(serialized, info))
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void {
     if (this._replay.admitRetained(hold, frame.from, frame.track, info)) {
-      this._end.deliverBinary(encodePublishBinary(framed, info))
+      this._end.deliverBinary(encodePublish(framed, info))
     }
   }
 
@@ -499,7 +498,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     this._tail = null
     for (const { serialized, ord, from } of held) {
       if (!this._wantsTextFrom(from)) continue
-      this._relayTextLive(from, encodePublishText(serialized, ord), ord)
+      this._relayTextLive(from, encodePublish(serialized, ord), ord)
     }
   }
 

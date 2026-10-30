@@ -25,7 +25,7 @@ export type {
 } from '../../wire-protocol/backend/subscription.js'
 export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { PageEnd, PageClient }
-export { encodePublishBinary, encodePublishText } from '../../wire-protocol/wire/connectionFrame.js'
+export { encodePublish } from '../../wire-protocol/wire/connectionFrame.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/connectionFrame.js'
 export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
 export { reportBug } from '../../wire-protocol/channel/server/channel.js'

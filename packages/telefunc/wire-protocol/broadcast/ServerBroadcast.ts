@@ -27,7 +27,7 @@ import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { markHandled } from '../../utils/markHandled.js'
 import { Listeners } from '../../utils/Listeners.js'
-import { encodePublishText, encodePublishBinary } from '../wire/connectionFrame.js'
+import { encodePublish } from '../wire/connectionFrame.js'
 import type { BroadcastKind, WirePublishInfo } from '../wire/connectionFrame.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../node/server/Abort.js'
@@ -150,7 +150,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     const listeners = this._subscribers.text.list()
     if (!this._callListeners(listeners, rawInfo, (cb, info) => cb(data, info))) return
     if (!this._peerSubscriptions.text) return
-    this._end.deliver(encodePublishText(serialized, rawInfo))
+    this._end.deliver(encodePublish(serialized, rawInfo))
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -158,7 +158,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     const listeners = this._subscribers.binary.list()
     if (!this._callListeners(listeners, rawInfo, (cb, info) => cb(new Uint8Array(data), info))) return
     if (!this._peerSubscriptions.binary) return
-    this._end.deliverBinary(encodePublishBinary(data, rawInfo))
+    this._end.deliverBinary(encodePublish(data, rawInfo))
   }
 
   /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once

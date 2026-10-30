@@ -6,7 +6,7 @@ import { assert } from '../utils/assert.js'
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
-import { encodePublishBinary, encodePublishText, hostLocal, type OrderingInfo } from 'telefunc/__internal'
+import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
 import { ALL, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
 import { DemandReport, RoomDemand } from './demand.js'
 import { DM_FAILURE } from '../errors.js'
@@ -489,7 +489,7 @@ class RoomReplica {
       if (ctrl.instance !== self && (ctrl.of ?? self) === self) void this._tellDemandAgain().catch(reportRoomError)
       return
     }
-    this.applyControl(ctrl, () => encodePublishText(serialized, info))
+    this.applyControl(ctrl, () => encodePublish(serialized, info))
   }
 
   /** @internal */
@@ -497,7 +497,7 @@ class RoomReplica {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
       for (const handle of this._receivers) handle._local.relayAnnouncement(envelope.data, info)
-      const wireText = encodePublishText(serialized, info)
+      const wireText = encodePublish(serialized, info)
       for (const stub of this.stubs) stub._relayAnnouncement(wireText, info)
       return
     }
@@ -518,7 +518,7 @@ class RoomReplica {
     assert(unframed)
     for (const handle of this._receivers) handle._local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
-    const wireData = encodePublishBinary(framed, info)
+    const wireData = encodePublish(framed, info)
     for (const stub of this.stubs) stub._relayBinary(wireData, unframed.from, unframed.track, info)
   }
 
