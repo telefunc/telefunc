@@ -1,5 +1,6 @@
 export { configUser as config }
 export { getServerConfig }
+export { getManifestConfig }
 export { getServerExtensionTypes }
 export { enableChannelTransports }
 export { setRootFromVite }
@@ -353,6 +354,17 @@ function getServerConfig(): ConfigResolved {
       ssePostIdleFlushDelay: configState.channel.ssePostIdleFlushDelay ?? SSE_POST_IDLE_FLUSH_DELAY_MS,
     },
     extensions: configState.extensions,
+  }
+}
+
+/** The user's settings as plain data, for the production manifest. (`extensions` and `broadcast` are runtime objects.) */
+function getManifestConfig(): Record<string, unknown> {
+  const { extensions, broadcast, stream, channel, ...manifestConfig } = configState
+  // Skip unset `stream` and `channel`: production may apply the manifest after the app's server code sets them
+  return {
+    ...manifestConfig,
+    ...(Object.keys(stream).length > 0 && { stream }),
+    ...(Object.keys(channel).length > 0 && { channel }),
   }
 }
 
