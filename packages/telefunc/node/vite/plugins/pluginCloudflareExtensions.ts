@@ -4,7 +4,7 @@ import type { Plugin } from 'vite'
 import { realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
-import { getExtensionSpecifiers } from '../../shared/discoverExtensions.js'
+import { iterateExtensions } from '../../shared/discoverExtensions.js'
 import { escapeRegex } from '../../../utils/escapeRegex.js'
 
 // telefunc/cloudflare imports `telefunc/__internal/cloudflare-extensions` (serve/cloudflare.ts), an empty module. This
@@ -25,7 +25,7 @@ function pluginCloudflareExtensions(): Plugin[] {
       config: {
         handler(config) {
           root = resolve(config.root ?? process.cwd())
-          specifiers = getExtensionSpecifiers(root, 'server')
+          specifiers = [...iterateExtensions(root)].flatMap(({ telefunc }) => telefunc.server ?? [])
         },
       },
       configEnvironment: {

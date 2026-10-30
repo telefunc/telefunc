@@ -1,5 +1,5 @@
 export { getExtensionImports }
-export { getExtensionSpecifiers }
+export { iterateExtensions }
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -14,17 +14,12 @@ type PackageJson = {
 
 /** Return one `import '<specifier>';` statement per `@telefunc/*` extension declared for the given side. */
 function getExtensionImports(root: string, side: 'server' | 'client'): string[] {
-  return getExtensionSpecifiers(root, side).map((specifier) => `import '${specifier}';`)
-}
-
-/** Return the entry specifier of each `@telefunc/*` extension declared for the given side. */
-function getExtensionSpecifiers(root: string, side: 'server' | 'client'): string[] {
-  const specifiers: string[] = []
+  const lines: string[] = []
   for (const { telefunc } of iterateExtensions(root)) {
     const specifier = telefunc[side]
-    if (specifier !== undefined) specifiers.push(specifier)
+    if (specifier !== undefined) lines.push(`import '${specifier}';`)
   }
-  return specifiers
+  return lines
 }
 
 /**
