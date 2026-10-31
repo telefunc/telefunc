@@ -4,7 +4,7 @@ import type { Plugin } from 'vite'
 import { realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { createRequire } from 'node:module'
-import { iterateExtensions } from '../../shared/discoverExtensions.js'
+import { getExtensionSpecifiers } from '../../shared/discoverExtensions.js'
 import { escapeRegex } from '../../../utils/escapeRegex.js'
 import { getMagicString } from '../../shared/getMagicString.js'
 import { DYNAMIC_IMPORT } from './non-runnable-dev/pluginReplaceConstantsNonRunnableDev.js'
@@ -29,7 +29,7 @@ function pluginCloudflareExtensions(): Plugin[] {
       config: {
         handler(config) {
           root = resolve(config.root ?? process.cwd())
-          specifiers = [...iterateExtensions(root)].flatMap(({ telefunc }) => telefunc.server ?? [])
+          specifiers = getExtensionSpecifiers(root, 'server')
         },
       },
       configEnvironment: {
