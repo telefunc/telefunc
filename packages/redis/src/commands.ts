@@ -330,40 +330,81 @@ return reply
 // published on its member's every-track channel and its track's every-member channel, after its lane key's two-byte
 // length and the key, so a receiver orders it by its own lane; no lane key is long enough for that length's first byte
 // to read as the fence byte.
-//   KEYS: [1]=head [2]=order: an inbox or binary lane's member's order hash, which holds it under its lane key, or
-//         another lane's own key [3]=retained [4]=channel [5]=generation-keys [6]=cell values
-//         [7]=a binary lane's member's every-track channel (another lane repeats [4])
-//         [8]=a retained binary lane's member's retained lanes [9]=its track's retained lanes (another commit repeats
-//         [3] for both) [10]=a binary lane's track's every-member channel (another lane repeats [4]) [11]=a binary
-//         lane's track's lane set, which its first commit enters (another lane repeats [2]) [12]=the generation's
-//         retained lanes
-//   ARGV: [1]=inc [2]=laneKind [3]=closingLease('') [4]=retain('0'|'1') [5]=payload
-//         [6]=local delivery-fence token for [4] or '' [7]=the same for [7] or '' [8]=lane key [9]=the same as [6] for
-//         [10] or '' [10..]=required live cells
+
+/** COMMIT's KEYS, by index: the script reads each by its name, and `commit.invoke` writes each there. A lane without a
+ *  key of its own repeats another: a binary lane's member's every-track channel and track's every-member channel are
+ *  another lane's `channel`, its track's lane set `order`; an unindexed retain's member and track lanes `retained`. */
+const COMMIT_KEYS = {
+  head: 0,
+  /** An inbox or binary lane's member's order hash, which holds it under its lane key, or another lane's own key. */
+  order: 1,
+  retained: 2,
+  channel: 3,
+  generationKeys: 4,
+  cellValues: 5,
+  everyTrackChannel: 6,
+  /** A retained binary lane's member's retained lanes. */
+  memberRetained: 7,
+  /** A retained binary lane's track's retained lanes. */
+  trackRetained: 8,
+  everyMemberChannel: 9,
+  /** A binary lane's track's lane set, which its first commit enters. */
+  trackLanes: 10,
+  /** The generation's retained lanes. */
+  retainedLanes: 11,
+} as const
+
+/** COMMIT's ARGV, by index; the required live cells follow the last. A fence token is the channel's local delivery-fence
+ *  token, or `''`. */
+const COMMIT_ARGS = {
+  inc: 0,
+  laneKind: 1,
+  /** `''` unless the close's control commit. */
+  closingLease: 2,
+  /** `'0'` or `'1'`. */
+  retain: 3,
+  payload: 4,
+  channelFence: 5,
+  everyTrackFence: 6,
+  laneKey: 7,
+  everyMemberFence: 8,
+  requiredCells: 9,
+} as const
+
+/** Each name of `table` as the script reads it: index 0 is `KEYS[1]` or `ARGV[1]`. Built once, at module load. */
+function luaRefs<Name extends string>(array: 'KEYS' | 'ARGV', table: Record<Name, number>): Record<Name, string> {
+  const refs = {} as Record<Name, string>
+  for (const name in table) refs[name] = `${array}[${table[name] + 1}]`
+  return refs
+}
+
+const COMMIT_KEY = luaRefs('KEYS', COMMIT_KEYS)
+const COMMIT_ARG = luaRefs('ARGV', COMMIT_ARGS)
+
 const COMMIT_LUA = `${HEAD_PRELUDE}
 ${REDIS_ORDERING_FRAME_LUA}
 local head_key, order_key, retained_key, channel_key, generation_keys_key =
-  KEYS[1], KEYS[2], KEYS[3], KEYS[4], KEYS[5]
+  ${COMMIT_KEY.head}, ${COMMIT_KEY.order}, ${COMMIT_KEY.retained}, ${COMMIT_KEY.channel}, ${COMMIT_KEY.generationKeys}
 local now = tf_now()
 local head = tf_live_head(head_key, now)
 local ok = false
-if head and head.inc == ARGV[1] then
-  if ARGV[3] == '' then
+if head and head.inc == ${COMMIT_ARG.inc} then
+  if ${COMMIT_ARG.closingLease} == '' then
     ok = (head.state == 'open')
   else
-    ok = (ARGV[2] == 'control' and head.state == 'closing' and head.lease ~= nil
-          and head.lease.id == ARGV[3] and now <= head.lease['until'])
+    ok = (${COMMIT_ARG.laneKind} == 'control' and head.state == 'closing' and head.lease ~= nil
+          and head.lease.id == ${COMMIT_ARG.closingLease} and now <= head.lease['until'])
   end
 end
 if not ok then return '{"stale":"incarnation"}' end
-for i = 10, #ARGV do
-  if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - 10) .. '}' end
+for i = ${COMMIT_ARGS.requiredCells + 1}, #ARGV do
+  if redis.call('HEXISTS', ${COMMIT_KEY.cellValues}, ARGV[i]) == 0 then return '{"stale":"cell","index":' .. (i - ${COMMIT_ARGS.requiredCells + 1}) .. '}' end
 end
 
-local member_lane = ARGV[2] == 'inbox' or ARGV[2] == 'binary'
+local member_lane = ${COMMIT_ARG.laneKind} == 'inbox' or ${COMMIT_ARG.laneKind} == 'binary'
 local base_seq, base_ts = 0, 0
 local prev
-if member_lane then prev = redis.call('HGET', order_key, ARGV[8]) else prev = redis.call('GET', order_key) end
+if member_lane then prev = redis.call('HGET', order_key, ${COMMIT_ARG.laneKey}) else prev = redis.call('GET', order_key) end
 if prev then
   local pseq, pts = string.match(prev, '^(%d+):(%d+)$')
   if not pseq then return redis.error_reply('commitLane: invalid ordering watermark') end
@@ -377,25 +418,25 @@ if base_ts > ts then ts = base_ts end
 local seq_text = string.format('%.0f', seq)
 local ts_text = string.format('%.0f', ts)
 if member_lane then
-  redis.call('HSET', order_key, ARGV[8], seq_text .. ':' .. ts_text)
+  redis.call('HSET', order_key, ${COMMIT_ARG.laneKey}, seq_text .. ':' .. ts_text)
 else
   redis.call('SET', order_key, seq_text .. ':' .. ts_text)
 end
 redis.call('SADD', generation_keys_key, order_key)
-if not prev and ARGV[2] == 'binary' then
-  redis.call('SADD', KEYS[11], ARGV[8])
-  redis.call('SADD', generation_keys_key, KEYS[11])
+if not prev and ${COMMIT_ARG.laneKind} == 'binary' then
+  redis.call('SADD', ${COMMIT_KEY.trackLanes}, ${COMMIT_ARG.laneKey})
+  redis.call('SADD', generation_keys_key, ${COMMIT_KEY.trackLanes})
 end
-local frame = tf_ordering_frame(seq, ts, ARGV[5])
-if ARGV[4] == '1' then
+local frame = tf_ordering_frame(seq, ts, ${COMMIT_ARG.payload})
+if ${COMMIT_ARG.retain} == '1' then
   -- A lane holding a retained frame is already indexed: its frame and index entries leave together.
   if redis.call('EXISTS', retained_key) == 0 then
-    redis.call('SADD', generation_keys_key, retained_key, KEYS[12])
-    redis.call('SADD', KEYS[12], ARGV[8])
-    if ARGV[2] == 'binary' then
-      redis.call('SADD', KEYS[8], ARGV[8])
-      redis.call('SADD', KEYS[9], ARGV[8])
-      redis.call('SADD', generation_keys_key, KEYS[8], KEYS[9])
+    redis.call('SADD', generation_keys_key, retained_key, ${COMMIT_KEY.retainedLanes})
+    redis.call('SADD', ${COMMIT_KEY.retainedLanes}, ${COMMIT_ARG.laneKey})
+    if ${COMMIT_ARG.laneKind} == 'binary' then
+      redis.call('SADD', ${COMMIT_KEY.memberRetained}, ${COMMIT_ARG.laneKey})
+      redis.call('SADD', ${COMMIT_KEY.trackRetained}, ${COMMIT_ARG.laneKey})
+      redis.call('SADD', generation_keys_key, ${COMMIT_KEY.memberRetained}, ${COMMIT_KEY.trackRetained})
     end
   end
   redis.call('SET', retained_key, frame)
@@ -404,14 +445,14 @@ end
 -- starts with.
 local fence = string.char(${REDIS_DELIVERY_FENCE_BYTE})
 local lane_message = frame
-if ARGV[6] ~= '' then lane_message = fence .. ARGV[6] .. frame end
+if ${COMMIT_ARG.channelFence} ~= '' then lane_message = fence .. ${COMMIT_ARG.channelFence} .. frame end
 local receivers = redis.call('PUBLISH', channel_key, lane_message)
-if ARGV[2] == 'binary' then
-  local fan_in = struct.pack('>I2', #ARGV[8]) .. ARGV[8] .. frame
+if ${COMMIT_ARG.laneKind} == 'binary' then
+  local fan_in = struct.pack('>I2', #${COMMIT_ARG.laneKey}) .. ${COMMIT_ARG.laneKey} .. frame
   local every_track, every_member = fan_in, fan_in
-  if ARGV[7] ~= '' then every_track = fence .. ARGV[7] .. fan_in end
-  if ARGV[9] ~= '' then every_member = fence .. ARGV[9] .. fan_in end
-  receivers = receivers + redis.call('PUBLISH', KEYS[7], every_track) + redis.call('PUBLISH', KEYS[10], every_member)
+  if ${COMMIT_ARG.everyTrackFence} ~= '' then every_track = fence .. ${COMMIT_ARG.everyTrackFence} .. fan_in end
+  if ${COMMIT_ARG.everyMemberFence} ~= '' then every_member = fence .. ${COMMIT_ARG.everyMemberFence} .. fan_in end
+  receivers = receivers + redis.call('PUBLISH', ${COMMIT_KEY.everyTrackChannel}, every_track) + redis.call('PUBLISH', ${COMMIT_KEY.everyMemberChannel}, every_member)
 end
 return '{"accepted":true,"seq":' .. seq_text .. ',"timestamp":' .. ts_text .. ',"receivers":' .. receivers .. '}'
 `
@@ -727,43 +768,40 @@ const REDIS_COMMANDS = {
   commit: command({
     name: 'tfRoomCommit',
     lua: COMMIT_LUA,
-    numberOfKeys: 12,
+    numberOfKeys: Object.keys(COMMIT_KEYS).length,
     invoke: (prefix, input: CommitInput) => {
-      const { roomId, inc, lane, laneKey, channels } = input
+      const { roomId, inc, lane, laneKey, channels, fenceTokens } = input
       const retained = retainedKey(prefix, roomId, inc, laneKey)
       const indexed = lane.kind === 'binary' && input.retain
       const order =
         lane.kind === 'inbox' || lane.kind === 'binary'
           ? memberOrderKey(prefix, roomId, inc, lane.member)
           : orderKey(prefix, roomId, inc, laneKey)
-      return {
-        keys: [
-          headKey(prefix, roomId),
-          order,
-          retained,
-          channels.lane,
-          generationKeysKey(prefix, roomId, inc),
-          cellValuesKey(prefix, roomId, inc),
-          channels.everyTrack ?? channels.lane,
-          indexed ? retainedOfKey(prefix, roomId, inc, lane.member) : retained,
-          indexed ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained,
-          channels.everyMember ?? channels.lane,
-          lane.kind === 'binary' ? trackLanesKey(prefix, roomId, inc, lane.track) : order,
-          retainedLanesKey(prefix, roomId, inc),
-        ],
-        argv: [
-          inc,
-          lane.kind,
-          input.closingLease ?? '',
-          input.retain ? '1' : '0',
-          toBuffer(input.payload),
-          input.fenceTokens.lane,
-          input.fenceTokens.everyTrack,
-          laneKey,
-          input.fenceTokens.everyMember,
-          ...input.requiredCellKeys,
-        ],
-      }
+      const keys: string[] = []
+      keys[COMMIT_KEYS.head] = headKey(prefix, roomId)
+      keys[COMMIT_KEYS.order] = order
+      keys[COMMIT_KEYS.retained] = retained
+      keys[COMMIT_KEYS.channel] = channels.lane
+      keys[COMMIT_KEYS.generationKeys] = generationKeysKey(prefix, roomId, inc)
+      keys[COMMIT_KEYS.cellValues] = cellValuesKey(prefix, roomId, inc)
+      keys[COMMIT_KEYS.everyTrackChannel] = channels.everyTrack ?? channels.lane
+      keys[COMMIT_KEYS.memberRetained] = indexed ? retainedOfKey(prefix, roomId, inc, lane.member) : retained
+      keys[COMMIT_KEYS.trackRetained] = indexed ? retainedOfTrackKey(prefix, roomId, inc, lane.track) : retained
+      keys[COMMIT_KEYS.everyMemberChannel] = channels.everyMember ?? channels.lane
+      keys[COMMIT_KEYS.trackLanes] = lane.kind === 'binary' ? trackLanesKey(prefix, roomId, inc, lane.track) : order
+      keys[COMMIT_KEYS.retainedLanes] = retainedLanesKey(prefix, roomId, inc)
+      const argv: (string | Buffer)[] = []
+      argv[COMMIT_ARGS.inc] = inc
+      argv[COMMIT_ARGS.laneKind] = lane.kind
+      argv[COMMIT_ARGS.closingLease] = input.closingLease ?? ''
+      argv[COMMIT_ARGS.retain] = input.retain ? '1' : '0'
+      argv[COMMIT_ARGS.payload] = toBuffer(input.payload)
+      argv[COMMIT_ARGS.channelFence] = fenceTokens.lane
+      argv[COMMIT_ARGS.everyTrackFence] = fenceTokens.everyTrack
+      argv[COMMIT_ARGS.laneKey] = laneKey
+      argv[COMMIT_ARGS.everyMemberFence] = fenceTokens.everyMember
+      for (const key of input.requiredCellKeys) argv.push(key)
+      return { keys, argv }
     },
     parse: (reply, { requiredCellKeys }) => {
       const parsed = JSON.parse(reply as string) as CommitReply
