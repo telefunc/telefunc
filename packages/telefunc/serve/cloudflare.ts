@@ -138,13 +138,12 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
   // coordinator, or an extension's `durableObject`.
   const TelefuncDurableObject = class extends DurableObject<Cloudflare.Env> {
-    // `#private`, not TypeScript `private`: Workers RPC lets any stub call a method on a Durable Object's prototype.
     readonly #authorityState: CloudflareBroadcastAuthorityState
     readonly #broadcastCalls: BroadcastCalls = new OrderedStubs()
     readonly #session: CloudflareSession
-    readonly #durableObjects = new Map<string, CloudflareExtensionDurableObject>()
+    private readonly durableObjects = new Map<string, CloudflareExtensionDurableObject>()
     /** The extension this Durable Object's storage is known to hold. */
-    #storedExtension: string | undefined
+    private storedExtension: string | undefined
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
@@ -211,11 +210,11 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
         typeof call === 'function',
         `The Cloudflare extension ${name} has no Durable Object method ${method}()`,
       )
-      if (this.#storedExtension !== name) {
+      if (this.storedExtension !== name) {
         if ((await this.ctx.storage.get(EXTENSION_STORAGE_KEY)) !== name) {
           await this.ctx.storage.put(EXTENSION_STORAGE_KEY, name)
         }
-        this.#storedExtension = name
+        this.storedExtension = name
       }
       return call.apply(durableObject, args)
     }
@@ -230,13 +229,16 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     async alarm(): Promise<void> {
       const name = await this.ctx.storage.get<string>(EXTENSION_STORAGE_KEY)
       assert(name !== undefined)
-      this.#storedExtension = name
+      this.storedExtension = name
       await this.#durableObject(name).alarm?.()
     }
 
+    // These two are `#`, not TypeScript `private`: Workers RPC lets any stub call a method on a Durable Object's
+    // prototype, a TypeScript `private` one too, but reaches no `#` method and no own instance field.
+
     /** Built once, synchronously, so that concurrent first calls share it. */
     #durableObject(name: string): CloudflareExtensionDurableObject {
-      const built = this.#durableObjects.get(name)
+      const built = this.durableObjects.get(name)
       if (built) return built
       const extension = getCloudflareExtension(name)
       assertUsage(
@@ -246,7 +248,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       const durableObject = extension.durableObject(this.ctx as never, this.env as never, () =>
         telefuncNamespace(this.env),
       )
-      this.#durableObjects.set(name, durableObject)
+      this.durableObjects.set(name, durableObject)
       return durableObject
     }
 
