@@ -1,5 +1,5 @@
 export { ReceiveCredit }
-export type { AttachedDownlink, CreditWire }
+export type { AttachedDownlink }
 
 import { BdpEstimator } from './BdpEstimator.js'
 import type { CreditOwner, WindowKind } from './credit.js'
@@ -14,14 +14,6 @@ type ReceiveCreditOptions = {
   selfTime: SelfTime
 }
 
-/** The wire a channel's credit attaches on: what frames that go at once wait behind, and on a page its round trips and downlink. */
-type CreditWire = {
-  readonly sendWait: SendWait
-  /** A page's uplink's: its round trip, which an answer to a `BDP_PING` says. */
-  readonly roundTrips?: RoundTrips
-  readonly downlink?: AttachedDownlink
-}
-
 /** The page's downlink, as a channel's credit tells it what it granted and what arrived. */
 type AttachedDownlink = {
   granted(bytes: number): void
@@ -33,8 +25,10 @@ class ReceiveCredit {
   private readonly owner: CreditOwner
   private readonly selfTime: SelfTime
   private bdp = new BdpEstimator()
-  /** The wire of the last `attach`. */
-  private wire: CreditWire | null = null
+  /** What the frames that go at once wait behind on the wire of the last `attach`, which identifies that wire. */
+  private sendWait: SendWait | null = null
+  /** A page's uplink's: its round trip, which an answer to a `BDP_PING` says. */
+  private roundTrips: RoundTrips | null = null
   private downlink: AttachedDownlink | null = null
   /** `fitReplay` said the replay buffer that bounds the window. */
   private fitted = false
@@ -74,7 +68,7 @@ class ReceiveCredit {
 
   /** The last `attach`'s wire's path round trip, `Infinity` where unmeasured: what an answer to a `BDP_PING` says. */
   pathRtt(): number {
-    return this.wire?.roundTrips?.pathRtt ?? Infinity
+    return this.roundTrips?.pathRtt ?? Infinity
   }
 
   /** Keeps what it lets be in flight within the replay buffer that holds what its peer sends (see `replayWindow`). */
@@ -88,12 +82,7 @@ class ReceiveCredit {
     this.arrived = true
     this.receivedBytes += bytes
     this.downlink?.creditArrived(bytes)
-    if (this.bdp.onReceive(bytes, this.wireWait())) this.owner._sendBdpPing(this.bdp.probe)
-  }
-
-  /** How long the frames that go at once wait behind the wire's own data. */
-  private wireWait(): SendWait | null {
-    return this.wire?.sendWait ?? null
+    if (this.bdp.onReceive(bytes, this.sendWait)) this.owner._sendBdpPing(this.bdp.probe)
   }
 
   /** A probe number for an attach's RECONCILE entry on `roundTrips`' wire; `undefined` where it is measured. */
@@ -131,7 +120,7 @@ class ReceiveCredit {
 
   /** Settles a `BDP_PING_ACK`; `deliveredBefore(ms)`: what the wire delivered in the `ms` before the ack arrived. */
   onPingAck(ack: BdpPingAck, deliveredBefore: (ms: number) => number): void {
-    const suggest = this.bdp.onPingAck(ack, deliveredBefore, this.wireWait())
+    const suggest = this.bdp.onPingAck(ack, deliveredBefore, this.sendWait)
     if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'
@@ -147,15 +136,24 @@ class ReceiveCredit {
     }
   }
 
-  /** Attach on `wire`. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
-  attach(wire: CreditWire): void {
-    if (wire.sendWait !== this.wire?.sendWait) {
-      this.wire = wire
-      this.downlink = wire.downlink ?? null
-      wire.downlink?.granted(this.grantedBytes - this.receivedBytes)
+  /** Attach on the wire whose frames that go at once wait behind `sendWait`; on a page, its uplink's `roundTrips` and
+   *  its `downlink`. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
+  attach(sendWait: SendWait, roundTrips: RoundTrips | null = null, downlink: AttachedDownlink | null = null): void {
+    if (sendWait !== this.sendWait) {
+      this.sendWait = sendWait
+      this.roundTrips = roundTrips
+      this.downlink = downlink
+      downlink?.granted(this.grantedBytes - this.receivedBytes)
       this.advertiseOnNewWire()
     }
-    if (wire.roundTrips) this.bdp.attach(wire.roundTrips)
+    if (roundTrips) this.bdp.attach(roundTrips)
+  }
+
+  /** The wire went, or the channel ended: it holds nothing of the wire, and the next attach repairs what it lost. */
+  detach(): void {
+    this.sendWait = null
+    this.roundTrips = null
+    this.downlink = null
   }
 
   /** Frames held back arrived at once: the round in flight doesn't count them as delivered within its round trip. */

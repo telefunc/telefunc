@@ -197,7 +197,7 @@ describe('ReceiveCredit — attach to another wire', () => {
     const { flow, emit } = makeFlow()
     flow.receive.onReceived(1024) // first ping in flight
     expect(emit.bdpPingCalls).toBe(1)
-    flow.receive.attach({ sendWait: { waitNow: () => 0, longestWaitSince: () => 0 } })
+    flow.receive.attach({ waitNow: () => 0, longestWaitSince: () => 0 })
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
     flow.receive.onReceived(1024)
     expect(emit.bdpPingCalls).toBe(2)

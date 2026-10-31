@@ -303,7 +303,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.closed) return
     if (batched) this.receiveCredit.useBatchTransportInitial()
     else this.receiveCredit.undoBatchTransportInitial()
-    this.receiveCredit.attach({ sendWait: uplink, roundTrips: uplink.roundTrips, downlink })
+    this.receiveCredit.attach(uplink, uplink.roundTrips, downlink)
     this.lifecycle.fireOpen()
   }
 
@@ -501,6 +501,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.lifecycle.ended) return
     this.lifecycle.end(err)
     this.sendCredit.shutdown()
+    this.receiveCredit.detach()
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this.pendingAcks.values()) reject(ackErr)
     this.pendingAcks.clear()

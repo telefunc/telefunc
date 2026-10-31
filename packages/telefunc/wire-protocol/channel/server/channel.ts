@@ -374,7 +374,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
     this.reconnectTimer = null
     this.peer = peer
-    this.receiveCredit.attach({ sendWait: peer.sender.sendWait() })
+    this.receiveCredit.attach(peer.sender.sendWait())
     this.flushOfflineBuffer(peer)
     this.sendPendingAckRes(peer)
     if (state?.broadcast) {
@@ -623,6 +623,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
     if (this._phase === 'ended' || this.peer?.sender !== peer.sender) return
     this.peer = null
+    this.receiveCredit.detach()
     this.reconnectTimer = unrefTimer(
       setTimeout(() => {
         this.reconnectTimer = null
@@ -794,6 +795,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.lifecycle.end(err)
     const pageAttached = this.peer !== null
     this.peer = null
+    this.receiveCredit.detach()
     if (this.ttlTimer) clearTimeout(this.ttlTimer)
     this.ttlTimer = null
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
