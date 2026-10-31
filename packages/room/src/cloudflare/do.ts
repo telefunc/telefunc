@@ -1,6 +1,6 @@
 /// <reference types="@cloudflare/workers-types" />
 export { RoomAuthority }
-export type { AcceptedCommitWire, CloudflareRoomAuthorityStub, CommitWire, RegisterWire }
+export type { AcceptedCommitWire, CloudflareRoomAuthorityStub, CommitWire, RegisterWire, RenewWire }
 
 // A room's authority owns its time, state and fanout.
 
@@ -48,6 +48,7 @@ import {
   initSchema,
   deleteLapsedHead,
   listOrphanGenerations,
+  hasGeneration,
   nextMaintenanceDeadline,
   readCells,
   readCellPage,
@@ -60,6 +61,8 @@ type AcceptedCommitWire = { accepted: true; seq: number; timestamp: number; rece
 type CommitWire = AcceptedCommitWire | StaleCommit
 
 type RegisterWire = { ok: true } | { rejected: true; reason: string }
+/** A route renewed, lapsed on its own, or deleted with its dropped generation. */
+type RenewWire = 'renewed' | 'lapsed' | 'dropped'
 
 /** The room authority's methods, which its Durable Object serves over RPC. */
 type CloudflareRoomAuthorityStub = Omit<RoomAuthority, 'alarm'>
@@ -171,12 +174,15 @@ class RoomAuthority {
     return result
   }
 
-  /** Fails once the route lapsed or its generation was dropped; the session then ends the attempt. */
-  async renewRoute(route: RouteInstallation): Promise<boolean> {
+  /** Renews the route, or says it lapsed or went with its dropped generation; the session then ends the attempt. */
+  async renewRoute(route: RouteInstallation): Promise<RenewWire> {
     const now = Date.now()
-    const renewed = this.transaction((sql) => renewRoute(sql, route, now))
+    const renewal = this.transaction((sql): RenewWire => {
+      if (renewRoute(sql, route, now)) return 'renewed'
+      return hasGeneration(sql, route.inc) ? 'lapsed' : 'dropped'
+    })
     await this.scheduleMaintenanceIfNeeded()
-    return renewed
+    return renewal
   }
 
   async unsubscribeRoute(route: RouteInstallation): Promise<void> {

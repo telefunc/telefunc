@@ -9,6 +9,7 @@ export {
   readLiveHead,
   deleteLapsedHead,
   listOrphanGenerations,
+  hasGeneration,
   nextMaintenanceDeadline,
   compareExchangeHead,
   readCells,
@@ -181,6 +182,11 @@ function listOrphanGenerations(sql: SqlStorage, currentInc: string | null): stri
     .exec<{ inc: string }>('SELECT inc FROM gen WHERE inc IS NOT ?', currentInc)
     .toArray()
     .map((row) => row.inc)
+}
+
+/** Whether `inc`'s generation is stored: `dropGenerationRows` deletes it with its routes. */
+function hasGeneration(sql: SqlStorage, inc: string): boolean {
+  return sql.exec('SELECT 1 FROM gen WHERE inc = ?', inc).toArray().length > 0
 }
 
 /** When the alarm's sweep next has work: `now` while an orphaned generation waits, else the first lapse of a head or a

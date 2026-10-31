@@ -6,12 +6,19 @@ export {
 }
 export type { RoomSessionDeliveryRequest }
 
-import { type BackendReceiver, type OrderingInfo, DriverAttempt, OrderedStubs, hostLocal } from 'telefunc/__internal'
+import {
+  type BackendReceiver,
+  type OrderingInfo,
+  DriverAttempt,
+  OrderedStubs,
+  SourceDroppedError,
+  hostLocal,
+} from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import { assertUsage } from '../utils/assert.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
-import type { CloudflareRoomAuthorityStub, RegisterWire } from './do.js'
+import type { CloudflareRoomAuthorityStub, RegisterWire, RenewWire } from './do.js'
 
 type RoomSessionDeliveryRequest = {
   route: RouteInstallation
@@ -159,15 +166,16 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
   }
 
   private async renew(): Promise<void> {
-    let renewed: boolean
+    let renewal: RenewWire
     try {
-      renewed = await this.callAuthority((authority) => authority.renewRoute(this.route))
+      renewal = await this.callAuthority((authority) => authority.renewRoute(this.route))
     } catch (error) {
       this.finish(error)
       return
     }
     if (this.state() !== 'ready') return
-    if (renewed) this.scheduleRenewal()
+    if (renewal === 'renewed') this.scheduleRenewal()
+    else if (renewal === 'dropped') this.finish(new SourceDroppedError('Cloudflare route went with its generation'))
     else this.finish()
   }
 
