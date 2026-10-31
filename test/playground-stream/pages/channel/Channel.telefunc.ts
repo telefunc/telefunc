@@ -253,7 +253,7 @@ async function onChannelClientAckListenerBug() {
  * Tests concurrent pending ack rejection on the server side.
  *
  * On open, server does `await ch.send(data, { ack: true })`. Before the
- * client can respond, the server calls `ch.abort()`. `_shutdown()` must
+ * client can respond, the server calls `ch.abort()`. `shutdown()` must
  * reject the in-flight ack promise — verified via cleanupState.
  *
  * cleanupState keys:

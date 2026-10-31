@@ -77,7 +77,7 @@ abstract class BaseStreamBlob implements Blob {
  * `size` and `type` are available immediately. Body data is pulled from the stream on
  * demand — no background pump. Each instance is **one-shot**: once consumed, further
  * reads throw. Subclasses that consume via a different path (e.g. StreamSource.bytes)
- * must call `_markConsumed()` to enforce the guard.
+ * must call `markConsumed()` to enforce the guard.
  */
 class LazyBlob extends BaseStreamBlob {
   readonly size: number
