@@ -449,7 +449,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onPeerCloseRequest(timeoutMs: number): void {
-    if (this.lifecycle.ended) return
     this.lifecycle.shortenDeadline(normalizeCloseTimeout(timeoutMs))
     this.connection.sendCloseAck(this)
     if (this.closed) return
