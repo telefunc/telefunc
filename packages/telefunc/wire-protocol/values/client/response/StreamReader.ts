@@ -1,7 +1,7 @@
 export { StreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
-import { splitOwned } from '../../../wire/frame.js'
+import { splitOwned } from '../../../wire/envelope.js'
 import { throwAbortError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)

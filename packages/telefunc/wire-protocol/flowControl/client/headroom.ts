@@ -1,4 +1,5 @@
-export { SendBudget }
+export { ClientHeadroom }
+export type { ClientHeadroomOwner }
 
 import {
   CREDIT_WINDOW_MAX_BYTES,
@@ -6,27 +7,32 @@ import {
   WIRE_QUEUE_DELAY_MS,
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../../constants.js'
-import { PieceSender, type PieceSenderOptions, type SendRoom } from '../pieces.js'
+import { PieceSender, type PieceSenderOptions, type PieceSenderOwner } from '../pieces.js'
 import type { Uplink } from './Uplink.js'
 import type { Downlink } from './Downlink.js'
-import { isSequencedTag, type PiecesAck } from '../../wire/connectionFrame.js'
+import type { PiecesAck } from '../../wire/frame.js'
+import { isSequencedTag } from '../../wire/tags.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
-type SendBudgetOptions = Pick<PieceSenderOptions, 'transmit' | 'queued' | 'pingInterval'> & {
+/** The WebSocket transport a page's headroom belongs to. */
+interface ClientHeadroomOwner {
+  /** The pacing timer found the uplink drained some of what it held. */
+  onHeadroom(headroom: ClientHeadroom): void
+}
+
+type ClientHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'> & {
   uplink: Uplink
   downlink: Downlink
-  /** Called when the timer finds the uplink drained some of what it held. */
-  onRoom: () => void
+  owner: ClientHeadroomOwner
 }
 
 /** The bytes of data a page lets its WebSocket's queues hold, so its window refreshes don't wait long behind them. */
-class SendBudget implements SendRoom {
-  readonly cuts = true
+class ClientHeadroom implements PieceSenderOwner {
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
   private readonly uplink: Uplink
   private readonly downlink: Downlink
-  private readonly onRoom: () => void
+  private readonly owner: ClientHeadroomOwner
   /** In ms, the server's clock from the first data an acknowledgement covered. */
   private arrivedAt = 0
   /** The least time an acknowledgement took back, up to the same offset: behind no queue of the uplink's. */
@@ -36,23 +42,34 @@ class SendBudget implements SendRoom {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   private paceDue = 0
 
-  constructor({ transmit, queued, pingInterval, uplink, downlink, onRoom }: SendBudgetOptions) {
+  constructor({ socket, pingInterval, uplink, downlink, owner }: ClientHeadroomOptions) {
     this.uplink = uplink
     this.downlink = downlink
-    this.onRoom = onRoom
-    this.sender = new PieceSender({ transmit, queued, pingInterval, link: uplink.link, room: this })
+    this.owner = owner
+    this.sender = new PieceSender({
+      socket,
+      pingInterval,
+      pieceRate: uplink.pieceRate,
+      cuts: 'cut',
+      owner: this,
+    })
   }
 
   /** Sends `frame` through the sender. */
   send(frame: Uint8Array<ArrayBuffer>): void {
     if (isSequencedTag(frame[0]!)) {
-      this.sender.send(frame)
+      this.sender.send(frame, this.sender.dataWaits ? 0 : this.headroom())
       return this.pace()
     }
     // What it waits behind: the uplink holds it too once handed.
     const wait = this.uplink.waitNow()
-    this.sender.send(frame)
+    this.sender.send(frame, 0)
     this.uplink.noteWait(wait)
+  }
+
+  /** Sends what waits in the sender, as far as the headroom goes now. */
+  sendWaiting(): void {
+    if (this.sender.dataWaits) this.sender.sendWaiting(this.headroom())
   }
 
   /** What the server takes in `WIRE_QUEUE_DELAY_MS`, `WIRE_SEND_AHEAD_MIN_BYTES` at least. */
@@ -63,14 +80,14 @@ class SendBudget implements SendRoom {
     )
   }
 
-  /** `SendRoom`: the room past what the sender handed the socket. */
-  dataRoom(): number {
-    return this.roomPast(this.sender.transmittedBytes)
+  /** The headroom past what the sender handed the socket. */
+  headroom(): number {
+    return this.headroomPast(this.sender.transmittedBytes)
   }
 
-  /** The room past all the sender was sent, what it holds included: none once the room is used or data waits for it. */
-  roomPastSent(): number {
-    return this.roomPast(this.sender.sentBytes)
+  /** The headroom past all the sender was sent, what waits in it included: none once used or data waits for it. */
+  headroomPastSent(): number {
+    return this.headroomPast(this.sender.sentBytes)
   }
 
   /** Its socket closed: it hands it nothing more. */
@@ -87,7 +104,7 @@ class SendBudget implements SendRoom {
     this.lookAgain()
   }
 
-  /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made room for. */
+  /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made headroom for. */
   acknowledged(ack: PiecesAck): boolean {
     const before = this.sender.acknowledgedBytes
     if (!this.sender.acknowledged(ack)) return false
@@ -102,13 +119,13 @@ class SendBudget implements SendRoom {
     this.lateAt = now
     this.uplink.arrived(newly, spanMs)
     this.uplink.acknowledged(this.sender.transmittedBytes - acknowledged)
-    this.sender.sendHeld()
+    this.sendWaiting()
     this.pace()
     return true
   }
 
-  /** The room less what the sender handed past `sent` bytes. */
-  private roomPast(sent: number): number {
+  /** The headroom less what the sender handed past `sent` bytes. */
+  private headroomPast(sent: number): number {
     const unacknowledged = sent - this.sender.acknowledgedBytes
     const waiting = Math.min(unacknowledged, this.uplink.inUplink() + sent - this.sender.transmittedBytes)
     // Unarrived: what no ack or newest heartbeat says the server took, less what crosses while late.
@@ -118,10 +135,10 @@ class SendBudget implements SendRoom {
     return this.allowance - Math.max(waiting, unarrived)
   }
 
-  /** With no room and data in the uplink, looks again once it carried what the server acks at once, or all it holds. */
+  /** With no headroom and data in the uplink, looks again once it carried what the server acks at once, or all it holds. */
   private pace(): void {
     const drainRate = this.uplink.drain.rate
-    if (drainRate === 0 || this.roomPastSent() > 0 || this.paceTimer !== null) return
+    if (drainRate === 0 || this.headroomPastSent() > 0 || this.paceTimer !== null) return
     const queued = this.uplink.inUplink()
     if (queued === 0) return
     const ms = Math.max(1, Math.min(queued, WIRE_PIECES_ACK_BYTES) / drainRate)
@@ -131,11 +148,11 @@ class SendBudget implements SendRoom {
 
   private readonly lookAgain = (): void => {
     this.paceTimer = null
-    this.onRoom()
+    this.owner.onHeadroom(this)
     this.pace()
   }
 
-  /** `SendRoom`: notes `bytes` the sender handed the socket. */
+  /** `PieceSenderOwner`: notes `bytes` the sender handed the socket. */
   handed(bytes: number): void {
     this.uplink.handed(bytes)
   }

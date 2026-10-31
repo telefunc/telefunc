@@ -3,42 +3,41 @@ export { WsTransport }
 import { assert } from '../../../utils/assert.js'
 import { CHANNEL_PING_INTERVAL_MIN_MS, CHANNEL_TRANSPORT, WS_PROBE_TIMEOUT_MS } from '../../constants.js'
 import { PieceSender } from '../../flowControl/pieces.js'
-import { PagePieceReceiver } from '../../flowControl/client/PagePieceReceiver.js'
-import { SendBudget } from '../../flowControl/client/SendBudget.js'
+import { ClientHeadroom, type ClientHeadroomOwner } from '../../flowControl/client/headroom.js'
+import { ClientPieceReceiver } from '../../flowControl/client/pieceReceiver.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
-import {
-  TAG,
-  decode,
-  encode,
-  isOneFrame,
-  messageFrames,
-  withTook,
-  type DecodedFrame,
-  type ReconciledPayload,
-} from '../../wire/connectionFrame.js'
-import type { ClientConnection, OutboundFrame, ProbeWire, UpgradeTarget } from './connection.js'
+import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
+import type { ReconciledPayload } from '../../wire/payloads.js'
+import type { OutboundFrame, TransportOwner } from './connection.js'
+import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */
-type WsEnds = { uplink: Uplink; downlink: Downlink; budget: SendBudget; sender: PieceSender; pieces: PagePieceReceiver }
+type WsEnds = {
+  uplink: Uplink
+  downlink: Downlink
+  headroom: ClientHeadroom
+  sender: PieceSender
+  pieces: ClientPieceReceiver
+}
 
 type WsTransportOptions = {
   telefuncUrl: string
-  owner: ClientConnection
+  owner: TransportOwner
 }
 
-class WsTransport implements UpgradeTarget {
+class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
   readonly type = CHANNEL_TRANSPORT.WS
-  readonly sendReconcileOnOpen = true
-  readonly reconcileMode = 'release-after-reconciled' as const
+  readonly carriesReconcileInOpen = false
   readonly batched = false
   heartbeat: Heartbeat | null = null
   /** The probe's socket and ends, kept as the transport adopts it: the server counts every frame the socket carries. */
   private probed: { ws: WebSocket; ends: WsEnds } | null = null
   private ws: WebSocket | null = null
-  /** The wire the page left, still read until the next takes over; its budget's timers may still send. */
-  private abandoned: { ws: WebSocket; budget: SendBudget } | null = null
+  /** The wire the page left, still read until the next takes over; its headroom's timers may still send. */
+  private abandoned: { ws: WebSocket; headroom: ClientHeadroom } | null = null
   private connecting = false
   /** The live wire's, set with it by `setupHandlers`: none before the first. */
   private ends: WsEnds | null = null
@@ -47,7 +46,7 @@ class WsTransport implements UpgradeTarget {
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
   private readonly wsUrl: string
-  private readonly owner: ClientConnection
+  private readonly owner: TransportOwner
 
   constructor({ telefuncUrl, owner }: WsTransportOptions) {
     this.owner = owner
@@ -57,7 +56,7 @@ class WsTransport implements UpgradeTarget {
     this.wsUrl = url.href
   }
 
-  async probe(): Promise<ProbeWire | null> {
+  async probe(owner: ProbeOwner): Promise<ProbeWire | null> {
     let ws: WebSocket
     try {
       ws = new WebSocket(this.wsUrl)
@@ -66,44 +65,41 @@ class WsTransport implements UpgradeTarget {
     }
     ws.binaryType = 'arraybuffer'
     const ends = this.wsEnds(ws)
-    const { budget, sender, pieces } = ends
+    const { headroom, sender, pieces } = ends
 
-    let onPong: (() => void) | null = null
-    let onClose: (() => void) | null = null
-    let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
+    // Till its first PONG proves the wire, `proved` settles the wait below; from then on it tells `owner`, till closed.
+    let proved: ((alive: boolean) => void) | null = null
+    let reporting = false
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
-      if (frame.tag === TAG.PIECES_ACK) return budget.acknowledged(frame)
+      if (frame.tag === TAG.PIECES_ACK) return headroom.acknowledged(frame)
       if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
-        onPong?.()
-      } else onFrame?.(frame, byteLength)
+        if (reporting) owner.onProbePong()
+        else proved?.(true)
+      } else if (reporting) owner.onProbeFrame(frame, byteLength)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
       if (!receiveMessage(pieces, new Uint8Array(data as ArrayBuffer), performance.now(), take)) ws.close()
     }
     ws.onclose = () => {
-      budget.close()
+      headroom.close()
       if (this.probed?.ws === ws) this.probed = null
-      onClose?.()
+      if (reporting) owner.onProbeClosed()
+      else proved?.(false)
     }
     ws.onerror = () => {}
-    ws.onopen = () => sender.send(encode.ping())
+    ws.onopen = () => sender.send(encode.ping(), 0)
 
-    // First pong proves the wire is alive — consumer reassigns onPong/onClose after the await.
     const ready = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), WS_PROBE_TIMEOUT_MS)
-      onPong = () => {
+      proved = (alive) => {
         clearTimeout(timer)
-        resolve(true)
-      }
-      onClose = () => {
-        clearTimeout(timer)
-        resolve(false)
+        resolve(alive)
       }
     })
     if (!ready) {
-      budget.close()
+      headroom.close()
       try {
         ws.close()
       } catch {}
@@ -113,31 +109,24 @@ class WsTransport implements UpgradeTarget {
     this.probed = { ws, ends }
     // A RECONCILED may have come while it waited for the PONG.
     sender.setPingInterval(this.pingInterval)
+    reporting = true
     return {
       ping: () => {
         try {
-          sender.send(withTook(encode.ping(), pieces.took))
+          sender.send(withTook(encode.ping(), pieces.took), 0)
         } catch {}
-      },
-      onPong: (cb) => {
-        onPong = cb
-      },
-      onClose: (cb) => {
-        onClose = cb
       },
       send: (frame) => {
         try {
-          sender.send(frame)
+          sender.send(frame, 0)
         } catch {
-          // Socket died between the open event and this send — `onClose` aborts the attempt.
+          // Socket died between the open event and this send — `onProbeClosed` aborts the attempt.
         }
       },
-      onFrame: (cb) => {
-        onFrame = cb
-      },
       close: () => {
+        reporting = false
         if (this.probed?.ws === ws) this.probed = null
-        budget.close()
+        headroom.close()
         try {
           ws.close()
         } catch {}
@@ -165,7 +154,7 @@ class WsTransport implements UpgradeTarget {
       ws = new WebSocket(this.wsUrl)
     } catch {
       this.connecting = false
-      this.owner._onTransportClosed(this)
+      this.owner.onTransportClosed(this)
       return
     }
 
@@ -183,7 +172,7 @@ class WsTransport implements UpgradeTarget {
   private handleOpen(ws: WebSocket): void {
     if (this.ws !== ws) return
     this.connecting = false
-    this.owner._onTransportOpen(this)
+    this.owner.onTransportOpen(this)
   }
 
   attachHeartbeat(hb: Heartbeat): void {
@@ -200,8 +189,8 @@ class WsTransport implements UpgradeTarget {
   }
 
   drained(): Promise<void> {
-    // A socket sends what it buffered before its close, but not what its piece sender holds for room.
-    if (!this.ws || !this.ends?.sender.heldBytes) return Promise.resolve()
+    // A socket sends what it buffered before its close, but not what waits in its piece sender for headroom.
+    if (!this.ws || !this.ends?.sender.waitingBytes) return Promise.resolve()
     return new Promise((resolve) => this.drainCallbacks.push(resolve))
   }
 
@@ -209,47 +198,42 @@ class WsTransport implements UpgradeTarget {
     for (const cb of this.drainCallbacks.splice(0)) cb()
   }
 
-  /** Every frame `ws` carries goes through its budget's sender, which counts the bytes its receiver acknowledges. */
+  /** Every frame `ws` carries goes through its headroom's sender, which counts the bytes its receiver acknowledges. */
   private wsEnds(ws: WebSocket): WsEnds {
     const uplink = new Uplink()
     const downlink = new Downlink(uplink)
-    const budget = new SendBudget({
-      transmit: (message) => ws.send(message),
-      queued: () => ws.bufferedAmount,
+    const headroom = new ClientHeadroom({
+      socket: ws,
       pingInterval: this.pingInterval,
       uplink,
       downlink,
-      onRoom: () => {
-        if (this.ws !== ws) return
-        sender.sendHeld()
-        this.onRoom(sender)
-      },
+      owner: this,
     })
-    const { sender } = budget
+    const { sender } = headroom
     return {
       uplink,
       downlink,
-      budget,
+      headroom,
       sender,
-      pieces: new PagePieceReceiver({
-        send: (frame) => sender.send(frame),
+      pieces: new ClientPieceReceiver({
+        send: (frame) => sender.send(frame, 0),
         carry: (ack) => sender.carry(ack),
       }),
     }
   }
 
   private setupHandlers(ws: WebSocket, ends: WsEnds): void {
-    const { downlink, budget, sender, pieces } = ends
+    const { downlink, headroom, sender, pieces } = ends
     this.ends = ends
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) {
-        if (!budget.acknowledged(frame)) return false
-        this.onRoom(sender)
+        if (!headroom.acknowledged(frame)) return false
+        this.headroomChanged(sender)
       } else if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
         this.heartbeat?.resetPong()
-        this.owner._onTransportPong(frame.ended)
-      } else this.owner._onTransportFrame(frame, this, byteLength, ws === this.abandoned?.ws)
+        this.owner.onTransportPong(frame.ended)
+      } else this.owner.onTransportFrame(frame, this, byteLength, ws === this.abandoned?.ws)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
@@ -257,23 +241,30 @@ class WsTransport implements UpgradeTarget {
       const raw = new Uint8Array(data as ArrayBuffer)
       this.heartbeat?.noteReceived(raw.byteLength, now)
       downlink.delivered(raw.byteLength, now)
-      budget.received()
+      headroom.received()
       if (!receiveMessage(pieces, raw, now, take)) ws.close()
     }
     ws.onclose = () => {
-      budget.close()
+      headroom.close()
       if (this.ws === ws) this.ws = null
       this.connecting = false
       this.settleDrained()
-      this.owner._onTransportClosed(this)
+      this.owner.onTransportClosed(this)
     }
     ws.onerror = () => {}
   }
 
-  /** What its sender held may have gone. */
-  private onRoom(sender: PieceSender): void {
-    if (sender.heldBytes === 0) this.settleDrained()
-    this.owner._onTransportRoom(this)
+  /** `ClientHeadroomOwner`: the live wire's sender sends what waited. */
+  onHeadroom(headroom: ClientHeadroom): void {
+    if (this.ws === null || this.ends?.headroom !== headroom) return
+    headroom.sendWaiting()
+    this.headroomChanged(headroom.sender)
+  }
+
+  /** What waited in its sender may have gone. */
+  private headroomChanged(sender: PieceSender): void {
+    if (sender.waitingBytes === 0) this.settleDrained()
+    this.owner.onTransportHeadroom(this)
   }
 
   hasWire(): boolean {
@@ -287,12 +278,12 @@ class WsTransport implements UpgradeTarget {
   sendFrame(frame: OutboundFrame): void {
     assert(this.ws && this.ends)
     if (frame.kind === 'acknowledgement') this.ends.sender.carry(() => frame.frame)
-    else this.ends.budget.send(frame.frame)
+    else this.ends.headroom.send(frame.frame)
   }
 
-  sendRoom(): number {
+  headroom(): number {
     assert(this.ends)
-    return this.ends.budget.roomPastSent()
+    return this.ends.headroom.headroomPastSent()
   }
 
   get uplink(): Uplink {
@@ -316,19 +307,19 @@ class WsTransport implements UpgradeTarget {
     this.ws = null
     this.closeAbandonedTransport()
     assert(this.ends)
-    const { budget } = this.ends
-    this.abandoned = { ws, budget }
+    const { headroom } = this.ends
+    this.abandoned = { ws, headroom }
     ws.onopen = ws.onerror = null
-    ws.onclose = () => budget.close()
+    ws.onclose = () => headroom.close()
     this.settleDrained()
   }
 
   closeAbandonedTransport(): void {
     if (!this.abandoned) return
-    const { ws, budget } = this.abandoned
+    const { ws, headroom } = this.abandoned
     this.abandoned = null
     ws.onmessage = ws.onclose = null
-    budget.close()
+    headroom.close()
     try {
       ws.close()
     } catch {}
@@ -346,16 +337,16 @@ class WsTransport implements UpgradeTarget {
   sendPing(frame: Uint8Array<ArrayBuffer>): void {
     if (this.ws?.readyState !== WebSocket.OPEN) return
     assert(this.ends)
-    this.ends.sender.send(withTook(frame, this.ends.pieces.took))
+    this.ends.sender.send(withTook(frame, this.ends.pieces.took), 0)
   }
 
   dispose(): void {
     this.connecting = false
     // A socket sends what it was handed before its close.
     this.probed?.ends.sender.flush()
-    this.probed?.ends.budget.close()
+    this.probed?.ends.headroom.close()
     if (this.ws) this.ends?.sender.flush()
-    if (this.ws) this.ends?.budget.close()
+    if (this.ws) this.ends?.headroom.close()
     const wsProbed = this.probed?.ws
     this.probed = null
     if (wsProbed) {
@@ -379,7 +370,7 @@ class WsTransport implements UpgradeTarget {
 
 /** Hands `take` the frames of a WebSocket message that arrived at `at`; false where its wire closes. */
 function receiveMessage(
-  pieces: PagePieceReceiver,
+  pieces: ClientPieceReceiver,
   raw: Uint8Array<ArrayBuffer>,
   at: number,
   take: (frame: DecodedFrame, byteLength: number, at: number) => boolean,

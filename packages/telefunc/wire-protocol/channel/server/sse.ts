@@ -1,4 +1,4 @@
-export { getTelefuncSseChannelHooks, handleSseChannelRequest }
+export { handleSseChannelRequest }
 export type { SseChannelHttpResponse, SseConnection }
 
 import type { Readable } from 'node:stream'
@@ -12,12 +12,13 @@ import { CHANNEL_TRANSPORT, SSE_METADATA_MAX_BYTES, WIRE_MAX_RAW_FRAME_BYTES } f
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { createPushReadable, type PushReadable } from '../../../utils/pushReadable.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
-import { textEncoder } from '../../wire/frame.js'
-import { parseSseRequestMetadata, type SseRequestMetadata } from '../sseRequest.js'
+import { parseSseRequestMetadata, textEncoder, type SseRequestMetadata } from '../../wire/envelope.js'
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../../wire/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ChannelMux, ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, isProtocolViolationError, passesData, ProtocolViolationError } from '../../wire/connectionFrame.js'
+import { encode } from '../../wire/frame.js'
+import { passesData } from '../../wire/tags.js'
+import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400
@@ -99,7 +100,7 @@ class EventStream {
 }
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/sse.ts', {
-  defaultHooks: null as ReturnType<typeof getTelefuncSseChannelHooks> | null,
+  sseTransport: null as SseConnectionTransport | null,
 })
 
 class SseConnectionTransport {
@@ -129,7 +130,7 @@ class SseConnectionTransport {
     terminateConnection: (connection) => this.terminateConnection(connection),
   }
 
-  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse | null> {
+  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
     if (request.method !== 'POST') return badRequest()
     const source = readable ?? request.body
@@ -143,10 +144,16 @@ class SseConnectionTransport {
       const reader = new StreamReader(source)
       const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
       connId = metadata.connId
-      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream)
-      if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
-      if (metadata.close) return this.handleClosePost(connId)
-      return await this.handleBatchPost(connId, reader)
+      switch (metadata.kind) {
+        case 'streamResponse':
+          return await this.handleStreamResponsePost(connId, reader, useNodeStream)
+        case 'streamRequest':
+          return await this.handleStreamRequestPost(connId, reader)
+        case 'close':
+          return this.handleClosePost(connId)
+        case 'batch':
+          return await this.handleBatchPost(connId, reader)
+      }
     } catch (err) {
       // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
       // just this POST.
@@ -333,7 +340,7 @@ class SseConnectionTransport {
     this.closedWires.set(connId, { at: now, sessionId })
   }
 
-  /** Mirrors `ChannelMux.waitForChannelRegistration`: the timeout path must remove the
+  /** As `RegistrationWaits.stop`: the timeout path must remove the
    *  waiter and (when last) the map entry, or abandoned data POSTs leak an entry forever. */
   private waitForConnection(connId: string): Promise<SseConnection | null> {
     return new Promise<SseConnection | null>((resolve) => {
@@ -404,11 +411,13 @@ class SseConnectionTransport {
 
 /** Malformed metadata is untrusted client ingress, not a truncation — same class as the decode seam. */
 function parseMetadata(raw: string): SseRequestMetadata {
+  let metadata: unknown
   try {
-    return parseSseRequestMetadata(raw)
+    metadata = JSON.parse(raw)
   } catch {
     throw new ProtocolViolationError('malformed SSE request metadata')
   }
+  return parseSseRequestMetadata(metadata)
 }
 
 function reportDispatchBug(err: unknown): void {
@@ -430,16 +439,7 @@ function okResponse(): SseChannelHttpResponse {
   return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
 }
 
-async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse | null> {
-  globalObject.defaultHooks ??= getTelefuncSseChannelHooks()
-  return globalObject.defaultHooks.handleRequest(request, readable)
-}
-
-function getTelefuncSseChannelHooks() {
-  const server = new SseConnectionTransport()
-  return {
-    handleRequest(request: Request, readable?: Readable) {
-      return server.handleRequest(request, readable)
-    },
-  }
+async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
+  globalObject.sseTransport ??= new SseConnectionTransport()
+  return globalObject.sseTransport.handleRequest(request, readable)
 }

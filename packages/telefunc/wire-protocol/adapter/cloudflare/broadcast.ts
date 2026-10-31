@@ -11,7 +11,7 @@ export type {
 
 import {
   KNOWN_BROADCAST_BUCKETS,
-  getBucketCoordinatorShardIndices,
+  getBucketCoordinatorScale,
   getDeterministicKeyBucketIndex,
   getScaleCountForBucket,
 } from './routing.js'
@@ -432,7 +432,7 @@ class CloudflareBroadcast {
   }
 
   private coordinatorName(key: string, locationBucket: LocationBucket): string {
-    const bucketShardCount = getBucketCoordinatorShardIndices(this.scale, locationBucket).length
+    const bucketShardCount = getBucketCoordinatorScale(this.scale, locationBucket)
     const bucketShardOrdinal = getDeterministicKeyBucketIndex(key, bucketShardCount)
     return `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
   }

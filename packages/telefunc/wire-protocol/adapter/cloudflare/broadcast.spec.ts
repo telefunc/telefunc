@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_BROADCAST_BUCKETS,
   assertLocationFallbackIsScaled,
-  getBucketCoordinatorShardIndices,
+  getBucketCoordinatorScale,
   getDeterministicKeyBucketIndex,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
@@ -132,33 +132,29 @@ describe('cloudflare broadcast routing', () => {
   })
 
   it('maps the same room to the same bucket-coordinator offset for a bucket', () => {
-    const shardIndices = getBucketCoordinatorShardIndices(2, 'weur')
+    const shardCount = getBucketCoordinatorScale(2, 'weur')
 
-    expect(getDeterministicKeyBucketIndex('room/alpha', shardIndices.length)).toBe(
-      getDeterministicKeyBucketIndex('room/alpha', shardIndices.length),
+    expect(getDeterministicKeyBucketIndex('room/alpha', shardCount)).toBe(
+      getDeterministicKeyBucketIndex('room/alpha', shardCount),
     )
   })
 
   it('assigns room keys only within the bucket-coordinator subset', () => {
-    const weurShards = getBucketCoordinatorShardIndices(2, 'weur')
-    const apacShards = getBucketCoordinatorShardIndices(2, 'apac')
-    const ocShards = getBucketCoordinatorShardIndices(2, 'oc')
-
-    expect(weurShards).toContain(weurShards[getDeterministicKeyBucketIndex('room/alpha', weurShards.length)]!)
-    expect(apacShards).toContain(apacShards[getDeterministicKeyBucketIndex('room/alpha', apacShards.length)]!)
-    expect(ocShards).toContain(ocShards[getDeterministicKeyBucketIndex('room/alpha', ocShards.length)]!)
+    for (const bucket of ['weur', 'apac', 'oc'] as const) {
+      expect(getDeterministicKeyBucketIndex('room/alpha', getBucketCoordinatorScale(2, bucket))).toBe(0)
+    }
   })
 
   it('partitions bucket coordinators at ceil(sessionScale / 2) per bucket', () => {
-    expect(getBucketCoordinatorShardIndices(1, 'wnam')).toEqual([0])
-    expect(getBucketCoordinatorShardIndices(2, 'wnam')).toEqual([0])
-    expect(getBucketCoordinatorShardIndices(3, 'wnam')).toEqual([0, 1])
-    expect(getBucketCoordinatorShardIndices(4, 'wnam')).toEqual([0, 1])
-    expect(getBucketCoordinatorShardIndices(4, 'enam')).toEqual([0, 1])
+    expect(getBucketCoordinatorScale(1, 'wnam')).toBe(1)
+    expect(getBucketCoordinatorScale(2, 'wnam')).toBe(1)
+    expect(getBucketCoordinatorScale(3, 'wnam')).toBe(2)
+    expect(getBucketCoordinatorScale(4, 'wnam')).toBe(2)
+    expect(getBucketCoordinatorScale(4, 'enam')).toBe(2)
   })
 
   it('uses only canonical bucket scale entries', () => {
-    expect(getBucketCoordinatorShardIndices({ weur: 2, apac: 1 }, 'apac')).toEqual([0])
+    expect(getBucketCoordinatorScale({ weur: 2, apac: 1 }, 'apac')).toBe(1)
   })
 
   it('resolves session targets from request location and scale', () => {
@@ -180,7 +176,6 @@ describe('cloudflare broadcast routing', () => {
     expect(fallbackTarget).toMatchObject({
       sessionInstanceName: 'telefunc-shard-weur-0',
       locationBucket: 'weur',
-      shardOrdinal: 0,
     })
   })
 
@@ -190,10 +185,9 @@ describe('cloudflare broadcast routing', () => {
     const target = resolveSessionRoutingTarget('telefunc', { weur: 2, apac: 1 }, wnamRequest, 'weur', 'token')
 
     expect(target).toMatchObject({
-      sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-/),
+      sessionInstanceName: expect.stringMatching(/^telefunc-shard-weur-[01]$/),
       locationBucket: 'weur',
     })
-    expect([0, 1]).toContain(target.shardOrdinal)
   })
 
   it('rejects a per-region scale map whose locationFallback region has no shards', () => {

@@ -23,7 +23,7 @@ import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
 import { STREAMING_ERROR_TYPE } from '../../../constants.js'
-import { ownIndexedPayload } from '../../../wire/frame.js'
+import { ownIndexedPayload } from '../../../wire/envelope.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 
 const globalObject = getGlobalObject('wire-protocol/values/client/response/parse.ts', {

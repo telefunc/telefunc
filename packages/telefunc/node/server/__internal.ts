@@ -23,8 +23,8 @@ export type {
 } from '../../wire-protocol/backend/subscription.js'
 export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
 export type { ServerBroadcastEnd, ClientBroadcast }
-export { encodePublish } from '../../wire-protocol/wire/connectionFrame.js'
-export type { BroadcastKind } from '../../wire-protocol/wire/connectionFrame.js'
+export { encodePublish } from '../../wire-protocol/wire/publishInfo.js'
+export type { BroadcastKind } from '../../wire-protocol/wire/payloads.js'
 export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
 export { reportBug } from '../../wire-protocol/channel/server/channel.js'
 export { getChannelLimits } from './serverConfig.js'

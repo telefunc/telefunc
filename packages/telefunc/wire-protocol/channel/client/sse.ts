@@ -15,25 +15,21 @@ import {
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../../constants.js'
-import { encodeU32, encodeLengthPrefixedFrames } from '../../wire/frame.js'
+import { encodeU32, encodeLengthPrefixedBlob, encodeSseRequest, encodeSseRequestMetadata } from '../../wire/envelope.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
-import { TAG, decode, isSequencedTag, type ReconciledPayload } from '../../wire/connectionFrame.js'
-import { encodeLengthPrefixedBlob, encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sseRequest.js'
+import { decode } from '../../wire/frame.js'
+import { TAG, isSequencedTag } from '../../wire/tags.js'
+import type { ReconciledPayload } from '../../wire/payloads.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
 import { SSEEvents } from './SSEEvents.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
-import type {
-  BarrierEmission,
-  ClientConnection,
-  OutboundFrame,
-  OutboundFrameKind,
-  UpgradeSource,
-} from './connection.js'
+import type { OutboundFrame, OutboundFrameKind, TransportOwner } from './connection.js'
+import type { BarrierEmission, UpgradeSource } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
@@ -63,17 +59,16 @@ type SseTransportOptions = {
   telefuncUrl: string
   fetchImpl: typeof fetch
   userHeaders: Record<string, string> | undefined
-  owner: ClientConnection
+  owner: TransportOwner
 }
 
 class SseTransport implements UpgradeSource {
   private readonly telefuncUrl: string
   private readonly fetchImpl: typeof fetch
   private readonly userHeaders: Record<string, string> | undefined
-  private readonly owner: ClientConnection
+  private readonly owner: TransportOwner
   readonly type = CHANNEL_TRANSPORT.SSE
-  readonly sendReconcileOnOpen = false
-  readonly reconcileMode = 'batch-on-reconcile' as const
+  readonly carriesReconcileInOpen = true
   /** Each wire's own, so a POST still in flight for a wire that died isn't dispatched on the next one. */
   private connId = randomUuid()
   uplink = new Uplink()
@@ -213,7 +208,7 @@ class SseTransport implements UpgradeSource {
     if (this.flushScheduler.pending && this.hasWire()) this.flushScheduler.schedule(deadline)
     else this.scheduleFlush()
     // A whole POST is held: it goes without waiting out the throttle, which would cap an upload at a POST per throttle.
-    if (deadline <= now || this.sendRoom() <= 0) void this.flushOutbox()
+    if (deadline <= now || this.headroom() <= 0) void this.flushOutbox()
   }
 
   /** While a POST is out, folds the outbox into the next body a MiB at a time: the flush after copies only the rest. */
@@ -248,13 +243,13 @@ class SseTransport implements UpgradeSource {
     const ssePromise = this.post(
       encodeSseRequest(
         { connId: this.connId, streamResponse: true },
-        encodeLengthPrefixedFrames(stage.initialFrames, (entry) => entry.frame),
+        stage.initialFrames.map((entry) => entry.frame),
       ),
       abortController.signal,
       { accept: 'text/event-stream' },
     )
     const upload = this.streamRequest.tag === 'failed' ? null : this.openUpload(abortController)
-    this.owner._onTransportReconcileSent(this)
+    this.owner.onTransportReconcileSent(this)
 
     let response: Response
     this.openPending = true
@@ -301,7 +296,7 @@ class SseTransport implements UpgradeSource {
     }
 
     this.connecting = false
-    this.owner._onTransportOpen(this)
+    this.owner.onTransportOpen(this)
     if (this.outbox.length > 0) void this.flushOutbox()
   }
 
@@ -341,7 +336,7 @@ class SseTransport implements UpgradeSource {
     this.streamRequest = { tag: 'failed' }
     const now = performance.now()
     if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: now, queuedAt: now })))
-    this.owner._onTransportBatched(this)
+    this.owner.onTransportBatched(this)
   }
 
   /** The downstream didn't open: what the reconcile took goes back to the outbox, and the wire closes. */
@@ -351,7 +346,7 @@ class SseTransport implements UpgradeSource {
     abortController.abort()
     this.transportAbort = null
     this.connecting = false
-    this.owner._onTransportClosed(this, { rejectedByServer })
+    this.owner.onTransportClosed(this, { rejectedByServer })
   }
 
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
@@ -367,10 +362,10 @@ class SseTransport implements UpgradeSource {
         const frame = decode(raw)
         if (frame.tag === TAG.PONG) {
           this.heartbeat?.resetPong()
-          this.owner._onTransportPong(frame.ended)
+          this.owner.onTransportPong(frame.ended)
           continue
         }
-        this.owner._onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        this.owner.onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
       }
     } catch {
       if (abortController.signal.aborted) return
@@ -385,12 +380,12 @@ class SseTransport implements UpgradeSource {
         abortController.abort()
       }
       // Abandoned controllers are owned by a successor transport — don't notify closed.
-      if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this)
+      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this)
     }
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
-    const reconcileBatch = this.owner.stageReconcileBatch(true)
+    const reconcileBatch = this.owner.stageInitialReconcileBatch()
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames
@@ -439,7 +434,7 @@ class SseTransport implements UpgradeSource {
     this.lastPostStartedAt = now
     const wire = this.transportAbort
     try {
-      const body = encodeSseBatch(
+      const body = encodeSseRequest(
         { connId: this.connId },
         queued.slice(head?.count ?? 0).map((entry) => entry.frame),
         head?.blob,
@@ -449,7 +444,7 @@ class SseTransport implements UpgradeSource {
       const response = await this.postAndRead(body, wire.signal)
       if (!response.ok) throw new Error('POST failed')
       this.sizePosts(body.size, performance.now() - now)
-      this.uplink.link.postAnswered(performance.now() - oldestQueuedAt(queued))
+      this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
     } catch {
       // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
       if (wire !== this.transportAbort) {
@@ -458,14 +453,14 @@ class SseTransport implements UpgradeSource {
       }
       this.requeue(queued)
       this.abandonActiveTransport()
-      this.owner._onTransportClosed(this)
+      this.owner.onTransportClosed(this)
     } finally {
       if (this.postWatch) clearTimeout(this.postWatch)
       this.postWatch = null
       this.flushing = false
       this.postOutBytes = 0
       this.flushNextOrDrain()
-      this.owner._onTransportRoom(this)
+      this.owner.onTransportHeadroom(this)
     }
   }
 
@@ -478,14 +473,14 @@ class SseTransport implements UpgradeSource {
     )
   }
 
-  sendRoom(): number {
+  headroom(): number {
     return this.batched ? this.postBytes - this.postOutBytes - this.outboxBytes : Infinity
   }
 
   /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
   private watchPost(wire: AbortController, ms: number): void {
     this.postWatch = setTimeout(() => {
-      this.owner._onTransportPostLate(this)
+      this.owner.onTransportPostLate(this)
       if (this.transportAbort === wire) this.watchPost(wire, SSE_POST_FLOOR_MS)
     }, ms)
   }
@@ -493,7 +488,7 @@ class SseTransport implements UpgradeSource {
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */
   private flushNextOrDrain(): void {
     if (this.outbox.length > 0) {
-      if (this.sendRoom() <= 0) void this.flushOutbox()
+      if (this.headroom() <= 0) void this.flushOutbox()
       else this.scheduleFlush()
       return
     }
@@ -551,10 +546,7 @@ class SseTransport implements UpgradeSource {
     if (!this.hasWire()) return
     assert(this.transportAbort)
     try {
-      await this.postAndRead(
-        encodeSseRequest({ connId: this.connId }, encodeLengthPrefixedFrames(frames)),
-        this.transportAbort.signal,
-      )
+      await this.postAndRead(encodeSseRequest({ connId: this.connId }, frames), this.transportAbort.signal)
     } catch {}
   }
 

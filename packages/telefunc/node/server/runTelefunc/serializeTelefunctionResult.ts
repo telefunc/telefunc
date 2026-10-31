@@ -20,7 +20,7 @@ import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import { buildInlineResponseBody } from '../../../wire-protocol/values/server/response/StreamingResponseBody.js'
 import { pumpProducerToChannel } from '../../../wire-protocol/values/server/response/ChannelResponseBody.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
-import { textEncoder } from '../../../wire-protocol/wire/frame.js'
+import { textEncoder } from '../../../wire-protocol/wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
 import type {
   ServerReplacerContext,

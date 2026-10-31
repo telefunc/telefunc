@@ -17,33 +17,35 @@ import type {
   BroadcastListeners,
 } from '../channel.js'
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
-import { invokeChannelListener, makePublishInfo } from '../channel.js'
+import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../../client/clientConfig.js'
-import { createAbortError, isAbort } from '../../../shared/Abort.js'
+import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import {
   ACK_STATUS,
-  TAG,
-  countsCredit,
-  isChannelCtrlTag,
+  encode,
   type AckResultStatus,
-  type BroadcastKind,
-  type BroadcastSubscriptions,
-  type ReattachState,
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
-  type WirePublishInfo,
-} from '../../wire/connectionFrame.js'
+  type SequencedEncoder,
+} from '../../wire/frame.js'
+import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
+import type { BroadcastKind, BroadcastSubscriptions, ReattachState } from '../../wire/payloads.js'
+import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './sessionRegistry.js'
 import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
-import { FlowControl } from '../../flowControl/FlowControl.js'
+import type { CreditOwner, Urgency } from '../../flowControl/credit.js'
+import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
+import { SelfTime } from '../../flowControl/SelfTime.js'
+import { SendCredit } from '../../flowControl/SendCredit.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
+import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
@@ -72,7 +74,7 @@ type ClientChannelOptions = {
 }
 
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel
+  implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel, CreditOwner, ChannelLifecycleOwner
 {
   /** @see ChannelShield in ../channel.ts — `data` validates C2S; `ack` validates ack of own C2S send. */
   declare readonly [TELEFUNC_SHIELDS]: {
@@ -83,37 +85,22 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   readonly ack: boolean
   readonly key: string | undefined
   readonly _maxFrameBytes: number
-  protected _connection: MuxConnection
-  private readonly _listeners = new Listeners<ChannelListener<ServerToClient>>()
-  private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
-  private _openCallbacks: Array<() => void> = []
-  private _disconnectCallbacks: Array<() => void> = []
-  private _reconnectCallbacks: Array<() => void> = []
-  private _closeCallbacks: Array<ChannelCloseCallback> = []
-  private _closeError: Error | undefined
-  protected _isClosed = false
-  private _didTerminate = false
-  private _didFireClose = false
-  private _didFireOpen = false
-  private _isConnected = false
-  private _closePromise: Promise<ChannelCloseResult> | null = null
-  private _closeDeadline = 0
-  private _closeWaiters: Array<() => void> = []
-  private _didReceiveCloseAck = false
-  private _expectCloseAck = false
-  private _pendingCloseCallbacks = 0
-  protected _inflightAcks = 0
+  protected connection: MuxConnection
+  private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
+  private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
+  protected closed = false
+  protected readonly lifecycle = new ChannelLifecycle({ owner: this })
   /** Outstanding ack-bearing sends, keyed by the seq the server will echo on `ACK_RES`.
-   *  Lives on the channel (mirrors server-side `_pendingAcks`) so per-channel state
+   *  Lives on the channel (mirrors server-side `pendingAcks`) so per-channel state
    *  stays encapsulated; connection just routes ACK_RES frames in. `resolve` is typed
    *  `any` because the channel hosts ack-bearing sends with several distinct resolution
    *  types (`ChannelAck<C2S>`, `unknown` for binary, `ChannelPublishAck` for broadcast
    *  publishes); the stored resolver is always invoked with `parse(text)` at the boundary. */
-  protected _pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
-  /** Owns sender-side credit, receiver-side consumption tracking, BDP estimator,
-   *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
-   *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
-  protected _flow: FlowControl
+  protected pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
+  /** Credit governs fire-and-forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
+  protected selfTime = new SelfTime()
+  protected sendCredit: SendCredit
+  protected receiveCredit: ReceiveCredit
 
   constructor({
     channelId,
@@ -126,20 +113,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.key = key
     this._maxFrameBytes = maxFrameBytes
-    this._flow = new FlowControl({
-      // A closed channel's server ends its sends with the close, so the channel grants it no more credit.
-      byteWindowUpdate: (limit, kind) => {
-        if (!this._isClosed) this._connection.sendByteWindowUpdate(this, limit, kind)
-      },
-      msgWindowUpdate: (limit, kind) => {
-        if (!this._isClosed) this._connection.sendMsgWindowUpdate(this, limit, kind)
-      },
-      bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
-      backlog: () => this._connection.bufferedAmount(),
-      yieldBytes: FC_PAGE_YIELD_BYTES,
-    })
+    this.sendCredit = new SendCredit({ owner: this, selfTime: this.selfTime, yieldBytes: FC_PAGE_YIELD_BYTES })
+    this.receiveCredit = new ReceiveCredit({ owner: this, selfTime: this.selfTime })
     const config = resolveClientConfig()
-    this._connection = ClientConnection.getOrCreate(getSessionUrl(connection.telefuncUrl), this, {
+    this.connection = ClientConnection.getOrCreate(getSessionUrl(connection.telefuncUrl), this, {
       transports: connection.transports,
       fetchImpl: (config.fetch ?? globalThis.fetch).bind(globalThis),
       connectionKey: connection.connectionKey,
@@ -149,11 +126,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   get isClosed(): boolean {
-    return this._isClosed
+    return this.closed
   }
 
   get isConnected(): boolean {
-    return this._isConnected
+    return this.lifecycle.connected
   }
 
   send(data: ChannelData<ClientToServer>): Promise<void>
@@ -165,29 +142,27 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   ): Promise<ChannelAck<ClientToServer>> | Promise<void> {
     const t0 = performance.now()
     try {
-      const ret = this._send(data, opts) ?? Promise.resolve()
+      const ret = this.sendData(data, opts) ?? Promise.resolve()
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this.selfTime.recordSince(t0)
     }
   }
 
-  _send(
+  private sendData(
     data: ChannelData<ClientToServer>,
     opts?: { ack?: boolean },
   ): void | Promise<ChannelAck<ClientToServer>> | Promise<void> {
-    if (this._isClosed) throw new ChannelClosedError()
+    if (this.closed) throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data)
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
-      return this._sendAckReq<ChannelAck<ClientToServer>>((onQueued) =>
-        this._connection.sendTextAckReq(this, serialized, onQueued),
-      )
+      return this.sendAckReq<ChannelAck<ClientToServer>, string>(encode.textAckReq, serialized)
     }
-    return this._waitForWindow(this._connection.send(this, serialized))
+    return this.sendCredit.decrement(this.connection.sendSequenced(this, 'data', encode.text, serialized))
   }
 
   sendBinary(data: Uint8Array): Promise<void>
@@ -200,203 +175,193 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this.selfTime.recordSince(t0)
     }
   }
 
   _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
-    if (this._isClosed) throw new ChannelClosedError()
-    // Ack-bearing path bypasses credit; see `_send` for rationale.
+    if (this.closed) throw new ChannelClosedError()
+    // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (opts?.ack === true) {
-      return this._sendAckReq((onQueued) => this._connection.sendBinaryAckReq(this, data, onQueued))
+      return this.sendAckReq<unknown, Uint8Array>(encode.binaryAckReq, data)
     }
-    return this._waitForWindow(this._connection.sendBinary(this, data))
-  }
-
-  /** Decrement credit by `bytes`; return void if credit remains, otherwise a Promise
-   *  that resolves when credit refreshes (so the caller's next `await` blocks).
-   *
-   *  Cooperative model: the send already fired in `connection.send(...)`; this only
-   *  gates the return value. Awaiting throttles the caller's next send; not awaiting
-   *  bypasses (matches the user-facing "skip await for max bandwidth" escape hatch). */
-  private _waitForWindow(bytes: number): void | Promise<void> {
-    return this._flow.decrement(bytes)
+    return this.sendCredit.decrement(this.connection.sendSequenced(this, 'data', encode.binary, data))
   }
 
   listen(callback: ChannelListener<ServerToClient>): () => void {
-    return this._listeners.add(callback)
+    return this.listeners.add(callback)
   }
 
   listenBinary(callback: ChannelBinaryListener): () => void {
-    return this._binaryListeners.add(callback)
+    return this.binaryListeners.add(callback)
   }
 
   onClose(callback: ChannelCloseCallback): void {
-    if (this._didFireClose) {
-      this._invokeCloseCallback(callback, this._closeError, false)
-      return
-    }
-    this._closeCallbacks.push(callback)
+    this.lifecycle.onClose(callback)
   }
 
   onOpen(callback: () => void): void {
-    if (this._didFireOpen) {
-      invokeChannelListener(callback, [], (err) => this._handleCallbackError(err))
-      return
-    }
-    this._openCallbacks.push(callback)
+    this.lifecycle.onOpen(callback)
   }
 
   onDisconnect(callback: () => void): void {
-    if (!this._didFireClose) this._disconnectCallbacks.push(callback)
+    this.lifecycle.onDisconnect(callback)
   }
 
   onReconnect(callback: () => void): void {
-    if (!this._didFireClose) this._reconnectCallbacks.push(callback)
+    this.lifecycle.onReconnect(callback)
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
-    if (this._closePromise) return this._closePromise
-    if (this._didTerminate) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
+    if (this.lifecycle.closing) return this.lifecycle.closing
+    if (this.lifecycle.ended) return Promise.resolve(this.lifecycle.result)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    this._closeDeadline = performance.now() + timeout
-    this._expectCloseAck = true
-    this._isClosed = true
-    this._connection.sendCloseRequest(this, timeout)
-    this._closePromise = this._runFinalizationLoop()
-    return this._closePromise
+    this.lifecycle.startClose(timeout, true)
+    this.closed = true
+    this.connection.sendCloseRequest(this, timeout)
+    return this.lifecycle.runClose()
   }
 
   /** @internal How long a server that is away is waited for. */
   _reconnectWindow(): number {
-    return this._connection.reconnectWindow()
+    return this.connection.reconnectWindow()
   }
 
   abort(): void
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
-    if (this._didTerminate || this._isClosed) return
-    this._isClosed = true
+    if (this.closed) return
+    this.closed = true
     const abortError = createAbortError(abortValue, message)
-    this._connection.sendAbort(this, stringify(abortValue))
-    this._finalizeClose(abortError)
+    this.connection.sendAbort(this, stringify(abortValue))
+    this._end(abortError)
+  }
+
+  // ── Called by its credit (see `CreditOwner`) ──
+
+  /** @internal A closed channel's server ends its sends with the close, so the channel grants it no more credit. */
+  _sendByteLimit(limit: number, urgency: Urgency): void {
+    if (!this.closed) this.connection.sendByteWindowUpdate(this, limit, urgency)
+  }
+
+  /** @internal */
+  _sendMessageLimit(limit: number, urgency: Urgency): void {
+    if (!this.closed) this.connection.sendMsgWindowUpdate(this, limit, urgency)
+  }
+
+  /** @internal */
+  _sendBdpPing(probe: number): void {
+    this.connection.sendBdpPing(this, probe)
+  }
+
+  /** @internal */
+  _backlogBytes(): number | undefined {
+    return this.connection.bufferedAmount()
   }
 
   // ── Called by transport connection ──
 
   /** @internal Probes a path it hasn't measured. */
   _reattachState(uplink: Uplink): ReattachState {
-    const probe = this._flow.probeAttach(uplink.link)
+    const probe = this.receiveCredit.probeAttach(uplink.roundTrips)
     return probe === undefined ? {} : { probe }
   }
 
   /** @internal */
   _onProbeAnswered(probe: number): void {
-    this._flow.onProbeAnswered(probe)
+    this.receiveCredit.onProbeAnswered(probe)
   }
 
   /** @internal */
   _fitReplays(window: number, peerWindow: number): void {
-    this._flow.fitReplays(window, peerWindow)
+    this.receiveCredit.fitReplay(window)
+    this.sendCredit.fitReplay(peerWindow)
   }
 
-  /** @internal At each heartbeat: see `FlowControl.acknowledge`. */
+  /** @internal At each heartbeat: see `ReceiveCredit.acknowledge`. */
   _acknowledge(): void {
-    this._flow.acknowledge()
+    this.receiveCredit.acknowledge()
   }
 
-  /** @internal See `FlowControl.answered`. */
+  /** @internal See `ReceiveCredit.answered`. */
   _answered(): void {
-    this._flow.answered()
+    this.receiveCredit.answered()
   }
 
   /** @internal */
   _onTransportBatched(): void {
-    if (!this._isClosed) this._flow.useBatchTransportInitial()
+    if (!this.closed) this.receiveCredit.useBatchTransportInitial()
   }
 
   /** @internal */
   _onUpgradeJoined(): void {
-    if (this._isClosed) return
-    this._flow.undoBatchTransportInitial()
-    this._flow.restartRound()
+    if (this.closed) return
+    this.receiveCredit.undoBatchTransportInitial()
+    this.receiveCredit.restartRound()
   }
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
-    if (this._isClosed) {
-      if (this._didFireOpen) this._fireReconnect()
+    if (this.closed) {
+      this.lifecycle.fireReconnect()
       return
     }
-    if (batched) this._flow.useBatchTransportInitial()
-    else this._flow.undoBatchTransportInitial()
-    this._flow.attach(uplink, downlink)
-    if (this._didFireOpen) this._fireReconnect()
-    else this._fireOpen()
+    if (batched) this.receiveCredit.useBatchTransportInitial()
+    else this.receiveCredit.undoBatchTransportInitial()
+    this.receiveCredit.attach(uplink, uplink.roundTrips, downlink)
+    this.lifecycle.fireOpen()
   }
 
   /** @internal Its wire went away, and the connection reconnects. */
   _onTransportDisconnect(): void {
-    if (!this._isConnected) return
-    this._isConnected = false
-    this._invokeAll(this._disconnectCallbacks)
+    this.lifecycle.fireDisconnect()
   }
 
-  _onTransportMessage(data: string, bytes: number): void {
+  _onPeerMessage(data: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
-      const parsed = parse(data) as ChannelData<ServerToClient>
-      const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners.list()) {
-        try {
-          const result = cb(parsed)
-          if (isPromise(result)) {
-            pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
-          }
-        } catch (err) {
-          if (this._handleCallbackError(err)) return
-        }
-      }
-      if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._flow.onConsumed(bytes))
-      } else {
-        this._flow.onConsumed(bytes)
-      }
+      this.receiveCredit.onReceived(bytes)
+      this.callListeners(this.listeners, parse(data) as ChannelData<ServerToClient>, bytes)
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this.selfTime.recordSince(t0)
     }
   }
 
-  _onTransportAckReqMessage(data: string, seq: number): Promise<void> {
-    return this._trackAck(this._answerAckReq(this._listeners, parse(data) as ChannelData<ServerToClient>, seq))
+  _onPeerAckReqMessage(data: string, seq: number): Promise<void> {
+    return this.lifecycle.trackAck(this.answerAckReq(this.listeners, parse(data) as ChannelData<ServerToClient>, seq))
   }
 
-  _onTransportBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._trackAck(this._answerAckReq(this._binaryListeners, data, seq))
+  _onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
+    return this.lifecycle.trackAck(this.answerAckReq(this.binaryListeners, data, seq))
   }
 
-  _onTransportBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
+  _onPeerBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
-      const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners.list()) {
-        try {
-          const result = cb(data)
-          if (isPromise(result)) {
-            pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
-          }
-        } catch (err) {
-          if (this._handleCallbackError(err)) return
-        }
-      }
-      if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._flow.onConsumed(bytes))
-      } else {
-        this._flow.onConsumed(bytes)
-      }
+      this.receiveCredit.onReceived(bytes)
+      this.callListeners(this.binaryListeners, data, bytes)
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this.selfTime.recordSince(t0)
+    }
+  }
+
+  /** Calls each of `listeners` with `value`; its `bytes` are consumed once the promises they return settle. A listener
+   *  that throws `Abort` stops the rest. */
+  private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T, bytes: number): void {
+    const pending: Promise<unknown>[] = []
+    for (const cb of listeners.list()) {
+      try {
+        const result = cb(value)
+        if (isPromise(result)) {
+          pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
+        }
+      } catch (err) {
+        if (this.lifecycle.handleCallbackError(err)) return
+      }
+    }
+    if (pending.length > 0) {
+      Promise.all(pending).finally(() => this.receiveCredit.onConsumed(bytes))
+    } else {
+      this.receiveCredit.onConsumed(bytes)
     }
   }
 
@@ -404,33 +369,33 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  here for any frame carrying an index; this method then splits ctrl vs data. */
   _dispatchFrame(frame: ChannelFrame): void {
     if (isChannelCtrlTag(frame.tag)) {
-      this._dispatchCtrl(frame as ChannelCtrlFrame)
+      this.dispatchCtrl(frame as ChannelCtrlFrame)
       return
     }
     const data = frame as ChannelDataFrame
-    if (!countsCredit(data.tag)) this._flow.onReceivedUncounted(data.bytes)
-    this._dispatchDataFrame(data)
+    if (!countsCredit(data.tag)) this.receiveCredit.onReceivedUncounted(data.bytes)
+    this.dispatchDataFrame(data)
   }
 
   /** @internal — Tag-keyed data-frame switch. `ClientBroadcast` overrides to add the
    *  PUBLISH variants and falls back to `super` for the common cases. Receive-time
    *  BDP accounting happens inside each credit-counted `_onTransport*` handler. */
-  protected _dispatchDataFrame(frame: ChannelDataFrame): void {
+  protected dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
-        this._onTransportMessage(frame.text, frame.bytes)
+        this._onPeerMessage(frame.text, frame.bytes)
         return
       case TAG.TEXT_ACK_REQ:
-        void this._onTransportAckReqMessage(frame.text, frame.seq)
+        void this._onPeerAckReqMessage(frame.text, frame.seq)
         return
       case TAG.BINARY:
-        this._onTransportBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
+        this._onPeerBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
         return
       case TAG.BINARY_ACK_REQ:
-        void this._onTransportBinaryAckReqMessage(frame.data, frame.seq)
+        void this._onPeerBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.ACK_RES:
-        this._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
+        this.onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
         return
       case TAG.PUBLISH:
       case TAG.PUBLISH_ACK_REQ:
@@ -444,39 +409,39 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Per-channel ctrl-message switch. Connection-level ctrls (PING/PONG/
    *  FIN/RECONCILED) and channel-termination ctrls (ABORT/ERROR — which involve
    *  connection-side cleanup) are handled by the connection and never reach here. */
-  protected _dispatchCtrl(frame: ChannelCtrlFrame): void {
+  protected dispatchCtrl(frame: ChannelCtrlFrame): void {
     switch (frame.tag) {
       case TAG.CLOSE:
-        this._onTransportCloseRequest(frame.timeoutMs)
+        this._onPeerCloseRequest(frame.timeoutMs)
         return
       case TAG.CLOSE_ACK:
-        this._onTransportCloseAck()
+        this._onPeerCloseAck()
         return
       case TAG.WINDOW:
-        this._flow.onPeerByteWindow(frame.bytes)
+        this.sendCredit.onPeerByteWindow(frame.bytes)
         return
       case TAG.MSG_WINDOW:
-        this._flow.onPeerMessageWindow(frame.count)
+        this.sendCredit.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
-        this._connection.sendBdpPingAck(this, {
+        this.connection.sendBdpPingAck(this, {
           probe: frame.probe,
-          backlog: this._flow.onPing(),
-          pathRtt: this._flow.pathRtt(),
+          backlog: this.sendCredit.onPing(),
+          pathRtt: this.receiveCredit.pathRtt(),
         })
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame, (ms) => this._connection.deliveredBeforeLast(ms))
+        this.receiveCredit.onPingAck(frame, (ms) => this.connection.deliveredBeforeLast(ms))
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }
   }
 
   /** Settle an outstanding ack-bearing send. Mirrors server-side `_onPeerAckRes`. */
-  protected _onPeerAckRes(ackedSeq: number, text: string, status: AckResultStatus): void {
-    const pending = this._pendingAcks.get(ackedSeq)
+  protected onPeerAckRes(ackedSeq: number, text: string, status: AckResultStatus): void {
+    const pending = this.pendingAcks.get(ackedSeq)
     if (!pending) return
-    this._pendingAcks.delete(ackedSeq)
+    this.pendingAcks.delete(ackedSeq)
     switch (status) {
       case ACK_STATUS.OK:
         pending.resolve(parse(text))
@@ -495,117 +460,30 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  _onTransportCloseRequest(timeoutMs: number): void {
-    if (this._didTerminate) return
-    const peerDeadline = performance.now() + normalizeCloseTimeout(timeoutMs)
-    if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
-    this._connection.sendCloseAck(this)
-    if (this._isClosed) {
-      this._notifyCloseProgress()
-    } else {
-      this._isClosed = true
-      void this._runFinalizationLoop()
-    }
+  _onPeerCloseRequest(timeoutMs: number): void {
+    this.lifecycle.shortenDeadline(normalizeCloseTimeout(timeoutMs))
+    this.connection.sendCloseAck(this)
+    if (this.closed) return
+    this.closed = true
+    void this.lifecycle.finish()
   }
 
-  _onTransportCloseAck(): void {
-    if (this._didTerminate) return
-    this._didReceiveCloseAck = true
-    this._expectCloseAck = false
-    this._notifyCloseProgress()
+  _onPeerCloseAck(): void {
+    if (this.lifecycle.ended) return
+    this.lifecycle.onCloseAck()
   }
 
-  _onTransportClose(err?: Error): void {
-    this._isClosed = true
+  _onEnded(err?: Error): void {
+    this.closed = true
     // A close the server acknowledged is graceful, whatever takes the channel off the wire before it finishes.
-    this._finalizeClose(this._didReceiveCloseAck ? undefined : err)
+    this._end(this.lifecycle.closeAcked ? undefined : err)
   }
 
   // ── Private ──
 
-  private _fireOpen(): void {
-    if (this._didFireOpen) return
-    this._didFireOpen = true
-    this._isConnected = true
-    this._invokeAll(this._openCallbacks)
-    this._openCallbacks.length = 0
-  }
-
-  private _fireReconnect(): void {
-    if (this._isConnected || this._didFireClose) return
-    this._isConnected = true
-    this._invokeAll(this._reconnectCallbacks)
-  }
-
-  private _invokeAll(callbacks: Array<() => void>): void {
-    for (const cb of callbacks) if (invokeChannelListener(cb, [], (err) => this._handleCallbackError(err))) return
-  }
-
-  private _fireClose(err?: Error): void {
-    if (this._didFireClose) return
-    this._didFireClose = true
-    this._isConnected = false
-    for (const cb of this._closeCallbacks) {
-      this._invokeCloseCallback(cb, err, true)
-    }
-    this._closeCallbacks.length = 0
-    this._openCallbacks.length = 0
-    this._disconnectCallbacks.length = 0
-    this._reconnectCallbacks.length = 0
-    this._notifyCloseProgress()
-  }
-
-  private async _runFinalizationLoop(): Promise<ChannelCloseResult> {
-    while (!this._didTerminate) {
-      // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
-      // so listeners see "closed" only after the channel can no longer receive frames.
-      if (this._isCloseRoundtripDone()) this._fireClose()
-      if (this._didFireClose && this._pendingCloseCallbacks === 0) {
-        this._finalizeClose()
-        break
-      }
-      const remaining = this._closeDeadline - performance.now()
-      if (remaining <= 0) {
-        this._finalizeClose(new ChannelClosedError('Channel close timed out'))
-        break
-      }
-      await this._waitForCloseProgress(remaining)
-    }
-    return this._didReceiveCloseAck ? 0 : 1
-  }
-
-  private _isCloseRoundtripDone(): boolean {
-    return this._inflightAcks === 0 && (!this._expectCloseAck || this._didReceiveCloseAck)
-  }
-
-  private _waitForCloseProgress(timeoutMs: number): Promise<void> {
-    return new Promise<void>((resolve) => {
-      let settled = false
-      const timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        const index = this._closeWaiters.indexOf(wake)
-        if (index >= 0) this._closeWaiters.splice(index, 1)
-        resolve()
-      }, timeoutMs)
-      const wake = () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve()
-      }
-      this._closeWaiters.push(wake)
-    })
-  }
-
-  private _notifyCloseProgress(): void {
-    const waiters = this._closeWaiters.splice(0)
-    for (const waiter of waiters) waiter()
-  }
-
-  private async _answerAckReq<T>(listeners: Listeners<(data: T) => unknown>, data: T, seq: number): Promise<void> {
+  private async answerAckReq<T>(listeners: Listeners<(data: T) => unknown>, data: T, seq: number): Promise<void> {
     if (listeners.size === 0) {
-      this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
+      this.connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
       return
     }
     let answer: string
@@ -614,81 +492,55 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       for (const cb of listeners.list()) lastResult = await cb(data)
       answer = stringify(lastResult)
     } catch (err) {
-      if (this._handleCallbackError(err)) return
-      this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
+      if (this.lifecycle.handleCallbackError(err)) return
+      this.connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
       return
     }
-    this._connection.sendAckRes(this, seq, answer)
+    this.connection.sendAckRes(this, seq, answer)
   }
 
   /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */
-  protected _sendAckReq<T>(send: (onQueued: (seq: number) => void) => void): Promise<T> {
+  protected sendAckReq<T, D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<T> {
     let pending!: { resolve: (v: T) => void; reject: (err: Error) => void }
     const ack = new Promise<T>((resolve, reject) => (pending = { resolve, reject }))
-    send((seq) => this._pendingAcks.set(seq, pending))
-    return this._trackAck(ack)
+    this.connection.sendSequenced(this, 'ack', encodeFrame, data, (seq) => this.pendingAcks.set(seq, pending))
+    return this.lifecycle.trackAck(ack)
   }
 
-  protected _trackAck<T>(promise: Promise<T>): Promise<T> {
-    this._inflightAcks++
-    return promise.finally(() => {
-      this._inflightAcks--
-      this._notifyCloseProgress()
-    })
-  }
-
-  private _finalizeClose(err?: Error): void {
-    if (this._didTerminate) return
-    this._didTerminate = true
-    this._closeError = err
-    this._flow.shutdown()
+  /** @internal */
+  _end(err?: Error): void {
+    if (this.lifecycle.ended) return
+    this.lifecycle.end(err)
+    this.sendCredit.shutdown()
+    this.receiveCredit.detach()
     const ackErr = err ?? new ChannelClosedError()
-    for (const { reject } of this._pendingAcks.values()) reject(ackErr)
-    this._pendingAcks.clear()
-    this._connection.unregister(this)
-    this._fireClose(err)
-    this._notifyCloseProgress()
+    for (const { reject } of this.pendingAcks.values()) reject(ackErr)
+    this.pendingAcks.clear()
+    this.connection.unregister(this)
+    this.lifecycle.fireClose(err)
   }
 
-  private _invokeCloseCallback(callback: ChannelCloseCallback, err: Error | undefined, track: boolean): void {
-    try {
-      const pending = callback(err)
-      if (!isPromise(pending)) return
-      if (track) {
-        this._pendingCloseCallbacks++
-        void pending.catch(reportChannelError).finally(() => {
-          this._pendingCloseCallbacks--
-          this._notifyCloseProgress()
-        })
-      } else {
-        void pending.catch(reportChannelError)
-      }
-    } catch (callbackErr) {
-      reportChannelError(callbackErr)
-    }
+  /** @internal */
+  _abortFromCallback(err: AbortError): void {
+    this.abort(err.abortValue, err.message)
   }
 
-  protected _handleCallbackError(err: unknown): boolean {
-    if (isAbort(err)) {
-      const abortError = err
-      this.abort(abortError.abortValue, abortError.message)
-      return true
-    }
+  /** @internal */
+  _reportCallbackError(err: unknown): void {
     reportChannelError(err)
-    return false
   }
 }
 
 class ClientBroadcast<T = unknown> extends ClientChannel {
   readonly [CLIENT_BROADCAST_BRAND] = true
-  private readonly _subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
-  private readonly _onListenerError = (error: unknown) => this._handleCallbackError(error)
-  private readonly _subscribed: BroadcastSubscriptions = { text: false, binary: false }
+  private readonly subscribers: BroadcastListeners<T> = { text: new Listeners(), binary: new Listeners() }
+  /** The subscriptions this page asks the server for. */
+  private readonly subscribed: BroadcastSubscriptions = { text: false, binary: false }
 
   constructor(options: ClientChannelOptions) {
     super(options)
     // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
-    this._flow.widenByteWindow()
+    this.receiveCredit.widenByteWindow()
   }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
@@ -697,20 +549,19 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** @internal Register a local listener without changing what it asks the server for. */
   _subscribeLocal<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
-    return this._subscribers[kind].add(callback)
+    return this.subscribers[kind].add(callback)
   }
 
   /** @internal Sends what `reply` resolves to, also while closing: a graceful close waits for it, as for an ack's answer.
    *  A reply it can't send is reported, and `failure` goes instead. */
   _sendReply(reply: Promise<unknown>, failure: unknown): void {
-    const send = (data: unknown) => this._flow.countSent(this._connection.send(this, stringify(data)))
-    void this._trackAck(
+    void this.lifecycle.trackAck(
       reply.then((data) => {
         try {
-          send(data)
+          this.sendReplyData(data)
         } catch (err) {
-          this._handleCallbackError(err)
-          send(failure)
+          this.lifecycle.handleCallbackError(err)
+          this.sendReplyData(failure)
         }
       }),
     )
@@ -718,15 +569,15 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** @internal Declare what it asks the server for; a reconnect carries it in the RECONCILE entry. */
   _setSubscribed(kind: BroadcastKind, on: boolean): void {
-    if (on === this._subscribed[kind] || this._isClosed) return
-    this._subscribed[kind] = on
-    if (on) this._connection.sendBroadcastSubscribe(this, kind === 'binary')
-    else this._connection.sendBroadcastUnsubscribe(this, kind === 'binary')
+    if (on === this.subscribed[kind] || this.closed) return
+    this.subscribed[kind] = on
+    if (on) this.connection.sendBroadcastSubscribe(this, kind === 'binary')
+    else this.connection.sendBroadcastUnsubscribe(this, kind === 'binary')
   }
 
   /** @internal Declares the subscriptions on every (re)attach: a SUB or UNSUB written to a dead wire isn't replayed. */
   override _reattachState(): ReattachState {
-    return { broadcast: this._subscribed }
+    return { broadcast: this.subscribed }
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
@@ -735,13 +586,12 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishUnreported(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    if (this._isClosed) throw new ChannelClosedError()
-    const serialized = stringify(data)
-    return this._sendAckReq((onQueued) => this._connection.sendPublishAckReq(this, serialized, onQueued))
+    if (this.closed) throw new ChannelClosedError()
+    return this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, stringify(data))
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    return this._subscribeWired('text', callback)
+    return this.subscribeWired('text', callback)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
@@ -750,55 +600,69 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** @internal A publish that leaves reporting its rejection to the caller. */
   _publishBinaryUnreported(data: Uint8Array): Promise<ChannelPublishAck> {
-    if (this._isClosed) throw new ChannelClosedError()
-    return this._sendAckReq((onQueued) => this._connection.sendPublishBinaryAckReq(this, data, onQueued))
+    if (this.closed) throw new ChannelClosedError()
+    return this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    return this._subscribeWired('binary', callback)
+    return this.subscribeWired('binary', callback)
   }
 
   /** The first listener of a kind subscribes the wire, and the last one unsubscribes it. */
-  private _subscribeWired<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
-    if (this._subscribers[kind].size === 0) this._setSubscribed(kind, true)
+  private subscribeWired<K extends BroadcastKind>(kind: K, callback: BroadcastListenerByKind<T>[K]): () => void {
+    if (this.subscribers[kind].size === 0) this._setSubscribed(kind, true)
     const unsubscribe = this._subscribeLocal(kind, callback)
     return () => {
       unsubscribe()
-      if (this._subscribers[kind].size === 0) this._setSubscribed(kind, false)
+      if (this.subscribers[kind].size === 0) this._setSubscribed(kind, false)
     }
   }
 
-  override _dispatchDataFrame(frame: ChannelDataFrame): void {
+  private sendReplyData(data: unknown): void {
+    this.sendCredit.countSent(this.connection.sendSequenced(this, 'data', encode.text, stringify(data)))
+  }
+
+  protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
-      this._onTransportPublish(frame.text, frame.info, frame.bytes)
+      this._onPeerPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      this._onTransportPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
+      this._onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
-    super._dispatchDataFrame(frame)
+    super.dispatchDataFrame(frame)
   }
 
   /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
-  _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
-    this._flow.onPublishArrived()
+  _onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
+    this.receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    for (const cb of this._subscribers.text.list()) {
-      if (invokeChannelListener(cb, [parsed, info], this._onListenerError)) return
+    for (const cb of this.subscribers.text.list()) {
+      try {
+        const result = cb(parsed, info)
+        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
+      } catch (err) {
+        if (this.lifecycle.handleCallbackError(err)) return
+      }
     }
-    this._flow.onPublishConsumed(bytes)
+    this.receiveCredit.onPublishConsumed(bytes)
   }
 
-  _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
-    this._flow.onPublishArrived()
+  _onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
+    this.receiveCredit.onPublishArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
-    // Each listener gets bytes of its own: one may write into them or transfer their buffer.
-    for (const cb of this._subscribers.binary.list()) {
-      if (invokeChannelListener(cb, [new Uint8Array(data), info], this._onListenerError)) return
+    for (const cb of this.subscribers.binary.list()) {
+      try {
+        // Bytes of its own: a listener may write into them or transfer their buffer.
+        const result = cb(new Uint8Array(data), info)
+        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
+      } catch (err) {
+        if (this.lifecycle.handleCallbackError(err)) return
+      }
     }
-    this._flow.onPublishConsumed(bytes)
+    this.receiveCredit.onPublishConsumed(bytes)
   }
 }
 

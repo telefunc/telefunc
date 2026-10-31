@@ -76,7 +76,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
   }
   if (requestKind === REQUEST_KIND.SSE) {
     const sseResponse = await handleSseChannelRequest(request, readable)
-    return sseResponse ? { isMalformedRequest: false, isSseRequest: true, sseResponse } : { isMalformedRequest: true }
+    return { isMalformedRequest: false, isSseRequest: true, sseResponse }
   }
 
   // Body + base reviver context (file handling differs between binary and text; channels are the same).

@@ -10,9 +10,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest'
 
 import { ClientConnection } from './connection.js'
-import { decode, encode, TAG } from '../../wire/connectionFrame.js'
-import type { DecodedFrame } from '../../wire/connectionFrame.js'
-import { decodeU32 } from '../../wire/frame.js'
+import { decode, encode } from '../../wire/frame.js'
+import { TAG } from '../../wire/tags.js'
+import type { DecodedFrame } from '../../wire/frame.js'
+import { decodeU32 } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 
@@ -34,7 +35,7 @@ function createChannel(dispatched: DecodedFrame[]) {
     _dispatchFrame(frame: DecodedFrame) {
       dispatched.push(frame)
     },
-    _onTransportClose() {},
+    _onEnded() {},
     _onTransportBatched() {},
     _onUpgradeJoined() {},
     _reattachState: () => ({}),

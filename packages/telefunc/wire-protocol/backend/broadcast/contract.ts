@@ -1,6 +1,6 @@
 export type { BroadcastBackend, BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult }
 
-import type { BroadcastKind } from '../../wire/connectionFrame.js'
+import type { BroadcastKind } from '../../wire/payloads.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import type { BackendReceiver, BackendSubscription, SubscriptionDriver } from '../subscription.js'
 

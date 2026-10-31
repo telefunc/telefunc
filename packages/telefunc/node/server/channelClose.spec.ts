@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'vitest'
 
 import { ReplayBuffer } from '../../wire-protocol/channel/ReplayBuffer.js'
-import { ACK_STATUS, ProtocolViolationError, TAG, decode } from '../../wire-protocol/wire/connectionFrame.js'
+import { ACK_STATUS, decode } from '../../wire-protocol/wire/frame.js'
+import { TAG } from '../../wire-protocol/wire/tags.js'
+import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'
 import { ServerChannel } from '../../wire-protocol/channel/server/channel.js'
 
@@ -70,13 +72,13 @@ describe('self-initiated close', () => {
 
     expect(channel.isClosed).toBe(true)
     expect(didFireClose).toBe(false)
-    expect(channel._didShutdown).toBe(false)
+    expect(channel._phase).not.toBe('ended')
 
     channel._onPeerCloseAck()
     await expect(closePromise).resolves.toBe(0)
     expect(didFireClose).toBe(true)
     expect(closeErr).toBe(undefined)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('close() sends close frame and resolves 0 after ack', async () => {
@@ -94,7 +96,7 @@ describe('self-initiated close', () => {
 
     channel._onPeerCloseAck()
     await expect(closePromise).resolves.toBe(0)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('close() resolves 1 when peer never acks', async () => {
@@ -110,7 +112,7 @@ describe('self-initiated close', () => {
     expectCloseFrame(frames[0]!)
 
     await expect(closePromise).resolves.toBe(1)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('close() waits for inflight inbound ack before resolving', async () => {
@@ -135,12 +137,12 @@ describe('self-initiated close', () => {
 
     // close() hasn't resolved yet — inflight inbound ack still in progress
     await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(channel._didShutdown).toBe(false)
+    expect(channel._phase).not.toBe('ended')
 
     // Inbound work finishes → close resolves
     await expect(inboundPending).resolves.toBeUndefined()
     await expect(closePromise).resolves.toBe(0)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('close() waits for inflight outbound ack before resolving', async () => {
@@ -158,7 +160,7 @@ describe('self-initiated close', () => {
 
     // close() hasn't resolved yet — outbound ack still pending
     await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(channel._didShutdown).toBe(false)
+    expect(channel._phase).not.toBe('ended')
 
     // Ack arrives → close resolves
     const ackReqFrame = decode(frames[0]!)
@@ -167,7 +169,7 @@ describe('self-initiated close', () => {
 
     await expect(sendPromise).resolves.toBe('received')
     await expect(closePromise).resolves.toBe(0)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('close() waits for async onClose callbacks before resolving', async () => {
@@ -189,11 +191,11 @@ describe('self-initiated close', () => {
     // close() hasn't resolved — async onClose still running
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(didFinishOnClose).toBe(false)
-    expect(channel._didShutdown).toBe(false)
+    expect(channel._phase).not.toBe('ended')
 
     await expect(closePromise).resolves.toBe(0)
     expect(didFinishOnClose).toBe(true)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('buffered send flushes before close request on attachPeer', async () => {
@@ -309,10 +311,10 @@ describe('peer-initiated close', () => {
 
     // Not terminated yet — inflight work
     await new Promise((resolve) => setTimeout(resolve, 10))
-    expect(channel._didShutdown).toBe(false)
+    expect(channel._phase).not.toBe('ended')
 
     await expect(pending).resolves.toBeUndefined()
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('peer timeout cuts short long-running inflight work', async () => {
@@ -335,7 +337,7 @@ describe('peer-initiated close', () => {
     expectCloseAckFrame(frames[0]!)
 
     await new Promise((resolve) => setTimeout(resolve, 25))
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('shutdown waits for async onClose callbacks', async () => {
@@ -353,11 +355,11 @@ describe('peer-initiated close', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(didFinishOnClose).toBe(false)
-    expect(channel._didShutdown).toBe(false)
+    expect(channel._phase).not.toBe('ended')
 
     await new Promise((resolve) => setTimeout(resolve, 25))
     expect(didFinishOnClose).toBe(true)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 })
 
@@ -388,7 +390,7 @@ describe('cross-close', () => {
     channel._onPeerCloseAck()
 
     await expect(closePromise).resolves.toBe(0)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
   })
 
   test('both sides close: close() resolves 1 on timeout without ack', async () => {
@@ -404,6 +406,20 @@ describe('cross-close', () => {
     channel._onPeerCloseRequest(10)
 
     await expect(closePromise).resolves.toBe(1)
-    expect(channel._didShutdown).toBe(true)
+    expect(channel._phase).toBe('ended')
+  })
+
+  test("a peer's shorter timeout cuts short a close already waiting on its own", async () => {
+    const channel = new ServerChannel<number, never>({ id: crypto.randomUUID() })
+
+    channel._registerChannel()
+    channel._attachPeer(createPeer([]))
+
+    const closePromise = channel.close({ timeout: 60_000 })
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    channel._onPeerCloseRequest(10)
+
+    await expect(closePromise).resolves.toBe(1)
+    expect(channel._phase).toBe('ended')
   })
 })

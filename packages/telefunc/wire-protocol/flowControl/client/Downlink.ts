@@ -1,6 +1,6 @@
 export { Downlink }
 
-import { DRAIN_SPAN_MS, DrainRate } from '../Link.js'
+import { DRAIN_SPAN_MS, DrainRate } from '../DrainRate.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import type { Uplink } from './Uplink.js'
 

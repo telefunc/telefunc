@@ -1,16 +1,9 @@
 import { describe, expect, test } from 'vitest'
 
-import {
-  ERROR_REASON,
-  ProtocolViolationError,
-  TAG,
-  decode,
-  decodeClientFrame,
-  encode,
-  type BarrierPayload,
-  type ReconcilePayload,
-  type ReconciledPayload,
-} from '../wire/connectionFrame.js'
+import { ERROR_REASON, decode, decodeClientFrame, encode } from '../wire/frame.js'
+import { TAG } from '../wire/tags.js'
+import type { BarrierPayload, ReconcilePayload, ReconciledPayload } from '../wire/payloads.js'
+import { ProtocolViolationError } from '../wire/protocolViolation.js'
 import {
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,
@@ -179,8 +172,8 @@ describe('decodeClientFrame — direction', () => {
     ['ACK_RES', encode.ackRes(0, 1, 1, '"ok"')],
     ['PUBLISH_ACK_REQ', encode.publishAckReq(0, '"hi"', 1)],
     ['PUBLISH_BINARY_ACK_REQ', encode.publishBinaryAckReq(0, new Uint8Array([1]), 1)],
-    ['CLOSE', encode.close(0, 1_000)],
-    ['CLOSE_ACK', encode.closeAck(0)],
+    ['CLOSE', encode.close(0, 1_000, 1)],
+    ['CLOSE_ACK', encode.closeAck(0, 1)],
     ['ABORT', encode.abort(0, JSON.stringify('nope'), 1)],
     ['ERROR', encode.error(0, ERROR_REASON.LOST, 1)],
     ['WINDOW', encode.window(0, 1_024, 7)],

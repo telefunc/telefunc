@@ -4,7 +4,7 @@ export { MemoryBackend }
 
 import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from '../broadcast/contract.js'
 import type { OrderingInfo } from '../../wire/orderingFrame.js'
-import type { BroadcastKind } from '../../wire/connectionFrame.js'
+import type { BroadcastKind } from '../../wire/payloads.js'
 import type { BackendPayload, BackendReceiver, SubscriptionAttempt, SubscriptionDriver } from '../subscription.js'
 import { MemoryPubSub, type Subscriptions } from './deliveries.js'
 

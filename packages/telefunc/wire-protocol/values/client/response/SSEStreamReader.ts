@@ -2,7 +2,7 @@ export { SSEStreamReader }
 
 import { BaseStreamReader } from './BaseStreamReader.js'
 import { SSEEvents } from '../../../channel/client/SSEEvents.js'
-import { splitOwned } from '../../../wire/frame.js'
+import { splitOwned } from '../../../wire/envelope.js'
 import { throwAbortError } from '../../../../client/remoteTelefunctionCall/errors.js'
 
 const EMPTY = new Uint8Array(0)

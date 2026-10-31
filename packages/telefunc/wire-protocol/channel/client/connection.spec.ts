@@ -16,7 +16,7 @@ function createChannel(id = crypto.randomUUID()) {
     _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
     _onTransportOpen() {},
     _dispatchFrame() {},
-    _onTransportClose() {},
+    _onEnded() {},
     _onTransportBatched() {},
     _onUpgradeJoined() {},
     _reattachState: () => ({}),
@@ -62,7 +62,7 @@ describe('SSE reconcile watchdog', () => {
     expect(getSseDownstreamOpens()).toBe(1)
 
     // The downstream is silent, so RECONCILED never lands. Without the watchdog the
-    // connection wedges here forever: pings keep flowing but `handlePongTimeout` is
+    // connection wedges here forever: pings keep flowing but `onPongTimeout` is
     // suppressed while reconciling, so the dead wire is never noticed. The watchdog must
     // instead time out the reconcile and reconnect.
     await vi.advanceTimersByTimeAsync(RECONCILE_TIMEOUT_MS + CHANNEL_RECONNECT_INITIAL_DELAY_MS + 500)

@@ -17,11 +17,6 @@ class Fifo<T> {
     return this.items[this.head]
   }
 
-  /** The newest item. */
-  peekLast(): T | undefined {
-    return this.length > 0 ? this.items[this.items.length - 1] : undefined
-  }
-
   *[Symbol.iterator](): Iterator<T> {
     for (let i = this.head; i < this.items.length; i++) yield this.items[i] as T
   }

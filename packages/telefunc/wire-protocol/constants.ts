@@ -193,7 +193,7 @@ export const WIRE_ANNOUNCED_WAIT_MARGIN = 2
 export const WIRE_PIECE_RATE_WINDOW_MS = 60_000
 /** A receiver sends at most one PIECES_ACK this often, covering every frame it took since the last. */
 export const WIRE_PIECES_ACK_GAP_MS = 50
-/** The same where its peer holds data back by what it acknowledges (see `flowControl/client/SendBudget.ts`). */
+/** The same where its peer holds data back by what it acknowledges (see `flowControl/client/headroom.ts`). */
 export const WIRE_SEND_ACK_GAP_MS = 10
 /** Where its peer holds data back, a receiver acks data this soon once `WIRE_SEND_ACK_MIN_BYTES` wait, not 16 KiB. */
 export const WIRE_SEND_ACK_MS = 25
@@ -243,7 +243,7 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             ack arrival AND credit refresh, which is confusing for
 //                             users. `await` is already the natural backpressure
 //                             signal here. Revisit if real workloads need it.
-//                             Also NOT tracked via `FlowControl.onConsumed` on
+//                             Also NOT tracked via `ReceiveCredit.onConsumed` on
 //                             receive — those bytes were never in the sender's
 //                             credit budget, so counting them would advertise
 //                             free buffer the receiver doesn't actually have.
@@ -277,7 +277,7 @@ export const CREDIT_WINDOW_MAX_BYTES = 64 * 1024 * 1024
 /** The most a batch POST is sized to carry (see `SSE_POST_TARGET_MS`). */
 export const SSE_POST_MAX_BYTES = CREDIT_WINDOW_MAX_BYTES / 2
 
-/** Each lane of a channel's replay buffer, on both ends: twice `CREDIT_WINDOW_MAX_BYTES` (see `replayWindow`). */
+/** Each queue of a channel's replay buffer, on both ends: twice `CREDIT_WINDOW_MAX_BYTES` (see `replayWindow`). */
 export const CHANNEL_SERVER_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 export const CHANNEL_SERVER_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
 export const CHANNEL_CLIENT_REPLAY_BUFFER_BYTES = 2 * CREDIT_WINDOW_MAX_BYTES
@@ -291,7 +291,7 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_B
 export const CREDIT_MSG_WINDOW_INITIAL = 100
 
 /** Hard cap on the adaptive message-count window. The self-utilisation gate in
- *  `FlowControl.onPingAck` stops growth long before this on hosts that can't
+ *  `ReceiveCredit.onPingAck` stops growth long before this on hosts that can't
  *  sustain the dispatch rate. */
 export const CREDIT_MSG_WINDOW_MAX = 50_000
 
@@ -304,12 +304,12 @@ export const BDP_PING_MIN_INTERVAL_MS = 50
  *  rare without ever freezing them, so a rate change is rediscovered within this. */
 export const BDP_PING_MAX_INTERVAL_MS = 10_000
 
-/** Rolling window over which `FlowControl` measures its own contribution to the
+/** Rolling window over which `SelfTime` measures telefunc's own contribution to the
  *  event loop (telefunc-side self-time vs wall-clock). 1 s captures recent
  *  pressure without lingering on stale history. */
 export const FC_SELF_TIME_WINDOW_MS = 1000
 
-/** How much a page's channel sends between macrotask yields, so its browser keeps the wire fed (see `FlowControl`). */
+/** How much a page's channel sends between macrotask yields, so its browser keeps the wire fed (see `SendCredit`). */
 export const FC_PAGE_YIELD_BYTES = 64 * 1024
 
 /** Self-utilisation threshold above which the flow-control sender yields a
