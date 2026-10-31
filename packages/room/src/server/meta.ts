@@ -10,15 +10,12 @@ export {
   dropMemberMeta,
   readMembersMetaCells,
   memberMetaOf,
-  dropCells,
-  deleteCells,
-  readOpenCells,
 }
 export type { StoredRoomMeta, RoomMetaWrite, MemberMetaWrite, MemberMetaCells }
 
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { getRoomBackend } from '../backend/plane.js'
-import { CELL_PAGE_SIZE, type CellMutation, type CellsRead, type CxResult } from '../backend/contract.js'
+import { CELL_PAGE_SIZE, type CellMutation, type CxResult } from '../backend/contract.js'
 import { decodeCellCounter } from '../backend/semantics.js'
 import { Slice } from '../Slice.js'
 import { participantGoneError, roomClosedError } from '../errors.js'
@@ -44,6 +41,7 @@ import {
   roomMetaGenPrefix,
 } from './cells.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
+import { dropCells, readOpenCells } from './cellStore.js'
 import { commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 
@@ -237,33 +235,16 @@ function committed(
   return update(result.committed.get(META_SEQ_CELL_KEY)!.value)
 }
 
-async function readOpenCells(
-  roomId: string,
-  inc: string,
-  keys: string[],
-): Promise<Exclude<CellsRead, { staleInc: true }>> {
-  const read = await getRoomBackend().readCells(roomId, inc, { keys })
-  if ('staleInc' in read) throw roomClosedError(roomId)
-  return read
-}
-
 /** Each generation a replace marked, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn, its mark going with
  *  its last page. A marked generation stopped being `meta:gen` in the exchange that marked it, so whoever finishes a
  *  mark, a later replace or the heartbeat, drops no live key. */
 async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise<void> {
-  const backend = getRoomBackend()
-  const marks = await backend.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
+  const marks = await getRoomBackend().readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
   if ('staleInc' in marks) return
   const slice = new Slice()
   for (const [mark, raw] of marks.cells) {
-    let held: string[] = []
-    for await (const page of backend.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
-      if ('staleInc' in page || (held.length > 0 && !(await deleteCells(roomId, inc, held)))) return
-      held = [...page.cells.keys()]
-      if (slice.over) await slice.next()
-    }
-    held.push(mark)
-    if (!(await deleteCells(roomId, inc, held))) return
+    const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(raw))
+    if (!(await dropCells(roomId, inc, prefix, { mark, slice }))) return
   }
 }
 
@@ -352,35 +333,12 @@ async function writeMemberConnection(
  *  `ROOM_PLAN_SLICE_MS` slice per turn; its last page goes with the mark the replace wrote under its own generation
  *  `next`, so a read finding part of it finds a newer generation too. */
 async function dropMemberMetaGeneration(room: RoomIncarnation, id: string, gen: number, next: number): Promise<void> {
-  let held: string[] = []
-  const slice = new Slice()
-  for await (const page of getRoomBackend().readCellPages(room.id, room.inc, memberMetaGenPrefix(id, gen))) {
-    if ('staleInc' in page || (held.length > 0 && !(await deleteCells(room.id, room.inc, held)))) return
-    held = [...page.cells.keys()]
-    if (slice.over) await slice.next()
-  }
-  held.push(memberMetaGenPrefix(id, next))
-  await deleteCells(room.id, room.inc, held)
+  await dropCells(room.id, room.inc, memberMetaGenPrefix(id, gen), { mark: memberMetaGenPrefix(id, next) })
 }
 
 /** Every generation of a member's meta, once its eviction removed the record. */
 async function dropMemberMeta(roomId: string, inc: string, id: string): Promise<void> {
   await dropCells(roomId, inc, memberMetaCellPrefix(id))
-}
-
-/** Deletes the cells under `prefix`, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn. */
-async function dropCells(roomId: string, inc: string, prefix: string): Promise<void> {
-  const slice = new Slice()
-  for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
-    if ('staleInc' in page || !(await deleteCells(roomId, inc, page.cells.keys()))) return
-    if (slice.over) await slice.next()
-  }
-}
-
-/** Deletes `keys` in one exchange; false once the incarnation is stale. */
-async function deleteCells(roomId: string, inc: string, keys: Iterable<string>): Promise<boolean> {
-  const mutations = Array.from(keys, (key) => ({ key, bytes: null }))
-  return (await getRoomBackend().compareExchangeCells(roomId, inc, { expect: [], mutations })) !== 'stale-inc'
 }
 
 /** The meta cells of every member, or of member `id`, by member, read after their `records` (by cell key). A page is

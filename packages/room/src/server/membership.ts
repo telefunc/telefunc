@@ -19,9 +19,8 @@ export {
 import { assert } from '../utils/assert.js'
 import { getRoomBackend } from '../backend/plane.js'
 import { Slice } from '../Slice.js'
-import type { CellCount, CellCounter, CellMutation } from '../backend/contract.js'
+import type { CellMutation } from '../backend/contract.js'
 import { isOpenIncarnation } from '../backend/semantics.js'
-import { ROOM_MEMBER_WRITES_IN_FLIGHT_MAX } from './constants.js'
 import { roomClosedError } from '../errors.js'
 import {
   leaveCauseToWire,
@@ -33,17 +32,25 @@ import {
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 import {
-  dropCells,
   dropMemberMeta,
   memberMetaMutations,
   memberMetaOf,
   readMembersMetaCells,
-  readOpenCells,
-  deleteCells,
   type MemberMetaCells,
 } from './meta.js'
+import {
+  deleteCells,
+  dropCells,
+  eachInFlight,
+  mutateCells,
+  readOpenCells,
+  readPrefix,
+  readPrefixAt,
+  type CellPlan,
+  type CellCommit,
+  type CellsAt,
+} from './cellStore.js'
 import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
-import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from './lifecycle.js'
 import {
   CLEANUP_CELL_PREFIX,
@@ -67,54 +74,11 @@ import {
 } from './cells.js'
 import { decodeSessionRecord, sessionRecordBytes, type RoomSession } from './session.js'
 
-type CellPlan<T> = { value: T; mutations: CellMutation[]; counts?: CellCount[] }
-type CellCommit<T> = { value: T; counters: ReadonlyMap<string, CellCounter> }
 /** `session` hosted the member: its mark goes with the cleanup. */
 type PendingMemberCleanup = { cause: WireLeaveCause; session: string; hidden?: true }
 /** An exchange hosting something under a session found it lost. */
 const SESSION_LOST: unique symbol = Symbol.for('telefunc.RoomSessionLost')
 const identityTextEncoder = new TextEncoder()
-
-/** The cells under `prefix`, a page and a `ROOM_PLAN_SLICE_MS` slice at a time. */
-async function readPrefix(roomId: string, inc: string, prefix: string): Promise<Map<string, Uint8Array>> {
-  return (await readPrefixAt(roomId, inc, prefix)).cells
-}
-
-/** Cells read, and the authority time of the last page's read. */
-type CellsAt = { cells: Map<string, Uint8Array>; now: number }
-
-async function readPrefixAt(roomId: string, inc: string, prefix: string): Promise<CellsAt> {
-  const cells = new Map<string, Uint8Array>()
-  let now = 0
-  const slice = new Slice()
-  for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
-    if ('staleInc' in page) throw roomClosedError(roomId)
-    for (const [key, raw] of page.cells) cells.set(key, raw)
-    now = page.now
-    if (slice.over) await slice.next()
-  }
-  return { cells, now }
-}
-
-/** Reads `keys`, plans from them and the read's authority time, and commits only while each is still as read. */
-async function mutateCells<T>(
-  roomId: string,
-  inc: string,
-  keys: string[],
-  plan: (cells: ReadonlyMap<string, Uint8Array>, now: number) => CellPlan<T>,
-): Promise<CellCommit<T>> {
-  const backend = getRoomBackend()
-  return await retryCompareExchange(async () => {
-    const read = await backend.readCells(roomId, inc, { keys })
-    if ('staleInc' in read) throw roomClosedError(roomId)
-    const { value, mutations, counts = [] } = plan(read.cells, read.now)
-    if (mutations.length === 0 && counts.length === 0) return { value, counters: new Map() }
-    const expect = keys.map((key) => ({ key, version: read.versions.get(key) ?? null }))
-    const result = await backend.compareExchangeCells(roomId, inc, { expect, mutations, counts })
-    if (result === 'stale-inc') throw roomClosedError(roomId)
-    return result === 'conflict' ? CX_CONFLICT : { value, counters: result.committed }
-  })
-}
 
 /** Commits what `writesOf` plans under the session in one exchange with its cell, which it only expects while live: a
  *  session found lost is replaced, and the write planned again under the new one. */
@@ -296,31 +260,6 @@ async function finishSessionMember(room: RoomIncarnation, session: string, id: s
     value: undefined,
     mutations: current.has(mark) ? [{ key: mark, bytes: null }] : [],
   }))
-}
-
-/** Runs `task` on each item in turn, `ROOM_MEMBER_WRITES_IN_FLIGHT_MAX` at a time and a `ROOM_PLAN_SLICE_MS` slice per
- *  turn; throws the first failure once every task ran. */
-async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<unknown>): Promise<void> {
-  const pending = items[Symbol.iterator]()
-  const slice = new Slice()
-  let turn: Promise<void> | null = null
-  let failure = null as { error: unknown } | null
-  const worker = async () => {
-    for (let next = pending.next(); next.done !== true; next = pending.next()) {
-      if (slice.over) {
-        await (turn ??= slice.next().then(() => {
-          turn = null
-        }))
-      }
-      try {
-        await task(next.value)
-      } catch (error) {
-        failure ??= { error }
-      }
-    }
-  }
-  await Promise.all(Array.from({ length: ROOM_MEMBER_WRITES_IN_FLIGHT_MAX }, worker))
-  if (failure) throw failure.error
 }
 
 /** Remove a member and record the cleanup in one write, then finish the cleanup; false once neither the member nor
