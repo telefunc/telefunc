@@ -15,8 +15,18 @@ type EntryCallback = {
   reject: (err: Error) => void
 }
 
+/** Where `flush` hands each entry, by its kind. */
+type FlushHandlers = {
+  sendText: (data: string) => void
+  sendPublish: (data: string) => void
+  sendBinary: (data: Uint8Array) => void
+  sendTextAck: (data: string, cb: EntryCallback | null) => void
+  sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
+  sendPublishBinary: (data: Uint8Array) => void
+}
+
 /**
- * Hard-capped ring buffer for channel messages sent before the client connects.
+ * Hard-capped FIFO buffer for channel messages sent before the client connects.
  *
  * Buffers text, publish, binary, and ack-request messages sent before the client connects.
  * After every push, oldest entries are evicted (FIFO) until the byte
@@ -24,7 +34,7 @@ type EntryCallback = {
  * Delivery callbacks on evicted entries are rejected immediately so channel
  * memory stays hard-capped.
  *
- * Binary messages (tags 1 and 4) are stored in a separate lane with its own
+ * Binary messages (binary sends, binary ack requests, binary publishes) are stored in a separate lane with its own
  * byte budget. An oversized binary only clears the binary lane — text messages
  * are never affected.
  *
@@ -89,14 +99,7 @@ class ServerChannelBuffer<TAck = never> {
    * Merge-iterates text and binary lanes by insertion order so the caller
    * sees the same sequence as if both lanes were a single interleaved buffer.
    */
-  flush(handlers: {
-    sendText: (data: string) => void
-    sendPublish: (data: string) => void
-    sendBinary: (data: Uint8Array) => void
-    sendTextAck: (data: string, cb: EntryCallback | null) => void
-    sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
-    sendPublishBinary: (data: Uint8Array) => void
-  }): void {
+  flush(handlers: FlushHandlers): void {
     let ti = this.text.head
     let bi = this.binary.head
     const textLen = this.text.dataLength
@@ -117,18 +120,7 @@ class ServerChannelBuffer<TAck = never> {
     this.insertionSeq = 0
   }
 
-  private flushEntry(
-    lane: BufferLane,
-    i: number,
-    h: {
-      sendText: (data: string) => void
-      sendPublish: (data: string) => void
-      sendBinary: (data: Uint8Array) => void
-      sendTextAck: (data: string, cb: EntryCallback | null) => void
-      sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
-      sendPublishBinary: (data: Uint8Array) => void
-    },
-  ): void {
+  private flushEntry(lane: BufferLane, i: number, h: FlushHandlers): void {
     const tag = lane.tagAt(i)
     const data = lane.dataAt(i)
     const cb = lane.callbackAt(i)
@@ -186,7 +178,7 @@ class BufferLane {
   private tags: number[] = []
   private data: (string | Uint8Array)[] = []
   private sizes: number[] = []
-  private callbacks: (EntryCallback | EntryCallback | null)[] = []
+  private callbacks: (EntryCallback | null)[] = []
   private order: number[] = []
   head = 0
   private totalBytes = 0
@@ -225,13 +217,7 @@ class BufferLane {
     return this.order[i]!
   }
 
-  push(
-    tag: number,
-    data: string | Uint8Array,
-    bytes: number,
-    callback: EntryCallback | EntryCallback | null,
-    order: number,
-  ): void {
+  push(tag: number, data: string | Uint8Array, bytes: number, callback: EntryCallback | null, order: number): void {
     const held = this.admit(bytes, callback)
     if (held !== null) this.append(tag, data, held, callback, order)
   }
