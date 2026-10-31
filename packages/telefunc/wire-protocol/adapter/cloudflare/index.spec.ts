@@ -35,7 +35,6 @@ const mocks = vi.hoisted(() => {
   return {
     crosswsAdapter,
     crosswsFactory: vi.fn(() => crosswsAdapter),
-    enableChannelTransports: vi.fn(),
     setAdapterMaxFrameBytes: vi.fn(),
     getServerConfig: vi.fn(() => ({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })),
     telefuncMock: vi.fn(async () => ({
@@ -75,7 +74,6 @@ vi.mock('../../channel/server/ws.js', () => ({
 
 vi.mock('../../../node/server/serverConfig.js', () => ({
   getServerConfig: mocks.getServerConfig,
-  enableChannelTransports: mocks.enableChannelTransports,
   setAdapterMaxFrameBytes: mocks.setAdapterMaxFrameBytes,
 }))
 
@@ -154,7 +152,6 @@ beforeEach(() => {
   mocks.crosswsAdapter.handleDurableUpgrade.mockReset()
   mocks.crosswsAdapter.handleDurableMessage.mockReset()
   mocks.crosswsAdapter.handleDurableClose.mockReset()
-  mocks.enableChannelTransports.mockClear()
   mocks.setAdapterMaxFrameBytes.mockClear()
   mocks.getServerConfig.mockReset()
   mocks.getServerConfig.mockReturnValue({ telefuncUrl: '/_telefunc', channel: { transports: ['WS'] } })
@@ -186,7 +183,6 @@ describe('cloudflare adapter entrypoint', () => {
       env: { TelefuncDurableObject: binding, TelefuncKV: kv } as unknown as Cloudflare.Env,
     })
 
-    expect(mocks.enableChannelTransports).toHaveBeenCalled()
     expect(mocks.installBroadcastAdapter).toHaveBeenCalledWith(expect.any(Function))
     expect(mocks.transportInstances).toHaveLength(1)
     expect(get).toHaveBeenCalledWith(expect.objectContaining({ name: 'telefunc-shard-weur-1' }), {
