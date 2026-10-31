@@ -16,7 +16,7 @@ export {
   textEncoder,
   textDecoder,
 }
-export type { SseRequestMetadata }
+export type { SseRequestMetadata, WireSseRequestMetadata }
 
 import { assertProtocol } from './protocolViolation.js'
 
@@ -127,17 +127,24 @@ type SseRequestMetadata = {
 /** On the wire, a kind other than `batch` is its name set to `true`. */
 const SSE_REQUEST_FLAGS = ['streamResponse', 'streamRequest', 'close'] as const satisfies SseRequestMetadata['kind'][]
 
+/** The metadata as the page builds it, in its wire shape: `{ connId }` for a `batch`, else its kind set to `true`. */
+type WireSseRequestMetadata =
+  | { connId: string }
+  | {
+      [Kind in (typeof SSE_REQUEST_FLAGS)[number]]: { connId: string } & Record<Kind, true>
+    }[(typeof SSE_REQUEST_FLAGS)[number]]
+
 /** `[u32 length][metadata UTF-8]` — the wire header, shared by every POST kind. The
  *  streaming stream-request POST pushes this onto its body directly (its body can't be a
  *  one-shot Blob); the others hand it to `encodeSseRequest` with their frames appended. */
-function encodeSseRequestMetadata({ connId, kind }: SseRequestMetadata): Uint8Array<ArrayBuffer> {
-  return encodeLengthPrefixedString(JSON.stringify(kind === 'batch' ? { connId } : { connId, [kind]: true }))
+function encodeSseRequestMetadata(metadata: WireSseRequestMetadata): Uint8Array<ArrayBuffer> {
+  return encodeLengthPrefixedString(JSON.stringify(metadata))
 }
 
 /** A POST's body: its metadata, then `frames` length-prefixed after `head`, in a Blob that takes the frames as they
  *  are: a batch POST of a window's worth isn't copied into one buffer first. `head`: the first frames,
  *  length-prefixed already. */
-function encodeSseRequest(metadata: SseRequestMetadata, frames?: Uint8Array<ArrayBuffer>[], head?: Blob): Blob {
+function encodeSseRequest(metadata: WireSseRequestMetadata, frames?: Uint8Array<ArrayBuffer>[], head?: Blob): Blob {
   const header = encodeSseRequestMetadata(metadata)
   return new Blob(frames ? [header, encodeLengthPrefixedBlob(frames, head)] : [header])
 }
