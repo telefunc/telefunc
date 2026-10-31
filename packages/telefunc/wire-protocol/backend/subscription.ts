@@ -27,8 +27,7 @@ type BackendReceiver<Payload = Uint8Array> = (payload: Payload, info: { seq: num
 type SubscriptionAttempt = {
   state(): SubscriptionState
   onStateChange(cb: (state: SubscriptionState, reason?: Error) => void): () => void
-  /** Settles after the driver's own cleanup, which may leave transport work queued (Redis unsubscribes its channel on
-   *  the connection's next sync). */
+  /** Settles after the driver's own cleanup, which may leave transport work queued. */
   unsubscribe(): Promise<void>
 }
 

@@ -65,7 +65,6 @@ function superviseBroadcastDriver(driver: BroadcastDriver): BroadcastBackend {
   return {
     publish: (route, payload) =>
       subscriptions.holding ? publishAfterEstablished(route, payload) : publishNow(route, payload),
-    // The manager hands a route's consumers only the deliveries checkDelivery passed.
     subscribe: (route, receiver) => {
       const published = driver.published?.(route.key) ?? 0
       const receive = receiver as BackendReceiver<BackendPayload>
