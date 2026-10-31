@@ -330,9 +330,9 @@ function testChannel(isDev: boolean, inDocker = false) {
 
   // ── Binary sendBinary / listenBinary round-trip ───────────────────────
 
-  if (channelTransport === 'ws') {
-    // In `vike dev` the channel is the telefunction's copy of telefunc, not the server's: the server tells the
-    // violation it raises by its brand.
+  // The page's first wire is the WebSocket, whose RECONCILE names the channel. In `vike dev` the channel is the
+  // telefunction's copy of telefunc, not the server's: the server tells the violation it raises by its brand.
+  if (channelTransports[0] === 'ws') {
     test("channel: a text message the server can't parse, on a channel a telefunction returned, closes the page's WebSocket", async () => {
       // A page of its own: its WebSocket stays routed through the test for as long as the page lives.
       const context = await page.context().browser()!.newContext()
