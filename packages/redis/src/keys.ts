@@ -27,9 +27,8 @@ export type { CommitChannels, FenceTokens }
 
 // Redis keys. Every per-room key shares `{rid}`, so a room is one Cluster slot.
 
-import { roomKit } from './roomKit.js'
 import type { BroadcastRoute } from 'telefunc/__internal'
-import type { LaneId } from '@telefunc/room/backend'
+import type { LaneId, RoomPlaneKit } from '@telefunc/room/backend'
 
 /** A binary commit's lane, its member's every-track and its track's every-member channels;
  *  another commit's lane only. */
@@ -113,12 +112,19 @@ function retainedOfTrackKey(prefix: string, roomId: string, inc: string, track: 
 function channelKey(prefix: string, roomId: string, inc: string, laneKey: string): string {
   return channelsPrefix(prefix, roomId, inc) + laneKey
 }
-function commitChannels(prefix: string, roomId: string, inc: string, lane: LaneId, laneKey: string): CommitChannels {
+function commitChannels(
+  prefix: string,
+  roomId: string,
+  inc: string,
+  lane: LaneId,
+  laneKey: string,
+  kit: RoomPlaneKit,
+): CommitChannels {
   const channels = channelsPrefix(prefix, roomId, inc)
   return {
     lane: channels + laneKey,
-    everyTrack: lane.kind === 'binary' ? channels + roomKit().everyTrackLaneKey(lane.member) : null,
-    everyMember: lane.kind === 'binary' ? channels + roomKit().everyMemberLaneKey(lane.track) : null,
+    everyTrack: lane.kind === 'binary' ? channels + kit.everyTrackLaneKey(lane.member) : null,
+    everyMember: lane.kind === 'binary' ? channels + kit.everyMemberLaneKey(lane.track) : null,
   }
 }
 /** What every lane channel of an incarnation starts with. */

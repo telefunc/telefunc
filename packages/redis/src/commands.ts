@@ -3,7 +3,6 @@ export type { RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
-import { roomKit } from './roomKit.js'
 import type { BroadcastPayload, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
 import type {
   CellCounter,
@@ -17,6 +16,7 @@ import type {
   RoomHead,
   RoomSubscriptionSource,
   CellsRead,
+  RoomPlaneKit,
 } from '@telefunc/room/backend'
 import { assert } from './assert.js'
 import {
@@ -634,14 +634,17 @@ const REDIS_COMMANDS = {
     lua: READ_CELL_PAGE_LUA,
     numberOfKeys: 4,
     binaryReply: true,
-    invoke: (prefix, { roomId, inc, cellPrefix, after }: RoomInc & { cellPrefix: string; after?: string }) => ({
+    invoke: (
+      prefix,
+      { roomId, inc, cellPrefix, after, pageSize }: RoomInc & { cellPrefix: string; after?: string; pageSize: number },
+    ) => ({
       keys: [
         headKey(prefix, roomId),
         cellIndexKey(prefix, roomId, inc),
         cellValuesKey(prefix, roomId, inc),
         cellVersionsKey(prefix, roomId, inc),
       ],
-      argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(roomKit().CELL_PAGE_SIZE)],
+      argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(pageSize)],
     }),
     parse: (reply): CellsRead & { after?: string } => {
       const [tag, now, ...found] = reply as Buffer[]
@@ -654,8 +657,7 @@ const REDIS_COMMANDS = {
     name: 'tfRoomLaneStart',
     lua: LANE_START_LUA,
     numberOfKeys: 2,
-    invoke: (prefix, { roomId, inc, lane }: RoomSubscriptionSource) => {
-      const laneKey = roomKit().encodeLaneKey(lane)
+    invoke: (prefix, { roomId, inc, lane, laneKey }: RoomSubscriptionSource & { laneKey: string }) => {
       const memberLane = lane.kind === 'inbox' || lane.kind === 'binary'
       return {
         keys: [
@@ -704,8 +706,8 @@ const REDIS_COMMANDS = {
     name: 'tfRoomLaneMarks',
     lua: LANE_MARKS_LUA,
     numberOfKeys: null,
-    invoke: (prefix, { roomId, inc, lanes }: RoomInc & { lanes: readonly string[] }) => ({
-      keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(laneKey).member)),
+    invoke: (prefix, { roomId, inc, lanes, kit }: RoomInc & { lanes: readonly string[]; kit: RoomPlaneKit }) => ({
+      keys: lanes.map((laneKey) => memberOrderKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).member)),
       argv: lanes,
     }),
     parse: (reply) => (reply as string[]).map((mark) => (mark === '' ? null : parseOrderMark(mark))),
@@ -815,8 +817,10 @@ const REDIS_COMMANDS = {
     name: 'tfRoomRetainedDelete',
     lua: RETAINED_DELETE_LUA,
     numberOfKeys: 5,
-    invoke: (prefix, { roomId, inc, lane, ifSeq }: RoomInc & { lane: LaneId; ifSeq: number | undefined }) => {
-      const laneKey = roomKit().encodeLaneKey(lane)
+    invoke: (
+      prefix,
+      { roomId, inc, lane, laneKey, ifSeq }: RoomInc & { lane: LaneId; laneKey: string; ifSeq: number | undefined },
+    ) => {
       const retained = retainedKey(prefix, roomId, inc, laneKey)
       const binary = lane.kind === 'binary'
       return {
@@ -836,10 +840,10 @@ const REDIS_COMMANDS = {
     name: 'tfRoomForgetTrackLanes',
     lua: FORGET_TRACK_LANES_LUA,
     numberOfKeys: null,
-    invoke: (prefix, { roomId, inc, lanes }: RoomInc & { lanes: readonly string[] }) => ({
+    invoke: (prefix, { roomId, inc, lanes, kit }: RoomInc & { lanes: readonly string[]; kit: RoomPlaneKit }) => ({
       keys: [
         generationKeysKey(prefix, roomId, inc),
-        ...lanes.map((laneKey) => trackLanesKey(prefix, roomId, inc, binaryLaneOf(laneKey).track)),
+        ...lanes.map((laneKey) => trackLanesKey(prefix, roomId, inc, binaryLaneOf(kit, laneKey).track)),
       ],
       argv: lanes,
     }),
@@ -949,8 +953,8 @@ function parseOrderMark(mark: string): OrderingInfo {
   return { seq, timestamp }
 }
 
-function binaryLaneOf(laneKey: string): Extract<LaneId, { kind: 'binary' }> {
-  const lane = roomKit().decodeLaneKey(laneKey)
+function binaryLaneOf(kit: RoomPlaneKit, laneKey: string): Extract<LaneId, { kind: 'binary' }> {
+  const lane = kit.decodeLaneKey(laneKey)
   assert(lane.kind === 'binary')
   return lane
 }

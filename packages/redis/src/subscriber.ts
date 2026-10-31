@@ -1,7 +1,6 @@
 export { RedisSubscriptionDriver }
 export type { RedisSubscriptionSource }
 
-import { roomKit } from './roomKit.js'
 import { randomUUID } from 'node:crypto'
 import type {
   BackendPayload,
@@ -10,30 +9,29 @@ import type {
   OrderingInfo,
   SubscriptionAttempt,
   SubscriptionBinding,
-  SubscriptionDriver,
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '@telefunc/room/backend'
 import { DriverAttempt, decodeOrderingFrame } from 'telefunc/__internal'
 import { createDeferred, type Deferred } from './createDeferred.js'
-import {
-  broadcastChannel,
-  channelKey,
-  generationInvalidationChannel,
-  type CommitChannels,
-  type FenceTokens,
-} from './keys.js'
+import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
 
 type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
 type RedisSubscriptionDriverOptions = {
-  prefix: string
   /** A fresh, unconnected subscriber socket that never retries on its own. */
   createSubscriber: () => Promise<SubscriberSocket>
+}
+
+/** Where a source's frames arrive, and how its attempts learn where its lanes start. */
+type SourceChannels<Source extends RedisSubscriptionSource> = {
+  laneChannel: string
+  /** A Room lane's generation channel: a message on it means the generation was dropped. */
+  invalidationChannel: string | null
   /** Each of the source's lanes' last commit, by the lane key its frames carry on a fan-in channel and `''` on another;
    *  null once a Room source's incarnation is not the open head. */
-  readLaneStarts: (source: RedisSubscriptionSource) => Promise<Map<string, OrderingInfo> | null>
+  readLaneStarts: (source: Source) => Promise<Map<string, OrderingInfo> | null>
 }
 
 /** The subscriber connection; `id` tells work that awaited across a drop that it is stale. */
@@ -66,13 +64,12 @@ const REORDER_WAIT_MS = 1_000
 
 /**
  * Redis's only backend-specific subscription edge: one subscriber connection, its channels refcounted
- * across attempts. When it drops, every ready attempt goes `lost`; a fresh connection re-subscribes them
- * and reports them `ready` again (a Room lane only while its incarnation is still the open head).
+ * across attempts, which Broadcast's and Room's drivers bind their sources on. When it drops, every ready attempt
+ * goes `lost`; a fresh connection re-subscribes them and reports them `ready` again (a Room lane only while its
+ * incarnation is still the open head).
  */
-class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSource> {
-  private readonly _prefix: string
+class RedisSubscriptionDriver {
   private readonly _createSubscriber: () => Promise<SubscriberSocket>
-  private readonly _readLaneStarts: RedisSubscriptionDriverOptions['readLaneStarts']
   /** Every channel some attempt needs, with the attempts that listen on it. */
   private readonly _byChannel = new Map<string, Set<RedisSubscriptionAttempt>>()
   /** The channels some attempt started or stopped needing since the last sync read them. */
@@ -88,20 +85,14 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   private _outageReported = false
 
   constructor(options: RedisSubscriptionDriverOptions) {
-    this._prefix = options.prefix
     this._createSubscriber = options.createSubscriber
-    this._readLaneStarts = options.readLaneStarts
   }
 
-  bind(source: RedisSubscriptionSource): SubscriptionBinding {
+  bind<Source extends RedisSubscriptionSource>(source: Source, channels: SourceChannels<Source>): SubscriptionBinding {
     return {
       partition: '',
-      open: (receiver) => this._open(source, receiver),
+      open: (receiver) => this._open(source, channels, receiver),
     }
-  }
-
-  partitionHere(): string {
-    return ''
   }
 
   /** Arms a delivery fence on the ready attempts of each channel the commit is published on: `delivery` settles once
@@ -133,10 +124,15 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
     }
   }
 
-  private _open(source: RedisSubscriptionSource, receiver: BackendReceiver<BackendPayload>): SubscriptionAttempt {
+  private _open<Source extends RedisSubscriptionSource>(
+    source: Source,
+    channels: SourceChannels<Source>,
+    receiver: BackendReceiver<BackendPayload>,
+  ): SubscriptionAttempt {
     const attempt: RedisSubscriptionAttempt = new RedisSubscriptionAttempt({
       source,
-      ...channelsOf(this._prefix, source),
+      // The attempt hands `readLaneStarts` its own source only.
+      channels: channels as SourceChannels<RedisSubscriptionSource>,
       receiver,
       onDetach: () => this._detach(attempt),
     })
@@ -292,7 +288,7 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   private async _confirm(attempt: RedisSubscriptionAttempt, id: number): Promise<void> {
     let starts: Map<string, OrderingInfo> | null
     try {
-      starts = await this._readLaneStarts(attempt.source)
+      starts = await attempt.readLaneStarts(attempt.source)
     } catch (error) {
       // A failed read (a command-connection error) fails this attempt, not the shared subscriber connection.
       if (this._isCurrent(id)) attempt.terminate(error)
@@ -317,8 +313,8 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
 class RedisSubscriptionAttempt extends DriverAttempt {
   readonly source: RedisSubscriptionSource
   readonly laneChannel: string
-  /** A Room lane's generation channel: a message on it means the generation was dropped. */
   readonly invalidationChannel: string | null
+  readonly readLaneStarts: SourceChannels<RedisSubscriptionSource>['readLaneStarts']
   readonly channels: readonly string[]
   private readonly _receiver: BackendReceiver<BackendPayload>
   private readonly _onDetach: () => void
@@ -335,14 +331,12 @@ class RedisSubscriptionAttempt extends DriverAttempt {
 
   constructor({
     source,
-    laneChannel,
-    invalidationChannel,
+    channels: { laneChannel, invalidationChannel, readLaneStarts },
     receiver,
     onDetach,
   }: {
     source: RedisSubscriptionSource
-    laneChannel: string
-    invalidationChannel: string | null
+    channels: SourceChannels<RedisSubscriptionSource>
     receiver: BackendReceiver<BackendPayload>
     onDetach: () => void
   }) {
@@ -350,6 +344,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     this.source = source
     this.laneChannel = laneChannel
     this.invalidationChannel = invalidationChannel
+    this.readLaneStarts = readLaneStarts
     this._receiver = receiver
     this._onDetach = onDetach
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
@@ -535,17 +530,5 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   private _rejectFences(error: unknown): void {
     for (const fence of this._fences.values()) fence.reject(error)
     this._fences.clear()
-  }
-}
-
-/** A Room lane's channel and its generation's invalidation channel, or a Broadcast route's channel. */
-function channelsOf(
-  prefix: string,
-  source: RedisSubscriptionSource,
-): { laneChannel: string; invalidationChannel: string | null } {
-  if (!('roomId' in source)) return { laneChannel: broadcastChannel(prefix, source), invalidationChannel: null }
-  return {
-    laneChannel: channelKey(prefix, source.roomId, source.inc, roomKit().encodeLaneKey(source.lane)),
-    invalidationChannel: generationInvalidationChannel(prefix, source.roomId, source.inc),
   }
 }
