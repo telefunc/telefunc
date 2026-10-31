@@ -19,6 +19,7 @@ import type {
 import type { TELEFUNC_SHIELDS } from '../../../node/shared/transformer/generateShield/shieldKey.js'
 
 import type { IndexedPeer } from './IndexedPeer.js'
+import type { ChannelMux } from './mux.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { hasProp } from '../../../utils/hasProp.js'
@@ -122,7 +123,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
-  private _shutdownCallback: ((keep: boolean, pageAttached: boolean) => void) | null = null
+  /** The mux it is registered with, which keeps or forgets it once it ends. */
+  private _mux: ChannelMux | null = null
   private _pendingEnd: PendingEnd | null = null
   private _closeRequestSeq = 0
   /** How far the page is known to have what this channel sent it. */
@@ -178,11 +180,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   get isClosed(): boolean {
     return this._isClosed
-  }
-
-  /** @internal Replaces the one-shot shutdown callback: `keep` if it keeps what its page may lack (see `_release`). */
-  _onShutdown(cb: (keep: boolean, pageAttached: boolean) => void): void {
-    this._shutdownCallback = cb
   }
 
   send(data: ChannelData<ServerToClient>): Promise<void>
@@ -362,7 +359,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal — Prepare channel state so the mux can register it. Called by
    *  `ChannelMux.registerChannel`; external code should call that instead. */
-  _registerChannel(): void {
+  _registerChannel(mux?: ChannelMux): void {
+    this._mux = mux ?? null
     if (this._peer || this._didRegister) return
     this._didRegister = true
     // Allocate the replay buffer up-front: registration is the moment the channel
@@ -861,14 +859,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._awaitingCloseAck = false
     this._clearTimer('_ttlTimer')
     this._clearTimer('_reconnectTimer')
-    // The mux subscribes to this callback in `registerChannel` to evict its bookkeeping —
-    // keeping the channel agnostic of who's listening.
-    const shutdownCb = this._shutdownCallback
-    this._shutdownCallback = null
     // Before any response carried it, it keeps its end for the page a later one hands it to.
-    const keep = !pageGone && !this._pageNeedsNothing()
-    if (!keep) this._release()
-    shutdownCb?.(keep, pageAttached)
+    if (!pageGone && !this._pageNeedsNothing()) {
+      this._mux?.keepEnded(this, pageAttached)
+    } else {
+      this._release()
+      this._mux?.unregisterChannel(this.id)
+    }
     this._fireClose(err)
     this._flow.shutdown()
     this._notifyCloseProgress()

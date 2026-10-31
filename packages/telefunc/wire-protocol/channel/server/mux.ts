@@ -186,18 +186,11 @@ class ChannelMux {
 
   /** Callers must not invoke `channel._registerChannel()` directly. */
   registerChannel(channel: ServerChannel<any, any>): void {
-    channel._registerChannel()
+    // Before a waiter attaches it: its `onOpen` may end it, which it tells this mux.
+    channel._registerChannel(this)
     this.channels.set(channel.id, channel)
-    if (channel._didShutdown) {
-      // It ended before a response carried it: it waits for its page as an ended channel does.
-      this.keepEnded(channel, false)
-    } else {
-      // Before a waiter attaches it: its `onOpen` may end it.
-      channel._onShutdown((keep, pageAttached) => {
-        if (keep) this.keepEnded(channel, pageAttached)
-        else this.unregisterChannel(channel.id)
-      })
-    }
+    // It ended before a response carried it: it waits for its page as an ended channel does.
+    if (channel._didShutdown) this.keepEnded(channel, false)
     const waiters = this.pendingRegisterWaiters.get(channel.id)
     if (waiters) {
       this.pendingRegisterWaiters.delete(channel.id)
@@ -211,7 +204,7 @@ class ChannelMux {
   }
 
   /** Keeps an ended channel attachable until its page needs nothing of it, leaves it, or is away `reconnectTimeout`. */
-  private keepEnded(channel: ServerChannel, pageAttached: boolean): void {
+  keepEnded(channel: ServerChannel<any, any>, pageAttached: boolean): void {
     const timer = this.endedChannels.get(channel)
     if (timer) clearTimeout(timer)
     this.endedChannels.set(
