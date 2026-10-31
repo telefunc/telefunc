@@ -70,44 +70,44 @@ type BroadcastNamespace = {
 class MemberRoute {
   state: 'establishing' | 'ready' | 'lost' = 'establishing'
   readonly route: BroadcastRoute
-  readonly #setup = createDeferred()
-  readonly #presenceListeners = new Listeners<(state: 'ready' | 'lost') => void>()
-  #refreshTimer: ReturnType<typeof setInterval> | undefined
+  private readonly setup = createDeferred()
+  private readonly presenceListeners = new Listeners<(state: 'ready' | 'lost') => void>()
+  private refreshTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(route: BroadcastRoute) {
     this.route = route
-    void this.#setup.promise.catch(() => {})
+    void this.setup.promise.catch(() => {})
   }
 
   /** Settles once the authority first holds this presence. */
   get ready(): Promise<void> {
-    return this.#setup.promise
+    return this.setup.promise
   }
 
   acknowledgePresence(): void {
     const recovered = this.state === 'lost'
     this.state = 'ready'
-    this.#setup.resolve()
-    if (recovered) this.#notifyPresenceState('ready')
+    this.setup.resolve()
+    if (recovered) this.notifyPresenceState('ready')
   }
 
   rejectPresence(error: unknown): void {
-    this.#setup.reject(error)
+    this.setup.reject(error)
   }
 
   losePresence(error: unknown): void {
     if (this.state !== 'ready') return
     this.state = 'lost'
     console.error(new Error(`Cloudflare Broadcast presence for '${this.route.key}' lost`, { cause: error }))
-    this.#notifyPresenceState('lost')
+    this.notifyPresenceState('lost')
   }
 
   onPresenceStateChange(cb: (state: 'ready' | 'lost') => void): () => void {
-    return this.#presenceListeners.add(cb)
+    return this.presenceListeners.add(cb)
   }
 
   startRefresh(refresh: () => Promise<void>): void {
-    this.#refreshTimer = setInterval(() => {
+    this.refreshTimer = setInterval(() => {
       void refresh().then(
         () => this.acknowledgePresence(),
         (error: unknown) => this.losePresence(error),
@@ -116,19 +116,19 @@ class MemberRoute {
   }
 
   stopRefresh(): void {
-    clearInterval(this.#refreshTimer)
+    clearInterval(this.refreshTimer)
   }
 
-  #notifyPresenceState(state: 'ready' | 'lost'): void {
-    for (const listener of this.#presenceListeners.list()) listener(state)
+  private notifyPresenceState(state: 'ready' | 'lost'): void {
+    for (const listener of this.presenceListeners.list()) listener(state)
   }
 }
 
 /** Follows its route's presence: ready once the authority holds it, lost while a refresh fails. */
 class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
-  readonly #receiver: BackendReceiver<BackendPayload>
-  readonly #detach: () => Promise<void>
-  readonly #stopPresenceObservation: () => void
+  private readonly receiver: BackendReceiver<BackendPayload>
+  private readonly detach: () => Promise<void>
+  private readonly stopPresenceObservation: () => void
 
   constructor({
     memberRoute,
@@ -140,13 +140,13 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
     detach: () => Promise<void>
   }) {
     super()
-    this.#receiver = receiver
-    this.#detach = detach
-    this.#stopPresenceObservation = memberRoute.onPresenceStateChange((state) => this.transition(state))
+    this.receiver = receiver
+    this.detach = detach
+    this.stopPresenceObservation = memberRoute.onPresenceStateChange((state) => this.transition(state))
     memberRoute.ready.then(
       () => this.transition('ready'),
       (error: unknown) => {
-        this.#stopPresenceObservation()
+        this.stopPresenceObservation()
         this.transition('closed', error)
       },
     )
@@ -154,13 +154,13 @@ class CloudflareBroadcastSubscriptionAttempt extends DriverAttempt {
 
   /** The authority forwards only to an unexpired record, so what arrives is owed, lost route or not. */
   deliver(payload: BroadcastPayload, info: OrderingInfo): void {
-    this.#receiver(payload, info)
+    this.receiver(payload, info)
   }
 
   async unsubscribe(): Promise<void> {
-    this.#stopPresenceObservation()
+    this.stopPresenceObservation()
     this.transition('closed')
-    await this.#detach()
+    await this.detach()
   }
 }
 
@@ -173,16 +173,16 @@ const AUTHORITY_SCHEMA = `
 /** A key authority DO's Broadcast state, in its SQLite storage: each key's `seq` and each route's member presence.
  *  The tables are created on first use, so a DO in another role never has them. */
 class CloudflareBroadcastAuthorityState {
-  readonly #storage: DurableObjectStorage
-  #schema = false
+  private readonly storage: DurableObjectStorage
+  private schema = false
 
   constructor(state: DurableObjectState) {
-    this.#storage = state.storage
+    this.storage = state.storage
   }
 
   nextSequence(key: string): number {
-    const sql = this.#sql()
-    return this.#storage.transactionSync(() => {
+    const sql = this.sql()
+    return this.storage.transactionSync(() => {
       const row = sql.exec<{ seq: number }>('SELECT seq FROM broadcast_key WHERE key = ?', key).toArray()[0]
       const seq = (row?.seq ?? 0) + 1
       sql.exec('INSERT OR REPLACE INTO broadcast_key (key, seq) VALUES (?, ?)', key, seq)
@@ -192,10 +192,10 @@ class CloudflareBroadcastAuthorityState {
 
   /** Records or withdraws a member DO, dropping the route's lapsed entries; the RPC reply waits for the write. */
   setPresence({ key, kind, member, bucket }: BroadcastPresenceRequest): void {
-    const sql = this.#sql()
+    const sql = this.sql()
     const routeKey = broadcastRouteKey({ key, kind })
     const now = Date.now()
-    this.#storage.transactionSync(() => {
+    this.storage.transactionSync(() => {
       sql.exec(
         'DELETE FROM broadcast_presence WHERE route_key = ? AND (member = ? OR expires_at <= ?)',
         routeKey,
@@ -215,7 +215,7 @@ class CloudflareBroadcastAuthorityState {
 
   /** The route's unexpired member DOs, each with its bucket. */
   livePresence(routeKey: string, now: number): Array<{ member: string; bucket: LocationBucket }> {
-    return this.#sql()
+    return this.sql()
       .exec<{ member: string; bucket: LocationBucket }>(
         'SELECT member, bucket FROM broadcast_presence WHERE route_key = ? AND expires_at > ?',
         routeKey,
@@ -224,12 +224,12 @@ class CloudflareBroadcastAuthorityState {
       .toArray()
   }
 
-  #sql(): SqlStorage {
-    if (!this.#schema) {
-      this.#storage.sql.exec(AUTHORITY_SCHEMA)
-      this.#schema = true
+  private sql(): SqlStorage {
+    if (!this.schema) {
+      this.storage.sql.exec(AUTHORITY_SCHEMA)
+      this.schema = true
     }
-    return this.#storage.sql
+    return this.storage.sql
   }
 }
 
@@ -239,26 +239,26 @@ class CloudflareBroadcastMember {
   /** Subscriptions share an attempt only within one session DO. */
   readonly partition = crypto.randomUUID()
   readonly calls: BroadcastCalls
-  readonly #broadcast: CloudflareBroadcast
-  readonly #id: string
-  #bucket: LocationBucket | null = null
-  readonly #routes = new Map<string, MemberRoute>()
-  readonly #subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
+  private readonly broadcast: CloudflareBroadcast
+  private readonly id: string
+  private locatedBucket: LocationBucket | null = null
+  private readonly routes = new Map<string, MemberRoute>()
+  private readonly subscriptions = new Map<string, CloudflareBroadcastSubscriptionAttempt>()
 
   constructor({ broadcast, id, calls }: { broadcast: CloudflareBroadcast; id: string; calls: BroadcastCalls }) {
-    this.#broadcast = broadcast
-    this.#id = id
+    this.broadcast = broadcast
+    this.id = id
     this.calls = calls
   }
 
   get bucket(): LocationBucket | null {
-    return this.#bucket
+    return this.locatedBucket
   }
 
   /** The bucket the session was placed in, from the request that reached it. */
   locate(bucket: LocationBucket): void {
     assert(KNOWN_BROADCAST_BUCKETS.has(bucket), `Invalid Broadcast location bucket "${bucket}".`)
-    this.#bucket = bucket
+    this.locatedBucket = bucket
   }
 
   openSubscription(
@@ -266,71 +266,71 @@ class CloudflareBroadcastMember {
     receiver: BackendReceiver<BackendPayload>,
   ): CloudflareBroadcastSubscriptionAttempt {
     const routeKey = broadcastRouteKey(route)
-    const memberRoute = this.#ensureRoute(route, routeKey)
+    const memberRoute = this.ensureRoute(route, routeKey)
     const detach = async () => {
-      this.#subscriptions.delete(routeKey)
+      this.subscriptions.delete(routeKey)
       // An establishing route is released once its presence is recorded, if no subscription remains.
-      if (memberRoute.state !== 'establishing') await this.#release(routeKey, memberRoute)
+      if (memberRoute.state !== 'establishing') await this.release(routeKey, memberRoute)
     }
     const attempt = new CloudflareBroadcastSubscriptionAttempt({ memberRoute, receiver, detach })
-    this.#subscriptions.set(routeKey, attempt)
+    this.subscriptions.set(routeKey, attempt)
     return attempt
   }
 
   /** A coordinator's delivery to this DO's subscription. */
   deliver(request: BroadcastDeliverRequest): void {
-    this.#subscriptions.get(broadcastRouteKey(request))?.deliver(request.payload, request.info)
+    this.subscriptions.get(broadcastRouteKey(request))?.deliver(request.payload, request.info)
   }
 
-  #ensureRoute(route: BroadcastRoute, routeKey: string): MemberRoute {
-    const existing = this.#routes.get(routeKey)
+  private ensureRoute(route: BroadcastRoute, routeKey: string): MemberRoute {
+    const existing = this.routes.get(routeKey)
     if (existing !== undefined) return existing
     const memberRoute = new MemberRoute(route)
-    this.#routes.set(routeKey, memberRoute)
+    this.routes.set(routeKey, memberRoute)
     // Nobody awaits a deferred teardown; a failed withdrawal lapses with the presence TTL.
-    void this.#initializeRoute(routeKey, memberRoute).catch(() => {})
+    void this.initializeRoute(routeKey, memberRoute).catch(() => {})
     return memberRoute
   }
 
-  async #initializeRoute(routeKey: string, memberRoute: MemberRoute): Promise<void> {
+  private async initializeRoute(routeKey: string, memberRoute: MemberRoute): Promise<void> {
     try {
-      await this.#recordPresence(memberRoute.route)
+      await this.recordPresence(memberRoute.route)
     } catch (error) {
       memberRoute.rejectPresence(error)
-      this.#routes.delete(routeKey)
+      this.routes.delete(routeKey)
       return
     }
     memberRoute.acknowledgePresence()
-    if (!this.#subscriptions.has(routeKey)) return this.#release(routeKey, memberRoute)
-    memberRoute.startRefresh(() => this.#recordPresence(memberRoute.route))
+    if (!this.subscriptions.has(routeKey)) return this.release(routeKey, memberRoute)
+    memberRoute.startRefresh(() => this.recordPresence(memberRoute.route))
   }
 
-  async #release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
+  private async release(routeKey: string, memberRoute: MemberRoute): Promise<void> {
     memberRoute.stopRefresh()
-    this.#routes.delete(routeKey)
-    await this.#withdrawPresence(memberRoute.route)
+    this.routes.delete(routeKey)
+    await this.withdrawPresence(memberRoute.route)
   }
 
   /** Through the DO's ordered stubs, so one route's writes reach its authority in the order they were made. */
-  #recordPresence(route: BroadcastRoute): Promise<void> {
-    assert(this.#bucket, 'A Broadcast member registers from a session that knows its bucket')
-    const request = { key: route.key, kind: route.kind, member: this.#id, bucket: this.#bucket }
-    return this.#broadcast.sendPresence(this.calls, request)
+  private recordPresence(route: BroadcastRoute): Promise<void> {
+    assert(this.locatedBucket, 'A Broadcast member registers from a session that knows its bucket')
+    const request = { key: route.key, kind: route.kind, member: this.id, bucket: this.locatedBucket }
+    return this.broadcast.sendPresence(this.calls, request)
   }
 
-  #withdrawPresence(route: BroadcastRoute): Promise<void> {
-    const request = { key: route.key, kind: route.kind, member: this.#id, bucket: null }
-    return this.#broadcast.sendPresence(this.calls, request)
+  private withdrawPresence(route: BroadcastRoute): Promise<void> {
+    const request = { key: route.key, kind: route.kind, member: this.id, bucket: null }
+    return this.broadcast.sendPresence(this.calls, request)
   }
 }
 
 /** The isolate's Cloudflare Broadcast driver: where each key's authority and each bucket's coordinators live, and
  *  their RPC handlers. Each session DO subscribes through its own `CloudflareBroadcastMember`. */
 class CloudflareBroadcast {
-  readonly #baseInstanceName: string
-  readonly #scale: CloudflareScale | undefined
-  readonly #locationFallback: LocationBucket
-  readonly #namespace: () => BroadcastNamespace
+  private readonly baseInstanceName: string
+  private readonly scale: CloudflareScale | undefined
+  private readonly locationFallback: LocationBucket
+  private readonly namespace: () => BroadcastNamespace
 
   constructor({
     baseInstanceName,
@@ -343,10 +343,10 @@ class CloudflareBroadcast {
     locationFallback: LocationBucket
     namespace: () => BroadcastNamespace
   }) {
-    this.#baseInstanceName = baseInstanceName
-    this.#scale = scale
-    this.#locationFallback = locationFallback
-    this.#namespace = namespace
+    this.baseInstanceName = baseInstanceName
+    this.scale = scale
+    this.locationFallback = locationFallback
+    this.namespace = namespace
   }
 
   member(id: string, calls: BroadcastCalls): CloudflareBroadcastMember {
@@ -357,7 +357,7 @@ class CloudflareBroadcast {
    *  the caller gets a native promise: a stub's RpcPromise is callable, which `isPromise` doesn't take for a
    *  promise. */
   async publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {
-    const name = this.#authorityName(route.key)
+    const name = this.authorityName(route.key)
     const member = currentCloudflareSession()?.broadcast
     const request = {
       key: route.key,
@@ -365,12 +365,12 @@ class CloudflareBroadcast {
       payload: typeof payload === 'string' ? payload : new Uint8Array(payload),
     }
     const send = (authority: TelefuncBroadcastStub) => authority.telefuncBroadcastPublish(request)
-    if (member === undefined) return send(this.#stubByName(name, null))
-    return this.#callByName(member.calls, name, member.bucket, send)
+    if (member === undefined) return send(this.stubByName(name, null))
+    return this.callByName(member.calls, name, member.bucket, send)
   }
 
   sendPresence(calls: BroadcastCalls, request: BroadcastPresenceRequest): Promise<void> {
-    return this.#callByName(calls, this.#authorityName(request.key), request.bucket, (authority) =>
+    return this.callByName(calls, this.authorityName(request.key), request.bucket, (authority) =>
       authority.telefuncBroadcastPresence(request),
     )
   }
@@ -388,12 +388,12 @@ class CloudflareBroadcast {
     // Presence written before a redeploy dropped its region forwards through the fallback region's coordinators.
     const membersByCoordinatorBucket = new Map<LocationBucket, string[]>()
     for (const { member, bucket } of presence) {
-      const via = getScaleCountForBucket(this.#scale, bucket) > 0 ? bucket : this.#locationFallback
+      const via = getScaleCountForBucket(this.scale, bucket) > 0 ? bucket : this.locationFallback
       getOrCreate(membersByCoordinatorBucket, via, () => []).push(member)
     }
     const forwards = await Promise.allSettled(
       Array.from(membersByCoordinatorBucket, ([bucket, members]) =>
-        this.#callByName(calls, this.#coordinatorName(key, bucket), bucket, (coordinator) =>
+        this.callByName(calls, this.coordinatorName(key, bucket), bucket, (coordinator) =>
           coordinator.telefuncBroadcastForward({ key, kind, payload, info, members }),
         ),
       ),
@@ -409,7 +409,7 @@ class CloudflareBroadcast {
       request.members.map((member) =>
         calls.call(
           member,
-          () => this.#stubById(member),
+          () => this.stubById(member),
           (stub) => stub.telefuncBroadcastDeliver(delivery),
         ),
       ),
@@ -418,32 +418,32 @@ class CloudflareBroadcast {
   }
 
   /** A call from the DO owning `calls`, through its stub for the named instance. */
-  #callByName<T>(
+  private callByName<T>(
     calls: BroadcastCalls,
     name: string,
     locationHint: LocationBucket | null,
     invoke: (stub: TelefuncBroadcastStub) => Promise<T>,
   ): Promise<T> {
-    return calls.call(name, () => this.#stubByName(name, locationHint), invoke)
+    return calls.call(name, () => this.stubByName(name, locationHint), invoke)
   }
 
-  #authorityName(key: string): string {
-    return `${this.#baseInstanceName}:broadcast:authority:${key}`
+  private authorityName(key: string): string {
+    return `${this.baseInstanceName}:broadcast:authority:${key}`
   }
 
-  #coordinatorName(key: string, locationBucket: LocationBucket): string {
-    const bucketShardCount = getBucketCoordinatorShardIndices(this.#scale, locationBucket).length
+  private coordinatorName(key: string, locationBucket: LocationBucket): string {
+    const bucketShardCount = getBucketCoordinatorShardIndices(this.scale, locationBucket).length
     const bucketShardOrdinal = getDeterministicKeyBucketIndex(key, bucketShardCount)
-    return `${this.#baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
+    return `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`
   }
 
-  #stubByName(name: string, locationHint: LocationBucket | null): TelefuncBroadcastStub {
-    const namespace = this.#namespace()
+  private stubByName(name: string, locationHint: LocationBucket | null): TelefuncBroadcastStub {
+    const namespace = this.namespace()
     return namespace.get(namespace.idFromName(name), locationHint === null ? undefined : { locationHint })
   }
 
-  #stubById(id: string): TelefuncBroadcastStub {
-    const namespace = this.#namespace()
+  private stubById(id: string): TelefuncBroadcastStub {
+    const namespace = this.namespace()
     return namespace.get(namespace.idFromString(id))
   }
 }
