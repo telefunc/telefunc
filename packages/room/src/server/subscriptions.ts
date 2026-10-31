@@ -169,7 +169,8 @@ class RoomSubscriptions {
    *  recovery failed. */
   replan(): Promise<void> {
     this._queued.all = true
-    this._replanAround(() => this._schedulePlan())
+    this._schedulePlan()
+    this.syncLanes()
     return this._planning!
   }
 
@@ -178,29 +179,26 @@ class RoomSubscriptions {
     for (const slot of drain(this._dropped)) slot.resume()
   }
 
-  /** What the room-wide lanes depend on changed: observers, listeners, the tail. */
-  syncLanes(): void {
-    this._replanAround(() => {})
-  }
-
   /** A holder attached, or its wants changed wholesale: its room-wide ones, and those of `members` when given. The next
    *  planning pass recounts each member it may have changed. */
   holderChanged(holder: LaneHolder, members?: Iterable<string>): void {
     runAll(this._indexHolder(holder, { members }))
-    this._replanAround(() => this._schedulePlan())
+    this._schedulePlan()
+    this.syncLanes()
   }
 
   /** A holder is gone. A planning pass in a later turn drops its wants, so the holders gone in one turn (the clients of
    *  a mass expiry) are dropped together, a slice at a time. */
   holderGone(holder: LaneHolder): void {
     this._gone.add(holder)
-    this._replanAround(() => this._schedulePlan())
+    this._schedulePlan()
+    this.syncLanes()
   }
 
   /** A holder's text wants changed: its room-wide ones, and those of `members`. */
   textChanged(holder: LaneHolder, members: Iterable<string>): void {
     runAll(this._wants.updateText(holder, { members }))
-    this._replanAround(() => {})
+    this.syncLanes()
   }
 
   /** One of a holder's binary wants changed: a want of one track replans only that track's pairs, in the next
@@ -232,28 +230,30 @@ class RoomSubscriptions {
       // Whom the track's every-member lane serves here may have changed.
       if (everyMember || wasEveryMember) queued.tracks.add(track)
     }
-    this._replanAround(() => this._schedulePlan())
+    this._schedulePlan()
+    this.syncLanes()
   }
 
   /** A member joined, or which holders suppress it changed: the next planning pass recounts it. */
   memberChanged(member: string): void {
     this._dropCounts(member)
     this._queued.members.add(member)
-    this._replanAround(() => this._schedulePlan())
+    this._schedulePlan()
+    this.syncLanes()
   }
 
   /** A member this instance now owns gets its inbox. */
   memberOwned(member: string): void {
-    this._replanAround(() => this._openInbox(member))
+    this._openInbox(member)
+    this.syncLanes()
   }
 
   /** A member left, or this instance no longer owns it. */
   memberReleased(member: string): void {
     this._queued.members.add(member)
-    this._replanAround(() => {
-      this._closeInbox(member)
-      this._schedulePlan()
-    })
+    this._closeInbox(member)
+    this._schedulePlan()
+    this.syncLanes()
   }
 
   /** The planning pass under way while a holder here receives the member's `track` and no lane here carries it yet:
@@ -295,8 +295,9 @@ class RoomSubscriptions {
     await this._binaryReady
   }
 
-  /** The room-wide lanes are planned around a change, and the heartbeat after it. */
-  private _replanAround(change: () => void): void {
+  /** What the room-wide lanes depend on changed (observers, listeners, the tail, the text wants): they follow it, and
+   *  the demand lane and the heartbeat after them. */
+  syncLanes(): void {
     const host = this._host
     const model = host.model
     const open = !model.closed
@@ -315,7 +316,6 @@ class RoomSubscriptions {
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
       void host.sync.refreshMembers().catch(reportRoomError)
     }
-    change()
     this._syncDemandLane()
     if (this._planning === null) this._demand.flush()
     this._syncHeartbeat()
@@ -363,8 +363,6 @@ class RoomSubscriptions {
         if (this._gone.size > 0) {
           await slice.next()
           await this._replanEach(slice, drain(this._gone), (holder) => this._indexHolder(holder, { gone: true }))
-          // Each slice synced the room-wide lanes before its holders' wants were dropped.
-          this.syncLanes()
         } else if (!isEmpty(plan)) {
           await this._planRound(slice, plan)
         } else if (this._demand.changed) {
@@ -428,7 +426,7 @@ class RoomSubscriptions {
     }
   }
 
-  /** Runs `step` on each item within `slice`, each slice planned around; a step that yields
+  /** Runs `step` on each item within `slice`, the room-wide lanes synced after each slice; a step that yields
    *  can end a slice at each yield. */
   private async _replanEach<T>(
     slice: Slice,
@@ -438,11 +436,10 @@ class RoomSubscriptions {
     const pending = stepsOf(items, step)
     for (let done = false; !done; ) {
       if (slice.over) await slice.next()
-      this._replanAround(() => {
-        do {
-          done = pending.next().done === true
-        } while (!done && !slice.over)
-      })
+      do {
+        done = pending.next().done === true
+      } while (!done && !slice.over)
+      this.syncLanes()
     }
   }
 
