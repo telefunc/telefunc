@@ -24,7 +24,6 @@ import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { hasProp } from '../../../utils/hasProp.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
-import { isAbort } from '../../../node/server/Abort.js'
 import type { ShieldValidator, ShieldValidators } from '../../../node/server/shield.js'
 import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
@@ -107,8 +106,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pendingAckBytes = 0
   protected readonly _bufferLimit: number
   protected readonly _bufferLimitBinary: number
-  private openCallbacks: Array<() => void> = []
-  private didFireOpen = false
   protected readonly lifecycle = new ChannelLifecycle({ owner: this })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
   /** Credit governs fire-and-forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
@@ -310,12 +307,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   onOpen(callback: () => void): void {
-    if (this.didFireOpen) {
-      const result = callback()
-      if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
-      return
-    }
-    this.openCallbacks.push(callback)
+    this.lifecycle.onOpen(callback)
   }
 
   _setResponseAbort(abortResponse: (abortValue?: unknown) => void): void {
@@ -394,7 +386,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     this.sendPendingEnd(peer)
     if (this._phase === 'closing') return
-    this.fireOpen()
+    this.lifecycle.fireOpen()
   }
 
   /** @internal — Entry point from the mux for an incoming wire frame. Handles ctrl routing,
@@ -556,10 +548,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       try {
         const result = cb(value)
         if (isPromise(result)) {
-          pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
+          pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }
       } catch (err) {
-        if (this._handleCallbackError(err)) return
+        if (this.lifecycle.handleCallbackError(err)) return
       }
     }
     if (pending.length > 0) {
@@ -772,7 +764,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       for (const cb of listeners.list()) lastResult = await cb(data)
       answer = stringify(lastResult)
     } catch (err) {
-      if (this._handleCallbackError(err)) return
+      if (this.lifecycle.handleCallbackError(err)) return
       this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
       return
     }
@@ -782,6 +774,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal */
   _end(err?: Error): void {
     this._shutdown(err)
+  }
+
+  /** @internal An `Abort` a callback threw ends its response where it has one. */
+  _abortFromCallback(err: AbortError): void {
+    if (this.responseAbort) {
+      this.responseAbort(err.abortValue)
+    } else {
+      this.abort(err.abortValue)
+    }
   }
 
   /** @internal */
@@ -805,7 +806,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!keep) this._release()
     this.mux?.onChannelEnded(this, { keep, pageAttached })
     this.lifecycle.fireClose(err)
-    this.openCallbacks.length = 0
     this._sendCredit.shutdown()
     // Building an error captures its stack: one is built only where an answer is awaited.
     if (this._pendingAcks.size > 0 || this._offlineBuffer.size > 0) {
@@ -832,34 +832,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._offlineBuffer.clear(err)
     this.pendingAckRes.length = 0
     this.pendingEnd = null
-  }
-
-  private fireOpen(): void {
-    if (this.didFireOpen) return
-    this.didFireOpen = true
-    for (const cb of this.openCallbacks) {
-      try {
-        const result = cb()
-        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
-    }
-    this.openCallbacks.length = 0
-  }
-
-  protected _handleCallbackError(err: unknown): boolean {
-    if (isAbort(err)) {
-      const abortError: AbortError = err
-      if (this.responseAbort) {
-        this.responseAbort(abortError.abortValue)
-      } else {
-        this.abort(abortError.abortValue)
-      }
-      return true
-    }
-    reportServerChannelError(err)
-    return false
   }
 }
 

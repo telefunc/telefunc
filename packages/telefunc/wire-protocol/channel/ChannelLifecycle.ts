@@ -3,12 +3,15 @@ export type { ChannelLifecycleOwner }
 
 import type { ChannelCloseCallback, ChannelCloseResult } from './channel.js'
 import { ChannelClosedError } from './channelErrors.js'
+import { isAbort, type AbortError } from '../../shared/Abort.js'
 import { isPromise } from '../../utils/isPromise.js'
 
-/** The channel end, which ends itself and reports what its callbacks throw. */
+/** The channel end, which ends itself and answers what its callbacks throw. */
 interface ChannelLifecycleOwner {
   /** Ends the channel; `err` where it didn't close gracefully. */
   _end(err?: Error): void
+  /** A callback threw `Abort`. */
+  _abortFromCallback(err: AbortError): void
   _reportCallbackError(err: unknown): void
 }
 
@@ -16,10 +19,12 @@ type ChannelLifecycleOptions = {
   owner: ChannelLifecycleOwner
 }
 
-/** A channel end's close handshake: its onClose callbacks run once its CLOSE is acknowledged and no ack is in flight,
- *  and it ends once they settled, or at the deadline. */
+/** A channel end's open and close callbacks, and its close handshake: the onClose callbacks run once its CLOSE is
+ *  acknowledged and no ack is in flight, and it ends once they settled, or at the deadline. */
 class ChannelLifecycle {
   private readonly owner: ChannelLifecycleOwner
+  private openCallbacks: Array<() => void> = []
+  private didFireOpen = false
   private closeCallbacks: ChannelCloseCallback[] = []
   private didFireClose = false
   private pendingCloseCallbacks = 0
@@ -61,6 +66,39 @@ class ChannelLifecycle {
 
   get result(): ChannelCloseResult {
     return this.didReceiveCloseAck ? 0 : 1
+  }
+
+  onOpen(callback: () => void): void {
+    if (this.didFireOpen) {
+      const result = callback()
+      if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
+      return
+    }
+    this.openCallbacks.push(callback)
+  }
+
+  fireOpen(): void {
+    if (this.didFireOpen) return
+    this.didFireOpen = true
+    for (const cb of this.openCallbacks) {
+      try {
+        const result = cb()
+        if (isPromise(result)) result.catch((err: unknown) => this.handleCallbackError(err))
+      } catch (err) {
+        if (this.handleCallbackError(err)) return
+      }
+    }
+    this.openCallbacks.length = 0
+  }
+
+  /** A callback's `Abort` aborts the channel: true where `err` is one. */
+  handleCallbackError(err: unknown): boolean {
+    if (isAbort(err)) {
+      this.owner._abortFromCallback(err)
+      return true
+    }
+    this.owner._reportCallbackError(err)
+    return false
   }
 
   onClose(callback: ChannelCloseCallback): void {
@@ -132,6 +170,7 @@ class ChannelLifecycle {
     this.didFireClose = true
     for (const callback of this.closeCallbacks) this.invokeCloseCallback(callback, err, true)
     this.closeCallbacks.length = 0
+    this.openCallbacks.length = 0
     this.notifyProgress()
   }
 

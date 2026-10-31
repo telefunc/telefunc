@@ -19,7 +19,7 @@ import { makePublishInfo } from '../channel.js'
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { resolveClientConfig } from '../../../client/clientConfig.js'
-import { createAbortError, isAbort } from '../../../shared/Abort.js'
+import { createAbortError, type AbortError } from '../../../shared/Abort.js'
 import {
   ACK_STATUS,
   encode,
@@ -85,10 +85,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _connection: MuxConnection
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
-  private openCallbacks: Array<() => void> = []
   protected _isClosed = false
-  private didFireOpen = false
-  private readonly lifecycle = new ChannelLifecycle({ owner: this })
+  protected readonly lifecycle = new ChannelLifecycle({ owner: this })
   /** Outstanding ack-bearing sends, keyed by the seq the server will echo on `ACK_RES`.
    *  Lives on the channel (mirrors server-side `_pendingAcks`) so per-channel state
    *  stays encapsulated; connection just routes ACK_RES frames in. `resolve` is typed
@@ -210,12 +208,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   onOpen(callback: () => void): void {
-    if (this.didFireOpen) {
-      const result = callback()
-      if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
-      return
-    }
-    this.openCallbacks.push(callback)
+    this.lifecycle.onOpen(callback)
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
@@ -311,7 +304,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (batched) this._receiveCredit.useBatchTransportInitial()
     else this._receiveCredit.undoBatchTransportInitial()
     this._receiveCredit.attach({ sendWait: uplink, roundTrips: uplink.roundTrips, downlink })
-    this.fireOpen()
+    this.lifecycle.fireOpen()
   }
 
   _onPeerMessage(data: string, bytes: number): void {
@@ -350,10 +343,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       try {
         const result = cb(value)
         if (isPromise(result)) {
-          pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
+          pending.push(result.catch((err: unknown) => this.lifecycle.handleCallbackError(err)))
         }
       } catch (err) {
-        if (this._handleCallbackError(err)) return
+        if (this.lifecycle.handleCallbackError(err)) return
       }
     }
     if (pending.length > 0) {
@@ -477,20 +470,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   // ── Private ──
 
-  private fireOpen(): void {
-    if (this.didFireOpen) return
-    this.didFireOpen = true
-    for (const cb of this.openCallbacks) {
-      try {
-        const result = cb()
-        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
-      } catch (err) {
-        if (this._handleCallbackError(err)) return
-      }
-    }
-    this.openCallbacks.length = 0
-  }
-
   private async answerAckReq<T>(listeners: Listeners<(data: T) => unknown>, data: T, seq: number): Promise<void> {
     if (listeners.size === 0) {
       this._connection.sendAckRes(this, seq, 'No listener registered for ack request', ACK_STATUS.ERROR)
@@ -502,7 +481,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       for (const cb of listeners.list()) lastResult = await cb(data)
       answer = stringify(lastResult)
     } catch (err) {
-      if (this._handleCallbackError(err)) return
+      if (this.lifecycle.handleCallbackError(err)) return
       this._connection.sendAckRes(this, seq, 'Internal client channel error — see client logs', ACK_STATUS.ERROR)
       return
     }
@@ -527,22 +506,16 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._pendingAcks.clear()
     this._connection.unregister(this)
     this.lifecycle.fireClose(err)
-    this.openCallbacks.length = 0
+  }
+
+  /** @internal */
+  _abortFromCallback(err: AbortError): void {
+    this.abort(err.abortValue, err.message)
   }
 
   /** @internal */
   _reportCallbackError(err: unknown): void {
     reportChannelError(err)
-  }
-
-  protected _handleCallbackError(err: unknown): boolean {
-    if (isAbort(err)) {
-      const abortError = err
-      this.abort(abortError.abortValue, abortError.message)
-      return true
-    }
-    reportChannelError(err)
-    return false
   }
 }
 
@@ -632,9 +605,9 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     for (const cb of this.broadcastListeners.list()) {
       try {
         const result = cb(parsed, info)
-        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
+        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
-        if (this._handleCallbackError(err)) return
+        if (this.lifecycle.handleCallbackError(err)) return
       }
     }
     this._receiveCredit.onPublishConsumed(bytes)
@@ -647,9 +620,9 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
       try {
         // Bytes of its own: a listener may write into them or transfer their buffer.
         const result = cb(new Uint8Array(data), info)
-        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
+        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
-        if (this._handleCallbackError(err)) return
+        if (this.lifecycle.handleCallbackError(err)) return
       }
     }
     this._receiveCredit.onPublishConsumed(bytes)

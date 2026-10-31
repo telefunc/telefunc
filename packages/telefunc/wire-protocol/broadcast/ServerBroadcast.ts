@@ -138,9 +138,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     for (const cb of this.broadcastListeners.list()) {
       try {
         const result = cb(data, info)
-        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
+        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
-        if (this._handleCallbackError(err)) return
+        if (this.lifecycle.handleCallbackError(err)) return
       }
     }
     if (!this.peerSubscribedText) return
@@ -153,9 +153,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       try {
         // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
         const result = cb(new Uint8Array(data), info)
-        if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
+        if (isPromise(result)) result.catch((err: unknown) => this.lifecycle.handleCallbackError(err))
       } catch (err) {
-        if (this._handleCallbackError(err)) return
+        if (this.lifecycle.handleCallbackError(err)) return
       }
     }
     if (!this.peerSubscribedBinary) return
@@ -282,7 +282,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       const result = await this.publishBroadcast(serialized)
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
-      if (this._handleCallbackError(err)) return
+      if (this.lifecycle.handleCallbackError(err)) return
       this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
     }
   }
@@ -293,7 +293,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       const result = await this.publishBinaryBroadcast(data)
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
-      if (this._handleCallbackError(err)) return
+      if (this.lifecycle.handleCallbackError(err)) return
       this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
     }
   }
