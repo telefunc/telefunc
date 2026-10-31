@@ -69,7 +69,7 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
  *  and pages the handles hold, and the heartbeat that renews it and checks the authority again. Each handle keeps its
  *  guards, its tail, the stubs it opened and its listeners. A replica no handle observes, owns a member through or
  *  tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
-class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
+class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner, RoomModelOwner {
   private static readonly _collected = new FinalizationRegistry<{
     replicas: Map<string, WeakRef<RoomReplica>>
     inc: string
@@ -158,7 +158,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
       meta: stored.entries,
       seed,
       metaSeq: stored.seq,
-      owner: new ReplicaModelOwner(this),
+      owner: this,
     })
     this._gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
     this.incomingDemand = new RoomDemand({
@@ -239,7 +239,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   }
 
   /** Applies a presence event to the model and relays what it changed to the clients: as the lane carried it when
-   *  `carried` is given, else as applied. A leave reaches them from `memberLeft`, whatever applied it, and an update as
+   *  `carried` is given, else as applied. A leave reaches them from `onMemberLeft`, whatever applied it, and an update as
    *  each one it let apply, in seq order. */
   applyControl(event: PresenceEvent, carried?: () => string): void {
     const relay = () => this._relayControl(event, carried ?? (() => unorderedEventText(event)))
@@ -562,12 +562,29 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   }
 
   /** A local participant takes each update its member's meta takes here. */
-  memberMetaApplied(id: string, update: MemberMetaUpdate): void {
+  onMemberMeta(id: string, update: MemberMetaUpdate): void {
     this._owners.get(id)?._acceptMeta(id, update)
   }
 
+  onMetaWaiting(): void {
+    this.authority.metaWaiting()
+  }
+
+  onMemberMetaGap(): void {
+    this.authority.memberMetaGap()
+  }
+
+  // A server reads its rosters whole, and shows each member as the room records it.
+  pendingMember(): undefined {
+    return undefined
+  }
+
+  heldConnection(): null {
+    return null
+  }
+
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
-  memberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
+  onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
     for (const handle of this._receivers) handle._local.forgetMember(id)
     const owner = this._owners.get(id)
@@ -609,38 +626,4 @@ function hiddenMemberOf(event: PresenceEvent): string | null {
     return event.hidden === true ? event.id : null
   }
   return null
-}
-
-/** What a replica's model asks of it. */
-class ReplicaModelOwner implements RoomModelOwner {
-  private readonly replica: RoomReplica
-
-  constructor(replica: RoomReplica) {
-    this.replica = replica
-  }
-
-  onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
-    this.replica.memberLeft(id, cause, hidden)
-  }
-
-  onMemberMeta(id: string, update: MemberMetaUpdate): void {
-    this.replica.memberMetaApplied(id, update)
-  }
-
-  onMetaWaiting(): void {
-    this.replica.authority.metaWaiting()
-  }
-
-  onMemberMetaGap(): void {
-    this.replica.authority.memberMetaGap()
-  }
-
-  // A server reads its rosters whole, and shows each member as the room records it.
-  pendingMember(): undefined {
-    return undefined
-  }
-
-  heldConnection(): null {
-    return null
-  }
 }
