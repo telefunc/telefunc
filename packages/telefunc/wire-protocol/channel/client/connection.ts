@@ -157,18 +157,22 @@ type ClientChannelTransport = {
 }
 
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
-type TransportOwner = Pick<
-  ClientConnection,
-  | 'onTransportOpen'
-  | 'onTransportClosed'
-  | 'onTransportFrame'
-  | 'onTransportPong'
-  | 'onTransportHeadroom'
-  | 'onTransportBatched'
-  | 'onTransportReconcileSent'
-  | 'onTransportPostLate'
-  | 'stageReconcileBatch'
->
+interface TransportOwner {
+  onTransportOpen(transport: ClientChannelTransport): void
+  onTransportClosed(transport: ClientChannelTransport, options?: { rejectedByServer?: boolean }): void
+  onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void
+  onTransportPong(ended: PongEntry[]): void
+  /** The transport may have headroom again: what waited for it goes. */
+  onTransportHeadroom(transport: ClientChannelTransport): void
+  /** The wire's upload fell back to batch POSTs, which a channel may have opened before (see `onTransportOpen`). */
+  onTransportBatched(transport: ClientChannelTransport): void
+  /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
+  onTransportReconcileSent(transport: ClientChannelTransport): void
+  /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
+  onTransportPostLate(transport: ClientChannelTransport): void
+  /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
+  stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch
+}
 
 type ConnectionState =
   | { tag: 'fresh' }
@@ -181,7 +185,9 @@ type ConnectionState =
     }
   | { tag: 'closed' }
 
-class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner {
+class ClientConnection
+  implements MuxConnection, TransportOwner, SendGateOwner, LivenessOwner, UpgradeOwner, AttachExchangeOwner
+{
   private static cache = new Map<string, ClientConnection>()
 
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
@@ -318,7 +324,6 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
     channel._fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
-  /** The transport may have headroom again: what waited for it goes. */
   onTransportHeadroom(transport: ClientChannelTransport): void {
     if (transport !== this.transport || !this.sendsOpen) return
     this.gate.sendWaiting()
@@ -472,7 +477,6 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
     this.upgrade.maybeStart()
   }
 
-  /** The wire's upload fell back to batch POSTs, which a channel may have opened before (see `onTransportOpen`). */
   onTransportBatched(transport: ClientChannelTransport): void {
     if (transport !== this.transport) return
     // Open ones only, as the join's undo: one still opening takes the batched window from its own open on this wire.
@@ -534,7 +538,6 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
     if (record && record.state.tag !== 'closed') record.channel._dispatchFrame(channelFrame)
   }
 
-  /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
   onTransportReconcileSent(transport: ClientChannelTransport): void {
     if (this.closed || transport !== this.transport) return
     this.liveness.beatFromReconcile(transport)
@@ -550,7 +553,6 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
     this.onTransportClosed(transport)
   }
 
-  /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
   onTransportPostLate(transport: ClientChannelTransport): void {
     this.onPongTimeout(transport)
   }
@@ -695,7 +697,6 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
 
   // ── Protocol internals ──
 
-  /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
   stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
     return this.exchange.stageReconcileBatch(isInitialBatch)
   }
