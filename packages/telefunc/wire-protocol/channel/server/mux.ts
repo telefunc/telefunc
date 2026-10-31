@@ -541,7 +541,7 @@ class ChannelMux {
     entry: ConnectionEntry,
     connection: Wire,
     rawFrame: Uint8Array<ArrayBuffer>,
-  ): null | Promise<ReconcileOutcome | null> {
+  ): null | ReconcileOutcome | Promise<ReconcileOutcome | null> {
     const frame = decodeClientFrame(rawFrame, WIRE_MAX_CONN_CTRL_FRAME_BYTES)
     if (frame.tag === TAG.PING) {
       const pieces = entry.state.pieces
@@ -691,14 +691,15 @@ class ChannelMux {
       stage.phase = 'committing'
       entry.state.retiredByBarrier = true
       this.moveAwaited(entry, wsEntry, wsConnection, ctrl.open)
-      return this.settleBarrierCommit(entry, wsEntry, wsConnection, ctrl, stage.upgradeId)
+      return this.attachBarrier(entry, wsEntry, wsConnection, ctrl, stage.upgradeId)
     } catch (err) {
       this.clearStage(wsConnection)
       throw retargetToProbe(err, wsConnection)
     }
   }
 
-  private async settleBarrierCommit(
+  /** Attaches the channels a barrier names to the WebSocket it commits. */
+  private async attachBarrier(
     oldEntry: ConnectionEntry,
     wsEntry: ConnectionEntry,
     wsConnection: Wire,
@@ -706,7 +707,8 @@ class ChannelMux {
     upgradeId: string,
   ): Promise<ReconcileOutcome> {
     try {
-      // `reconcile` ran against the staged WS, so the outcome already carries it as `deliverTo`.
+      // `reconcile` ran against the staged WS, so the outcome already carries it as `deliverTo`. Awaited: the stage
+      // stays committing for a microtask, so a claim of the old session that runs in it is refused.
       const outcome = await this.reconcile(wsEntry, wsConnection, ctrl, true)
       return { ...outcome, upgradeId }
     } catch (err) {
@@ -743,12 +745,12 @@ class ChannelMux {
 
   /** `isBarrier`: the old wire's session is retired by this commit, so it gets a finalizer that
    *  FINs it once the new wire's RECONCILED has gone out. */
-  private async reconcile(
+  private reconcile(
     entry: ConnectionEntry,
     connection: Wire,
     ctrl: ReconcilePayload,
     isBarrier = false,
-  ): Promise<ReconcileOutcome> {
+  ): ReconcileOutcome {
     const { state, transport } = entry
     const oldWire = isBarrier && ctrl.sessionId ? this.sessionWires.get(ctrl.sessionId) : undefined
     const finalizeUpgrade = oldWire === undefined ? null : () => this.send(oldWire, encode.fin())
@@ -765,8 +767,8 @@ class ChannelMux {
     assertProtocol(released === undefined || newSessionId === ctrl.sessionId, 'RECONCILE released on another wire')
     const attached =
       released === undefined
-        ? this.reconcileSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection, replay)
-        : this.reconcileChanges(newSessionId, ctrl.open, released, entry, connection)
+        ? this.attachSession(ctrl.sessionId, newSessionId, ctrl.open, entry, connection, replay)
+        : this.attachChanges(newSessionId, ctrl.open, released, entry, connection)
     // Its wire no longer has the session it names, which is gone with the handles it had.
     if (ctrl.sessionId) this.sessionWires.delete(ctrl.sessionId)
 
@@ -786,7 +788,8 @@ class ChannelMux {
     return { sessionId: newSessionId, attached, finalizeUpgrade, deliverTo: connection }
   }
 
-  private reconcileSession(
+  /** Attaches the channels a RECONCILE of the whole session names; one of the session before it doesn't name ends. */
+  private attachSession(
     prevSessionId: string | undefined,
     newSessionId: string,
     open: ReconcilePayload['open'],
@@ -811,8 +814,8 @@ class ChannelMux {
     return handles
   }
 
-  /** Attaches the channels the RECONCILE names to the session, and ends there each one the page released. */
-  private reconcileChanges(
+  /** Attaches the channels a RECONCILE of what changed names to the session, and ends each one the page released. */
+  private attachChanges(
     sessionId: string,
     open: ReconcileOpenEntry[],
     released: number[],
