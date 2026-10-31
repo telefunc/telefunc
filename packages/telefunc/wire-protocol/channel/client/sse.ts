@@ -208,7 +208,7 @@ class SseTransport implements UpgradeSource {
     if (this.flushScheduler.pending && this.hasWire()) this.flushScheduler.schedule(deadline)
     else this.scheduleFlush()
     // A whole POST is held: it goes without waiting out the throttle, which would cap an upload at a POST per throttle.
-    if (deadline <= now || this.sendRoom() <= 0) void this.flushOutbox()
+    if (deadline <= now || this.headroom() <= 0) void this.flushOutbox()
   }
 
   /** While a POST is out, folds the outbox into the next body a MiB at a time: the flush after copies only the rest. */
@@ -473,7 +473,7 @@ class SseTransport implements UpgradeSource {
     )
   }
 
-  sendRoom(): number {
+  headroom(): number {
     return this.batched ? this.postBytes - this.postOutBytes - this.outboxBytes : Infinity
   }
 
@@ -488,7 +488,7 @@ class SseTransport implements UpgradeSource {
   /** After a POST: the outbox goes next, or those waiting for the drain are told it's empty. */
   private flushNextOrDrain(): void {
     if (this.outbox.length > 0) {
-      if (this.sendRoom() <= 0) void this.flushOutbox()
+      if (this.headroom() <= 0) void this.flushOutbox()
       else this.scheduleFlush()
       return
     }

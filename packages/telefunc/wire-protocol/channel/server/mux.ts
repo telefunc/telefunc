@@ -29,8 +29,8 @@ import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from
 import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
-import { PathRoom } from '../../flowControl/server/PathRoom.js'
-import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'
+import { ServerHeadroom } from '../../flowControl/server/headroom.js'
+import { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { SocketWait } from '../../flowControl/server/SocketWait.js'
 import { WireSender } from './WireSender.js'
@@ -108,7 +108,7 @@ type DetachReason = 'transient' | 'permanent' | 'recoveryFailed'
 
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 
-type WirePieces = { room: PathRoom; receiver: ServerPieceReceiver }
+type WirePieces = { headroom: ServerHeadroom; receiver: ServerPieceReceiver }
 
 type ConnectionState = {
   pingTimer: ReturnType<typeof setTimeout> | null
@@ -237,18 +237,18 @@ class ChannelMux {
       ahead: () => this.queuedAhead(connection),
     })
     const recvBacklog = { bytes: 0, frames: 0 }
-    const room = transport.wholeMessages
-      ? new PathRoom({
+    const headroom = transport.wholeMessages
+      ? new ServerHeadroom({
           transmit: (message) => transport.sendNow(connection, message),
           queued: () => transport.bufferedAmount(connection) ?? 0,
           pingInterval: this.options.pingInterval,
         })
       : null
-    const pieces = room && {
-      room,
+    const pieces = headroom && {
+      headroom,
       receiver: new ServerPieceReceiver({
         send: (frame) => this.send(connection, frame),
-        carry: (ack) => room.sender.carry(ack),
+        carry: (ack) => headroom.sender.carry(ack),
       }),
     }
     const attaching = new Set<ServerChannel>()
@@ -280,7 +280,7 @@ class ChannelMux {
       sender: {
         send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
         carry: (frame) => {
-          if (room) room.sender.carry(() => frame as Uint8Array<ArrayBuffer>)
+          if (headroom) headroom.sender.carry(() => frame as Uint8Array<ArrayBuffer>)
           else this.send(connection, frame as Uint8Array<ArrayBuffer>)
         },
         bufferedAmount: () => this.bufferedAmount(connection),
@@ -339,7 +339,7 @@ class ChannelMux {
     const entry = this.connectionEntries.get(connection)
     if (!entry) return
     entry.state.closed = { isPermanent: permanent }
-    entry.state.pieces?.room.close()
+    entry.state.pieces?.headroom.close()
     this.clearPingTimer(entry.state)
     entry.state.awaited.stop()
     this.connectionEntries.delete(connection)
@@ -546,14 +546,14 @@ class ChannelMux {
     if (frame.tag === TAG.PING) {
       const pieces = entry.state.pieces
       if (pieces)
-        assertProtocol(pieces.room.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
+        assertProtocol(pieces.headroom.sender.heartbeat(frame.took, performance.now()), 'PING took more than sent')
       this.resetPingTimer(connection)
       this.acknowledgeArrivals(entry, connection)
       this.pong(entry, connection, this.answerPing(entry, connection, frame.ended))
       return null
     }
     if (frame.tag === TAG.PIECES_ACK) {
-      const known = entry.state.pieces?.room.acknowledged(frame)
+      const known = entry.state.pieces?.headroom.acknowledged(frame)
       assertProtocol(known, 'PIECES_ACK for nothing sent')
       return null
     }

@@ -1,4 +1,4 @@
-export { PagePieceReceiver }
+export { ClientPieceReceiver }
 
 import { WIRE_PIECES_ACK_GAP_MS } from '../../constants.js'
 import { PieceReceiver, acknowledges, type FrameArrival, type PieceArrival } from '../pieces.js'
@@ -6,7 +6,7 @@ import { PieceReceiver, acknowledges, type FrameArrival, type PieceArrival } fro
 /** The page's `PieceReceiver`, which puts a WebSocket frame sent in pieces back together. It acknowledges each frame
  *  over `WIRE_PIECES_ACK_BYTES` and the ANNOUNCE that closes an announcement,
  *  at most every `WIRE_PIECES_ACK_GAP_MS`. */
-class PagePieceReceiver extends PieceReceiver {
+class ClientPieceReceiver extends PieceReceiver {
   protected tookFrame({ bytes, data, at }: FrameArrival): void {
     if (!acknowledges(bytes)) return
     this.date(data, at)

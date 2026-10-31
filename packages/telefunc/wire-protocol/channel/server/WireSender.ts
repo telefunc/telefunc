@@ -56,7 +56,7 @@ class WireSender {
     }
     this.headroom -= frame.byteLength
     this.wait.handed(frame.byteLength, passesData(frame[0]!))
-    if (this.pieces) this.pieces.room.send(frame)
+    if (this.pieces) this.pieces.headroom.send(frame)
     else this.transport.sendNow(this.wire, frame)
   }
 
@@ -73,7 +73,7 @@ class WireSender {
   /** What its socket holds unsent, and what its piece sender hasn't handed it. */
   bufferedAmount(): number | undefined {
     const socket = this.transport.bufferedAmount(this.wire)
-    return socket === undefined ? undefined : socket + (this.pieces?.room.sender.unhandedBytes ?? 0)
+    return socket === undefined ? undefined : socket + (this.pieces?.headroom.sender.unhandedBytes ?? 0)
   }
 
   /** Each answer says no credit ran out and names no round trip. */

@@ -1,18 +1,18 @@
-export { PathRoom }
+export { ServerHeadroom }
 
 import { WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../../constants.js'
 import { DrainRate } from '../DrainRate.js'
 import { PieceRate } from '../PieceRate.js'
-import { PieceSender, acknowledges, type PieceSenderOptions, type SendRoom } from '../pieces.js'
+import { PieceSender, acknowledges, type PieceSenderOptions, type PieceSenderOwner } from '../pieces.js'
 import type { PiecesAck } from '../../wire/frame.js'
+import { isSequencedTag } from '../../wire/tags.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
-type PathRoomOptions = Pick<PieceSenderOptions, 'transmit' | 'queued' | 'pingInterval'>
+type ServerHeadroomOptions = Pick<PieceSenderOptions, 'transmit' | 'queued' | 'pingInterval'>
 
-/** The path to the page holds what `dataRoom` allows; the rest waits whole in its sender. */
-class PathRoom implements SendRoom {
-  readonly cuts = false
+/** The path to the page holds what `headroom` allows; the rest waits whole in its sender. */
+class ServerHeadroom implements PieceSenderOwner {
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
   private readonly queued: () => number
@@ -28,7 +28,7 @@ class PathRoom implements SendRoom {
   private readonly sent = new Fifo<{ end: number; at: number }>()
   /** Where the newest data handed with nothing waiting ahead ends: arrivals up to it came at the app's rate. */
   private appLimitedTo = 0
-  /** Whether the sender is sending what it held for room. */
+  /** Whether the sender is sending what waited for headroom. */
   private releasing = false
   /** Bytes handed since the newest data: an in-order socket holding no more holds none of it, bar what is carried. */
   private handedSinceData = 0
@@ -37,25 +37,32 @@ class PathRoom implements SendRoom {
   private inPathAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor({ transmit, queued, pingInterval }: PathRoomOptions) {
+  constructor({ transmit, queued, pingInterval }: ServerHeadroomOptions) {
     this.queued = queued
-    this.sender = new PieceSender({ transmit, queued, pingInterval, pieceRate: new PieceRate(), room: this })
+    this.sender = new PieceSender({
+      transmit,
+      queued,
+      pingInterval,
+      pieceRate: new PieceRate(),
+      cuts: 'whole',
+      owner: this,
+    })
   }
 
   /** Sends `frame` through the sender. */
   send(frame: Uint8Array<ArrayBuffer>): void {
-    this.sender.send(frame)
+    this.sender.send(frame, isSequencedTag(frame[0]!) && !this.sender.dataWaits ? this.headroom() : 0)
     this.pace()
   }
 
-  /** `SendRoom`: what the path takes past what it holds. */
-  dataRoom(): number {
+  /** What the path takes past what it holds. */
+  headroom(): number {
     if (this.drain.rate === 0 || this.leastRtt === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY
-    const room = Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * this.drain.rate * this.leastRtt)
-    return room - this.pathHolds(performance.now())
+    const takes = Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * this.drain.rate * this.leastRtt)
+    return takes - this.pathHolds(performance.now())
   }
 
-  /** `SendRoom`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
+  /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
   handed(bytes: number, data: boolean): void {
     const now = performance.now()
     this.inPath = this.pathHolds(now) + bytes
@@ -65,12 +72,12 @@ class PathRoom implements SendRoom {
       return
     }
     const end = this.sender.transmittedBytes
-    if (!this.releasing && this.queued() <= this.handedSinceData && !this.sender.holdsData) this.appLimitedTo = end
+    if (!this.releasing && this.queued() <= this.handedSinceData && !this.sender.dataWaits) this.appLimitedTo = end
     this.handedSinceData = 0
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }
 
-  /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made room for. */
+  /** Takes a PIECES_ACK (see `PieceSender.acknowledged`), and sends what it made headroom for. */
   acknowledged(ack: PiecesAck): boolean {
     const before = this.sender.acknowledgedBytes
     if (!this.sender.acknowledged(ack)) return false
@@ -93,7 +100,7 @@ class PathRoom implements SendRoom {
       this.sender.transmittedBytes - acknowledged - this.drain.rate * Math.max(0, now - arrived),
     )
     this.inPathAt = now
-    this.sendHeld()
+    this.sendWaiting()
     return true
   }
 
@@ -104,11 +111,13 @@ class PathRoom implements SendRoom {
     this.sender.close()
   }
 
-  /** Sends what waits for room, as far as its room goes now. */
-  private sendHeld(): void {
-    this.releasing = true
-    this.sender.sendHeld()
-    this.releasing = false
+  /** Sends what waits for headroom, as far as the headroom goes now. */
+  private sendWaiting(): void {
+    if (this.sender.dataWaits) {
+      this.releasing = true
+      this.sender.sendWaiting(this.headroom())
+      this.releasing = false
+    }
     this.pace()
   }
 
@@ -117,15 +126,15 @@ class PathRoom implements SendRoom {
     return Math.max(0, this.inPath - this.drain.rate * (now - this.inPathAt))
   }
 
-  /** While data waits for room, looks again once the rate drained what the path holds past it. */
+  /** While data waits for headroom, looks again once the rate drained what the path holds past it. */
   private pace(): void {
-    if (this.paceTimer !== null || this.sender.heldBytes === 0) return
-    const ms = Math.max(1, -this.dataRoom() / this.drain.rate)
+    if (this.paceTimer !== null || this.sender.waitingBytes === 0) return
+    const ms = Math.max(1, -this.headroom() / this.drain.rate)
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
 
   private readonly lookAgain = (): void => {
     this.paceTimer = null
-    this.sendHeld()
+    this.sendWaiting()
   }
 }
