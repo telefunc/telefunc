@@ -22,7 +22,7 @@ export type {
   SubscriptionDriver,
 } from '../../wire-protocol/backend/subscription.js'
 export type { BroadcastEndOwner } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-export type { PageEnd, PageClient }
+export type { ServerBroadcastEnd, ClientBroadcast }
 export { encodePublish } from '../../wire-protocol/wire/connectionFrame.js'
 export type { BroadcastKind } from '../../wire-protocol/wire/connectionFrame.js'
 export { hostLocal } from '../../wire-protocol/channel/server/mux.js'
@@ -40,12 +40,12 @@ export type { ChannelPublishAck, ChannelPublishInfo } from '../../wire-protocol/
 export { MemoryPubSub, type Subscriptions } from '../../wire-protocol/backend/memory/deliveries.js'
 export { isChannelOverflowError } from '../../wire-protocol/channel/channelErrors.js'
 
-import type { ServerBroadcastEnd } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
-import type { ClientBroadcast } from '../../wire-protocol/channel/client/channel.js'
+import type { ServerBroadcastEnd as ServerBroadcastEndClass } from '../../wire-protocol/channel/server/ServerBroadcastEnd.js'
+import type { ClientBroadcast as ClientBroadcastClass } from '../../wire-protocol/channel/client/channel.js'
 
 /** The members of a page's broadcast end that an add-on drives. */
-type PageEnd = Pick<
-  ServerBroadcastEnd,
+type ServerBroadcastEnd = Pick<
+  ServerBroadcastEndClass,
   | 'id'
   | '_setOwner'
   | '_terminateWire'
@@ -63,8 +63,8 @@ type PageEnd = Pick<
 >
 
 /** The members of a page's `ClientBroadcast` that an add-on drives. */
-type PageClient = Pick<
-  ClientBroadcast,
+type ClientBroadcast = Pick<
+  ClientBroadcastClass,
   | '_publishUnreported'
   | '_publishBinaryUnreported'
   | '_setSubscribed'

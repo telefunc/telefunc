@@ -11,7 +11,7 @@ import {
   getChannelLimits,
   type BroadcastEndOwner,
   type BroadcastKind,
-  type PageEnd,
+  type ServerBroadcastEnd,
   type OrderingInfo,
   type ChannelPublishAck,
 } from 'telefunc/__internal'
@@ -147,7 +147,7 @@ function roomResult(work: Promise<unknown>): Promise<RoomResult> {
 }
 
 /** Runs a stub's handling of what its page sent: a malformed message ends the page's wire and fails its request. */
-function receiveFromPage<T>(end: PageEnd, handle: () => T): T | Promise<RoomFailure> {
+function receiveFromPage<T>(end: ServerBroadcastEnd, handle: () => T): T | Promise<RoomFailure> {
   try {
     return handle()
   } catch (err) {
@@ -159,7 +159,7 @@ function receiveFromPage<T>(end: PageEnd, handle: () => T): T | Promise<RoomFail
 
 type RoomStubOptions = {
   room: ServerRoom
-  end: PageEnd
+  end: ServerBroadcastEnd
   publishShield?: ShieldValidator
   grants: ResponseRoomGrants
 }
@@ -167,7 +167,7 @@ type RoomStubOptions = {
 /** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
 class RoomStub implements LaneHolder, BroadcastEndOwner {
   /** Its channel to its client. */
-  readonly _end: PageEnd
+  readonly _end: ServerBroadcastEnd
   private readonly room: ServerRoom
   private readonly publishShield: ShieldValidator | undefined
   private readonly members = new Set<string>()
@@ -513,7 +513,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
 type RoomParticipantStubOptions = {
   participant: ServerLocalParticipant
-  end: PageEnd
+  end: ServerBroadcastEnd
   publishShield?: ShieldValidator
 }
 
@@ -521,7 +521,7 @@ type RoomParticipantStubOptions = {
  *  flow back to the client. */
 class RoomParticipantStub implements BroadcastEndOwner {
   /** Its channel to its client. */
-  private readonly end: PageEnd
+  private readonly end: ServerBroadcastEnd
   private readonly participant: ServerLocalParticipant
   private readonly publishShield: ShieldValidator | undefined
   private readonly dmReplies = new PendingDmReplies()

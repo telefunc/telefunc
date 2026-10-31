@@ -5,7 +5,7 @@ import { ClientRoom, ClientStandaloneParticipant } from './room.js'
 import type { LocalParticipant, RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../protocol.js'
 import { assert } from '../utils/assert.js'
-import { untether, type PageClient } from 'telefunc/__internal'
+import { untether, type ClientBroadcast } from 'telefunc/__internal'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
@@ -51,7 +51,7 @@ const roomTypes = [roomReviver, roomParticipantReviver, roomRemoteReviver]
 /** The reviver of a value that holds its own Broadcast channel to the server, which its close and abort end. */
 function channelReviver<Contract extends TypeContract<never, unknown, ChannelMetadata>>(
   prefix: string,
-  create: (end: PageClient, metadata: Contract['metadata']) => Contract['result'],
+  create: (end: ClientBroadcast, metadata: Contract['metadata']) => Contract['result'],
 ): ReviverType<Contract, ClientReviverContext> {
   return {
     prefix,
