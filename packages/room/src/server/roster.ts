@@ -107,8 +107,23 @@ function memberSnapshot(id: string, record: RoomMemberRecord, meta: ParticipantM
   return snapshot
 }
 
+/** Read again after a lapsed lease's members were removed. */
 async function reapAndCountPresence(room: RoomIncarnation): Promise<number> {
-  return (await reapAndReadRoster(room)).members.filter((member) => !member.hidden).length
+  const [leases, count] = await Promise.all([readPrefixAt(room.id, room.inc, LEASE_CELL_PREFIX), countPresence(room)])
+  return (await reapLeases(room, leases)) ? await countPresence(room) : count
+}
+
+/** The members neither hidden nor departing, from their records alone: a count reads no meta. */
+async function countPresence(room: RoomIncarnation): Promise<number> {
+  const cells = await readPrefix(room.id, room.inc, MEMBER_CELL_PREFIX)
+  // After the member read, as `readRoster`'s.
+  const cleanups = await readPrefix(room.id, room.inc, CLEANUP_CELL_PREFIX)
+  const departing = new Set(Array.from(cleanups.keys(), memberIdOfCleanupKey))
+  let count = 0
+  for (const [, raw] of stayingMembers(cells, departing)) {
+    if (!decodeRoomRecord<RoomMemberRecord>(raw).hidden) count++
+  }
+  return count
 }
 
 async function reapAndResolveIdentity(room: RoomIncarnation, identity: string): Promise<MemberSnapshot[]> {
