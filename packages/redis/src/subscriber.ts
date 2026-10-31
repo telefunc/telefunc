@@ -136,9 +136,7 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   private _open(source: RedisSubscriptionSource, receiver: BackendReceiver<BackendPayload>): SubscriptionAttempt {
     const attempt: RedisSubscriptionAttempt = new RedisSubscriptionAttempt({
       source,
-      laneChannel: laneChannel(this._prefix, source),
-      invalidationChannel:
-        'roomId' in source ? generationInvalidationChannel(this._prefix, source.roomId, source.inc) : null,
+      ...channelsOf(this._prefix, source),
       receiver,
       onDetach: () => this._detach(attempt),
     })
@@ -332,6 +330,8 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   private _early: Buffer[] = []
   private readonly _fanIn: boolean
   private readonly _broadcast: boolean
+  /** A Broadcast text source's deliveries are strings. */
+  private readonly _text: boolean
 
   constructor({
     source,
@@ -353,8 +353,15 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     this._receiver = receiver
     this._onDetach = onDetach
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
-    this._fanIn = 'roomId' in source && (source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track')
-    this._broadcast = !('roomId' in source)
+    if ('roomId' in source) {
+      this._fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
+      this._broadcast = false
+      this._text = false
+    } else {
+      this._fanIn = false
+      this._broadcast = true
+      this._text = source.kind === 'text'
+    }
   }
 
   async unsubscribe(): Promise<void> {
@@ -515,8 +522,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
 
   private _deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
     try {
-      const text = !('roomId' in this.source) && this.source.kind === 'text'
-      this._receiver(text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
+      this._receiver(this._text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
     } finally {
       this._settle(token)
     }
@@ -532,8 +538,14 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   }
 }
 
-function laneChannel(prefix: string, source: RedisSubscriptionSource): string {
-  return 'roomId' in source
-    ? channelKey(prefix, source.roomId, source.inc, roomKit().encodeLaneKey(source.lane))
-    : broadcastChannel(prefix, source)
+/** A Room lane's channel and its generation's invalidation channel, or a Broadcast route's channel. */
+function channelsOf(
+  prefix: string,
+  source: RedisSubscriptionSource,
+): { laneChannel: string; invalidationChannel: string | null } {
+  if (!('roomId' in source)) return { laneChannel: broadcastChannel(prefix, source), invalidationChannel: null }
+  return {
+    laneChannel: channelKey(prefix, source.roomId, source.inc, roomKit().encodeLaneKey(source.lane)),
+    invalidationChannel: generationInvalidationChannel(prefix, source.roomId, source.inc),
+  }
 }
