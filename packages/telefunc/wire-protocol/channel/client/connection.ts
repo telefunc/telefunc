@@ -62,6 +62,7 @@ import { randomUuid } from '../../../utils/randomUuid.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 import { Heartbeat } from './Heartbeat.js'
+import { ChannelTable, type ChannelRecord, type ClosedState } from './ChannelTable.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
@@ -321,27 +322,6 @@ function isJoinLimb(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
-/** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
- *  it on the server. */
-type ChannelState =
-  | { tag: 'pending'; initial: boolean }
-  | { tag: 'open' }
-  | {
-      tag: 'closed'
-      initial: boolean
-      /** The server has all the page sent on it, or ended it. */
-      delivered: boolean
-      /** A PING named it. */
-      reported: boolean
-    }
-
-type ClosedState = Extract<ChannelState, { tag: 'closed' }>
-
-type ChannelEntry = {
-  channel: MuxChannel
-  state: ChannelState
-}
-
 class ClientConnection implements MuxConnection {
   private static cache = new Map<string, ClientConnection>()
 
@@ -411,17 +391,7 @@ class ClientConnection implements MuxConnection {
   private reconciledWire = -1
   private nextIndex = 0
   private inFlight = reconcileInFlight()
-  /** Initial channels a RECONCILED left out, till their ATTACH_RESULT: what they queue waits, so replays go first. */
-  private awaitedIxes = new Set<number>()
-  /** Channels no RECONCILE named on the wire yet: the next one there names them. */
-  private unnamedIxes = new Set<number>()
-  /** Channels let go since the last RECONCILE: the next one on the same wire releases them on the server. */
-  private releasedIxes: number[] = []
-  /** Closed channels not let go: a RECONCILE names them, as the server's answer tells when it has all they sent. */
-  private closedIxes = new Set<number>()
-  private channels = new Map<number, ChannelEntry>()
-  /** The channels not closed: `unregister` takes one out while `channels` still lists it. */
-  private channelIndex = new Map<MuxChannel, number>()
+  private readonly channels = new ChannelTable()
   /** Frames held while sends are, or for their channel's ATTACH_RESULT. */
   private sendBuffer: BufferedFrame[] = []
   /** Sequenced frames waiting only for the transport's headroom, in order: a channel's next send waits behind them. */
@@ -429,8 +399,6 @@ class ClientConnection implements MuxConnection {
   private waitingForHeadroomBytes = 0
   /** Channels whose queued frames go, all in one pass when they're next read (see `settleQueue`). */
   private droppedQueues = new Set<number>()
-  private lastSeqByChannel = new Map<number, number>()
-  private replayBuffers = new Map<number, ReplayBuffer>()
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
@@ -546,37 +514,16 @@ class ClientConnection implements MuxConnection {
     return this.connected && !this.reconciling && !this.upgradeGatesSends && !this.reconcileOwed
   }
 
-  private canSendImmediately(ix: number): boolean {
-    return this.sendsOpen && !this.awaitedIxes.has(ix)
-  }
-
-  // ── Per-channel state transitions: every `entry.state =` write goes through these. ──
-
-  private enterChannelPending(ix: number, channel: MuxChannel, initial: boolean): void {
-    this.channels.set(ix, { channel, state: { tag: 'pending', initial } })
-    this.channelIndex.set(channel, ix)
-  }
-
-  private enterChannelOpen(ix: number): void {
-    const entry = this.channels.get(ix)
-    assert(entry && entry.state.tag === 'pending')
-    entry.state = { tag: 'open' }
-  }
-
-  private enterChannelClosed(ix: number): void {
-    const entry = this.channels.get(ix)
-    assert(entry && entry.state.tag !== 'closed')
-    const initial = entry.state.tag === 'pending' && entry.state.initial
-    entry.state = { tag: 'closed', initial, delivered: false, reported: false }
-    this.closedIxes.add(ix)
+  private canSendImmediately(record: ChannelRecord): boolean {
+    return this.sendsOpen && !record.awaited
   }
 
   private register(channel: MuxChannel): void {
     // A new wire's RECONCILE lists every channel, the closed ones too, so the oldest the server has all of makes way.
     if (this.channels.size === MAX_CHANNELS_PER_CONNECTION) {
-      for (const [ix, entry] of this.channels) {
-        if (entry.state.tag !== 'closed' || !entry.state.delivered) continue
-        this.releaseChannel(ix, entry.channel)
+      for (const record of this.channels.values()) {
+        if (record.state.tag !== 'closed' || !record.state.delivered) continue
+        this.releaseChannel(record)
         break
       }
     }
@@ -588,13 +535,11 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.ttl)
       this.ttl = null
     }
-    const ix = this.nextIndex++
-    this.enterChannelPending(ix, channel, true)
-    this.unnamedIxes.add(ix)
-    this.replayBuffers.set(
-      ix,
-      new ReplayBuffer({ maxBytes: this.clientReplayBufferBytes, binaryMaxBytes: this.clientReplayBufferBinaryBytes }),
-    )
+    const replay = new ReplayBuffer({
+      maxBytes: this.clientReplayBufferBytes,
+      binaryMaxBytes: this.clientReplayBufferBinaryBytes,
+    })
+    this.channels.add(this.nextIndex++, channel, replay)
     this.fitReplays(channel)
 
     if (!this.transport.hasWire() && !this.transport.isConnecting()) {
@@ -655,10 +600,9 @@ class ClientConnection implements MuxConnection {
 
   /** The channel sends nothing more. */
   unregister(channel: MuxChannel): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    this.channelIndex.delete(channel)
-    this.enterChannelClosed(ix)
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    this.channels.close(record)
     this.startTtlIfIdle()
   }
 
@@ -671,10 +615,10 @@ class ClientConnection implements MuxConnection {
     data: T,
     onQueued?: (seq: number) => void,
   ): number {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return 0
-    const replay = this.replayBuffers.get(ix)!
-    const frame = encodeFrame(ix, data, replay.seq + 1)
+    const record = this.channels.of(channel)
+    if (record === undefined) return 0
+    const { replay } = record
+    const frame = encodeFrame(record.ix, data, replay.seq + 1)
     const maxFrameBytes = this.maxFrameBytesOf(channel)
     // The server ends the wire a larger frame arrives on, and the one its replay arrives on next.
     assertUsage(
@@ -683,24 +627,29 @@ class ClientConnection implements MuxConnection {
     )
     const seq = replay.nextSeq()
     onQueued?.(seq)
-    this.sendOrQueue(ix, seq, frame, kind)
+    this.sendOrQueue(record, seq, frame, kind)
     return frame.byteLength
   }
 
   /** Sends, or queues while sends are held or the transport lacks headroom; one sent at once passes the settle queue. */
-  private sendOrQueue(ix: number, seq: number, frame: Uint8Array<ArrayBuffer>, kind: OutboundFrameKind): void {
-    if (!this.canSendImmediately(ix)) {
-      this.settleQueue().push({ frame, channelIx: ix, seq })
+  private sendOrQueue(
+    record: ChannelRecord,
+    seq: number,
+    frame: Uint8Array<ArrayBuffer>,
+    kind: OutboundFrameKind,
+  ): void {
+    if (!this.canSendImmediately(record)) {
+      this.settleQueue().push({ frame, channelIx: record.ix, seq })
       return
     }
     // What waited goes first.
     this.sendWaitingForHeadroom()
     if (this.waitingForHeadroom.length === 0 && this.transport.headroom() > 0) {
-      this.replayBuffers.get(ix)!.push(seq, frame)
+      record.replay.push(seq, frame)
       this.transport.sendFrame({ kind, frame })
       return
     }
-    this.waitForHeadroom({ frame, channelIx: ix, seq })
+    this.waitForHeadroom({ frame, channelIx: record.ix, seq })
   }
 
   private waitForHeadroom(entry: HeldFrame): void {
@@ -717,16 +666,17 @@ class ClientConnection implements MuxConnection {
       const { frame, channelIx, seq } = this.waitingForHeadroom.shift()!
       this.waitingForHeadroomBytes -= frame.byteLength
       headroom -= frame.byteLength
-      this.replayBuffers.get(channelIx)!.push(seq, frame)
+      this.channels.get(channelIx)!.replay.push(seq, frame)
       this.transport.sendFrame({ kind: 'released', frame })
     }
     this.startTtlIfIdle()
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const seq = this.replayBuffers.get(ix)!.nextSeq()
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    const { ix } = record
+    const seq = record.replay.nextSeq()
     let frame = encode.ackRes(ix, seq, ackedSeq, result, status)
     const maxFrameBytes = this.maxFrameBytesOf(channel)
     // The server ends the wire a larger frame arrives on, so the send it answers gets an error instead.
@@ -734,8 +684,8 @@ class ClientConnection implements MuxConnection {
       const error = `Channel ack answer too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`
       frame = encode.ackRes(ix, seq, ackedSeq, error, ACK_STATUS.ERROR)
     }
-    this.sendOrQueue(ix, seq, frame, 'ack')
-    if (ackedSeq === this.lastSeqByChannel.get(ix)) channel._answered()
+    this.sendOrQueue(record, seq, frame, 'ack')
+    if (ackedSeq === record.lastSeq) channel._answered()
   }
 
   /** The largest frame of `channel`'s the server takes: a runtime's lower limit is its WebSocket's. */
@@ -761,28 +711,27 @@ class ClientConnection implements MuxConnection {
     channel: MuxChannel,
     buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
   ): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const replay = this.replayBuffers.get(ix)!
-    const seq = replay.nextSeq()
-    this.sendOrQueue(ix, seq, buildFrame(ix, seq), 'control')
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    const seq = record.replay.nextSeq()
+    this.sendOrQueue(record, seq, buildFrame(record.ix, seq), 'control')
   }
 
   sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void {
-    this.sendUnsequenced(channel, kind, (ix) => encode.window(ix, limit, this.lastSeqByChannel.get(ix) ?? 0))
+    this.sendUnsequenced(channel, kind, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq))
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void {
-    this.sendUnsequenced(channel, kind, (ix) => encode.msgWindow(ix, limit))
+    this.sendUnsequenced(channel, kind, ({ ix }) => encode.msgWindow(ix, limit))
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {
-    this.sendUnsequenced(channel, 'flow-control', (ix) => encode.bdpPing(ix, probe))
+    this.sendUnsequenced(channel, 'flow-control', ({ ix }) => encode.bdpPing(ix, probe))
   }
 
   sendBdpPingAck(channel: MuxChannel, { probe, backlog, pathRtt }: BdpPingAck): void {
     // The round trip a page measures on batch POSTs leaves out the wait for its POST, so it vouches for no path.
-    this.sendUnsequenced(channel, 'flow-control', (ix) =>
+    this.sendUnsequenced(channel, 'flow-control', ({ ix }) =>
       encode.bdpPingAck(ix, probe, backlog, this.transport.batched ? Infinity : pathRtt),
     )
   }
@@ -799,24 +748,24 @@ class ClientConnection implements MuxConnection {
   private sendUnsequenced(
     channel: MuxChannel,
     kind: OutboundFrameKind,
-    buildFrame: (ix: number) => Uint8Array<ArrayBuffer>,
+    buildFrame: (record: ChannelRecord) => Uint8Array<ArrayBuffer>,
   ): void {
-    const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
-    const frame = buildFrame(ix)
-    if (!this.canSendImmediately(ix)) {
-      this.settleQueue().push({ frame, channelIx: ix, seq: undefined })
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    const frame = buildFrame(record)
+    if (!this.canSendImmediately(record)) {
+      this.settleQueue().push({ frame, channelIx: record.ix, seq: undefined })
       return
     }
     this.transport.sendFrame({ kind, frame })
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
-    this.sendUnsequenced(channel, 'control', (ix) => encode.broadcastSub(ix, binary))
+    this.sendUnsequenced(channel, 'control', ({ ix }) => encode.broadcastSub(ix, binary))
   }
 
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
-    this.sendUnsequenced(channel, 'control', (ix) => encode.broadcastUnsub(ix, binary))
+    this.sendUnsequenced(channel, 'control', ({ ix }) => encode.broadcastUnsub(ix, binary))
   }
 
   onTransportOpen(transport: ClientChannelTransport): void {
@@ -891,9 +840,9 @@ class ClientConnection implements MuxConnection {
     // transports peel them off in their own receive paths. Everything that lands
     // here is per-channel and carries `index`.
     const channelFrame = frame as ChannelFrame
-    const entry = this.channels.get(channelFrame.index)
+    const record = this.channels.get(channelFrame.index)
     // A closed channel stays listed only for what it still has to tell the server.
-    if (entry && entry.state.tag !== 'closed') entry.channel._dispatchFrame(channelFrame)
+    if (record && record.state.tag !== 'closed') record.channel._dispatchFrame(channelFrame)
   }
 
   /** Every frame arriving mid-handoff lands here — the one charge site. Before the flip the probe
@@ -979,18 +928,18 @@ class ClientConnection implements MuxConnection {
   private buildPing(): Uint8Array<ArrayBuffer> {
     const ended: PingEntry[] = []
     let queued: Set<number> | undefined
-    for (const [ix, entry] of this.channels) {
-      const state = entry.state
+    for (const record of this.channels.values()) {
+      const { ix, state } = record
       if (state.tag !== 'closed' || state.initial) continue
-      if (state.reported && this.replayBuffers.get(ix)!.length === 0) {
+      if (state.reported && record.replay.length === 0) {
         queued ??= this.queuedIxes()
         if (!queued.has(ix)) {
-          this.releaseChannel(ix, entry.channel)
+          this.releaseChannel(record)
           continue
         }
       }
       state.reported = true
-      ended.push({ ix, lastSeq: this.lastSeqByChannel.get(ix) ?? 0 })
+      ended.push({ ix, lastSeq: record.lastSeq })
     }
     return encode.ping(ended)
   }
@@ -998,28 +947,28 @@ class ClientConnection implements MuxConnection {
   /** How far the server has what the page sent on each channel named, or that it no longer holds it. */
   onTransportPong(ended: PongEntry[]): void {
     for (const { ix, lastSeq } of ended) {
-      const entry = this.channels.get(ix)
-      if (entry === undefined || entry.state.tag !== 'closed') continue
-      if (lastSeq === null) this.releaseChannel(ix, entry.channel)
-      else this.serverHas(ix, entry.state, this.sentThrough(ix, lastSeq))
+      const record = this.channels.get(ix)
+      if (record === undefined || record.state.tag !== 'closed') continue
+      if (lastSeq === null) this.releaseChannel(record)
+      else this.serverHas(record, record.state, this.sentThrough(ix, lastSeq))
     }
   }
 
   /** The wire carries a seq's low 32 bits: the server's acknowledgement is the latest seq with them the page sent. */
   private sentThrough(ix: number, lastSeq: number): number {
-    return seqThrough(lastSeq, this.replayBuffers.get(ix)?.seq ?? 0)
+    return seqThrough(lastSeq, this.channels.get(ix)?.replay.seq ?? 0)
   }
 
   /** A closed channel the server attached has what the page sent on it through `lastSeq`. */
-  private serverHas(ix: number, state: ClosedState, lastSeq: number): void {
+  private serverHas({ replay }: ChannelRecord, state: ClosedState, lastSeq: number): void {
     state.initial = false
-    this.serverHasThrough(ix, lastSeq)
-    if (lastSeq >= this.replayBuffers.get(ix)!.seq) state.delivered = true
+    replay.acknowledge(lastSeq)
+    if (lastSeq >= replay.seq) state.delivered = true
   }
 
   /** The server has what the page sent on the channel through `lastSeq`, which its replay lets go. */
   private serverHasThrough(ix: number, lastSeq: number): void {
-    this.replayBuffers.get(ix)?.acknowledge(lastSeq)
+    this.channels.get(ix)?.replay.acknowledge(lastSeq)
   }
 
   private dropWire(transport: ClientChannelTransport): void {
@@ -1342,8 +1291,8 @@ class ClientConnection implements MuxConnection {
       return
     }
     // A closed channel the server has all of needs nothing from another wire.
-    for (const [ix, entry] of this.channels) {
-      if (entry.state.tag === 'closed' && entry.state.delivered) this.releaseChannel(ix, entry.channel)
+    for (const record of this.channels.values()) {
+      if (record.state.tag === 'closed' && record.state.delivered) this.releaseChannel(record)
     }
     if (this.channels.size === 0) {
       this.dispose()
@@ -1366,13 +1315,13 @@ class ClientConnection implements MuxConnection {
       this.ttl ||
       this.settleQueue().length > 0 ||
       this.waitingForHeadroom.length > 0 ||
-      this.channelIndex.size > 0
+      !this.channels.idle
     ) {
       return
     }
     const ttl = setTimeout(() => {
       void this.transport.drained().then(() => {
-        if (this.ttl === ttl && this.channelIndex.size === 0) this.dispose()
+        if (this.ttl === ttl && this.channels.idle) this.dispose()
       })
     }, this.idleTimeoutMs)
     this.ttl = ttl
@@ -1380,7 +1329,7 @@ class ClientConnection implements MuxConnection {
 
   /** The server stops awaiting channels as their wire goes, and the next wire's RECONCILE lists them again. */
   private forgetWire(): void {
-    this.awaitedIxes.clear()
+    this.channels.stopAwaiting()
     this.inFlight = reconcileInFlight()
     this.exitReconciling()
   }
@@ -1398,18 +1347,11 @@ class ClientConnection implements MuxConnection {
     this.enterClosed()
     this.transport.detachHeartbeat()
     this.transport.dispose()
-    for (const replayBuffer of this.replayBuffers.values()) replayBuffer.dispose()
     this.channels.clear()
-    this.channelIndex.clear()
     this.sendBuffer = []
     this.waitingForHeadroom = new Fifo()
     this.waitingForHeadroomBytes = 0
     this.droppedQueues.clear()
-    this.lastSeqByChannel.clear()
-    this.replayBuffers.clear()
-    this.unnamedIxes.clear()
-    this.releasedIxes = []
-    this.closedIxes.clear()
     this.forgetWire()
     // A fresh connection replaces this one once its indexes run out.
     if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
@@ -1421,28 +1363,29 @@ class ClientConnection implements MuxConnection {
     const { uplink } = this.transport
     // The wire that has the session holds what the RECONCILEs before named: one there names what changed since.
     const changes = this.sessionId !== null && this.reconciledWire === this.wire
-    const ixes = changes ? new Set([...this.unnamedIxes, ...this.closedIxes]) : this.channels.keys()
-    const open = this.declareOpenEntries(ixes, {
+    const records = changes ? this.channels.changed() : this.channels.values()
+    const open = this.declareOpenEntries(records, {
       skipUnnamed: false,
       uplink,
     })
+    const released = this.channels.takeReleased()
     const reconcile: ReconcilePayload = { open }
     if (this.sessionId) reconcile.sessionId = this.sessionId
-    if (changes) reconcile.released = this.releasedIxes
-    this.releasedIxes = []
+    if (changes) reconcile.released = released
     return { kind: 'reconcile', frame: encode.reconcile(reconcile) }
   }
 
   /** The old wire's last frame; a channel no RECONCILE named yet is left out, to reconcile after the handoff. */
   private buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
-    const open = this.declareOpenEntries(this.channels.keys(), { skipUnnamed: true, uplink })
-    this.releasedIxes = []
+    const open = this.declareOpenEntries(this.channels.values(), { skipUnnamed: true, uplink })
+    // A new wire's RECONCILE releases what it leaves out.
+    this.channels.takeReleased()
     return { kind: 'reconcile', frame: encode.barrier({ sessionId, upgradeId, open }) }
   }
 
   private declareOpenEntries(
-    ixes: Iterable<number>,
+    records: Iterable<ChannelRecord>,
     {
       skipUnnamed,
       uplink,
@@ -1455,24 +1398,24 @@ class ClientConnection implements MuxConnection {
     this.inFlight = reconcileInFlight()
     const open: ReconcileOpenEntry[] = []
     const subscribing = new Set<number>()
-    for (const ix of ixes) {
-      const entry = this.channels.get(ix)!
+    for (const record of records) {
+      const { ix } = record
       // The server has all a delivered one sent it, or ended it: leaving it out lets it go there too.
-      if (entry.state.tag === 'closed' && entry.state.delivered) {
-        this.releaseChannel(ix, entry.channel)
+      if (record.state.tag === 'closed' && record.state.delivered) {
+        this.releaseChannel(record)
         continue
       }
-      const isInitial = entry.state.tag !== 'open' && entry.state.initial
-      if (skipUnnamed && isInitial && !this.awaitedIxes.has(ix)) continue
-      this.unnamedIxes.delete(ix)
+      const isInitial = record.state.tag !== 'open' && record.state.initial
+      if (skipUnnamed && isInitial && !record.awaited) continue
+      this.channels.name(record)
       this.inFlight.ixes.set(ix, isInitial)
       const payloadEntry: ReconcileOpenEntry = {
-        id: entry.channel.id,
+        id: record.channel.id,
         ix,
-        lastSeq: this.lastSeqByChannel.get(ix) ?? 0,
+        lastSeq: record.lastSeq,
       }
       if (isInitial) payloadEntry.initial = true
-      const state = entry.channel._reattachState(uplink)
+      const state = record.channel._reattachState(uplink)
       if (state.probe !== undefined) this.inFlight.probes.set(ix, state.probe)
       Object.assign(payloadEntry, state)
       if (state.broadcast) subscribing.add(ix)
@@ -1503,11 +1446,11 @@ class ClientConnection implements MuxConnection {
 
   /** Whether a replay holds a frame the page sent. */
   private sentBefore(): boolean {
-    for (const replay of this.replayBuffers.values()) if (replay.length > 0) return true
+    for (const { replay } of this.channels.values()) if (replay.length > 0) return true
     return false
   }
 
-  private readonly isSendable = (ix: number): boolean => !this.awaitedIxes.has(ix)
+  private readonly isSendable = (ix: number): boolean => this.channels.get(ix)?.awaited !== true
 
   stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
     // This batch names every channel registered since the last, so it already covers any pending registration.
@@ -1538,27 +1481,29 @@ class ClientConnection implements MuxConnection {
     for (const [ix, lastSeq] of attachResults) if (lastSeq !== null && !serverMap.has(ix)) serverMap.set(ix, lastSeq)
     // An initial channel left out is one the server awaits, until its ATTACH_RESULT.
     for (const [ix, initial] of ixes) {
-      this.awaitedIxes.delete(ix)
-      if (!initial || serverMap.has(ix) || attachResults.has(ix) || !this.channels.has(ix)) continue
-      this.awaitedIxes.add(ix)
+      const record = this.channels.get(ix)
+      if (record !== undefined) record.awaited = initial && !serverMap.has(ix) && !attachResults.has(ix)
     }
     const releaseFrames: OutboundFrame[] = []
     const channelsToOpen: MuxChannel[] = []
     // Registered after the RECONCILE we just got back was built — wait for next round.
-    const hasNewChannels = this.unnamedIxes.size > 0
+    const hasNewChannels = this.channels.hasUnnamed
 
     for (const ix of ixes.keys()) {
-      const entry = this.channels.get(ix)
-      if (entry === undefined || this.awaitedIxes.has(ix)) continue
-      const replay = this.reattach(ix, entry, serverMap.get(ix), (carriedFrom.get(ix) ?? Infinity) - 1, deferredOmitted)
+      const record = this.channels.get(ix)
+      if (record === undefined || record.awaited) continue
+      const replay = this.reattach(record, serverMap.get(ix), (carriedFrom.get(ix) ?? Infinity) - 1, deferredOmitted)
       if (replay === null) continue
       for (const frame of replay) releaseFrames.push(frame)
-      if (entry.state.tag !== 'closed') channelsToOpen.push(entry.channel)
+      if (record.state.tag !== 'closed') channelsToOpen.push(record.channel)
     }
 
     // What the server has: the channels this RECONCILE named that it attached, and those the ones before named.
-    const attached = (ix: number): boolean =>
-      ixes.has(ix) ? serverMap.has(ix) : this.channels.has(ix) && !this.unnamedIxes.has(ix) && this.isSendable(ix)
+    const attached = (ix: number): boolean => {
+      if (ixes.has(ix)) return serverMap.has(ix)
+      const record = this.channels.get(ix)
+      return record !== undefined && !this.channels.isUnnamed(record) && !record.awaited
+    }
     for (const frame of this.drainBufferedFrames(attached)) releaseFrames.push(frame)
 
     if (hasNewChannels && !this.upgradeReady) {
@@ -1592,7 +1537,7 @@ class ClientConnection implements MuxConnection {
     this.clientReplayBufferBinaryBytes = ctrl.clientReplayBufferBinary
     this.replayWindows = { window, peerWindow: replayWindow(ctrl.clientReplayBuffer, ctrl.clientReplayBufferBinary) }
     // Before this reconcile stores anything: a channel registered before the first RECONCILED was sized with the defaults.
-    for (const replay of this.replayBuffers.values()) {
+    for (const { replay } of this.channels.values()) {
       replay.setLimits(this.clientReplayBufferBytes, this.clientReplayBufferBinaryBytes)
     }
     for (const { channel } of this.channels.values()) this.fitReplays(channel)
@@ -1600,36 +1545,35 @@ class ClientConnection implements MuxConnection {
 
   /** What a channel the RECONCILE named replays to the server, its state brought to the server's; null if let go. */
   private reattach(
-    ix: number,
-    entry: ChannelEntry,
+    record: ChannelRecord,
     lastSeq: number | undefined,
     throughSeq: number,
     deferredOmitted: number[] | null,
   ): OutboundFrame[] | null {
-    if (entry.state.tag === 'closed') {
+    if (record.state.tag === 'closed') {
       // One the server no longer has needs nothing more from the page.
       if (lastSeq === undefined) {
-        this.releaseChannel(ix, entry.channel)
+        this.releaseChannel(record)
         return null
       }
-      this.serverHas(ix, entry.state, lastSeq)
+      this.serverHas(record, record.state, lastSeq)
     }
     if (lastSeq === undefined) {
-      if (deferredOmitted) deferredOmitted.push(ix)
-      else this.closeUnacknowledged([ix])
+      if (deferredOmitted) deferredOmitted.push(record.ix)
+      else this.closeUnacknowledged([record.ix])
       return null
     }
-    if (entry.state.tag === 'pending') this.enterChannelOpen(ix)
-    return this.replayTo(ix, entry, lastSeq, throughSeq)
+    if (record.state.tag === 'pending') this.channels.open(record)
+    return this.replayTo(record, lastSeq, throughSeq)
   }
 
   private closeUnacknowledged(ixes: number[]): void {
     for (const ix of ixes) {
-      const entry = this.channels.get(ix)
-      if (!entry) continue
+      const record = this.channels.get(ix)
+      if (!record) continue
       const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
-      this.releaseChannel(ix, entry.channel)
-      entry.channel._onEnded(err)
+      this.releaseChannel(record)
+      record.channel._onEnded(err)
     }
   }
 
@@ -1639,19 +1583,20 @@ class ClientConnection implements MuxConnection {
       this.inFlight.attachResults.set(ix, lastSeq)
       return
     }
-    if (!this.awaitedIxes.delete(ix)) return
-    const entry = this.channels.get(ix)!
+    const record = this.channels.get(ix)
+    if (record === undefined || !record.awaited) return
+    record.awaited = false
     if (lastSeq === null) {
       this.closeUnacknowledged([ix])
     } else {
-      const opened = entry.state.tag === 'pending'
-      if (opened) this.enterChannelOpen(ix)
-      else if (entry.state.tag === 'closed') this.serverHas(ix, entry.state, lastSeq)
+      const opened = record.state.tag === 'pending'
+      if (opened) this.channels.open(record)
+      else if (record.state.tag === 'closed') this.serverHas(record, record.state, lastSeq)
       // As `applyReconciled` does: its replay, then what it queued.
-      for (const frame of this.replayTo(ix, entry, lastSeq)) this.transport.sendFrame(frame)
+      for (const frame of this.replayTo(record, lastSeq)) this.transport.sendFrame(frame)
       for (const frame of this.drainBufferedFrames((i) => i === ix)) this.transport.sendFrame(frame)
-      if (opened && entry.state.tag === 'open') {
-        entry.channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
+      if (opened && record.state.tag === 'open') {
+        record.channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
       }
     }
     this.startTtlIfIdle()
@@ -1659,47 +1604,48 @@ class ClientConnection implements MuxConnection {
   }
 
   /** What the server lacks through `throughSeq`: the replay, or an ERROR ending the channel if the replay lost some. */
-  private replayTo(ix: number, entry: ChannelEntry, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
-    this.serverHasThrough(ix, lastSeq)
-    const missed = this.replayBuffers.get(ix)!.getAfter(lastSeq, throughSeq)
+  private replayTo(record: ChannelRecord, lastSeq: number, throughSeq = Infinity): OutboundFrame[] {
+    record.replay.acknowledge(lastSeq)
+    const missed = record.replay.getAfter(lastSeq, throughSeq)
     if (missed !== null) return missed.map((frame) => ({ kind: 'released', frame }))
     // One the server ended needs nothing more.
-    if (entry.state.tag === 'closed' && entry.state.delivered) return []
-    return [this.loseChannel(ix, entry)]
+    if (record.state.tag === 'closed' && record.state.delivered) return []
+    return [this.loseChannel(record)]
   }
 
   /** Ends the channel on both ends, dropping its queue; the ERROR isn't replayed, as the next reconcile sends one. */
-  private loseChannel(ix: number, entry: ChannelEntry): OutboundFrame {
+  private loseChannel({ ix, replay, channel }: ChannelRecord): OutboundFrame {
     this.droppedQueues.add(ix)
-    const frame = encode.error(ix, ERROR_REASON.LOST, this.replayBuffers.get(ix)!.nextSeq())
-    entry.channel._onEnded(replayLossError('client'))
+    const frame = encode.error(ix, ERROR_REASON.LOST, replay.nextSeq())
+    channel._onEnded(replayLossError('client'))
     return { kind: 'control', frame }
   }
 
   /** The server ended it, so it needs nothing more the page sent on it. */
   private closeRemoteChannel(ix: number, err?: Error): void {
-    const entry = this.channels.get(ix)
-    if (!entry) return
-    this.unregister(entry.channel)
-    assert(entry.state.tag === 'closed')
-    entry.state.delivered = true
-    entry.channel._onEnded(err)
+    const record = this.channels.get(ix)
+    if (!record) return
+    this.unregister(record.channel)
+    assert(record.state.tag === 'closed')
+    record.state.delivered = true
+    record.channel._onEnded(err)
   }
 
   private closeAll(err: Error): void {
-    for (const [, entry] of this.channels) {
-      entry.channel._onEnded(err)
+    for (const { channel } of this.channels.values()) {
+      channel._onEnded(err)
     }
     this.dispose()
   }
 
   /** The seq of a frame of channel `ix` with low bits `bits`, or null to drop a duplicate or one of a let-go one. */
   private trackSeq(ix: number, bits: number): number | null {
-    if (!this.channels.has(ix)) return null
-    const prev = this.lastSeqByChannel.get(ix) ?? 0
+    const record = this.channels.get(ix)
+    if (record === undefined) return null
+    const prev = record.lastSeq
     const seq = seqNear(bits, prev + 1)
     if (seq <= prev) return null
-    this.lastSeqByChannel.set(ix, seq)
+    record.lastSeq = seq
     return seq
   }
 
@@ -1730,7 +1676,7 @@ class ClientConnection implements MuxConnection {
           continue
         }
         headroom -= frame.byteLength
-        this.replayBuffers.get(channelIx)?.push(seq, frame)
+        this.channels.get(channelIx)?.replay.push(seq, frame)
       }
       frames.push({ kind: 'released', frame })
     }
@@ -1740,17 +1686,9 @@ class ClientConnection implements MuxConnection {
 
   /** Drops all the channel holds, its ATTACH_RESULT wait too, as the RECONCILE releasing it, or a new wire's leaving it
    *  out, ends that on the server. */
-  private releaseChannel(ix: number, channel: MuxChannel): void {
-    if (!this.unnamedIxes.delete(ix)) this.releasedIxes.push(ix)
-    this.closedIxes.delete(ix)
-    this.channels.delete(ix)
-    this.channelIndex.delete(channel)
-    this.awaitedIxes.delete(ix)
-    this.lastSeqByChannel.delete(ix)
-    const replayBuffer = this.replayBuffers.get(ix)
-    replayBuffer?.dispose()
-    this.replayBuffers.delete(ix)
-    if (this.sendBuffer.length > 0 || this.waitingForHeadroom.length > 0) this.droppedQueues.add(ix)
+  private releaseChannel(record: ChannelRecord): void {
+    this.channels.release(record)
+    if (this.sendBuffer.length > 0 || this.waitingForHeadroom.length > 0) this.droppedQueues.add(record.ix)
   }
 
   /** sendBuffer, with what waited for headroom in front of it once sends are held: a reconcile takes them all in order. */
