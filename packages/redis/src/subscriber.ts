@@ -69,29 +69,29 @@ const REORDER_WAIT_MS = 1_000
  * incarnation is still the open head).
  */
 class RedisSubscriber {
-  private readonly _createSubscriber: () => Promise<SubscriberSocket>
+  private readonly createSubscriber: () => Promise<SubscriberSocket>
   /** Every channel some attempt needs, with the attempts that listen on it. */
-  private readonly _byChannel = new Map<string, Set<RedisSubscriptionAttempt>>()
+  private readonly byChannel = new Map<string, Set<RedisSubscriptionAttempt>>()
   /** The channels some attempt started or stopped needing since the last sync read them. */
-  private _changedChannels = new Set<string>()
+  private changedChannels = new Set<string>()
   /** The attempts that may await confirmation; a sync confirms those its connection covers. */
-  private readonly _unconfirmed = new Set<RedisSubscriptionAttempt>()
-  private _connection: Connection = { phase: 'idle' }
-  private _nextId = 0
-  private _syncing: Promise<void> = Promise.resolve()
-  private _syncQueued = false
-  private _reconnectDelay = RECONNECT_DELAY_MIN_MS
+  private readonly unconfirmed = new Set<RedisSubscriptionAttempt>()
+  private connection: Connection = { phase: 'idle' }
+  private nextId = 0
+  private syncing: Promise<void> = Promise.resolve()
+  private syncQueued = false
+  private reconnectDelay = RECONNECT_DELAY_MIN_MS
   /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
-  private _outageReported = false
+  private outageReported = false
 
   constructor(options: RedisSubscriberOptions) {
-    this._createSubscriber = options.createSubscriber
+    this.createSubscriber = options.createSubscriber
   }
 
   bind<Source extends RedisSubscriptionSource>(source: Source, channels: SourceChannels<Source>): SubscriptionBinding {
     return {
       partition: '',
-      open: (receiver) => this._open(source, channels, receiver),
+      open: (receiver) => this.open(source, channels, receiver),
     }
   }
 
@@ -104,7 +104,7 @@ class RedisSubscriber {
   } {
     const token = randomUUID()
     const arm = (channel: string | null) => {
-      const attempts = channel === null ? [] : [...(this._byChannel.get(channel) ?? [])]
+      const attempts = channel === null ? [] : [...(this.byChannel.get(channel) ?? [])]
       return { attempts, armed: attempts.flatMap((attempt) => attempt.prepareFence(token) ?? []) }
     }
     const lane = arm(channels.lane)
@@ -124,7 +124,7 @@ class RedisSubscriber {
     }
   }
 
-  private _open<Source extends RedisSubscriptionSource>(
+  private open<Source extends RedisSubscriptionSource>(
     source: Source,
     channels: SourceChannels<Source>,
     receiver: BackendReceiver<BackendPayload>,
@@ -134,130 +134,130 @@ class RedisSubscriber {
       // The attempt hands `readLaneStarts` its own source only.
       channels: channels as SourceChannels<RedisSubscriptionSource>,
       receiver,
-      onDetach: () => this._detach(attempt),
+      onDetach: () => this.detach(attempt),
     })
     for (const channel of attempt.channels) {
-      const attempts = this._byChannel.get(channel)
+      const attempts = this.byChannel.get(channel)
       if (attempts !== undefined) {
         attempts.add(attempt)
       } else {
-        this._byChannel.set(channel, new Set([attempt]))
-        this._changedChannels.add(channel)
+        this.byChannel.set(channel, new Set([attempt]))
+        this.changedChannels.add(channel)
       }
     }
-    this._unconfirmed.add(attempt)
-    if (this._connection.phase === 'connected') this._syncChannels()
-    else if (this._connection.phase === 'idle') void this._connect()
+    this.unconfirmed.add(attempt)
+    if (this.connection.phase === 'connected') this.syncChannels()
+    else if (this.connection.phase === 'idle') void this.connect()
     return attempt
   }
 
-  private _detach(attempt: RedisSubscriptionAttempt): void {
-    this._unconfirmed.delete(attempt)
+  private detach(attempt: RedisSubscriptionAttempt): void {
+    this.unconfirmed.delete(attempt)
     for (const channel of attempt.channels) {
-      const attempts = this._byChannel.get(channel)
+      const attempts = this.byChannel.get(channel)
       attempts?.delete(attempt)
       if (attempts?.size !== 0) continue
-      this._byChannel.delete(channel)
-      this._changedChannels.add(channel)
+      this.byChannel.delete(channel)
+      this.changedChannels.add(channel)
     }
-    if (this._byChannel.size > 0) return this._syncChannels()
+    if (this.byChannel.size > 0) return this.syncChannels()
     // Nothing left to deliver to: release the connection until the next subscription, which starts afresh.
-    this._disconnect()
-    this._outageReported = false
-    this._reconnectDelay = RECONNECT_DELAY_MIN_MS
+    this.disconnect()
+    this.outageReported = false
+    this.reconnectDelay = RECONNECT_DELAY_MIN_MS
   }
 
-  private async _connect(): Promise<void> {
-    const id = ++this._nextId
+  private async connect(): Promise<void> {
+    const id = ++this.nextId
     const connecting: Extract<Connection, { phase: 'connecting' }> = { phase: 'connecting', id, socket: null }
-    this._connection = connecting
+    this.connection = connecting
     let socket: SubscriberSocket
     try {
-      socket = await this._createSubscriber()
+      socket = await this.createSubscriber()
     } catch (error) {
-      return this._lost(id, error)
+      return this.lost(id, error)
     }
-    if (!this._isCurrent(id)) return socket.disconnect()
+    if (!this.isCurrent(id)) return socket.disconnect()
     connecting.socket = socket
     socket.on('messageBuffer', (channel: Buffer, frame: Buffer) => {
-      if (this._isCurrent(id)) this._dispatch(channel.toString(), frame)
+      if (this.isCurrent(id)) this.dispatch(channel.toString(), frame)
     })
     let lastError: unknown = new Error('Redis subscriber connection closed')
     socket.on('error', (error: unknown) => {
       lastError = error
     })
-    socket.on('close', () => this._lost(id, lastError))
+    socket.on('close', () => this.lost(id, lastError))
     try {
       await socket.connect()
     } catch (error) {
-      return this._lost(id, error)
+      return this.lost(id, error)
     }
-    if (!this._isCurrent(id)) return
-    this._connection = { phase: 'connected', id, socket, subscribed: new Set() }
-    this._changedChannels = new Set(this._byChannel.keys())
-    this._syncChannels()
+    if (!this.isCurrent(id)) return
+    this.connection = { phase: 'connected', id, socket, subscribed: new Set() }
+    this.changedChannels = new Set(this.byChannel.keys())
+    this.syncChannels()
   }
 
-  private _lost(id: number, error: unknown): void {
-    if (!this._isCurrent(id)) return
-    this._disconnect()
-    for (const attempt of this._attempts()) {
+  private lost(id: number, error: unknown): void {
+    if (!this.isCurrent(id)) return
+    this.disconnect()
+    for (const attempt of this.attempts()) {
       attempt.lose(error)
-      this._unconfirmed.add(attempt)
+      this.unconfirmed.add(attempt)
     }
     // A listener may have released the last attempt, or opened one that is already connecting.
-    if (this._byChannel.size === 0 || this._connection.phase !== 'idle') return
-    if (!this._outageReported) {
-      this._outageReported = true
+    if (this.byChannel.size === 0 || this.connection.phase !== 'idle') return
+    if (!this.outageReported) {
+      this.outageReported = true
       console.error(error)
     }
-    const timer = setTimeout(() => void this._connect(), this._reconnectDelay)
+    const timer = setTimeout(() => void this.connect(), this.reconnectDelay)
     timer.unref()
-    this._connection = { phase: 'waiting', timer }
-    this._reconnectDelay = Math.min(this._reconnectDelay * 2, RECONNECT_DELAY_MAX_MS)
+    this.connection = { phase: 'waiting', timer }
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_DELAY_MAX_MS)
   }
 
-  private _disconnect(): void {
-    const connection = this._connection
-    this._connection = { phase: 'idle' }
+  private disconnect(): void {
+    const connection = this.connection
+    this.connection = { phase: 'idle' }
     if (connection.phase === 'waiting') clearTimeout(connection.timer)
     else if (connection.phase !== 'idle') connection.socket?.disconnect()
   }
 
-  private _isCurrent(id: number): boolean {
-    const connection = this._connection
+  private isCurrent(id: number): boolean {
+    const connection = this.connection
     return (connection.phase === 'connecting' || connection.phase === 'connected') && connection.id === id
   }
 
   /** Serialized: brings the connection's channel set to the attempts' and confirms what it covers. A sync reads the
    *  changed channels when it starts, so one that is queued already covers any later request. */
-  private _syncChannels(): void {
-    if (this._syncQueued) return
-    this._syncQueued = true
-    this._syncing = this._syncing.then(async () => {
-      this._syncQueued = false
-      const connection = this._connection
+  private syncChannels(): void {
+    if (this.syncQueued) return
+    this.syncQueued = true
+    this.syncing = this.syncing.then(async () => {
+      this.syncQueued = false
+      const connection = this.connection
       if (connection.phase !== 'connected') return
       try {
-        await this._syncChannelsOnce(connection)
+        await this.syncChannelsOnce(connection)
       } catch (error) {
         // A failed (UN)SUBSCRIBE leaves the channel set unknown: start over on a fresh connection.
-        return this._lost(connection.id, error)
+        return this.lost(connection.id, error)
       }
       // Recovered once the channels are subscribed, not when the socket connects:
       // a refused SUBSCRIBE keeps backing off.
-      this._reconnectDelay = RECONNECT_DELAY_MIN_MS
-      this._outageReported = false
+      this.reconnectDelay = RECONNECT_DELAY_MIN_MS
+      this.outageReported = false
     })
   }
 
-  private async _syncChannelsOnce({ id, socket, subscribed }: Connected): Promise<void> {
-    const changed = this._changedChannels
-    this._changedChannels = new Set()
+  private async syncChannelsOnce({ id, socket, subscribed }: Connected): Promise<void> {
+    const changed = this.changedChannels
+    this.changedChannels = new Set()
     const stale: string[] = []
     const missing: string[] = []
     for (const channel of changed) {
-      const wanted = this._byChannel.has(channel)
+      const wanted = this.byChannel.has(channel)
       if (wanted && !subscribed.has(channel)) missing.push(channel)
       else if (!wanted && subscribed.has(channel)) stale.push(channel)
     }
@@ -267,46 +267,46 @@ class RedisSubscriber {
     }
     if (missing.length > 0) {
       await socket.subscribe(...missing)
-      if (!this._isCurrent(id)) return
+      if (!this.isCurrent(id)) return
       for (const channel of missing) subscribed.add(channel)
     }
     // An attempt attached during the SUBSCRIBE above waits for the sync it queued.
     const covered: RedisSubscriptionAttempt[] = []
-    for (const attempt of this._unconfirmed) {
+    for (const attempt of this.unconfirmed) {
       if (!attempt.awaitsConfirmation()) {
-        this._unconfirmed.delete(attempt)
+        this.unconfirmed.delete(attempt)
       } else if (attempt.channels.every((channel) => subscribed.has(channel))) {
-        this._unconfirmed.delete(attempt)
+        this.unconfirmed.delete(attempt)
         covered.push(attempt)
       }
     }
-    await Promise.all(covered.map((attempt) => this._confirm(attempt, id)))
+    await Promise.all(covered.map((attempt) => this.confirm(attempt, id)))
   }
 
   /** Its channels are subscribed on a live connection: ready from where each lane stands now, unless its incarnation is
    *  no longer open. */
-  private async _confirm(attempt: RedisSubscriptionAttempt, id: number): Promise<void> {
+  private async confirm(attempt: RedisSubscriptionAttempt, id: number): Promise<void> {
     let starts: Map<string, OrderingInfo> | null
     try {
       starts = await attempt.readLaneStarts(attempt.source)
     } catch (error) {
       // A failed read (a command-connection error) fails this attempt, not the shared subscriber connection.
-      if (this._isCurrent(id)) attempt.terminate(error)
+      if (this.isCurrent(id)) attempt.terminate(error)
       return
     }
-    if (!this._isCurrent(id)) return
+    if (!this.isCurrent(id)) return
     if (starts !== null) return attempt.markReady(starts)
     attempt.terminate(new Error(`subscribeLane: the generation of '${attempt.laneChannel}' is not open`))
   }
 
-  private _attempts(): Set<RedisSubscriptionAttempt> {
+  private attempts(): Set<RedisSubscriptionAttempt> {
     const all = new Set<RedisSubscriptionAttempt>()
-    for (const attempts of this._byChannel.values()) for (const attempt of attempts) all.add(attempt)
+    for (const attempts of this.byChannel.values()) for (const attempt of attempts) all.add(attempt)
     return all
   }
 
-  private _dispatch(channel: string, frame: Buffer): void {
-    for (const attempt of [...(this._byChannel.get(channel) ?? [])]) attempt.receive(channel, frame)
+  private dispatch(channel: string, frame: Buffer): void {
+    for (const attempt of [...(this.byChannel.get(channel) ?? [])]) attempt.receive(channel, frame)
   }
 }
 
@@ -316,18 +316,18 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   readonly invalidationChannel: string | null
   readonly readLaneStarts: SourceChannels<RedisSubscriptionSource>['readLaneStarts']
   readonly channels: readonly string[]
-  private readonly _receiver: BackendReceiver<BackendPayload>
-  private readonly _onDetach: () => void
-  private readonly _fences = new Map<string, Deferred<void>>()
+  private readonly receiver: BackendReceiver<BackendPayload>
+  private readonly onDetach: () => void
+  private readonly fences = new Map<string, Deferred<void>>()
   /** Each lane's order: an every-track or every-member channel carries many binary lanes, keyed by lane key; any other
    *  channel one lane, keyed `''`. */
-  private _orders = new Map<string, LaneOrder>()
+  private orders = new Map<string, LaneOrder>()
   /** The frames that arrived while it awaited confirmation, ordered once it knows where each lane starts. */
-  private _early: Buffer[] = []
-  private readonly _fanIn: boolean
-  private readonly _broadcast: boolean
+  private early: Buffer[] = []
+  private readonly fanIn: boolean
+  private readonly broadcast: boolean
   /** A Broadcast text source's deliveries are strings. */
-  private readonly _text: boolean
+  private readonly text: boolean
 
   constructor({
     source,
@@ -345,38 +345,38 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     this.laneChannel = laneChannel
     this.invalidationChannel = invalidationChannel
     this.readLaneStarts = readLaneStarts
-    this._receiver = receiver
-    this._onDetach = onDetach
+    this.receiver = receiver
+    this.onDetach = onDetach
     this.channels = invalidationChannel === null ? [laneChannel] : [laneChannel, invalidationChannel]
     if ('roomId' in source) {
-      this._fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
-      this._broadcast = false
-      this._text = false
+      this.fanIn = source.lane.kind === 'binary-all' || source.lane.kind === 'binary-track'
+      this.broadcast = false
+      this.text = false
     } else {
-      this._fanIn = false
-      this._broadcast = true
-      this._text = source.kind === 'text'
+      this.fanIn = false
+      this.broadcast = true
+      this.text = source.kind === 'text'
     }
   }
 
   async unsubscribe(): Promise<void> {
-    this._dropHeld()
-    for (const token of this._fences.keys()) this.settleFence(token)
+    this.dropHeld()
+    for (const token of this.fences.keys()) this.settleFence(token)
     this.transition('closed', new Error(`Redis subscription '${this.laneChannel}' was closed`))
-    this._onDetach()
+    this.onDetach()
   }
 
   prepareFence(token: string): Promise<void> | null {
     if (this.state() !== 'ready') return null
     const fence = createDeferred()
-    this._fences.set(token, fence)
+    this.fences.set(token, fence)
     return fence.promise
   }
 
   /** Resolves the fence: its token arrived, the commit that armed it was refused, or no receiver is left. */
   settleFence(token: string): void {
-    this._fences.get(token)?.resolve()
-    this._fences.delete(token)
+    this.fences.get(token)?.resolve()
+    this.fences.delete(token)
   }
 
   awaitsConfirmation(): boolean {
@@ -386,33 +386,33 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   /** A lane missing from `starts` has no commit yet. */
   markReady(starts: Map<string, OrderingInfo>): void {
     if (!this.awaitsConfirmation()) return
-    this._orders = new Map()
+    this.orders = new Map()
     for (const [lane, start] of starts) {
-      this._orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, held: null, release: null })
+      this.orders.set(lane, { last: start.seq, lastTimestamp: start.timestamp, held: null, release: null })
     }
-    const early = this._early
-    this._early = []
+    const early = this.early
+    this.early = []
     this.transition('ready')
     for (const message of early) {
       // A receiver may close the lane.
       if (this.state() !== 'ready') return
-      this._receiveFrame(message)
+      this.receiveFrame(message)
     }
   }
 
   terminate(error: unknown): void {
     if (this.ended) return
-    this._dropHeld()
-    this._rejectFences(error)
+    this.dropHeld()
+    this.rejectFences(error)
     this.transition('closed', error)
   }
 
   lose(error: unknown): void {
-    this._early = []
+    this.early = []
     if (this.state() !== 'ready') return
     // What arrived goes out: what it waits for can no longer arrive on this connection.
-    for (const order of this._orders.values()) if (order.held !== null) this._release(order)
-    this._rejectFences(error)
+    for (const order of this.orders.values()) if (order.held !== null) this.release(order)
+    this.rejectFences(error)
     this.transition('lost')
   }
 
@@ -420,76 +420,76 @@ class RedisSubscriptionAttempt extends DriverAttempt {
     if (channel === this.invalidationChannel) {
       return this.terminate(new Error('Redis generation subscription was invalidated'))
     }
-    if (this.state() === 'ready') return this._receiveFrame(message)
-    if (this.awaitsConfirmation()) this._early.push(message)
+    if (this.state() === 'ready') return this.receiveFrame(message)
+    if (this.awaitsConfirmation()) this.early.push(message)
   }
 
-  private _receiveFrame(message: Buffer): void {
-    if (message[0] !== REDIS_DELIVERY_FENCE_BYTE) return this._order(message, null)
+  private receiveFrame(message: Buffer): void {
+    if (message[0] !== REDIS_DELIVERY_FENCE_BYTE) return this.order(message, null)
     const token = message.toString('latin1', 1, 1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH)
-    this._order(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH), token)
+    this.order(message.subarray(1 + REDIS_DELIVERY_FENCE_TOKEN_LENGTH), token)
   }
 
   /** Delivers each lane in seq order: a frame whose predecessor is past the last delivered waits `REORDER_WAIT_MS` for
    *  it, and one at or below the last delivered is dropped. Its commit's fence settles once it is delivered or
    *  dropped. */
-  private _order(frame: Buffer, token: string | null): void {
+  private order(frame: Buffer, token: string | null): void {
     let lane = ''
-    if (this._fanIn) {
+    if (this.fanIn) {
       const end = 2 + frame.readUInt16BE(0)
       lane = frame.toString('latin1', 2, end)
       frame = frame.subarray(end)
     }
     // A Broadcast key's kinds share one sequence, so its frame leads with the seq of the previous publish of its kind.
-    const { payload, info } = decodeOrderingFrame(this._broadcast ? frame.subarray(8) : frame)
-    const predecessor = this._broadcast ? Number(frame.readBigUInt64BE(0)) : info.seq - 1
-    let order = this._orders.get(lane)
+    const { payload, info } = decodeOrderingFrame(this.broadcast ? frame.subarray(8) : frame)
+    const predecessor = this.broadcast ? Number(frame.readBigUInt64BE(0)) : info.seq - 1
+    let order = this.orders.get(lane)
     if (order === undefined) {
       // A lane with no commit when the subscription went live: every one of its commits is after.
       order = { last: 0, lastTimestamp: 0, held: null, release: null }
-      this._orders.set(lane, order)
+      this.orders.set(lane, order)
     }
     if (predecessor <= order.last && info.seq > order.last) {
-      this._advance(order, payload, info, token)
-      if (order.held !== null) this._drain(order)
+      this.advance(order, payload, info, token)
+      if (order.held !== null) this.drain(order)
       return
     }
-    if (predecessor > order.last) return this._hold(order, predecessor, payload, info, token)
+    if (predecessor > order.last) return this.hold(order, predecessor, payload, info, token)
     // A commit never sets its lane's time back, so a later time on a seq at or below the last is a failover's rewind.
-    if (info.timestamp <= order.lastTimestamp) return this._settle(token)
-    if (order.held !== null) this._release(order)
-    this._advance(order, payload, info, token)
+    if (info.timestamp <= order.lastTimestamp) return this.settle(token)
+    if (order.held !== null) this.release(order)
+    this.advance(order, payload, info, token)
   }
 
-  private _advance(order: LaneOrder, payload: Uint8Array, info: OrderingInfo, token: string | null): void {
+  private advance(order: LaneOrder, payload: Uint8Array, info: OrderingInfo, token: string | null): void {
     order.last = info.seq
     order.lastTimestamp = info.timestamp
-    this._deliver(payload, info, token)
+    this.deliver(payload, info, token)
   }
 
-  private _hold(
+  private hold(
     order: LaneOrder,
     predecessor: number,
     payload: Uint8Array,
     info: OrderingInfo,
     token: string | null,
   ): void {
-    if (order.held?.has(predecessor)) return this._settle(token)
+    if (order.held?.has(predecessor)) return this.settle(token)
     order.held ??= new Map()
     order.held.set(predecessor, { payload, info, token })
     if (order.release !== null) return
-    order.release = setTimeout(() => this._release(order), REORDER_WAIT_MS)
+    order.release = setTimeout(() => this.release(order), REORDER_WAIT_MS)
     order.release.unref()
   }
 
   /** The held frames that now follow in order. */
-  private _drain(order: LaneOrder): void {
+  private drain(order: LaneOrder): void {
     const held = order.held!
     for (let next = held.get(order.last); next !== undefined; next = held.get(order.last)) {
       // A receiver may close the lane.
       if (this.state() !== 'ready') return
       held.delete(order.last)
-      this._advance(order, next.payload, next.info, next.token)
+      this.advance(order, next.payload, next.info, next.token)
     }
     if (held.size > 0) return
     clearTimeout(order.release!)
@@ -498,37 +498,37 @@ class RedisSubscriptionAttempt extends DriverAttempt {
   }
 
   /** The wait ended: every held frame goes out in seq order, past what never arrived. */
-  private _release(order: LaneOrder): void {
+  private release(order: LaneOrder): void {
     clearTimeout(order.release!)
     const held = [...order.held!.values()].sort((a, b) => a.info.seq - b.info.seq)
     order.held = null
     order.release = null
     for (const frame of held) {
       if (this.state() !== 'ready') return
-      this._advance(order, frame.payload, frame.info, frame.token)
+      this.advance(order, frame.payload, frame.info, frame.token)
     }
   }
 
-  private _dropHeld(): void {
-    for (const order of this._orders.values()) if (order.release !== null) clearTimeout(order.release)
-    this._orders.clear()
-    this._early = []
+  private dropHeld(): void {
+    for (const order of this.orders.values()) if (order.release !== null) clearTimeout(order.release)
+    this.orders.clear()
+    this.early = []
   }
 
-  private _deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
+  private deliver(payload: Uint8Array, info: OrderingInfo, token: string | null): void {
     try {
-      this._receiver(this._text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
+      this.receiver(this.text ? textDecoder.decode(payload) : Uint8Array.from(payload), info)
     } finally {
-      this._settle(token)
+      this.settle(token)
     }
   }
 
-  private _settle(token: string | null): void {
+  private settle(token: string | null): void {
     if (token !== null) this.settleFence(token)
   }
 
-  private _rejectFences(error: unknown): void {
-    for (const fence of this._fences.values()) fence.reject(error)
-    this._fences.clear()
+  private rejectFences(error: unknown): void {
+    for (const fence of this.fences.values()) fence.reject(error)
+    this.fences.clear()
   }
 }

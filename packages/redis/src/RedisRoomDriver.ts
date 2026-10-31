@@ -58,7 +58,7 @@ class RedisRoomDriver implements RoomDriver {
   private readonly connection: RedisConnection
   private readonly kit: RoomPlaneKit
   /** A Cluster's last commit per lane. */
-  private readonly _laneTurns = new Map<string, Promise<void>>()
+  private readonly laneTurns = new Map<string, Promise<void>>()
 
   constructor({ connection, kit }: { connection: RedisConnection; kit: RoomPlaneKit }) {
     this.connection = connection
@@ -102,17 +102,17 @@ class RedisRoomDriver implements RoomDriver {
     if (!isCluster(this.connection.client)) return commit()
     // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
     // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
-    return this._inLaneTurn(JSON.stringify([target.roomId, target.inc, this.kit.encodeLaneKey(target.lane)]), commit)
+    return this.inLaneTurn(JSON.stringify([target.roomId, target.inc, this.kit.encodeLaneKey(target.lane)]), commit)
   }
 
-  private _inLaneTurn<T>(turnKey: string, commit: () => Promise<T>): Promise<T> {
-    const previous = this._laneTurns.get(turnKey)
+  private inLaneTurn<T>(turnKey: string, commit: () => Promise<T>): Promise<T> {
+    const previous = this.laneTurns.get(turnKey)
     const committing = previous === undefined ? commit() : previous.then(commit)
     const release = () => {
-      if (this._laneTurns.get(turnKey) === turn) this._laneTurns.delete(turnKey)
+      if (this.laneTurns.get(turnKey) === turn) this.laneTurns.delete(turnKey)
     }
     const turn: Promise<void> = committing.then(release, release)
-    this._laneTurns.set(turnKey, turn)
+    this.laneTurns.set(turnKey, turn)
     return committing
   }
 
@@ -264,12 +264,12 @@ class RedisRoomDriver implements RoomDriver {
     source: RoomSubscriptionSource,
   ): Promise<Map<string, OrderingInfo> | null> => {
     const { roomId, inc, lane } = source
-    if (lane.kind === 'binary-all') return await this._memberLaneStarts(roomId, inc, lane.member)
-    if (lane.kind === 'binary-track') return await this._trackLaneStarts(roomId, inc, lane.track)
+    if (lane.kind === 'binary-all') return await this.memberLaneStarts(roomId, inc, lane.member)
+    if (lane.kind === 'binary-track') return await this.trackLaneStarts(roomId, inc, lane.track)
     return await this.connection.run(REDIS_COMMANDS.laneStart, { ...source, laneKey: this.kit.encodeLaneKey(lane) })
   }
 
-  private async _memberLaneStarts(
+  private async memberLaneStarts(
     roomId: string,
     inc: string,
     member: string,
@@ -285,11 +285,7 @@ class RedisRoomDriver implements RoomDriver {
     return starts
   }
 
-  private async _trackLaneStarts(
-    roomId: string,
-    inc: string,
-    track: string,
-  ): Promise<Map<string, OrderingInfo> | null> {
+  private async trackLaneStarts(roomId: string, inc: string, track: string): Promise<Map<string, OrderingInfo> | null> {
     const starts = new Map<string, OrderingInfo>()
     let cursor = '0'
     do {
