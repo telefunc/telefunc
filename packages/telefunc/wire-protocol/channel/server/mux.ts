@@ -275,7 +275,7 @@ class ChannelMux implements RegistrationWaitsOwner {
         closed: null,
         retiredByBarrier: false,
         recvBacklog,
-        awaited: new AwaitedChannels({ backlog: recvBacklog, waits: this.registrationWaits }),
+        awaited: new AwaitedChannels(recvBacklog, this.registrationWaits),
         attaching,
         wireSender,
       },

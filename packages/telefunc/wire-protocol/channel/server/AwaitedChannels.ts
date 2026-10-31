@@ -26,12 +26,6 @@ type AwaitedChannel = {
   ttl: ReturnType<typeof setTimeout> | null
 }
 
-type AwaitedChannelsOptions = {
-  backlog: RecvBacklog
-  /** The mux's, which every wire's awaited channels wait in. */
-  waits: RegistrationWaits
-}
-
 /** The channels a wire awaits, by index; what it holds for them counts in its recv backlog. */
 class AwaitedChannels {
   private readonly byIx = new Map<number, AwaitedChannel>()
@@ -39,7 +33,8 @@ class AwaitedChannels {
   private readonly waits: RegistrationWaits
   private attachedCount = 0
 
-  constructor({ backlog, waits }: AwaitedChannelsOptions) {
+  /** `waits`: the mux's, which every wire's awaited channels wait in. */
+  constructor(backlog: RecvBacklog, waits: RegistrationWaits) {
     this.backlog = backlog
     this.waits = waits
   }
