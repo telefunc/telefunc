@@ -543,7 +543,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private get sendsOpen(): boolean {
-    return this.connected && !this.reconciling && !this.upgradeGatesSends && this.registerReconcileTimer === null
+    return this.connected && !this.reconciling && !this.upgradeGatesSends && !this.reconcileOwed
   }
 
   private canSendImmediately(ix: number): boolean {
@@ -620,27 +620,34 @@ class ClientConnection implements MuxConnection {
     return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(this.pingIntervalMs) + this.reconnectTimeoutMs)
   }
 
+  /** A channel registered since the last RECONCILE, which owes the server one naming it. */
+  private reconcileOwed = false
   private registerReconcileTimer: ReturnType<typeof setTimeout> | null = null
   /** Coalesces sync-burst registrations into one RECONCILE round-trip. */
   private scheduleRegisterReconcile(): void {
-    if (this.registerReconcileTimer !== null) return
-    this.registerReconcileTimer = setTimeout(() => this.flushPendingRegisterReconcile(), 0)
+    if (this.reconcileOwed) return
+    this.reconcileOwed = true
+    this.registerReconcileTimer = setTimeout(() => {
+      this.registerReconcileTimer = null
+      this.flushPendingRegisterReconcile()
+    }, 0)
   }
 
   /** Send the queued RECONCILE on the live wire. No-op when nothing's queued. While the wire
    *  can't take it (connecting, awaiting RECONCILED, from an upgrade's READY until its handoff)
-   *  the obligation is KEPT, not consumed — `registerReconcileTimer` stays non-null as the marker (which also keeps
+   *  the obligation is KEPT, not consumed — `reconcileOwed` stays set (which also keeps
    *  `canSendImmediately` false so data frames buffer behind the RECONCILE), and the
    *  transitions that make the wire sendable re-invoke this: `onTransportOpen`, a settled
    *  RECONCILED, upgrade-attempt exit, and handoff completion. */
   private flushPendingRegisterReconcile(): void {
-    if (this.registerReconcileTimer === null) return
+    if (!this.reconcileOwed) return
     if (this.state.tag !== 'open' || this.state.upgrade.tag === 'committing' || this.upgradeReady) return
     if (this.reconciling) return
     this.sendReconcileBatch(this.stageReconcileBatch(false))
   }
 
-  private cancelRegisterReconcileTimer(): void {
+  private cancelRegisterReconcile(): void {
+    this.reconcileOwed = false
     if (this.registerReconcileTimer === null) return
     clearTimeout(this.registerReconcileTimer)
     this.registerReconcileTimer = null
@@ -1230,7 +1237,7 @@ class ClientConnection implements MuxConnection {
     const ready = await readyP
     if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
       attempt.abort()
-      if (this.registerReconcileTimer === null) this.drainBufferedFramesToWire()
+      if (!this.reconcileOwed) this.drainBufferedFramesToWire()
       return null
     }
     this.enterUpgradeReady(attempt)
@@ -1274,7 +1281,7 @@ class ClientConnection implements MuxConnection {
 
     if (emission === 'not-emitted') {
       attempt.abort()
-      if (this.registerReconcileTimer === null) this.drainBufferedFramesToWire()
+      if (!this.reconcileOwed) this.drainBufferedFramesToWire()
       // An attempt that ended without its barrier goes again once the outbox drained.
       void from.drained().then(() => this.maybeStartUpgrade())
       return
@@ -1319,7 +1326,7 @@ class ClientConnection implements MuxConnection {
     }
     this.wire++
     // The wire is dying: the queued RECONCILE isn't sent, the reconnect's lists every channel.
-    this.cancelRegisterReconcileTimer()
+    this.cancelRegisterReconcile()
     this.forgetWire()
     if (this.ttl) {
       clearTimeout(this.ttl)
@@ -1384,10 +1391,7 @@ class ClientConnection implements MuxConnection {
       clearTimeout(this.ttl)
       this.ttl = null
     }
-    if (this.registerReconcileTimer !== null) {
-      clearTimeout(this.registerReconcileTimer)
-      this.registerReconcileTimer = null
-    }
+    this.cancelRegisterReconcile()
     // Tear down any in-flight phase before transitioning to `closed`.
     if (this.state.tag === 'reconnecting') clearTimeout(this.state.timer)
     this.teardownUpgrade()
@@ -1507,7 +1511,7 @@ class ClientConnection implements MuxConnection {
 
   stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
     // This batch names every channel registered since the last, so it already covers any pending registration.
-    this.cancelRegisterReconcileTimer()
+    this.cancelRegisterReconcile()
     const reconcileFrame = this.buildReconcileFrame()
     const movedBufferedFrames = this.drainBufferedFramesForReconcile(isInitialBatch)
     return { reconcileFrame, movedBufferedFrames }
