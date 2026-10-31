@@ -606,7 +606,7 @@ class RoomParticipantStub implements BroadcastEndOwner {
       unlistenDemand()
       unlistenLeave()
       this._dmReplies.drop()
-      if (!left) void participant._releaseHolder().catch(reportRoomError)
+      if (!left) void participant._releaseHolder()
     })
   }
 

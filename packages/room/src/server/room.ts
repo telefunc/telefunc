@@ -254,10 +254,9 @@ class ServerRoom extends RoomStateView implements Room {
     const identity = this._state.getRemote(id)?.identity ?? null
     try {
       await this._removeMember(id, cause)
-    } catch (error) {
+    } catch {
       this._replica.evictLater(id, identity)
       this._model.applyLeave(id, cause)
-      throw error
     }
   }
 
@@ -404,7 +403,7 @@ class ServerRoom extends RoomStateView implements Room {
       const admission = this._admissions.get(id)
       if (admission !== undefined) this._admissions.set(id, 'abandoned')
       if (admission === 'owned') continue // the admission rolls itself back
-      void this._removeDepartedMember(id).catch(reportRoomError)
+      void this._removeDepartedMember(id)
     }
   }
 
