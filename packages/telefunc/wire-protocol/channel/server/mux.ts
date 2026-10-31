@@ -216,9 +216,7 @@ class ChannelMux {
     if (timer) clearTimeout(timer)
     this.endedChannels.set(
       channel,
-      pageAttached
-        ? null
-        : unrefTimer(setTimeout(() => this.releaseEnded(channel), getServerConfig().channel.reconnectTimeout)),
+      pageAttached ? null : unrefTimer(setTimeout(() => this.releaseEnded(channel), this.options.reconnectTimeout)),
     )
   }
 
@@ -1029,7 +1027,7 @@ class ChannelMux {
         h.channel._onPeerClose()
         return
       case DETACH_REASON.TRANSIENT:
-        h.channel._onPeerDisconnect(h.peer, getServerConfig().channel.reconnectTimeout)
+        h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
         return
       case DETACH_REASON.RECOVERY_FAILED:
         h.channel._onPeerRecoveryFailure()
