@@ -1,4 +1,5 @@
 export { RosterStream }
+export type { RosterStreamOptions, RosterStreamOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { ROOM_ROSTER_PART_MEMBERS } from './constants.js'
@@ -7,7 +8,18 @@ import { Slice } from '../Slice.js'
 import type { MembershipEvent, RoomModel } from '../state.js'
 import { reportRoomError } from './errors.js'
 import { type RoomStub, unorderedEventText } from './stub.js'
+import type { AuthoritySync } from './AuthoritySync.js'
 assertIsNotBrowser()
+
+/** The replica whose view's roster streams. */
+interface RosterStreamOwner {
+  readonly model: RoomModel
+  /** The view's attached stubs; one that leaves it drops out of a stream. */
+  readonly stubs: ReadonlySet<RoomStub>
+  readonly authority: Pick<AuthoritySync, 'ensureRoster'>
+}
+
+type RosterStreamOptions = { owner: RosterStreamOwner }
 
 /** A view's roster to its clients: on attach, and again to every client once a roster read corrected a drift. */
 class RosterStream {
@@ -21,23 +33,10 @@ class RosterStream {
   /** The roster stream each stub is being sent; a newer one replaces it. */
   private readonly _streamOf = new WeakMap<RoomStub, object>()
 
-  private readonly _model: RoomModel
-  /** The view's attached stubs; one that leaves it drops out of a stream. */
-  private readonly _stubs: ReadonlySet<RoomStub>
-  private readonly _ensureRoster: () => Promise<void>
+  private readonly owner: RosterStreamOwner
 
-  constructor({
-    model,
-    stubs,
-    ensureRoster,
-  }: {
-    model: RoomModel
-    stubs: ReadonlySet<RoomStub>
-    ensureRoster: () => Promise<void>
-  }) {
-    this._model = model
-    this._stubs = stubs
-    this._ensureRoster = ensureRoster
+  constructor({ owner }: RosterStreamOptions) {
+    this.owner = owner
   }
 
   /** Whether a client of the view was sent every member it holds, as it holds them:
@@ -53,11 +52,11 @@ class RosterStream {
     roster: { members: MemberSnapshot[]; departing: ReadonlySet<string> },
     events: readonly MembershipEvent[],
   ): Promise<boolean> {
-    this._reconciling = this._model.rosterKnown
+    this._reconciling = this.owner.model.rosterKnown
     try {
-      const drifted = await this._model.reconcileRoster(roster, events)
+      const drifted = await this.owner.model.reconcileRoster(roster, events)
       if (drifted === null) return false
-      const recipients = drifted ? [...this._stubs] : [...this._owed]
+      const recipients = drifted ? [...this.owner.stubs] : [...this._owed]
       this._owed.clear()
       if (recipients.length > 0) void this._stream(recipients).catch(reportRoomError)
       return true
@@ -68,13 +67,14 @@ class RosterStream {
 
   /** An attached stub's first roster, once the view knows it; a failed read owes it the next one. */
   sendTo(stub: RoomStub): void {
-    void this._ensureRoster()
+    void this.owner.authority
+      .ensureRoster()
       .then(() => {
-        if (this._stubs.has(stub) && !this._model.closed) return this._stream([stub])
+        if (this.owner.stubs.has(stub) && !this.owner.model.closed) return this._stream([stub])
       })
       .catch((error) => {
         reportRoomError(error)
-        if (!this._stubs.has(stub) || this._model.closed) return
+        if (!this.owner.stubs.has(stub) || this.owner.model.closed) return
         stub._relayEvent({ __r: 'roster-error' })
         this._owed.add(stub)
       })
@@ -98,7 +98,7 @@ class RosterStream {
       this._streamOf.set(stub, stream)
       stub._rosterSent = false
     }
-    const model = this._model
+    const model = this.owner.model
     const version = model.version
     if (this._texts?.version !== version) this._texts = { version, parts: [] }
     const texts = this._texts.parts
@@ -115,7 +115,7 @@ class RosterStream {
         }
         chunk.push(next.value)
       }
-      const receiving = stubs.filter((stub) => this._streamOf.get(stub) === stream && this._stubs.has(stub))
+      const receiving = stubs.filter((stub) => this._streamOf.get(stub) === stream && this.owner.stubs.has(stub))
       if (receiving.length === 0 || model.closed) return
       // The first roster read adds its members without a change.
       const unchanged = model.rosterKnown && model.version === version

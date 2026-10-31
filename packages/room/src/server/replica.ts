@@ -8,7 +8,7 @@ import { getRoomBackend } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
 import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
-import { DemandReport, RoomDemand } from './demand.js'
+import { DemandReport, RoomDemand, type DemandReportOwner, type RoomDemandOwner } from './demand.js'
 import { PublishedTracks } from './PublishedTracks.js'
 import { DM_FAILURE } from '../errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../protocol.js'
@@ -24,7 +24,7 @@ import type { DemandEntry, RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope
 import { Slice } from '../Slice.js'
 import { RoomModel, type RoomModelOwner } from '../state.js'
 import type { LeaveCause } from '../types.js'
-import { AuthoritySync } from './AuthoritySync.js'
+import { AuthoritySync, type AuthoritySyncOwner } from './AuthoritySync.js'
 import { PendingDmAcks } from './dmAcks.js'
 import { reportRoomError } from './errors.js'
 import { GossipOutbox } from './gossip.js'
@@ -46,7 +46,7 @@ import { finishLeaseCleanups, holdViews, removeView, renewLease } from './leases
 import type { StoredRoomMeta } from './meta.js'
 import type { LaneHolder, ReplayHold, TextWantsChange } from './replay.js'
 import type { MetaMirror, ServerRoom } from './room.js'
-import { RosterStream } from './RosterStream.js'
+import { RosterStream, type RosterStreamOwner } from './RosterStream.js'
 import { toggle } from './sets.js'
 import { RoomLease } from './lease.js'
 import { MemberMessageTexts, type RoomStub, unorderedEventText } from './stub.js'
@@ -69,7 +69,16 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
  *  and pages the handles hold, and the heartbeat that renews it and checks the authority again. Each handle keeps its
  *  guards, its tail, the stubs it opened and its listeners. A replica no handle observes, owns a member through or
  *  tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
-class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner, RoomModelOwner {
+class RoomReplica
+  implements
+    RoomModelOwner,
+    DemandReportOwner,
+    RoomDemandOwner,
+    LanePlanOwner,
+    AuthoritySyncOwner,
+    RoomHeartbeatOwner,
+    RosterStreamOwner
+{
   private static readonly _collected = new FinalizationRegistry<{
     replicas: Map<string, WeakRef<RoomReplica>>
     inc: string
@@ -105,7 +114,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner, RoomModelOwner {
   readonly incomingDemand: RoomDemand
   readonly publishedTracks = new PublishedTracks()
   /** What every holder here receives, told to the other processes and to `demand`. */
-  readonly outgoingDemand = new DemandReport((entry, on) => this._tellDemand(entry, on))
+  readonly outgoingDemand = new DemandReport({ owner: this })
   readonly lanePlan: LanePlan
   readonly authority: AuthoritySync
   readonly heartbeat: RoomHeartbeat
@@ -161,21 +170,11 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner, RoomModelOwner {
       owner: this,
     })
     this._gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
-    this.incomingDemand = new RoomDemand({
-      ownsMember: (id) => this._owners.has(id),
-      ownedMembers: () => this._owners.keys(),
-      deliver: (member, track, wanted) => this._owners.get(member)?._deliverDemand(member, track, wanted),
-      ask: (instance) => this._askDemand(instance),
-      published: this.publishedTracks,
-    })
+    this.incomingDemand = new RoomDemand({ owner: this })
     this.lanePlan = new LanePlan({ owner: this, outgoingDemand: this.outgoingDemand })
-    this.authority = new AuthoritySync(this, this.lanePlan)
+    this.authority = new AuthoritySync({ owner: this })
     this.heartbeat = new RoomHeartbeat({ owner: this })
-    this.roster = new RosterStream({
-      model: this.model,
-      stubs: this.stubs,
-      ensureRoster: () => this.authority.ensureRoster(),
-    })
+    this.roster = new RosterStream({ owner: this })
   }
 
   /** Whether the handle's holders and holds are served: its stubs, participants and listeners, and its tail. */
@@ -379,6 +378,10 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner, RoomModelOwner {
     return this._owners.keys()
   }
 
+  deliverDemand(member: string, track: string, wanted: boolean): void {
+    this._owners.get(member)?._deliverDemand(member, track, wanted)
+  }
+
   /** The heartbeat evicts the member again, as `disconnected`. */
   evictLater(id: string): void {
     this._unevicted.add(id)
@@ -410,7 +413,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner, RoomModelOwner {
   }
 
   /** This process's demand entry, to the other processes and to its own owners. */
-  private _tellDemand(entry: DemandEntry, on: boolean): void {
+  tellDemand(entry: DemandEntry, on: boolean): void {
     this._gossip.push({ on, ...entry })
     this.incomingDemand.take(this.outgoingDemand.instance, entry, on)
   }

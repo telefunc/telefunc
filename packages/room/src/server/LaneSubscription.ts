@@ -1,11 +1,22 @@
 export { LaneSubscription }
+export type { LaneSubscriptionOptions, LaneSubscriptionOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { createDeferred, type Deferred } from '../utils/createDeferred.js'
 import type { BackendSubscription } from 'telefunc/__internal'
+import type { RoomSubscriptionSource } from '../backend/contract.js'
 assertIsNotBrowser()
 
-function ignorePending(): void {}
+/** The plan that holds a lane subscription, told as its lane ends, recovers, and goes pending or ready. */
+interface LaneSubscriptionOwner {
+  /** The lane ended for good: the owner's recovery policy replaces it. */
+  onLaneTerminal(slot: LaneSubscription): void
+  /** The lane is ready again after a loss. */
+  onLaneRecovered(): void
+  onLanePending(slot: LaneSubscription, pending: boolean): void
+}
+
+type LaneSubscriptionOptions = { owner: LaneSubscriptionOwner; lane: RoomSubscriptionSource['lane'] }
 
 /** A lane subscription the room wants: holder-facing readiness survives failed attempts, and Room's recovery policy
  *  replaces them. */
@@ -17,22 +28,13 @@ class LaneSubscription {
   private _pendingReady: Deferred<void> | null = null
   private _delivering = false
 
-  private readonly _onTerminal: (slot: LaneSubscription) => void
-  private readonly _onRecovered: () => void
-  private readonly _onPending: (slot: LaneSubscription, pending: boolean) => void
+  /** The lane it subscribes, which tells its owner what its readiness replans. */
+  readonly lane: RoomSubscriptionSource['lane']
+  private readonly owner: LaneSubscriptionOwner
 
-  constructor({
-    onTerminal,
-    onRecovered,
-    onPending = ignorePending,
-  }: {
-    onTerminal: (slot: LaneSubscription) => void
-    onRecovered: () => void
-    onPending?: (slot: LaneSubscription, pending: boolean) => void
-  }) {
-    this._onTerminal = onTerminal
-    this._onRecovered = onRecovered
-    this._onPending = onPending
+  constructor({ owner, lane }: LaneSubscriptionOptions) {
+    this.owner = owner
+    this.lane = lane
   }
 
   get established(): boolean {
@@ -94,7 +96,7 @@ class LaneSubscription {
         if (wasReady) lostAfterReady = true
         this._ensurePendingReady()
       } else if (state === 'ready') {
-        if (lostAfterReady) this._onRecovered()
+        if (lostAfterReady) this.owner.onLaneRecovered()
         wasReady = true
         lostAfterReady = false
         this._settleReady()
@@ -111,7 +113,7 @@ class LaneSubscription {
   private _ended(subscription: BackendSubscription): void {
     this._ensurePendingReady()
     const end = () => {
-      if (this._subscription === subscription) this._onTerminal(this)
+      if (this._subscription === subscription) this.owner.onLaneTerminal(this)
     }
     void subscription.ready.then(end, end)
   }
@@ -137,7 +139,7 @@ class LaneSubscription {
     if (this._pendingReady !== null) return
     this._pendingReady = createDeferred()
     this._readyPromise = this._pendingReady.promise
-    this._onPending(this, true)
+    this.owner.onLanePending(this, true)
   }
 
   private _settleReady(): void {
@@ -145,6 +147,6 @@ class LaneSubscription {
     if (this._pendingReady === null) return
     this._pendingReady.resolve()
     this._pendingReady = null
-    this._onPending(this, false)
+    this.owner.onLanePending(this, false)
   }
 }

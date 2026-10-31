@@ -1,5 +1,5 @@
 export { WantsIndex }
-export type { Affected }
+export type { Affected, WantsIndexOptions, WantsIndexOwner }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
@@ -31,6 +31,14 @@ type TrackCover = Map<TrackKey | EveryTrack, Set<LaneHolder>>
 type Affected = ReadonlySet<string> | 'all'
 const NONE: Affected = new Set()
 
+/** The plan whose holders' wants the index aggregates. */
+interface WantsIndexOwner {
+  /** The holders naming `track` of every member changed. */
+  onEveryMemberCoverChanged(track: string): void
+}
+
+type WantsIndexOptions = { owner: WantsIndexOwner }
+
 /** Every holder's wants, aggregated as each one changes, so a change costs the size of what it changed. */
 class WantsIndex {
   private readonly _indexed = new Map<LaneHolder, Indexed>()
@@ -42,8 +50,11 @@ class WantsIndex {
   /** Per named track, the members some holder names it of alone. */
   private readonly _namedAloneOf = new Map<string, Set<string>>()
 
-  /** `onEveryMemberCover` hears each track whose holders naming it of every member changed. */
-  constructor(private readonly _onEveryMemberCover: (track: string) => void) {}
+  private readonly owner: WantsIndexOwner
+
+  constructor({ owner }: WantsIndexOptions) {
+    this.owner = owner
+  }
 
   get wantsText(): boolean {
     return this._textAll > 0 || this._textMembers.size > 0 || this._announce > 0
@@ -241,7 +252,7 @@ class WantsIndex {
     const [other] = this._everyMember.get(key) ?? []
     if (on) toggleEntry(this._everyMember, key, holder, true)
     if (key === EVERY_TRACK) return other !== undefined ? new Set(other._suppressedMembers()) : 'all'
-    this._onEveryMemberCover(key)
+    this.owner.onEveryMemberCoverChanged(key)
     if (other !== undefined) return new Set(other._suppressedMembers())
     // Only the members it is named of alone change lanes; the holder's own may stop or start being received.
     const affected = new Set(this._namedAloneOf.get(key))

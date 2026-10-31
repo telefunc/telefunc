@@ -45,7 +45,7 @@ import type { RoomRequest } from './requests.js'
 import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
 import type { RoomReplica } from './replica.js'
-import { RoomWrites, runAfterHook } from './writes.js'
+import { RoomWrites, runAfterHook, type RoomWritesOwner } from './writes.js'
 import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { Admission } from './Admission.js'
@@ -73,7 +73,7 @@ type MetaMirror = { accepted(update: MemberMetaUpdate): void; rewound(): void }
 
 /** One `Room.get()`'s handle on a room: its guards, its tail, the stubs it opened, its participants and its listeners,
  *  over this process's one view of the room, which every handle to it shares. Each serialization opens a fresh stub. */
-class ServerRoom extends RoomStateView implements Room {
+class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   readonly [SERVER_ROOM_BRAND] = true
   /** Phantom: the publish shield rides the type only (see `RoomShield`), never a runtime field. */
   declare readonly [TELEFUNC_SHIELDS]: { data: unknown }
@@ -85,7 +85,8 @@ class ServerRoom extends RoomStateView implements Room {
   readonly _replica: RoomReplica
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
   private _tail: TailHold | null = null
-  private _guards: Partial<RoomGuardHooks> | null = null
+  /** @internal */
+  _guards: Partial<RoomGuardHooks> | null = null
   /** @internal This handle's listeners over the replica's model. */
   readonly _state: RoomState
   /** @internal */
@@ -93,7 +94,8 @@ class ServerRoom extends RoomStateView implements Room {
   private readonly _stubs = new Set<RoomStub>()
   /** The attached stub holding each member a client joined through. */
   private readonly _stubOf = new Map<string, RoomStub>()
-  private readonly _localParticipants = new Map<string, ServerLocalParticipant>()
+  /** @internal */
+  readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** The local participants that joined with `selfDelivery: false`. */
   private readonly _localSuppressed = new Set<string>()
   /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
@@ -107,10 +109,7 @@ class ServerRoom extends RoomStateView implements Room {
     this._incarnation = replica._incarnation
     this._state = new RoomState({ view: this, model: replica.model, owner: new ServerRoomStateOwner(this) })
     this._local = new LocalHolder(this._state, this._localSuppressed)
-    this._writes = new RoomWrites(this, {
-      guards: () => this._guards,
-      local: (id) => this._localParticipants.get(id),
-    })
+    this._writes = new RoomWrites({ owner: this })
   }
 
   /** @internal */

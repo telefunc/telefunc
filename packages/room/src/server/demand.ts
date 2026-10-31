@@ -1,4 +1,5 @@
 export { RoomDemand, DemandReport }
+export type { DemandReportOptions, DemandReportOwner, RoomDemandOptions, RoomDemandOwner }
 
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { EVERY_MEMBER, DEFAULT_TRACK, type EveryMember } from '../binary.js'
@@ -20,16 +21,26 @@ type TrackLeases = Map<string, TrackLease>
 type Reporter = { expiresAt: number; page: number; telling: number; asked: boolean }
 
 /** The replica whose owned members the demand is for. */
-type DemandHost = {
-  ownsMember(id: string): boolean
+interface RoomDemandOwner {
+  _ownsMember(id: string): boolean
   /** Live. */
-  ownedMembers(): Iterable<string>
-  deliver(member: string, track: string, wanted: boolean): void
+  _ownedMembers(): Iterable<string>
+  /** Tells an owned member whether a track of it is wanted. */
+  deliverDemand(member: string, track: string, wanted: boolean): void
   /** Asks the reporter to tell everything again. */
-  ask(instance: string): void
+  _askDemand(instance: string): void
   /** A report of a member's every track covers the tracks it published on. */
-  readonly published: PublishedTracks
+  readonly publishedTracks: Pick<PublishedTracks, 'has' | 'namedOf'>
 }
+
+type RoomDemandOptions = { owner: RoomDemandOwner }
+
+/** The replica that tells the room each change of its planner's demand. */
+interface DemandReportOwner {
+  tellDemand(entry: DemandEntry, on: boolean): void
+}
+
+type DemandReportOptions = { owner: DemandReportOwner }
 
 /** What some holder of a replica receives. */
 class Receives {
@@ -65,7 +76,11 @@ class DemandReport {
     fetched: new Set<string>(),
   }
 
-  constructor(private readonly _tell: (entry: DemandEntry, on: boolean) => void) {}
+  private readonly owner: DemandReportOwner
+
+  constructor({ owner }: DemandReportOptions) {
+    this.owner = owner
+  }
 
   setPair(member: string, track: string, on: boolean): void {
     if (on === hasEntry(this._planned.pairs, member, track)) return
@@ -157,20 +172,20 @@ class DemandReport {
     const told = this._told
     for (const [member, tracks] of told.pairs) {
       for (const track of tracks) {
-        this._tell({ member, track }, true)
+        this.owner.tellDemand({ member, track }, true)
         yield
       }
     }
     for (const member of told.members) {
-      this._tell({ member }, true)
+      this.owner.tellDemand({ member }, true)
       yield
     }
     for (const member of told.fetched) {
-      this._tell({ member, byMember: true }, true)
+      this.owner.tellDemand({ member, byMember: true }, true)
       yield
     }
     for (const [track, entry] of told.tracks) {
-      this._tell(trackEntry(track, entry), true)
+      this.owner.tellDemand(trackEntry(track, entry), true)
       yield
     }
   }
@@ -190,7 +205,7 @@ class DemandReport {
       for (const track of byTrack) {
         if (hasEntry(planned.pairs, member, track) && !hasEntry(told.pairs, member, track)) {
           toggleEntry(told.pairs, member, track, true)
-          this._tell({ member, track }, true)
+          this.owner.tellDemand({ member, track }, true)
         }
         yield
       }
@@ -198,14 +213,14 @@ class DemandReport {
     for (const member of members) {
       if (planned.members.has(member) && !told.members.has(member)) {
         told.members.add(member)
-        this._tell({ member }, true)
+        this.owner.tellDemand({ member }, true)
       }
       yield
     }
     for (const member of fetched) {
       if (planned.fetched.has(member) && !told.fetched.has(member)) {
         told.fetched.add(member)
-        this._tell({ member, byMember: true }, true)
+        this.owner.tellDemand({ member, byMember: true }, true)
       }
       yield
     }
@@ -214,7 +229,7 @@ class DemandReport {
       if (planned.tracks.has(track) && told.tracks.get(track)?.byMember !== byMember) {
         const entry = { except: new Set(planned.except.get(track)), byMember }
         told.tracks.set(track, entry)
-        this._tell(trackEntry(track, entry), true)
+        this.owner.tellDemand(trackEntry(track, entry), true)
       }
       yield
     }
@@ -223,7 +238,7 @@ class DemandReport {
         const was = told.tracks.get(track)
         if (planned.tracks.has(track) && !hasEntry(planned.except, track, member) && was?.except.has(member) === true) {
           was.except.delete(member)
-          this._tell({ track, member, except: true }, false)
+          this.owner.tellDemand({ track, member, except: true }, false)
         }
         yield
       }
@@ -233,7 +248,7 @@ class DemandReport {
         const was = told.tracks.get(track)
         if (planned.tracks.has(track) && hasEntry(planned.except, track, member) && was?.except.has(member) === false) {
           was.except.add(member)
-          this._tell({ track, member, except: true }, true)
+          this.owner.tellDemand({ track, member, except: true }, true)
         }
         yield
       }
@@ -242,21 +257,21 @@ class DemandReport {
       const was = told.tracks.get(track)
       if (!planned.tracks.has(track) && was !== undefined) {
         told.tracks.delete(track)
-        this._tell(trackEntry(track, was), false)
+        this.owner.tellDemand(trackEntry(track, was), false)
       }
       yield
     }
     for (const member of fetched) {
       if (!planned.fetched.has(member) && told.fetched.has(member)) {
         told.fetched.delete(member)
-        this._tell({ member, byMember: true }, false)
+        this.owner.tellDemand({ member, byMember: true }, false)
       }
       yield
     }
     for (const member of members) {
       if (!planned.members.has(member) && told.members.has(member)) {
         told.members.delete(member)
-        this._tell({ member }, false)
+        this.owner.tellDemand({ member }, false)
       }
       yield
     }
@@ -264,7 +279,7 @@ class DemandReport {
       for (const track of byTrack) {
         if (!hasEntry(planned.pairs, member, track) && hasEntry(told.pairs, member, track)) {
           toggleEntry(told.pairs, member, track, false)
-          this._tell({ member, track }, false)
+          this.owner.tellDemand({ member, track }, false)
         }
         yield
       }
@@ -291,7 +306,11 @@ class RoomDemand {
   private readonly _due = new Map<string, Set<string> | EveryMember>()
   private _settling = false
 
-  constructor(private readonly _host: DemandHost) {}
+  private readonly owner: RoomDemandOwner
+
+  constructor({ owner }: RoomDemandOptions) {
+    this.owner = owner
+  }
 
   /** Another process's page, which renews its lease. A page count that skips one makes this process ask it to tell
    *  everything again, once until it does or its next page is only a renewal; what it tells again replaces what it
@@ -320,7 +339,7 @@ class RoomDemand {
     const asksAgain = reporter.asked ? page.wants.length === 0 : !continues
     if (tellsAgain || !asksAgain) return
     reporter.asked = true
-    this._host.ask(instance)
+    this.owner._askDemand(instance)
   }
 
   /** Drops what the other processes told, read from a demand lane this one no longer subscribes. It owns no member
@@ -339,7 +358,7 @@ class RoomDemand {
     const telling = this._reporters.get(instance)?.telling ?? 0
     if ('except' in entry) {
       this._takeTrack(instance, entry, on, telling)
-    } else if (!this._host.ownsMember(entry.member)) {
+    } else if (!this.owner._ownsMember(entry.member)) {
       return
     } else if ('byMember' in entry) {
       const { member } = entry
@@ -538,7 +557,7 @@ class RoomDemand {
   private *_evaluations(): Generator<void> {
     for (const [track, members] of this._due) {
       this._due.delete(track)
-      for (const member of members === EVERY_MEMBER ? this._host.ownedMembers() : members) {
+      for (const member of members === EVERY_MEMBER ? this.owner._ownedMembers() : members) {
         this._evaluate(member, track)
         yield
       }
@@ -546,17 +565,17 @@ class RoomDemand {
   }
 
   private _evaluate(member: string, track: string): void {
-    if (!this._host.ownsMember(member)) return
+    if (!this.owner._ownsMember(member)) return
     const wanted = this._wanted(member, track)
     if (wanted === hasEntry(this._told, track, member)) return
     toggleEntry(this._told, track, member, wanted)
-    this._host.deliver(member, track, wanted)
+    this.owner.deliverDemand(member, track, wanted)
   }
 
   /** Whether some reporter receives the owned member's track. */
   private _wanted(member: string, track: string): boolean {
     if (this._pairs.get(member)?.has(track)) return true
-    if (this._host.published.has(member, track) && this._members.has(member)) return true
+    if (this.owner.publishedTracks.has(member, track) && this._members.has(member)) return true
     for (const { instance, except, byMember } of this._tracks.get(track)?.values() ?? []) {
       if (!except.has(member) && (!byMember || this._fetched.get(member)?.has(instance) === true)) return true
     }
@@ -564,7 +583,7 @@ class RoomDemand {
   }
 
   private _everyTrackOf(member: string): string[] {
-    return [DEFAULT_TRACK, ...this._host.published.namedOf(member)]
+    return [DEFAULT_TRACK, ...this.owner.publishedTracks.namedOf(member)]
   }
 }
 
