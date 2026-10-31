@@ -4,7 +4,7 @@ import { assert } from '../utils/assert.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { RoomBackend, RoomHead } from '../backend/contract.js'
 import { ROOM_CLOSE_LEASE_MS, ROOM_TOMBSTONE_TTL_MS } from './constants.js'
-import { commitControl, configFromHead } from './lanes.js'
+import { commitLane, configFromHead, controlLane, encodeRoomRecord } from './lanes.js'
 
 /** Closes the room, or only its incarnation `inc` when given; returns the incarnation that ended closed, if any. */
 async function closeIncarnation(id: string, inc?: string): Promise<string | null> {
@@ -52,7 +52,8 @@ async function finishClose(backend: RoomBackend, roomId: string, closing: RoomHe
   const inc = closing.currentInc
   const lease = closing.closeLease
   assert(inc !== null && lease !== undefined) // the closing head acquireClosingLease just wrote
-  const closedEvent = await commitControl(roomId, inc, { __r: 'closed' }, { closingLease: lease.id })
+  const closed = encodeRoomRecord({ __r: 'closed' })
+  const closedEvent = await commitLane(controlLane(roomId, inc), closed, { closingLease: lease.id })
   if ('stale' in closedEvent) return false
   const finalized = await backend.compareExchangeHead(
     roomId,

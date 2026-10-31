@@ -9,7 +9,7 @@ import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 import { dropMemberMeta, memberMetaMutations } from './meta.js'
 import { dropCells, mutateCells, readOpenCells } from './cellStore.js'
-import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
+import { SEMANTIC_LANE, acceptedOrThrow, commitLane, controlLane, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from './lifecycle.js'
 import { cleanupCellKey, dmReplyCellPrefix, identityCellKey, leaseMemberCellKey, memberCellKey } from './cells.js'
 import type { RoomLease } from './lease.js'
@@ -112,7 +112,7 @@ async function completeCleanup(roomId: string, inc: string, memberId: string, ra
   await dropCells(roomId, inc, dmReplyCellPrefix(memberId))
   const leave: Extract<RoomCtrlEnvelope, { __r: 'leave' }> = { __r: 'leave', id: memberId, ...cleanup.cause }
   if (cleanup.hidden) leave.hidden = true
-  await commitControlOrThrow(roomId, inc, leave)
+  acceptedOrThrow(roomId, await commitLane(controlLane(roomId, inc), encodeRoomRecord(leave)))
   // The mark goes last, so a lease's cleaner finds the member until its leave is out.
   const mark = leaseMemberCellKey(cleanup.session, memberId)
   await mutateCells(roomId, inc, [key, mark], (cells) => ({

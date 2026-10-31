@@ -35,10 +35,11 @@ import type {
   RoomSendReceipt,
   SendGuard,
 } from '../types.js'
+import { memberCellKey } from './cells.js'
 import { tryCreateRoom } from './create.js'
 import { evictMember } from './members.js'
 import { reapAndCountPresence, reapAndReadMembersById, reapAndReadRoster, reapAndResolveIdentity } from './roster.js'
-import { SEMANTIC_LANE, commitToInbox, commitRoomLaneOrThrow, openConfig, encodeRoomRecord } from './lanes.js'
+import { SEMANTIC_LANE, acceptedOrThrow, commitLane, inboxOf, openConfig, encodeRoomRecord } from './lanes.js'
 import { ServerRoom } from './room.js'
 import { RoomReplica } from './replica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
@@ -320,7 +321,7 @@ async function getRoomParticipants(id: string, target?: { identity: string }): P
 async function announceToRoom(id: string, data: unknown): Promise<RoomSendReceipt> {
   const record = encodeRoomRecord({ __r: 'announce', data } satisfies RoomEnvelope)
   const config = await requireRoom(id)
-  const commit = await commitRoomLaneOrThrow({ roomId: id, inc: config.inc, lane: SEMANTIC_LANE }, record)
+  const commit = acceptedOrThrow(id, await commitLane({ roomId: id, inc: config.inc, lane: SEMANTIC_LANE }, record))
   return { seq: commit.seq, timestamp: commit.timestamp }
 }
 
@@ -331,7 +332,10 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
   const exact = 'id' in target
   for (const member of members) {
     const envelope = { __r: 'dm', to: member.id, from: '', fromMeta: null, data: message } as const
-    const receipt = await commitToInbox(id, incarnation.inc, envelope)
+    const requiredCellKeys = [memberCellKey(member.id)]
+    const target = inboxOf(id, incarnation.inc, member.id)
+    const receipt = await commitLane(target, encodeRoomRecord(envelope), { requiredCellKeys })
+    if ('stale' in receipt) throw roomClosedError(id)
     if ('gone' in receipt && exact) throw participantGoneError(member.id)
   }
 }

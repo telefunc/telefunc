@@ -23,10 +23,12 @@ import { reportRoomError } from './errors.js'
 import { GossipOutbox } from './gossip.js'
 import {
   SEMANTIC_LANE,
-  commitControl,
+  commitLane,
+  controlLane,
   decodeDemandPage,
   decodeLaneEnvelope,
   decodeRoomText,
+  encodeRoomRecord,
   openConfig,
   withinRoomHorizon,
 } from './lanes.js'
@@ -454,7 +456,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     }
     if (of) ask.of = of
     // A stale commit is a closed room's, which has no demand.
-    void commitControl(this.id, this._incarnation.inc, ask).catch(reportRoomError)
+    void commitLane(controlLane(this.id, this._incarnation.inc), encodeRoomRecord(ask)).catch(reportRoomError)
   }
 
   /** @internal */

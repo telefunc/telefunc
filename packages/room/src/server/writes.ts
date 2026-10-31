@@ -28,12 +28,12 @@ import type {
   RoomDmEnvelope,
   SenderStamp,
 } from '../protocol.js'
-import type { RoomDataEnvelope } from './protocol.js'
+import type { RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
 import type { RoomModel, RoomState } from '../state.js'
 import type { ParticipantMeta, RoomAckReceipt, RoomSendReceipt, Sender } from '../types.js'
 import { memberCellKey } from './cells.js'
 import { reportRoomError } from './errors.js'
-import { SEMANTIC_LANE, commitControlOrThrow, commitRoomLaneOrThrow, commitToInbox, encodeRoomRecord } from './lanes.js'
+import { SEMANTIC_LANE, acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, inboxOf } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import { reapAndReadMembersById } from './roster.js'
 import { storeDmReply, takeDmReply } from './dmReplies.js'
@@ -110,9 +110,9 @@ class RoomWrites {
     const accepted: Extract<RoomCtrlEnvelope, { __r: 'p-meta' }> = { __r: 'p-meta', id, ...update }
     if (hidden) accepted.hidden = true
     host._replica.applyControl(accepted)
-    const publishing = commitControlOrThrow(host.id, host._incarnation.inc, accepted)
+    const publishing = commitLane(controlLane(host.id, host._incarnation.inc), encodeRoomRecord(accepted))
     sent()
-    await publishing
+    acceptedOrThrow(host.id, await publishing)
   }
 
   async publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
@@ -123,9 +123,9 @@ class RoomWrites {
       const record = encodeRoomRecord(envelope)
       const target = { roomId: host.id, inc: host._incarnation.inc, lane: SEMANTIC_LANE }
       const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitRoomLaneOrThrow(target, record, opts)
+      const committing = commitLane(target, record, opts)
       sent()
-      return { sender, commit: await committing }
+      return { sender, commit: acceptedOrThrow(host.id, await committing) }
     })
     return await this._finishPublish(sender, data, commit)
   }
@@ -145,9 +145,9 @@ class RoomWrites {
       }
       if (tracks.add(from, lane.track)) host._replica.incomingDemand.published(from, lane.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitRoomLaneOrThrow({ roomId: host.id, inc: host._incarnation.inc, lane }, framed, opts)
+      const committing = commitLane({ roomId: host.id, inc: host._incarnation.inc, lane }, framed, opts)
       sent()
-      return { sender, commit: await committing }
+      return { sender, commit: acceptedOrThrow(host.id, await committing) }
     })
     return await this._finishPublish(sender, frame.payload, commit)
   }
@@ -248,8 +248,11 @@ class RoomWrites {
     if (onBeforeSend) await onBeforeSend(sender, target, data)
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
     if (ackId) envelope.ackId = ackId
-    const receipt = await commitToInbox(host.id, host._incarnation.inc, envelope, [from])
-    if ('gone' in receipt) throw participantGoneError(receipt.gone)
+    const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
+    const committing = commitLane(inboxOf(host.id, host._incarnation.inc, to), encodeRoomRecord(envelope), {
+      requiredCellKeys,
+    })
+    const receipt = acceptedOrThrow(host.id, await committing)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this._of.guards()?.onAfterSend
     if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))
@@ -259,7 +262,11 @@ class RoomWrites {
   /** A sender that left had its wait failed by its leave; only a closed room is an error. */
   async publishDmAck(to: string, ackId: string, reply: RoomResult): Promise<void> {
     await storeDmReply(this._host.id, this._host._incarnation.inc, to, ackId, reply)
-    await commitToInbox(this._host.id, this._host._incarnation.inc, { __r: 'dm-ack', to, ackId, ...reply })
+    const { id, _incarnation } = this._host
+    const envelope: RoomDmAckEnvelope = { __r: 'dm-ack', to, ackId, ...reply }
+    const requiredCellKeys = [memberCellKey(to)]
+    const acked = await commitLane(inboxOf(id, _incarnation.inc, to), encodeRoomRecord(envelope), { requiredCellKeys })
+    if ('stale' in acked) throw roomClosedError(id)
   }
 
   private async _resolveMember(id: string): Promise<Sender | null> {

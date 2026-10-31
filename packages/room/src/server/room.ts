@@ -46,7 +46,7 @@ import { LocalHolder, type LaneHolder, type TextWantsChange } from './replay.js'
 import { TailHold } from './tail.js'
 import type { RoomReplica } from './replica.js'
 import { RoomWrites, runAfterHook } from './writes.js'
-import { commitControlOrThrow, withinRoomHorizon } from './lanes.js'
+import { acceptedOrThrow, commitLane, controlLane, encodeRoomRecord, withinRoomHorizon } from './lanes.js'
 import { reportRoomError } from './errors.js'
 import { Admission } from './Admission.js'
 import { createMember, evictMember } from './members.js'
@@ -201,7 +201,10 @@ class ServerRoom extends RoomStateView implements Room {
       admission.assertLive(this._model)
       admission.commit()
       // A member removed meanwhile gets no join after its leave, here or anywhere.
-      await commitControlOrThrow(this.id, this._incarnation.inc, join, { requiredCellKeys: [memberCellKey(id)] })
+      const committing = commitLane(controlLane(this.id, this._incarnation.inc), encodeRoomRecord(join), {
+        requiredCellKeys: [memberCellKey(id)],
+      })
+      acceptedOrThrow(this.id, await committing)
       admission.assertLive(this._model)
       this._admissions.delete(id)
       this._replica.applyControl(join)

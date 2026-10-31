@@ -2,10 +2,10 @@ export {
   CONTROL_LANE,
   DEMAND_LANE,
   SEMANTIC_LANE,
-  commitControl,
-  commitControlOrThrow,
-  commitRoomLaneOrThrow,
-  commitToInbox,
+  acceptedOrThrow,
+  commitLane,
+  controlLane,
+  inboxOf,
   openConfig,
   configFromHead,
   decodeDemandPage,
@@ -21,14 +21,14 @@ import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { raceTimeout } from '../utils/raceTimeout.js'
 import { getRoomBackend } from '../backend/plane.js'
-import type { CommitAccepted, CommitOptions, CommitTarget, LaneId, RoomHead, StaleCommit } from '../backend/contract.js'
-import { hasRoomTag, type RoomCtrlEnvelope, type RoomDmEnvelope } from '../protocol.js'
-import type { RoomConfigRecord, RoomDemandPage, RoomDmAckEnvelope } from './protocol.js'
+import type { CommitAccepted, CommitOptions, CommitTarget, LaneId, RoomHead } from '../backend/contract.js'
+import { hasRoomTag } from '../protocol.js'
+import type { RoomConfigRecord, RoomDemandPage } from './protocol.js'
 import { RoomError, participantGoneError, roomClosedError } from '../errors.js'
 import { assert } from '../utils/assert.js'
 import { ROOM_HORIZON_MS } from './constants.js'
 import { reportRoomError } from './errors.js'
-import { memberCellKey, memberIdOfCellKey } from './cells.js'
+import { memberIdOfCellKey } from './cells.js'
 
 const roomTextEncoder = new TextEncoder()
 const roomTextDecoder = new TextDecoder()
@@ -78,55 +78,32 @@ function openConfig(current: RoomHead | null, inc?: string): RoomConfigRecord | 
   return configFromHead(current)
 }
 
-async function commitRoomLaneOrThrow(
-  target: CommitTarget,
-  payload: Uint8Array,
-  opts?: Omit<CommitOptions, 'closingLease'>,
-): Promise<CommitAccepted> {
+/** An accepted commit; a member whose cell the commit required and that left; or the incarnation ended. */
+type LaneCommit = CommitAccepted | { gone: string } | { stale: 'incarnation' }
+
+/** Commits `payload` on `target`'s lane. An accepted inbox or control commit waits for its handoff up to the horizon: a
+ *  server applies its own joins and leaves as it commits them, so a join's frame must not reach it after the member's
+ *  leave. */
+async function commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<LaneCommit> {
   const result = await getRoomBackend().commitLane(target, payload, opts)
-  if ('stale' in result) throw staleCommitError(target.roomId, result)
+  if ('stale' in result) return result.stale === 'cell' ? { gone: memberIdOfCellKey(result.key) } : result
+  if (result.delivery !== undefined) await handedOff(target.roomId, result)
   return result
 }
 
-/** Commits `envelope` to its recipient's inbox, requiring the recipient's member cell and each of `requiring`'s, and
- *  waits for its handoff up to the horizon. A closed room throws; a required member that left is returned as `gone`,
- *  for the caller to throw or skip. */
-async function commitToInbox(
-  roomId: string,
-  inc: string,
-  envelope: RoomDmEnvelope | RoomDmAckEnvelope,
-  requiring: string[] = [],
-): Promise<CommitAccepted | { gone: string }> {
-  const target = { roomId, inc, lane: { kind: 'inbox', member: envelope.to } } as const
-  const requiredCellKeys = [...requiring, envelope.to].map(memberCellKey)
-  const result = await getRoomBackend().commitLane(target, encodeRoomRecord(envelope), { requiredCellKeys })
-  if ('stale' in result && result.stale === 'cell') return { gone: memberIdOfCellKey(result.key) }
-  if ('stale' in result) throw roomClosedError(roomId)
-  await handedOff(roomId, result)
-  return result
+/** The accepted commit; a member that left or an ended incarnation throws. */
+function acceptedOrThrow(roomId: string, commit: LaneCommit): CommitAccepted {
+  if ('gone' in commit) throw participantGoneError(commit.gone)
+  if ('stale' in commit) throw roomClosedError(roomId)
+  return commit
 }
 
-/** Commits `event` on the control lane and waits for its handoff up to the horizon. A server applies its own joins and
- *  leaves as it commits them, so a join's frame must not reach it after the member's leave. */
-async function commitControl(
-  roomId: string,
-  inc: string,
-  event: RoomCtrlEnvelope,
-  opts?: CommitOptions,
-): Promise<CommitAccepted | StaleCommit> {
-  const result = await getRoomBackend().commitLane({ roomId, inc, lane: CONTROL_LANE }, encodeRoomRecord(event), opts)
-  if (!('stale' in result)) await handedOff(roomId, result)
-  return result
+function controlLane(roomId: string, inc: string): CommitTarget {
+  return { roomId, inc, lane: CONTROL_LANE }
 }
 
-async function commitControlOrThrow(
-  roomId: string,
-  inc: string,
-  event: RoomCtrlEnvelope,
-  opts?: { requiredCellKeys: string[] },
-): Promise<void> {
-  const result = await commitControl(roomId, inc, event, opts)
-  if ('stale' in result) throw staleCommitError(roomId, result)
+function inboxOf(roomId: string, inc: string, member: string): CommitTarget {
+  return { roomId, inc, lane: { kind: 'inbox', member } }
 }
 
 /** Delivery is at-most-once: a handoff that rejects or never settles is lost, not the committer's failure. */
@@ -152,6 +129,3 @@ function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
 }
 
 /** Required cells are member records, so a missing one names the member that left. */
-function staleCommitError(roomId: string, stale: StaleCommit): RoomError {
-  return stale.stale === 'cell' ? participantGoneError(memberIdOfCellKey(stale.key)) : roomClosedError(roomId)
-}
