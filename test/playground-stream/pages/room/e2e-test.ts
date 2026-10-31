@@ -794,7 +794,7 @@ function testRoom() {
       await bob.context.close()
     }
   })
-  test('room: in a members-only chat, a member whose tab goes offline while the membership service decides is shown reconnecting once admitted, and back once its tab is', async () => {
+  test("room: in a members-only chat, a member whose tab goes offline while the membership service decides is shown reconnecting once admitted, and back once its tab is, and its tab then shows the member's own renames", async () => {
     const chatId = `e2e-chat:${crypto.randomUUID()}`
     const alice = await openChat(chatId, 'Alice', 'join')
     const context = await page.context().browser()!.newContext()
@@ -813,13 +813,22 @@ function testRoom() {
       await alice.tab.click('#chat-who')
       await autoRetry(async () => expect(await alice.tab.textContent('#chat-online')).toBe('Alice, Bob (away)'))
       await context.setOffline(false)
+      await autoRetry(async () =>
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob'] }),
+      )
+      // Bob's join ends only now: his tab heard, while he was joining, that he started disconnected and came back.
+      await runServerAction(`chatWelcome_${chatId}_Bob`)
       await autoRetry(async () => {
-        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob'] })
         expect(await tab.textContent('#chat-status')).toBe('Connected')
         expect(await tab.locator('#chat-members li').allTextContents()).deep.equal(['Alice', 'Bob (you)'])
       })
       await alice.tab.click('#chat-who')
       await autoRetry(async () => expect(await alice.tab.textContent('#chat-online')).toBe('Alice, Bob'))
+      await tab.click('#chat-rename')
+      await autoRetry(async () => {
+        expect(await tab.textContent('#chat-rename')).toBe('Bob!')
+        expect(await alice.sees()).deep.equal({ status: 'Connected', members: ['Alice (you)', 'Bob!'] })
+      })
     } finally {
       await alice.context.close()
       await context.close()

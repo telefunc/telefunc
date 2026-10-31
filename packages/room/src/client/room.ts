@@ -68,6 +68,7 @@ function heldMemberOf(event: ClientRoomEvent): string | null {
     case 'demand-state':
       return event.member
     case 'leave':
+    case 'p-meta':
       return event.id
     default:
       return null
