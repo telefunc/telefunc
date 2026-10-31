@@ -15,7 +15,7 @@ import {
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../../constants.js'
-import { encodeU32, encodeLengthPrefixedFrames } from '../../wire/envelope.js'
+import { encodeU32, encodeLengthPrefixedBlob, encodeSseRequest, encodeSseRequestMetadata } from '../../wire/envelope.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
@@ -23,7 +23,6 @@ import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wi
 import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
-import { encodeLengthPrefixedBlob, encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sseRequest.js'
 import { DeadlineScheduler } from './DeadlineScheduler.js'
 import { SSEEvents } from './SSEEvents.js'
 import { Fifo } from '../../../utils/Fifo.js'
@@ -243,7 +242,7 @@ class SseTransport implements UpgradeSource {
     const ssePromise = this.post(
       encodeSseRequest(
         { connId: this.connId, kind: 'streamResponse' },
-        encodeLengthPrefixedFrames(stage.initialFrames, (entry) => entry.frame),
+        stage.initialFrames.map((entry) => entry.frame),
       ),
       abortController.signal,
       { accept: 'text/event-stream' },
@@ -434,7 +433,7 @@ class SseTransport implements UpgradeSource {
     this.lastPostStartedAt = now
     const wire = this.transportAbort
     try {
-      const body = encodeSseBatch(
+      const body = encodeSseRequest(
         { connId: this.connId, kind: 'batch' },
         queued.slice(head?.count ?? 0).map((entry) => entry.frame),
         head?.blob,
@@ -547,7 +546,7 @@ class SseTransport implements UpgradeSource {
     assert(this.transportAbort)
     try {
       await this.postAndRead(
-        encodeSseRequest({ connId: this.connId, kind: 'batch' }, encodeLengthPrefixedFrames(frames)),
+        encodeSseRequest({ connId: this.connId, kind: 'batch' }, frames),
         this.transportAbort.signal,
       )
     } catch {}
