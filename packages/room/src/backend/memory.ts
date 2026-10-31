@@ -197,48 +197,48 @@ function advanceOrder(order: Map<string, OrderingInfo>, domain: string, now: num
 class MemoryRoomDriver implements RoomDriver {
   readonly subscriptions: SubscriptionDriver<RoomSubscriptionSource>
 
-  private readonly _rooms = new Map<string, RoomRecord>()
-  private readonly _directory = new Map<string, DirectoryEntry>()
+  private readonly rooms = new Map<string, RoomRecord>()
+  private readonly directory = new Map<string, DirectoryEntry>()
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
-  private readonly _directoryChecks: DirectoryCheck[] = []
-  private _revSeq = 0
-  private readonly _pubSub = new MemoryPubSub()
+  private readonly directoryChecks: DirectoryCheck[] = []
+  private revSeq = 0
+  private readonly pubSub = new MemoryPubSub()
 
   constructor() {
     this.subscriptions = {
       bind: (source) => ({
         partition: '',
-        open: (receiver, localReceiverCount) => this._openSubscription(source, receiver, localReceiverCount),
+        open: (receiver, localReceiverCount) => this.openSubscription(source, receiver, localReceiverCount),
       }),
       partitionHere: () => '',
     }
   }
 
   async readHead(roomId: string): Promise<RoomHead | null> {
-    const head = this._liveHead(this._rooms.get(roomId))
+    const head = this.liveHead(this.rooms.get(roomId))
     return head === null ? null : publicHead(head, copyBytes(head.config))
   }
 
   async compareExchangeHead(roomId: string, cx: HeadCx, next: HeadNext): Promise<HeadCxResult> {
-    const current = this._liveHead(this._rooms.get(roomId))
+    const current = this.liveHead(this.rooms.get(roomId))
     if (!headCxMatches(cx, current, Date.now())) {
       return { conflict: true, current: current === null ? null : publicHead(current, copyBytes(current.config)) }
     }
     // Only a CX that actually applies materializes a room record.
-    const head = this._storeHead(this._roomFor(roomId), next)
+    const head = this.storeHead(this.roomFor(roomId), next)
     return { head: publicHead(head, copyBytes(head.config)) }
   }
 
-  private _storeHead(room: RoomRecord, next: HeadNext): StoredHead {
-    const materialized = materializeHead(next, Date.now(), `rev-${++this._revSeq}`)
+  private storeHead(room: RoomRecord, next: HeadNext): StoredHead {
+    const materialized = materializeHead(next, Date.now(), `rev-${++this.revSeq}`)
     const stored = { ...materialized, config: copyBytes(materialized.config) }
     room.head = stored
-    if (stored.currentInc !== null) this._generation(room, stored.currentInc)
+    if (stored.currentInc !== null) this.generation(room, stored.currentInc)
     return stored
   }
 
   async readCells(roomId: string, inc: string, sel: CellSelector): Promise<CellsRead> {
-    const gen = this._readableGeneration(roomId, inc)
+    const gen = this.readableGeneration(roomId, inc)
     if (gen === null) return { staleInc: true }
     return readCellsOf(gen, 'keys' in sel ? sel.keys : cellKeysWithPrefix(gen, sel.prefix), Date.now())
   }
@@ -249,7 +249,7 @@ class MemoryRoomDriver implements RoomDriver {
     const seen = new Set<string>()
     let page: string[]
     do {
-      const gen = this._readableGeneration(roomId, inc)
+      const gen = this.readableGeneration(roomId, inc)
       if (gen === null) {
         yield { staleInc: true }
         return
@@ -261,18 +261,18 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   /** Closing tails may read; only writes require an open head. */
-  private _readableGeneration(roomId: string, inc: string): Generation | null {
-    const room = this._rooms.get(roomId)
-    const head = this._liveHead(room)
+  private readableGeneration(roomId: string, inc: string): Generation | null {
+    const room = this.rooms.get(roomId)
+    const head = this.liveHead(room)
     if (room === undefined || head === null || head.currentInc !== inc) return null
-    return this._generation(room, inc)
+    return this.generation(room, inc)
   }
 
   async compareExchangeCells(roomId: string, inc: string, cx: CellsCx): Promise<CxResult> {
-    const room = this._rooms.get(roomId)
-    const head = this._liveHead(room)
+    const room = this.rooms.get(roomId)
+    const head = this.liveHead(room)
     if (room === undefined || !isOpenIncarnation(head, inc)) return 'stale-inc'
-    const gen = this._generation(room, inc)
+    const gen = this.generation(room, inc)
     if (cx.expect.some(({ key, version }) => (gen.cells.get(key)?.version ?? null) !== version)) return 'conflict'
     const version = String(++gen.version)
     for (const mutation of cx.mutations) setCell(gen, mutation.key, mutation.bytes, version)
@@ -291,12 +291,12 @@ class MemoryRoomDriver implements RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    const room = this._rooms.get(roomId)
-    const head = this._liveHead(room)
+    const room = this.rooms.get(roomId)
+    const head = this.liveHead(room)
     if (room === undefined || !commitPreconditionHolds(head, inc, lane.kind, opts?.closingLease, Date.now())) {
       return { stale: 'incarnation' }
     }
-    const gen = this._generation(room, inc)
+    const gen = this.generation(room, inc)
     const missing = opts?.requiredCellKeys?.find((key) => !gen.cells.has(key))
     if (missing !== undefined) return { stale: 'cell', key: missing }
     const key = encodeLaneKey(lane)
@@ -321,7 +321,7 @@ class MemoryRoomDriver implements RoomDriver {
     const everyMember = binary ? (gen.everyMemberSubs.get(lane.track) ?? NO_TARGETS) : NO_TARGETS
     const delivered = lane.kind === 'inbox' || lane.kind === 'control' ? createDeferred() : null
     // Commits assign their seq and queue their delivery in one synchronous step, so deliveries run in seq order.
-    const nextTurn = this._pubSub.deliverSoon(() => {
+    const nextTurn = this.pubSub.deliverSoon(() => {
       // A subscriber may write into the bytes it is given, which a retained frame must not share.
       const shared = opts?.retain ? copyBytes(frame) : frame
       for (const target of targets) target.deliver(shared, mark)
@@ -329,27 +329,27 @@ class MemoryRoomDriver implements RoomDriver {
       for (const target of everyMember) target.deliver(shared, mark)
       delivered?.resolve()
     })
-    const receivers = this._pubSub.receivers(targets, everyTrack, everyMember)
+    const receivers = this.pubSub.receivers(targets, everyTrack, everyMember)
     if (nextTurn !== null) await nextTurn
     if (delivered === null) return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers }
     return { accepted: true, seq: mark.seq, timestamp: mark.timestamp, receivers, delivery: delivered.promise }
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
-    const gen = this._rooms.get(roomId)?.gens.get(inc)
+    const gen = this.rooms.get(roomId)?.gens.get(inc)
     const order = lane.kind === 'inbox' || lane.kind === 'binary' ? gen?.memberOrders.get(lane.member) : gen?.order
     const mark = order?.get(encodeLaneKey(lane))
     return mark === undefined ? null : { ...mark }
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const entry = this._rooms.get(roomId)?.gens.get(inc)?.retained.get(encodeLaneKey(lane))
+    const entry = this.rooms.get(roomId)?.gens.get(inc)?.retained.get(encodeLaneKey(lane))
     if (entry === undefined) return null
     return { payload: copyBytes(entry.payload), seq: entry.seq, timestamp: entry.timestamp }
   }
 
   async listRetained(roomId: string, inc: string, of?: RetainedOf): Promise<LaneId[]> {
-    const gen = this._rooms.get(roomId)?.gens.get(inc)
+    const gen = this.rooms.get(roomId)?.gens.get(inc)
     if (gen === undefined) return []
     if (of === undefined) return Array.from(gen.retained.values(), (entry) => copyLane(entry.lane))
     const keys = 'member' in of ? gen.retainedOf.get(of.member) : gen.retainedOfTrack.get(of.track)
@@ -357,7 +357,7 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   async deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
-    const gen = this._rooms.get(roomId)?.gens.get(inc)
+    const gen = this.rooms.get(roomId)?.gens.get(inc)
     const key = encodeLaneKey(lane)
     if (gen === undefined || (opts?.ifSeq !== undefined && gen.retained.get(key)?.seq !== opts.ifSeq)) return
     gen.retained.delete(key)
@@ -367,21 +367,21 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   async dropLaneOrders(roomId: string, inc: string, member: string): Promise<void> {
-    this._rooms.get(roomId)?.gens.get(inc)?.memberOrders.delete(member)
+    this.rooms.get(roomId)?.gens.get(inc)?.memberOrders.delete(member)
   }
 
-  private _openSubscription(
+  private openSubscription(
     { roomId, inc, lane }: RoomSubscriptionSource,
     receiver: BackendReceiver<BackendPayload>,
     localReceiverCount: () => number,
   ): SubscriptionAttempt {
-    const room = this._rooms.get(roomId)
-    const head = this._liveHead(room)
+    const room = this.rooms.get(roomId)
+    const head = this.liveHead(room)
     if (room === undefined || !isOpenIncarnation(head, inc)) {
       throw new Error(`subscribeLane: room '${roomId}' has no open incarnation '${inc}'`)
     }
     // Registration is durable before `ready` resolves: a commit accepted after this point must see it.
-    const gen = this._generation(room, inc)
+    const gen = this.generation(room, inc)
     let subs: Subscriptions
     let key: string
     if (lane.kind === 'binary-all') {
@@ -395,34 +395,34 @@ class MemoryRoomDriver implements RoomDriver {
       key = encodeLaneKey(lane)
     }
     // Ready once what was committed before it is delivered: a lane it replaces delivers those first.
-    return this._pubSub.subscribe({ subs, key, receiver, localReceiverCount })
+    return this.pubSub.subscribe({ subs, key, receiver, localReceiverCount })
   }
 
   async dropGeneration(roomId: string, inc: string): Promise<void> {
-    const room = this._rooms.get(roomId)
+    const room = this.rooms.get(roomId)
     if (room === undefined) return
     const gen = room.gens.get(inc)
     if (gen === undefined) return // already dropped (the janitor is resumable)
     room.gens.delete(inc)
-    this._releaseWhenLapsed(roomId, room)
+    this.releaseWhenLapsed(roomId, room)
   }
 
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
-    this._directory.set(roomId, { incTag, checkAt: at })
-    if (at !== Infinity) pushCheck(this._directoryChecks, { at, roomId })
+    this.directory.set(roomId, { incTag, checkAt: at })
+    if (at !== Infinity) pushCheck(this.directoryChecks, { at, roomId })
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    if (this._directory.get(roomId)?.incTag === incTag) this._directory.delete(roomId)
+    if (this.directory.get(roomId)?.incTag === incTag) this.directory.delete(roomId)
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
-    return this._directory.get(roomId)?.incTag
+    return this.directory.get(roomId)?.incTag
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
-    const matching = [...this._directory]
+    const matching = [...this.directory]
       .filter(
         ([roomId]) => roomId.startsWith(prefix) && (cursor === undefined || compareCodePoints(roomId, cursor) > 0),
       )
@@ -436,39 +436,39 @@ class MemoryRoomDriver implements RoomDriver {
     const now = Date.now()
     // A put twice at the same time scheduled two checks, both current.
     const due = new Map<string, DirectoryCheck>()
-    while (due.size < DIRECTORY_PAGE_SIZE && this._directoryChecks.length > 0 && this._directoryChecks[0]!.at <= now) {
-      const check = popCheck(this._directoryChecks)
-      if (this._directory.get(check.roomId)?.checkAt === check.at) due.set(check.roomId, check)
+    while (due.size < DIRECTORY_PAGE_SIZE && this.directoryChecks.length > 0 && this.directoryChecks[0]!.at <= now) {
+      const check = popCheck(this.directoryChecks)
+      if (this.directory.get(check.roomId)?.checkAt === check.at) due.set(check.roomId, check)
     }
     // Still due until put again or deleted.
-    for (const check of due.values()) pushCheck(this._directoryChecks, check)
-    return Array.from(due.keys(), (roomId) => ({ roomId, incTag: this._directory.get(roomId)!.incTag }))
+    for (const check of due.values()) pushCheck(this.directoryChecks, check)
+    return Array.from(due.keys(), (roomId) => ({ roomId, incTag: this.directory.get(roomId)!.incTag }))
   }
 
   // ── internals ──
 
-  private _roomFor(roomId: string): RoomRecord {
-    return getOrCreate(this._rooms, roomId, () => ({ head: null, gens: new Map() }))
+  private roomFor(roomId: string): RoomRecord {
+    return getOrCreate(this.rooms, roomId, () => ({ head: null, gens: new Map() }))
   }
 
   /** A room with no incarnation left is forgotten once its tombstone lapses (this backend's revs are never reused). */
-  private _releaseWhenLapsed(roomId: string, room: RoomRecord): void {
-    if (this._rooms.get(roomId) !== room || room.gens.size > 0) return
-    const head = this._liveHead(room)
+  private releaseWhenLapsed(roomId: string, room: RoomRecord): void {
+    if (this.rooms.get(roomId) !== room || room.gens.size > 0) return
+    const head = this.liveHead(room)
     if (head === null) {
-      this._rooms.delete(roomId)
+      this.rooms.delete(roomId)
       return
     }
     if (head.expiresAt === null) return
-    unrefTimer(setTimeout(() => this._releaseWhenLapsed(roomId, room), head.expiresAt - Date.now()))
+    unrefTimer(setTimeout(() => this.releaseWhenLapsed(roomId, room), head.expiresAt - Date.now()))
   }
 
-  private _generation(room: RoomRecord, inc: string): Generation {
+  private generation(room: RoomRecord, inc: string): Generation {
     return getOrCreate(room.gens, inc, newGeneration)
   }
 
   /** Lazy TTL: a lapsed tombstone reads as absent, which is what reopens an absence epoch. */
-  private _liveHead(room: RoomRecord | undefined): StoredHead | null {
+  private liveHead(room: RoomRecord | undefined): StoredHead | null {
     const head = room?.head ?? null
     return head === null || isExpired(head, Date.now()) ? null : head
   }

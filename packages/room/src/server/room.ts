@@ -84,22 +84,22 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   /** @internal What this process shares of the incarnation. */
   readonly _replica: RoomReplica
   /** `Room.get({ tail: true })`'s hold until a stub attaches and takes it. */
-  private _tail: TailHold | null = null
+  private tail: TailHold | null = null
   /** @internal */
   _guards: Partial<RoomGuardHooks> | null = null
   /** @internal This handle's listeners over the replica's model. */
   readonly _state: RoomState
   /** @internal */
   readonly _local: LocalHolder
-  private readonly _stubs = new Set<RoomStub>()
+  private readonly stubs = new Set<RoomStub>()
   /** The attached stub holding each member a client joined through. */
-  private readonly _stubOf = new Map<string, RoomStub>()
+  private readonly stubOf = new Map<string, RoomStub>()
   /** @internal */
   readonly _localParticipants = new Map<string, ServerLocalParticipant>()
   /** The local participants that joined with `selfDelivery: false`. */
-  private readonly _localSuppressed = new Set<string>()
+  private readonly localSuppressed = new Set<string>()
   /** The admissions under way; an `owned` one the heartbeat leaves alone, and its holder's detach doesn't evict. */
-  private readonly _admissions = new Map<string, Admission>()
+  private readonly admissions = new Map<string, Admission>()
   /** @internal */
   readonly _writes: RoomWrites
 
@@ -108,7 +108,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     this._replica = replica
     this._incarnation = replica._incarnation
     this._state = new RoomState({ view: this, model: replica.model, owner: new ServerRoomStateOwner(this) })
-    this._local = new LocalHolder(this._state, this._localSuppressed)
+    this._local = new LocalHolder(this._state, this.localSuppressed)
     this._writes = new RoomWrites({ owner: this })
   }
 
@@ -134,10 +134,10 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     const { meta, selfDelivery, identity, hidden } = normalizeJoinOptions(options)
     const admission = new Admission({ meta, identity, hidden })
     const participant = new ServerLocalParticipant(this, { id: admission.id, meta, selfDelivery, identity })
-    await this._admit(admission, () => {
+    await this.admit(admission, () => {
       this._localParticipants.set(admission.id, participant)
       this._replica.own(admission.id, this)
-      if (!selfDelivery) this._localSuppressed.add(admission.id)
+      if (!selfDelivery) this.localSuppressed.add(admission.id)
       this._replica.track(this)
     })
     return participant
@@ -161,13 +161,13 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   }
 
   /** Both join paths: the room is open, the guard passes, the holder takes the member, then the member commits. */
-  private async _admit(admission: Admission, hold: () => void): Promise<void> {
-    await this._assertOpen()
+  private async admit(admission: Admission, hold: () => void): Promise<void> {
+    await this.assertOpen()
     const { id, meta, identity, joinedAt, hidden } = admission
     const onBeforeJoin = this._guards?.onBeforeJoin
     if (!hidden && onBeforeJoin) await onBeforeJoin({ id, meta, identity })
     hold()
-    await this._commitAdmission(admission)
+    await this.commitAdmission(admission)
     if (hidden) return // a hidden participant has no post-join hook
     const onAfterJoin = this._guards?.onAfterJoin
     if (onAfterJoin) await runAfterHook(() => onAfterJoin({ id, meta, identity }, { joinedAt }))
@@ -175,18 +175,18 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
 
   /** The member's inbox is ready before its record is durable, and the join is announced after,
    *  so no DM or event is lost. */
-  private async _commitAdmission(admission: Admission): Promise<void> {
+  private async commitAdmission(admission: Admission): Promise<void> {
     const { id, meta, identity, joinedAt, hidden } = admission
     const record: Omit<RoomMemberRecord, 'session'> = { joinedAt, metaSeq: 0, metaGen: 0 }
     const join: Extract<RoomCtrlEnvelope, { __r: 'join' }> = { __r: 'join', id, meta, joinedAt }
     if (identity !== null) record.identity = join.identity = identity
     if (hidden) record.hidden = join.hidden = true
-    this._admissions.set(id, admission)
+    this.admissions.set(id, admission)
     // A holder that detached during the guard took nothing, and a room that closed meanwhile takes no one.
-    if (this._holderOf(id) === undefined || this._model.closed) admission.abandon()
+    if (this.holderOf(id) === undefined || this._model.closed) admission.abandon()
     this._replica.lanePlan.memberOwned(id)
     try {
-      await this._inboxReady(admission)
+      await this.inboxReady(admission)
       await createMember(this._incarnation, this._replica.lease, id, record, meta)
       admission.assertLive(this._model)
       admission.commit()
@@ -196,10 +196,10 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
       })
       acceptedOrThrow(this.id, await committing)
       admission.assertLive(this._model)
-      this._admissions.delete(id)
+      this.admissions.delete(id)
       this._replica.applyControl(join)
       // A drop of the page's wire during the admission skipped this member: it starts disconnected.
-      if (this._stubOf.get(id)?._end.isConnected === false) this._setMemberConnected(id, false)
+      if (this.stubOf.get(id)?._end.isConnected === false) this.setMemberConnected(id, false)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
@@ -209,20 +209,20 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
         reportRoomError(error)
         this._replica.evictLater(id)
       })
-      this._abandonAdmission(id, cause)
+      this.abandonAdmission(id, cause)
       throw error
     }
   }
 
   /** The member's inbox delivers (within the horizon) before its join is visible, and the admission still holds. */
-  private async _inboxReady(admission: Admission): Promise<void> {
+  private async inboxReady(admission: Admission): Promise<void> {
     const inbox = this._replica.lanePlan.inboxOf(admission.id)
     if (inbox !== undefined) await withinRoomHorizon(inbox.ready)
     admission.assertLive(this._model)
   }
 
-  private _abandonAdmission(id: string, cause: LeaveCause): void {
-    this._admissions.delete(id)
+  private abandonAdmission(id: string, cause: LeaveCause): void {
+    this.admissions.delete(id)
     this._model.applyLeave(id, cause)
   }
 
@@ -244,14 +244,14 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     }
   }
 
-  private async _assertOpen(): Promise<void> {
+  private async assertOpen(): Promise<void> {
     if (this._model.closed || (await this._replica._readOpenConfig()) === null) throw roomClosedError(this.id)
   }
 
   /** @internal What the lane carried for this handle's own listeners, or for its tail while no stub took it. */
   _relayData(serialized: string, event: RoomDataEnvelope, info: OrderingInfo): void {
     this._local.relayText(event, info, serialized)
-    if (this._stubs.size === 0) this._tail?.push({ serialized, ord: info, from: event.from })
+    if (this.stubs.size === 0) this.tail?.push({ serialized, ord: info, from: event.from })
   }
 
   /** @internal A meta update of a member this handle owns, which its participant mirrors. */
@@ -264,30 +264,30 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     const local = this._localParticipants.get(id)
     if (local) {
       this._localParticipants.delete(id)
-      this._localSuppressed.delete(id)
+      this.localSuppressed.delete(id)
       local._onLeft(cause)
     }
-    this._stubOf.delete(id)
-    this._admissions.get(id)?.abandon()
+    this.stubOf.delete(id)
+    this.admissions.get(id)?.abandon()
     this._replica.track(this)
   }
 
   /** @internal The room closed: the replica already applied and relayed `closed`. */
   _teardown(): void {
-    this._teardownTail()
+    this.teardownTail()
     for (const local of this._localParticipants.values()) local._onLeft({ type: 'closed' })
     this._localParticipants.clear()
-    this._localSuppressed.clear()
-    for (const admission of this._admissions.values()) admission.abandon()
+    this.localSuppressed.clear()
+    for (const admission of this.admissions.values()) admission.abandon()
     // A client back while its channel still holds it gets `closed`.
     const timeout = getChannelLimits().reconnectWindow
-    for (const stub of this._stubs) void stub._end.close({ timeout }).catch(() => {})
+    for (const stub of this.stubs) void stub._end.close({ timeout }).catch(() => {})
     this._replica.track(this)
   }
 
   /** @internal A DM for a member this handle owns, routed to its holder: a server participant or its client stub. */
   _onDm(envelope: RoomDmEnvelope, serialized: string, info: OrderingInfo): void {
-    const holder = this._holderOf(envelope.to)
+    const holder = this.holderOf(envelope.to)
     // A client that joined through a stub gets the DM relayed (its `ackId` rides along) and answers with `dm-reply`.
     if (holder instanceof RoomStub) {
       if (envelope.fromMetaSeq !== undefined) {
@@ -309,16 +309,16 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
 
   /** Resolves once the tail receives, so it holds everything committed after it returns. */
   async _startTail(): Promise<void> {
-    this._tail = new TailHold(() => this._teardownTail())
+    this.tail = new TailHold(() => this.teardownTail())
     this._replica.track(this)
     this._replica.lanePlan.syncLanes() // bring up text ingestion before any stub exists
     await withinRoomHorizon(this._replica.lanePlan.semanticReady)
   }
 
-  private _teardownTail(): void {
-    if (this._tail === null) return // already handed off to a stub
-    this._tail.end()
-    this._tail = null
+  private teardownTail(): void {
+    if (this.tail === null) return // already handed off to a stub
+    this.tail.end()
+    this.tail = null
     this._replica.track(this)
     this._replica.lanePlan.syncLanes() // drop the text ingestion nothing is consuming
   }
@@ -339,12 +339,12 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   }
 
   _attachStub(stub: RoomStub): void {
-    this._stubs.add(stub)
+    this.stubs.add(stub)
     this._replica.attachStub(stub)
-    if (this._tail !== null) {
+    if (this.tail !== null) {
       // Its expiry ends only the stub's want of all text.
-      stub._beginTail(this._tail.take(), () => this._replica.lanePlan.textChanged(stub, []))
-      this._tail = null
+      stub._beginTail(this.tail.take(), () => this._replica.lanePlan.textChanged(stub, []))
+      this.tail = null
     }
     this._replica.track(this)
     this._replica.lanePlan.holderChanged(stub)
@@ -361,26 +361,26 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   /** @internal */
   _setHeldConnected(stub: RoomStub, connected: boolean): void {
     // An admission under way takes the wire's state once its join applies.
-    for (const id of stub._heldMembers()) if (!this._admissions.has(id)) this._setMemberConnected(id, connected)
+    for (const id of stub._heldMembers()) if (!this.admissions.has(id)) this.setMemberConnected(id, connected)
   }
 
-  private _setMemberConnected(id: string, connected: boolean): void {
+  private setMemberConnected(id: string, connected: boolean): void {
     void this._writes.setMemberConnected(id, connected).catch(reportRoomError)
   }
 
   /** @internal */
   _detachStub(stub: RoomStub): void {
-    this._stubs.delete(stub)
+    this.stubs.delete(stub)
     this._replica.detachStub(stub)
     stub._endTail()
     stub._endReplayHolds()
     this._replica.track(this)
     this._replica.lanePlan.holderGone(stub)
     for (const id of stub._heldMembers()) {
-      this._stubOf.delete(id)
+      this.stubOf.delete(id)
       this._replica.disown(id, this)
       this._replica.lanePlan.memberReleased(id)
-      const admission = this._admissions.get(id)
+      const admission = this.admissions.get(id)
       const owned = admission?.owned === true
       admission?.abandon()
       if (owned) continue // the admission rolls itself back
@@ -390,7 +390,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
 
   /** @internal A response serialized a participant whose own frames the stub's client doesn't get back. */
   _onStubSuppressed(stub: RoomStub, member: string): void {
-    if (this._stubs.has(stub)) this._replica.lanePlan.memberChanged(member)
+    if (this.stubs.has(stub)) this._replica.lanePlan.memberChanged(member)
   }
 
   async _joinStubMember(
@@ -398,10 +398,10 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     req: Extract<RoomRequest, { __r: 'req-join' }>,
   ): Promise<{ id: string; joinedAt: number }> {
     const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
-    await this._admit(admission, () => {
+    await this.admit(admission, () => {
       stub._addMember(req.reqId, admission.id, req.selfDelivery)
-      if (this._stubs.has(stub)) {
-        this._stubOf.set(admission.id, stub)
+      if (this.stubs.has(stub)) {
+        this.stubOf.set(admission.id, stub)
         this._replica.own(admission.id, this)
       }
     })
@@ -411,38 +411,38 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   /** @internal A holder's text wants changed (`before` is `null` when none did): replan, then replay the retained
    *  frame it now wants. */
   _onHolderTextChanged(holder: LaneHolder, before: TextWantsChange | null): void {
-    if (this._holdsLanes(holder)) this._replica.lanePlan.textChanged(holder, before?.members.keys() ?? [])
+    if (this.holdsLanes(holder)) this._replica.lanePlan.textChanged(holder, before?.members.keys() ?? [])
     if (before) void this._replica.replayText(holder, before).catch(reportRoomError)
   }
 
   /** @internal One of a holder's binary wants changed: replan the pairs it covers, then replay what it now wants. */
   _onHolderBinaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
-    if (this._holdsLanes(holder)) this._replica.lanePlan.binaryChanged(holder, change)
+    if (this.holdsLanes(holder)) this._replica.lanePlan.binaryChanged(holder, change)
     if (change.on) void this._replica.replayBinary(holder, change).catch(reportRoomError)
   }
 
   /** A stub that is not attached holds no lanes. */
-  private _holdsLanes(holder: LaneHolder): boolean {
-    return holder === this._local || this._stubs.has(holder as RoomStub)
+  private holdsLanes(holder: LaneHolder): boolean {
+    return holder === this._local || this.stubs.has(holder as RoomStub)
   }
 
   /** @internal Whether this handle observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean {
-    return this._stubs.size > 0 || this._localParticipants.size > 0 || this._state.listenerCount > 0
+    return this.stubs.size > 0 || this._localParticipants.size > 0 || this._state.listenerCount > 0
   }
 
   /** @internal */
   _holdsTail(): boolean {
-    return this._tail !== null
+    return this.tail !== null
   }
 
-  private _holderOf(id: string): ServerLocalParticipant | RoomStub | undefined {
-    return this._localParticipants.get(id) ?? this._stubOf.get(id)
+  private holderOf(id: string): ServerLocalParticipant | RoomStub | undefined {
+    return this._localParticipants.get(id) ?? this.stubOf.get(id)
   }
 
   /** @internal */
   _deliverDemand(member: string, track: string, wanted: boolean): void {
-    const holder = this._holderOf(member)
+    const holder = this.holderOf(member)
     if (holder instanceof ServerLocalParticipant) holder._onDemand(track, wanted)
     else holder?._relayEvent({ __r: 'demand', member, track, wanted })
   }
@@ -453,7 +453,7 @@ class ServerLocalParticipant extends ParticipantBase {
   readonly [SERVER_PARTICIPANT_BRAND] = true
   /** @internal */
   readonly _room: ServerRoom
-  private _metaMirror: MetaMirror | null = null
+  private metaMirror: MetaMirror | null = null
   /** The client holding this participant, which its inbox forwards to instead of local listeners. */
   private holder: RoomParticipantStub | null = null
   protected readonly _bugMessage = ROOM_BUG_MESSAGE
@@ -482,7 +482,7 @@ class ServerLocalParticipant extends ParticipantBase {
       options?.coalesce === undefined || typeof options.coalesce === 'string',
       'publish() options.coalesce should be a string',
     )
-    return markHandled(this._publishText(ownMessage(data), options?.retain))
+    return markHandled(this.publishText(ownMessage(data), options?.retain))
   }
 
   publishBinary(data: Uint8Array, options?: BinaryPublishOptions): Promise<ChannelPublishAck> {
@@ -493,7 +493,7 @@ class ServerLocalParticipant extends ParticipantBase {
     return markHandled(this._publishFrame(frame, framed))
   }
 
-  private async _publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
+  private async publishText(data: unknown, retain: boolean | undefined): Promise<ChannelPublishAck> {
     this._assertActive()
     return await this._room._writes.publishText(this.id, data, retain)
   }
@@ -539,11 +539,11 @@ class ServerLocalParticipant extends ParticipantBase {
   /** @internal Each meta update this participant applies, and each failover rewind of its seq, which a client holding
    *  it mirrors. */
   _onMeta(mirror: MetaMirror): () => void {
-    this._metaMirror = mirror
+    this.metaMirror = mirror
     this._room._replica.metaMirrors.add(mirror)
     return () => {
       this._room._replica.metaMirrors.delete(mirror)
-      if (this._metaMirror === mirror) this._metaMirror = null
+      if (this.metaMirror === mirror) this.metaMirror = null
     }
   }
 
@@ -555,7 +555,7 @@ class ServerLocalParticipant extends ParticipantBase {
   override _acceptMeta(update: MemberMetaUpdate): boolean {
     const wasConnected = this.isConnected
     if (!super._acceptMeta(update)) return false
-    this._metaMirror?.accepted(update)
+    this.metaMirror?.accepted(update)
     if (this.isConnected === wasConnected) return true
     if (this.isConnected) this._onReconnected()
     else this._onDisconnected()
@@ -578,10 +578,10 @@ class ServerLocalParticipant extends ParticipantBase {
       options?.ack === undefined || typeof options.ack === 'boolean',
       'send() options.ack should be a boolean',
     )
-    return markHandled(this._sendDm(recipientId(to), ownMessage(data), options?.ack === true))
+    return markHandled(this.sendDm(recipientId(to), ownMessage(data), options?.ack === true))
   }
 
-  private async _sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
+  private async sendDm(to: string, data: unknown, ack: boolean): Promise<unknown> {
     this._assertActive()
     return await this._room._writes.sendDm(this.id, to, data, ack)
   }

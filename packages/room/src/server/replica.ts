@@ -79,7 +79,7 @@ class RoomReplica
     RoomHeartbeatOwner,
     RosterStreamOwner
 {
-  private static readonly _collected = new FinalizationRegistry<{
+  private static readonly collected = new FinalizationRegistry<{
     replicas: Map<string, WeakRef<RoomReplica>>
     inc: string
   }>(({ replicas, inc }) => {
@@ -104,7 +104,7 @@ class RoomReplica
     const replica = new RoomReplica({ incarnation, stored, seed })
     const replicas = replicasHere()
     replicas.set(config.inc, new WeakRef(replica))
-    RoomReplica._collected.register(replica, { replicas, inc: config.inc })
+    RoomReplica.collected.register(replica, { replicas, inc: config.inc })
     return replica
   }
 
@@ -129,27 +129,27 @@ class RoomReplica
   readonly metaMirrors = new Set<MetaMirror>()
   /** Each stub's latest view write, from its attach or a rewrite, to the key it wrote, null if it failed; its removal
    *  comes after it. */
-  private readonly _views = new Map<RoomStub, Promise<string | null>>()
+  private readonly views = new Map<RoomStub, Promise<string | null>>()
   /** A view write failed, or the lease hosting the views was lost: the heartbeat writes them again. */
-  private _viewsLost = false
+  private viewsLost = false
   /** Members whose eviction failed: the lease would host them for as long as it lives. */
-  private readonly _unevicted = new Set<string>()
+  private readonly unevicted = new Set<string>()
   /** Whether this process tells its demand again, and was asked to again meanwhile. */
-  private _tellingAgain = false
-  private _askedAgain = false
+  private tellingAgain = false
+  private askedAgain = false
   /** The cleanups of the lease's members pending at the last heartbeat. */
-  private _pendingCleanups: ReadonlySet<string> = new Set()
-  private readonly _gossip: GossipOutbox
+  private pendingCleanups: ReadonlySet<string> = new Set()
+  private readonly gossip: GossipOutbox
   /** The handle holding each member it joined. */
-  private readonly _owners = new Map<string, ServerRoom>()
+  private readonly owners = new Map<string, ServerRoom>()
   /** The seq of the last frame each owned member's inbox delivered, 0 before its first. */
-  private readonly _inboxSeqs = new Map<string, number>()
+  private readonly inboxSeqs = new Map<string, number>()
   /** The handles with a client stub, a participant or a listener; those with a listener; those with a tail; those with
    *  either, which take what a lane carries. */
-  private readonly _observers = new Set<ServerRoom>()
-  private readonly _listening = new Set<ServerRoom>()
-  private readonly _tails = new Set<ServerRoom>()
-  private readonly _receivers = new Set<ServerRoom>()
+  private readonly observers = new Set<ServerRoom>()
+  private readonly listening = new Set<ServerRoom>()
+  private readonly tails = new Set<ServerRoom>()
+  private readonly receivers = new Set<ServerRoom>()
 
   private constructor({
     incarnation,
@@ -169,7 +169,7 @@ class RoomReplica
       metaSeq: stored.seq,
       owner: this,
     })
-    this._gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
+    this.gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
     this.incomingDemand = new RoomDemand({ owner: this })
     this.lanePlan = new LanePlan({ owner: this, outgoingDemand: this.outgoingDemand })
     this.authority = new AuthoritySync({ owner: this })
@@ -179,40 +179,40 @@ class RoomReplica
 
   /** Whether the handle's holders and holds are served: its stubs, participants and listeners, and its tail. */
   track(handle: ServerRoom): void {
-    toggle(this._observers, handle, handle._observed())
-    toggle(this._listening, handle, handle._state.listenerCount > 0)
-    toggle(this._tails, handle, handle._holdsTail())
-    toggle(this._receivers, handle, this._listening.has(handle) || this._tails.has(handle))
+    toggle(this.observers, handle, handle._observed())
+    toggle(this.listening, handle, handle._state.listenerCount > 0)
+    toggle(this.tails, handle, handle._holdsTail())
+    toggle(this.receivers, handle, this.listening.has(handle) || this.tails.has(handle))
   }
 
   own(member: string, handle: ServerRoom): void {
-    this._owners.set(member, handle)
+    this.owners.set(member, handle)
     // A member's id is fresh at each join, so its inbox starts before seq 1.
-    this._inboxSeqs.set(member, 0)
+    this.inboxSeqs.set(member, 0)
     this.incomingDemand.owned(member)
   }
 
   /** The member's demand goes with it. */
   disown(member: string, handle: ServerRoom): void {
-    if (this._owners.get(member) !== handle) return
-    this._owners.delete(member)
-    this._inboxSeqs.delete(member)
+    if (this.owners.get(member) !== handle) return
+    this.owners.delete(member)
+    this.inboxSeqs.delete(member)
     this.incomingDemand.forgetMember(member)
     this.publishedTracks.forget(member)
   }
 
   attachStub(stub: RoomStub): void {
     this.stubs.add(stub)
-    this._views.set(
+    this.views.set(
       stub,
-      this._holdViews([stub]).then(([key]) => key ?? null),
+      this.holdViews([stub]).then(([key]) => key ?? null),
     )
   }
 
   detachStub(stub: RoomStub): void {
     this.stubs.delete(stub)
-    const view = this._views.get(stub)
-    this._views.delete(stub)
+    const view = this.views.get(stub)
+    this.views.delete(stub)
     void view
       ?.then(async (key) => {
         if (key !== null) await removeView(this._incarnation, key)
@@ -222,7 +222,7 @@ class RoomReplica
   }
 
   /** The stubs' views' keys, in order; each null and the views lost if the write failed. */
-  private async _holdViews(stubs: RoomStub[]): Promise<(string | null)[]> {
+  private async holdViews(stubs: RoomStub[]): Promise<(string | null)[]> {
     try {
       const keys = await holdViews(
         this._incarnation,
@@ -231,7 +231,7 @@ class RoomReplica
       )
       return stubs.map((_, i) => keys[i] ?? null)
     } catch (error) {
-      this._viewsLost = true
+      this.viewsLost = true
       reportRoomError(error)
       return stubs.map(() => null)
     }
@@ -241,7 +241,7 @@ class RoomReplica
    *  `carried` is given, else as applied. A leave reaches them from `onMemberLeft`, whatever applied it, and an update as
    *  each one it let apply, in seq order. */
   applyControl(event: PresenceEvent, carried?: () => string): void {
-    const relay = () => this._relayControl(event, carried ?? (() => unorderedEventText(event)))
+    const relay = () => this.relayControl(event, carried ?? (() => unorderedEventText(event)))
     switch (event.__r) {
       case 'join':
         if (!this.model.applyJoin(joinedMember(event))) return
@@ -256,13 +256,13 @@ class RoomReplica
         return
       case 'update':
         for (const applied of this.model.applyRoomUpdate(event)) {
-          this._relayControl(applied, () => unorderedEventText(applied))
+          this.relayControl(applied, () => unorderedEventText(applied))
         }
         return
       case 'closed':
         if (!this.model.applyClosed()) return
         relay()
-        this._teardown()
+        this.teardown()
     }
   }
 
@@ -281,7 +281,7 @@ class RoomReplica
     if (before.all) return
     // A live message from a sender another want's subscription already delivers would otherwise beat the retained one.
     const hold = holder._hold(null)
-    const reading = this._readRetainedText(holder, before, hold).finally(() => hold.end())
+    const reading = this.readRetainedText(holder, before, hold).finally(() => hold.end())
     try {
       await withinRoomHorizon(reading)
     } finally {
@@ -290,7 +290,7 @@ class RoomReplica
     }
   }
 
-  private async _readRetainedText(holder: LaneHolder, before: TextWantsChange, hold: ReplayHold): Promise<void> {
+  private async readRetainedText(holder: LaneHolder, before: TextWantsChange, hold: ReplayHold): Promise<void> {
     await this.authority.ensureRoster()
     // Read retained only after subscription readiness: a racing commit is then retained or live, never lost in the gap.
     await withinRoomHorizon(this.lanePlan.semanticReady)
@@ -312,7 +312,7 @@ class RoomReplica
   async replayBinary(holder: LaneHolder, change: BinaryWantChange): Promise<void> {
     // A live frame on a lane another want's subscription already delivers would otherwise beat its retained frame.
     const hold = holder._hold(change)
-    const reading = this._readRetainedBinary(holder, change, hold).finally(() => hold.end())
+    const reading = this.readRetainedBinary(holder, change, hold).finally(() => hold.end())
     try {
       await withinRoomHorizon(reading)
     } finally {
@@ -321,7 +321,7 @@ class RoomReplica
     }
   }
 
-  private async _readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {
+  private async readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {
     await this.authority.ensureRoster()
     await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
     const backend = getRoomBackend()
@@ -350,61 +350,61 @@ class RoomReplica
 
   /** @internal Whether a handle here observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean {
-    return this._observers.size > 0
+    return this.observers.size > 0
   }
 
   /** @internal */
   _listened(): boolean {
-    return this._listening.size > 0
+    return this.listening.size > 0
   }
 
   /** @internal A pre-attach tail ingests all text. */
   _holdsTail(): boolean {
-    return this._tails.size > 0
+    return this.tails.size > 0
   }
 
   /** @internal */
   _ownsMember(id: string): boolean {
-    return this._owners.has(id)
+    return this.owners.has(id)
   }
 
   /** @internal */
   _ownsAnyMember(): boolean {
-    return this._owners.size > 0
+    return this.owners.size > 0
   }
 
   /** @internal Live. A pending admission owns its inbox. */
   _ownedMembers(): Iterable<string> {
-    return this._owners.keys()
+    return this.owners.keys()
   }
 
   deliverDemand(member: string, track: string, wanted: boolean): void {
-    this._owners.get(member)?._deliverDemand(member, track, wanted)
+    this.owners.get(member)?._deliverDemand(member, track, wanted)
   }
 
   /** The heartbeat evicts the member again, as `disconnected`. */
   evictLater(id: string): void {
-    this._unevicted.add(id)
+    this.unevicted.add(id)
   }
 
   /** @internal Renews the lease, evicts again whom it failed to, and finishes the leaves its members' evicting
    *  servers left unfinished; once the lease was lost, or a view write failed, writes every stub's view again in one
    *  write, after each one's earlier write. */
   async _renewLease(): Promise<void> {
-    if (!(await renewLease(this._incarnation, this.lease))) this._viewsLost = true
-    for (const id of this._unevicted) {
+    if (!(await renewLease(this._incarnation, this.lease))) this.viewsLost = true
+    for (const id of this.unevicted) {
       await evictMember(this._incarnation, id, { type: 'disconnected' })
-      this._unevicted.delete(id)
+      this.unevicted.delete(id)
     }
-    this._pendingCleanups = await finishLeaseCleanups(this._incarnation, this.lease, this._pendingCleanups)
-    if (!this._viewsLost) return
-    this._viewsLost = false
-    const stubs = [...this._views.keys()]
+    this.pendingCleanups = await finishLeaseCleanups(this._incarnation, this.lease, this.pendingCleanups)
+    if (!this.viewsLost) return
+    this.viewsLost = false
+    const stubs = [...this.views.keys()]
     if (stubs.length === 0) return
-    const previous = Promise.all(this._views.values())
-    const keys = previous.then(() => this._holdViews(stubs))
+    const previous = Promise.all(this.views.values())
+    const keys = previous.then(() => this.holdViews(stubs))
     stubs.forEach((stub, i) =>
-      this._views.set(
+      this.views.set(
         stub,
         keys.then((written) => written[i] ?? null),
       ),
@@ -414,37 +414,37 @@ class RoomReplica
 
   /** This process's demand entry, to the other processes and to its own owners. */
   tellDemand(entry: DemandEntry, on: boolean): void {
-    this._gossip.push({ on, ...entry })
+    this.gossip.push({ on, ...entry })
     this.incomingDemand.take(this.outgoingDemand.instance, entry, on)
   }
 
   /** @internal Renews this process's demand elsewhere with one page, and drops the reporters that lapsed,
    *  a slice at a time. */
   async _renewDemand(): Promise<void> {
-    if (this.outgoingDemand.reporting) this._gossip.renew()
+    if (this.outgoingDemand.reporting) this.gossip.renew()
     const slice = new Slice()
     for (const _ of this.incomingDemand.expire()) if (slice.over) await slice.next()
   }
 
   /** Tells every entry of this process's demand again as all it receives, a slice at a time; once more after it when
    *  asked again meanwhile, as an asker may not have read what it told before the ask. */
-  private async _tellDemandAgain(): Promise<void> {
-    if (this._tellingAgain) {
-      this._askedAgain = true
+  private async tellDemandAgain(): Promise<void> {
+    if (this.tellingAgain) {
+      this.askedAgain = true
       return
     }
-    this._tellingAgain = true
+    this.tellingAgain = true
     try {
       do {
-        this._askedAgain = false
+        this.askedAgain = false
         if (!this.outgoingDemand.reporting) continue
-        this._gossip.push({ again: true })
+        this.gossip.push({ again: true })
         const slice = new Slice()
         for (const _ of this.outgoingDemand.all()) if (slice.over) await slice.next()
-        this._gossip.push({ again: false })
-      } while (this._askedAgain)
+        this.gossip.push({ again: false })
+      } while (this.askedAgain)
     } finally {
-      this._tellingAgain = false
+      this.tellingAgain = false
     }
   }
 
@@ -498,7 +498,7 @@ class RoomReplica
     const ctrl = decodeLaneEnvelope(serialized) as RoomCtrlEnvelope
     if (ctrl.__r === 'demand-ask') {
       const self = this.outgoingDemand.instance
-      if (ctrl.instance !== self && (ctrl.of ?? self) === self) void this._tellDemandAgain().catch(reportRoomError)
+      if (ctrl.instance !== self && (ctrl.of ?? self) === self) void this.tellDemandAgain().catch(reportRoomError)
       return
     }
     this.applyControl(ctrl, () => encodePublish(serialized, info))
@@ -508,13 +508,13 @@ class RoomReplica
   _onTextData(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDataEnvelope | Extract<RoomEnvelope, { __r: 'announce' }>
     if (envelope.__r === 'announce') {
-      for (const handle of this._receivers) handle._local.relayAnnouncement(envelope.data, info)
+      for (const handle of this.receivers) handle._local.relayAnnouncement(envelope.data, info)
       const wireText = encodePublish(serialized, info)
       for (const stub of this.stubs) stub._relayAnnouncement(wireText, info)
       return
     }
     this.applyStamp(envelope.from, envelope)
-    for (const handle of this._receivers) handle._relayData(serialized, envelope, info)
+    for (const handle of this.receivers) handle._relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
     const texts = new MemberMessageTexts(serialized, info, envelope)
     for (const stub of this.stubs) stub._relayText(serialized, texts, envelope.from, info)
@@ -524,7 +524,7 @@ class RoomReplica
   _onBinary(framed: Uint8Array, info: OrderingInfo): void {
     const unframed = decodeBinaryFrame(framed)
     assert(unframed)
-    for (const handle of this._receivers) handle._local.relayBinary(unframed, info)
+    for (const handle of this.receivers) handle._local.relayBinary(unframed, info)
     if (this.stubs.size === 0) return
     const wireData = encodePublish(framed, info)
     for (const stub of this.stubs) stub._relayBinary(wireData, unframed.from, unframed.track, info)
@@ -533,29 +533,29 @@ class RoomReplica
   /** @internal A DM for a member a handle here owns, routed to that handle. */
   _onDm(serialized: string, info: OrderingInfo): void {
     const envelope = decodeLaneEnvelope(serialized) as RoomDmEnvelope | RoomDmAckEnvelope
-    this._inboxFrame(envelope.to, info.seq)
+    this.inboxFrame(envelope.to, info.seq)
     // A reply to one of our own `send(…, { ack: true })`s, riding our inbox back home.
-    if (envelope.__r === 'dm-ack') return this._dmAcked(envelope)
-    this._owners.get(envelope.to)?._onDm(envelope, serialized, info)
+    if (envelope.__r === 'dm-ack') return this.dmAcked(envelope)
+    this.owners.get(envelope.to)?._onDm(envelope, serialized, info)
   }
 
   /** A seq skipped in an owned member's inbox may have been a reply, which its recipient stored before committing. */
-  private _inboxFrame(member: string, seq: number): void {
-    const last = this._inboxSeqs.get(member)
+  private inboxFrame(member: string, seq: number): void {
+    const last = this.inboxSeqs.get(member)
     if (last === undefined) return
-    this._inboxSeqs.set(member, seq)
+    this.inboxSeqs.set(member, seq)
     if (seq <= last + 1 || !this.acks.waitsOn(member)) return
     void takeDmReplies(this.id, this._incarnation.inc, member).then((replies) => {
       for (const [ackId, reply] of replies) this.acks.settle(ackId, reply)
     }, reportRoomError)
   }
 
-  private _dmAcked(envelope: RoomDmAckEnvelope): void {
+  private dmAcked(envelope: RoomDmAckEnvelope): void {
     this.acks.settle(envelope.ackId, envelope)
     void dropDmReply(this.id, this._incarnation.inc, envelope.to, envelope.ackId).catch(reportRoomError)
   }
 
-  private _relayControl(event: PresenceEvent, wireText: () => string): void {
+  private relayControl(event: PresenceEvent, wireText: () => string): void {
     if (this.stubs.size === 0) return
     const text = wireText()
     const hiddenMember = hiddenMemberOf(event)
@@ -566,7 +566,7 @@ class RoomReplica
 
   /** A local participant takes each update its member's meta takes here. */
   onMemberMeta(id: string, update: MemberMetaUpdate): void {
-    this._owners.get(id)?._acceptMeta(id, update)
+    this.owners.get(id)?._acceptMeta(id, update)
   }
 
   onMetaWaiting(): void {
@@ -589,8 +589,8 @@ class RoomReplica
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
   onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
-    for (const handle of this._receivers) handle._local.forgetMember(id)
-    const owner = this._owners.get(id)
+    for (const handle of this.receivers) handle._local.forgetMember(id)
+    const owner = this.owners.get(id)
     if (owner !== undefined) {
       this.disown(id, owner)
       owner._memberLeft(id, cause)
@@ -599,7 +599,7 @@ class RoomReplica
     if (hidden !== null) {
       const leave: Extract<PresenceEvent, { __r: 'leave' }> = { __r: 'leave', id, ...leaveCauseToWire(cause) }
       if (hidden) leave.hidden = true
-      this._relayControl(leave, () => unorderedEventText(leave))
+      this.relayControl(leave, () => unorderedEventText(leave))
     }
     for (const stub of this.stubs) {
       stub._forgetMember(id)
@@ -609,16 +609,16 @@ class RoomReplica
   }
 
   /** The room closed. Runs once, after the `closed` event has been applied and relayed. */
-  private _teardown(): void {
+  private teardown(): void {
     this.acks.settleAll(DM_FAILURE.roomClosed) // no recipient will reply now
     this.roster.clear()
     this.incomingDemand.close()
     this.publishedTracks.clear()
-    for (const [id, owner] of this._owners) this.disown(id, owner)
-    const handles = new Set(this._observers)
-    for (const tail of this._tails) handles.add(tail)
+    for (const [id, owner] of this.owners) this.disown(id, owner)
+    const handles = new Set(this.observers)
+    for (const tail of this.tails) handles.add(tail)
     for (const handle of handles) handle._teardown()
-    this._gossip.close()
+    this.gossip.close()
     void this.lanePlan.replan()
   }
 }

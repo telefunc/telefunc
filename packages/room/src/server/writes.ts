@@ -65,7 +65,7 @@ type RoomWritesOptions = { owner: RoomWritesOwner }
 class RoomWrites {
   /** The last publish in call order, by key: a member's id for its text, `meta:<id>` for its meta writes, and
    *  its lane key for a binary lane. */
-  private readonly _publishTurns = new Map<string, Promise<void>>()
+  private readonly publishTurns = new Map<string, Promise<void>>()
 
   private readonly owner: RoomWritesOwner
 
@@ -75,35 +75,35 @@ class RoomWrites {
 
   /** Full replace (`setMeta`). */
   async setMemberMeta(id: string, meta: ParticipantMeta): Promise<MemberMetaUpdate> {
-    return await this._writeMemberMeta(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
+    return await this.writeMemberMeta(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
   }
 
   /** Per-key merge (`setAttributes`); an `undefined` value deletes the key. */
   async mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<MemberMetaUpdate> {
-    return await this._writeMemberMeta(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
+    return await this.writeMemberMeta(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
   }
 
   /** The connection of the page holding the member, which its holder here saw change. */
   async setMemberConnected(id: string, connected: boolean): Promise<void> {
-    await this._inCallOrder(`meta:${id}`, async (sent) => {
+    await this.inCallOrder(`meta:${id}`, async (sent) => {
       const written = await writeMemberConnection(this.owner._incarnation, id, connected)
-      if (written !== null) await this._publishMemberUpdate(id, written.update, written.hidden, sent)
+      if (written !== null) await this.publishMemberUpdate(id, written.update, written.hidden, sent)
     })
   }
 
   /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
    *  seq order. */
-  private async _writeMemberMeta(id: string, write: MemberMetaWrite): Promise<MemberMetaUpdate> {
+  private async writeMemberMeta(id: string, write: MemberMetaWrite): Promise<MemberMetaUpdate> {
     const host = this.owner
-    return await this._inCallOrder(`meta:${id}`, async (sent) => {
+    return await this.inCallOrder(`meta:${id}`, async (sent) => {
       const { update, hidden, replaced } = await writeMemberMeta(host._incarnation, id, write)
-      await this._publishMemberUpdate(id, update, hidden, sent)
+      await this.publishMemberUpdate(id, update, hidden, sent)
       if (replaced !== null) await dropMemberMetaGeneration(host._incarnation, id, replaced, update.seq)
       return update
     })
   }
 
-  private async _publishMemberUpdate(
+  private async publishMemberUpdate(
     id: string,
     update: MemberMetaUpdate,
     hidden: boolean,
@@ -120,8 +120,8 @@ class RoomWrites {
 
   async publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
     const host = this.owner
-    const { sender, commit } = await this._inCallOrder(from, async (sent) => {
-      const { sender, stamp } = await this._admitPublish(from, data)
+    const { sender, commit } = await this.inCallOrder(from, async (sent) => {
+      const { sender, stamp } = await this.admitPublish(from, data)
       const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...stamp }
       const record = encodeRoomRecord(envelope)
       const target = { roomId: host.id, inc: host._incarnation.inc, lane: SEMANTIC_LANE }
@@ -130,7 +130,7 @@ class RoomWrites {
       sent()
       return { sender, commit: acceptedOrThrow(host.id, await committing) }
     })
-    return await this._finishPublish(sender, data, commit)
+    return await this.finishPublish(sender, data, commit)
   }
 
   /** `frame` is `framed` decoded; receivers trust its sender id, which every caller checked is the publisher's. */
@@ -138,8 +138,8 @@ class RoomWrites {
     const host = this.owner
     const { from } = frame
     const lane = { kind: 'binary', member: from, track: frame.track } as const
-    const { sender, commit } = await this._inCallOrder(encodeLaneKey(lane), async (sent) => {
-      const { sender } = await this._admitPublish(from, frame.payload)
+    const { sender, commit } = await this.inCallOrder(encodeLaneKey(lane), async (sent) => {
+      const { sender } = await this.admitPublish(from, frame.payload)
       const planned = host._replica.lanePlan.lanePlanned(from, lane.track)
       if (planned !== null) await planned
       const tracks = host._replica.publishedTracks
@@ -152,36 +152,36 @@ class RoomWrites {
       sent()
       return { sender, commit: acceptedOrThrow(host.id, await committing) }
     })
-    return await this._finishPublish(sender, frame.payload, commit)
+    return await this.finishPublish(sender, frame.payload, commit)
   }
 
   /** A member's publishes on one lane leave in call order: each starts once the one before it was sent to the backend
    *  (its guard ran and its commit went out) or failed, never waiting on that commit's answer, which the backend
    *  keeps in sending order. */
-  private async _inCallOrder<T>(key: string, publish: (sent: () => void) => Promise<T>): Promise<T> {
-    const previous = this._publishTurns.get(key)
+  private async inCallOrder<T>(key: string, publish: (sent: () => void) => Promise<T>): Promise<T> {
+    const previous = this.publishTurns.get(key)
     const turn = createDeferred()
-    this._publishTurns.set(key, turn.promise)
+    this.publishTurns.set(key, turn.promise)
     try {
       await previous
       return await publish(turn.resolve)
     } finally {
       turn.resolve()
-      if (this._publishTurns.get(key) === turn.promise) this._publishTurns.delete(key)
+      if (this.publishTurns.get(key) === turn.promise) this.publishTurns.delete(key)
     }
   }
 
   /** The sender as its guard sees it, with its stamp. */
-  private async _admitPublish(from: string, payload: unknown): Promise<{ sender: Sender; stamp: SenderStamp }> {
+  private async admitPublish(from: string, payload: unknown): Promise<{ sender: Sender; stamp: SenderStamp }> {
     if (this.owner._model.closed) throw roomClosedError(this.owner.id)
-    const sender = this._memberSender(from)
-    const stamp = this._stampOf(from, sender)
+    const sender = this.memberSender(from)
+    const stamp = this.stampOf(from, sender)
     const onBeforePublish = this.owner._guards?.onBeforePublish
     if (onBeforePublish) await onBeforePublish(sender, payload)
     return { sender, stamp }
   }
 
-  private async _finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
+  private async finishPublish(sender: Sender, payload: unknown, commit: CommitAccepted): Promise<ChannelPublishAck> {
     const receipt: Omit<ChannelPublishAck, 'key'> = { seq: commit.seq, timestamp: commit.timestamp }
     if (commit.receivers !== undefined) receipt.receivers = commit.receivers
     const onAfterPublish = this.owner._guards?.onAfterPublish
@@ -190,7 +190,7 @@ class RoomWrites {
   }
 
   /** `sender` with the meta seq it reflects, read before a guard waits: a meta write meanwhile takes the next seq. */
-  private _stampOf(from: string, sender: Sender): SenderStamp {
+  private stampOf(from: string, sender: Sender): SenderStamp {
     const accepted = this.owner._model.acceptedMeta(from) ?? this.owner._localParticipants.get(from)!._acceptedMeta
     const stamp: SenderStamp = { fromMeta: sender.meta, fromMetaSeq: accepted.seq }
     if (sender.identity !== null) stamp.fromIdentity = sender.identity
@@ -199,25 +199,25 @@ class RoomWrites {
   }
 
   /** A member that left while its call waited has no sender to show a guard. */
-  private _memberSender(from: string): Sender {
+  private memberSender(from: string): Sender {
     const known = this.owner._state.getRemote(from) ?? this.owner._localParticipants.get(from)
     if (!known) throw participantLeftError()
     return senderOf(from, known.meta, known.identity)
   }
 
   async sendDm(from: string, to: string, data: unknown, ack: boolean): Promise<RoomSendReceipt | RoomAckReceipt> {
-    return ack ? await this._sendDmAck(from, to, data) : await this._publishDm(from, to, data)
+    return ack ? await this.sendDmAck(from, to, data) : await this.publishDm(from, to, data)
   }
 
-  private async _sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
+  private async sendDmAck(from: string, to: string, data: unknown): Promise<RoomAckReceipt> {
     const acks = this.owner._replica.acks
     const ackId = crypto.randomUUID()
     const reply = new Promise<RoomResult>((settle) => acks.add(ackId, { from, to, settle }))
     // Bounds the wait nothing else settles: a lost reply frame, or a recipient that never handled the DM.
-    const timer = unrefTimer(setTimeout(() => void this._settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
+    const timer = unrefTimer(setTimeout(() => void this.settleTimedOut(from, ackId), ROOM_DM_ACK_TIMEOUT_MS))
     let receipt: RoomSendReceipt
     try {
-      receipt = await this._publishDm(from, to, data, ackId)
+      receipt = await this.publishDm(from, to, data, ackId)
     } catch (err) {
       acks.delete(ackId)
       clearTimeout(timer)
@@ -230,7 +230,7 @@ class RoomWrites {
   }
 
   /** The recipient stores its reply before committing its frame, so a reply whose frame was lost is still read. */
-  private async _settleTimedOut(from: string, ackId: string): Promise<void> {
+  private async settleTimedOut(from: string, ackId: string): Promise<void> {
     let reply: RoomResult
     try {
       reply = (await takeDmReply(this.owner.id, this.owner._incarnation.inc, from, ackId)) ?? DM_FAILURE.timeout
@@ -240,13 +240,13 @@ class RoomWrites {
     this.owner._replica.acks.settle(ackId, reply)
   }
 
-  private async _publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
+  private async publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
     const host = this.owner
     if (host._model.closed) throw roomClosedError(host.id)
-    const target = await this._resolveMember(to)
+    const target = await this.resolveMember(to)
     if (!target) throw participantGoneError(to)
-    const sender = this._memberSender(from)
-    const stamp = this._stampOf(from, sender)
+    const sender = this.memberSender(from)
+    const stamp = this.stampOf(from, sender)
     const onBeforeSend = this.owner._guards?.onBeforeSend
     if (onBeforeSend) await onBeforeSend(sender, target, data)
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
@@ -272,7 +272,7 @@ class RoomWrites {
     if ('stale' in acked) throw roomClosedError(id)
   }
 
-  private async _resolveMember(id: string): Promise<Sender | null> {
+  private async resolveMember(id: string): Promise<Sender | null> {
     const remote = this.owner._state.getRemote(id)
     if (remote) return senderOf(id, remote.meta, remote.identity)
     const [member] = await reapAndReadMembersById(this.owner._incarnation, [id])

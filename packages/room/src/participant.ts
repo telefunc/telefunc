@@ -36,18 +36,18 @@ abstract class ParticipantBase implements LocalParticipant {
   readonly identity: string | null
   readonly selfDelivery: boolean
   private readonly _meta: MemberMeta
-  private _leftCause: LeaveCause | null = null
+  private leftCause: LeaveCause | null = null
   // Each list is made when its first listener is added.
-  private _leaveCbs: Listeners<(cause: LeaveCause) => unknown> | null = null
-  private _messageCbs: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
-  private _demandCbs: Listeners<(track: string | null, wanted: boolean) => unknown> | null = null
-  private _disconnectCbs: Listeners<() => unknown> | null = null
-  private _reconnectCbs: Listeners<() => unknown> | null = null
-  private _listenerCleanups: Set<() => void> | null = null
-  private _inboxAttached = false
+  private leaveCbs: Listeners<(cause: LeaveCause) => unknown> | null = null
+  private messageCbs: Listeners<(data: unknown, from: Sender | null) => unknown> | null = null
+  private demandCbs: Listeners<(track: string | null, wanted: boolean) => unknown> | null = null
+  private disconnectCbs: Listeners<() => unknown> | null = null
+  private reconnectCbs: Listeners<() => unknown> | null = null
+  private listenerCleanups: Set<() => void> | null = null
+  private inboxAttached = false
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
-  private _pendingInbox: Fifo<HeldDm> | null = null
-  private _pendingInboxBytes = 0
+  private pendingInbox: Fifo<HeldDm> | null = null
+  private pendingInboxBytes = 0
 
   /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
   constructor(
@@ -91,7 +91,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   protected get _left(): boolean {
-    return this._leftCause !== null
+    return this.leftCause !== null
   }
 
   abstract publish(data: unknown, options?: PublishOptions): Promise<ChannelPublishAck>
@@ -110,73 +110,73 @@ abstract class ParticipantBase implements LocalParticipant {
   protected abstract _inboxBufferLimit(): number
 
   listen(callback: (data: unknown, from: Sender | null) => unknown): () => void {
-    const unlisten = this._register((this._messageCbs ??= new Listeners()), callback)
-    this._flushHeld({ deliver: (msg) => this._fireInbox(msg), deliverAck: (msg) => this._fireInboxAck(msg) })
+    const unlisten = this.register((this.messageCbs ??= new Listeners()), callback)
+    this._flushHeld({ deliver: (msg) => this.fireInbox(msg), deliverAck: (msg) => this.fireInboxAck(msg) })
     return unlisten
   }
 
   /** @internal A DM for this member: to its listeners, held until the first `listen()`. */
   _deliverMessage(msg: InboxMessage): void {
-    if (!this._messageCbs?.size) {
-      if (this._left || this._inboxAttached) return
-      this._hold(msg)
+    if (!this.messageCbs?.size) {
+      if (this._left || this.inboxAttached) return
+      this.hold(msg)
       return
     }
-    this._fireInbox(msg)
+    this.fireInbox(msg)
   }
 
   /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never
    *  rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<RoomResult> {
-    if (this._messageCbs?.size) return this._fireInboxAck(msg)
+    if (this.messageCbs?.size) return this.fireInboxAck(msg)
     if (this._left) return Promise.resolve(DM_FAILURE.left)
-    if (this._inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
-    return new Promise<RoomResult>((resolve) => this._hold(msg, resolve))
+    if (this.inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
+    return new Promise<RoomResult>((resolve) => this.hold(msg, resolve))
   }
 
   /** The inbox attached: DMs held until now go out in order, and nothing is held again. */
   protected _flushHeld(to: InboxTarget): void {
-    this._inboxAttached = true
-    const held = this._pendingInbox
-    this._pendingInbox = null
-    this._pendingInboxBytes = 0
+    this.inboxAttached = true
+    const held = this.pendingInbox
+    this.pendingInbox = null
+    this.pendingInboxBytes = 0
     for (const { msg, ackResolve } of held ?? []) {
       if (ackResolve) void to.deliverAck(msg).then(ackResolve)
       else to.deliver(msg)
     }
   }
 
-  private _hold(msg: InboxMessage, ackResolve?: (reply: RoomResult) => void): void {
-    const pending = (this._pendingInbox ??= new Fifo())
+  private hold(msg: InboxMessage, ackResolve?: (reply: RoomResult) => void): void {
+    const pending = (this.pendingInbox ??= new Fifo())
     const bytes = utf8ByteLength(stringify(msg)) + PENDING_INBOX_OVERHEAD_BYTES
     pending.push({ msg, bytes, ackResolve })
-    this._pendingInboxBytes += bytes
+    this.pendingInboxBytes += bytes
     const limit = this._inboxBufferLimit()
-    while (this._pendingInboxBytes > limit) {
+    while (this.pendingInboxBytes > limit) {
       const dropped = pending.shift()!
-      this._pendingInboxBytes -= dropped.bytes
+      this.pendingInboxBytes -= dropped.bytes
       dropped.ackResolve?.(DM_FAILURE.overflow)
     }
   }
 
   /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a room view
    *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
-  private _senderOf(msg: InboxMessage): Sender | null {
+  private senderOf(msg: InboxMessage): Sender | null {
     const { from, fromMeta, fromIdentity: identity } = msg
     return from === '' ? null : (this._resolveSender(from) ?? senderOf(from, ownMetadata(fromMeta ?? {}), identity))
   }
 
-  private _fireInbox(msg: InboxMessage): void {
-    const sender = this._senderOf(msg)
-    for (const cb of this._messageCbs?.list() ?? []) this._invoke(cb, msg.data, sender)
+  private fireInbox(msg: InboxMessage): void {
+    const sender = this.senderOf(msg)
+    for (const cb of this.messageCbs?.list() ?? []) this.invoke(cb, msg.data, sender)
   }
 
   /** The last listener's return is the reply; a throw is the failure reply (see `toRoomFailure`: a bug is reported
    *  here, the sender gets only that it failed). */
-  private async _fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
-    const sender = this._senderOf(msg)
+  private async fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
+    const sender = this.senderOf(msg)
     let result: unknown
-    for (const cb of this._messageCbs?.list() ?? []) {
+    for (const cb of this.messageCbs?.list() ?? []) {
       try {
         result = await cb(msg.data, sender)
       } catch (err) {
@@ -192,8 +192,8 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   onDemand(callback: (track: string | null, wanted: boolean) => void): () => void {
-    const unlisten = this._register((this._demandCbs ??= new Listeners()), callback)
-    for (const track of this._demandedTracks) this._invoke(callback, publicTrack(track), true)
+    const unlisten = this.register((this.demandCbs ??= new Listeners()), callback)
+    for (const track of this._demandedTracks) this.invoke(callback, publicTrack(track), true)
     return unlisten
   }
 
@@ -202,60 +202,60 @@ abstract class ParticipantBase implements LocalParticipant {
 
   /** @internal Room-wide demand for one of this member's tracks changed. */
   _onDemand(track: TrackKey, wanted: boolean): void {
-    for (const cb of this._demandCbs?.list() ?? []) this._invoke(cb, publicTrack(track), wanted)
+    for (const cb of this.demandCbs?.list() ?? []) this.invoke(cb, publicTrack(track), wanted)
   }
 
   onDisconnect(callback: () => void): () => void {
-    return this._register((this._disconnectCbs ??= new Listeners()), callback)
+    return this.register((this.disconnectCbs ??= new Listeners()), callback)
   }
 
   onReconnect(callback: () => void): () => void {
-    return this._register((this._reconnectCbs ??= new Listeners()), callback)
+    return this.register((this.reconnectCbs ??= new Listeners()), callback)
   }
 
   /** @internal */
   _onDisconnected(): void {
-    for (const cb of this._disconnectCbs?.list() ?? []) this._invoke(cb)
+    for (const cb of this.disconnectCbs?.list() ?? []) this.invoke(cb)
   }
 
   /** @internal */
   _onReconnected(): void {
-    for (const cb of this._reconnectCbs?.list() ?? []) this._invoke(cb)
+    for (const cb of this.reconnectCbs?.list() ?? []) this.invoke(cb)
   }
 
   onLeave(callback: (cause: LeaveCause) => void): () => void {
-    if (this._leftCause) {
-      this._invoke(callback, this._leftCause)
+    if (this.leftCause) {
+      this.invoke(callback, this.leftCause)
       return makeDisposer()
     }
-    return this._register((this._leaveCbs ??= new Listeners()), callback)
+    return this.register((this.leaveCbs ??= new Listeners()), callback)
   }
 
   /** @internal The member is gone; `cause` says how. */
   _onLeft(cause: LeaveCause): void {
-    if (this._leftCause) return
+    if (this.leftCause) return
     const ownedCause = ownLeaveCause(cause)
-    this._leftCause = ownedCause
+    this.leftCause = ownedCause
     // Held ack DMs will never be handled now, so fail their senders instead of hanging them.
-    const held = this._pendingInbox
-    this._pendingInbox = null
-    this._pendingInboxBytes = 0
+    const held = this.pendingInbox
+    this.pendingInbox = null
+    this.pendingInboxBytes = 0
     if (held) for (const entry of held) entry.ackResolve?.(DM_FAILURE.left)
-    const cbs = this._leaveCbs?.list() ?? []
-    for (const unlisten of this._listenerCleanups ?? []) unlisten()
-    for (const cb of cbs) this._invoke(cb, ownedCause)
+    const cbs = this.leaveCbs?.list() ?? []
+    for (const unlisten of this.listenerCleanups ?? []) unlisten()
+    for (const cb of cbs) this.invoke(cb, ownedCause)
   }
 
   protected _assertActive(): void {
     if (this._left) throw participantLeftError()
   }
 
-  private _register<T>(list: Listeners<T>, cb: T): () => void {
+  private register<T>(list: Listeners<T>, cb: T): () => void {
     const remove = list.add(cb)
-    return makeDisposer(() => void remove(), (this._listenerCleanups ??= new Set()))
+    return makeDisposer(() => void remove(), (this.listenerCleanups ??= new Set()))
   }
 
-  private _invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
+  private invoke<Args extends unknown[]>(cb: (...args: Args) => unknown, ...args: Args): void {
     invokeChannelListener(cb, args, (err) => this._reportError(err))
   }
 }
