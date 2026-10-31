@@ -190,7 +190,6 @@ describe('BdpEstimator', () => {
   it('onPingAck without an outstanding ping returns no-grow for both axes', () => {
     const bdp = new BdpEstimator()
     expect(bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck)).toEqual({
-      acknowledged: false,
       bytes: 'sample-too-small',
       msgs: 'sample-too-small',
     })
@@ -214,7 +213,6 @@ describe('BdpEstimator', () => {
 
     expect(bdp.byteWindow).toBe(grown) // preserved
     expect(bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck)).toEqual({
-      acknowledged: false,
       bytes: 'sample-too-small',
       msgs: 'sample-too-small',
     }) // stale ack ignored
@@ -240,7 +238,7 @@ describe('BdpEstimator', () => {
     bdp.onReceive(1)
     bdp.onReceive(CREDIT_WINDOW_INITIAL_BYTES) // huge byte sample, msg sample = 2
     const dec = bdp.onPingAck({ probe: bdp.probe, backlog: EMPTY, pathRtt: Infinity }, upToAck)
-    expect(dec).toEqual({ acknowledged: true, bytes: 'grow', msgs: 'sample-too-small' })
+    expect(dec).toEqual({ bytes: 'grow', msgs: 'sample-too-small' })
   })
 
   // And the dual: many small frames saturate the msg sample but barely the byte

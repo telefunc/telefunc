@@ -16,10 +16,10 @@ import type { BdpPingAck } from '../wire/frame.js'
 /** Per-axis verdict on a settled probe; `grow` needs the sample to saturate ≥ 2/3 of a window not at cap. */
 type AxisDecision = 'grow' | 'sample-too-small' | 'wire-busy' | 'window-grew' | 'at-cap'
 
-/** `acknowledged`: a ping was in flight to settle, not a stale ack or an attach's probe's; each axis grows apart. */
-type GrowDecision = { acknowledged: boolean; bytes: AxisDecision; msgs: AxisDecision }
+/** Each axis grows apart. */
+type GrowDecision = { bytes: AxisDecision; msgs: AxisDecision }
 
-const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-small', msgs: 'sample-too-small' }
+const NOT_SETTLED: GrowDecision = { bytes: 'sample-too-small', msgs: 'sample-too-small' }
 
 type AttachProbe = { probe: number; sentAt: number; roundTrips: RoundTrips }
 
@@ -153,7 +153,7 @@ class BdpEstimator {
         ? Math.min(2 * this.currentByteWindow, Math.max(this.currentByteWindow, Math.ceil(1.5 * byteSample)))
         : 0
     this.pace(bytes, msgs)
-    return { acknowledged: true, bytes, msgs }
+    return { bytes, msgs }
   }
 
   /** This round, less its wait behind this side's data, bounds the round trip where shorter, or where no queue held it. */
