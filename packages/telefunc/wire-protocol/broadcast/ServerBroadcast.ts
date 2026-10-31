@@ -3,6 +3,7 @@ export { Broadcast, BroadcastChannel, ServerBroadcast }
 import type {
   ChannelData,
   ChannelPublishAck,
+  ChannelPublishInfo,
   BroadcastBinaryListener,
   BroadcastListener,
   ChannelCloseCallback,
@@ -348,7 +349,7 @@ const Broadcast = {
     const adapter = getBroadcastAdapter()
     return adapter.subscribe(key, (serialized, info) => {
       const data = parse(serialized) as ChannelData<U>
-      callStaticListener(() => callback(data, { key, seq: info.seq, timestamp: info.timestamp }))
+      callStaticListener(callback, data, makePublishInfo(key, info.seq, info.timestamp))
     })
   },
   publishBinary(key: string, data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
@@ -359,20 +360,25 @@ const Broadcast = {
     const adapter = getBroadcastAdapter()
     return adapter.subscribeBinary(key, (data, info) => {
       // A copy of its own, as a `BroadcastChannel` listener gets.
-      callStaticListener(() => callback(new Uint8Array(data), { key, seq: info.seq, timestamp: info.timestamp }))
+      callStaticListener(callback, new Uint8Array(data), makePublishInfo(key, info.seq, info.timestamp))
     })
   },
 }
 
 /** Reports a listener's error as a channel listener's is, but an Abort: there is no channel to close. */
-function callStaticListener(call: () => unknown): void {
-  const report = (err: unknown) => {
-    if (!isAbort(err)) reportServerChannelError(err)
-  }
+function callStaticListener<D>(
+  callback: (data: D, info: ChannelPublishInfo) => unknown,
+  data: D,
+  info: ChannelPublishInfo,
+): void {
   try {
-    const pending = call()
-    if (isPromise(pending)) pending.catch(report)
+    const pending = callback(data, info)
+    if (isPromise(pending)) pending.catch(reportStaticListenerError)
   } catch (err) {
-    report(err)
+    reportStaticListenerError(err)
   }
+}
+
+function reportStaticListenerError(err: unknown): void {
+  if (!isAbort(err)) reportServerChannelError(err)
 }
