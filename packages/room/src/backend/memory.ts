@@ -199,6 +199,9 @@ class MemoryRoomDriver implements RoomDriver {
 
   private readonly rooms = new Map<string, RoomRecord>()
   private readonly directory = new Map<string, DirectoryEntry>()
+  /** The directory's room ids in code point order: a put of a new id or a delete drops it, and the next list sorts
+   *  them again, so a full list sorts once and each page reads only its own ids. */
+  private sortedIds: string[] | null = null
   /** A min-heap by `at` of the checks each put scheduled; a check its entry no longer has is dropped when reached. */
   private readonly directoryChecks: DirectoryCheck[] = []
   private revSeq = 0
@@ -409,12 +412,15 @@ class MemoryRoomDriver implements RoomDriver {
 
   async directoryPut(roomId: string, incTag: string, checkAt: number, minDelayMs: number): Promise<void> {
     const at = Math.max(checkAt, Date.now() + minDelayMs)
+    if (!this.directory.has(roomId)) this.sortedIds = null
     this.directory.set(roomId, { incTag, checkAt: at })
     if (at !== Infinity) pushCheck(this.directoryChecks, { at, roomId })
   }
 
   async directoryDelete(roomId: string, incTag: string): Promise<void> {
-    if (this.directory.get(roomId)?.incTag === incTag) this.directory.delete(roomId)
+    if (this.directory.get(roomId)?.incTag !== incTag) return
+    this.directory.delete(roomId)
+    this.sortedIds = null
   }
 
   async directoryGet(roomId: string): Promise<string | undefined> {
@@ -422,14 +428,18 @@ class MemoryRoomDriver implements RoomDriver {
   }
 
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
-    const matching = [...this.directory]
-      .filter(
-        ([roomId]) => roomId.startsWith(prefix) && (cursor === undefined || compareCodePoints(roomId, cursor) > 0),
-      )
-      .sort(([left], [right]) => compareCodePoints(left, right))
-    const entries = matching.slice(0, DIRECTORY_PAGE_SIZE).map(([roomId, { incTag }]) => ({ roomId, incTag }))
-    const last = entries.at(-1)
-    return last !== undefined && matching.length > DIRECTORY_PAGE_SIZE ? { entries, cursor: last.roomId } : { entries }
+    const ids = (this.sortedIds ??= [...this.directory.keys()].sort(compareCodePoints))
+    // The ids under `prefix` sit together in code point order; a page starts past the cursor.
+    const from = cursor !== undefined && compareCodePoints(cursor, prefix) > 0 ? cursor : prefix
+    let at = positionOf(ids, from)
+    if (ids[at] === cursor) at++
+    const entries: DirectoryPage['entries'] = []
+    for (; at < ids.length && ids[at]!.startsWith(prefix); at++) {
+      if (entries.length === DIRECTORY_PAGE_SIZE) return { entries, cursor: entries.at(-1)!.roomId }
+      const roomId = ids[at]!
+      entries.push({ roomId, incTag: this.directory.get(roomId)!.incTag })
+    }
+    return { entries }
   }
 
   async directoryDue(): Promise<DirectoryPage['entries']> {
@@ -482,6 +492,18 @@ function compareCodePoints(left: string, right: string): number {
     i += a > 0xffff ? 2 : 1
   }
   return left.length - right.length
+}
+
+/** Where `id` is in `ids`, which are in code point order, or where it would go. */
+function positionOf(ids: readonly string[], id: string): number {
+  let low = 0
+  let high = ids.length
+  while (low < high) {
+    const mid = (low + high) >> 1
+    if (compareCodePoints(ids[mid]!, id) < 0) low = mid + 1
+    else high = mid
+  }
+  return low
 }
 
 function pushCheck(checks: DirectoryCheck[], check: DirectoryCheck): void {
