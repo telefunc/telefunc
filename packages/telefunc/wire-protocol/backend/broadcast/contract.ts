@@ -14,6 +14,7 @@ type BroadcastPayload<Kind extends BroadcastKind = BroadcastKind> = { text: stri
 type PublishResult = {
   seq: number
   timestamp: number
+  /** How many subscribers the backend handed it to, counted the backend's way; absent where it can't tell. */
   receivers?: number
 }
 
