@@ -1,6 +1,7 @@
 export { Upgrade }
 export type { BarrierEmission, ProbeSession, ProbeWire, UpgradeOwner, UpgradeSource, UpgradeTarget }
 
+import type { AttachExchange } from './AttachExchange.js'
 import type { ChannelTable } from './ChannelTable.js'
 import type { ClientChannelTransport, OutboundFrame } from './connection.js'
 import type { Liveness } from './Liveness.js'
@@ -105,20 +106,13 @@ function isJoinLimb(frame: DecodedFrame): boolean {
 interface UpgradeOwner {
   readonly transport: ClientChannelTransport
   readonly connected: boolean
-  readonly sessionId: string | null
-  readonly reconciling: boolean
-  readonly reconcileOwed: boolean
-  reconcileSettled(signal: AbortSignal): Promise<void>
-  flushPendingRegisterReconcile(): void
   drainBufferedFramesToWire(): void
-  buildBarrierFrame(session: ProbeSession): OutboundFrame
   /** A WebSocket transport of the connection, its wire not opened yet. */
   createWebSocket(): UpgradeTarget
   /** The connection moves to `transport`, whose wire the upgrade opened. */
   adoptTransport(transport: UpgradeTarget): void
   dispatchFrame(frame: DecodedFrame): void
   handleReconciled(ctrl: ReconciledPayload): void
-  closeUnacknowledged(ixes: number[]): void
   fallbackToSse(err: Error): void
   startTtlIfIdle(): void
 }
@@ -127,6 +121,7 @@ type UpgradeOptions = {
   owner: UpgradeOwner
   channels: ChannelTable
   liveness: Liveness
+  exchange: AttachExchange
   /** The page's transports include a WebSocket. */
   allowsWebSocket: boolean
 }
@@ -137,6 +132,7 @@ class Upgrade {
   private readonly owner: UpgradeOwner
   private readonly channels: ChannelTable
   private readonly liveness: Liveness
+  private readonly exchange: AttachExchange
   private readonly allowsWebSocket: boolean
   /** Only while the connection is open: it goes with the open state it was in (see `forget`). */
   private state: UpgradeState = { tag: 'none' }
@@ -147,10 +143,11 @@ class Upgrade {
    *  first RECONCILED can arrive in either order on the SSE path. */
   serverTransports: ReconciledPayload['transports'] | null = null
 
-  constructor({ owner, channels, liveness, allowsWebSocket }: UpgradeOptions) {
+  constructor({ owner, channels, liveness, exchange, allowsWebSocket }: UpgradeOptions) {
     this.owner = owner
     this.channels = channels
     this.liveness = liveness
+    this.exchange = exchange
     this.allowsWebSocket = allowsWebSocket
   }
 
@@ -185,7 +182,7 @@ class Upgrade {
     if (!this.owner.connected || this.state.tag !== 'none') return
     // Settled-reconcile gate; a flush above may have just re-armed `reconciling` — the next
     // RECONCILED retries via `handleReconciled`.
-    if (this.owner.reconciling) return
+    if (this.exchange.reconciling) return
     // Only SSE can carry a barrier as its last frame, and only SSE has anywhere to upgrade to.
     const { transport } = this.owner
     if (transport.type !== CHANNEL_TRANSPORT.SSE) return
@@ -228,7 +225,7 @@ class Upgrade {
     const abandoned = this.teardown()
     if (abandoned) {
       for (const entry of abandoned.buffer.old) this.owner.dispatchFrame(entry.frame)
-      this.owner.closeUnacknowledged(abandoned.deferredOmitted)
+      this.exchange.closeUnacknowledged(abandoned.deferredOmitted)
     }
     this.disabled = true
   }
@@ -265,10 +262,10 @@ class Upgrade {
     const { from, buffer, deferredOmitted } = this.exitCommitting()
     retireOldWire(from)
     for (const entry of buffer.old) this.owner.dispatchFrame(entry.frame)
-    this.owner.closeUnacknowledged(deferredOmitted)
+    this.exchange.closeUnacknowledged(deferredOmitted)
     for (const entry of buffer.new) this.owner.dispatchFrame(entry.frame)
     for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onUpgradeJoined()
-    this.owner.flushPendingRegisterReconcile()
+    this.exchange.flushPendingRegisterReconcile()
     this.owner.startTtlIfIdle()
   }
 
@@ -338,8 +335,8 @@ class Upgrade {
   // ── The attempt ──
 
   private async probeAndUpgrade(from: UpgradeSource): Promise<void> {
-    this.owner.flushPendingRegisterReconcile()
-    const { sessionId } = this.owner
+    this.exchange.flushPendingRegisterReconcile()
+    const { sessionId } = this.exchange
     if (sessionId === null) return
     const attempt = new AbortController()
     this.enterStaging(attempt)
@@ -350,7 +347,7 @@ class Upgrade {
       await this.commitBarrier(from, to, session, attempt)
     } finally {
       this.exitAttempt(attempt)
-      this.owner.flushPendingRegisterReconcile()
+      this.exchange.flushPendingRegisterReconcile()
     }
   }
 
@@ -385,7 +382,7 @@ class Upgrade {
     const ready = await readyP
     if (!ready || ready.upgradeId !== upgradeId || attempt.signal.aborted) {
       attempt.abort()
-      if (!this.owner.reconcileOwed) this.owner.drainBufferedFramesToWire()
+      if (!this.exchange.reconcileOwed) this.owner.drainBufferedFramesToWire()
       return null
     }
     this.enterReady(attempt)
@@ -423,14 +420,14 @@ class Upgrade {
     attempt: AbortController,
   ): Promise<void> {
     // After the RECONCILED of the one in flight, which may name a channel the barrier lists.
-    await this.owner.reconcileSettled(attempt.signal)
+    await this.exchange.reconcileSettled(attempt.signal)
     if (attempt.signal.aborted) return
     this.enterCommitting(from, to, session, attempt)
-    const emission = await from.emitBarrier(() => this.owner.buildBarrierFrame(session), attempt.signal)
+    const emission = await from.emitBarrier(() => this.exchange.buildBarrierFrame(session), attempt.signal)
 
     if (emission === 'not-emitted') {
       attempt.abort()
-      if (!this.owner.reconcileOwed) this.owner.drainBufferedFramesToWire()
+      if (!this.exchange.reconcileOwed) this.owner.drainBufferedFramesToWire()
       // An attempt that ended without its barrier goes again once the outbox drained.
       void from.drained().then(() => this.maybeStart())
       return
