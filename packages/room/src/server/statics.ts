@@ -1,7 +1,7 @@
 export { Room }
 export type { RoomGuardHooks, RoomStatic }
 
-import { assert, assertUsage } from '../utils/assert.js'
+import { assertUsage } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { RoomBackend } from '../backend/contract.js'
@@ -9,7 +9,6 @@ import { RoomError, isRoomError, participantGoneError, roomClosedError } from '.
 import {
   assertKnownOptions,
   assertParticipantIdentity,
-  assertRoomTimeout,
   isRecord,
   ownMessage,
   ownMetadata,
@@ -36,18 +35,17 @@ import type {
   RoomSendReceipt,
   SendGuard,
 } from '../types.js'
+import { tryCreateRoom } from './create.js'
 import { evictMember } from './members.js'
 import { reapAndCountPresence, reapAndReadMembersById, reapAndReadRoster, reapAndResolveIdentity } from './roster.js'
 import { SEMANTIC_LANE, commitToInbox, commitRoomLaneOrThrow, openConfig, encodeRoomRecord } from './lanes.js'
 import { ServerRoom } from './room.js'
 import { RoomReplica } from './replica.js'
 import { readRoomMeta, writeRoomMeta, type StoredRoomMeta } from './meta.js'
-import { metaEntriesAt, metaObjectOf } from '../metaState.js'
-import { CX_CONFLICT, retryCompareExchange } from './cx.js'
-import { cleanupFinalizedIncarnation, closeIncarnation, takeOverClose } from './close.js'
-import { cancelClose, createHold, lapseNewRoom, newHoldConfig, type RoomIncarnation } from './lifecycle.js'
-import { listRoom, repairRoomIndex, sweepLapsedRoomsSoon } from './directory.js'
-import { getRoomConfig } from './config.js'
+import { metaObjectOf } from '../metaState.js'
+import { closeIncarnation } from './close.js'
+import { cancelClose, type RoomIncarnation } from './lifecycle.js'
+import { repairRoomIndex } from './directory.js'
 import { ROOM_GUARD_USAGE } from './lazyRoom.js'
 
 type Room<M extends RoomMeta = RoomMeta, P extends ParticipantMeta = ParticipantMeta, Pub = unknown> = RoomInstance<
@@ -126,55 +124,6 @@ async function requireRoom(id: string): Promise<RoomIncarnation & RoomConfigReco
 
 function roomNotFoundError(id: string): RoomError {
   return new RoomError(`Room not found: ${id}`)
-}
-
-type TryCreateRoomResult = { kind: 'created'; room: ServerRoom } | { kind: 'exists' } | { kind: 'closing' }
-
-async function tryCreateRoom(id: string, options: RoomOptions | undefined): Promise<TryCreateRoomResult> {
-  const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
-  const backend = getRoomBackend()
-  return await retryCompareExchange(async () => {
-    let current = await backend.readHead(id)
-    if (current?.state === 'closing') {
-      if (!(await takeOverClose(backend, id, current))) return { kind: 'closing' }
-      current = await backend.readHead(id)
-    }
-    if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
-    if (current !== null && current.state !== 'closed') return { kind: 'exists' }
-    const incarnation: RoomIncarnation = {
-      id,
-      inc: crypto.randomUUID(),
-      hold: newHoldConfig(emptyTimeout, departureTimeout),
-    }
-    const created: RoomConfigRecord = { meta, inc: incarnation.inc, hold: incarnation.hold }
-    // An incarnation that lapsed is still listed, and its data still stored: dropped as `Room.list()` would.
-    const lapsedInc = current === null ? await backend.directoryGet(id) : undefined
-    // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
-    if (lapsedInc === undefined) await listRoom(backend, incarnation, undefined)
-    const result = await backend.compareExchangeHead(
-      id,
-      current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
-      { head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) } },
-    )
-    if ('conflict' in result) {
-      // A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again.
-      if (result.current === null || result.current.state === 'closed') return CX_CONFLICT
-      return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
-    }
-    assert('head' in result)
-    // The head lapses only once the counters that keep it ahead are written.
-    await createHold(incarnation)
-    const lapsing = await lapseNewRoom(incarnation)
-    if (lapsedInc !== undefined) await backend.dropGeneration(id, lapsedInc)
-    await listRoom(backend, incarnation, lapsing?.expiresAt)
-    sweepLapsedRoomsSoon()
-    return {
-      kind: 'created',
-      room: new ServerRoom(
-        RoomReplica.seeded(id, created, { entries: metaEntriesAt(meta, 0), seq: 0 }, { members: [] }),
-      ),
-    }
-  })
 }
 
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
@@ -385,21 +334,4 @@ async function sendToParticipant(id: string, target: ParticipantRef, data: unkno
     const receipt = await commitToInbox(id, incarnation.inc, envelope)
     if ('gone' in receipt && exact) throw participantGoneError(member.id)
   }
-}
-
-function normalizeRoomOptions(options: RoomOptions | undefined): {
-  meta: RoomMeta
-  emptyTimeout: number
-  departureTimeout: number
-} {
-  assertUsage(options === undefined || isObject(options), 'Room options should be an object')
-  assertKnownOptions(options, ['meta', 'emptyTimeout', 'departureTimeout'], 'Room')
-  const meta = options?.meta ?? {}
-  assertUsage(isRecord(meta), 'options.meta should be an object')
-  const defaults = getRoomConfig()
-  const emptyTimeout = options?.emptyTimeout ?? defaults.emptyTimeout
-  const departureTimeout = options?.departureTimeout ?? defaults.departureTimeout
-  assertRoomTimeout(emptyTimeout, 'options.emptyTimeout')
-  assertRoomTimeout(departureTimeout, 'options.departureTimeout')
-  return { meta: ownMetadata(meta), emptyTimeout, departureTimeout }
 }
