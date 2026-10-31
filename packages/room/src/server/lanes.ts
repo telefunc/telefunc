@@ -86,6 +86,7 @@ type LaneCommit = CommitAccepted | { gone: string } | { stale: 'incarnation' }
  *  leave. */
 async function commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<LaneCommit> {
   const result = await getRoomBackend().commitLane(target, payload, opts)
+  // Required cells are member records, so a missing one names the member that left.
   if ('stale' in result) return result.stale === 'cell' ? { gone: memberIdOfCellKey(result.key) } : result
   if (result.delivery !== undefined) await handedOff(target.roomId, result)
   return result
@@ -127,5 +128,3 @@ function withinRoomHorizon<T>(promise: Promise<T>): Promise<T> {
     throw new RoomError('Room subscription recovery horizon expired')
   })
 }
-
-/** Required cells are member records, so a missing one names the member that left. */
