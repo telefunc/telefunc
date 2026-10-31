@@ -11,8 +11,7 @@
     "@types/node": "^24.0.10",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
-    "@universal-middleware/core": "^0.4.17",
-    "@universal-middleware/express": "^0.4.27",
+    "@vikejs/express": "^0.4.1",
     "@vitejs/plugin-react": "^6.0.2",
     "cookie-parser": "^1.4.7",
     "cross-env": "^7.0.3",
@@ -24,7 +23,6 @@
     "ts-node": "^10.9.2",
     "typescript": "^7.0.2",
     "vike": "^0.4.268",
-    "vike-node": "^0.3.7",
     "vite": "^8.0.16"
   },
   "type": "module",

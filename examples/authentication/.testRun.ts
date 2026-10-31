@@ -5,6 +5,9 @@ export { testRun }
 function testRun(cmd: 'pnpm run dev' | 'pnpm run prod') {
   run(cmd, {
     additionalTimeout: 10 * 1000,
+    // Vike's server (+server.ts) in production, Vite in development
+    serverIsReadyMessage: (log) =>
+      log.includes('Listening on') || (log.includes('Local:') && log.includes('http://localhost:3000')),
   })
 
   test('Log-in', async () => {
