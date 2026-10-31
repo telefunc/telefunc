@@ -124,7 +124,7 @@ type RoomStateOptions = {
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
 type RemoteBacking = { state: RoomState; entry: MemberEntry }
 
-const { remoteBackings } = getGlobalObject('wire-protocol/room/state.ts', () => ({
+const { remoteBackings } = getGlobalObject('state.ts', () => ({
   remoteBackings: new WeakMap<object, RemoteBacking>(),
 }))
 
