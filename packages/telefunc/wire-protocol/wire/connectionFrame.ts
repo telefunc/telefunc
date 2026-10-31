@@ -900,55 +900,51 @@ function isUint(value: unknown, max: number): value is number {
 }
 
 function parsePreparePayload(value: unknown): PreparePayload {
-  const payload = asObject(value)
-  assertProtocol(isNonEmptyString(payload.upgradeId), 'PREPARE upgradeId')
-  assertProtocol(isNonEmptyString(payload.sessionId), 'PREPARE sessionId')
-  return { upgradeId: payload.upgradeId, sessionId: payload.sessionId }
+  const { upgradeId, sessionId } = asObject(value)
+  assertProtocol(isNonEmptyString(upgradeId), 'PREPARE upgradeId')
+  assertProtocol(isNonEmptyString(sessionId), 'PREPARE sessionId')
+  return { upgradeId, sessionId }
 }
 
-function parseOpenList(payload: Record<string, unknown>): void {
-  assertProtocol(Array.isArray(payload.open), 'open list')
-  assertProtocol(payload.open.length <= MAX_CHANNELS_PER_CONNECTION, 'open list over entry cap')
+function parseOpenList(open: unknown): ReconcileOpenEntry[] {
+  assertProtocol(Array.isArray(open), 'open list')
+  assertProtocol(open.length <= MAX_CHANNELS_PER_CONNECTION, 'open list over entry cap')
   const indexes = new Set<number>()
-  for (const rawEntry of payload.open) {
-    const entry = asObject(rawEntry)
-    assertProtocol(typeof entry.id === 'string', 'open entry id')
+  return open.map((rawEntry: unknown) => {
+    const { id, ix, lastSeq, initial, probe, broadcast } = asObject(rawEntry)
+    assertProtocol(typeof id === 'string', 'open entry id')
     // `ix` is truncated to u16 by the header writer, so a wider one would alias onto another channel.
-    assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix), 'open entry ix')
-    indexes.add(entry.ix)
-    assertProtocol(isUint(entry.lastSeq, Number.MAX_SAFE_INTEGER), 'open entry lastSeq')
-    assertProtocol(entry.initial === undefined || entry.initial === true, 'open entry initial')
-    assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'open entry probe')
-    if (entry.broadcast !== undefined) {
-      const broadcast = asObject(entry.broadcast)
-      assertProtocol(
-        typeof broadcast.text === 'boolean' && typeof broadcast.binary === 'boolean',
-        'open entry broadcast',
-      )
-    }
-  }
+    assertProtocol(isUint(ix, 0xffff) && !indexes.has(ix), 'open entry ix')
+    indexes.add(ix)
+    assertProtocol(isUint(lastSeq, Number.MAX_SAFE_INTEGER), 'open entry lastSeq')
+    assertProtocol(initial === undefined || initial === true, 'open entry initial')
+    assertProtocol(probe === undefined || isUint(probe, 0xffffffff), 'open entry probe')
+    if (broadcast === undefined) return { id, ix, lastSeq, initial, probe }
+    const { text, binary } = asObject(broadcast)
+    assertProtocol(typeof text === 'boolean' && typeof binary === 'boolean', 'open entry broadcast')
+    return { id, ix, lastSeq, initial, probe, broadcast: { text, binary } }
+  })
 }
 
 function parseReconcilePayload(value: unknown): ReconcilePayload {
-  const payload = asObject(value)
-  parseOpenList(payload)
-  assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
-  if (payload.released !== undefined) {
-    assertProtocol(isNonEmptyString(payload.sessionId) && Array.isArray(payload.released), 'RECONCILE released')
-    assertProtocol(payload.released.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE released over entry cap')
-    for (const ix of payload.released) assertProtocol(isUint(ix, 0xffff), 'RECONCILE released ix')
-  }
-  return payload as ReconcilePayload
+  const { sessionId, open, released } = asObject(value)
+  const entries = parseOpenList(open)
+  assertProtocol(sessionId === undefined || isNonEmptyString(sessionId), 'RECONCILE sessionId')
+  if (released === undefined) return { sessionId, open: entries }
+  assertProtocol(isNonEmptyString(sessionId) && Array.isArray(released), 'RECONCILE released')
+  assertProtocol(released.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE released over entry cap')
+  for (const ix of released) assertProtocol(isUint(ix, 0xffff), 'RECONCILE released ix')
+  return { sessionId, open: entries, released }
 }
 
 function parseBarrierPayload(value: unknown): BarrierPayload {
-  const payload = asObject(value)
-  parseOpenList(payload)
+  const { sessionId, upgradeId, open } = asObject(value)
+  const entries = parseOpenList(open)
   // Both ids are mandatory: a barrier that cannot name its session and its upgrade has no claim
   // on either, and there is no ordinary-reconcile leg left for it to fall through to.
-  assertProtocol(isNonEmptyString(payload.sessionId), 'barrier sessionId')
-  assertProtocol(isNonEmptyString(payload.upgradeId), 'barrier upgradeId')
-  return payload as BarrierPayload
+  assertProtocol(isNonEmptyString(sessionId), 'barrier sessionId')
+  assertProtocol(isNonEmptyString(upgradeId), 'barrier upgradeId')
+  return { sessionId, upgradeId, open: entries }
 }
 
 // ===== Publish info helpers =====
