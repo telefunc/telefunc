@@ -1,6 +1,7 @@
 export { ClientConnection }
 export type {
   BarrierEmission,
+  ClientChannelTransport,
   MuxChannel,
   MuxConnection,
   OutboundFrame,
@@ -59,27 +60,15 @@ import type {
   ReconciledPayload,
 } from '../../wire/payloads.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
-import { Fifo } from '../../../utils/Fifo.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 import { Heartbeat } from './Heartbeat.js'
 import { ChannelTable, type ChannelRecord, type ClosedState } from './ChannelTable.js'
+import { SendGate, type SendGateOwner } from './SendGate.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WsTransport } from './ws.js'
 import { SseTransport } from './sse.js'
-
-type BufferedFrame = {
-  frame: Uint8Array<ArrayBuffer>
-  channelIx: number
-  seq?: number
-}
-type HeldFrame = BufferedFrame & { seq: number }
-
-/** Its channel and tag, for a WINDOW or MSG_WINDOW; null for any other frame. */
-function limitKey({ frame, channelIx }: BufferedFrame): number | null {
-  return frame[0] === TAG.WINDOW || frame[0] === TAG.MSG_WINDOW ? channelIx * 256 + frame[0] : null
-}
 
 /** Probe wire returned by `WsTransport.probe`. Liveness is the consumer's responsibility
  *  until the swap commits — typically driven via a transient Heartbeat. */
@@ -322,7 +311,7 @@ function isJoinLimb(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
-class ClientConnection implements MuxConnection {
+class ClientConnection implements MuxConnection, SendGateOwner {
   private static cache = new Map<string, ClientConnection>()
 
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
@@ -343,7 +332,7 @@ class ClientConnection implements MuxConnection {
   private readonly connectionOptions: ClientConnectionOptions
   /** Its transports include a WebSocket, whose runtime may take smaller frames than the wire's limit. */
   private readonly usesWebSocket: boolean
-  private transport: ClientChannelTransport
+  transport: ClientChannelTransport
 
   private state: ConnectionState = { tag: 'fresh' }
   /** Sticky after a permanent upgrade abort — survives every state transition until dispose. */
@@ -392,13 +381,7 @@ class ClientConnection implements MuxConnection {
   private nextIndex = 0
   private inFlight = reconcileInFlight()
   private readonly channels = new ChannelTable()
-  /** Frames held while sends are, or for their channel's ATTACH_RESULT. */
-  private sendBuffer: BufferedFrame[] = []
-  /** Sequenced frames waiting only for the transport's headroom, in order: a channel's next send waits behind them. */
-  private waitingForHeadroom = new Fifo<HeldFrame>()
-  private waitingForHeadroomBytes = 0
-  /** Channels whose queued frames go, all in one pass when they're next read (see `settleQueue`). */
-  private droppedQueues = new Set<number>()
+  private readonly gate = new SendGate({ owner: this, channels: this.channels })
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
   private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
@@ -510,12 +493,8 @@ class ClientConnection implements MuxConnection {
     return u
   }
 
-  private get sendsOpen(): boolean {
+  get sendsOpen(): boolean {
     return this.connected && !this.reconciling && !this.upgradeGatesSends && !this.reconcileOwed
-  }
-
-  private canSendImmediately(record: ChannelRecord): boolean {
-    return this.sendsOpen && !record.awaited
   }
 
   private register(channel: MuxChannel): void {
@@ -557,7 +536,9 @@ class ClientConnection implements MuxConnection {
 
   /** The transport may have headroom again: what waited for it goes. */
   onTransportHeadroom(transport: ClientChannelTransport): void {
-    if (transport === this.transport && this.sendsOpen) this.sendWaitingForHeadroom()
+    if (transport !== this.transport || !this.sendsOpen) return
+    this.gate.sendWaiting()
+    this.startTtlIfIdle()
   }
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
@@ -581,7 +562,7 @@ class ClientConnection implements MuxConnection {
   /** Send the queued RECONCILE on the live wire. No-op when nothing's queued. While the wire
    *  can't take it (connecting, awaiting RECONCILED, from an upgrade's READY until its handoff)
    *  the obligation is KEPT, not consumed — `reconcileOwed` stays set (which also keeps
-   *  `canSendImmediately` false so data frames buffer behind the RECONCILE), and the
+   *  `sendsOpen` false so data frames buffer behind the RECONCILE), and the
    *  transitions that make the wire sendable re-invoke this: `onTransportOpen`, a settled
    *  RECONCILED, upgrade-attempt exit, and handoff completion. */
   private flushPendingRegisterReconcile(): void {
@@ -627,49 +608,8 @@ class ClientConnection implements MuxConnection {
     )
     const seq = replay.nextSeq()
     onQueued?.(seq)
-    this.sendOrQueue(record, seq, frame, kind)
+    this.gate.send(record, seq, frame, kind)
     return frame.byteLength
-  }
-
-  /** Sends, or queues while sends are held or the transport lacks headroom; one sent at once passes the settle queue. */
-  private sendOrQueue(
-    record: ChannelRecord,
-    seq: number,
-    frame: Uint8Array<ArrayBuffer>,
-    kind: OutboundFrameKind,
-  ): void {
-    if (!this.canSendImmediately(record)) {
-      this.settleQueue().push({ frame, channelIx: record.ix, seq })
-      return
-    }
-    // What waited goes first.
-    this.sendWaitingForHeadroom()
-    if (this.waitingForHeadroom.length === 0 && this.transport.headroom() > 0) {
-      record.replay.push(seq, frame)
-      this.transport.sendFrame({ kind, frame })
-      return
-    }
-    this.waitForHeadroom({ frame, channelIx: record.ix, seq })
-  }
-
-  private waitForHeadroom(entry: HeldFrame): void {
-    this.waitingForHeadroom.push(entry)
-    this.waitingForHeadroomBytes += entry.frame.byteLength
-  }
-
-  /** What waits for headroom goes, from the front, while the transport has headroom. */
-  private sendWaitingForHeadroom(): void {
-    if (this.waitingForHeadroom.length === 0) return
-    this.dropQueues()
-    let headroom = this.transport.headroom()
-    while (headroom > 0 && this.waitingForHeadroom.length > 0) {
-      const { frame, channelIx, seq } = this.waitingForHeadroom.shift()!
-      this.waitingForHeadroomBytes -= frame.byteLength
-      headroom -= frame.byteLength
-      this.channels.get(channelIx)!.replay.push(seq, frame)
-      this.transport.sendFrame({ kind: 'released', frame })
-    }
-    this.startTtlIfIdle()
   }
 
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
@@ -684,7 +624,7 @@ class ClientConnection implements MuxConnection {
       const error = `Channel ack answer too large: ${frame.byteLength} bytes encoded, the server accepts ${maxFrameBytes} at most`
       frame = encode.ackRes(ix, seq, ackedSeq, error, ACK_STATUS.ERROR)
     }
-    this.sendOrQueue(record, seq, frame, 'ack')
+    this.gate.send(record, seq, frame, 'ack')
     if (ackedSeq === record.lastSeq) channel._answered()
   }
 
@@ -714,7 +654,7 @@ class ClientConnection implements MuxConnection {
     const record = this.channels.of(channel)
     if (record === undefined) return
     const seq = record.replay.nextSeq()
-    this.sendOrQueue(record, seq, buildFrame(record.ix, seq), 'control')
+    this.gate.send(record, seq, buildFrame(record.ix, seq), 'control')
   }
 
   sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void {
@@ -737,14 +677,14 @@ class ClientConnection implements MuxConnection {
   }
 
   bufferedAmount(): number {
-    return this.transport.bufferedAmount() + this.waitingForHeadroomBytes
+    return this.transport.bufferedAmount() + this.gate.waitingBytes
   }
 
   deliveredBeforeLast(ms: number): number {
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
-  /** Sends what `buildFrame` builds, or queues it while its channel waits: a limit is cumulative, so stays right. */
+  /** Sends what `buildFrame` builds, as `SendGate.sendUnsequenced` does. */
   private sendUnsequenced(
     channel: MuxChannel,
     kind: OutboundFrameKind,
@@ -752,12 +692,7 @@ class ClientConnection implements MuxConnection {
   ): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    const frame = buildFrame(record)
-    if (!this.canSendImmediately(record)) {
-      this.settleQueue().push({ frame, channelIx: record.ix, seq: undefined })
-      return
-    }
-    this.transport.sendFrame({ kind, frame })
+    this.gate.sendUnsequenced(record, buildFrame(record), kind)
   }
 
   sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
@@ -932,7 +867,7 @@ class ClientConnection implements MuxConnection {
       const { ix, state } = record
       if (state.tag !== 'closed' || state.initial) continue
       if (state.reported && record.replay.length === 0) {
-        queued ??= this.queuedIxes()
+        queued ??= this.gate.queuedIxes()
         if (!queued.has(ix)) {
           this.releaseChannel(record)
           continue
@@ -1263,7 +1198,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFramesToWire(): void {
-    for (const frame of this.drainBufferedFrames(this.isSendable)) this.transport.sendFrame(frame)
+    for (const frame of this.gate.drainSendable()) this.transport.sendFrame(frame)
     this.startTtlIfIdle()
   }
 
@@ -1310,13 +1245,7 @@ class ClientConnection implements MuxConnection {
 
   /** On a live wire with no channel open and nothing queued: what the transport holds leaves before the wire does. */
   private startTtlIfIdle(): void {
-    if (
-      !this.connected ||
-      this.ttl ||
-      this.settleQueue().length > 0 ||
-      this.waitingForHeadroom.length > 0 ||
-      !this.channels.idle
-    ) {
+    if (!this.connected || this.ttl || !this.gate.idle || !this.channels.idle) {
       return
     }
     const ttl = setTimeout(() => {
@@ -1348,10 +1277,7 @@ class ClientConnection implements MuxConnection {
     this.transport.detachHeartbeat()
     this.transport.dispose()
     this.channels.clear()
-    this.sendBuffer = []
-    this.waitingForHeadroom = new Fifo()
-    this.waitingForHeadroomBytes = 0
-    this.droppedQueues.clear()
+    this.gate.clear()
     this.forgetWire()
     // A fresh connection replaces this one once its indexes run out.
     if (ClientConnection.cache.get(this.cacheKey) === this) ClientConnection.cache.delete(this.cacheKey)
@@ -1422,12 +1348,7 @@ class ClientConnection implements MuxConnection {
       open.push(payloadEntry)
     }
     // The declared subscriptions supersede the SUB/UNSUB frames queued before them.
-    if (subscribing.size > 0) {
-      this.sendBuffer = this.settleQueue().filter(
-        ({ channelIx, frame }) =>
-          !subscribing.has(channelIx) || (frame[0] !== TAG.BROADCAST_SUB && frame[0] !== TAG.BROADCAST_UNSUB),
-      )
-    }
+    if (subscribing.size > 0) this.gate.dropSubscriptionFrames(subscribing)
     return open
   }
 
@@ -1436,12 +1357,7 @@ class ClientConnection implements MuxConnection {
     // After a wire that may have lost frames, the replay goes first: a newer frame ahead gets an older one dropped.
     if (isInitialBatch && (this.sessionId !== null || this.sentBefore())) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
-    for (const { channelIx, seq } of this.settleQueue()) {
-      if (seq !== undefined && this.isSendable(channelIx) && !this.inFlight.carriedFrom.has(channelIx)) {
-        this.inFlight.carriedFrom.set(channelIx, seq)
-      }
-    }
-    return this.drainBufferedFrames(this.isSendable)
+    return this.gate.drainForReconcile(this.inFlight.carriedFrom)
   }
 
   /** Whether a replay holds a frame the page sent. */
@@ -1449,8 +1365,6 @@ class ClientConnection implements MuxConnection {
     for (const { replay } of this.channels.values()) if (replay.length > 0) return true
     return false
   }
-
-  private readonly isSendable = (ix: number): boolean => this.channels.get(ix)?.awaited !== true
 
   stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
     // This batch names every channel registered since the last, so it already covers any pending registration.
@@ -1504,7 +1418,7 @@ class ClientConnection implements MuxConnection {
       const record = this.channels.get(ix)
       return record !== undefined && !this.channels.isUnnamed(record) && !record.awaited
     }
-    for (const frame of this.drainBufferedFrames(attached)) releaseFrames.push(frame)
+    for (const frame of this.gate.drain(attached)) releaseFrames.push(frame)
 
     if (hasNewChannels && !this.upgradeReady) {
       const reconcileBatch = this.stageReconcileBatch(false)
@@ -1594,7 +1508,7 @@ class ClientConnection implements MuxConnection {
       else if (record.state.tag === 'closed') this.serverHas(record, record.state, lastSeq)
       // As `applyReconciled` does: its replay, then what it queued.
       for (const frame of this.replayTo(record, lastSeq)) this.transport.sendFrame(frame)
-      for (const frame of this.drainBufferedFrames((i) => i === ix)) this.transport.sendFrame(frame)
+      for (const frame of this.gate.drain((i) => i === ix)) this.transport.sendFrame(frame)
       if (opened && record.state.tag === 'open') {
         record.channel._onTransportOpen(this.transport.batched, this.transport.uplink, this.transport.downlink)
       }
@@ -1615,7 +1529,7 @@ class ClientConnection implements MuxConnection {
 
   /** Ends the channel on both ends, dropping its queue; the ERROR isn't replayed, as the next reconcile sends one. */
   private loseChannel({ ix, replay, channel }: ChannelRecord): OutboundFrame {
-    this.droppedQueues.add(ix)
+    this.gate.dropQueue(ix)
     const frame = encode.error(ix, ERROR_REASON.LOST, replay.nextSeq())
     channel._onEnded(replayLossError('client'))
     return { kind: 'control', frame }
@@ -1649,80 +1563,11 @@ class ClientConnection implements MuxConnection {
     return seq
   }
 
-  /** Takes out what `releasable` channels queued; past the headroom, their sequenced frames go behind those waiting. */
-  private drainBufferedFrames(releasable: (ix: number) => boolean): OutboundFrame[] {
-    const frames: OutboundFrame[] = []
-    const sendBuffer = this.settleQueue()
-    // A limit replaces the one before it, so of a channel's queued limits only its newest WINDOW and MSG_WINDOW go.
-    const newestLimit = new Map<number, number>()
-    for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
-      const key = limitKey(sendBuffer[readIx]!)
-      if (key !== null) newestLimit.set(key, readIx)
-    }
-    let headroom = this.transport.headroom()
-    let writeIx = 0
-    for (let readIx = 0; readIx < sendBuffer.length; readIx++) {
-      const entry = sendBuffer[readIx]!
-      const { frame, channelIx, seq } = entry
-      if (!releasable(channelIx)) {
-        sendBuffer[writeIx++] = entry
-        continue
-      }
-      const key = limitKey(entry)
-      if (key !== null && newestLimit.get(key) !== readIx) continue
-      if (seq !== undefined) {
-        if (headroom <= 0 || this.waitingForHeadroom.length > 0) {
-          this.waitForHeadroom({ frame, channelIx, seq })
-          continue
-        }
-        headroom -= frame.byteLength
-        this.channels.get(channelIx)?.replay.push(seq, frame)
-      }
-      frames.push({ kind: 'released', frame })
-    }
-    sendBuffer.length = writeIx
-    return frames
-  }
-
   /** Drops all the channel holds, its ATTACH_RESULT wait too, as the RECONCILE releasing it, or a new wire's leaving it
    *  out, ends that on the server. */
   private releaseChannel(record: ChannelRecord): void {
     this.channels.release(record)
-    if (this.sendBuffer.length > 0 || this.waitingForHeadroom.length > 0) this.droppedQueues.add(record.ix)
-  }
-
-  /** sendBuffer, with what waited for headroom in front of it once sends are held: a reconcile takes them all in order. */
-  private settleQueue(): BufferedFrame[] {
-    this.dropQueues()
-    if (!this.sendsOpen && this.waitingForHeadroom.length > 0) {
-      this.sendBuffer = [...this.waitingForHeadroom, ...this.sendBuffer]
-      this.waitingForHeadroom = new Fifo()
-      this.waitingForHeadroomBytes = 0
-    }
-    return this.sendBuffer
-  }
-
-  /** The channels whose frames wait to go. */
-  private queuedIxes(): Set<number> {
-    const ixes = new Set<number>()
-    for (const { channelIx } of this.settleQueue()) ixes.add(channelIx)
-    for (const { channelIx } of this.waitingForHeadroom) ixes.add(channelIx)
-    return ixes
-  }
-
-  private dropQueues(): void {
-    if (this.droppedQueues.size === 0) return
-    const dropped = this.droppedQueues
-    this.sendBuffer = this.sendBuffer.filter(({ channelIx }) => !dropped.has(channelIx))
-    if (this.waitingForHeadroom.length > 0) {
-      const kept = new Fifo<HeldFrame>()
-      for (const entry of this.waitingForHeadroom) {
-        if (dropped.has(entry.channelIx)) this.waitingForHeadroomBytes -= entry.frame.byteLength
-        else kept.push(entry)
-      }
-      this.waitingForHeadroom = kept
-    }
-    this.droppedQueues = new Set()
+    this.gate.dropQueue(record.ix)
   }
 }
 
