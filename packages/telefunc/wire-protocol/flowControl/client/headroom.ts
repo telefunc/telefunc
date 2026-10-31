@@ -20,7 +20,7 @@ interface ClientHeadroomOwner {
   onHeadroom(headroom: ClientHeadroom): void
 }
 
-type ClientHeadroomOptions = Pick<PieceSenderOptions, 'transmit' | 'queued' | 'pingInterval'> & {
+type ClientHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'> & {
   uplink: Uplink
   downlink: Downlink
   owner: ClientHeadroomOwner
@@ -42,13 +42,12 @@ class ClientHeadroom implements PieceSenderOwner {
   private paceTimer: ReturnType<typeof setTimeout> | null = null
   private paceDue = 0
 
-  constructor({ transmit, queued, pingInterval, uplink, downlink, owner }: ClientHeadroomOptions) {
+  constructor({ socket, pingInterval, uplink, downlink, owner }: ClientHeadroomOptions) {
     this.uplink = uplink
     this.downlink = downlink
     this.owner = owner
     this.sender = new PieceSender({
-      transmit,
-      queued,
+      socket,
       pingInterval,
       pieceRate: uplink.pieceRate,
       cuts: 'cut',

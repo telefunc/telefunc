@@ -213,8 +213,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const uplink = new Uplink()
     const downlink = new Downlink(uplink)
     const headroom = new ClientHeadroom({
-      transmit: (message) => ws.send(message),
-      queued: () => ws.bufferedAmount,
+      socket: ws,
       pingInterval: this.pingInterval,
       uplink,
       downlink,

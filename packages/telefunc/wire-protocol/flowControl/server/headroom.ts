@@ -3,19 +3,25 @@ export { ServerHeadroom }
 import { WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../../constants.js'
 import { DrainRate } from '../DrainRate.js'
 import { PieceRate } from '../PieceRate.js'
-import { PieceSender, acknowledges, type PieceSenderOptions, type PieceSenderOwner } from '../pieces.js'
+import {
+  PieceSender,
+  acknowledges,
+  type PieceSenderOptions,
+  type PieceSenderOwner,
+  type PieceSocket,
+} from '../pieces.js'
 import type { PiecesAck } from '../../wire/frame.js'
 import { isSequencedTag } from '../../wire/tags.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 
-type ServerHeadroomOptions = Pick<PieceSenderOptions, 'transmit' | 'queued' | 'pingInterval'>
+type ServerHeadroomOptions = Pick<PieceSenderOptions, 'socket' | 'pingInterval'>
 
 /** The path to the page holds what `headroom` allows; the rest waits whole in its sender. */
 class ServerHeadroom implements PieceSenderOwner {
   /** Every frame the WebSocket carries goes through it. */
   readonly sender: PieceSender
-  private readonly queued: () => number
+  private readonly socket: PieceSocket
   /** The rate the page takes data at. */
   private readonly drain = new DrainRate()
   /** In ms, the page's clock from the first data an acknowledgement covered. */
@@ -37,11 +43,10 @@ class ServerHeadroom implements PieceSenderOwner {
   private inPathAt = 0
   private paceTimer: ReturnType<typeof setTimeout> | null = null
 
-  constructor({ transmit, queued, pingInterval }: ServerHeadroomOptions) {
-    this.queued = queued
+  constructor({ socket, pingInterval }: ServerHeadroomOptions) {
+    this.socket = socket
     this.sender = new PieceSender({
-      transmit,
-      queued,
+      socket,
       pingInterval,
       pieceRate: new PieceRate(),
       cuts: 'whole',
@@ -72,7 +77,8 @@ class ServerHeadroom implements PieceSenderOwner {
       return
     }
     const end = this.sender.transmittedBytes
-    if (!this.releasing && this.queued() <= this.handedSinceData && !this.sender.dataWaits) this.appLimitedTo = end
+    if (!this.releasing && this.socket.bufferedAmount <= this.handedSinceData && !this.sender.dataWaits)
+      this.appLimitedTo = end
     this.handedSinceData = 0
     if (acknowledges(bytes)) this.sent.push({ end, at: now })
   }

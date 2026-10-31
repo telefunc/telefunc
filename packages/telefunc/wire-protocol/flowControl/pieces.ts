@@ -1,5 +1,5 @@
 export { PieceSender, PieceReceiver, acknowledges }
-export type { FrameArrival, PieceArrival, PieceReceiverOptions, PieceSenderOptions, PieceSenderOwner }
+export type { FrameArrival, PieceArrival, PieceReceiverOptions, PieceSenderOptions, PieceSenderOwner, PieceSocket }
 
 import {
   WIRE_ANNOUNCED_MIN_BYTES,
@@ -40,10 +40,15 @@ interface PieceSenderOwner {
   handed(bytes: number, data: boolean): void
 }
 
+/** The socket a piece sender hands its messages to: a page's `WebSocket`, a server wire's `TransportSocket`. */
+interface PieceSocket {
+  send(message: Uint8Array<ArrayBuffer>): void
+  /** The bytes it holds unsent. */
+  readonly bufferedAmount: number
+}
+
 type PieceSenderOptions = {
-  transmit: (message: Uint8Array<ArrayBuffer>) => void
-  /** The bytes its socket holds unsent. */
-  queued: () => number
+  socket: PieceSocket
   /** Its wire's ping interval, which sizes the frames it sends whole. */
   pingInterval: number
   /** Its wire's: the rates it measures go there. */
@@ -55,7 +60,7 @@ type PieceSenderOptions = {
 
 /** One WebSocket's sender: a frame goes in its own message, one that may take a ping interval to cross in pieces. */
 class PieceSender {
-  private readonly queued: () => number
+  private readonly socket: PieceSocket
   private pingInterval: number
   private readonly pieceRate: PieceRate
   private readonly cutsData: boolean
@@ -100,13 +105,13 @@ class PieceSender {
   /** The frames carried and not yet handed to the socket. */
   private readonly messages: SocketMessages
 
-  constructor({ transmit, queued, pingInterval, pieceRate, cuts, owner }: PieceSenderOptions) {
-    this.queued = queued
+  constructor({ socket, pingInterval, pieceRate, cuts, owner }: PieceSenderOptions) {
+    this.socket = socket
     this.pingInterval = pingInterval
     this.pieceRate = pieceRate
     this.cutsData = cuts === 'cut'
     this.owner = owner
-    this.messages = new SocketMessages(transmit)
+    this.messages = new SocketMessages(socket)
     this.setWholeUpTo()
   }
 
@@ -337,7 +342,7 @@ class PieceSender {
   private track(crossingBytes: number, at: number, probe: boolean): void {
     // What its socket holds and what it carries cross first, less the largest message, which a browser may count.
     this.unacknowledged.push({
-      crossing: Math.max(0, this.queued() + this.messages.bytes - this.messages.largest) + crossingBytes,
+      crossing: Math.max(0, this.socket.bufferedAmount + this.messages.bytes - this.messages.largest) + crossingBytes,
       at,
       end: this.transmittedBytes,
       probe,
@@ -459,7 +464,7 @@ class PieceSender {
 
 /** The frames carried, handed to its socket ahead of the next message (see `messageFrames`). */
 class SocketMessages {
-  private readonly transmit: (message: Uint8Array<ArrayBuffer>) => void
+  private readonly socket: PieceSocket
   /** The bytes of the frames it holds. */
   bytes = 0
   /** The largest message handed: a browser may count a message in full while sending it. */
@@ -467,8 +472,8 @@ class SocketMessages {
   private readonly frames: Uint8Array<ArrayBuffer>[] = []
   private closed = false
 
-  constructor(transmit: (message: Uint8Array<ArrayBuffer>) => void) {
-    this.transmit = transmit
+  constructor(socket: PieceSocket) {
+    this.socket = socket
   }
 
   /** Adds `frame`, carried; its tag fixes its bytes. */
@@ -492,7 +497,7 @@ class SocketMessages {
     this.frames.length = 0
     this.bytes = 0
     if (message.byteLength > this.largest) this.largest = message.byteLength
-    this.transmit(message)
+    this.socket.send(message)
   }
 
   close(): void {

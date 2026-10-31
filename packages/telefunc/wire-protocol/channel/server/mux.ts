@@ -34,6 +34,7 @@ import { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
 import { SocketWait } from '../../flowControl/server/SocketWait.js'
 import { WireSender } from './WireSender.js'
+import { TransportSocket } from './TransportSocket.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
 import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
 import type { ServerChannel } from './channel.js'
@@ -242,8 +243,7 @@ class ChannelMux implements RegistrationWaitsOwner {
     const recvBacklog = { bytes: 0, frames: 0 }
     const headroom = transport.wholeMessages
       ? new ServerHeadroom({
-          transmit: (message) => transport.sendNow(connection, message),
-          queued: () => transport.bufferedAmount(connection) ?? 0,
+          socket: new TransportSocket({ transport: transport as ServerTransport<unknown>, wire: connection }),
           pingInterval: this.options.pingInterval,
         })
       : null
