@@ -421,12 +421,15 @@ class MemoryRoomDriver implements RoomDriver {
     return this._directory.get(roomId)?.incTag
   }
 
-  async directoryList(prefix: string): Promise<DirectoryPage> {
-    const entries = [...this._directory]
-      .filter(([roomId]) => roomId.startsWith(prefix))
+  async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
+    const matching = [...this._directory]
+      .filter(
+        ([roomId]) => roomId.startsWith(prefix) && (cursor === undefined || compareCodePoints(roomId, cursor) > 0),
+      )
       .sort(([left], [right]) => compareCodePoints(left, right))
-      .map(([roomId, { incTag }]) => ({ roomId, incTag }))
-    return { entries }
+    const entries = matching.slice(0, DIRECTORY_PAGE_SIZE).map(([roomId, { incTag }]) => ({ roomId, incTag }))
+    const last = entries.at(-1)
+    return last !== undefined && matching.length > DIRECTORY_PAGE_SIZE ? { entries, cursor: last.roomId } : { entries }
   }
 
   async directoryDue(): Promise<DirectoryPage['entries']> {
