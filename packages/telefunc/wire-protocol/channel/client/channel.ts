@@ -43,6 +43,7 @@ import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
+import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
 import type { MuxChannel, MuxConnection } from './connection.js'
@@ -70,7 +71,7 @@ type ClientChannelOptions = {
 }
 
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel, CreditOwner
+  implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel, CreditOwner, ChannelLifecycleOwner
 {
   /** @see ChannelShield in ../channel.ts — `data` validates C2S; `ack` validates ack of own C2S send. */
   declare readonly [TELEFUNC_SHIELDS]: {
@@ -85,19 +86,9 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   private readonly listeners = new Listeners<ChannelListener<ServerToClient>>()
   private readonly binaryListeners = new Listeners<ChannelBinaryListener>()
   private openCallbacks: Array<() => void> = []
-  private closeCallbacks: Array<ChannelCloseCallback> = []
-  private closeError: Error | undefined
   protected _isClosed = false
-  private didTerminate = false
-  private didFireClose = false
   private didFireOpen = false
-  private closePromise: Promise<ChannelCloseResult> | null = null
-  private closeDeadline = 0
-  private closeWaiters: Array<() => void> = []
-  private didReceiveCloseAck = false
-  private expectCloseAck = false
-  private pendingCloseCallbacks = 0
-  protected _inflightAcks = 0
+  private readonly lifecycle = new ChannelLifecycle({ owner: this })
   /** Outstanding ack-bearing sends, keyed by the seq the server will echo on `ACK_RES`.
    *  Lives on the channel (mirrors server-side `_pendingAcks`) so per-channel state
    *  stays encapsulated; connection just routes ACK_RES frames in. `resolve` is typed
@@ -215,11 +206,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   onClose(callback: ChannelCloseCallback): void {
-    if (this.didFireClose) {
-      this.invokeCloseCallback(callback, this.closeError, false)
-      return
-    }
-    this.closeCallbacks.push(callback)
+    this.lifecycle.onClose(callback)
   }
 
   onOpen(callback: () => void): void {
@@ -232,15 +219,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
-    if (this.closePromise) return this.closePromise
-    if (this.didTerminate) return Promise.resolve(this.didReceiveCloseAck ? 0 : 1)
+    if (this.lifecycle.closing) return this.lifecycle.closing
+    if (this.lifecycle.ended) return Promise.resolve(this.lifecycle.result)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    this.closeDeadline = performance.now() + timeout
-    this.expectCloseAck = true
+    this.lifecycle.startClose(timeout, true)
     this._isClosed = true
     this._connection.sendCloseRequest(this, timeout)
-    this.closePromise = this.runFinalizationLoop()
-    return this.closePromise
+    return this.lifecycle.runClose()
   }
 
   /** @internal How long a server that is away is waited for. */
@@ -251,11 +236,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   abort(): void
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
-    if (this.didTerminate || this._isClosed) return
+    if (this.lifecycle.ended || this._isClosed) return
     this._isClosed = true
     const abortError = createAbortError(abortValue, message)
     this._connection.sendAbort(this, stringify(abortValue))
-    this.finalizeClose(abortError)
+    this._end(abortError)
   }
 
   // ── Called by its credit (see `CreditOwner`) ──
@@ -340,11 +325,11 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onPeerAckReqMessage(data: string, seq: number): Promise<void> {
-    return this._trackAck(this.answerAckReq(this.listeners, parse(data) as ChannelData<ServerToClient>, seq))
+    return this.lifecycle.trackAck(this.answerAckReq(this.listeners, parse(data) as ChannelData<ServerToClient>, seq))
   }
 
   _onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._trackAck(this.answerAckReq(this.binaryListeners, data, seq))
+    return this.lifecycle.trackAck(this.answerAckReq(this.binaryListeners, data, seq))
   }
 
   _onPeerBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
@@ -471,29 +456,23 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onPeerCloseRequest(timeoutMs: number): void {
-    if (this.didTerminate) return
-    const peerDeadline = performance.now() + normalizeCloseTimeout(timeoutMs)
-    if (!this.closeDeadline || peerDeadline < this.closeDeadline) this.closeDeadline = peerDeadline
+    if (this.lifecycle.ended) return
+    this.lifecycle.shortenDeadline(normalizeCloseTimeout(timeoutMs))
     this._connection.sendCloseAck(this)
-    if (this._isClosed) {
-      this.notifyCloseProgress()
-    } else {
-      this._isClosed = true
-      void this.runFinalizationLoop()
-    }
+    if (this._isClosed) return
+    this._isClosed = true
+    void this.lifecycle.finish()
   }
 
   _onPeerCloseAck(): void {
-    if (this.didTerminate) return
-    this.didReceiveCloseAck = true
-    this.expectCloseAck = false
-    this.notifyCloseProgress()
+    if (this.lifecycle.ended) return
+    this.lifecycle.onCloseAck()
   }
 
   _onEnded(err?: Error): void {
     this._isClosed = true
     // A close the server acknowledged is graceful, whatever takes the channel off the wire before it finishes.
-    this.finalizeClose(this.didReceiveCloseAck ? undefined : err)
+    this._end(this.lifecycle.closeAcked ? undefined : err)
   }
 
   // ── Private ──
@@ -510,65 +489,6 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
     }
     this.openCallbacks.length = 0
-  }
-
-  private fireClose(err?: Error): void {
-    if (this.didFireClose) return
-    this.didFireClose = true
-    for (const cb of this.closeCallbacks) {
-      this.invokeCloseCallback(cb, err, true)
-    }
-    this.closeCallbacks.length = 0
-    this.openCallbacks.length = 0
-    this.notifyCloseProgress()
-  }
-
-  private async runFinalizationLoop(): Promise<ChannelCloseResult> {
-    while (!this.didTerminate) {
-      // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
-      // so listeners see "closed" only after the channel can no longer receive frames.
-      if (this.isCloseRoundtripDone()) this.fireClose()
-      if (this.didFireClose && this.pendingCloseCallbacks === 0) {
-        this.finalizeClose()
-        break
-      }
-      const remaining = this.closeDeadline - performance.now()
-      if (remaining <= 0) {
-        this.finalizeClose(new ChannelClosedError('Channel close timed out'))
-        break
-      }
-      await this.waitForCloseProgress(remaining)
-    }
-    return this.didReceiveCloseAck ? 0 : 1
-  }
-
-  private isCloseRoundtripDone(): boolean {
-    return this._inflightAcks === 0 && (!this.expectCloseAck || this.didReceiveCloseAck)
-  }
-
-  private waitForCloseProgress(timeoutMs: number): Promise<void> {
-    return new Promise<void>((resolve) => {
-      let settled = false
-      const timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        const index = this.closeWaiters.indexOf(wake)
-        if (index >= 0) this.closeWaiters.splice(index, 1)
-        resolve()
-      }, timeoutMs)
-      const wake = () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve()
-      }
-      this.closeWaiters.push(wake)
-    })
-  }
-
-  private notifyCloseProgress(): void {
-    const waiters = this.closeWaiters.splice(0)
-    for (const waiter of waiters) waiter()
   }
 
   private async answerAckReq<T>(listeners: Listeners<(data: T) => unknown>, data: T, seq: number): Promise<void> {
@@ -594,46 +514,25 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     let pending!: { resolve: (v: T) => void; reject: (err: Error) => void }
     const ack = new Promise<T>((resolve, reject) => (pending = { resolve, reject }))
     send((seq) => this._pendingAcks.set(seq, pending))
-    return this._trackAck(ack)
+    return this.lifecycle.trackAck(ack)
   }
 
-  protected _trackAck<T>(promise: Promise<T>): Promise<T> {
-    this._inflightAcks++
-    return promise.finally(() => {
-      this._inflightAcks--
-      this.notifyCloseProgress()
-    })
-  }
-
-  private finalizeClose(err?: Error): void {
-    if (this.didTerminate) return
-    this.didTerminate = true
-    this.closeError = err
+  /** @internal */
+  _end(err?: Error): void {
+    if (this.lifecycle.ended) return
+    this.lifecycle.end(err)
     this._sendCredit.shutdown()
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
     this._connection.unregister(this)
-    this.fireClose(err)
-    this.notifyCloseProgress()
+    this.lifecycle.fireClose(err)
+    this.openCallbacks.length = 0
   }
 
-  private invokeCloseCallback(callback: ChannelCloseCallback, err: Error | undefined, track: boolean): void {
-    try {
-      const pending = callback(err)
-      if (!isPromise(pending)) return
-      if (track) {
-        this.pendingCloseCallbacks++
-        void pending.catch(reportChannelError).finally(() => {
-          this.pendingCloseCallbacks--
-          this.notifyCloseProgress()
-        })
-      } else {
-        void pending.catch(reportChannelError)
-      }
-    } catch (callbackErr) {
-      reportChannelError(callbackErr)
-    }
+  /** @internal */
+  _reportCallbackError(err: unknown): void {
+    reportChannelError(err)
   }
 
   protected _handleCallbackError(err: unknown): boolean {

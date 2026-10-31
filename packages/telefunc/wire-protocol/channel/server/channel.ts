@@ -34,6 +34,7 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
+import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
 import { replayWindow, type CreditOwner, type WindowKind } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
@@ -70,7 +71,7 @@ function parsePeerText(text: string): unknown {
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements Channel<ClientToServer, ServerToClient>, CreditOwner
+  implements Channel<ClientToServer, ServerToClient>, CreditOwner, ChannelLifecycleOwner
 {
   readonly [SERVER_CHANNEL_BRAND] = true
   /** @see ChannelShield in ../channel.ts — `data` validates incoming C2S, `ack` validates ack of own S2C sends. */
@@ -106,18 +107,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private pendingAckBytes = 0
   protected readonly _bufferLimit: number
   protected readonly _bufferLimitBinary: number
-  private closeCallbacks: Array<ChannelCloseCallback> = []
   private openCallbacks: Array<() => void> = []
-  private closeError: Error | undefined
-  private didFireClose = false
   private didFireOpen = false
-  private closePromise: Promise<ChannelCloseResult> | null = null
-  private closeDeadline = 0
-  private closeWaiters: Array<() => void> = []
-  private didReceiveCloseAck = false
-  private awaitingCloseAck = false
-  private pendingCloseCallbacks = 0
-  protected _inflightAcks = 0
+  protected readonly lifecycle = new ChannelLifecycle({ owner: this })
   private ttlTimer: ReturnType<typeof setTimeout> | null = null
   /** Credit governs fire-and-forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
   protected _selfTime = new SelfTime()
@@ -204,7 +196,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const serialized = stringify(data)
     if (!this._peer) {
       if (needsAck) {
-        return this._trackAck(
+        return this.lifecycle.trackAck(
           new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
             this._offlineBuffer.pushTextAck(serialized, resolve, reject)
           }),
@@ -218,7 +210,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
       if (this._isPeerBehind()) return rejectOverflow()
-      return this._trackAck(
+      return this.lifecycle.trackAck(
         new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
           this._peer!.sendSequenced(encode.textAckReq, serialized, (seq, bytes) =>
             this.addPendingAck(seq, bytes, { resolve, reject }),
@@ -251,7 +243,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const needsAck = opts?.ack === true
     if (!this._peer) {
       if (needsAck) {
-        return this._trackAck(
+        return this.lifecycle.trackAck(
           new Promise<unknown>((resolve, reject) => {
             this._offlineBuffer.pushBinaryAck(data, resolve, reject)
           }),
@@ -264,7 +256,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing path bypasses credit; see `_send` for rationale.
     if (needsAck) {
       if (this._isPeerBehind()) return rejectOverflow()
-      return this._trackAck(
+      return this.lifecycle.trackAck(
         new Promise<unknown>((resolve, reject) => {
           this._peer!.sendSequenced(encode.binaryAckReq, data, (seq, bytes) =>
             this.addPendingAck(seq, bytes, { resolve, reject }),
@@ -314,11 +306,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   onClose(callback: ChannelCloseCallback): void {
-    if (this.didFireClose) {
-      this.invokeCloseCallback(callback, this.closeError, false)
-      return
-    }
-    this.closeCallbacks.push(callback)
+    this.lifecycle.onClose(callback)
   }
 
   onOpen(callback: () => void): void {
@@ -346,17 +334,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
-    if (this.closePromise) return this.closePromise
-    if (this._phase === 'ended') return Promise.resolve(this.didReceiveCloseAck ? 0 : 1)
+    if (this.lifecycle.closing) return this.lifecycle.closing
+    if (this._phase === 'ended') return Promise.resolve(this.lifecycle.result)
     const timeout = normalizeCloseTimeout(opts?.timeout)
-    this.closeDeadline = performance.now() + timeout
     // A channel no response carried yet has no page to acknowledge its close.
-    this.awaitingCloseAck = this.didRegister
+    this.lifecycle.startClose(timeout, this.didRegister)
     this._phase = 'closing'
     if (this._peer) this.closeRequestSeq = this._peer.sendCloseRequest(timeout)
     else this.ensurePendingEnd().closeRequest = true
-    this.closePromise = this.runFinalizationLoop()
-    return this.closePromise
+    return this.lifecycle.runClose()
   }
 
   /** @internal — Prepare channel state so the mux can register it. Called by
@@ -407,10 +393,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._onPeerSubscription({ binary: true, subscribed: state.broadcast.binary })
     }
     this.sendPendingEnd(peer)
-    if (this._phase === 'closing') {
-      this.notifyCloseProgress()
-      return
-    }
+    if (this._phase === 'closing') return
     this.fireOpen()
   }
 
@@ -548,11 +531,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Parsed here rather than inside the async dispatch so a malformed payload throws in the recv
     // turn, where the violation still names the wire that sent it.
     const data = parsePeerText(text) as ChannelData<ClientToServer>
-    return this._trackAck(this.answerAckReq(this.listeners, data, seq, this._validators.get('data')))
+    return this.lifecycle.trackAck(this.answerAckReq(this.listeners, data, seq, this._validators.get('data')))
   }
 
   _onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._trackAck(this.answerAckReq(this.binaryListeners, data, seq))
+    return this.lifecycle.trackAck(this.answerAckReq(this.binaryListeners, data, seq))
   }
 
   _onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
@@ -632,25 +615,19 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerCloseRequest(timeoutMs: number): void {
     if (this._phase === 'ended') return
     assertProtocol(timeoutMs <= TIMER_DELAY_MAX_MS, `CLOSE timeout ${timeoutMs}`)
-    const peerDeadline = performance.now() + timeoutMs
-    if (!this.closeDeadline || peerDeadline < this.closeDeadline) this.closeDeadline = peerDeadline
+    this.lifecycle.shortenDeadline(timeoutMs)
     if (this._peer) this._peer.sendCloseAck()
     else this.ensurePendingEnd().closeAck = true
-    if (this._phase === 'closing') {
-      this.notifyCloseProgress()
-      return
-    }
+    if (this._phase === 'closing') return
     this._phase = 'closing'
-    void this.runFinalizationLoop()
+    void this.lifecycle.finish()
   }
 
   _onPeerCloseAck(): void {
     if (this._phase === 'ended') return
     // The page acknowledges the close request as it gets it, so it has all sent before it.
     this._onPageHas(this.closeRequestSeq)
-    this.didReceiveCloseAck = true
-    this.awaitingCloseAck = false
-    this.notifyCloseProgress()
+    this.lifecycle.onCloseAck()
   }
 
   /** @internal `peer`'s wire went away. A channel a later reconcile moved to another wire keeps that one. */
@@ -747,7 +724,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.pendingEnd === null) return
     const { closeAck, closeRequest, abort, error } = this.pendingEnd
     if (closeAck) peer.sendCloseAck()
-    if (closeRequest) this.closeRequestSeq = peer.sendCloseRequest(Math.max(0, this.closeDeadline - performance.now()))
+    if (closeRequest) this.closeRequestSeq = peer.sendCloseRequest(this.lifecycle.timeLeft())
     if (abort !== null) peer.sendAbort(abort)
     if (error !== null) peer.sendError(error)
     this.pendingEnd = null
@@ -770,54 +747,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     } else {
       this.pendingAckRes.push({ ackedSeq, result, status })
     }
-  }
-
-  private async runFinalizationLoop(): Promise<ChannelCloseResult> {
-    while (this._phase !== 'ended') {
-      // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
-      // so listeners see "closed" only after the channel can no longer receive frames.
-      if (this.isCloseRoundtripDone()) this.fireClose()
-      if (this.didFireClose && this.pendingCloseCallbacks === 0) {
-        this._shutdown()
-        break
-      }
-      const remaining = this.closeDeadline - performance.now()
-      if (remaining <= 0) {
-        this._shutdown(new ChannelClosedError('Channel close timed out'))
-        break
-      }
-      await this.waitForCloseProgress(remaining)
-    }
-    return this.didReceiveCloseAck ? 0 : 1
-  }
-
-  private isCloseRoundtripDone(): boolean {
-    return this._inflightAcks === 0 && (!this.awaitingCloseAck || this.didReceiveCloseAck)
-  }
-
-  private waitForCloseProgress(timeoutMs: number): Promise<void> {
-    return new Promise<void>((resolve) => {
-      let settled = false
-      const timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        const index = this.closeWaiters.indexOf(wake)
-        if (index >= 0) this.closeWaiters.splice(index, 1)
-        resolve()
-      }, timeoutMs)
-      const wake = () => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        resolve()
-      }
-      this.closeWaiters.push(wake)
-    })
-  }
-
-  private notifyCloseProgress(): void {
-    const waiters = this.closeWaiters.splice(0)
-    for (const waiter of waiters) waiter()
   }
 
   private async answerAckReq<T>(
@@ -850,22 +779,23 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._sendAckRes(seq, answer)
   }
 
-  protected _trackAck<T>(promise: Promise<T>): Promise<T> {
-    this._inflightAcks++
-    return promise.finally(() => {
-      this._inflightAcks--
-      this.notifyCloseProgress()
-    })
+  /** @internal */
+  _end(err?: Error): void {
+    this._shutdown(err)
+  }
+
+  /** @internal */
+  _reportCallbackError(err: unknown): void {
+    reportServerChannelError(err)
   }
 
   /** `pageGone`: its page left it, or never came, so nothing it lacks of the channel can reach it. */
   protected _shutdown(err?: Error, { pageGone = false } = {}): void {
     if (this._phase === 'ended') return
     this._phase = 'ended'
-    this.closeError = err
+    this.lifecycle.end(err)
     const pageAttached = this._peer !== null
     this._peer = null
-    this.awaitingCloseAck = false
     if (this.ttlTimer) clearTimeout(this.ttlTimer)
     this.ttlTimer = null
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
@@ -874,9 +804,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const keep = !pageGone && !this._pageNeedsNothing()
     if (!keep) this._release()
     this.mux?.onChannelEnded(this, { keep, pageAttached })
-    this.fireClose(err)
+    this.lifecycle.fireClose(err)
+    this.openCallbacks.length = 0
     this._sendCredit.shutdown()
-    this.notifyCloseProgress()
     // Building an error captures its stack: one is built only where an answer is awaited.
     if (this._pendingAcks.size > 0 || this._offlineBuffer.size > 0) {
       const ackErr = err ?? new ChannelClosedError()
@@ -892,7 +822,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _release(): void {
     this._replayBuffer?.dispose()
     this._replayBuffer = null
-    this.dropPending(this._offlineBuffer.size === 0 ? undefined : (this.closeError ?? new ChannelClosedError()))
+    this.dropPending(
+      this._offlineBuffer.size === 0 ? undefined : (this.lifecycle.closeError ?? new ChannelClosedError()),
+    )
   }
 
   /** What was sent while no peer was attached rejects with `err`. */
@@ -900,37 +832,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._offlineBuffer.clear(err)
     this.pendingAckRes.length = 0
     this.pendingEnd = null
-  }
-
-  private fireClose(err?: Error): void {
-    if (this.didFireClose) return
-    this.didFireClose = true
-    for (const cb of this.closeCallbacks) {
-      this.invokeCloseCallback(cb, err, true)
-    }
-    this.closeCallbacks.length = 0
-    this.openCallbacks.length = 0
-    this.notifyCloseProgress()
-  }
-
-  private invokeCloseCallback(callback: ChannelCloseCallback, err: Error | undefined, track: boolean): void {
-    try {
-      const pending = callback(err)
-      if (!isPromise(pending)) return
-      if (track) {
-        this.pendingCloseCallbacks++
-        void pending
-          .catch((e) => reportServerChannelError(e))
-          .finally(() => {
-            this.pendingCloseCallbacks--
-            this.notifyCloseProgress()
-          })
-      } else {
-        void pending.catch((e) => reportServerChannelError(e))
-      }
-    } catch (callbackErr) {
-      reportServerChannelError(callbackErr)
-    }
   }
 
   private fireOpen(): void {

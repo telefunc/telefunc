@@ -85,7 +85,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this.ensureBroadcast()
     if (!this.adapter) throw new ChannelClosedError()
     const serialized = stringify(data)
-    const ret = this._trackAck(Promise.resolve(this.publishBroadcast(serialized)))
+    const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
     return ret
   }
@@ -99,7 +99,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     this.ensureBroadcast()
     if (!this.adapter) throw new ChannelClosedError()
-    const ret = this._trackAck(Promise.resolve(this.publishBinaryBroadcast(data)))
+    const ret = this.lifecycle.trackAck(Promise.resolve(this.publishBinaryBroadcast(data)))
     ret.catch(() => {})
     return ret
   }
@@ -125,11 +125,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this._trackAck(this.dispatchPublishAckReq(text, seq))
+    return this.lifecycle.trackAck(this.dispatchPublishAckReq(text, seq))
   }
 
   _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._trackAck(this.dispatchPublishBinaryAckReq(data, seq))
+    return this.lifecycle.trackAck(this.dispatchPublishBinaryAckReq(data, seq))
   }
 
   private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
