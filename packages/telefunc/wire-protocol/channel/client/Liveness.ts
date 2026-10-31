@@ -45,16 +45,33 @@ class Liveness {
 
   /** From the RECONCILE on: a RECONCILED comes behind what the server sends as it attaches, however long that takes. */
   beatFromReconcile(transport: ClientChannelTransport): void {
-    if (this.owner.sessionId !== null) this.install(transport, this.pingIntervalMs, false)
-    else this.install(transport, CHANNEL_PING_INTERVAL_MIN_MS, true)
+    if (this.owner.sessionId !== null) this.install(transport, this.pingIntervalMs)
+    else this.installProvisional(transport)
   }
 
-  /** Idempotent once a RECONCILED set the interval; the next install replaces a provisional one. */
-  install(transport: ClientChannelTransport, intervalMs: number, provisional: boolean): void {
-    if (transport.heartbeat !== null && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs) return
+  /** Idempotent once a RECONCILED set the interval; replaces a provisional heartbeat. Its first PING goes at once. */
+  install(transport: ClientChannelTransport, intervalMs: number): void {
+    if (this.beatsAt(transport, intervalMs)) return
+    this.pingIntervalMs = intervalMs
+    this.provisionalHeartbeat = false
+    this.replaceHeartbeat(transport, intervalMs).start(true)
+  }
+
+  /** Before a first RECONCILED: at the shortest interval, its first PING one interval on; an install replaces it. */
+  private installProvisional(transport: ClientChannelTransport): void {
+    if (this.beatsAt(transport, CHANNEL_PING_INTERVAL_MIN_MS)) return
+    this.provisionalHeartbeat = true
+    this.replaceHeartbeat(transport, CHANNEL_PING_INTERVAL_MIN_MS).start(false)
+  }
+
+  /** The wire beats at `intervalMs` as a RECONCILED set it. */
+  private beatsAt(transport: ClientChannelTransport, intervalMs: number): boolean {
+    return transport.heartbeat !== null && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs
+  }
+
+  /** Hands the wire a heartbeat at `intervalMs` in place of the one it had, not started. */
+  private replaceHeartbeat(transport: ClientChannelTransport, intervalMs: number): Heartbeat {
     transport.detachHeartbeat()
-    if (!provisional) this.pingIntervalMs = intervalMs
-    this.provisionalHeartbeat = provisional
     const hb = new Heartbeat({
       intervalMs,
       pongTimeoutMs: pingDeadline(intervalMs),
@@ -62,7 +79,7 @@ class Liveness {
       onDead: () => this.owner.onPongTimeout(transport),
     })
     transport.attachHeartbeat(hb)
-    hb.start(!provisional)
+    return hb
   }
 
   /** How far the server has what the page sent on each channel named, or that it no longer holds it. */

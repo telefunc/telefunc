@@ -580,7 +580,7 @@ class ClientConnection
     this.transport.applyReconciledSettings(ctrl)
     const deferredOmitted = this.upgrade.committing?.deferredOmitted ?? null
     const outcome = this.exchange.applyReconciled(ctrl, deferredOmitted)
-    this.liveness.install(this.transport, ctrl.pingInterval, false)
+    this.liveness.install(this.transport, ctrl.pingInterval)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen) {
