@@ -25,7 +25,8 @@ import type {
  *  ones are bounded by memory too. The inbox is the one lane no want gates, so the only one to bridge. */
 const PENDING_INBOX_OVERHEAD_BYTES = 64
 type HeldDm = { msg: InboxMessage; bytes: number; ackResolve?: (reply: RoomResult) => void }
-type InboxForwarder = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<RoomResult> }
+/** Where the inbox delivers once it attaches: the local listeners, or the client holding the participant. */
+type InboxTarget = { deliver(msg: InboxMessage): void; deliverAck(msg: InboxMessage): Promise<RoomResult> }
 
 /** The private-message inbox and the leave lifecycle, identical on server and client; flavors supply the transport. */
 abstract class ParticipantBase implements LocalParticipant {
@@ -47,9 +48,6 @@ abstract class ParticipantBase implements LocalParticipant {
   /** DMs held until the first `listen()` (`null` once flushed); an ack DM carries the resolver of its reply. */
   private _pendingInbox: Fifo<HeldDm> | null = null
   private _pendingInboxBytes = 0
-  /** When a client holds this participant, its inbox forwards there instead of to local listeners (see
-   *  `RoomParticipantStub`). */
-  private _forwarder: InboxForwarder | null = null
 
   /** `rewinds` is its room view's, or its own for a participant a client holds alone. */
   constructor(
@@ -60,17 +58,6 @@ abstract class ParticipantBase implements LocalParticipant {
     this._meta = new MemberMeta({ meta: participant.meta, seq: 0, rewinds })
     this.selfDelivery = participant.selfDelivery
     this.identity = participant.identity
-  }
-
-  /** @internal Route this participant's inbox to a remote holder instead of local listeners. */
-  _setForwarder(forwarder: InboxForwarder): void {
-    this._forwarder = forwarder
-    this._flushHeld(forwarder)
-  }
-
-  /** @internal Already bound to a client holder (serialized once, via `RoomParticipantStub`)? */
-  get _isBound(): boolean {
-    return this._forwarder !== null
   }
 
   get meta(): ParticipantMeta {
@@ -128,10 +115,8 @@ abstract class ParticipantBase implements LocalParticipant {
     return unlisten
   }
 
-  /** @internal A DM for this member: to its remote holder if bound, else its listeners (held until the first
-   *  `listen()`). */
+  /** @internal A DM for this member: to its listeners, held until the first `listen()`. */
   _deliverMessage(msg: InboxMessage): void {
-    if (this._forwarder) return this._forwarder.deliver(msg)
     if (!this._messageCbs?.size) {
       if (this._left || this._inboxAttached) return
       this._hold(msg)
@@ -143,7 +128,6 @@ abstract class ParticipantBase implements LocalParticipant {
   /** @internal An `{ ack: true }` DM, resolved with the recipient's reply (or an error if it leaves first); never
    *  rejects. */
   _deliverMessageAck(msg: InboxMessage): Promise<RoomResult> {
-    if (this._forwarder) return this._forwarder.deliverAck(msg)
     if (this._messageCbs?.size) return this._fireInboxAck(msg)
     if (this._left) return Promise.resolve(DM_FAILURE.left)
     if (this._inboxAttached) return Promise.resolve(DM_FAILURE.noListener)
@@ -151,7 +135,7 @@ abstract class ParticipantBase implements LocalParticipant {
   }
 
   /** The inbox attached: DMs held until now go out in order, and nothing is held again. */
-  private _flushHeld(to: InboxForwarder): void {
+  protected _flushHeld(to: InboxTarget): void {
     this._inboxAttached = true
     const held = this._pendingInbox
     this._pendingInbox = null

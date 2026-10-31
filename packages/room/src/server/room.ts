@@ -28,6 +28,8 @@ import {
   type MemberMetaUpdate,
   type ParticipantStubMetadata,
   type RoomSnapshotMetadata,
+  type InboxMessage,
+  type RoomResult,
 } from '../protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import { type RoomModel, RoomState, RoomStateView } from '../state.js'
@@ -463,6 +465,8 @@ class ServerLocalParticipant extends ParticipantBase {
   /** @internal */
   readonly _room: ServerRoom
   private _metaMirror: MetaMirror | null = null
+  /** The client holding this participant, which its inbox forwards to instead of local listeners. */
+  private holder: RoomParticipantStub | null = null
   protected readonly _bugMessage = ROOM_BUG_MESSAGE
 
   constructor(serverRoom: ServerRoom, participant: ConstructorParameters<typeof ParticipantBase>[0]) {
@@ -511,14 +515,27 @@ class ServerLocalParticipant extends ParticipantBase {
     return await this._room._writes.publishBinaryFrame(frame, framed)
   }
 
+  /** @internal A DM for this member: to the client holding it, else its listeners. */
+  override _deliverMessage(msg: InboxMessage): void {
+    if (this.holder) return this.holder.deliver(msg)
+    super._deliverMessage(msg)
+  }
+
+  /** @internal An `{ ack: true }` DM: to the client holding it, else its listeners; never rejects. */
+  override _deliverMessageAck(msg: InboxMessage): Promise<RoomResult> {
+    if (this.holder) return this.holder.deliverAck(msg)
+    return super._deliverMessageAck(msg)
+  }
+
   /** @internal A client's hold on this participant, which its inbox forwards to. */
   _openStub({ end, publishShield }: Omit<RoomParticipantStubOptions, 'participant'>): ParticipantStubMetadata {
     // A LocalParticipant has one holder; rebinding would overwrite its inbox forwarder and let either close drop it.
     assertUsage(
-      !this._isBound,
+      this.holder === null,
       'This LocalParticipant is already bound to a client and cannot be handed to another. A LocalParticipant is a single member: give each client its own join(), or share a getParticipants() view (which is read-only) instead.',
     )
-    this._setForwarder(new RoomParticipantStub({ participant: this, end, publishShield }))
+    this.holder = new RoomParticipantStub({ participant: this, end, publishShield })
+    this._flushHeld(this.holder)
     return {
       channelId: end.id,
       roomId: this._room.id,
