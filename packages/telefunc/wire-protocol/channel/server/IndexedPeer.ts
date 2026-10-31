@@ -1,8 +1,8 @@
 export { IndexedPeer }
 export type { PeerSender }
 
-import { ACK_STATUS, encode } from '../../wire/connectionFrame.js'
-import type { AckResultStatus, ErrorReason } from '../../wire/connectionFrame.js'
+import { ACK_STATUS, encode } from '../../wire/frame.js'
+import type { AckResultStatus, ErrorReason } from '../../wire/frame.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import type { SendWait } from '../../flowControl/Link.js'
 import type { WindowKind } from '../../flowControl/FlowControl.js'

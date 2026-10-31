@@ -26,7 +26,7 @@ import {
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
-} from '../../wire/connectionFrame.js'
+} from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import type { ReattachState } from '../../wire/payloads.js'
 import type { WirePublishInfo } from '../../wire/publishInfo.js'

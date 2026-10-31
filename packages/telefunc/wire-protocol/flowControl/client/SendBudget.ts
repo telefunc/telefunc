@@ -9,7 +9,7 @@ import {
 import { PieceSender, type PieceSenderOptions, type SendRoom } from '../pieces.js'
 import type { Uplink } from './Uplink.js'
 import type { Downlink } from './Downlink.js'
-import type { PiecesAck } from '../../wire/connectionFrame.js'
+import type { PiecesAck } from '../../wire/frame.js'
 import { isSequencedTag } from '../../wire/tags.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 

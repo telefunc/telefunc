@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Broadcast, ServerBroadcast } from './ServerBroadcast.js'
 import { ReplayBuffer } from '../channel/ReplayBuffer.js'
-import { ACK_STATUS, decode } from '../wire/connectionFrame.js'
+import { ACK_STATUS, decode } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { IndexedPeer } from '../channel/server/IndexedPeer.js'
 import { getBroadcastAdapter, _resetBroadcastAdapterForTesting, DefaultBroadcastAdapter } from './broadcastAdapter.js'

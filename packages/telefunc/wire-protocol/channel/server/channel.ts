@@ -41,7 +41,7 @@ import { ReplayBuffer } from '../ReplayBuffer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { assert } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { ACK_STATUS, ERROR_REASON, isSequencedFrame } from '../../wire/connectionFrame.js'
+import { ACK_STATUS, ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
@@ -51,7 +51,7 @@ import type {
   ChannelDataFrame,
   ChannelFrame,
   ErrorReason,
-} from '../../wire/connectionFrame.js'
+} from '../../wire/frame.js'
 import type { ReattachState } from '../../wire/payloads.js'
 
 /** Peer-authored JSON: a parse failure is the peer's, so it surfaces as a protocol violation. */

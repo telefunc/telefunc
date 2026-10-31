@@ -7,7 +7,7 @@ import { PagePieceReceiver } from '../../flowControl/client/PagePieceReceiver.js
 import { SendBudget } from '../../flowControl/client/SendBudget.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
-import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/connectionFrame.js'
+import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { OutboundFrame, ProbeWire, TransportOwner, UpgradeTarget } from './connection.js'

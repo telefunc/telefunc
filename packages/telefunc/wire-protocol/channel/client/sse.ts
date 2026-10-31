@@ -20,7 +20,7 @@ import { createPushReadableStream, type PushReadableStream } from '../../../util
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'
 import { REQUEST_KIND, REQUEST_KIND_HEADER, getMarkedRequestUrl } from '../../wire/requestKind.js'
-import { decode } from '../../wire/connectionFrame.js'
+import { decode } from '../../wire/frame.js'
 import { TAG, isSequencedTag } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import { encodeLengthPrefixedBlob, encodeSseBatch, encodeSseRequest, encodeSseRequestMetadata } from '../sseRequest.js'

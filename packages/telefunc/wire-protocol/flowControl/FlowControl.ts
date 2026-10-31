@@ -12,7 +12,7 @@ import {
   FC_SELF_TIME_WINDOW_MS,
   FC_SELF_UTIL_THRESHOLD,
 } from '../constants.js'
-import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type BdpPingAck } from '../wire/connectionFrame.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, type BdpPingAck } from '../wire/frame.js'
 import { Fifo } from '../../utils/Fifo.js'
 
 /** A batching wire sends `urgent-flow-control` at once; an `acknowledgement` may ride the next message it sends. */

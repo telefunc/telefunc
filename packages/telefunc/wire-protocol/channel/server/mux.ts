@@ -22,11 +22,11 @@ import {
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
 } from '../../constants.js'
-import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/connectionFrame.js'
+import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/frame.js'
 import { TAG, isConnCtrlTag } from '../../wire/tags.js'
 import { seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
-import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/connectionFrame.js'
+import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { PathRoom } from '../../flowControl/server/PathRoom.js'

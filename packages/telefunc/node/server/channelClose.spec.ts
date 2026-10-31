@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest'
 
 import { ReplayBuffer } from '../../wire-protocol/channel/ReplayBuffer.js'
-import { ACK_STATUS, decode } from '../../wire-protocol/wire/connectionFrame.js'
+import { ACK_STATUS, decode } from '../../wire-protocol/wire/frame.js'
 import { TAG } from '../../wire-protocol/wire/tags.js'
 import { ProtocolViolationError } from '../../wire-protocol/wire/protocolViolation.js'
 import { IndexedPeer } from '../../wire-protocol/channel/server/IndexedPeer.js'

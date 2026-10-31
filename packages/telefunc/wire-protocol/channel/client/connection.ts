@@ -39,17 +39,10 @@ import {
 } from '../../constants.js'
 import { replayWindow, type WindowKind } from '../../flowControl/FlowControl.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
-import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/connectionFrame.js'
+import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
-import type {
-  AckResultStatus,
-  BdpPingAck,
-  ChannelFrame,
-  DecodedFrame,
-  PingEntry,
-  PongEntry,
-} from '../../wire/connectionFrame.js'
+import type { AckResultStatus, BdpPingAck, ChannelFrame, DecodedFrame, PingEntry, PongEntry } from '../../wire/frame.js'
 import type {
   ReadyPayload,
   ReattachState,
