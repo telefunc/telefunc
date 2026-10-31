@@ -534,22 +534,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._receiveCredit.onConsumed(bytes)
         return
       }
-      const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners.list()) {
-        try {
-          const result = cb(data)
-          if (isPromise(result)) {
-            pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
-          }
-        } catch (err) {
-          if (this._handleCallbackError(err)) return
-        }
-      }
-      if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
-      } else {
-        this._receiveCredit.onConsumed(bytes)
-      }
+      this.callListeners(this._listeners, data, bytes)
     } finally {
       this._selfTime.recordSince(t0)
     }
@@ -570,24 +555,30 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const t0 = performance.now()
     try {
       this._receiveCredit.onReceived(bytes)
-      const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners.list()) {
-        try {
-          const result = cb(data)
-          if (isPromise(result)) {
-            pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
-          }
-        } catch (err) {
-          if (this._handleCallbackError(err)) return
-        }
-      }
-      if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
-      } else {
-        this._receiveCredit.onConsumed(bytes)
-      }
+      this.callListeners(this._binaryListeners, data, bytes)
     } finally {
       this._selfTime.recordSince(t0)
+    }
+  }
+
+  /** Calls each of `listeners` with `value`; its `bytes` are consumed once the promises they return settle. A listener
+   *  that throws `Abort` stops the rest. */
+  private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T, bytes: number): void {
+    const pending: Promise<unknown>[] = []
+    for (const cb of listeners.list()) {
+      try {
+        const result = cb(value)
+        if (isPromise(result)) {
+          pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
+        }
+      } catch (err) {
+        if (this._handleCallbackError(err)) return
+      }
+    }
+    if (pending.length > 0) {
+      Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
+    } else {
+      this._receiveCredit.onConsumed(bytes)
     }
   }
 

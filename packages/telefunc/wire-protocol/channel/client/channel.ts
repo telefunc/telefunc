@@ -326,62 +326,52 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._fireOpen()
   }
 
-  _onTransportMessage(data: string, bytes: number): void {
+  _onPeerMessage(data: string, bytes: number): void {
     const t0 = performance.now()
     try {
       this._receiveCredit.onReceived(bytes)
-      const parsed = parse(data) as ChannelData<ServerToClient>
-      const pending: Promise<unknown>[] = []
-      for (const cb of this._listeners.list()) {
-        try {
-          const result = cb(parsed)
-          if (isPromise(result)) {
-            pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
-          }
-        } catch (err) {
-          if (this._handleCallbackError(err)) return
-        }
-      }
-      if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
-      } else {
-        this._receiveCredit.onConsumed(bytes)
-      }
+      this.callListeners(this._listeners, parse(data) as ChannelData<ServerToClient>, bytes)
     } finally {
       this._selfTime.recordSince(t0)
     }
   }
 
-  _onTransportAckReqMessage(data: string, seq: number): Promise<void> {
+  _onPeerAckReqMessage(data: string, seq: number): Promise<void> {
     return this._trackAck(this._answerAckReq(this._listeners, parse(data) as ChannelData<ServerToClient>, seq))
   }
 
-  _onTransportBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
+  _onPeerBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
     return this._trackAck(this._answerAckReq(this._binaryListeners, data, seq))
   }
 
-  _onTransportBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
+  _onPeerBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
     const t0 = performance.now()
     try {
       this._receiveCredit.onReceived(bytes)
-      const pending: Promise<unknown>[] = []
-      for (const cb of this._binaryListeners.list()) {
-        try {
-          const result = cb(data)
-          if (isPromise(result)) {
-            pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
-          }
-        } catch (err) {
-          if (this._handleCallbackError(err)) return
-        }
-      }
-      if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
-      } else {
-        this._receiveCredit.onConsumed(bytes)
-      }
+      this.callListeners(this._binaryListeners, data, bytes)
     } finally {
       this._selfTime.recordSince(t0)
+    }
+  }
+
+  /** Calls each of `listeners` with `value`; its `bytes` are consumed once the promises they return settle. A listener
+   *  that throws `Abort` stops the rest. */
+  private callListeners<T>(listeners: Listeners<(value: T) => unknown>, value: T, bytes: number): void {
+    const pending: Promise<unknown>[] = []
+    for (const cb of listeners.list()) {
+      try {
+        const result = cb(value)
+        if (isPromise(result)) {
+          pending.push(result.catch((err: unknown) => this._handleCallbackError(err)))
+        }
+      } catch (err) {
+        if (this._handleCallbackError(err)) return
+      }
+    }
+    if (pending.length > 0) {
+      Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
+    } else {
+      this._receiveCredit.onConsumed(bytes)
     }
   }
 
@@ -403,16 +393,16 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _dispatchDataFrame(frame: ChannelDataFrame): void {
     switch (frame.tag) {
       case TAG.TEXT:
-        this._onTransportMessage(frame.text, frame.bytes)
+        this._onPeerMessage(frame.text, frame.bytes)
         return
       case TAG.TEXT_ACK_REQ:
-        void this._onTransportAckReqMessage(frame.text, frame.seq)
+        void this._onPeerAckReqMessage(frame.text, frame.seq)
         return
       case TAG.BINARY:
-        this._onTransportBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
+        this._onPeerBinaryMessage(frame.data as Uint8Array<ArrayBuffer>, frame.bytes)
         return
       case TAG.BINARY_ACK_REQ:
-        void this._onTransportBinaryAckReqMessage(frame.data, frame.seq)
+        void this._onPeerBinaryAckReqMessage(frame.data, frame.seq)
         return
       case TAG.ACK_RES:
         this._onPeerAckRes(frame.ackedSeq, frame.text, frame.status)
@@ -432,10 +422,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _dispatchCtrl(frame: ChannelCtrlFrame): void {
     switch (frame.tag) {
       case TAG.CLOSE:
-        this._onTransportCloseRequest(frame.timeoutMs)
+        this._onPeerCloseRequest(frame.timeoutMs)
         return
       case TAG.CLOSE_ACK:
-        this._onTransportCloseAck()
+        this._onPeerCloseAck()
         return
       case TAG.WINDOW:
         this._sendCredit.onPeerByteWindow(frame.bytes)
@@ -477,7 +467,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  _onTransportCloseRequest(timeoutMs: number): void {
+  _onPeerCloseRequest(timeoutMs: number): void {
     if (this._didTerminate) return
     const peerDeadline = performance.now() + normalizeCloseTimeout(timeoutMs)
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
@@ -490,7 +480,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  _onTransportCloseAck(): void {
+  _onPeerCloseAck(): void {
     if (this._didTerminate) return
     this._didReceiveCloseAck = true
     this._expectCloseAck = false
@@ -722,18 +712,18 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   override _dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH) {
-      this._onTransportPublish(frame.text, frame.info, frame.bytes)
+      this._onPeerPublish(frame.text, frame.info, frame.bytes)
       return
     }
     if (frame.tag === TAG.PUBLISH_BINARY) {
-      this._onTransportPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
+      this._onPeerPublishBinary(frame.data as Uint8Array<ArrayBuffer>, frame.info, frame.bytes)
       return
     }
     super._dispatchDataFrame(frame)
   }
 
   /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
-  _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
+  _onPeerPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
     this._receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
@@ -748,7 +738,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
     this._receiveCredit.onPublishConsumed(bytes)
   }
 
-  _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
+  _onPeerPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
     this._receiveCredit.onPublishArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners.list()) {
