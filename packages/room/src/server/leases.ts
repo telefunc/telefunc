@@ -28,7 +28,7 @@ import { completeCleanup, evictMember, type PendingMemberCleanup } from './membe
 // What a server's lease hosts (its members' and pages' views' cells), its renewal, and the reaping of lapsed leases.
 
 /** An exchange hosting something under a lease found it lost. */
-const LEASE_LOST: unique symbol = Symbol.for('telefunc.RoomLeaseLost')
+const LEASE_LOST: unique symbol = Symbol.for('telefunc.RoomSessionLost')
 
 /** Commits what `writesOf` plans under the lease in one exchange with its cell, which it only expects while live: a
  *  lease found lost is replaced, and the write planned again under the new one. */
