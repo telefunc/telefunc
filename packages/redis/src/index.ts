@@ -66,15 +66,15 @@ class RedisTransport implements BroadcastTransport {
     this.subscriber = options.redis.duplicate()
     this.prefix = options.prefix ?? DEFAULT_PREFIX
     this.publisher.defineCommand(PUBLISH_CMD, { numberOfKeys: 2, lua: PUBLISH_LUA })
-    this.subscriber.on('messageBuffer', this._onMessage)
+    this.subscriber.on('messageBuffer', this.onMessage)
   }
 
   async send(key: string, payload: string): Promise<{ seq: number; timestamp: number }> {
-    return this._publish(this.channelKey(key, 't'), this.seqKey(key), textEncoder.encode(payload))
+    return this.publish(this.channelKey(key, 't'), this.seqKey(key), textEncoder.encode(payload))
   }
 
   async sendBinary(key: string, payload: Uint8Array): Promise<{ seq: number; timestamp: number }> {
-    return this._publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
+    return this.publish(this.channelKey(key, 'b'), this.seqKey(key), payload)
   }
 
   listen(key: string, onMessage: TextOnMessage): () => void {
@@ -112,7 +112,7 @@ class RedisTransport implements BroadcastTransport {
     this.subscribesAcked = this.subscribesAcked.then(() => acked)
   }
 
-  private readonly _onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
+  private readonly onMessage = (channelBytes: Uint8Array, frame: Uint8Array): void => {
     assert(frame.byteLength >= HEADER_BYTES, 'Malformed publish frame: header too short')
     const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength)
     const seq = view.getUint32(0, false) * U32_RANGE + view.getUint32(4, false)
@@ -130,7 +130,7 @@ class RedisTransport implements BroadcastTransport {
 
   // ── Publish (private) ─────────────────────────────────────────────────
 
-  private async _publish(
+  private async publish(
     channelKey: string,
     seqKey: string,
     payload: Uint8Array,
