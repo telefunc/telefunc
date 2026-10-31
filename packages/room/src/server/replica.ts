@@ -239,7 +239,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   }
 
   /** Applies a presence event to the model and relays what it changed to the clients: as the lane carried it when
-   *  `carried` is given, else as applied. A leave reaches them from `_onLeave`, whatever applied it, and an update as
+   *  `carried` is given, else as applied. A leave reaches them from `memberLeft`, whatever applied it, and an update as
    *  each one it let apply, in seq order. */
   applyControl(event: PresenceEvent, carried?: () => string): void {
     const relay = () => this._relayControl(event, carried ?? (() => unorderedEventText(event)))
