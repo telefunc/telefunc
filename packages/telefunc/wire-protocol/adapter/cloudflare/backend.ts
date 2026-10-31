@@ -16,7 +16,7 @@ import { currentCloudflareSession, requireCloudflareSession } from './session.js
 class CloudflareBackend implements BroadcastDriver {
   readonly broadcast: CloudflareBroadcast
   readonly subscriptions: SubscriptionDriver<BroadcastRoute>
-  readonly #namespace: () => TelefuncExtensionNamespace
+  private readonly namespace: () => TelefuncExtensionNamespace
 
   constructor({
     namespace,
@@ -26,7 +26,7 @@ class CloudflareBackend implements BroadcastDriver {
     broadcast: CloudflareBroadcast
   }) {
     this.broadcast = broadcast
-    this.#namespace = namespace
+    this.namespace = namespace
     this.subscriptions = {
       bind: (source) => {
         const session = requireCloudflareSession()
@@ -41,7 +41,7 @@ class CloudflareBackend implements BroadcastDriver {
 
   /** The planes of the Cloudflare extensions registered so far. */
   get planes(): { readonly [key: symbol]: (kit: never) => unknown } {
-    return getCloudflareExtensionPlanes(this.#namespace)
+    return getCloudflareExtensionPlanes(this.namespace)
   }
 
   publish(route: BroadcastRoute, payload: BroadcastPayload): Promise<PublishResult> {

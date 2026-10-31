@@ -29,7 +29,7 @@ function isBlobDownload(value: unknown): value is BlobDownload {
 /** File-shaped streaming download. Inherits Blob/File methods (`stream`/`arrayBuffer`/
  *  `text`/`slice`) from `LazyFile`; overrides `bytes` to use the StreamSource's built-in
  *  onChunk hook for progress + cancel detection.
- *  Keep this module's implementation fields as ECMAScript `#private`: `wrapProxy` forwards own keys
+ *  Keep the download classes' `#core` as ECMAScript `#private`: `wrapProxy` forwards own keys
  *  and client `close()` recursively traverses `Object.values()`, so enumerability changes behavior. */
 class FileDownload extends LazyFile {
   readonly [FILE_DOWNLOAD_BRAND] = true
@@ -124,16 +124,16 @@ class BlobDownload extends LazyBlob {
  *  everything except `saveToMemory` (return type differs) and the brand. */
 class DownloadCore {
   readonly state: ProgressState
-  readonly #source: StreamSource
-  readonly #name: string
-  readonly #type: string
-  readonly #markConsumed: () => void
+  private readonly source: StreamSource
+  private readonly name: string
+  private readonly type: string
+  private readonly markConsumed: () => void
 
   constructor(source: StreamSource, total: number | undefined, name: string, type: string, markConsumed: () => void) {
-    this.#source = source
-    this.#name = name
-    this.#type = type
-    this.#markConsumed = markConsumed
+    this.source = source
+    this.name = name
+    this.type = type
+    this.markConsumed = markConsumed
     this.state = makeState(total)
   }
 
@@ -143,38 +143,38 @@ class DownloadCore {
   }
 
   cancel(): void {
-    this.#source.cancel()
+    this.source.cancel()
   }
 
   /** Returns the underlying source's instrumented stream — fires progress + errors on
    *  cancel/truncation. Inherited `bytes`/`text`/`arrayBuffer` flow through this. */
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    this.#markConsumed()
-    return this.#source.stream({ expectedSize: this.state.total, onChunk: (n) => this.state.fire(n) })
+    this.markConsumed()
+    return this.source.stream({ expectedSize: this.state.total, onChunk: (n) => this.state.fire(n) })
   }
 
   async saveToDisk(opts: { mode?: 'picker' | 'memory' | 'opfs' } = {}): Promise<File> {
-    this.#markConsumed()
+    this.markConsumed()
     const showPicker = getShowSaveFilePicker()
     const mode = opts.mode ?? (showPicker ? 'picker' : 'memory')
     if (mode === 'picker') {
       if (!showPicker) {
         throw new Error('saveToDisk({ mode: "picker" }) requires window.showSaveFilePicker')
       }
-      const handle = await openPickerHandle(showPicker, this.#name, this.#type)
-      return pipeAndGetFile(this.#source, this.state, handle)
+      const handle = await openPickerHandle(showPicker, this.name, this.type)
+      return pipeAndGetFile(this.source, this.state, handle)
     }
     if (mode === 'opfs') {
-      return streamToOpfsThenTrigger(this.#source, this.state, this.#name)
+      return streamToOpfsThenTrigger(this.source, this.state, this.name)
     }
-    return bufferThenTrigger(this.#source, this.state, this.#name, this.#type)
+    return bufferThenTrigger(this.source, this.state, this.name, this.type)
   }
 
   async saveToOpfs(path?: string): Promise<File> {
-    this.#markConsumed()
-    const finalPath = path ?? `__telefunc_opfs/${randomUuid()}${this.#name ? `-${this.#name}` : ''}`
+    this.markConsumed()
+    const finalPath = path ?? `__telefunc_opfs/${randomUuid()}${this.name ? `-${this.name}` : ''}`
     const handle = await openOpfsHandle(finalPath)
-    return pipeAndGetFile(this.#source, this.state, handle)
+    return pipeAndGetFile(this.source, this.state, handle)
   }
 }
 
