@@ -184,13 +184,13 @@ describe('FlowControl — BDP integration', () => {
 })
 
 describe('FlowControl — reset (transport reattach)', () => {
-  // The BDP estimator's in-flight ping is dropped on reset (its ack rode the
+  // The BDP estimator's in-flight ping is dropped on an attach to another wire (its ack rode the
   // prior wire and won't arrive). A fresh ping must be allowed to fire next.
   it('drops the in-flight BDP ping so the next receive can fire a fresh one', () => {
     const { flow, emit } = makeFlow()
     flow.onReceived(1024) // first ping in flight
     expect(emit.bdpPingCalls).toBe(1)
-    flow.reattach()
+    flow.attach({ sendWait: { waitNow: () => 0, longestWaitSince: () => 0 } })
     vi.advanceTimersByTime(BDP_PING_MIN_INTERVAL_MS)
     flow.onReceived(1024)
     expect(emit.bdpPingCalls).toBe(2)

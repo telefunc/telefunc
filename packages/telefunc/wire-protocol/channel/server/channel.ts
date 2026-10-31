@@ -158,7 +158,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    this._flow = new FlowControl({ owner: this, sendWait: () => this._peer?.sender.sendWait() ?? null })
+    this._flow = new FlowControl({ owner: this })
     const c = getServerConfig().channel
     this._flow.fitReplays(
       replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary),
@@ -392,10 +392,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._ttlTimer = null
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer)
     this._reconnectTimer = null
-    // The wire of the last peer lost nothing to repair, and still answers the probe in flight.
-    const rewired = this._peer?.sender !== peer.sender
     this._peer = peer
-    if (rewired) this._flow.reattach()
+    this._flow.attach({ sendWait: peer.sender.sendWait() })
     this.flushOfflineBuffer(peer)
     this._sendPendingAckRes(peer)
     if (state?.broadcast) {

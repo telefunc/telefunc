@@ -1,5 +1,5 @@
 export { FlowControl, replayWindow }
-export type { AttachedDownlink, AttachedUplink, CreditOwner, WindowKind }
+export type { AttachedDownlink, CreditOwner, CreditWire, WindowKind }
 
 import { BdpEstimator } from './BdpEstimator.js'
 import type { Link, SendWait } from './Link.js'
@@ -32,13 +32,14 @@ type FlowControlOptions = {
   owner: CreditOwner
   /** A page's: Chromium takes what a page queued on a socket only between tasks, so its sender yields past this. */
   yieldBytes?: number
-  /** How long frames that go at once wait behind the wire's own data where no attach tells it, `null` for unknown. */
-  sendWait?(): SendWait | null
 }
 
-/** The page's uplink, as a channel's credit reads it. */
-type AttachedUplink = SendWait & {
-  readonly link: Link
+/** The wire a channel's credit attaches on: what frames that go at once wait behind, and on a page its link and downlink. */
+type CreditWire = {
+  readonly sendWait: SendWait
+  /** A page's uplink's: its round trip, which an answer to a `BDP_PING` says. */
+  readonly link?: Link
+  readonly downlink?: AttachedDownlink
 }
 
 /** The page's downlink, as a channel's credit tells it what it granted and what arrived. */
@@ -55,10 +56,9 @@ function replayWindow(text: number, binary: number): number {
 /** A channel's byte and message credit both ways, as cumulative limits, as QUIC's MAX_DATA. */
 class FlowControl {
   private readonly owner: CreditOwner
-  private readonly _sendWait: FlowControlOptions['sendWait']
   private _bdp = new BdpEstimator()
-  /** The page's uplink of the last `attach`. */
-  private _uplink: AttachedUplink | null = null
+  /** The wire of the last `attach`. */
+  private wire: CreditWire | null = null
   private _downlink: AttachedDownlink | null = null
   // Sender side: what this side has sent, and the peer's limits.
   private _sentBytes = 0
@@ -110,10 +110,9 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  constructor({ owner, yieldBytes, sendWait }: FlowControlOptions) {
+  constructor({ owner, yieldBytes }: FlowControlOptions) {
     this.owner = owner
     this._yieldBytes = yieldBytes ?? Infinity
-    this._sendWait = sendWait
     macrotaskYield.assertSupported()
   }
 
@@ -133,7 +132,7 @@ class FlowControl {
 
   /** The last `attach`'s wire's path round trip, `Infinity` where unmeasured: what an answer to a `BDP_PING` says. */
   pathRtt(): number {
-    return this._uplink?.link.pathRtt ?? Infinity
+    return this.wire?.link?.pathRtt ?? Infinity
   }
 
   /** Keeps what credit lets be in flight within the replay buffers (see `replayWindow`). */
@@ -210,9 +209,9 @@ class FlowControl {
     if (this._bdp.onReceive(bytes, this._wireWait())) this.owner._sendBdpPing(this._bdp.probe)
   }
 
-  /** How long the frames that go at once wait behind the wire's own data: the attached uplink's, else `sendWait`'s. */
+  /** How long the frames that go at once wait behind the wire's own data. */
   private _wireWait(): SendWait | null {
-    return this._uplink ?? this._sendWait?.() ?? null
+    return this.wire?.sendWait ?? null
   }
 
   /** Receiver-side: a probe number for an attach on `link`'s RECONCILE entry; `undefined` where `link` is measured. */
@@ -302,15 +301,15 @@ class FlowControl {
     this._curBucketStart = now
   }
 
-  /** Attach on `uplink`'s wire. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
-  attach(uplink: AttachedUplink, downlink: AttachedDownlink): void {
-    if (uplink !== this._uplink) {
-      this._uplink = uplink
-      this._downlink = downlink
-      downlink.granted(this._grantedBytes - this._receivedBytes)
-      this.reattach()
+  /** Attach on `wire`. The wire of the last attach lost nothing to repair, and still answers the probe in flight. */
+  attach(wire: CreditWire): void {
+    if (wire.sendWait !== this.wire?.sendWait) {
+      this.wire = wire
+      this._downlink = wire.downlink ?? null
+      wire.downlink?.granted(this._grantedBytes - this._receivedBytes)
+      this.advertiseOnNewWire()
     }
-    this._bdp.attach(uplink.link)
+    if (wire.link) this._bdp.attach(wire.link)
   }
 
   /** Frames held back arrived at once: the round in flight doesn't count them as delivered within its round trip. */
@@ -319,7 +318,7 @@ class FlowControl {
   }
 
   /** Attach on another wire than the last, or the first: the limits go out again, which repairs what the prior lost. */
-  reattach(): void {
+  private advertiseOnNewWire(): void {
     this._bdp.reset()
     if (!this._wired) {
       this._wired = true
