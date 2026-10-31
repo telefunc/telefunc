@@ -1,6 +1,6 @@
 export { Match }
 
-import { Room, type LocalParticipant } from 'telefunc'
+import { type LocalParticipant, Room } from '@telefunc/room'
 import { NEUTRAL, TICK_HZ, TICK_MS, KEYFRAME_TICKS, type Team } from '../../shared/constants'
 import { encodeFrame } from '../../shared/protocol'
 import type { Command, MatchRoom, PlayerMeta } from '../../shared/types'

@@ -27,7 +27,7 @@ export {
   showToast,
 }
 
-import type { LocalParticipant, RoomSnapshotView } from 'telefunc'
+import type { LocalParticipant, RoomSnapshotView } from '@telefunc/room'
 import { create } from 'zustand'
 import { BLUE, NEUTRAL, RED, type Team } from '../shared/constants'
 import type { ChatMsg, MatchAuthority, MatchListing, MatchMeta, MatchRoom, PlayerMeta } from '../shared/types'

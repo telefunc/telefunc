@@ -1,6 +1,6 @@
 export { guardMatchRoom }
 
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 import { MATCH_SIZE, type MatchRoom } from '../shared/types'
 
 // Server-side policy for a match room. Attached to every instance that hands out memberships.

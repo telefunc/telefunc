@@ -1,6 +1,7 @@
 export { onEnterMatch, onStartMatch }
 
-import { Abort, getContext, type LocalParticipant } from 'telefunc'
+import type { LocalParticipant } from '@telefunc/room'
+import { Abort, getContext } from 'telefunc'
 import { BLUE, NEUTRAL, RED, type Team } from '../shared/constants'
 import { getMatchRoom, getPlayerTeam, startMatch } from '../server/matches'
 import { guardMatchRoom } from '../server/guards'

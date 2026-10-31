@@ -3,7 +3,7 @@
 
 export { worldBuffer, startStream, stopStream, sendCommand, netStats }
 
-import type { LocalParticipant } from 'telefunc'
+import type { LocalParticipant } from '@telefunc/room'
 import { BLUE, RED, type Team } from '../shared/constants'
 import { decodeFrame } from '../shared/protocol'
 import type { Command, MatchAuthority, PlayerMeta } from '../shared/types'

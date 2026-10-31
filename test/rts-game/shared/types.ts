@@ -1,7 +1,7 @@
 // Types that cross the wire: room/participant metadata, the typed `Room` aliases, and the
 // client→authority command protocol.
 
-import type { RemoteParticipant, Room } from 'telefunc'
+import type { RemoteParticipant, Room } from '@telefunc/room'
 import type { Team } from './constants'
 
 export const MATCH_SIZE = 20 // 10v10 — the server seat is not counted (excluded from presence)

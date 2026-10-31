@@ -1,7 +1,7 @@
 export { createMatch, getMatchRoom, listMatches, startMatch, getPlayerTeam, MATCH_PREFIX }
 
 import { randomUUID } from 'node:crypto'
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 import { BLUE, RED, type Team } from '../shared/constants'
 import {
   type ChatMsg,
