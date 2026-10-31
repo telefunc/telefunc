@@ -1167,13 +1167,11 @@ class ClientConnection implements MuxConnection {
     // Settled-reconcile gate; a flush above may have just re-armed `reconciling` — the next
     // RECONCILED retries via `handleReconciled`.
     if (this.reconciling) return
-    const nextTransport = UPGRADE_PATH[this.transport.type]
-    if (!nextTransport) return
-    if (!this.isTransportUpgradeAllowed(nextTransport)) return
-    if (!this.serverTransports?.includes(nextTransport)) return
     // Only SSE can carry a barrier as its last frame, and only SSE has anywhere to upgrade to.
     if (this.transport.type !== CHANNEL_TRANSPORT.SSE) return
-    void this.probeAndUpgrade(this.transport as UpgradeSource, nextTransport)
+    if (!this.connectionOptions.transports.includes(CHANNEL_TRANSPORT.WS)) return
+    if (!this.serverTransports?.includes(CHANNEL_TRANSPORT.WS)) return
+    void this.probeAndUpgrade(this.transport as UpgradeSource)
   }
 
   private fallbackToSse(err: Error): void {
@@ -1190,18 +1188,14 @@ class ClientConnection implements MuxConnection {
     this.handleTransportLoss(err, false)
   }
 
-  private isTransportUpgradeAllowed(nextTransport: ChannelTransport): boolean {
-    return this.connectionOptions.transports.includes(nextTransport)
-  }
-
-  private async probeAndUpgrade(from: UpgradeSource, targetTransport: UpgradeTargetTransport): Promise<void> {
+  private async probeAndUpgrade(from: UpgradeSource): Promise<void> {
     this.flushPendingRegisterReconcile()
     const sessionId = this.sessionId
     if (sessionId === null) return
     const attempt = new AbortController()
     this.enterUpgradeStaging(attempt)
     try {
-      const to = UPGRADE_TARGET_REGISTRY[targetTransport](this.telefuncUrl, this)
+      const to = new WsTransport({ telefuncUrl: this.telefuncUrl, owner: this })
       const session = await this.stageProbe(to, sessionId, attempt)
       if (!session) return
       await this.commitBarrier(from, to, session, attempt)
@@ -1806,20 +1800,6 @@ const TRANSPORT_REGISTRY: Record<
   [CHANNEL_TRANSPORT.WS]: (telefuncUrl, _options, owner) => new WsTransport({ telefuncUrl, owner }),
   [CHANNEL_TRANSPORT.SSE]: (telefuncUrl, options, owner) =>
     new SseTransport({ telefuncUrl, fetchImpl: options.fetchImpl, userHeaders: options.headers, owner }),
-}
-
-/** Defines which transport can upgrade to which. */
-type UpgradeTargetTransport = typeof CHANNEL_TRANSPORT.WS
-
-const UPGRADE_PATH: Partial<Record<ChannelTransport, UpgradeTargetTransport>> = {
-  [CHANNEL_TRANSPORT.SSE]: CHANNEL_TRANSPORT.WS,
-}
-
-const UPGRADE_TARGET_REGISTRY: Record<
-  UpgradeTargetTransport,
-  (telefuncUrl: string, owner: ClientConnection) => UpgradeTarget
-> = {
-  [CHANNEL_TRANSPORT.WS]: (telefuncUrl, owner) => new WsTransport({ telefuncUrl, owner }),
 }
 
 /** What a channel the server ended with an ERROR of `reason` closes with. */
