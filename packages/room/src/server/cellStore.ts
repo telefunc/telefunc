@@ -90,22 +90,25 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
   if (failure) throw failure.error
 }
 
-/** Deletes the cells under `prefix`, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn, on `slice` if given;
- *  `mark` goes with the last page. False once the incarnation is stale. */
-async function dropCells(
-  roomId: string,
-  inc: string,
-  prefix: string,
-  { mark, slice = new Slice() }: { mark?: string; slice?: Slice } = {},
-): Promise<boolean> {
+/** Deletes the cells under `prefix`, a page per exchange and a `ROOM_PLAN_SLICE_MS` slice per turn; `mark` goes with
+ *  the last page. False once the incarnation is stale. */
+async function dropCells(roomId: string, inc: string, prefix: string, mark?: string): Promise<boolean> {
   let held: string[] = []
+  const slice = new Slice()
   for await (const page of getRoomBackend().readCellPages(roomId, inc, prefix)) {
-    if ('staleInc' in page || (held.length > 0 && !(await deleteCells(roomId, inc, held)))) return false
-    held = [...page.cells.keys()]
+    if ('staleInc' in page) return false
+    // Without a mark, each page goes as it is read; with one, a page waits for the next, so the last goes with it.
+    if (mark === undefined) {
+      if (!(await deleteCells(roomId, inc, page.cells.keys()))) return false
+    } else {
+      if (held.length > 0 && !(await deleteCells(roomId, inc, held))) return false
+      held = [...page.cells.keys()]
+    }
     if (slice.over) await slice.next()
   }
-  if (mark !== undefined) held.push(mark)
-  return held.length === 0 || (await deleteCells(roomId, inc, held))
+  if (mark === undefined) return true
+  held.push(mark)
+  return await deleteCells(roomId, inc, held)
 }
 
 /** Deletes `keys` in one exchange; false once the incarnation is stale. */

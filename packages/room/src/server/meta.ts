@@ -41,7 +41,7 @@ import {
   roomMetaGenPrefix,
 } from './cells.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
-import { dropCells, readOpenCells } from './cellStore.js'
+import { deleteCells, dropCells, readOpenCells } from './cellStore.js'
 import { commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import type { RoomIncarnation } from './lifecycle.js'
 
@@ -239,12 +239,20 @@ function committed(
  *  its last page. A marked generation stopped being `meta:gen` in the exchange that marked it, so whoever finishes a
  *  mark, a later replace or the heartbeat, drops no live key. */
 async function dropReplacedMetaGenerations(roomId: string, inc: string): Promise<void> {
-  const marks = await getRoomBackend().readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
+  const backend = getRoomBackend()
+  const marks = await backend.readCells(roomId, inc, { prefix: META_DROP_CELL_PREFIX })
   if ('staleInc' in marks) return
   const slice = new Slice()
+  // The loop is `dropCells`' marked one, inline so that a replace's drop runs in this one async frame.
   for (const [mark, raw] of marks.cells) {
-    const prefix = roomMetaGenPrefix(decodeRoomRecord<number>(raw))
-    if (!(await dropCells(roomId, inc, prefix, { mark, slice }))) return
+    let held: string[] = []
+    for await (const page of backend.readCellPages(roomId, inc, roomMetaGenPrefix(decodeRoomRecord<number>(raw)))) {
+      if ('staleInc' in page || (held.length > 0 && !(await deleteCells(roomId, inc, held)))) return
+      held = [...page.cells.keys()]
+      if (slice.over) await slice.next()
+    }
+    held.push(mark)
+    if (!(await deleteCells(roomId, inc, held))) return
   }
 }
 
@@ -332,8 +340,8 @@ async function writeMemberConnection(
 /** A generation a replace left, which stopped being the record's `metaGen` in its exchange, a page per exchange and a
  *  `ROOM_PLAN_SLICE_MS` slice per turn; its last page goes with the mark the replace wrote under its own generation
  *  `next`, so a read finding part of it finds a newer generation too. */
-async function dropMemberMetaGeneration(room: RoomIncarnation, id: string, gen: number, next: number): Promise<void> {
-  await dropCells(room.id, room.inc, memberMetaGenPrefix(id, gen), { mark: memberMetaGenPrefix(id, next) })
+function dropMemberMetaGeneration(room: RoomIncarnation, id: string, gen: number, next: number): Promise<boolean> {
+  return dropCells(room.id, room.inc, memberMetaGenPrefix(id, gen), memberMetaGenPrefix(id, next))
 }
 
 /** Every generation of a member's meta, once its eviction removed the record. */
