@@ -201,7 +201,10 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     this._end = end
     end._setOwner(this)
     end.listen((message) => receiveFromPage(end, () => this._receive(message)))
-    end.onClose(() => room._detachStub(this))
+    end.onClose(() => {
+      this._dmReplies.drop()
+      room._detachStub(this)
+    })
     end.onDisconnect(() => room._setHeldConnected(this, false))
     end.onReconnect(() => room._setHeldConnected(this, true))
     grants.onSuppressed((member) => room._onStubSuppressed(this, member))
