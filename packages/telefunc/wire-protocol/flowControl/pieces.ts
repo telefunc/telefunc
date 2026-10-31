@@ -551,7 +551,7 @@ abstract class PieceReceiver implements AckScheduleOwner {
   protected abstract tookPiece(piece: PieceArrival): void
   /** An ANNOUNCE that arrived at `at` closed an announcement. */
   protected abstract tookClose(at: number): void
-  /** How long an acknowledgement waits from now. */
+  /** How long an acknowledgement waits after the newest arrival. */
   protected abstract ackWait(): number
 
   /** A whole frame of `tag` and `bytes` arrived at `at`, `'riding'` ahead of its message's last frame, which alone
@@ -653,13 +653,13 @@ abstract class PieceReceiver implements AckScheduleOwner {
   /** Acknowledges once `ackWait` allows, in the message its side sends next then. */
   protected acknowledgeWithNextSoon(): void {
     const wait = this.ackWait()
-    if (wait > 0) this.ack.withNextIn(wait)
+    if (wait > 0) this.ack.withNextBy(this.newestAt + wait)
     else this.acknowledgeWithNext()
   }
 
-  /** Acknowledges `ms` from now, or sooner where it already would. */
+  /** Acknowledges `ms` after the newest arrival, or sooner where it already would. */
   protected acknowledgeIn(ms: number): void {
-    this.ack.aloneIn(ms)
+    this.ack.aloneBy(this.newestAt + ms)
   }
 
   /** Acknowledges now, alone. */
@@ -716,25 +716,25 @@ class AckSchedule {
     return this.carrying
   }
 
-  /** Acknowledges `ms` from now, or sooner where it already would, in its side's next message unless it goes alone. */
-  withNextIn(ms: number): void {
-    this.arm(ms)
+  /** Acknowledges at `due`, or sooner where it already would, in its side's next message unless it goes alone. */
+  withNextBy(due: number): void {
+    this.arm(due)
   }
 
-  /** Acknowledges `ms` from now, or sooner where it already would, alone. */
-  aloneIn(ms: number): void {
+  /** Acknowledges at `due`, or sooner where it already would, alone. */
+  aloneBy(due: number): void {
     this.alone = true
-    this.arm(ms)
+    this.arm(due)
   }
 
-  private arm(ms: number): void {
-    const due = performance.now() + ms
+  // A due dated from the arrival is the same for each frame of a burst, however late each was taken: one timer.
+  private arm(due: number): void {
     if (this.timer !== null) {
       if (this.due <= due) return
       clearTimeout(this.timer)
     }
     this.due = due
-    this.timer = unrefTimer(setTimeout(this.fire, ms))
+    this.timer = unrefTimer(setTimeout(this.fire, Math.max(0, due - performance.now())))
   }
 
   /** Carries it in its side's next message; false where it already does. */
