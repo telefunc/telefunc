@@ -35,6 +35,7 @@ import { Deliveries } from '../../flowControl/Deliveries.js'
 import { SocketWait } from '../../flowControl/server/SocketWait.js'
 import { WireSender } from './WireSender.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
+import { RegistrationWaits, type RegistrationWaitsOwner } from './RegistrationWaits.js'
 import type { ServerChannel } from './channel.js'
 
 /** A transport-owned connection handle. The mux never looks inside one — it only compares them by
@@ -146,11 +147,10 @@ function getChannelMux(): ChannelMux {
   return getGlobals().mux
 }
 
-class ChannelMux {
+class ChannelMux implements RegistrationWaitsOwner {
   private readonly channels = new Map<string, ServerChannel>()
-  /** Waiters registered by `attach` when a reconcile lands before the channel is registered.
-   *  Fired synchronously from `registerChannel`. */
-  private readonly pendingRegisterWaiters = new Map<string, Set<(channel: ServerChannel) => void>>()
+  /** The channels a reconcile named before they registered, which `registerChannel` attaches. */
+  private readonly registrationWaits = new RegistrationWaits({ owner: this })
   private readonly sessions = new SessionRegistry()
   /** The wire each session is on: the last to reconcile it, until another reconciles it or the wire closes. */
   private readonly sessionWires = new Map<string, Wire>()
@@ -186,11 +186,14 @@ class ChannelMux {
     this.channels.set(channel.id, channel)
     // It ended before a response carried it: it waits for its page as an ended channel does.
     if (channel._phase === 'ended') this.keepEnded(channel, false)
-    const waiters = this.pendingRegisterWaiters.get(channel.id)
-    if (waiters) {
-      this.pendingRegisterWaiters.delete(channel.id)
-      for (const cb of waiters) cb(channel)
+    for (const awaited of this.registrationWaits.take(channel.id)) {
+      if (this.registrationWaits.stop(awaited)) this.attachAwaited(awaited, channel)
     }
+  }
+
+  /** `RegistrationWaitsOwner`: its channel didn't register within `connectTtl`. */
+  onRegistrationTimeout(awaited: AwaitedChannel): void {
+    this.expireAwaited(awaited)
   }
 
   unregisterChannel(channelId: string): void {
@@ -272,7 +275,7 @@ class ChannelMux {
         closed: null,
         retiredByBarrier: false,
         recvBacklog,
-        awaited: new AwaitedChannels(recvBacklog),
+        awaited: new AwaitedChannels({ backlog: recvBacklog, waits: this.registrationWaits }),
         attaching,
         wireSender,
       },
@@ -874,18 +877,16 @@ class ChannelMux {
   }
 
   private awaitChannel(open: ReconcileOpenEntry, entry: ConnectionEntry, connection: Wire): void {
-    const onResult = (channel: ServerChannel | null): void => {
-      if (channel) this.attachAwaited(awaited, channel)
-      else this.expireAwaited(awaited)
-    }
     const awaited: AwaitedChannel = {
+      channelId: open.id,
       open,
       entry,
       wire: connection,
       held: [],
       phase: 'waiting',
-      stopWaiting: this.waitForChannelRegistration(open.id, this.options.connectTtl, onResult),
+      ttl: null,
     }
+    this.registrationWaits.wait(awaited, this.options.connectTtl)
     entry.state.awaited.add(awaited)
   }
 
@@ -944,7 +945,13 @@ class ChannelMux {
       const awaited = oldEntry.state.awaited.get(ix)
       if (!awaited) continue
       if (awaited.phase === 'attached') this.dispatchHeld(awaited)
-      else oldEntry.state.awaited.move(awaited, wsEntry, wsConnection)
+      else {
+        // The WebSocket awaits it from now on, with what it held.
+        const held = oldEntry.state.awaited.take(awaited)
+        awaited.entry = wsEntry
+        awaited.wire = wsConnection
+        wsEntry.state.awaited.add(awaited, held)
+      }
     }
   }
 
@@ -969,35 +976,6 @@ class ChannelMux {
     }
     if (this.endedChannels.has(channel)) this.keepEnded(channel, true)
     return { channel, ix: open.ix, peer }
-  }
-
-  /** Returns what ends the wait without a result. */
-  private waitForChannelRegistration(
-    channelId: string,
-    ttlMs: number,
-    onResult: (channel: ServerChannel | null) => void,
-  ): () => void {
-    let settled = false
-    let timer: ReturnType<typeof setTimeout>
-    const waiterSet = this.pendingRegisterWaiters.get(channelId) ?? new Set()
-    this.pendingRegisterWaiters.set(channelId, waiterSet)
-
-    const stop = (): boolean => {
-      if (settled) return false
-      settled = true
-      waiterSet.delete(waiter)
-      if (waiterSet.size === 0) this.pendingRegisterWaiters.delete(channelId)
-      clearTimeout(timer)
-      return true
-    }
-    const waiter = (channel: ServerChannel): void => {
-      if (stop()) onResult(channel)
-    }
-    waiterSet.add(waiter)
-    timer = setTimeout(() => {
-      if (stop()) onResult(null)
-    }, ttlMs)
-    return () => void stop()
   }
 
   /** Transient: leave registry entries so the next reconcile's prev-comparison can fire

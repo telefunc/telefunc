@@ -338,7 +338,7 @@ class SseConnectionTransport {
     this.closedWires.set(connId, { at: now, sessionId })
   }
 
-  /** Mirrors `ChannelMux.waitForChannelRegistration`: the timeout path must remove the
+  /** As `RegistrationWaits.stop`: the timeout path must remove the
    *  waiter and (when last) the map entry, or abandoned data POSTs leak an entry forever. */
   private waitForConnection(connId: string): Promise<SseConnection | null> {
     return new Promise<SseConnection | null>((resolve) => {
