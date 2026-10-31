@@ -138,6 +138,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
   // coordinator, or an extension's `durableObject`.
   const TelefuncDurableObject = class extends DurableObject<Cloudflare.Env> {
+    // `#private`, not TypeScript `private`: Workers RPC lets any stub call a method on a Durable Object's prototype.
     readonly #authorityState: CloudflareBroadcastAuthorityState
     readonly #broadcastCalls: BroadcastCalls = new OrderedStubs()
     readonly #session: CloudflareSession
