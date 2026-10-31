@@ -334,7 +334,6 @@ class Upgrade {
   // ── The attempt ──
 
   private async probeAndUpgrade(from: UpgradeSource): Promise<void> {
-    this.exchange.flushPendingRegisterReconcile()
     const { sessionId } = this.exchange
     if (sessionId === null) return
     const attempt = new AbortController()
