@@ -1,7 +1,8 @@
 export { PathRoom }
 
 import { WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS } from '../../constants.js'
-import { DrainRate, Link } from '../Link.js'
+import { DrainRate } from '../DrainRate.js'
+import { PieceRate } from '../PieceRate.js'
 import { PieceSender, acknowledges, type PieceSenderOptions, type SendRoom } from '../pieces.js'
 import type { PiecesAck } from '../../wire/frame.js'
 import { Fifo } from '../../../utils/Fifo.js'
@@ -38,7 +39,7 @@ class PathRoom implements SendRoom {
 
   constructor({ transmit, queued, pingInterval }: PathRoomOptions) {
     this.queued = queued
-    this.sender = new PieceSender({ transmit, queued, pingInterval, link: new Link(), room: this })
+    this.sender = new PieceSender({ transmit, queued, pingInterval, pieceRate: new PieceRate(), room: this })
   }
 
   /** Sends `frame` through the sender. */

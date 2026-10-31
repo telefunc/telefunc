@@ -9,7 +9,8 @@ import {
   CREDIT_WINDOW_INITIAL_BYTES,
   CREDIT_WINDOW_MAX_BYTES,
 } from '../constants.js'
-import type { Link, SendWait } from './Link.js'
+import type { RoundTrips } from './RoundTrips.js'
+import type { SendWait } from './SendWait.js'
 import type { BdpPingAck } from '../wire/frame.js'
 
 /** Per-axis verdict on a settled probe; `grow` needs the sample to saturate ≥ 2/3 of a window not at cap. */
@@ -20,7 +21,7 @@ type GrowDecision = { acknowledged: boolean; bytes: AxisDecision; msgs: AxisDeci
 
 const NOT_SETTLED: GrowDecision = { acknowledged: false, bytes: 'sample-too-small', msgs: 'sample-too-small' }
 
-type AttachProbe = { probe: number; sentAt: number; link: Link }
+type AttachProbe = { probe: number; sentAt: number; roundTrips: RoundTrips }
 
 const NO_ATTACH_PROBES: readonly AttachProbe[] = []
 
@@ -49,7 +50,7 @@ class BdpEstimator {
   /** Attach probes not answered yet: each settles no growth, so none holds up a ping. */
   private _attachProbes: readonly AttachProbe[] = NO_ATTACH_PROBES
   /** The wire it attached on last, whose round trip a sample counts at. */
-  private _link: Link | null = null
+  private _roundTrips: RoundTrips | null = null
   /** A round trip the window held back, which no queue lengthened, since the wire was replaced; `Infinity` before. */
   private _boundRtt = Infinity
   private _lastPingAt = Number.NEGATIVE_INFINITY
@@ -97,12 +98,14 @@ class BdpEstimator {
     return probe
   }
 
-  /** Starts a probe that goes out with an attach on `link`; `undefined` where that wire's round trip is measured. */
-  probeAttach(link: Link): number | undefined {
-    if (link.pathRtt < Infinity) return undefined
-    const attachProbes = this._attachProbes.filter((attach) => attach.link === link || attach.link === this._link)
+  /** Starts a probe that goes out with an attach on `roundTrips`' wire; `undefined` where its round trip is measured. */
+  probeAttach(roundTrips: RoundTrips): number | undefined {
+    if (roundTrips.pathRtt < Infinity) return undefined
+    const attachProbes = this._attachProbes.filter(
+      (attach) => attach.roundTrips === roundTrips || attach.roundTrips === this._roundTrips,
+    )
     this._probes = (this._probes + 1) >>> 0
-    attachProbes.push({ probe: this._probes, sentAt: performance.now(), link })
+    attachProbes.push({ probe: this._probes, sentAt: performance.now(), roundTrips })
     this._attachProbes = attachProbes
     return this._probes
   }
@@ -112,13 +115,13 @@ class BdpEstimator {
     const attach = this._attachProbes.find((pending) => pending.probe === probe)
     if (!attach) return false
     this._attachProbes = this._attachProbes.filter((pending) => pending !== attach)
-    attach.link.measured(performance.now() - attach.sentAt)
+    attach.roundTrips.measured(performance.now() - attach.sentAt)
     return true
   }
 
-  /** It attached on `link`. */
-  attach(link: Link): void {
-    this._link = link
+  /** It attached on the wire of `roundTrips`. */
+  attach(roundTrips: RoundTrips): void {
+    this._roundTrips = roundTrips
   }
 
   /** Settles the ping in flight; `deliveredBefore(ms)`: what the wire delivered from any channel in the `ms` before. */
@@ -132,15 +135,15 @@ class BdpEstimator {
     this._pingInFlight = false
     const rtt = performance.now() - this._lastPingAt
     // An attach's probe may have waited behind other frames: a later ping that took less shows the path takes no more.
-    const link = this._link
-    if (link !== null && link.pathRtt < Infinity) link.measured(rtt)
+    const roundTrips = this._roundTrips
+    if (roundTrips !== null && roundTrips.pathRtt < Infinity) roundTrips.measured(rtt)
     const roundWait = sendWait?.longestWaitSince(this._lastPingAt) ?? 0
     const received = this._bytesReceived - this._bytesAtPingSent
     const starved = senderBacklog * 8 < this._byteWindow
     this._boundRoundTrip(rtt, received, starved, deliveredBefore)
     const pathRtt = this._pathRtt(senderPathRtt)
     // A round of credit on a batch-POST wire also waits for its POST.
-    const loopRtt = pathRtt + roundWait + (link?.longestPostWaitSince(this._lastPingAt) ?? 0)
+    const loopRtt = pathRtt + roundWait + (roundTrips?.longestPostWaitSince(this._lastPingAt) ?? 0)
     const byteSample = received * (loopRtt < rtt ? loopRtt / rtt : 1)
     const bytes = this._byteDecision(byteSample, pathRtt < Infinity, starved)
     const msgs = this._msgDecision(this._msgsReceived - this._msgsAtPingSent, starved)
@@ -170,7 +173,7 @@ class BdpEstimator {
 
   /** A measured path round trip, or a round the window held back, tells a queue from the path; else only the sender. */
   private _pathRtt(senderPathRtt: number): number {
-    const pathRtt = Math.min(this._link?.pathRtt ?? Infinity, senderPathRtt)
+    const pathRtt = Math.min(this._roundTrips?.pathRtt ?? Infinity, senderPathRtt)
     if (this._boundRtt === Infinity) return pathRtt
     return pathRtt < Infinity ? Math.max(pathRtt, this._boundRtt) : this._boundRtt
   }

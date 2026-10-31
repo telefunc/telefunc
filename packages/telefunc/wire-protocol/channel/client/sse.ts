@@ -444,7 +444,7 @@ class SseTransport implements UpgradeSource {
       const response = await this.postAndRead(body, wire.signal)
       if (!response.ok) throw new Error('POST failed')
       this.sizePosts(body.size, performance.now() - now)
-      this.uplink.link.postAnswered(performance.now() - oldestQueuedAt(queued))
+      this.uplink.roundTrips.postAnswered(performance.now() - oldestQueuedAt(queued))
     } catch {
       // Its wire ended already: what the POST carried goes as that wire's outbox does (stageInitialBatch).
       if (wire !== this.transportAbort) {

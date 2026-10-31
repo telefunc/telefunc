@@ -41,7 +41,7 @@ class SendBudget implements SendRoom {
     this.uplink = uplink
     this.downlink = downlink
     this.onRoom = onRoom
-    this.sender = new PieceSender({ transmit, queued, pingInterval, link: uplink.link, room: this })
+    this.sender = new PieceSender({ transmit, queued, pingInterval, pieceRate: uplink.pieceRate, room: this })
   }
 
   /** Sends `frame` through the sender. */

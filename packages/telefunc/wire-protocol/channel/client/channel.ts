@@ -281,7 +281,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal Probes a path it hasn't measured. */
   _reattachState(uplink: Uplink): ReattachState {
-    const probe = this._receiveCredit.probeAttach(uplink.link)
+    const probe = this._receiveCredit.probeAttach(uplink.roundTrips)
     return probe === undefined ? {} : { probe }
   }
 
@@ -322,7 +322,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._isClosed) return
     if (batched) this._receiveCredit.useBatchTransportInitial()
     else this._receiveCredit.undoBatchTransportInitial()
-    this._receiveCredit.attach({ sendWait: uplink, link: uplink.link, downlink })
+    this._receiveCredit.attach({ sendWait: uplink, roundTrips: uplink.roundTrips, downlink })
     this._fireOpen()
   }
 

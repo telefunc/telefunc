@@ -3,8 +3,9 @@ export type { AttachedDownlink, CreditWire }
 
 import { BdpEstimator } from './BdpEstimator.js'
 import type { CreditOwner, WindowKind } from './credit.js'
-import type { Link, SendWait } from './Link.js'
+import type { RoundTrips } from './RoundTrips.js'
 import type { SelfTime } from './SelfTime.js'
+import type { SendWait } from './SendWait.js'
 import { CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_INITIAL_BYTES_BATCH, FC_SELF_UTIL_THRESHOLD } from '../constants.js'
 import type { BdpPingAck } from '../wire/frame.js'
 
@@ -13,11 +14,11 @@ type ReceiveCreditOptions = {
   selfTime: SelfTime
 }
 
-/** The wire a channel's credit attaches on: what frames that go at once wait behind, and on a page its link and downlink. */
+/** The wire a channel's credit attaches on: what frames that go at once wait behind, and on a page its round trips and downlink. */
 type CreditWire = {
   readonly sendWait: SendWait
   /** A page's uplink's: its round trip, which an answer to a `BDP_PING` says. */
-  readonly link?: Link
+  readonly roundTrips?: RoundTrips
   readonly downlink?: AttachedDownlink
 }
 
@@ -73,7 +74,7 @@ class ReceiveCredit {
 
   /** The last `attach`'s wire's path round trip, `Infinity` where unmeasured: what an answer to a `BDP_PING` says. */
   pathRtt(): number {
-    return this.wire?.link?.pathRtt ?? Infinity
+    return this.wire?.roundTrips?.pathRtt ?? Infinity
   }
 
   /** Keeps what it lets be in flight within the replay buffer that holds what its peer sends (see `replayWindow`). */
@@ -95,9 +96,9 @@ class ReceiveCredit {
     return this.wire?.sendWait ?? null
   }
 
-  /** A probe number for an attach on `link`'s RECONCILE entry; `undefined` where `link` is measured. */
-  probeAttach(link: Link): number | undefined {
-    return this._bdp.probeAttach(link)
+  /** A probe number for an attach's RECONCILE entry on `roundTrips`' wire; `undefined` where it is measured. */
+  probeAttach(roundTrips: RoundTrips): number | undefined {
+    return this._bdp.probeAttach(roundTrips)
   }
 
   /** The RECONCILED answered the probe of an attach's RECONCILE entry (see `probeAttach`). */
@@ -154,7 +155,7 @@ class ReceiveCredit {
       wire.downlink?.granted(this._grantedBytes - this._receivedBytes)
       this.advertiseOnNewWire()
     }
-    if (wire.link) this._bdp.attach(wire.link)
+    if (wire.roundTrips) this._bdp.attach(wire.roundTrips)
   }
 
   /** Frames held back arrived at once: the round in flight doesn't count them as delivered within its round trip. */
