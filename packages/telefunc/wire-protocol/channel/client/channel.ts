@@ -156,7 +156,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (needsAck) {
       return this.sendAckReq<ChannelAck<ClientToServer>, string>(encode.textAckReq, serialized)
     }
-    return this.waitForWindow(this.connection.sendSequenced(this, 'data', encode.text, serialized))
+    return this.sendCredit.decrement(this.connection.sendSequenced(this, 'data', encode.text, serialized))
   }
 
   sendBinary(data: Uint8Array): Promise<void>
@@ -179,17 +179,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (opts?.ack === true) {
       return this.sendAckReq<unknown, Uint8Array>(encode.binaryAckReq, data)
     }
-    return this.waitForWindow(this.connection.sendSequenced(this, 'data', encode.binary, data))
-  }
-
-  /** Decrement credit by `bytes`; return void if credit remains, otherwise a Promise
-   *  that resolves when credit refreshes (so the caller's next `await` blocks).
-   *
-   *  Cooperative model: the send already fired in `connection.send(...)`; this only
-   *  gates the return value. Awaiting throttles the caller's next send; not awaiting
-   *  bypasses (matches the user-facing "skip await for max bandwidth" escape hatch). */
-  private waitForWindow(bytes: number): void | Promise<void> {
-    return this.sendCredit.decrement(bytes)
+    return this.sendCredit.decrement(this.connection.sendSequenced(this, 'data', encode.binary, data))
   }
 
   listen(callback: ChannelListener<ServerToClient>): () => void {

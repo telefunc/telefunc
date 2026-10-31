@@ -78,7 +78,8 @@ class SendCredit {
     return Math.max(0, this.sentBytes - Math.max(this.limitBytes, this.sentWithCredit))
   }
 
-  /** Counts a frame of `bytes` against credit; a Promise where the sender waits for credit or yields. */
+  /** Counts a frame of `bytes` against credit; a Promise where the sender waits for credit or yields. The frame already
+   *  went (`sendSequenced`): awaiting the Promise throttles the sender's next send, not awaiting it bypasses credit. */
   decrement(bytes: number): void | Promise<void> {
     this.countSent(bytes)
     this.released = false
