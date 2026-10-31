@@ -103,7 +103,7 @@ class ChannelLifecycle {
 
   onClose(callback: ChannelCloseCallback): void {
     if (this.didFireClose) {
-      this.invokeCloseCallback(callback, this.endError, false)
+      void this.invokeCloseCallback(callback, this.endError)
       return
     }
     this.closeCallbacks.push(callback)
@@ -168,7 +168,15 @@ class ChannelLifecycle {
   fireClose(err?: Error): void {
     if (this.didFireClose) return
     this.didFireClose = true
-    for (const callback of this.closeCallbacks) this.invokeCloseCallback(callback, err, true)
+    for (const callback of this.closeCallbacks) {
+      const pending = this.invokeCloseCallback(callback, err)
+      if (pending === undefined) continue
+      this.pendingCloseCallbacks++
+      void pending.finally(() => {
+        this.pendingCloseCallbacks--
+        this.notifyProgress()
+      })
+    }
     this.closeCallbacks.length = 0
     this.openCallbacks.length = 0
     this.notifyProgress()
@@ -213,23 +221,15 @@ class ChannelLifecycle {
     wake()
   }
 
-  private invokeCloseCallback(callback: ChannelCloseCallback, err: Error | undefined, track: boolean): void {
+  /** Reports what `callback` throws or rejects with; where it returned a Promise, returns one that settles after it. */
+  private invokeCloseCallback(callback: ChannelCloseCallback, err: Error | undefined): Promise<void> | undefined {
     try {
       const pending = callback(err)
-      if (!isPromise(pending)) return
-      if (track) {
-        this.pendingCloseCallbacks++
-        void pending
-          .catch((e: unknown) => this.owner._reportCallbackError(e))
-          .finally(() => {
-            this.pendingCloseCallbacks--
-            this.notifyProgress()
-          })
-      } else {
-        void pending.catch((e: unknown) => this.owner._reportCallbackError(e))
-      }
+      if (!isPromise(pending)) return undefined
+      return pending.catch((e: unknown) => this.owner._reportCallbackError(e))
     } catch (callbackErr) {
       this.owner._reportCallbackError(callbackErr)
+      return undefined
     }
   }
 }
