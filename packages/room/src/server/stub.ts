@@ -62,16 +62,16 @@ assertIsNotBrowser()
 class ResponseRoomGrants {
   readonly selfSuppressed = new Set<string>()
   readonly hidden = new Set<string>()
-  private readonly _onSuppressed: Array<(member: string) => void> = []
+  private readonly suppressedListeners: Array<(member: string) => void> = []
 
   suppress(member: string): void {
     if (this.selfSuppressed.has(member)) return
     this.selfSuppressed.add(member)
-    for (const listener of this._onSuppressed) listener(member)
+    for (const listener of this.suppressedListeners) listener(member)
   }
 
   onSuppressed(listener: (member: string) => void): void {
-    this._onSuppressed.push(listener)
+    this.suppressedListeners.push(listener)
   }
 }
 

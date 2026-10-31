@@ -29,7 +29,7 @@ class RoomMetaState {
   private _object: RoomMeta | null = null
   private _seq: number
   /** Changes past the next seq, until the ones before them arrive or a whole meta covers them. */
-  private readonly _waiting = new Map<number, RoomMetaUpdate>()
+  private readonly pendingUpdates = new Map<number, RoomMetaUpdate>()
 
   constructor(entries: readonly RoomMetaEntry[], seq: number) {
     this._entries = new Map(entries.map((entry) => [entry[0], entry]))
@@ -43,7 +43,7 @@ class RoomMetaState {
   }
 
   get waiting(): boolean {
-    return this._waiting.size > 0
+    return this.pendingUpdates.size > 0
   }
 
   get object(): RoomMeta {
@@ -57,7 +57,7 @@ class RoomMetaState {
   /** A failover rewound the seq: any whole meta applies next, and a change waits for one. */
   forget(): void {
     this._seq = -1
-    this._waiting.clear()
+    this.pendingUpdates.clear()
   }
 
   /** The updates `update` lets apply, in seq order: a whole meta at any newer seq, a change at the next one, then the
@@ -65,14 +65,18 @@ class RoomMetaState {
   apply(update: RoomMetaUpdate): RoomMetaUpdate[] {
     if (update.seq <= this._seq) return []
     if ('changes' in update && update.seq > this._seq + 1) {
-      this._waiting.set(update.seq, update)
+      this.pendingUpdates.set(update.seq, update)
       return []
     }
     const applied = [update]
     this.applyOne(update)
-    for (const seq of this._waiting.keys()) if (seq <= this._seq) this._waiting.delete(seq)
-    for (let next = this._waiting.get(this._seq + 1); next !== undefined; next = this._waiting.get(this._seq + 1)) {
-      this._waiting.delete(next.seq)
+    for (const seq of this.pendingUpdates.keys()) if (seq <= this._seq) this.pendingUpdates.delete(seq)
+    for (
+      let next = this.pendingUpdates.get(this._seq + 1);
+      next !== undefined;
+      next = this.pendingUpdates.get(this._seq + 1)
+    ) {
+      this.pendingUpdates.delete(next.seq)
       this.applyOne(next)
       applied.push(next)
     }

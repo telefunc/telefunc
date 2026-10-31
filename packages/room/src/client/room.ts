@@ -195,11 +195,13 @@ class ClientRoom extends RoomStateView implements Room {
   }
 
   join(options?: JoinOptions): Promise<LocalParticipant> {
-    const joining: Promise<LocalParticipant> = this._join(options).then((participant) => participant._handOut(joining))
+    const joining: Promise<LocalParticipant> = this.requestJoin(options).then((participant) =>
+      participant._handOut(joining),
+    )
     return joining
   }
 
-  private async _join(options?: JoinOptions): Promise<ClientRoomParticipant> {
+  private async requestJoin(options?: JoinOptions): Promise<ClientRoomParticipant> {
     assertUsage(
       options?.identity === undefined,
       'join() options.identity is server-assigned: identity is trusted, so set it where trust lives, in the granting telefunction (server-side join()), not on the client.',

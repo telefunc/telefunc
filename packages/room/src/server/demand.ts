@@ -64,7 +64,7 @@ class DemandReport {
   private readonly planned = new Receives()
   /** The planned tracks of every member that are fetched by member. */
   private readonly byMember = new Set<string>()
-  private _changed = new Receives()
+  private untold = new Receives()
   /** A telling a deadline stopped, resumed by the next one. */
   private telling: Iterator<void> | null = null
 
@@ -85,14 +85,14 @@ class DemandReport {
   setPair(member: string, track: string, on: boolean): void {
     if (on === hasEntry(this.planned.pairs, member, track)) return
     toggleEntry(this.planned.pairs, member, track, on)
-    toggleEntry(this._changed.pairs, member, track, true)
+    toggleEntry(this.untold.pairs, member, track, true)
   }
 
   /** Whether some holder here receives every track of the member. */
   setMember(member: string, on: boolean): void {
     if (on === this.planned.members.has(member)) return
     toggle(this.planned.members, member, on)
-    this._changed.members.add(member)
+    this.untold.members.add(member)
   }
 
   /** Whether some holder here receives `track` of every member, and whether only of the members it is fetched by. */
@@ -101,21 +101,21 @@ class DemandReport {
     if (on === this.planned.tracks.has(track) && (on && byMember) === this.byMember.has(track)) return
     toggle(this.planned.tracks, track, on)
     toggle(this.byMember, track, on && byMember)
-    this._changed.tracks.add(track)
+    this.untold.tracks.add(track)
   }
 
   /** Whether the member's tracks fetched by member reach this process. */
   setFetched(member: string, on: boolean): void {
     if (on === this.planned.fetched.has(member)) return
     toggle(this.planned.fetched, member, on)
-    this._changed.fetched.add(member)
+    this.untold.fetched.add(member)
   }
 
   /** Whether no holder here receives `track` from the member, though some holder names it of every member. */
   setExcept(track: string, member: string, on: boolean): void {
     if (on === hasEntry(this.planned.except, track, member)) return
     toggleEntry(this.planned.except, track, member, on)
-    toggleEntry(this._changed.except, track, member, true)
+    toggleEntry(this.untold.except, track, member, true)
   }
 
   /** No holder here names `track` of every member any more. */
@@ -147,7 +147,7 @@ class DemandReport {
 
   /** Whether some planned change isn't told yet. */
   get changed(): boolean {
-    const changed = this._changed
+    const changed = this.untold
     return (
       this.telling !== null ||
       changed.pairs.size > 0 ||
@@ -197,8 +197,8 @@ class DemandReport {
    *  round sets what this reads, and none runs until the telling ends, so it is read as it goes. Each change it reads
    *  is a step. */
   private *tellChanges(): Generator<void, void, void> {
-    const { pairs, members, tracks, fetched, except } = this._changed
-    this._changed = new Receives()
+    const { pairs, members, tracks, fetched, except } = this.untold
+    this.untold = new Receives()
     const planned = this.planned
     const told = this.told
     for (const [member, byTrack] of pairs) {
@@ -566,14 +566,14 @@ class RoomDemand {
 
   private evaluate(member: string, track: string): void {
     if (!this.owner._ownsMember(member)) return
-    const wanted = this._wanted(member, track)
+    const wanted = this.isWanted(member, track)
     if (wanted === hasEntry(this.told, track, member)) return
     toggleEntry(this.told, track, member, wanted)
     this.owner.deliverDemand(member, track, wanted)
   }
 
   /** Whether some reporter receives the owned member's track. */
-  private _wanted(member: string, track: string): boolean {
+  private isWanted(member: string, track: string): boolean {
     if (this.pairs.get(member)?.has(track)) return true
     if (this.owner.publishedTracks.has(member, track) && this.members.has(member)) return true
     for (const { instance, except, byMember } of this.tracks.get(track)?.values() ?? []) {

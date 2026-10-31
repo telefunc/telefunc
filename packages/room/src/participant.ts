@@ -35,7 +35,7 @@ abstract class ParticipantBase implements LocalParticipant {
   readonly id: string
   readonly identity: string | null
   readonly selfDelivery: boolean
-  private readonly _meta: MemberMeta
+  private readonly memberMeta: MemberMeta
   private leftCause: LeaveCause | null = null
   // Each list is made when its first listener is added.
   private leaveCbs: Listeners<(cause: LeaveCause) => unknown> | null = null
@@ -55,39 +55,39 @@ abstract class ParticipantBase implements LocalParticipant {
     rewinds: MetaRewinds,
   ) {
     this.id = participant.id
-    this._meta = new MemberMeta({ meta: participant.meta, seq: 0, rewinds })
+    this.memberMeta = new MemberMeta({ meta: participant.meta, seq: 0, rewinds })
     this.selfDelivery = participant.selfDelivery
     this.identity = participant.identity
   }
 
   get meta(): ParticipantMeta {
-    return this._meta.object
+    return this.memberMeta.object
   }
 
   /** @internal Whole, as an attach resends it. */
   get _acceptedMeta(): WholeMemberUpdate {
     const update: WholeMemberUpdate = {
-      meta: this._meta.object,
-      seq: this._meta.seq,
+      meta: this.memberMeta.object,
+      seq: this.memberMeta.seq,
     }
-    if (!this._meta.connected) update.disconnected = true
+    if (!this.memberMeta.connected) update.disconnected = true
     return update
   }
 
   /** The connection of the page holding this member, as the room accepted it. */
   protected get _acceptedConnected(): boolean {
-    return this._meta.connected
+    return this.memberMeta.connected
   }
 
   /** @internal A meta update the room accepted, applied in seq order; whether it applied. One past a gap waits for the
    *  whole meta its holder's next attach or roster sends. */
   _acceptMeta(update: MemberMetaUpdate): boolean {
-    return this._meta.apply(update) === 'applied'
+    return this.memberMeta.apply(update) === 'applied'
   }
 
   /** @internal A failover rewound the seq: the next whole meta applies, whatever its seq. */
   _forgetMetaSeq(): void {
-    this._meta.forget()
+    this.memberMeta.forget()
   }
 
   protected get _left(): boolean {

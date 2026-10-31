@@ -237,7 +237,7 @@ class RoomModel {
   /** The views with a listener: one without has nothing to fire. */
   private readonly views = new Set<RoomState>()
   private readonly owner: RoomModelOwner
-  private readonly _meta: RoomMetaState
+  private readonly metaState: RoomMetaState
   /** Shared by the members' metas here and by the local participants of this view. */
   readonly metaRewinds: MetaRewinds = { count: 0 }
   private _rosterKnown: boolean
@@ -248,7 +248,7 @@ class RoomModel {
 
   constructor(opts: RoomModelOptions) {
     this.roomId = opts.roomId
-    this._meta = new RoomMetaState(opts.meta, opts.metaSeq)
+    this.metaState = new RoomMetaState(opts.meta, opts.metaSeq)
     this.closed = opts.closed === true
     this.owner = opts.owner
     if ('members' in opts.seed) {
@@ -291,7 +291,7 @@ class RoomModel {
   /** A failover rewound the room's and its members' meta seqs: the next whole meta of each applies, whatever its
    *  seq. */
   forgetMetaSeqs(): void {
-    this._meta.forget()
+    this.metaState.forget()
     this.metaRewinds.count++
     this.bumpState()
   }
@@ -512,32 +512,32 @@ class RoomModel {
    *  `prev` is this model's own previous meta, which can differ per model. */
   applyRoomUpdate(update: RoomMetaUpdate): RoomMetaUpdate[] {
     const listening = [...this.views].filter((view) => view._listensToRoomMeta())
-    const prev = listening.length > 0 ? this._meta.object : null
-    const applied = this._meta.apply(update)
-    if (this._meta.waiting) this.owner.onMetaWaiting()
+    const prev = listening.length > 0 ? this.metaState.object : null
+    const applied = this.metaState.apply(update)
+    if (this.metaState.waiting) this.owner.onMetaWaiting()
     if (applied.length === 0) return applied
     this.bumpState()
-    if (prev !== null) for (const view of listening) view._roomMetaChanged(this._meta.object, prev)
+    if (prev !== null) for (const view of listening) view._roomMetaChanged(this.metaState.object, prev)
     return applied
   }
 
   /** Built when read, and kept until the next change. */
   get meta(): RoomMeta {
-    return this._meta.object
+    return this.metaState.object
   }
 
   /** In key order, as a snapshot or a whole `update` carries it. */
   metaEntries(): RoomMetaEntry[] {
-    return this._meta.entries()
+    return this.metaState.entries()
   }
 
   /** How many meta writes this model's meta reflects (serialized into room snapshots). */
   get metaSeq(): number {
-    return this._meta.seq
+    return this.metaState.seq
   }
 
   get metaWaiting(): boolean {
-    return this._meta.waiting
+    return this.metaState.waiting
   }
 
   /** Room closed: member-level cleanup callbacks run (decoders etc.), then `onClose`. Room-level `onLeave`/`onEmpty`

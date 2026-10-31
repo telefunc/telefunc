@@ -145,7 +145,7 @@ class WantsIndex {
   /** Whether some holder receives every track of the member: a publisher's own suppressed frames are no demand. */
   wantsEveryTrack(member: string): boolean {
     // A holder covering every track wants the default one unless it suppresses the member.
-    return this._receives(member, DEFAULT_TRACK, [
+    return this.coveredBy(member, DEFAULT_TRACK, [
       this.everyMember.get(EVERY_TRACK),
       this.members.get(member)?.get(EVERY_TRACK),
     ])
@@ -176,7 +176,7 @@ class WantsIndex {
   /** Whether some holder receives the member's `track`, named or with every track. */
   receives(member: string, track: string): boolean {
     const own = this.members.get(member)
-    return this._receives(member, track, [
+    return this.coveredBy(member, track, [
       this.everyMember.get(track),
       own?.get(track),
       this.everyMember.get(EVERY_TRACK),
@@ -186,7 +186,7 @@ class WantsIndex {
 
   /** Whether some holder that names the track receives it from the member. */
   wantsNamedPair(member: string, track: string): boolean {
-    return this._receives(member, track, [this.everyMember.get(track), this.members.get(member)?.get(track)])
+    return this.coveredBy(member, track, [this.everyMember.get(track), this.members.get(member)?.get(track)])
   }
 
   /** After `applyBinary(holder, change)` for a named track, whether `wantsNamedPair` held for `member` before and
@@ -197,7 +197,7 @@ class WantsIndex {
     member: string,
   ): [before: boolean, after: boolean] {
     const coverers = [this.everyMember.get(track), this.members.get(member)?.get(track)]
-    const others = this._receives(member, track, coverers, holder)
+    const others = this.coveredBy(member, track, coverers, holder)
     if (others || holder._suppressedMembers().has(member)) return [others, others]
     // The holder may name the track of the member in the other scope too.
     const indexed = this.indexed.get(holder)
@@ -206,7 +206,7 @@ class WantsIndex {
     return [both || !on, both || on]
   }
 
-  private _receives(
+  private coveredBy(
     member: string,
     track: string,
     coverers: Array<Set<LaneHolder> | undefined>,

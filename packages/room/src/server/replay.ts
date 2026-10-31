@@ -310,7 +310,7 @@ class LocalHolder implements LaneHolder {
       const relay = () => this.relayText(event, info, serialized)
       if (replay.held(event.from, null, heldTextWeight(serialized), relay)) return
     }
-    if (replay.admit(event.from, info)) this.applyText(event, info)
+    if (replay.admit(event.from, info)) this.applyTextMessage(event, info)
   }
 
   relayAnnouncement(data: unknown, info: OrderingInfo): void {
@@ -328,7 +328,7 @@ class LocalHolder implements LaneHolder {
       const weight = heldWeight(frame.payload, frame.payload.byteOffset)
       if (replay.held(from, track, weight, () => this.relayBinary(frame, info))) return
     }
-    if (replay.admitBinary(from, track, info)) this._applyBinary(frame, info)
+    if (replay.admitBinary(from, track, info)) this.applyBinaryFrame(frame, info)
   }
 
   _hold(change: BinaryWantChange | null): ReplayHold {
@@ -336,22 +336,22 @@ class LocalHolder implements LaneHolder {
   }
 
   _emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, _serialized: string, hold: ReplayHold): void {
-    if (this.replay.admitRetained(hold, event.from, null, info)) this.applyText(event, info)
+    if (this.replay.admitRetained(hold, event.from, null, info)) this.applyTextMessage(event, info)
   }
 
   _emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, _framed: Uint8Array, hold: ReplayHold): void {
-    if (this.replay.admitRetained(hold, frame.from, frame.track, info)) this._applyBinary(frame, info)
+    if (this.replay.admitRetained(hold, frame.from, frame.track, info)) this.applyBinaryFrame(frame, info)
   }
 
   forgetMember(member: string): void {
     this.replay.forgetMember(member)
   }
 
-  private applyText(event: RoomDataEnvelope, info: OrderingInfo): void {
+  private applyTextMessage(event: RoomDataEnvelope, info: OrderingInfo): void {
     this.state.applyData(event, this.publishInfo(info))
   }
 
-  private _applyBinary(frame: BinaryFrame, info: OrderingInfo): void {
+  private applyBinaryFrame(frame: BinaryFrame, info: OrderingInfo): void {
     this.state.applyBinary(frame, this.publishInfo(info))
   }
 
