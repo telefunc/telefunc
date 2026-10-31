@@ -138,19 +138,19 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
   // coordinator, or an extension's `durableObject`.
   const TelefuncDurableObject = class extends DurableObject<Cloudflare.Env> {
-    readonly #authorityState: CloudflareBroadcastAuthorityState
-    readonly #broadcastCalls: BroadcastCalls = new OrderedStubs()
-    readonly #session: CloudflareSession
+    private readonly authorityState: CloudflareBroadcastAuthorityState
+    private readonly broadcastCalls: BroadcastCalls = new OrderedStubs()
+    private readonly session: CloudflareSession
     private readonly durableObjects = new Map<string, CloudflareExtensionDurableObject>()
     /** The extension this Durable Object's storage is known to hold. */
     private storedExtension: string | undefined
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
       super(ctx, env)
-      this.#authorityState = new CloudflareBroadcastAuthorityState(ctx)
+      this.authorityState = new CloudflareBroadcastAuthorityState(ctx)
       const id = ctx.id.toString()
-      this.#session = {
-        broadcast: broadcast.member(id, this.#broadcastCalls),
+      this.session = {
+        broadcast: broadcast.member(id, this.broadcastCalls),
         mux: new ChannelMux({ hostId: id }),
       }
       crosswsAdapter.handleDurableInit(this, ctx, env)
@@ -159,7 +159,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     async fetch(request: Request) {
       return this.#runInSession(async () => {
         const target = readForwardedTarget(request)
-        if (target) this.#session.broadcast.locate(target.locationBucket)
+        if (target) this.session.broadcast.locate(target.locationBucket)
         pinSession(request)
         if (request.headers.get('upgrade') === 'websocket') {
           return crosswsAdapter.handleDurableUpgrade(this, request)
@@ -187,19 +187,19 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     telefuncBroadcastPublish(request: BroadcastPublishRequest) {
-      return broadcast.publishToSubscribers(this.#authorityState, this.#broadcastCalls, request)
+      return broadcast.publishToSubscribers(this.authorityState, this.broadcastCalls, request)
     }
 
     telefuncBroadcastForward(request: BroadcastForwardRequest) {
-      return broadcast.forwardToBucket(this.#broadcastCalls, request)
+      return broadcast.forwardToBucket(this.broadcastCalls, request)
     }
 
     telefuncBroadcastDeliver(request: BroadcastDeliverRequest) {
-      return this.#runInSession(() => this.#session.broadcast.deliver(request))
+      return this.#runInSession(() => this.session.broadcast.deliver(request))
     }
 
     telefuncBroadcastPresence(request: BroadcastPresenceRequest) {
-      return this.#authorityState.setPresence(request)
+      return this.authorityState.setPresence(request)
     }
 
     /** The RPC method every extension's `durableObject` is called through. */
@@ -253,7 +253,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
     }
 
     #runInSession<T>(fn: () => T): T {
-      return withCloudflareSession(this.#session, fn)
+      return withCloudflareSession(this.session, fn)
     }
   }
 
