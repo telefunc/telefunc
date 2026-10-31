@@ -451,16 +451,18 @@ function encodeJsonFrame(tag: number, payload: unknown): Uint8Array<ArrayBuffer>
 }
 
 const encode = {
-  text: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.TEXT, index, text, seq),
-  publish: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.PUBLISH, index, text, seq),
-  publishAckReq: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.PUBLISH_ACK_REQ, index, text, seq),
-  textAckReq: (index: number, text: string, seq = 0) => encodeTextFrame(TAG.TEXT_ACK_REQ, index, text, seq),
+  text: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT, index, text, seq),
+  publish: (index: number, text: string, seq: number) => encodeTextFrame(TAG.PUBLISH, index, text, seq),
+  publishAckReq: (index: number, text: string, seq: number) => encodeTextFrame(TAG.PUBLISH_ACK_REQ, index, text, seq),
+  textAckReq: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT_ACK_REQ, index, text, seq),
 
-  binary: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.BINARY, index, data, seq),
-  publishBinary: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.PUBLISH_BINARY, index, data, seq),
-  publishBinaryAckReq: (index: number, data: Uint8Array, seq = 0) =>
+  binary: (index: number, data: Uint8Array, seq: number) => encodeBinaryFrame(TAG.BINARY, index, data, seq),
+  publishBinary: (index: number, data: Uint8Array, seq: number) =>
+    encodeBinaryFrame(TAG.PUBLISH_BINARY, index, data, seq),
+  publishBinaryAckReq: (index: number, data: Uint8Array, seq: number) =>
     encodeBinaryFrame(TAG.PUBLISH_BINARY_ACK_REQ, index, data, seq),
-  binaryAckReq: (index: number, data: Uint8Array, seq = 0) => encodeBinaryFrame(TAG.BINARY_ACK_REQ, index, data, seq),
+  binaryAckReq: (index: number, data: Uint8Array, seq: number) =>
+    encodeBinaryFrame(TAG.BINARY_ACK_REQ, index, data, seq),
 
   /** Wire: [header][u64 ackedSeq][u8 status][result bytes...]
    *  `ownSeq` — this frame's own replay sequence number.
@@ -537,15 +539,15 @@ const encode = {
   },
 
   // ── Per-channel ctrls ──
-  close(index: number, timeoutMs: number, seq = 0): Uint8Array<ArrayBuffer> {
+  close(index: number, timeoutMs: number, seq: number): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 4)
     writeHeader(frame, TAG.CLOSE, index, seq)
     writeU32(frame, HEADER, timeoutMs)
     return frame
   },
-  closeAck: (index: number, seq = 0) => encodeBareFrame(TAG.CLOSE_ACK, index, seq),
-  abort: (index: number, abortValue: string, seq = 0) => encodeTextFrame(TAG.ABORT, index, abortValue, seq),
-  error(index: number, reason: ErrorReason, seq = 0): Uint8Array<ArrayBuffer> {
+  closeAck: (index: number, seq: number) => encodeBareFrame(TAG.CLOSE_ACK, index, seq),
+  abort: (index: number, abortValue: string, seq: number) => encodeTextFrame(TAG.ABORT, index, abortValue, seq),
+  error(index: number, reason: ErrorReason, seq: number): Uint8Array<ArrayBuffer> {
     const frame = new Uint8Array(HEADER + 1)
     writeHeader(frame, TAG.ERROR, index, seq)
     frame[HEADER] = reason
@@ -623,9 +625,9 @@ const FIXED_BYTES: Partial<Record<number, number>> = {
   [TAG.STREAM_REQUEST_OPEN_ACK]: encode.streamRequestOpenAck().byteLength,
   [TAG.PIECES_ACK]: encode.piecesAck(0, 0, 0).byteLength,
   [TAG.ANNOUNCE]: encode.announce(0, 0).byteLength,
-  [TAG.CLOSE]: encode.close(0, 0).byteLength,
-  [TAG.CLOSE_ACK]: encode.closeAck(0).byteLength,
-  [TAG.ERROR]: encode.error(0, ERROR_REASON.LOST).byteLength,
+  [TAG.CLOSE]: encode.close(0, 0, 0).byteLength,
+  [TAG.CLOSE_ACK]: encode.closeAck(0, 0).byteLength,
+  [TAG.ERROR]: encode.error(0, ERROR_REASON.LOST, 0).byteLength,
   [TAG.WINDOW]: encode.window(0, 0, 0).byteLength,
   [TAG.BROADCAST_SUB]: encode.broadcastSub(0, false).byteLength,
   [TAG.BROADCAST_UNSUB]: encode.broadcastUnsub(0, false).byteLength,
