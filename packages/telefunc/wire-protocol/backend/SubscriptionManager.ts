@@ -57,16 +57,16 @@ type SubscriptionSlotConfig = {
 
 class SubscriptionManager<Source> {
   /** Slots by driver partition and source key. */
-  private readonly _slots = new Map<string, SubscriptionSlot>()
-  private readonly _cleanups = new Set<Promise<void>>()
-  private readonly _holds = new Map<string, Hold>()
+  private readonly slots = new Map<string, SubscriptionSlot>()
+  private readonly cleanups = new Set<Promise<void>>()
+  private readonly holds = new Map<string, Hold>()
   /** Bytes held per partition and budget. */
-  private readonly _held = new Map<string, number>()
+  private readonly held = new Map<string, number>()
   /** Slots not yet established, counted down a microtask after: at 0, no send has anything to wait for. */
-  private _establishing = 0
-  private readonly _driver: SubscriptionDriver<Source>
-  private readonly _sourceKey: (source: Source) => string
-  private readonly _payloadKind: (source: Source) => 'text' | 'binary'
+  private establishing = 0
+  private readonly driver: SubscriptionDriver<Source>
+  private readonly sourceKey: (source: Source) => string
+  private readonly payloadKind: (source: Source) => 'text' | 'binary'
 
   /** `payloadKind` is what a source carries: a string for 'text', bytes for 'binary'. */
   constructor({
@@ -78,58 +78,58 @@ class SubscriptionManager<Source> {
     sourceKey: (source: Source) => string
     payloadKind: (source: Source) => 'text' | 'binary'
   }) {
-    this._driver = driver
-    this._sourceKey = sourceKey
-    this._payloadKind = payloadKind
+    this.driver = driver
+    this.sourceKey = sourceKey
+    this.payloadKind = payloadKind
   }
 
   /** Checks a delivery against the driver contract, once for all its consumers; one it throws for is reported and
    *  dropped. */
-  private _checkDelivery(source: Source, payload: BackendPayload, info: OrderingInfo): void {
+  private checkDelivery(source: Source, payload: BackendPayload, info: OrderingInfo): void {
     assertDriverOrdering(info)
-    assert((this._payloadKind(source) === 'text') === (typeof payload === 'string'))
+    assert((this.payloadKind(source) === 'text') === (typeof payload === 'string'))
   }
 
   subscribe(source: Source, receiver: BackendReceiver<BackendPayload>): BackendSubscription {
-    const binding = this._driver.bind(source)
-    const sourceKey = this._sourceKey(source)
+    const binding = this.driver.bind(source)
+    const sourceKey = this.sourceKey(source)
     const slotKey = JSON.stringify([binding.partition, sourceKey])
-    let slot = this._slots.get(slotKey)
+    let slot = this.slots.get(slotKey)
     if (slot === undefined) {
       const created: SubscriptionSlot = new SubscriptionSlot({
         binding,
-        checkDelivery: (payload, info) => this._checkDelivery(source, payload, info),
+        checkDelivery: (payload, info) => this.checkDelivery(source, payload, info),
         sourceKey,
-        cleanup: (attempt) => this._cleanup(attempt),
+        cleanup: (attempt) => this.cleanup(attempt),
         unmap: () => {
-          if (this._slots.get(slotKey) === created) this._slots.delete(slotKey)
+          if (this.slots.get(slotKey) === created) this.slots.delete(slotKey)
         },
       })
-      this._slots.set(slotKey, (slot = created))
-      this._establishing++
-      void created.established.then(() => this._establishing--)
+      this.slots.set(slotKey, (slot = created))
+      this.establishing++
+      void created.established.then(() => this.establishing--)
     }
     return slot.attach(receiver)
   }
 
   async dispose(): Promise<void> {
-    const slots = [...this._slots.values()]
-    this._slots.clear()
-    await Promise.allSettled([...slots.map((slot) => slot.stop()), ...this._cleanups])
+    const slots = [...this.slots.values()]
+    this.slots.clear()
+    await Promise.allSettled([...slots.map((slot) => slot.stop()), ...this.cleanups])
   }
 
-  private _cleanup(attempt: SubscriptionAttempt): Promise<void> {
+  private cleanup(attempt: SubscriptionAttempt): Promise<void> {
     // Not deferred: a subscribe in the same tick opens the source's next attempt after this one let go.
     const unsubscribing = new Promise<void>((resolve) => resolve(attempt.unsubscribe()))
     const cleanup = unsubscribing.catch((error) => console.error(error))
-    this._cleanups.add(cleanup)
-    void cleanup.finally(() => this._cleanups.delete(cleanup))
+    this.cleanups.add(cleanup)
+    void cleanup.finally(() => this.cleanups.delete(cleanup))
     return cleanup
   }
 
   /** Whether a send can be held now: some subscription establishes or some send is held. */
   get holding(): boolean {
-    return this._establishing > 0 || this._holds.size > 0
+    return this.establishing > 0 || this.holds.size > 0
   }
 
   /** Runs `send` once none of its caller's subscriptions on the hold's `sources` is establishing, waiting at most the
@@ -139,65 +139,65 @@ class SubscriptionManager<Source> {
     if (!this.holding) return send()
     const { key, sources, kind, budget: budgetKey, bytes: payloadBytes, label, onHeld } = describeHold()
     // Another partition's subscription (another Cloudflare session's) is not ordered before this send.
-    const partition = this._driver.partitionHere(sources[0])
+    const partition = this.driver.partitionHere(sources[0])
     if (partition === null) return send()
     const holdKey = JSON.stringify([partition, key])
-    let hold = this._holds.get(holdKey)
+    let hold = this.holds.get(holdKey)
     if (hold === undefined) {
-      if (this._establishingWaits(sources, partition).length === 0) return send()
-      const established = raceTimeout(this._established(sources, partition), ESTABLISH_HOLD_MS, () => {})
+      if (this.establishingWaits(sources, partition).length === 0) return send()
+      const established = raceTimeout(this.established(sources, partition), ESTABLISH_HOLD_MS, () => {})
       hold = { established, sends: 0 }
     }
     const current = hold
     const weight = heldSendWeight(kind, budgetKey, payloadBytes, label)
     const bytes = weight.bytes()
     const budget = JSON.stringify([partition, weight.budget])
-    const held = (this._held.get(budget) ?? 0) + bytes
+    const held = (this.held.get(budget) ?? 0) + bytes
     if (!weight.fits(held)) return Promise.reject(weight.overflow())
-    this._held.set(budget, held)
+    this.held.set(budget, held)
     onHeld?.()
-    this._holds.set(holdKey, current)
+    this.holds.set(holdKey, current)
     current.sends++
     // Sent inside the reaction, so a send that finds the hold gone can't reach the driver first.
     return current.established.then(() => {
-      if (--current.sends === 0) this._holds.delete(holdKey)
-      this._unhold(budget, bytes)
+      if (--current.sends === 0) this.holds.delete(holdKey)
+      this.unhold(budget, bytes)
       return send()
     })
   }
 
-  private _unhold(budget: string, bytes: number): void {
-    const held = this._held.get(budget)! - bytes
-    if (held === 0) this._held.delete(budget)
-    else this._held.set(budget, held)
+  private unhold(budget: string, bytes: number): void {
+    const held = this.held.get(budget)! - bytes
+    if (held === 0) this.held.delete(budget)
+    else this.held.set(budget, held)
   }
 
   /** Resolves once no slot of the partition on `sources`, including ones added meanwhile, is establishing. */
-  private async _established(sources: readonly Source[], partition: string): Promise<void> {
+  private async established(sources: readonly Source[], partition: string): Promise<void> {
     for (
-      let waits = this._establishingWaits(sources, partition);
+      let waits = this.establishingWaits(sources, partition);
       waits.length > 0;
-      waits = this._establishingWaits(sources, partition)
+      waits = this.establishingWaits(sources, partition)
     ) {
       await Promise.all(waits)
     }
   }
 
   /** A slot is establishing until it is first ready, stopped or ended. */
-  private _establishingWaits(sources: readonly Source[], partition: string): Promise<void>[] {
+  private establishingWaits(sources: readonly Source[], partition: string): Promise<void>[] {
     return sources.flatMap((source) => {
-      const slot = this._slots.get(JSON.stringify([partition, this._sourceKey(source)]))
+      const slot = this.slots.get(JSON.stringify([partition, this.sourceKey(source)]))
       return slot?.establishing ? [slot.established] : []
     })
   }
 }
 
 class SubscriptionSlot {
-  private readonly _attachments = new Set<SlotAttachment>()
+  private readonly attachments = new Set<SlotAttachment>()
   /** Taken at a delivery or notify and dropped on a change, so each iterates the attachments it started with. */
-  private _snapshot: readonly SlotAttachment[] | null = null
-  private _attempt: SubscriptionAttempt | null = null
-  private _unobserve: (() => void) | null = null
+  private snapshot: readonly SlotAttachment[] | null = null
+  private attempt: SubscriptionAttempt | null = null
+  private unobserve: (() => void) | null = null
   private _readiness: Deferred<void> = createReadiness()
 
   /** The first readiness, settled by the first ready, a stop or an end; a later loss opens a new one. */
@@ -206,14 +206,14 @@ class SubscriptionSlot {
     () => {},
   )
 
-  private _wasReady = false
+  private wasReady = false
   private _state: SubscriptionState = 'establishing'
-  private _stopPromise: Promise<void> | null = null
+  private stopPromise: Promise<void> | null = null
 
-  constructor(private readonly _config: SubscriptionSlotConfig) {}
+  constructor(private readonly config: SubscriptionSlotConfig) {}
 
   get establishing(): boolean {
-    return this._stopPromise === null && !this._wasReady
+    return this.stopPromise === null && !this.wasReady
   }
 
   get state(): SubscriptionState {
@@ -225,57 +225,57 @@ class SubscriptionSlot {
   }
 
   attach(receiver: BackendReceiver<BackendPayload>): BackendSubscription {
-    assert(this._stopPromise === null) // the manager unmaps a slot before stopping it
+    assert(this.stopPromise === null) // the manager unmaps a slot before stopping it
     const attachment = new SlotAttachment(this, receiver)
-    this._attachments.add(attachment)
-    this._snapshot = null
-    if (this._attempt === null) this._start()
+    this.attachments.add(attachment)
+    this.snapshot = null
+    if (this.attempt === null) this.start()
     return attachment
   }
 
   async detach(attachment: SlotAttachment): Promise<void> {
-    this._attachments.delete(attachment)
-    this._snapshot = null
-    if (this._attachments.size > 0) return
-    this._config.unmap()
+    this.attachments.delete(attachment)
+    this.snapshot = null
+    if (this.attachments.size > 0) return
+    this.config.unmap()
     await this.stop()
   }
 
   stop(): Promise<void> {
-    if (this._stopPromise !== null) return this._stopPromise
-    this._stopPromise = this._release()
+    if (this.stopPromise !== null) return this.stopPromise
+    this.stopPromise = this.release()
     this._readiness.resolve()
-    this._transition('closed')
-    return this._stopPromise
+    this.transition('closed')
+    return this.stopPromise
   }
 
-  private _start(): void {
+  private start(): void {
     let attempt: SubscriptionAttempt
     try {
-      attempt = this._config.binding.open(
-        (payload, info) => this._deliver(payload, info),
-        () => this._attachments.size,
+      attempt = this.config.binding.open(
+        (payload, info) => this.deliver(payload, info),
+        () => this.attachments.size,
       )
     } catch (error) {
-      this._terminal(error)
+      this.terminal(error)
       return
     }
-    this._attempt = attempt
-    this._unobserve = attempt.onStateChange((state, reason) => this._onStateChange(attempt, state, reason))
+    this.attempt = attempt
+    this.unobserve = attempt.onStateChange((state, reason) => this.onStateChange(attempt, state, reason))
     // A refusal known at once throws from open(), so an attempt opens establishing or ready.
     assert(attempt.state() !== 'closed')
-    if (attempt.state() === 'ready') this._becameReady()
+    if (attempt.state() === 'ready') this.becameReady()
   }
 
-  private _deliver(payload: BackendPayload, info: { seq: number; timestamp: number }): void {
-    if (this._stopPromise !== null) return
+  private deliver(payload: BackendPayload, info: { seq: number; timestamp: number }): void {
+    if (this.stopPromise !== null) return
     try {
-      this._config.checkDelivery(payload, info)
+      this.config.checkDelivery(payload, info)
     } catch (error) {
       console.error(error)
       return
     }
-    for (const attachment of this._targets()) {
+    for (const attachment of this.targets()) {
       try {
         attachment.receiver(payload, info)
       } catch (error) {
@@ -285,98 +285,98 @@ class SubscriptionSlot {
   }
 
   /** An attempt reports a `ReportedState`: ready, lost or closed, never establishing again. */
-  private _onStateChange(attempt: SubscriptionAttempt, state: ReportedState, reason?: Error): void {
-    assert(this._attempt === attempt) // a slot opens one attempt, and unobserves it before cleanup
-    if (state === 'ready') return this._becameReady()
-    if (state === 'closed') return this._ended(reason)
-    this._markLost()
+  private onStateChange(attempt: SubscriptionAttempt, state: ReportedState, reason?: Error): void {
+    assert(this.attempt === attempt) // a slot opens one attempt, and unobserves it before cleanup
+    if (state === 'ready') return this.becameReady()
+    if (state === 'closed') return this.ended(reason)
+    this.markLost()
   }
 
-  private _becameReady(): void {
-    this._wasReady = true
+  private becameReady(): void {
+    this.wasReady = true
     this._readiness.resolve()
-    this._transition('ready')
+    this.transition('ready')
   }
 
   /** The driver's reason, if any, is the failure's cause. A dropped source is an end its consumers expect, so only
    *  another end is reported. */
-  private _ended(reason: Error | undefined): void {
-    const failure = new Error(`Backend subscription closed: ${this._config.sourceKey}`, reason && { cause: reason })
-    this._terminal(failure, { report: !isSourceDroppedError(reason) })
+  private ended(reason: Error | undefined): void {
+    const failure = new Error(`Backend subscription closed: ${this.config.sourceKey}`, reason && { cause: reason })
+    this.terminal(failure, { report: !isSourceDroppedError(reason) })
   }
 
-  private _terminal(error: unknown, { report = true }: { report?: boolean } = {}): void {
+  private terminal(error: unknown, { report = true }: { report?: boolean } = {}): void {
     const failure = error instanceof Error ? error : new Error(String(error))
-    this._config.unmap()
-    this._stopPromise = this._release()
+    this.config.unmap()
+    this.stopPromise = this.release()
     // A resolved readiness cannot carry the failure, so `ready` read from here on is a fresh, rejected one.
     if (this._state === 'ready') this._readiness = createReadiness()
-    this._transition('closed')
+    this.transition('closed')
     this._readiness.reject(failure)
     // Reported here, once, however many consumers share the subscription.
     void this._readiness.promise.catch(report ? reportBug : () => {})
   }
 
-  private _markLost(): void {
+  private markLost(): void {
     if (this._state === 'ready') this._readiness = createReadiness()
-    this._transition('lost')
+    this.transition('lost')
   }
 
-  private _transition(state: SubscriptionState): void {
+  private transition(state: SubscriptionState): void {
     if (this._state === state) return
     this._state = state
-    for (const attachment of this._targets()) attachment.notify(state)
+    for (const attachment of this.targets()) attachment.notify(state)
   }
 
-  private _targets(): readonly SlotAttachment[] {
-    return (this._snapshot ??= [...this._attachments])
+  private targets(): readonly SlotAttachment[] {
+    return (this.snapshot ??= [...this.attachments])
   }
 
   /** Unobserves the attempt first: its closing on cleanup is no end. */
-  private _release(): Promise<void> {
-    const attempt = this._attempt
-    this._unobserve?.()
-    this._unobserve = null
-    this._attempt = null
-    return attempt === null ? Promise.resolve() : this._config.cleanup(attempt)
+  private release(): Promise<void> {
+    const attempt = this.attempt
+    this.unobserve?.()
+    this.unobserve = null
+    this.attempt = null
+    return attempt === null ? Promise.resolve() : this.config.cleanup(attempt)
   }
 }
 
 /** One consumer's subscription on a slot. */
 class SlotAttachment implements BackendSubscription {
-  private _attached = true
-  private readonly _listeners = new Set<StateListener>()
+  private attached = true
+  private readonly listeners = new Set<StateListener>()
 
   constructor(
-    private readonly _slot: SubscriptionSlot,
+    private readonly slot: SubscriptionSlot,
     readonly receiver: BackendReceiver<BackendPayload>,
   ) {}
 
   get ready(): Promise<void> {
-    return this._attached ? this._slot.readiness : Promise.resolve()
+    return this.attached ? this.slot.readiness : Promise.resolve()
   }
 
   state(): SubscriptionState {
-    return this._attached ? this._slot.state : 'closed'
+    return this.attached ? this.slot.state : 'closed'
   }
 
   onStateChange(listener: StateListener): () => void {
-    assert(this._attached)
-    this._listeners.add(listener)
-    return () => this._listeners.delete(listener)
+    assert(this.attached)
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
   }
 
   async unsubscribe(): Promise<void> {
-    if (!this._attached) return
-    this._attached = false
-    if (this._slot.state !== 'closed') this.notify('closed')
-    this._listeners.clear()
-    await this._slot.detach(this)
+    if (!this.attached) return
+    this.attached = false
+    if (this.slot.state !== 'closed') this.notify('closed')
+    this.listeners.clear()
+    await this.slot.detach(this)
   }
 
   /** Consumer listeners are isolated from each other; one that throws is reported. */
   notify(state: SubscriptionState): void {
-    for (const listener of this._listeners) {
+    for (const listener of this.listeners) {
       try {
         listener(state)
       } catch (error) {

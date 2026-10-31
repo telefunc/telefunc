@@ -37,9 +37,9 @@ function removeSubscription(subs: Subscriptions, key: string, sub: MemorySubscri
 }
 
 class MemorySubscriptionAttempt extends DriverAttempt {
-  private readonly _receiver: BackendReceiver<BackendPayload>
-  private readonly _localReceiverCount: () => number
-  private readonly _detach: () => void
+  private readonly receiver: BackendReceiver<BackendPayload>
+  private readonly localReceiverCount: () => number
+  private readonly detach: () => void
 
   constructor({
     receiver,
@@ -51,9 +51,9 @@ class MemorySubscriptionAttempt extends DriverAttempt {
     detach: () => void
   }) {
     super()
-    this._receiver = receiver
-    this._localReceiverCount = localReceiverCount
-    this._detach = detach
+    this.receiver = receiver
+    this.localReceiverCount = localReceiverCount
+    this.detach = detach
   }
 
   establish(): void {
@@ -61,73 +61,73 @@ class MemorySubscriptionAttempt extends DriverAttempt {
   }
 
   async unsubscribe(): Promise<void> {
-    this._detach()
+    this.detach()
     this.transition('closed')
   }
 
   deliver(payload: BackendPayload, info: { seq: number; timestamp: number }): void {
-    this._receiver(payload, info)
+    this.receiver(payload, info)
   }
 
   receiverCount(): number {
-    return this._localReceiverCount()
+    return this.localReceiverCount()
   }
 }
 
 /** Deliveries in seq order: the running one stays queued, so a publish made inside it is delivered after. */
 class MemoryDeliveries {
-  private readonly _queue = new Fifo<() => void>()
-  private _deliveredThisTurn = 0
+  private readonly queue = new Fifo<() => void>()
+  private deliveredThisTurn = 0
 
   get length(): number {
-    return this._queue.length
+    return this.queue.length
   }
 
   /** A turn's worth of deliveries is queued. */
   get isFull(): boolean {
-    return this._queue.length >= DELIVERIES_PER_TURN
+    return this.queue.length >= DELIVERIES_PER_TURN
   }
 
   deliversNow(): boolean {
-    return this._queue.length === 0 && this._deliveredThisTurn < DELIVERIES_PER_TURN
+    return this.queue.length === 0 && this.deliveredThisTurn < DELIVERIES_PER_TURN
   }
 
   /** Runs a delivery while nothing is queued, holding the queue's head as `_drain()` does. */
   deliverNow(delivery: () => void): void {
-    if (this._deliveredThisTurn++ === 0) nextTurn(() => this._nextTurn())
-    this._queue.push(DELIVERING_NOW)
+    if (this.deliveredThisTurn++ === 0) nextTurn(() => this.nextTurn())
+    this.queue.push(DELIVERING_NOW)
     delivery()
-    this._queue.shift()
-    this._drain()
+    this.queue.shift()
+    this.drain()
   }
 
   /** Runs `delivery` after those queued before it: now, unless one is running or this turn's deliveries ran out. */
   deliver(delivery: () => void): void {
     const now = this.deliversNow()
-    this._queue.push(delivery)
-    if (now) this._drain()
+    this.queue.push(delivery)
+    if (now) this.drain()
   }
 
-  private _drain(): void {
-    for (let delivery = this._queue.peek(); delivery !== undefined; delivery = this._queue.peek()) {
-      if (this._deliveredThisTurn === DELIVERIES_PER_TURN) return
-      if (this._deliveredThisTurn++ === 0) nextTurn(() => this._nextTurn())
+  private drain(): void {
+    for (let delivery = this.queue.peek(); delivery !== undefined; delivery = this.queue.peek()) {
+      if (this.deliveredThisTurn === DELIVERIES_PER_TURN) return
+      if (this.deliveredThisTurn++ === 0) nextTurn(() => this.nextTurn())
       delivery()
-      this._queue.shift()
+      this.queue.shift()
     }
   }
 
-  private _nextTurn(): void {
-    this._deliveredThisTurn = 0
-    this._drain()
+  private nextTurn(): void {
+    this.deliveredThisTurn = 0
+    this.drain()
   }
 }
 
 /** An in-process driver's pub/sub: subscriptions by key, delivered in order, a turn's worth at a time. */
 class MemoryPubSub {
-  private readonly _deliveries = new MemoryDeliveries()
+  private readonly deliveries = new MemoryDeliveries()
   /** Deliveries a microtask is yet to queue. */
-  private _queuing = 0
+  private queuing = 0
 
   /** Subscribes `receiver` to `key` of `subs`; `onDetach` runs once it is removed. */
   subscribe({
@@ -154,8 +154,8 @@ class MemoryPubSub {
     subs.set(key, [...(subs.get(key) ?? []), sub])
     // Ready once what was published before it is delivered, as a network subscriber hears its confirmation after the
     // messages sent before it.
-    if (this._queuing === 0 && this._deliveries.length === 0) sub.establish()
-    else queueMicrotask(() => this._deliveries.deliver(() => sub.establish()))
+    if (this.queuing === 0 && this.deliveries.length === 0) sub.establish()
+    else queueMicrotask(() => this.deliveries.deliver(() => sub.establish()))
     return sub
   }
 
@@ -172,8 +172,8 @@ class MemoryPubSub {
   ): Receipt | Promise<Receipt> {
     // Counted before delivery, which may unsubscribe or subscribe.
     const receipt = { seq: mark.seq, timestamp: mark.timestamp, receivers: sumReceiverCounts(targets) }
-    if (this._deliveries.deliversNow()) {
-      this._deliveries.deliverNow(() => {
+    if (this.deliveries.deliversNow()) {
+      this.deliveries.deliverNow(() => {
         for (const target of targets) target.deliver(payload, mark)
       })
       return receipt
@@ -181,7 +181,7 @@ class MemoryPubSub {
     const held = typeof payload === 'string' ? payload : copyBytes(payload)
     // A queued publish resolves as it is delivered, so a publisher awaiting each can't outrun its subscribers.
     return new Promise((resolve) => {
-      this._deliveries.deliver(() => {
+      this.deliveries.deliver(() => {
         for (const target of targets) target.deliver(held, mark)
         resolve(receipt)
       })
@@ -191,11 +191,11 @@ class MemoryPubSub {
   /** Queues `delivery` from a microtask, so a subscription made meanwhile is ready after it. Past a turn's deliveries,
    *  returns the next turn, which the caller waits for as for a network write, so it can't outrun them. */
   deliverSoon(delivery: () => void): Promise<void> | null {
-    this._queuing++
+    this.queuing++
     queueMicrotask(() => {
-      this._queuing--
-      this._deliveries.deliver(delivery)
+      this.queuing--
+      this.deliveries.deliver(delivery)
     })
-    return this._deliveries.isFull ? new Promise<void>(nextTurn) : null
+    return this.deliveries.isFull ? new Promise<void>(nextTurn) : null
   }
 }

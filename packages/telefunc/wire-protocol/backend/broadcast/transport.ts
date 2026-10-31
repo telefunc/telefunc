@@ -71,13 +71,13 @@ function open(
 
 /** Ready at once: a user transport's listen() has no establishment to wait for. */
 class TransportAttempt extends DriverAttempt {
-  constructor(private readonly _stop: () => void) {
+  constructor(private readonly stop: () => void) {
     super()
     this.transition('ready')
   }
 
   async unsubscribe(): Promise<void> {
-    this._stop()
+    this.stop()
     this.transition('closed')
   }
 }

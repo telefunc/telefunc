@@ -6,7 +6,7 @@ type StateListener = (state: ReportedState, reason?: Error) => void
 
 /** A driver attempt's state and listeners; an ended attempt never transitions again. */
 abstract class DriverAttempt implements SubscriptionAttempt {
-  private readonly _listeners = new Set<StateListener>()
+  private readonly listeners = new Set<StateListener>()
   private _state: SubscriptionState = 'establishing'
 
   protected get ended(): boolean {
@@ -18,8 +18,8 @@ abstract class DriverAttempt implements SubscriptionAttempt {
   }
 
   onStateChange(listener: StateListener): () => void {
-    this._listeners.add(listener)
-    return () => this._listeners.delete(listener)
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
   }
 
   abstract unsubscribe(): Promise<void>
@@ -29,7 +29,7 @@ abstract class DriverAttempt implements SubscriptionAttempt {
     if (this._state === state || this.ended) return
     this._state = state
     const error = reason === undefined || reason instanceof Error ? reason : new Error(String(reason))
-    for (const listener of this._listeners) listener(state, error)
+    for (const listener of this.listeners) listener(state, error)
   }
 }
 

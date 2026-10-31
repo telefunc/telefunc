@@ -23,14 +23,14 @@ type BroadcastEndOwner = {
 /** The server end of a page's `ClientBroadcast`: a channel to that page, which also takes the page's publishes and
  *  subscriptions, and delivers publishes to it. */
 class ServerBroadcastEnd extends ServerChannel {
-  private _owner: BroadcastEndOwner | null = null
+  private owner: BroadcastEndOwner | null = null
 
   constructor() {
     super({ publishes: true })
   }
 
   _setOwner(owner: BroadcastEndOwner): void {
-    this._owner = owner
+    this.owner = owner
   }
 
   get isAttached(): boolean {
@@ -45,16 +45,16 @@ class ServerBroadcastEnd extends ServerChannel {
   /** A PUBLISH frame to its page, never refused: a page too far behind is let go. One `resentOnAttach`, which the owner
    *  sends again at each attach, may be dropped while the page is away without leaving it a gap. */
   deliver(frame: string, opts?: { resentOnAttach?: boolean }): void {
-    this._deliver(frame, opts?.resentOnAttach !== true)
+    this.deliverOrHold(frame, opts?.resentOnAttach !== true)
   }
 
   deliverBinary(frame: Uint8Array): void {
-    this._deliver(frame, true)
+    this.deliverOrHold(frame, true)
   }
 
   /** Buffered while its page is away, where dropping a `gap` frame, which its page doesn't get again as it attaches,
    *  lets the page go. */
-  private _deliver(frame: string | Uint8Array, gap: boolean): void {
+  private deliverOrHold(frame: string | Uint8Array, gap: boolean): void {
     const binary = typeof frame !== 'string'
     const peer = this._peer
     if (peer === null) {
@@ -84,18 +84,18 @@ class ServerBroadcastEnd extends ServerChannel {
   override _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     super._attachPeer(peer, state)
     if (this._peer !== peer || this._isClosed) return
-    assert(this._owner)
-    this._owner._onPageAttach?.()
+    assert(this.owner)
+    this.owner._onPageAttach?.()
   }
 
   override _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    const owner = this._owner
+    const owner = this.owner
     assert(owner)
     return this._trackAck(this._answerRequest(seq, [(t: string) => owner._onPagePublish(t)], text))
   }
 
   override _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    const owner = this._owner
+    const owner = this.owner
     assert(owner)
     return this._trackAck(this._answerRequest(seq, [(d: Uint8Array) => owner._onPagePublishBinary(d)], data))
   }
@@ -108,7 +108,7 @@ class ServerBroadcastEnd extends ServerChannel {
   }
 
   override _onPeerSubscription(kind: BroadcastKind, on: boolean): void {
-    assert(this._owner)
-    this._owner._onPageSubscription?.(kind, on)
+    assert(this.owner)
+    this.owner._onPageSubscription?.(kind, on)
   }
 }
