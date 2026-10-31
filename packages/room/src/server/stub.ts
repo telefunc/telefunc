@@ -186,7 +186,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   private trackWants = 0
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private tail: TailHold | null = null
-  /** @internal Whether this client was sent the whole roster since it attached. */
+  /** Whether this client was sent the whole roster since it attached. */
   rosterSent = false
 
   constructor({ room, end, publishShield, grants }: RoomStubOptions) {

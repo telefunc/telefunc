@@ -179,7 +179,6 @@ class ReplayGate {
     this.heldBytes = 0
   }
 
-  /** @internal */
   flush(hold: ReplayHold): void {
     if (!hold.holding) return
     hold.holding = false
@@ -190,7 +189,6 @@ class ReplayGate {
     for (const frame of held) frame.relay()
   }
 
-  /** @internal */
   end(hold: ReplayHold): void {
     this.replays.delete(hold)
     if (this.replays.size === 0) this.lateRetained.clear()
