@@ -120,7 +120,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
         try {
           sender.send(frame, 0)
         } catch {
-          // Socket died between the open event and this send — `onClose` aborts the attempt.
+          // Socket died between the open event and this send — `onProbeClosed` aborts the attempt.
         }
       },
       close: () => {
