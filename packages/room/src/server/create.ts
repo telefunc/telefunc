@@ -3,7 +3,7 @@ export { tryCreateRoom }
 import { assert, assertUsage } from '../utils/assert.js'
 import { isObject } from '../utils/isObject.js'
 import { getRoomBackend } from '../backend/plane.js'
-import type { RoomBackend, RoomHead } from '../backend/contract.js'
+import type { HeadCx, HeadNext, RoomHead } from '../backend/contract.js'
 import { assertKnownOptions, assertRoomTimeout, isRecord, ownMetadata } from '../model.js'
 import type { RoomConfigRecord } from './protocol.js'
 import type { RoomMeta, RoomOptions } from '../types.js'
@@ -18,7 +18,7 @@ import { listRoom, sweepLapsedRoomsSoon } from './directory.js'
 import { getRoomConfig } from './config.js'
 
 // A create reads the head until it may replace it, replaces it in one compare-exchange, and only then sets up the new
-// incarnation; a head that changed under the exchange sends it back to the read.
+// incarnation; a head that changed under the exchange sends it back to the read. The three run in one async attempt.
 
 type TryCreateRoomResult = { kind: 'created'; room: ServerRoom } | { kind: 'exists' } | { kind: 'closing' }
 type Refusal = { kind: 'exists' } | { kind: 'closing' }
@@ -27,8 +27,14 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
   const { meta, emptyTimeout, departureTimeout } = normalizeRoomOptions(options)
   const backend = getRoomBackend()
   return await retryCompareExchange(async () => {
-    const current = await resolveHeadForCreate(backend, id)
-    if (current !== null && 'kind' in current) return current
+    // The head a create may replace: a closing one taken over, a closed one cleaned up.
+    let current = await backend.readHead(id)
+    if (current?.state === 'closing') {
+      if (!(await takeOverClose(backend, id, current))) return { kind: 'closing' }
+      current = await backend.readHead(id)
+    }
+    if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
+    if (current !== null && current.state !== 'closed') return { kind: 'exists' }
     const incarnation: RoomIncarnation = {
       id,
       inc: crypto.randomUUID(),
@@ -39,61 +45,37 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
     const lapsedInc = current === null ? await backend.directoryGet(id) : undefined
     // A creator that stops past its head leaves a listing the sweep finds: the lapsed incarnation's, or this one.
     if (lapsedInc === undefined) await listRoom(backend, incarnation, undefined)
-    const committed = await commitNewHead(backend, id, current, created)
-    if (committed !== true) return committed
-    return { kind: 'created', room: await initNewIncarnation(backend, incarnation, created, lapsedInc) }
+    // The new head, in the one exchange.
+    const result = await backend.compareExchangeHead(id, replacing(current), { head: openHead(created) })
+    if ('conflict' in result) return refusalOf(result.current)
+    assert('head' in result)
+    // The new incarnation: the head lapses only once the counters that keep it ahead are written.
+    await createHold(incarnation)
+    const lapsing = await lapseNewRoom(incarnation)
+    if (lapsedInc !== undefined) await backend.dropGeneration(id, lapsedInc)
+    await listRoom(backend, incarnation, lapsing?.expiresAt)
+    sweepLapsedRoomsSoon()
+    return { kind: 'created', room: seededRoom(id, created) }
   })
 }
 
-/** The head a create may replace (null: none), once a closing one was taken over and a closed one cleaned up; or why it
- *  may not. */
-async function resolveHeadForCreate(backend: RoomBackend, id: string): Promise<RoomHead | null | Refusal> {
-  let current = await backend.readHead(id)
-  if (current?.state === 'closing') {
-    if (!(await takeOverClose(backend, id, current))) return { kind: 'closing' }
-    current = await backend.readHead(id)
-  }
-  if (current?.state === 'closed') await cleanupFinalizedIncarnation(backend, id, current)
-  if (current !== null && current.state !== 'closed') return { kind: 'exists' }
-  return current
+/** What the head exchange expects of the head the create read: still absent, or still at its revision. */
+function replacing(current: RoomHead | null): HeadCx {
+  return current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev }
 }
 
-/** Replaces `current` with the new incarnation's open head; true once it did. */
-async function commitNewHead(
-  backend: RoomBackend,
-  id: string,
-  current: RoomHead | null,
-  created: RoomConfigRecord,
-): Promise<true | Refusal | typeof CX_CONFLICT> {
-  const result = await backend.compareExchangeHead(
-    id,
-    current === null ? { form: 'absent' } : { form: 'rev', rev: current.rev },
-    { head: { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) } },
-  )
-  if ('conflict' in result) {
-    // A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again.
-    if (result.current === null || result.current.state === 'closed') return CX_CONFLICT
-    return result.current.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
-  }
-  assert('head' in result)
-  return true
+function openHead(created: RoomConfigRecord): HeadNext['head'] {
+  return { currentInc: created.inc, state: 'open', config: encodeRoomRecord(created) }
 }
 
-/** Sets up an incarnation whose head was just written: its hold, its lapse, its listing; drops the lapsed one it
- *  replaced, and seeds this process's view. */
-async function initNewIncarnation(
-  backend: RoomBackend,
-  incarnation: RoomIncarnation,
-  created: RoomConfigRecord,
-  lapsedInc: string | undefined,
-): Promise<ServerRoom> {
-  const { id } = incarnation
-  // The head lapses only once the counters that keep it ahead are written.
-  await createHold(incarnation)
-  const lapsing = await lapseNewRoom(incarnation)
-  if (lapsedInc !== undefined) await backend.dropGeneration(id, lapsedInc)
-  await listRoom(backend, incarnation, lapsing?.expiresAt)
-  sweepLapsedRoomsSoon()
+/** A head that went away (a lapsed tombstone) or closed meanwhile still allows the create: try again. */
+function refusalOf(conflicting: RoomHead | null): Refusal | typeof CX_CONFLICT {
+  if (conflicting === null || conflicting.state === 'closed') return CX_CONFLICT
+  return conflicting.state === 'closing' ? { kind: 'closing' } : { kind: 'exists' }
+}
+
+/** This process's view of the new incarnation: its meta at seq 0, no members. */
+function seededRoom(id: string, created: RoomConfigRecord): ServerRoom {
   const meta = { entries: metaEntriesAt(created.meta, 0), seq: 0 }
   return new ServerRoom(RoomReplica.seeded(id, created, meta, { members: [] }))
 }
