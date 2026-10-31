@@ -67,7 +67,9 @@ class FailingAttempt extends DriverAttempt {
   ) {
     super()
     const follow = () => {
-      this.transition(_inner.state())
+      // An attempt starts establishing, so only a later state is news.
+      const state = _inner.state()
+      if (state !== 'establishing') this.transition(state)
       _inner.onStateChange((state, reason) => this.transition(state, reason))
     }
     if (held === undefined) follow()
