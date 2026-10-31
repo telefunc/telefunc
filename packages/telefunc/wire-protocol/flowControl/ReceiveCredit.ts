@@ -121,7 +121,6 @@ class ReceiveCredit {
   /** Settles a `BDP_PING_ACK`; `deliveredBefore(ms)`: what the wire delivered in the `ms` before the ack arrived. */
   onPingAck(ack: BdpPingAck, deliveredBefore: (ms: number) => number): void {
     const suggest = this.bdp.onPingAck(ack, deliveredBefore, this.sendWait)
-    if (!suggest.acknowledged) return
     const wantBytes = suggest.bytes === 'grow'
     const wantMsgs = suggest.msgs === 'grow'
     if (!wantBytes && !wantMsgs) return
