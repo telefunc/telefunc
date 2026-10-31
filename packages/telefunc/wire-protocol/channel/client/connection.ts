@@ -21,8 +21,6 @@ import {
   CHANNEL_CLIENT_REPLAY_BUFFER_BYTES,
   CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES,
   CHANNEL_IDLE_TIMEOUT_MS,
-  CHANNEL_PING_INTERVAL_MIN_MS,
-  CHANNEL_PING_INTERVAL_MS,
   CHANNEL_RECONNECT_INITIAL_DELAY_MS,
   CHANNEL_RECONNECT_MAX_DELAY_MS,
   CHANNEL_RECONNECT_TIMEOUT_MS,
@@ -42,13 +40,12 @@ import { replayWindow, type WindowKind } from '../../flowControl/credit.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
-import { seqNear, seqThrough } from '../../wire/seq.js'
+import { seqNear } from '../../wire/seq.js'
 import type {
   AckResultStatus,
   BdpPingAck,
   ChannelFrame,
   DecodedFrame,
-  PingEntry,
   PongEntry,
   SequencedEncoder,
 } from '../../wire/frame.js'
@@ -62,8 +59,9 @@ import type {
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
 import { Heartbeat } from './Heartbeat.js'
-import { ChannelTable, type ChannelRecord, type ClosedState } from './ChannelTable.js'
+import { ChannelTable, type ChannelRecord } from './ChannelTable.js'
 import { SendGate, type SendGateOwner } from './SendGate.js'
+import { Liveness, type LivenessOwner } from './Liveness.js'
 import { pingDeadline } from '../../wire/pingDeadline.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
@@ -311,7 +309,7 @@ function isJoinLimb(frame: DecodedFrame): boolean {
   return frame.tag === TAG.FIN || frame.tag === TAG.RECONCILED
 }
 
-class ClientConnection implements MuxConnection, SendGateOwner {
+class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner {
   private static cache = new Map<string, ClientConnection>()
 
   static getOrCreate(telefuncUrl: string, channel: MuxChannel, options: ClientConnectionOptions): ClientConnection {
@@ -373,7 +371,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
     return u !== null && !u.committed
   }
 
-  private sessionId: string | null = null
+  sessionId: string | null = null
   /** Advances each time the connection moves to another wire: what went out on the one before may not have arrived. */
   private wire = 0
   /** The wire the last RECONCILED came on. */
@@ -382,11 +380,9 @@ class ClientConnection implements MuxConnection, SendGateOwner {
   private inFlight = reconcileInFlight()
   private readonly channels = new ChannelTable()
   private readonly gate = new SendGate({ owner: this, channels: this.channels })
+  private readonly liveness = new Liveness({ owner: this, channels: this.channels, gate: this.gate })
   private reconnectTimeoutMs = CHANNEL_RECONNECT_TIMEOUT_MS
   private idleTimeoutMs: number
-  private pingIntervalMs = CHANNEL_PING_INTERVAL_MS
-  /** The heartbeat last installed is the provisional one before a first RECONCILED (see `beatFromReconcile`). */
-  private provisionalHeartbeat = false
   private clientReplayBufferBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BYTES
   private clientReplayBufferBinaryBytes = CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES
   /** The windows the replay buffers allow, the page's and the server's, as the last RECONCILED says them. */
@@ -543,7 +539,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
 
   /** How long a gone server is still held: until its loss is noticed at the pong deadline, then for `reconnectTimeout`. */
   reconnectWindow(): number {
-    return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(this.pingIntervalMs) + this.reconnectTimeoutMs)
+    return Math.min(TIMER_DELAY_MAX_MS, pingDeadline(this.liveness.pingInterval) + this.reconnectTimeoutMs)
   }
 
   /** A channel registered since the last RECONCILE, which owes the server one naming it. */
@@ -709,7 +705,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
     this.enterOpen()
     if (!this.transport.carriesReconcileInOpen) {
       this.sendReconcileBatch(this.stageReconcileBatch(false))
-      this.beatFromReconcile(transport)
+      this.liveness.beatFromReconcile(transport)
       return
     }
     if (!this.reconciling) {
@@ -746,8 +742,10 @@ class ClientConnection implements MuxConnection, SendGateOwner {
       if (seq === null) return
       frame.seq = seq
     }
-    if (frame.tag === TAG.WINDOW) this.serverHasThrough(frame.index, this.sentThrough(frame.index, frame.lastSeq))
-    if (frame.tag === TAG.ACK_RES) this.serverHasThrough(frame.index, frame.ackedSeq)
+    if (frame.tag === TAG.WINDOW) {
+      this.channels.serverHasThrough(frame.index, this.channels.sentThrough(frame.index, frame.lastSeq))
+    }
+    if (frame.tag === TAG.ACK_RES) this.channels.serverHasThrough(frame.index, frame.ackedSeq)
     // ATTACH_RESULT and the connection-level and closing ctrls need connection bookkeeping; the rest is per-channel.
     switch (frame.tag) {
       case TAG.FIN:
@@ -759,7 +757,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
       case TAG.ATTACH_RESULT:
         this.handleAttachResult(
           frame.index,
-          frame.lastSeq === null ? null : this.sentThrough(frame.index, frame.lastSeq),
+          frame.lastSeq === null ? null : this.channels.sentThrough(frame.index, frame.lastSeq),
         )
         return
       case TAG.ABORT:
@@ -828,82 +826,11 @@ class ClientConnection implements MuxConnection, SendGateOwner {
   /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
   onTransportReconcileSent(transport: ClientChannelTransport): void {
     if (this.closed || transport !== this.transport) return
-    this.beatFromReconcile(transport)
+    this.liveness.beatFromReconcile(transport)
   }
 
-  /** From the RECONCILE on: a RECONCILED comes behind what the server sends as it attaches, however long that takes. */
-  private beatFromReconcile(transport: ClientChannelTransport): void {
-    if (this.sessionId !== null) this.installHeartbeat(transport, this.pingIntervalMs, false)
-    else this.installHeartbeat(transport, CHANNEL_PING_INTERVAL_MIN_MS, true)
-  }
-
-  /** Idempotent once a RECONCILED set the interval; the next install replaces a provisional one. */
-  private installHeartbeat(transport: ClientChannelTransport, intervalMs: number, provisional: boolean): void {
-    if (transport.heartbeat !== null && !this.provisionalHeartbeat && this.pingIntervalMs === intervalMs) return
-    transport.detachHeartbeat()
-    if (!provisional) this.pingIntervalMs = intervalMs
-    this.provisionalHeartbeat = provisional
-    const hb = new Heartbeat({
-      intervalMs,
-      pongTimeoutMs: pingDeadline(intervalMs),
-      send: () => this.beat(transport),
-      onDead: () => this.handlePongTimeout(transport),
-    })
-    transport.attachHeartbeat(hb)
-    hb.start(!provisional)
-  }
-
-  /** Each open channel acknowledges what arrived since its last WINDOW, then the PING goes. */
-  private beat(transport: ClientChannelTransport): void {
-    for (const { channel, state } of this.channels.values()) if (state.tag !== 'closed') channel._acknowledge()
-    transport.sendPing(this.buildPing())
-  }
-
-  /** Names each closed channel the server attached; one a PING named, with nothing to replay or send, is let go. */
-  private buildPing(): Uint8Array<ArrayBuffer> {
-    const ended: PingEntry[] = []
-    let queued: Set<number> | undefined
-    for (const record of this.channels.values()) {
-      const { ix, state } = record
-      if (state.tag !== 'closed' || state.initial) continue
-      if (state.reported && record.replay.length === 0) {
-        queued ??= this.gate.queuedIxes()
-        if (!queued.has(ix)) {
-          this.releaseChannel(record)
-          continue
-        }
-      }
-      state.reported = true
-      ended.push({ ix, lastSeq: record.lastSeq })
-    }
-    return encode.ping(ended)
-  }
-
-  /** How far the server has what the page sent on each channel named, or that it no longer holds it. */
   onTransportPong(ended: PongEntry[]): void {
-    for (const { ix, lastSeq } of ended) {
-      const record = this.channels.get(ix)
-      if (record === undefined || record.state.tag !== 'closed') continue
-      if (lastSeq === null) this.releaseChannel(record)
-      else this.serverHas(record, record.state, this.sentThrough(ix, lastSeq))
-    }
-  }
-
-  /** The wire carries a seq's low 32 bits: the server's acknowledgement is the latest seq with them the page sent. */
-  private sentThrough(ix: number, lastSeq: number): number {
-    return seqThrough(lastSeq, this.channels.get(ix)?.replay.seq ?? 0)
-  }
-
-  /** A closed channel the server attached has what the page sent on it through `lastSeq`. */
-  private serverHas({ replay }: ChannelRecord, state: ClosedState, lastSeq: number): void {
-    state.initial = false
-    replay.acknowledge(lastSeq)
-    if (lastSeq >= replay.seq) state.delivered = true
-  }
-
-  /** The server has what the page sent on the channel through `lastSeq`, which its replay lets go. */
-  private serverHasThrough(ix: number, lastSeq: number): void {
-    this.channels.get(ix)?.replay.acknowledge(lastSeq)
+    this.liveness.onPong(ended)
   }
 
   private dropWire(transport: ClientChannelTransport): void {
@@ -914,11 +841,11 @@ class ClientConnection implements MuxConnection, SendGateOwner {
 
   /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
   onTransportPostLate(transport: ClientChannelTransport): void {
-    this.handlePongTimeout(transport)
+    this.onPongTimeout(transport)
   }
 
   /** Till its first RECONCILED a wire's RECONCILE deadline bounds it: what precedes may outlast the pong deadline. */
-  private handlePongTimeout(transport: ClientChannelTransport): void {
+  onPongTimeout(transport: ClientChannelTransport): void {
     if (this.reconciling && this.reconciledWire !== this.wire) return
     this.dropWire(transport)
   }
@@ -1029,7 +956,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
     this.reconciledWire = this.wire
     const deferredOmitted = committing?.deferredOmitted ?? null
     const outcome = this.applyReconciled(ctrl, deferredOmitted)
-    this.installHeartbeat(this.transport, ctrl.pingInterval, false)
+    this.liveness.install(this.transport, ctrl.pingInterval, false)
     this.transport.closeAbandonedTransport()
     for (const frame of outcome.frames) this.transport.sendFrame(frame)
     for (const channel of outcome.channelsToOpen) {
@@ -1132,8 +1059,8 @@ class ClientConnection implements MuxConnection, SendGateOwner {
    *  alive until the flip adopts it, and any death — its own or the attempt's — closes both. */
   private keepProbeAlive(probe: ProbeWire, attempt: AbortController): Heartbeat {
     const heartbeat = new Heartbeat({
-      intervalMs: this.pingIntervalMs,
-      pongTimeoutMs: pingDeadline(this.pingIntervalMs),
+      intervalMs: this.liveness.pingInterval,
+      pongTimeoutMs: pingDeadline(this.liveness.pingInterval),
       send: () => probe.ping(),
       onDead: () => attempt.abort(),
     })
@@ -1470,7 +1397,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
         this.releaseChannel(record)
         return null
       }
-      this.serverHas(record, record.state, lastSeq)
+      this.channels.serverHas(record, record.state, lastSeq)
     }
     if (lastSeq === undefined) {
       if (deferredOmitted) deferredOmitted.push(record.ix)
@@ -1505,7 +1432,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
     } else {
       const opened = record.state.tag === 'pending'
       if (opened) this.channels.open(record)
-      else if (record.state.tag === 'closed') this.serverHas(record, record.state, lastSeq)
+      else if (record.state.tag === 'closed') this.channels.serverHas(record, record.state, lastSeq)
       // As `applyReconciled` does: its replay, then what it queued.
       for (const frame of this.replayTo(record, lastSeq)) this.transport.sendFrame(frame)
       for (const frame of this.gate.drain((i) => i === ix)) this.transport.sendFrame(frame)
@@ -1541,7 +1468,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
     if (!record) return
     this.unregister(record.channel)
     assert(record.state.tag === 'closed')
-    record.state.delivered = true
+    this.channels.serverEnded(record.state)
     record.channel._onEnded(err)
   }
 
@@ -1565,7 +1492,7 @@ class ClientConnection implements MuxConnection, SendGateOwner {
 
   /** Drops all the channel holds, its ATTACH_RESULT wait too, as the RECONCILE releasing it, or a new wire's leaving it
    *  out, ends that on the server. */
-  private releaseChannel(record: ChannelRecord): void {
+  releaseChannel(record: ChannelRecord): void {
     this.channels.release(record)
     this.gate.dropQueue(record.ix)
   }

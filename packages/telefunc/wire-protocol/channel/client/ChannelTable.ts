@@ -4,6 +4,7 @@ export type { ChannelRecord, ClosedState }
 import type { ReplayBuffer } from '../ReplayBuffer.js'
 import type { MuxChannel } from './connection.js'
 import { assert } from '../../../utils/assert.js'
+import { seqThrough } from '../../wire/seq.js'
 
 /** `closed`: unregistered, and kept till released, as the RECONCILE releasing it, or a new wire's leaving it out, ends
  *  it on the server. */
@@ -93,7 +94,17 @@ class ChannelTable {
     return released
   }
 
-  // ── Per-channel state transitions: every `record.state =` write goes through these. ──
+  /** The wire carries a seq's low 32 bits: the server's acknowledgement is the latest seq with them the page sent. */
+  sentThrough(ix: number, lastSeq: number): number {
+    return seqThrough(lastSeq, this.records.get(ix)?.replay.seq ?? 0)
+  }
+
+  /** The server has what the page sent on channel `ix` through `lastSeq`, which its replay lets go. */
+  serverHasThrough(ix: number, lastSeq: number): void {
+    this.records.get(ix)?.replay.acknowledge(lastSeq)
+  }
+
+  // ── Per-channel state transitions: every write of a `record.state`, or of its fields, goes through these. ──
 
   add(ix: number, channel: MuxChannel, replay: ReplayBuffer): ChannelRecord {
     const record: ChannelRecord = {
@@ -121,6 +132,23 @@ class ChannelTable {
     const initial = record.state.tag === 'pending' && record.state.initial
     record.state = { tag: 'closed', initial, delivered: false, reported: false }
     this.closed.add(record)
+  }
+
+  /** A closed channel the server attached has what the page sent on it through `lastSeq`. */
+  serverHas({ replay }: ChannelRecord, state: ClosedState, lastSeq: number): void {
+    state.initial = false
+    replay.acknowledge(lastSeq)
+    if (lastSeq >= replay.seq) state.delivered = true
+  }
+
+  /** The server ended the closed channel. */
+  serverEnded(state: ClosedState): void {
+    state.delivered = true
+  }
+
+  /** A PING named the closed channel. */
+  reported(state: ClosedState): void {
+    state.reported = true
   }
 
   /** Drops all the channel holds, its ATTACH_RESULT wait too. */
