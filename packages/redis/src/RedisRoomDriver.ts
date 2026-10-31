@@ -98,7 +98,7 @@ class RedisRoomDriver implements RoomDriver {
   }
 
   commitLane(target: CommitTarget, payload: Uint8Array, opts?: CommitOptions): Promise<CommitResult> {
-    const commit = () => this._commitLane(target, payload, opts)
+    const commit = () => this.sendCommit(target, payload, opts)
     if (!isCluster(this.connection.client)) return commit()
     // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
     // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
@@ -116,7 +116,7 @@ class RedisRoomDriver implements RoomDriver {
     return committing
   }
 
-  private async _commitLane(
+  private async sendCommit(
     { roomId, inc, lane }: CommitTarget,
     payload: Uint8Array,
     opts?: CommitOptions,
