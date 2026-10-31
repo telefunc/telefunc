@@ -1,4 +1,4 @@
-export { RedisSubscriptionDriver }
+export { RedisSubscriber }
 export type { RedisSubscriptionSource }
 
 import { randomUUID } from 'node:crypto'
@@ -19,7 +19,7 @@ import type { SubscriberSocket } from './ioredis.js'
 
 type RedisSubscriptionSource = BroadcastRoute | RoomSubscriptionSource
 
-type RedisSubscriptionDriverOptions = {
+type RedisSubscriberOptions = {
   /** A fresh, unconnected subscriber socket that never retries on its own. */
   createSubscriber: () => Promise<SubscriberSocket>
 }
@@ -68,7 +68,7 @@ const REORDER_WAIT_MS = 1_000
  * goes `lost`; a fresh connection re-subscribes them and reports them `ready` again (a Room lane only while its
  * incarnation is still the open head).
  */
-class RedisSubscriptionDriver {
+class RedisSubscriber {
   private readonly _createSubscriber: () => Promise<SubscriberSocket>
   /** Every channel some attempt needs, with the attempts that listen on it. */
   private readonly _byChannel = new Map<string, Set<RedisSubscriptionAttempt>>()
@@ -84,7 +84,7 @@ class RedisSubscriptionDriver {
   /** An establishing attempt reports no failure, so the first one of an outage is reported here. */
   private _outageReported = false
 
-  constructor(options: RedisSubscriptionDriverOptions) {
+  constructor(options: RedisSubscriberOptions) {
     this._createSubscriber = options.createSubscriber
   }
 

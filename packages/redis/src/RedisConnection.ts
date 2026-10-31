@@ -10,7 +10,7 @@ import {
 } from './ioredis.js'
 import { assertKeyPrefix } from './keys.js'
 import { REDIS_COMMANDS, type RedisCommand } from './commands.js'
-import { RedisSubscriptionDriver } from './subscriber.js'
+import { RedisSubscriber } from './subscriber.js'
 
 /** One Redis deployment as Broadcast's and Room's drivers reach it: the backend's command client, the key prefix, and
  *  the one subscriber connection their subscriptions share. */
@@ -18,7 +18,7 @@ class RedisConnection {
   readonly prefix: string
   /** A Cluster node's PUBLISH count is node-local, so it cannot prove global absence. */
   readonly reportsReceivers: boolean
-  readonly subscriber: RedisSubscriptionDriver
+  readonly subscriber: RedisSubscriber
   private commands: RedisClient
   /** The app clients installed with this backend: its command client ends once the last one does. */
   private readonly holders = new Set<RedisClient>()
@@ -31,7 +31,7 @@ class RedisConnection {
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
     this.prefix = isCluster(this.commands) ? prefix : `${prefix}${this.commands.options.db ?? 0}:`
     this.reportsReceivers = !isCluster(this.commands)
-    this.subscriber = new RedisSubscriptionDriver({ createSubscriber: () => createSubscriberSocket(this.commands) })
+    this.subscriber = new RedisSubscriber({ createSubscriber: () => createSubscriberSocket(this.commands) })
   }
 
   /** The command client, for the commands that need no script. */
