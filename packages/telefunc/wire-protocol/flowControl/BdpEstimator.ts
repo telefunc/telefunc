@@ -239,8 +239,8 @@ class BdpEstimator {
     this.currentMsgWindow = Math.min(CREDIT_MSG_WINDOW_MAX, this.currentMsgWindow * 2)
   }
 
-  /** Drop the ping in flight (its ack rode the prior wire). Preserves window AND
-   *  cadence — both are link properties; a real rate change rediscovers. */
+  /** Drops the ping in flight, whose ack rode a prior wire or counts frames held back, and starts the next round here.
+   *  Keeps the windows and the cadence: both are the link's, and a real rate change rediscovers them. */
   reset(): void {
     this.pingInFlight = false
     this.boundRtt = Infinity
