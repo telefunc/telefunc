@@ -5,7 +5,6 @@ export {
   encode,
   withTook,
   MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
-  fixedBytes,
   isOneFrame,
   messageFrames,
   decode,

@@ -6,7 +6,6 @@ export {
   splitOwned,
   encodeLengthPrefixedFrames,
   encodeLengthPrefixedString,
-  readLengthPrefixedString,
   encodeIndexedFrame,
   decodeIndexedFrame,
   ownIndexedPayload,
@@ -124,15 +123,6 @@ function encodeLengthPrefixedString(s: string): Uint8Array<ArrayBuffer> {
   new DataView(out.buffer).setUint32(0, bytes.byteLength, false)
   out.set(bytes, U32_SIZE)
   return out
-}
-
-/** Read a `[u32 BE byte length][UTF-8 bytes]` string at `offset`.
- *  Returns the string and the offset of the first byte past it. */
-function readLengthPrefixedString(bytes: Uint8Array, offset: number): { value: string; offsetAfter: number } {
-  const len = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, false)
-  const start = offset + U32_SIZE
-  const end = start + len
-  return { value: textDecoder.decode(bytes.subarray(start, end)), offsetAfter: end }
 }
 
 // ===== Indexed frame (streaming multiplexing) =====

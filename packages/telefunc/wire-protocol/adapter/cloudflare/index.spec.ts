@@ -106,7 +106,6 @@ vi.mock('./routing.js', async (importOriginal) => ({
       return {
         sessionInstanceName: `${baseInstanceName}-shard-weur-0`,
         locationBucket: 'weur',
-        shardOrdinal: 0,
       }
     },
   ),

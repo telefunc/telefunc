@@ -3,7 +3,7 @@ export { CloudflareBroadcastTransport, CloudflareBroadcastAuthorityState }
 export type { BroadcastDeliverRequest, BroadcastPublishRequest, TelefuncBroadcastStub }
 
 import { CHANNEL_BUFFER_LIMIT_BYTES } from '../../constants.js'
-import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorShardIndices, getDeterministicKeyBucketIndex } from './routing.js'
+import { KNOWN_BROADCAST_BUCKETS, getBucketCoordinatorScale, getDeterministicKeyBucketIndex } from './routing.js'
 import { assert, assertUsage, assertWarning } from '../../../utils/assert.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import type {
@@ -616,7 +616,7 @@ class CloudflareBroadcastTransport implements BroadcastAdapter {
   }
 
   private getBucketCoordinatorStub(key: string, locationBucket: LocationBucket): TelefuncBroadcastStub {
-    const bucketShardCount = getBucketCoordinatorShardIndices(this.scale, locationBucket).length
+    const bucketShardCount = getBucketCoordinatorScale(this.scale, locationBucket)
     const bucketShardOrdinal = getDeterministicKeyBucketIndex(key, bucketShardCount)
     return this.getBoundStub(
       `${this.baseInstanceName}:broadcast:${locationBucket}:${bucketShardOrdinal}`,
