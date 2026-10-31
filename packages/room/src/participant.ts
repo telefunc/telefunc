@@ -161,20 +161,20 @@ abstract class ParticipantBase implements LocalParticipant {
 
   /** `from`/`fromMeta` come from the wire envelope; upgrades to the live `RemoteParticipant` when a room view
    *  exists. An empty `from` is the wire encoding of a room-authored message → `null`. */
-  private senderOf(msg: InboxMessage): Sender | null {
+  private inboxSender(msg: InboxMessage): Sender | null {
     const { from, fromMeta, fromIdentity: identity } = msg
     return from === '' ? null : (this._resolveSender(from) ?? senderOf(from, ownMetadata(fromMeta ?? {}), identity))
   }
 
   private fireInbox(msg: InboxMessage): void {
-    const sender = this.senderOf(msg)
+    const sender = this.inboxSender(msg)
     for (const cb of this.messageCbs?.list() ?? []) this.invoke(cb, msg.data, sender)
   }
 
   /** The last listener's return is the reply; a throw is the failure reply (see `toRoomFailure`: a bug is reported
    *  here, the sender gets only that it failed). */
   private async fireInboxAck(msg: InboxMessage): Promise<RoomResult> {
-    const sender = this.senderOf(msg)
+    const sender = this.inboxSender(msg)
     let result: unknown
     for (const cb of this.messageCbs?.list() ?? []) {
       try {
