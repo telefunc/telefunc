@@ -27,6 +27,7 @@ import {
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
+  type SequencedEncoder,
 } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import type { ReattachState } from '../../wire/payloads.js'
@@ -153,9 +154,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
     // Promise already serializes the next send, so credit would add nothing.
     if (needsAck) {
-      return this.sendAckReq<ChannelAck<ClientToServer>>((onQueued) =>
-        this.connection.sendSequenced(this, 'ack', encode.textAckReq, serialized, onQueued),
-      )
+      return this.sendAckReq<ChannelAck<ClientToServer>, string>(encode.textAckReq, serialized)
     }
     return this.waitForWindow(this.connection.sendSequenced(this, 'data', encode.text, serialized))
   }
@@ -178,9 +177,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this.closed) throw new ChannelClosedError()
     // Ack-bearing path bypasses credit; see `sendData` for rationale.
     if (opts?.ack === true) {
-      return this.sendAckReq((onQueued) =>
-        this.connection.sendSequenced(this, 'ack', encode.binaryAckReq, data, onQueued),
-      )
+      return this.sendAckReq<unknown, Uint8Array>(encode.binaryAckReq, data)
     }
     return this.waitForWindow(this.connection.sendSequenced(this, 'data', encode.binary, data))
   }
@@ -488,10 +485,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** An ack-bearing send: what refuses it throws here, as it does for a send without an ack. */
-  protected sendAckReq<T>(send: (onQueued: (seq: number) => void) => void): Promise<T> {
+  protected sendAckReq<T, D>(encodeFrame: SequencedEncoder<D>, data: D): Promise<T> {
     let pending!: { resolve: (v: T) => void; reject: (err: Error) => void }
     const ack = new Promise<T>((resolve, reject) => (pending = { resolve, reject }))
-    send((seq) => this.pendingAcks.set(seq, pending))
+    this.connection.sendSequenced(this, 'ack', encodeFrame, data, (seq) => this.pendingAcks.set(seq, pending))
     return this.lifecycle.trackAck(ack)
   }
 
@@ -539,9 +536,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
     if (this.closed) throw new ChannelClosedError()
     const serialized = stringify(data)
-    const ret = this.sendAckReq<ChannelPublishAck>((onQueued) =>
-      this.connection.sendSequenced(this, 'ack', encode.publishAckReq, serialized, onQueued),
-    )
+    const ret = this.sendAckReq<ChannelPublishAck, string>(encode.publishAckReq, serialized)
     ret.catch(reportChannelError)
     return ret
   }
@@ -557,9 +552,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
     if (this.closed) throw new ChannelClosedError()
-    const ret = this.sendAckReq<ChannelPublishAck>((onQueued) =>
-      this.connection.sendSequenced(this, 'ack', encode.publishBinaryAckReq, data, onQueued),
-    )
+    const ret = this.sendAckReq<ChannelPublishAck, Uint8Array>(encode.publishBinaryAckReq, data)
     ret.catch(reportChannelError)
     return ret
   }
