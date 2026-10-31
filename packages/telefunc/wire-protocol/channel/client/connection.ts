@@ -590,7 +590,6 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
     if (outcome.reconcileComplete) {
       this.upgrade.serverTransports = ctrl.transports
       this.startTtlIfIdle()
-      this.exchange.flushPendingRegisterReconcile()
       this.upgrade.maybeStart()
     }
   }

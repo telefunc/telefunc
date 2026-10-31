@@ -121,8 +121,8 @@ class AttachExchange {
    *  can't take it (connecting, awaiting RECONCILED, from an upgrade's READY until its handoff)
    *  the obligation is KEPT, not consumed — `reconcileOwed` stays set (which also keeps
    *  `sendsOpen` false so data frames buffer behind the RECONCILE), and the
-   *  transitions that make the wire sendable re-invoke this: `onTransportOpen`, a settled
-   *  RECONCILED, upgrade-attempt exit, and handoff completion. */
+   *  transitions that make the wire sendable re-invoke this: `onTransportOpen`, upgrade-attempt
+   *  start and exit, and handoff completion. A RECONCILED names what registered meanwhile in its follow-up. */
   flushPendingRegisterReconcile(): void {
     if (!this.isReconcileOwed) return
     if (this.owner.reconcileHeld) return
