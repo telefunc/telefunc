@@ -265,7 +265,6 @@ class Upgrade {
     this.exchange.closeUnacknowledged(deferredOmitted)
     for (const entry of buffer.new) this.owner.dispatchFrame(entry.frame)
     for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onUpgradeJoined()
-    this.exchange.flushPendingRegisterReconcile()
     this.owner.startTtlIfIdle()
   }
 
