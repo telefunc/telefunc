@@ -165,6 +165,7 @@ class AttachExchange {
 
   /** The old wire's last frame; a channel no RECONCILE named yet is left out, to reconcile after the handoff. */
   buildBarrierFrame({ sessionId, upgradeId, uplink }: ProbeSession): OutboundFrame {
+    this.enterReconciling()
     // Its entries attach on the WebSocket, `uplink`'s wire, the one after this one.
     const open = this.declareOpenEntries(this.channels.values(), { skipUnnamed: true, uplink })
     // A new wire's RECONCILE releases what it leaves out.
@@ -260,10 +261,11 @@ class AttachExchange {
 
   // ── The await-RECONCILED window ──
 
-  /** Enter the await-RECONCILED window and arm its liveness bound. A follow-up RECONCILE for
-   *  late registrations re-enters and restarts the deadline from scratch. */
+  /** Enter the await-RECONCILED window of a new RECONCILE in flight and arm its liveness bound. A follow-up RECONCILE
+   *  for late registrations re-enters and restarts the deadline from scratch. */
   private enterReconciling(): void {
     this.isReconciling = true
+    this.inFlight = reconcileInFlight()
     this.armReconcileDeadline(RECONCILE_TIMEOUT_MS)
   }
 
@@ -296,6 +298,7 @@ class AttachExchange {
   // ── The RECONCILE ──
 
   private buildReconcileFrame(): OutboundFrame {
+    this.enterReconciling()
     const { uplink } = this.owner.transport
     // The wire that has the session holds what the RECONCILEs before named: one there names what changed since.
     const changes = this.session !== null && this.reconciledWire === this.owner.wire
@@ -321,8 +324,6 @@ class AttachExchange {
       uplink: Uplink
     },
   ): ReconcileOpenEntry[] {
-    this.enterReconciling()
-    this.inFlight = reconcileInFlight()
     const open: ReconcileOpenEntry[] = []
     const subscribing = new Set<number>()
     for (const record of records) {
