@@ -39,7 +39,7 @@ import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
-import { ServerChannelBuffer } from './channelBuffer.js'
+import { ServerChannelBuffer, type BufferedSender, type EntryCallback } from './channelBuffer.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { assert } from '../../../utils/assert.js'
@@ -70,7 +70,7 @@ function parsePeerText(text: string): unknown {
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements Channel<ClientToServer, ServerToClient>, CreditOwner, ChannelLifecycleOwner
+  implements Channel<ClientToServer, ServerToClient>, CreditOwner, ChannelLifecycleOwner, BufferedSender
 {
   readonly [SERVER_CHANNEL_BRAND] = true
   /** @see ChannelShield in ../channel.ts — `data` validates incoming C2S, `ack` validates ack of own S2C sends. */
@@ -687,22 +687,45 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return (this.pendingEnd ??= { closeAck: false, closeRequest: false, abort: null, error: null })
   }
 
-  /** What was sent while no peer was attached goes to `peer`; an ack request rejected at the end takes no answer. */
   private flushOfflineBuffer(peer: IndexedPeer): void {
-    this.offlineBuffer.flush({
-      sendText: (msg) => this.sendCredit.countSent(peer.sendSequenced(encode.text, msg)),
-      sendPublish: (msg) => this.sendCredit.countPublishSent(peer.sendSequenced(encode.publish, msg)),
-      sendBinary: (msg) => this.sendCredit.countSent(peer.sendSequenced(encode.binary, msg)),
-      sendTextAck: (data, cb) =>
+    this.offlineBuffer.flush(this, peer)
+  }
+
+  /** @internal `BufferedSender`: what was sent while no peer was attached goes to `peer`, as it would have then; an ack
+   *  request rejected at the end takes no answer. */
+  _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void {
+    switch (tag) {
+      case TAG.TEXT:
+        assert(typeof data === 'string' && callback)
+        this.sendCredit.countSent(peer.sendSequenced(encode.text, data))
+        callback.resolve()
+        return
+      case TAG.TEXT_ACK_REQ:
+        assert(typeof data === 'string')
         peer.sendSequenced(encode.textAckReq, data, (seq, bytes) => {
-          if (cb) this.addPendingAck(seq, bytes, cb)
-        }),
-      sendBinaryAck: (data, cb) =>
+          if (callback) this.addPendingAck(seq, bytes, callback)
+        })
+        return
+      case TAG.PUBLISH:
+        assert(typeof data === 'string')
+        this.sendCredit.countPublishSent(peer.sendSequenced(encode.publish, data))
+        return
+      case TAG.BINARY:
+        assert(data instanceof Uint8Array && callback)
+        this.sendCredit.countSent(peer.sendSequenced(encode.binary, data))
+        callback.resolve()
+        return
+      case TAG.BINARY_ACK_REQ:
+        assert(data instanceof Uint8Array)
         peer.sendSequenced(encode.binaryAckReq, data, (seq, bytes) => {
-          if (cb) this.addPendingAck(seq, bytes, cb)
-        }),
-      sendPublishBinary: (msg) => this.sendCredit.countPublishSent(peer.sendSequenced(encode.publishBinary, msg)),
-    })
+          if (callback) this.addPendingAck(seq, bytes, callback)
+        })
+        return
+      case TAG.PUBLISH_BINARY:
+        assert(data instanceof Uint8Array)
+        this.sendCredit.countPublishSent(peer.sendSequenced(encode.publishBinary, data))
+        return
+    }
   }
 
   private sendPendingAckRes(peer: IndexedPeer): void {

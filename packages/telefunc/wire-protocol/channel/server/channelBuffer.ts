@@ -1,9 +1,10 @@
 export { ServerChannelBuffer }
+export type { BufferedSender, EntryCallback }
 
 import { ChannelOverflowError } from '../channelErrors.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 import { TAG } from '../../wire/tags.js'
-import { assert } from '../../../utils/assert.js'
+import type { IndexedPeer } from './IndexedPeer.js'
 
 /** Held beyond an entry's payload: a send's callbacks and promise (about 480 B), a publish's slots (about 52 B). */
 const HELD_SEND_OVERHEAD_BYTES = 512
@@ -15,14 +16,9 @@ type EntryCallback = {
   reject: (err: Error) => void
 }
 
-/** Where `flush` hands each entry, by its kind. */
-type FlushHandlers = {
-  sendText: (data: string) => void
-  sendPublish: (data: string) => void
-  sendBinary: (data: Uint8Array) => void
-  sendTextAck: (data: string, cb: EntryCallback | null) => void
-  sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
-  sendPublishBinary: (data: Uint8Array) => void
+/** The channel `flush` hands each held entry to, with the entry's tag, data and callbacks (null once rejected). */
+interface BufferedSender {
+  _sendBuffered(peer: IndexedPeer, tag: number, data: string | Uint8Array, callback: EntryCallback | null): void
 }
 
 /**
@@ -99,7 +95,7 @@ class ServerChannelBuffer<TAck = never> {
    * Merge-iterates text and binary queues by insertion order so the caller
    * sees the same sequence as if both queues were a single interleaved buffer.
    */
-  flush(handlers: FlushHandlers): void {
+  flush(sender: BufferedSender, peer: IndexedPeer): void {
     let ti = this.text.head
     let bi = this.binary.head
     const textLen = this.text.dataLength
@@ -107,51 +103,21 @@ class ServerChannelBuffer<TAck = never> {
 
     while (ti < textLen && bi < binaryLen) {
       if (this.text.orderAt(ti) < this.binary.orderAt(bi)) {
-        this.flushEntry(this.text, ti++, handlers)
+        this.flushEntry(this.text, ti++, sender, peer)
       } else {
-        this.flushEntry(this.binary, bi++, handlers)
+        this.flushEntry(this.binary, bi++, sender, peer)
       }
     }
-    while (ti < textLen) this.flushEntry(this.text, ti++, handlers)
-    while (bi < binaryLen) this.flushEntry(this.binary, bi++, handlers)
+    while (ti < textLen) this.flushEntry(this.text, ti++, sender, peer)
+    while (bi < binaryLen) this.flushEntry(this.binary, bi++, sender, peer)
 
     this.text.clear()
     this.binary.clear()
     this.insertionSeq = 0
   }
 
-  private flushEntry(queue: BufferQueue, i: number, h: FlushHandlers): void {
-    const tag = queue.tagAt(i)
-    const data = queue.dataAt(i)
-    const cb = queue.callbackAt(i)
-    switch (tag) {
-      case TAG.TEXT:
-        assert(typeof data === 'string' && cb)
-        h.sendText(data)
-        cb.resolve()
-        break
-      case TAG.TEXT_ACK_REQ:
-        assert(typeof data === 'string')
-        h.sendTextAck(data, cb)
-        break
-      case TAG.PUBLISH:
-        assert(typeof data === 'string')
-        h.sendPublish(data)
-        break
-      case TAG.BINARY:
-        assert(data instanceof Uint8Array && cb)
-        h.sendBinary(data)
-        cb.resolve()
-        break
-      case TAG.BINARY_ACK_REQ:
-        assert(data instanceof Uint8Array)
-        h.sendBinaryAck(data, cb)
-        break
-      case TAG.PUBLISH_BINARY:
-        assert(data instanceof Uint8Array)
-        h.sendPublishBinary(data)
-        break
-    }
+  private flushEntry(queue: BufferQueue, i: number, sender: BufferedSender, peer: IndexedPeer): void {
+    sender._sendBuffered(peer, queue.tagAt(i), queue.dataAt(i), queue.callbackAt(i))
   }
 
   clear(err?: Error): void {
