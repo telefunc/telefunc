@@ -6,10 +6,9 @@ export {
 }
 export type { RoomSessionDeliveryRequest }
 
-import { type BackendReceiver, type OrderingInfo, DriverAttempt, hostLocal } from 'telefunc/__internal'
+import { type BackendReceiver, type OrderingInfo, DriverAttempt, OrderedStubs, hostLocal } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
-import { OrderedStubs } from './OrderedStubs.js'
 import { assertUsage } from '../utils/assert.js'
 import { ROUTE_RENEW_EVERY_MS, type RouteInstallation } from './routes.js'
 import type { CloudflareRoomAuthorityStub, RegisterWire } from './do.js'

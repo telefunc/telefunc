@@ -1,10 +1,15 @@
 export { Fanout }
 
-import type { OrderingInfo, TelefuncExtensionNamespace, TelefuncExtensionStub } from 'telefunc/__internal'
+import {
+  OrderedStubs,
+  reportLostDeliveries,
+  type OrderingInfo,
+  type TelefuncExtensionNamespace,
+  type TelefuncExtensionStub,
+} from 'telefunc/__internal'
 import { ROOM_CLOUDFLARE_EXTENSION, ROOM_HORIZON_MS } from '../server/constants.js'
 import type { RouteInstallation } from './routes.js'
 import type { RoomSessionDeliveryRequest } from './subscription.js'
-import { OrderedStubs, reportLostDeliveries } from './OrderedStubs.js'
 
 /** A room authority's deliveries. Each session DO's frames go through one ordered stub, so they arrive in commit order
  *  without waiting on each other. A lane has one route per subscribed session DO, at most the deployment's session

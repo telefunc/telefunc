@@ -30,6 +30,7 @@ export { getChannelLimits } from './serverConfig.js'
 export { untether } from '../../utils/wrapProxy.js'
 export { MAX_CHANNELS_PER_CONNECTION } from '../../wire-protocol/constants.js'
 export { registerCloudflareExtension } from '../../wire-protocol/adapter/cloudflare/extensions.js'
+export { OrderedStubs, reportLostDeliveries } from '../../wire-protocol/adapter/cloudflare/OrderedStubs.js'
 export type {
   TelefuncExtensionNamespace,
   TelefuncExtensionStub,
