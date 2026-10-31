@@ -185,6 +185,7 @@ async function tryCreateRoom(id: string, options: RoomOptions | undefined): Prom
 async function createRoom(id: string, options?: RoomOptions): Promise<Room> {
   assertRoomId(id)
   const result = await tryCreateRoom(id, options)
+  if (result.kind === 'closing') throw new RoomError(`Room is closing: ${id}`)
   if (result.kind !== 'created') throw new RoomError(`Room already exists: ${id}`)
   return result.room
 }
