@@ -104,12 +104,7 @@ type MuxServerOptions = {
   transports: ChannelTransports
 }
 
-const DETACH_REASON = {
-  TRANSIENT: 0x01 as const,
-  PERMANENT: 0x02 as const,
-  RECOVERY_FAILED: 0x03 as const,
-}
-type DetachReason = (typeof DETACH_REASON)[keyof typeof DETACH_REASON]
+type DetachReason = 'transient' | 'permanent' | 'recoveryFailed'
 
 type ChannelHandle = { channel: ServerChannel; ix: number; peer: IndexedPeer }
 
@@ -352,13 +347,13 @@ class ChannelMux {
     if (stagedWs !== undefined) this.abandonStage(stagedWs)
     // Channels survive a transient close (`_onPeerDisconnect`'s reconnectTimeout grace);
     // permanent tears them down.
-    this.detachSession(sessionId, permanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT)
+    this.detachSession(sessionId, permanent ? 'permanent' : 'transient')
     if (this.sessionWires.get(sessionId) === connection) this.sessionWires.delete(sessionId)
   }
 
   /** Ends the channels of a session whose wire closed transiently as a permanent close would have: its page left. */
   endSession(sessionId: string): void {
-    this.detachSession(sessionId, DETACH_REASON.PERMANENT)
+    this.detachSession(sessionId, 'permanent')
   }
 
   readPermanentTermination(connection: Wire): boolean {
@@ -769,7 +764,7 @@ class ChannelMux {
     // Closed since this frame arrived: the session goes, but a transient close keeps its channels' reattach grace.
     if (state.closed) {
       state.attaching.clear()
-      const reason = state.closed.isPermanent ? DETACH_REASON.PERMANENT : DETACH_REASON.TRANSIENT
+      const reason = state.closed.isPermanent ? 'permanent' : 'transient'
       const session = this.sessions.removeSession(newSessionId)
       if (session) for (const handle of session.values()) this.detachHandle(handle, reason)
       state.awaited.stop()
@@ -799,8 +794,7 @@ class ChannelMux {
       const prev = this.sessions.removeSession(prevSessionId)
       if (prev) {
         const keptIxes = new Set(handles.map((h) => h.ix))
-        for (const [ix, prevHandle] of prev)
-          if (!keptIxes.has(ix)) this.detachHandle(prevHandle, DETACH_REASON.RECOVERY_FAILED)
+        for (const [ix, prevHandle] of prev) if (!keptIxes.has(ix)) this.detachHandle(prevHandle, 'recoveryFailed')
       }
     }
     entry.state.awaited.forgetUnnamed(open)
@@ -838,7 +832,7 @@ class ChannelMux {
     }
     for (const ix of released) {
       const handle = this.sessions.remove(sessionId, ix)
-      if (handle) this.detachHandle(handle, DETACH_REASON.RECOVERY_FAILED)
+      if (handle) this.detachHandle(handle, 'recoveryFailed')
     }
     entry.state.awaited.forget(released)
     return handles
@@ -998,7 +992,7 @@ class ChannelMux {
    *  `recovery-failed` on abandoned channels. Permanent: remove outright — no resume. */
   private detachSession(sessionId: string, reason: DetachReason): void {
     const session =
-      reason === DETACH_REASON.PERMANENT ? this.sessions.removeSession(sessionId) : this.sessions.peekSession(sessionId)
+      reason === 'permanent' ? this.sessions.removeSession(sessionId) : this.sessions.peekSession(sessionId)
     if (!session) return
     for (const handle of session.values()) this.detachHandle(handle, reason)
   }
@@ -1007,18 +1001,18 @@ class ChannelMux {
     // An ended channel waits out a lost wire for its page, which lets it go by releasing it, leaving it out of a new
     // wire's RECONCILE, or leaving for good.
     if (this.endedChannels.has(h.channel)) {
-      if (reason === DETACH_REASON.TRANSIENT) this.keepEnded(h.channel, false)
+      if (reason === 'transient') this.keepEnded(h.channel, false)
       else this.releaseEnded(h.channel)
       return
     }
     switch (reason) {
-      case DETACH_REASON.PERMANENT:
+      case 'permanent':
         h.channel._onPeerClose()
         return
-      case DETACH_REASON.TRANSIENT:
+      case 'transient':
         h.channel._onPeerDisconnect(h.peer, this.options.reconnectTimeout)
         return
-      case DETACH_REASON.RECOVERY_FAILED:
+      case 'recoveryFailed':
         h.channel._onPeerRecoveryFailure()
         return
     }
