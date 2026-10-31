@@ -385,8 +385,6 @@ function* messageFrames(message: Uint8Array<ArrayBuffer>): Generator<Uint8Array<
       yield new Uint8Array(message.subarray(at))
       return
     }
-    const tag = message[at]
-    assertProtocol(tag !== TAG.PIECE && tag !== TAG.ANNOUNCE, 'frame ahead of another it never is')
     yield new Uint8Array(message.subarray(at, at + bytes))
     at += bytes
   }
