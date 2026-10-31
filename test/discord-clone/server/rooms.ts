@@ -4,7 +4,7 @@ export { BOT_COLOR, BOT_NAME, channelRoomId, dbChannelIdOf, ensureLiveWorld, GUI
 // the live layer exists: one guild room, one room per `channels` row, and the bot.
 
 import { randomUUID } from 'node:crypto'
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 import * as q from '../database/queries'
 import { type ChannelMeta, type MemberMeta, VOICE_CHANNEL_SIZE } from '../shared/types'
 

@@ -43,7 +43,7 @@ export {
   patchCall,
 }
 
-import type { LeaveCause, LocalParticipant, ParticipantSnapshotView } from 'telefunc'
+import type { LeaveCause, LocalParticipant, ParticipantSnapshotView } from '@telefunc/room'
 import { Abort } from 'telefunc/client'
 import { create } from 'zustand'
 import { VOICE_CHANNEL_SIZE } from '../shared/types'

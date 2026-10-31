@@ -11,7 +11,8 @@ export { onDmThread, onListDmThreads, onSendDm }
 // app can't be built on it (see README finding). The guild guard closes it outright.
 
 import { randomUUID } from 'node:crypto'
-import { Abort, getContext, Room } from 'telefunc'
+import { Room } from '@telefunc/room'
+import { Abort, getContext } from 'telefunc'
 import { dmThreadKey } from '../database/db'
 import * as q from '../database/queries'
 import { ensureLiveWorld, GUILD_ROOM_ID } from '../server/rooms'

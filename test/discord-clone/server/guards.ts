@@ -6,7 +6,8 @@ export { BANNED_WORDS, getGuardedChannel, getGuardedGuild }
 // room-global guard — so policy must be attached to every instance that hands out memberships.
 // These factories are the only place rooms are fetched (README finding 3, still open upstream).
 
-import { Abort, Room } from 'telefunc'
+import { Room } from '@telefunc/room'
+import { Abort } from 'telefunc'
 import * as q from '../database/queries'
 import type { ChannelMeta, ChannelPublish, GuildRoom, MemberMeta } from '../shared/types'
 import { dbChannelIdOf, GUILD_ROOM_ID, VOICE_CHANNEL_SIZE } from './rooms'

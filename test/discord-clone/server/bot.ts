@@ -5,7 +5,7 @@ export { startBot }
 // answers a few commands in every text channel. (Its DM replies live in dms.telefunc.ts — DMs
 // are server-delivered in this app, they never ride the member-to-member lane.)
 
-import type { LocalParticipant } from 'telefunc'
+import type { LocalParticipant } from '@telefunc/room'
 import * as q from '../database/queries'
 import type { ChannelPublish, GuildAnnouncement, GuildRoom, MemberMeta } from '../shared/types'
 import { BANNED_WORDS, getGuardedChannel, getGuardedGuild } from './guards'

@@ -504,6 +504,9 @@ importers:
       '@tailwindcss/vite':
         specifier: ^4.2.1
         version: 4.3.1(vite@8.0.16(@types/node@22.20.1)(esbuild@0.27.3)(jiti@2.7.0))
+      '@telefunc/room':
+        specifier: workspace:*
+        version: link:../../packages/room
       '@types/node':
         specifier: ^22.15.0
         version: 22.20.1

@@ -16,7 +16,7 @@ export type {
 }
 export { VOICE_CHANNEL_SIZE }
 
-import type { Room } from 'telefunc'
+import type { Room } from '@telefunc/room'
 
 const VOICE_CHANNEL_SIZE = 8
 

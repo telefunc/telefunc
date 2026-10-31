@@ -1,6 +1,7 @@
 export { onAnnounce, onKickUser }
 
-import { Abort, getContext, Room } from 'telefunc'
+import { Room } from '@telefunc/room'
+import { Abort, getContext } from 'telefunc'
 import * as q from '../database/queries'
 import { channelRoomId, GUILD_ROOM_ID } from '../server/rooms'
 

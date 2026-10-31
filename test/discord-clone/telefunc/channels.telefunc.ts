@@ -1,7 +1,8 @@
 export { onChannelHistory, onCreateChannel, onDeleteChannel, onGetChannel, onJoinVoice, onOpenChannel, onSetTopic }
 
 import { randomUUID } from 'node:crypto'
-import { Abort, getContext, Room, type LocalParticipant } from 'telefunc'
+import { type LocalParticipant, Room } from '@telefunc/room'
+import { Abort, getContext } from 'telefunc'
 import type { MessageRow } from '../database/schema'
 import * as q from '../database/queries'
 import { getGuardedChannel } from '../server/guards'

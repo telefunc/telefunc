@@ -28,7 +28,7 @@ export { joinCall, leaveCall, toggleMute, toggleCamera, toggleScreenShare, regis
 // - Decoder lifecycle is presence: `room.onJoin` attaches a peer, `member.onLeave` tears it
 //   down (a member's listeners are released with it).
 
-import type { LocalParticipant, RemoteParticipant } from 'telefunc'
+import type { LocalParticipant, RemoteParticipant } from '@telefunc/room'
 import type { MemberMeta } from '../shared/types'
 import { onJoinVoice } from '../telefunc/channels.telefunc'
 import { getChannelRoom, getIdentity, patchCall, showToast } from './store'
