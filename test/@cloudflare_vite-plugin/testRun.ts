@@ -23,8 +23,9 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
       // (the message flow is asserted by testChannel()/testChat()).
       log.logText.includes('ERR_ALPN_NEGOTIATION_FAILED') ||
       // workerd logs a response it wrote to a connection the browser closed as it navigated away,
-      // before the request's signal could report it.
-      (log.logText.includes('disconnected: ::write(') && log.logText.includes('Broken pipe')) ||
+      // before the request's signal could report it: "Broken pipe" and "Connection reset by peer" are both that write.
+      (log.logText.includes('disconnected: ::write(') &&
+        (log.logText.includes('Broken pipe') || log.logText.includes('Connection reset by peer'))) ||
       // testRefusedPresence()'s authority refuses a presence, and the subscription it ended is reported.
       log.logText.includes('Backend subscription closed: text:refused-presence'),
   })
