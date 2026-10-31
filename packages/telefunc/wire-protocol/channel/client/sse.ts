@@ -385,7 +385,7 @@ class SseTransport implements UpgradeSource {
   }
 
   private stageInitialBatch(): SseInitialBatchStage {
-    const reconcileBatch = this.owner.stageReconcileBatch(true)
+    const reconcileBatch = this.owner.stageInitialReconcileBatch()
     const initialFrames: OutboundFrame[] = []
     initialFrames.push(reconcileBatch.reconcileFrame)
     const movedBufferedFrames = reconcileBatch.movedBufferedFrames

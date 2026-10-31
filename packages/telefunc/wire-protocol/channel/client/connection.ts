@@ -170,7 +170,7 @@ interface TransportOwner {
   /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
   onTransportPostLate(transport: ClientChannelTransport): void
   /** What a transport's wire carries as it opens: the RECONCILE, and the frames buffered behind it. */
-  stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch
+  stageInitialReconcileBatch(): ReconcileBatch
 }
 
 type ConnectionState =
@@ -462,7 +462,7 @@ class ClientConnection
     if (transport !== this.transport) return
     this.enterOpen()
     if (!this.transport.carriesReconcileInOpen) {
-      this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch(false))
+      this.exchange.sendReconcileBatch(this.exchange.stageReconcileBatch())
       this.liveness.beatFromReconcile(transport)
       return
     }
@@ -695,8 +695,8 @@ class ClientConnection
 
   // ── Protocol internals ──
 
-  stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
-    return this.exchange.stageReconcileBatch(isInitialBatch)
+  stageInitialReconcileBatch(): ReconcileBatch {
+    return this.exchange.stageInitialReconcileBatch()
   }
 
   /** The timeouts, replay sizes and frame limit the server sets, each replay fitted to them. */

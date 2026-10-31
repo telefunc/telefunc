@@ -127,7 +127,7 @@ class AttachExchange {
     if (!this.isReconcileOwed) return
     if (this.owner.reconcileHeld) return
     if (this.isReconciling) return
-    this.sendReconcileBatch(this.stageReconcileBatch(false))
+    this.sendReconcileBatch(this.stageReconcileBatch())
   }
 
   cancelRegisterReconcile(): void {
@@ -149,12 +149,17 @@ class AttachExchange {
     this.exitReconciling()
   }
 
-  stageReconcileBatch(isInitialBatch: boolean): ReconcileBatch {
-    // This batch names every channel registered since the last, so it already covers any pending registration.
-    this.cancelRegisterReconcile()
-    const reconcileFrame = this.buildReconcileFrame()
-    const movedBufferedFrames = this.drainBufferedFramesForReconcile(isInitialBatch)
-    return { reconcileFrame, movedBufferedFrames }
+  stageReconcileBatch(): ReconcileBatch {
+    const reconcileFrame = this.stageReconcile()
+    return { reconcileFrame, movedBufferedFrames: this.drainBufferedFramesForReconcile() }
+  }
+
+  /** The batch an SSE wire's opening request carries. */
+  stageInitialReconcileBatch(): ReconcileBatch {
+    const reconcileFrame = this.stageReconcile()
+    // After a wire that may have lost frames, the replay goes first: a newer frame ahead gets an older one dropped.
+    const replayFirst = this.session !== null || this.sentBefore()
+    return { reconcileFrame, movedBufferedFrames: replayFirst ? [] : this.drainBufferedFramesForReconcile() }
   }
 
   sendReconcileBatch(reconcileBatch: ReconcileBatch): void {
@@ -211,7 +216,7 @@ class AttachExchange {
     for (const frame of this.gate.drain(attached)) releaseFrames.push(frame)
 
     if (hasNewChannels && !this.owner.upgradeReady) {
-      const reconcileBatch = this.stageReconcileBatch(false)
+      const reconcileBatch = this.stageReconcileBatch()
       appendReconcileBatch(releaseFrames, reconcileBatch)
     } else {
       this.exitReconciling()
@@ -354,10 +359,14 @@ class AttachExchange {
     return open
   }
 
-  private drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
+  /** Builds the RECONCILE, which names every channel registered since the last: it covers any pending registration. */
+  private stageReconcile(): OutboundFrame {
+    this.cancelRegisterReconcile()
+    return this.buildReconcileFrame()
+  }
+
+  private drainBufferedFramesForReconcile(): OutboundFrame[] {
     if (!this.owner.transport.carriesReconcileInOpen) return []
-    // After a wire that may have lost frames, the replay goes first: a newer frame ahead gets an older one dropped.
-    if (isInitialBatch && (this.session !== null || this.sentBefore())) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.
     return this.gate.drainForReconcile(this.inFlight.carriedFrom)
   }
