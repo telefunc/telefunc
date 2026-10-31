@@ -49,17 +49,17 @@ class ServerHeadroom implements PieceSenderOwner {
     })
   }
 
-  /** Sends `frame` through the sender. */
-  send(frame: Uint8Array<ArrayBuffer>): void {
-    this.sender.send(frame, isSequencedTag(frame[0]!) && !this.sender.dataWaits ? this.headroom() : 0)
+  /** Sends `frame`, sent at `at`, through the sender. */
+  send(frame: Uint8Array<ArrayBuffer>, at: number): void {
+    this.sender.send(frame, isSequencedTag(frame[0]!) && !this.sender.dataWaits ? this.headroom(at) : 0)
     this.pace()
   }
 
-  /** What the path takes past what it holds. */
-  headroom(): number {
+  /** What the path takes at `at` past what it holds. */
+  headroom(at: number): number {
     if (this.drain.rate === 0 || this.leastRtt === Number.POSITIVE_INFINITY) return Number.POSITIVE_INFINITY
     const takes = Math.max(WIRE_SEND_AHEAD_MIN_BYTES, WIRE_SEND_AHEAD_ROUND_TRIPS * this.drain.rate * this.leastRtt)
-    return takes - this.pathHolds(performance.now())
+    return takes - this.pathHolds(at)
   }
 
   /** `PieceSenderOwner`: the path holds `bytes`; each dated part is dated apart, so a burst's first part measures the path. */
@@ -115,7 +115,7 @@ class ServerHeadroom implements PieceSenderOwner {
   private sendWaiting(): void {
     if (this.sender.dataWaits) {
       this.releasing = true
-      this.sender.sendWaiting(this.headroom())
+      this.sender.sendWaiting(this.headroom(performance.now()))
       this.releasing = false
     }
     this.pace()
@@ -129,7 +129,7 @@ class ServerHeadroom implements PieceSenderOwner {
   /** While data waits for headroom, looks again once the rate drained what the path holds past it. */
   private pace(): void {
     if (this.paceTimer !== null || this.sender.waitingBytes === 0) return
-    const ms = Math.max(1, -this.headroom() / this.drain.rate)
+    const ms = Math.max(1, -this.headroom(performance.now()) / this.drain.rate)
     this.paceTimer = unrefTimer(setTimeout(this.lookAgain, ms))
   }
 

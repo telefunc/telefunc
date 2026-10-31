@@ -26,11 +26,10 @@ class SocketWait implements SendWait {
     this.ahead = ahead
   }
 
-  /** Notes `bytes` about to be sent, of a frame that goes at once if `atOnce`. */
-  handed(bytes: number, atOnce: boolean): void {
-    const now = performance.now()
-    if (now - this.spanFrom >= DRAIN_SPAN_MS) this.measure(now)
-    if (atOnce) this.waits.note(this.waitNow(), now)
+  /** Notes `bytes` about to be sent at `at`, of a frame that goes at once if `atOnce`. */
+  handed(bytes: number, atOnce: boolean, at: number): void {
+    if (at - this.spanFrom >= DRAIN_SPAN_MS) this.measure(at)
+    if (atOnce) this.waits.note(this.waitNow(), at)
     this.spanHanded += bytes
   }
 

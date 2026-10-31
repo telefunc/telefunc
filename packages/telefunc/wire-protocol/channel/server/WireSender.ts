@@ -55,8 +55,9 @@ class WireSender {
       }
     }
     this.headroom -= frame.byteLength
-    this.wait.handed(frame.byteLength, passesData(frame[0]!))
-    if (this.pieces) this.pieces.headroom.send(frame)
+    const at = performance.now()
+    this.wait.handed(frame.byteLength, passesData(frame[0]!), at)
+    if (this.pieces) this.pieces.headroom.send(frame, at)
     else this.transport.sendNow(this.wire, frame)
   }
 

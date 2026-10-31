@@ -149,7 +149,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._selfTime.record(performance.now() - t0)
+      this._selfTime.recordSince(t0)
     }
   }
 
@@ -180,7 +180,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._selfTime.record(performance.now() - t0)
+      this._selfTime.recordSince(t0)
     }
   }
 
@@ -348,7 +348,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._receiveCredit.onConsumed(bytes)
       }
     } finally {
-      this._selfTime.record(performance.now() - t0)
+      this._selfTime.recordSince(t0)
     }
   }
 
@@ -381,7 +381,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._receiveCredit.onConsumed(bytes)
       }
     } finally {
-      this._selfTime.record(performance.now() - t0)
+      this._selfTime.recordSince(t0)
     }
   }
 
