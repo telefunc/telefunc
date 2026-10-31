@@ -11,7 +11,7 @@ import { DEFAULT_PREFIX } from './keys.js'
 function installRedis(redis: RedisClient, options: InstallRedisOptions = {}): void {
   const prefix = options.prefix ?? DEFAULT_PREFIX
   // A module evaluated again (a dev server, HMR) builds a new client for the same deployment, which keeps the backend.
-  installBackend(() => new RedisBackend({ redis, prefix }), ['redis', deploymentOf(redis), prefix])
+  installBackend(() => new RedisBackend({ redis, prefix }), ['redis', deploymentOf(redis), prefix]).holdFor(redis)
 }
 
 type InstallRedisOptions = {

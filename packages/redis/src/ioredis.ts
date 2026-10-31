@@ -32,8 +32,8 @@ function deploymentOf(redis: RedisClient): string {
   return JSON.stringify({ path, host, port, db, sentinels, name })
 }
 
-/** A clone of the app's client for the backend's commands: it never resends a command (at-most-once), reads masters
- *  only (Room reads are strongly consistent), and ends when the app's client does. */
+/** A clone of the app's client for the backend's commands: it never resends a command (at-most-once) and reads masters
+ *  only (Room reads are strongly consistent). */
 function createCommandClient(redis: RedisClient): RedisClient {
   // A Cluster copies redisOptions.keyPrefix to its own options, so this reads either form.
   if (redis.options.keyPrefix) {
@@ -53,7 +53,6 @@ function createCommandClient(redis: RedisClient): RedisClient {
     : redis.duplicate({ maxRetriesPerRequest: 0, reconnectOnError: null })
   // A connection error reaches the backend as its command's rejection.
   commands.on('error', () => {})
-  redis.once('end', () => commands.disconnect())
   return commands
 }
 

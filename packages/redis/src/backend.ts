@@ -77,6 +77,8 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   private readonly _reportsReceivers: boolean
   /** A Cluster's last commit per lane. */
   private readonly _laneTurns = new Map<string, Promise<void>>()
+  /** The app clients installed with this backend: its command client ends once the last one does. */
+  private readonly holders = new Set<RedisClient>()
 
   constructor(options: RedisBackendOptions) {
     assertKeyPrefix(options.prefix)
@@ -92,6 +94,18 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
       prefix: this._prefix,
       createSubscriber: () => createSubscriberSocket(this._publisher),
       readLaneStarts: (source) => this._readLaneStarts(source),
+    })
+  }
+
+  /** The backend's command client lives while `redis`, or another app client installed with it, does; a client
+   *  installed after the last one ended connects it again. */
+  holdFor(redis: RedisClient): void {
+    if (this.holders.has(redis)) return
+    this.holders.add(redis)
+    if (this._publisher.status === 'end') void this._publisher.connect().catch(() => {})
+    redis.once('end', () => {
+      this.holders.delete(redis)
+      if (this.holders.size === 0) this._publisher.disconnect()
     })
   }
 
