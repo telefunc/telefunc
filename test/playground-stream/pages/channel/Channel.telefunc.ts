@@ -35,6 +35,8 @@ export {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelLateCallbacks,
+  onChannelOpenAbort,
 }
 
 import { Channel, Abort, BroadcastChannel } from 'telefunc'
@@ -724,4 +726,45 @@ async function onChannelOpenHello() {
   const ch = new Channel<never, string>()
   ch.onOpen(() => void ch.send('hello').catch(() => {}))
   return { channel: ch.client }
+}
+
+/** Registers an onOpen once the channel opened and an onClose once it closed: each runs at once, the onClose with what
+ *  the channel ended with. */
+async function onChannelLateCallbacks() {
+  const ch = new Channel<never, string>()
+  const id = ch.id
+  ch.onOpen(() => {
+    setTimeout(() => {
+      let ranAtOnce = false
+      ch.onOpen(() => {
+        ranAtOnce = true
+      })
+      cleanupState[`late_${id}_onOpen`] = String(ranAtOnce)
+      void ch.send('opened').catch(() => {})
+    })
+  })
+  ch.onClose(() => {
+    setTimeout(() => {
+      let closeErr = 'not run'
+      ch.onClose((err) => {
+        closeErr = formatCloseError(err as CloseError)
+      })
+      cleanupState[`late_${id}_onClose`] = closeErr
+    })
+  })
+  return { channel: ch.client, channelId: id }
+}
+
+/** Its first onOpen throws an Abort: the channel aborts with that value, and the onOpen after it doesn't run. */
+async function onChannelOpenAbort() {
+  const ch = new Channel<never, never>()
+  const id = ch.id
+  cleanupState[`openAbort_${id}_second`] = 'not run'
+  ch.onOpen(() => {
+    throw Abort('stop')
+  })
+  ch.onOpen(() => {
+    cleanupState[`openAbort_${id}_second`] = 'run'
+  })
+  return { channel: ch.client, channelId: id }
 }

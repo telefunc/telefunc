@@ -1,7 +1,7 @@
 export { testChannel }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
-import type { Request, Response, WebSocket } from 'playwright-chromium'
+import type { Request, Response, WebSocket, WebSocketRoute } from 'playwright-chromium'
 import {
   navigate,
   getResult,
@@ -87,6 +87,8 @@ type ChannelState = {
   freshBinaryEchoed: number | null
   helloBesideBurst: boolean
   manyListenersMs: { page: number; server: number | null } | null
+  lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
+  openAbort: { channelId: string; abortValue: unknown } | null
 }
 
 function testChannel(isDev: boolean, inDocker = false) {
@@ -298,7 +300,81 @@ function testChannel(isDev: boolean, inDocker = false) {
     })
   })
 
+  test('channel: an onOpen registered once the channel opened runs at once, and an onClose registered once it closed runs at once with the Abort it ended with, on both ends', async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-late-callbacks')
+    let late: ChannelState['lateCallbacks'] = null
+    await autoRetry(async () => {
+      late = (await getResult<ChannelState>('#channel-state')).lateCallbacks
+      expect(late?.onOpen).toBe(true)
+      expect(late?.onCloseAbortValue).toBe('bye')
+    })
+    await autoRetry(async () => {
+      const ss = await getCleanupState()
+      expect(ss[`late_${late!.channelId}_onOpen`]).toBe('true')
+      expect(ss[`late_${late!.channelId}_onClose`]).toBe('abort:"bye"')
+    })
+  })
+
+  test("channel: an Abort the server's onOpen throws aborts the channel with its value, and the onOpen after it doesn't run", async () => {
+    await navigate(`${getServerUrl()}/channel`)
+    await page.click('#channel-test-open-abort')
+    let openAbort: ChannelState['openAbort'] = null
+    await autoRetry(async () => {
+      openAbort = (await getResult<ChannelState>('#channel-state')).openAbort
+      expect(openAbort?.abortValue).toBe('stop')
+    })
+    const ss = await getCleanupState()
+    expect(ss[`openAbort_${openAbort!.channelId}_second`]).toBe('not run')
+  })
+
   // ── Binary sendBinary / listenBinary round-trip ───────────────────────
+
+  if (channelTransport === 'ws') {
+    // In `vike dev` the channel is the telefunction's copy of telefunc, not the server's: the server tells the
+    // violation it raises by its brand.
+    test("channel: a text message the server can't parse, on a channel a telefunction returned, closes the page's WebSocket", async () => {
+      // A page of its own: its WebSocket stays routed through the test for as long as the page lives.
+      const context = await page.context().browser()!.newContext()
+      const routed = await context.newPage()
+      try {
+        let toServer: WebSocketRoute | undefined
+        let channelIx: number | undefined
+        let serverClosed = false
+        await routed.routeWebSocket(/\/_telefunc/, (ws) => {
+          const server = ws.connectToServer()
+          toServer = server
+          ws.onMessage((message) => {
+            // The page's first RECONCILE names its one channel.
+            const ix = /"ix":(\d+)/.exec(typeof message === 'string' ? message : message.toString('latin1'))
+            if (ix && channelIx === undefined) channelIx = Number(ix[1])
+            server.send(message)
+          })
+          server.onMessage((message) => ws.send(message))
+          server.onClose((code, reason) => {
+            serverClosed = true
+            ws.close({ code, reason })
+          })
+        })
+        await navigate(`${getServerUrl()}/channel`, undefined, routed)
+        await routed.click('#channel-connect')
+        await autoRetry(async () => {
+          expect(JSON.parse((await routed.textContent('#channel-state'))!).welcomeReceived).toBe(true)
+          expect(channelIx).not.toBe(undefined)
+        })
+        // A TEXT frame (tag 0x10) with the channel's index and a seq past the page's, its payload not JSON.
+        const frame = Buffer.from([0x10, 0, 0, 0, 0, 0, 0, '{'.charCodeAt(0)])
+        frame.writeUInt16LE(channelIx!, 1)
+        frame.writeUInt32LE(1_000, 3)
+        toServer!.send(frame)
+        await autoRetry(async () => {
+          expect(serverClosed).toBe(true)
+        })
+      } finally {
+        await context.close()
+      }
+    })
+  }
 
   test('channel: binary round-trip — sendBinary(1 MB) echoed back byte-exact via listenBinary', async () => {
     await page.click('#channel-test-binary')

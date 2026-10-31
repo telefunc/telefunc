@@ -39,6 +39,8 @@ import {
   onChannelSlowUplink,
   onChannelOpenAnswer,
   onChannelOpenHello,
+  onChannelLateCallbacks,
+  onChannelOpenAbort,
 } from './Channel.telefunc'
 
 /**
@@ -167,6 +169,8 @@ type ChannelState = {
   manyListenersMs: { page: number; server: number | null } | null
   linkShare: { pingMs: number[]; downloaded: number } | null
   slowUplink: { uploaded: number; opened: string; longestTickGapMs: number } | null
+  lateCallbacks: { channelId: string; onOpen: boolean; onCloseAbortValue: unknown } | null
+  openAbort: { channelId: string; abortValue: unknown } | null
 }
 
 const initialState: ChannelState = {
@@ -239,6 +243,8 @@ const initialState: ChannelState = {
   manyListenersMs: null,
   linkShare: null,
   slowUplink: null,
+  lateCallbacks: null,
+  openAbort: null,
 }
 
 function timestamp() {
@@ -1037,6 +1043,37 @@ function ChannelDemo() {
     })
   }, [])
 
+  // Once the channel opened, an onOpen runs at once; once it closed, an onClose runs at once with the Abort it ended with.
+  const testLateCallbacks = useCallback(async () => {
+    setChannelState((s) => ({ ...s, lateCallbacks: null }))
+    const { channel, channelId } = await openChannel(onChannelLateCallbacks)
+    channel.listen(() => {
+      let onOpen = false
+      channel.onOpen(() => {
+        onOpen = true
+      })
+      channel.onClose(() => {
+        setTimeout(() => {
+          let onCloseAbortValue: unknown = 'not run'
+          channel.onClose((err) => {
+            onCloseAbortValue = err instanceof TelefuncAbort ? err.abortValue : (err?.message ?? 'none')
+          })
+          setChannelState((s) => ({ ...s, lateCallbacks: { channelId, onOpen, onCloseAbortValue } }))
+        })
+      })
+      channel.abort('bye')
+    })
+  }, [])
+
+  const testOpenAbort = useCallback(async () => {
+    setChannelState((s) => ({ ...s, openAbort: null }))
+    const { channel, channelId } = await openChannel(onChannelOpenAbort)
+    channel.onClose((err) => {
+      const abortValue = err instanceof TelefuncAbort ? err.abortValue : (err?.message ?? 'none')
+      setChannelState((s) => ({ ...s, openAbort: { channelId, abortValue } }))
+    })
+  }, [])
+
   const testManyListeners = useCallback(async () => {
     setChannelState((s) => ({ ...s, manyListenersMs: null }))
     const { channel } = await openChannel(onChannelManyListeners)
@@ -1445,6 +1482,22 @@ function ChannelDemo() {
             className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
           >
             Server Says Hello as a Channel Opens Beside a 4 MiB Burst
+          </button>
+          <button
+            id="channel-test-late-callbacks"
+            type="button"
+            onClick={testLateCallbacks}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            Callbacks Registered Late
+          </button>
+          <button
+            id="channel-test-open-abort"
+            type="button"
+            onClick={testOpenAbort}
+            className="px-3 py-1.5 text-sm rounded bg-sky-700 text-white hover:bg-sky-800"
+          >
+            onOpen Throws Abort
           </button>
           <button
             id="channel-test-link-share"
