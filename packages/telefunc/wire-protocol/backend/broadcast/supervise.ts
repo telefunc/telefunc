@@ -5,13 +5,13 @@ import type { BroadcastBackend, BroadcastDriver, BroadcastPayload, BroadcastRout
 import type { BackendPayload, BackendReceiver } from '../subscription.js'
 import type { ChannelPublishAck } from '../../channel/channel.js'
 import { broadcastRouteKey } from './routeKey.js'
-import { assertDriverPosition } from '../driverPosition.js'
+import { assertDriverOrdering } from '../driverOrdering.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { utf8ByteLength } from '../../../utils/utf8ByteLength.js'
 
 /** The driver's receipt as the public ack, carrying its key like a subscriber's `info`. */
 function toAck(key: string, result: PublishResult): ChannelPublishAck {
-  assertDriverPosition(result)
+  assertDriverOrdering(result)
   const { seq, timestamp, receivers } = result
   return receivers === undefined ? { key, seq, timestamp } : { key, seq, timestamp, receivers }
 }

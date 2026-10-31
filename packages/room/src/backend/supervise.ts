@@ -1,6 +1,12 @@
 export { superviseRoomDriver }
 
-import { type BackendPayload, type BackendReceiver, type PlaneSubscriptions, type SendHold } from 'telefunc/__internal'
+import {
+  assertDriverOrdering,
+  type BackendPayload,
+  type BackendReceiver,
+  type PlaneSubscriptions,
+  type SendHold,
+} from 'telefunc/__internal'
 import type { CommitTarget, HeadNext, RoomBackend, RoomDriver, RoomSubscriptionSource } from './contract.js'
 import { roomSubscriptionSourceKey } from './laneKey.js'
 import { assert } from '../utils/assert.js'
@@ -46,17 +52,17 @@ function superviseRoomDriver(
         opts?.closingLease === undefined
           ? await subscriptions.afterEstablished(commit, () => describeCommitHold(target, payload))
           : await commit()
-      if ('accepted' in result) subscriptions.checkPosition(result)
+      if ('accepted' in result) assertDriverOrdering(result)
       return result
     },
     readLaneOrder: async (roomId, inc, lane) => {
       const order = await driver.readLaneOrder(roomId, inc, lane)
-      if (order !== null) subscriptions.checkPosition(order)
+      if (order !== null) assertDriverOrdering(order)
       return order
     },
     readRetained: async (roomId, inc, lane) => {
       const retained = await driver.readRetained(roomId, inc, lane)
-      if (retained !== null) subscriptions.checkPosition(retained)
+      if (retained !== null) assertDriverOrdering(retained)
       return retained
     },
     listRetained: (roomId, inc, of) => driver.listRetained(roomId, inc, of),

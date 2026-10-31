@@ -6,7 +6,7 @@ import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { ESTABLISH_HOLD_MS } from '../constants.js'
 import { reportBug } from '../channel/server/channel.js'
-import { assertDriverPosition } from './driverPosition.js'
+import { assertDriverOrdering } from './driverOrdering.js'
 import { heldSendWeight } from './heldSendWeight.js'
 import type { OrderingInfo } from '../wire/orderingFrame.js'
 import type {
@@ -43,10 +43,7 @@ type SendHold<Source> = {
 
 /** What a plane's supervisor gets from `backendPlane()`: its driver's subscriptions, shared by source and checked once
  *  for all their consumers, and the hold of sends on them. */
-type PlaneSubscriptions<Source> = Pick<
-  SubscriptionManager<Source>,
-  'subscribe' | 'holding' | 'afterEstablished' | 'checkPosition' | 'dispose'
->
+type PlaneSubscriptions<Source> = Pick<SubscriptionManager<Source>, 'subscribe' | 'afterEstablished' | 'dispose'>
 
 type SubscriptionSlotConfig = {
   binding: SubscriptionBinding
@@ -84,15 +81,10 @@ class SubscriptionManager<Source> {
     this._payloadKind = payloadKind
   }
 
-  /** Checks an ordering position a driver returned. */
-  checkPosition(info: OrderingInfo): void {
-    assertDriverPosition(info)
-  }
-
   /** Checks a delivery against the driver contract, once for all its consumers; one it throws for is reported and
    *  dropped. */
   private _checkDelivery(source: Source, payload: BackendPayload, info: OrderingInfo): void {
-    assertDriverPosition(info)
+    assertDriverOrdering(info)
     assert((this._payloadKind(source) === 'text') === (typeof payload === 'string'))
   }
 
