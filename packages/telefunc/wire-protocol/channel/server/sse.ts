@@ -1,4 +1,4 @@
-export { getTelefuncSseChannelHooks, handleSseChannelRequest }
+export { handleSseChannelRequest }
 export type { SseChannelHttpResponse, SseConnection }
 
 import type { Readable } from 'node:stream'
@@ -101,7 +101,7 @@ class EventStream {
 }
 
 const globalObject = getGlobalObject('wire-protocol/channel/server/sse.ts', {
-  defaultHooks: null as ReturnType<typeof getTelefuncSseChannelHooks> | null,
+  sseTransport: null as SseConnectionTransport | null,
 })
 
 class SseConnectionTransport {
@@ -128,7 +128,7 @@ class SseConnectionTransport {
     terminateConnection: (connection) => this.terminateConnection(connection),
   }
 
-  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse | null> {
+  async handleRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
     if (!getServerConfig().channel.transports.includes(CHANNEL_TRANSPORT.SSE)) return badRequest()
     if (request.method !== 'POST') return badRequest()
     const source = readable ?? request.body
@@ -438,16 +438,7 @@ function okResponse(): SseChannelHttpResponse {
   return { statusCode: 200, contentType: 'text/plain', headers: [], body: '' }
 }
 
-async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse | null> {
-  globalObject.defaultHooks ??= getTelefuncSseChannelHooks()
-  return globalObject.defaultHooks.handleRequest(request, readable)
-}
-
-function getTelefuncSseChannelHooks() {
-  const server = new SseConnectionTransport()
-  return {
-    handleRequest(request: Request, readable?: Readable) {
-      return server.handleRequest(request, readable)
-    },
-  }
+async function handleSseChannelRequest(request: Request, readable?: Readable): Promise<SseChannelHttpResponse> {
+  globalObject.sseTransport ??= new SseConnectionTransport()
+  return globalObject.sseTransport.handleRequest(request, readable)
 }
