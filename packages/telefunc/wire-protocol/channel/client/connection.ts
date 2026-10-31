@@ -639,7 +639,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
       this.state.tag === 'reconnecting' ? this.state : { attempt: 0, startedAt: 0 }
 
     if (rejected && prevAttempt === 0) {
-      this.closeAll(err instanceof Error ? err : new NetworkError('Connection dropped', true))
+      this.closeAll(err)
       this.dispose()
       return
     }
@@ -653,7 +653,7 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
     }
     const startedAt = prevStartedAt || performance.now()
     if (performance.now() - startedAt > this.reconnectTimeoutMs) {
-      this.closeAll(err instanceof Error ? err : new NetworkError('Connection dropped', true))
+      this.closeAll(err)
       this.dispose()
       return
     }
