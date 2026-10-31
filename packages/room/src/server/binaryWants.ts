@@ -26,18 +26,18 @@ function binaryWantsCovers(wants: BinaryWants, memberId: string, track: TrackKey
 
 /** Whether `change` changed `wants`. */
 function applyBinaryWantChange(wants: BinaryWants, { member, track, on }: BinaryWantChange): boolean {
-  let scope = member === ALL ? wants.everyMember : wants.members.get(member)
-  if (scope === undefined) {
+  let wanted = member === ALL ? wants.everyMember : wants.members.get(member)
+  if (wanted === undefined) {
     if (!on) return false
-    wants.members.set(member as string, (scope = { all: false, tracks: new Set() }))
+    wants.members.set(member as string, (wanted = { all: false, tracks: new Set() }))
   }
   if (track === ALL) {
-    if (scope.all === on) return false
-    scope.all = on
+    if (wanted.all === on) return false
+    wanted.all = on
   } else {
-    if (scope.tracks.has(track) === on) return false
-    toggle(scope.tracks, track, on)
+    if (wanted.tracks.has(track) === on) return false
+    toggle(wanted.tracks, track, on)
   }
-  if (member !== ALL && !scope.all && scope.tracks.size === 0) wants.members.delete(member)
+  if (member !== ALL && !wanted.all && wanted.tracks.size === 0) wants.members.delete(member)
   return true
 }

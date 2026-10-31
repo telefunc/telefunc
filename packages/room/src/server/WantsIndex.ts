@@ -32,7 +32,7 @@ class WantsIndex {
   private readonly _everyMember: TrackCover = new Map()
   private readonly _members = new Map<string, TrackCover>()
   /** Per named track, the members some holder names it of alone. */
-  private readonly _trackMembers = new Map<string, Set<string>>()
+  private readonly _namedAloneOf = new Map<string, Set<string>>()
 
   /** `onEveryMemberCover` hears each track whose holders naming it of every member changed. */
   constructor(private readonly _onEveryMemberCover: (track: string) => void) {}
@@ -216,7 +216,7 @@ class WantsIndex {
       const cover = getOrCreate(this._members, scope, () => new Map())
       toggleEntry(cover, key, holder, on)
       if (cover.size === 0) this._members.delete(scope)
-      if (key !== ALL) toggleEntry(this._trackMembers, key, scope, cover.has(key))
+      if (key !== ALL) toggleEntry(this._namedAloneOf, key, scope, cover.has(key))
       return new Set([scope])
     }
     // A pair a room-wide coverer adds or drops is one every other coverer of the key suppresses, so any one names it.
@@ -227,7 +227,7 @@ class WantsIndex {
     this._onEveryMemberCover(key)
     if (other !== undefined) return new Set(other._suppressedMembers())
     // Only the members it is named of alone change lanes; the holder's own may stop or start being received.
-    const affected = new Set(this._trackMembers.get(key))
+    const affected = new Set(this._namedAloneOf.get(key))
     for (const member of holder._suppressedMembers()) affected.add(member)
     return affected
   }
