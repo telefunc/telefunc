@@ -147,8 +147,7 @@ type ClientChannelTransport = {
   applyReconciledSettings(ctrl: ReconciledPayload): void
   /** Its wire's, which tracks what the wire delivers. */
   readonly heartbeat: Heartbeat | null
-  /** Connection constructs the Heartbeat (with the funnel-bound onDead) and hands it over.
-   *  Transport's frame receive path routes PONG to it directly (`heartbeat?.resetPong()`). */
+  /** Liveness constructs the Heartbeat and hands it over; the transport's receive path tells it of each PONG. */
   attachHeartbeat(hb: Heartbeat): void
   detachHeartbeat(): void
   /** Settles once the frames it was handed have left it, or its wire is gone. */
