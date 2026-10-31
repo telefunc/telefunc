@@ -26,13 +26,14 @@ export class TelefuncDurableObject extends (tf.TelefuncDurableObject as Telefunc
 }
 export { TodoListDurableObject } from './database/todoItems'
 
-// The Durable Object's Broadcast presence RPC, which its public type doesn't name.
+// The Durable Object's Broadcast presence and extension Durable Object RPCs, which its public type doesn't name.
 type PresenceRequest = { key: string; bucket: string | null }
 type TelefuncDurableObjectWithPresence = new (
   ctx: DurableObjectState,
   env: Env,
 ) => InstanceType<typeof tf.TelefuncDurableObject> & {
   telefuncBroadcastPresence(request: PresenceRequest): Promise<void>
+  telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown>
 }
 const refusedPresences = new Set<string>()
 
@@ -57,6 +58,14 @@ export default {
       } catch (error) {
         return new Response(String(error))
       }
+    }
+    // A Room Durable Object call before any .telefunc file loads, as a room's alarm() after the Worker restarts.
+    if (url.pathname === '/__room-call-from-worker') {
+      const namespace = env.TelefuncDurableObject as DurableObjectNamespace<TelefuncDurableObject>
+      await namespace
+        .get(namespace.idFromName('__telefunc_room_directory__'))
+        .telefuncDurableObjectCall('room', 'directoryGet', ['x'])
+      return new Response(null, { status: 204 })
     }
     // Test-only: the run the backlog page asked for, as its telefunction recorded it; a POST says the page is stalled.
     if (url.pathname === '/backlog-run') {

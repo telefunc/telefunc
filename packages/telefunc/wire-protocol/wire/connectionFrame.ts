@@ -21,8 +21,7 @@ export {
   replayLaneOf,
   countsCredit,
   isConnCtrlTag,
-  encodePublishText,
-  encodePublishBinary,
+  encodePublish,
   seqNear,
   seqThrough,
 }
@@ -965,8 +964,16 @@ function parseBarrierPayload(value: unknown): BarrierPayload {
 // Format: seq,timestamp\n{serialized text}
 // JSON.stringify never produces bare \n, so the first \n reliably splits info from payload.
 
-function encodePublishText(text: string, info: WirePublishInfo): string {
-  return info.seq + ',' + info.timestamp + '\n' + text
+/** A publish frame at `info`; a text one with no position (null) carries seq 0 and the current time. */
+function encodePublish(text: string, info: WirePublishInfo | null): string
+function encodePublish(data: Uint8Array, info: WirePublishInfo): Uint8Array
+function encodePublish(payload: string | Uint8Array, info: WirePublishInfo | null): string | Uint8Array {
+  if (typeof payload === 'string') {
+    const { seq, timestamp } = info ?? { seq: 0, timestamp: Date.now() }
+    return seq + ',' + timestamp + '\n' + payload
+  }
+  assert(info !== null)
+  return encodeOrderingFrame(payload, info)
 }
 
 function decodePublishText(wire: string): { text: string; info: WirePublishInfo } {
@@ -978,10 +985,6 @@ function decodePublishText(wire: string): { text: string; info: WirePublishInfo 
   const timestamp = Number(wire.slice(comma + 1, nl))
   assertProtocol(Number.isFinite(seq) && Number.isFinite(timestamp), 'PUBLISH frame info must be finite numbers')
   return { text: wire.slice(nl + 1), info: { seq, timestamp } }
-}
-
-function encodePublishBinary(data: Uint8Array, info: WirePublishInfo): Uint8Array {
-  return encodeOrderingFrame(data, info)
 }
 
 function decodePublishBinary(wire: Uint8Array): { data: Uint8Array; info: WirePublishInfo } {

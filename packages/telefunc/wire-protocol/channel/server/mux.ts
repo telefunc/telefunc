@@ -1,4 +1,4 @@
-export { ChannelMux, getChannelMux, CHANNEL_MUX }
+export { ChannelMux, getChannelMux, hostLocal, CHANNEL_MUX }
 export type { ConnectionEntry, ReconcileOutcome, ServerTransport, Wire, WirePieces }
 
 import { assert } from '../../../utils/assert.js'
@@ -7,6 +7,7 @@ import { getRawContext } from '../../../node/server/context/context.js'
 import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
 import { GcRegistry } from '../../../utils/GcRegistry.js'
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
@@ -171,7 +172,16 @@ function getChannelMux(): ChannelMux {
   return (getRawContext()?.[CHANNEL_MUX] as ChannelMux | undefined) ?? getGlobals().mux
 }
 
+/** One value per host: one per process on Node/Bun/Deno, one per session Durable Object on Cloudflare. */
+function hostLocal<T>(key: symbol, init: (host: { id: string | null }) => T): T {
+  const mux = getChannelMux()
+  return getOrCreate(mux.hostLocals, key, () => init({ id: mux.hostId })) as T
+}
+
 class ChannelMux {
+  /** Its session Durable Object's id on Cloudflare, else null. */
+  readonly hostId: string | null
+  readonly hostLocals = new Map<symbol, unknown>()
   private readonly channels = new Map<string, ServerChannel>()
   /** Per mux, not per isolate: a session DO's scan timer must be made and cleared in its own calls. Not per request
    *  either: a closure on the request context would pin the call's arguments, so a stub is never collected. */
@@ -195,6 +205,10 @@ class ChannelMux {
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
   private resolvedOptions: MuxServerOptions | null = null
+
+  constructor(opts?: { hostId?: string }) {
+    this.hostId = opts?.hostId ?? null
+  }
 
   private get options(): MuxServerOptions {
     return (this.resolvedOptions ??= resolveMuxServerOptions())

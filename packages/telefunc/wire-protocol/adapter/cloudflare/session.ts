@@ -5,12 +5,10 @@ import { getRawContext, restoreContext } from '../../../node/server/context/cont
 import { assertUsage } from '../../../utils/assert.js'
 import { CHANNEL_MUX, type ChannelMux } from '../../channel/server/mux.js'
 import type { CloudflareBroadcastMember } from './broadcast.js'
-import type { CloudflareRoomSessionManager } from './room/subscription.js'
 
-/** What a session DO lends the code it runs: its Room manager, its Broadcast membership and its channels, all of
- *  which end with this incarnation of the DO. */
+/** What a session DO lends the code it runs: its Broadcast membership and its channels, both of which end with this
+ *  incarnation of the DO. */
 type CloudflareSession = {
-  room: CloudflareRoomSessionManager
   broadcast: CloudflareBroadcastMember
   mux: ChannelMux
 }

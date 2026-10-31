@@ -1,6 +1,6 @@
 export { onGetCall, onJoinCall, onSwitchHere }
 
-import { Room } from 'telefunc'
+import { Room } from '@telefunc/room'
 
 const callId = 'video-chat'
 

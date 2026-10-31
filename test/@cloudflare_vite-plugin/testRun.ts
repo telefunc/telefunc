@@ -10,6 +10,8 @@ function testRun(cmd: 'pnpm run dev' | 'pnpm run preview') {
   // First, so no session Durable Object exists in the isolate yet.
   testBroadcastPublishFromWorker()
   testSubscribeOutsideSession()
+  // Before any page loads a .telefunc file, which would register Room.
+  testRoomRoleFromWorker()
   testCloudflareBindings()
   testRunClassic(cmd, {
     // testResubscribe() waits out a presence's TTL.
@@ -55,6 +57,13 @@ function testSubscribeOutsideSession() {
     expect(await response.text()).toContain(
       'A Cloudflare subscription delivers to a Telefunc session: subscribe from a telefunction or a channel handler, not from outside a request.',
     )
+  })
+}
+
+function testRoomRoleFromWorker() {
+  test('a Room Durable Object call from the Worker, before any .telefunc file loads', async () => {
+    const response = await fetch(getServerUrl() + '/__room-call-from-worker')
+    expect(response.status).toBe(204)
   })
 }
 

@@ -54,7 +54,7 @@ function logShieldError(detail: ShieldErrorDetail, shieldErrors: ShieldLogConfig
   console.error(parts.join(' '))
 }
 
-/** The publish shield validates a page's Room or Broadcast data at ingress only. */
+/** The publish shield validates a page's Broadcast data at ingress only. */
 function assertPublishShield(validate: ShieldValidator | undefined, data: unknown): void {
   if (!validate) return
   const result = validate(data)

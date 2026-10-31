@@ -33,21 +33,28 @@ import {
   resolveSessionRoutingTarget,
 } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { SessionPins, readSessionPin } from '../wire-protocol/adapter/cloudflare/sessionPin.js'
-import { assertUsage } from '../utils/assert.js'
+import { assert, assertUsage } from '../utils/assert.js'
 import type { Telefunc as TelefuncNamespace } from '../node/server/context/getContext.js'
 import type { CloudflareScale } from '../wire-protocol/adapter/cloudflare/routing.js'
 import { CHANNEL_TRANSPORT } from '../wire-protocol/constants.js'
 import { CloudflareBackend } from '../wire-protocol/adapter/cloudflare/backend.js'
 import {
-  CloudflareRoomSessionManager,
-  type RoomSessionDeliveryRequest,
-} from '../wire-protocol/adapter/cloudflare/room/subscription.js'
-import { RoomAuthority } from '../wire-protocol/adapter/cloudflare/room/do.js'
+  getCloudflareExtension,
+  type CloudflareExtensionDurableObject,
+} from '../wire-protocol/adapter/cloudflare/extensions.js'
 import { withCloudflareSession, type CloudflareSession } from '../wire-protocol/adapter/cloudflare/session.js'
 import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cloudflare/namespace.js'
 import { isTelefuncRequest, toResponse } from './shared.js'
 import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
+
+// The installed extensions' server entries, which Telefunc's Vite plugin imports (pluginCloudflareExtensions.ts).
+// `true` only where Vite bundles telefunc/cloudflare: neither another bundler nor Node sees this import.
+if (globalThis.__TELEFUNC__IS_BUNDLED) await __TELEFUNC__DYNAMIC_IMPORT('virtual:telefunc:cloudflare-extensions')
+
+/** The extension a Durable Object belongs to, kept in its storage so that its alarm() finds the extension after an
+ *  eviction. */
+const EXTENSION_STORAGE_KEY = 'telefunc:extension'
 
 /** A Durable Object takes a WebSocket message of 32 MiB at most. */
 const DURABLE_OBJECT_MAX_RECEIVED_MESSAGE_BYTES = 32 * 1024 * 1024
@@ -107,7 +114,7 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const cloudflareBackend = installBackend(
     () =>
       new CloudflareBackend({
-        rooms: () => telefuncNamespace(workerEnv),
+        namespace: () => telefuncNamespace(workerEnv),
         broadcast: new CloudflareBroadcast({
           baseInstanceName,
           scale,
@@ -129,20 +136,22 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
   const getContext = options?.context
 
   // One class for every role; an instance's name decides which: a session shard, a Broadcast key authority or
-  // coordinator, a room authority or the room directory.
-  const TelefuncDurableObject = class extends RoomAuthority<Cloudflare.Env> {
+  // coordinator, or an extension's `durableObject`.
+  const TelefuncDurableObject = class extends DurableObject<Cloudflare.Env> {
     readonly #authorityState: CloudflareBroadcastAuthorityState
     readonly #broadcastCalls: BroadcastCalls = new OrderedStubs()
     readonly #session: CloudflareSession
+    readonly #durableObjects = new Map<string, CloudflareExtensionDurableObject>()
+    /** The extension this Durable Object's storage is known to hold. */
+    #storedExtension: string | undefined
 
     constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
-      super(ctx, env, telefuncNamespace(env))
+      super(ctx, env)
       this.#authorityState = new CloudflareBroadcastAuthorityState(ctx)
       const id = ctx.id.toString()
       this.#session = {
-        room: new CloudflareRoomSessionManager(id),
         broadcast: broadcast.member(id, this.#broadcastCalls),
-        mux: new ChannelMux(),
+        mux: new ChannelMux({ hostId: id }),
       }
       crosswsAdapter.handleDurableInit(this, ctx, env)
     }
@@ -193,8 +202,51 @@ function telefunc(options?: CloudflareOptions): TelefuncServe {
       return this.#authorityState.setPresence(request)
     }
 
-    telefuncRoomDeliver(request: RoomSessionDeliveryRequest) {
-      return this.#runInSession(() => this.#session.room.deliver(request))
+    /** The RPC method every extension's `durableObject` is called through. */
+    async telefuncDurableObjectCall(name: string, method: string, args: unknown[]): Promise<unknown> {
+      const durableObject = this.#durableObject(name)
+      const call = (durableObject as Record<string, unknown>)[method]
+      assertUsage(
+        typeof call === 'function',
+        `The Cloudflare extension ${name} has no Durable Object method ${method}()`,
+      )
+      if (this.#storedExtension !== name) {
+        if ((await this.ctx.storage.get(EXTENSION_STORAGE_KEY)) !== name) {
+          await this.ctx.storage.put(EXTENSION_STORAGE_KEY, name)
+        }
+        this.#storedExtension = name
+      }
+      return call.apply(durableObject, args)
+    }
+
+    telefuncSessionCall(name: string, method: string, args: unknown[]): unknown {
+      const call = getCloudflareExtension(name)?.session?.[method] as ((...args: unknown[]) => unknown) | undefined
+      assertUsage(call, `The Cloudflare extension ${name} has no session call ${method}()`)
+      return this.#runInSession(() => call(...args))
+    }
+
+    /** Only an extension's `durableObject` schedules alarms. */
+    async alarm(): Promise<void> {
+      const name = await this.ctx.storage.get<string>(EXTENSION_STORAGE_KEY)
+      assert(name !== undefined)
+      this.#storedExtension = name
+      await this.#durableObject(name).alarm?.()
+    }
+
+    /** Built once, synchronously, so that concurrent first calls share it. */
+    #durableObject(name: string): CloudflareExtensionDurableObject {
+      const built = this.#durableObjects.get(name)
+      if (built) return built
+      const extension = getCloudflareExtension(name)
+      assertUsage(
+        extension?.durableObject,
+        `The Cloudflare extension ${name} isn't registered: is it installed, and does your worker's build use Telefunc's Vite plugin?`,
+      )
+      const durableObject = extension.durableObject(this.ctx as never, this.env as never, () =>
+        telefuncNamespace(this.env),
+      )
+      this.#durableObjects.set(name, durableObject)
+      return durableObject
     }
 
     #runInSession<T>(fn: () => T): T {

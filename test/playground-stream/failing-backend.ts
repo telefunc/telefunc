@@ -4,24 +4,29 @@ export {
   pendingBackendFaults,
   endBackendSubscriptions,
   holdCellPages,
+  holdSubscriptions,
   holdRetainedReads,
 }
 export type { BackendFault }
 
 import {
   installBackend,
-  getRoomBackend,
-  createDeferred,
   DriverAttempt,
   MemoryBackend,
-  type CellsRead,
-  type RoomBackend,
   type BackendPayload,
   type BackendReceiver,
   type BroadcastRoute,
-  type RoomSubscriptionSource,
   type SubscriptionAttempt,
+  type SubscriptionDriver,
 } from 'telefunc/__internal'
+import {
+  getRoomBackend,
+  MemoryRoomDriver,
+  type CellsRead,
+  type RoomBackend,
+  type RoomSubscriptionSource,
+} from '@telefunc/room/backend'
+import { createDeferred } from './createDeferred'
 
 /** `op` is a driver method (its next matching call rejects), 'bind' (the next matching subscribe throws), 'subscribe'
  *  (the next matching subscription refuses to open) or 'deliver' (the next message a matching subscription gets is
@@ -34,13 +39,14 @@ type Call = { roomId?: string; keys: string[] }
 type CellPagesHold = { roomId: string; key: string; pages: number; wait: () => Promise<void> }
 type RetainedReadsHold = { roomId: string; waiting: number; released: Promise<void> }
 
-const { faults, attempts, holds, holding, retainedHolds, holdingRetained } = ((globalThis as Record<symbol, unknown>)[
-  Symbol.for('playground-stream:failingBackend')
-] ??= {
+const { faults, attempts, holds, holding, subscriptionHolds, retainedHolds, holdingRetained } = ((
+  globalThis as Record<symbol, unknown>
+)[Symbol.for('playground-stream:failingBackend')] ??= {
   faults: [],
   attempts: new Set(),
   holds: [],
   holding: new WeakSet(),
+  subscriptionHolds: new Map(),
   retainedHolds: [],
   holdingRetained: new WeakSet(),
 }) as {
@@ -48,6 +54,7 @@ const { faults, attempts, holds, holding, retainedHolds, holdingRetained } = ((g
   attempts: Set<FailingAttempt>
   holds: CellPagesHold[]
   holding: WeakSet<RoomBackend>
+  subscriptionHolds: Map<string, Promise<void>>
   retainedHolds: RetainedReadsHold[]
   holdingRetained: WeakSet<RoomBackend>
 }
@@ -56,10 +63,15 @@ class FailingAttempt extends DriverAttempt {
   constructor(
     readonly source: Source,
     private readonly _inner: SubscriptionAttempt,
+    held: Promise<void> | undefined,
   ) {
     super()
-    this.transition(_inner.state())
-    _inner.onStateChange((state, reason) => this.transition(state, reason))
+    const follow = () => {
+      this.transition(_inner.state())
+      _inner.onStateChange((state, reason) => this.transition(state, reason))
+    }
+    if (held === undefined) follow()
+    else void held.then(follow)
   }
 
   async unsubscribe(): Promise<void> {
@@ -76,7 +88,15 @@ class FailingAttempt extends DriverAttempt {
 
 /** Installs the in-memory backend, failing what a test asks it to fail. */
 function installFailingBackend() {
-  const memory = new MemoryBackend()
+  const room = failing(new MemoryRoomDriver())
+  const backend = failing(
+    Object.assign(new MemoryBackend(), { planes: { [Symbol.for('telefunc.room.plane')]: () => room } }),
+  )
+  installBackend(() => backend, ['failing-backend'])
+}
+
+/** `memory`, failing what a test asks it to fail. */
+function failing<Driver extends { subscriptions: SubscriptionDriver<Source> }>(memory: Driver): Driver {
   const subscriptions = {
     bind(source: Source) {
       const call = callOf(source)
@@ -89,7 +109,8 @@ function installFailingBackend() {
           const inner = binding.open((payload, info) => {
             if (!takeFault('deliver', call)) receiver(payload, info)
           }, localReceiverCount)
-          const attempt = new FailingAttempt(source, inner)
+          const held = 'roomId' in source ? subscriptionHolds.get(source.roomId) : undefined
+          const attempt = new FailingAttempt(source, inner, held)
           attempts.add(attempt)
           return attempt
         },
@@ -97,7 +118,7 @@ function installFailingBackend() {
     },
     partitionHere: (source: Source) => memory.subscriptions.partitionHere(source),
   }
-  const driver = new Proxy(memory, {
+  return new Proxy(memory, {
     get(target, op) {
       if (op === 'subscriptions') return subscriptions
       const value = Reflect.get(target, op)
@@ -113,7 +134,16 @@ function installFailingBackend() {
       }
     },
   })
-  installBackend(() => driver, ['failing-backend'])
+}
+
+/** Holds the subscriptions opened on `roomId` until `release()` short of ready, as a store slow to confirm them would. */
+function holdSubscriptions(roomId: string): () => void {
+  const released = createDeferred()
+  subscriptionHolds.set(roomId, released.promise)
+  return () => {
+    subscriptionHolds.delete(roomId)
+    released.resolve()
+  }
 }
 
 function addBackendFault(fault: BackendFault) {

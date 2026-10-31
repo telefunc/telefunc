@@ -3,25 +3,21 @@ export type { RedisCommand }
 
 // Every Lua script and the one command table that registers and invokes them.
 
-import {
-  CELL_PAGE_SIZE,
-  decodeLaneKey,
-  encodeLaneKey,
-  type BroadcastPayload,
-  type BroadcastRoute,
-  type CellCounter,
-  type CellSelector,
-  type CellsCx,
-  type CxResult,
-  type HeadCx,
-  type HeadCxResult,
-  type HeadNext,
-  type LaneId,
-  type OrderingInfo,
-  type RoomHead,
-  type RoomSubscriptionSource,
-  type CellsRead,
-} from 'telefunc/__internal'
+import { roomKit } from './roomKit.js'
+import type { BroadcastPayload, BroadcastRoute, OrderingInfo } from 'telefunc/__internal'
+import type {
+  CellCounter,
+  CellSelector,
+  CellsCx,
+  CxResult,
+  HeadCx,
+  HeadCxResult,
+  HeadNext,
+  LaneId,
+  RoomHead,
+  RoomSubscriptionSource,
+  CellsRead,
+} from '@telefunc/room/backend'
 import { assert } from './assert.js'
 import {
   broadcastChannel,
@@ -604,7 +600,7 @@ const REDIS_COMMANDS = {
         cellValuesKey(prefix, roomId, inc),
         cellVersionsKey(prefix, roomId, inc),
       ],
-      argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(CELL_PAGE_SIZE)],
+      argv: [inc, after === undefined ? `[${cellPrefix}` : `(${after}`, cellPrefix, String(roomKit().CELL_PAGE_SIZE)],
     }),
     parse: (reply): CellsRead & { after?: string } => {
       const [tag, now, ...found] = reply as Buffer[]
@@ -618,7 +614,7 @@ const REDIS_COMMANDS = {
     lua: LANE_START_LUA,
     numberOfKeys: 2,
     invoke: (prefix, { roomId, inc, lane }: RoomSubscriptionSource) => {
-      const laneKey = encodeLaneKey(lane)
+      const laneKey = roomKit().encodeLaneKey(lane)
       const memberLane = lane.kind === 'inbox' || lane.kind === 'binary'
       return {
         keys: [
@@ -782,7 +778,7 @@ const REDIS_COMMANDS = {
     lua: RETAINED_DELETE_LUA,
     numberOfKeys: 5,
     invoke: (prefix, { roomId, inc, lane, ifSeq }: RoomInc & { lane: LaneId; ifSeq: number | undefined }) => {
-      const laneKey = encodeLaneKey(lane)
+      const laneKey = roomKit().encodeLaneKey(lane)
       const retained = retainedKey(prefix, roomId, inc, laneKey)
       const binary = lane.kind === 'binary'
       return {
@@ -916,7 +912,7 @@ function parseOrderMark(mark: string): OrderingInfo {
 }
 
 function binaryLaneOf(laneKey: string): Extract<LaneId, { kind: 'binary' }> {
-  const lane = decodeLaneKey(laneKey)
+  const lane = roomKit().decodeLaneKey(laneKey)
   assert(lane.kind === 'binary')
   return lane
 }

@@ -1,4 +1,4 @@
-export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, parsePeerText, reportServerChannelError }
+export { Channel, ServerChannel, SERVER_CHANNEL_BRAND, parsePeerText, reportBug }
 export { ChannelClosedError, ChannelOverflowError } from '../channelErrors.js'
 export { NetworkError } from '../../../shared/NetworkError.js'
 
@@ -979,16 +979,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       if (track) {
         this._pendingCloseCallbacks++
         void pending
-          .catch((e) => reportServerChannelError(e))
+          .catch((e) => reportBug(e))
           .finally(() => {
             this._pendingCloseCallbacks--
             this._notifyCloseProgress()
           })
       } else {
-        void pending.catch((e) => reportServerChannelError(e))
+        void pending.catch((e) => reportBug(e))
       }
     } catch (callbackErr) {
-      reportServerChannelError(callbackErr)
+      reportBug(callbackErr)
     }
   }
 
@@ -1021,7 +1021,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       }
       return true
     }
-    reportServerChannelError(err)
+    reportBug(err)
     return false
   }
 
@@ -1041,7 +1041,7 @@ function rejectOverflow(): Promise<never> {
   return Promise.reject(new ChannelOverflowError())
 }
 
-function reportServerChannelError(err: unknown): void {
+function reportBug(err: unknown): void {
   handleTelefunctionBug(err instanceof Error ? err : new Error(String(err)))
 }
 
