@@ -30,7 +30,7 @@ import {
   type RoomCtrlEnvelope,
   type WireLeaveCause,
 } from '../protocol.js'
-import type { HoldConfig, RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
+import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
 import type { LeaveCause, ParticipantMeta } from '../types.js'
 import {
   dropCells,
@@ -44,7 +44,7 @@ import {
 } from './meta.js'
 import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
-import { afterHoldChange, holdChange, holdCounts, type RoomIncarnation } from './lifecycle.js'
+import { afterHoldChange, holdDelta, type HoldDelta, type RoomIncarnation } from './lifecycle.js'
 import {
   CLEANUP_CELL_PREFIX,
   MEMBER_CELL_PREFIX,
@@ -174,7 +174,7 @@ async function createMember(
   record: Omit<RoomMemberRecord, 'session'>,
   meta: ParticipantMeta,
 ): Promise<void> {
-  const config = record.hidden ? null : room.hold
+  const hold = holdDelta(record.hidden ? null : room.hold, 1, { joining: true })
   const { counters } = await mutateHosted(room, session, (hostId) => {
     const mutations: CellMutation[] = [
       { key: memberCellKey(id), bytes: encodeRoomRecord({ ...record, session: hostId } satisfies RoomMemberRecord) },
@@ -184,10 +184,10 @@ async function createMember(
     if (record.identity !== undefined) {
       mutations.push({ key: identityCellKey(record.identity, id), bytes: new Uint8Array() })
     }
-    const plan = () => ({ value: undefined, mutations, counts: holdCounts(config, 1, { joining: true }) })
+    const plan = () => ({ value: undefined, mutations, counts: hold.counts })
     return { keys: mutations.map(({ key }) => key), plan }
   })
-  afterHoldChange(room, holdChange(config, counters, 1, { joining: true }))
+  afterHoldChange(room, hold.after(counters))
 }
 
 /** Writes pages' views under the session in one write, and returns their cells' keys; each holds the room, and a room
@@ -200,21 +200,23 @@ async function holdViews(room: RoomIncarnation, session: RoomSession, ids: strin
     const plan = (cells: ReadonlyMap<string, Uint8Array>) => {
       const added = keys.filter((key) => !cells.has(key))
       const views = added.map((key) => ({ key, bytes: new Uint8Array() }))
-      return { value: { keys, added: added.length }, mutations: views, counts: holdCounts(hold, added.length) }
+      const delta = holdDelta(hold, added.length)
+      return { value: { keys, added: added.length, delta }, mutations: views, counts: delta.counts }
     }
     return { keys, plan }
   })
-  if (value.added > 0) afterHoldChange(room, holdChange(hold, counters, value.added))
+  if (value.added > 0) afterHoldChange(room, value.delta.after(counters))
   return value.keys
 }
 
 /** Removes a view by the key `holdViews` returned. */
 async function removeView(room: RoomIncarnation, key: string): Promise<void> {
-  const { value: config, counters } = await mutateCells(room.id, room.inc, [key], (cells) => {
-    if (!cells.has(key)) return { value: null, mutations: [] }
-    return { value: room.hold, mutations: [{ key, bytes: null }], counts: holdCounts(room.hold, -1) }
+  const hold = holdDelta(room.hold, -1)
+  const { value: removed, counters } = await mutateCells(room.id, room.inc, [key], (cells) => {
+    if (!cells.has(key)) return { value: false, mutations: [] }
+    return { value: true, mutations: [{ key, bytes: null }], counts: hold.counts }
   })
-  afterHoldChange(room, holdChange(config, counters, -1))
+  if (removed) afterHoldChange(room, hold.after(counters))
 }
 
 /** Renews the session's lease once a write created it; false once the session was lost. */
@@ -336,7 +338,7 @@ async function evictMember(room: RoomIncarnation, id: string, cause: LeaveCause)
 async function removeMemberCells(room: RoomIncarnation, id: string, cause: LeaveCause): Promise<boolean> {
   const memberKey = memberCellKey(id)
   const cleanupKey = cleanupCellKey(id)
-  const { value: outcome, counters } = await mutateCells<{ cleanup: boolean; config: HoldConfig | null }>(
+  const { value: outcome, counters } = await mutateCells<{ cleanup: boolean; hold: HoldDelta | null }>(
     room.id,
     room.inc,
     [memberKey, cleanupKey],
@@ -344,18 +346,18 @@ async function removeMemberCells(room: RoomIncarnation, id: string, cause: Leave
       const pending = cells.has(cleanupKey)
       const raw = cells.get(memberKey)
       const record = raw === undefined ? null : decodeRoomRecord<RoomMemberRecord>(raw)
-      if (record === null) return { value: { cleanup: pending, config: null }, mutations: [] }
+      if (record === null) return { value: { cleanup: pending, hold: null }, mutations: [] }
       const cleanup: PendingMemberCleanup = { cause: leaveCauseToWire(cause), session: record.session }
       if (record.hidden) cleanup.hidden = true
-      const config = record.hidden ? null : room.hold
+      const hold = holdDelta(record.hidden ? null : room.hold, -1)
       // The marker is written with the record, so the record's version covers it.
       const mutations: CellMutation[] = [{ key: memberKey, bytes: null }]
       if (record.identity !== undefined) mutations.push({ key: identityCellKey(record.identity, id), bytes: null })
       if (!pending) mutations.push({ key: cleanupKey, bytes: encodeRoomRecord(cleanup) })
-      return { value: { cleanup: true, config }, mutations, counts: holdCounts(config, -1) }
+      return { value: { cleanup: true, hold }, mutations, counts: hold.counts }
     },
   )
-  afterHoldChange(room, holdChange(outcome.config, counters, -1))
+  if (outcome.hold !== null) afterHoldChange(room, outcome.hold.after(counters))
   if (outcome.cleanup) await finishPendingMemberCleanup(room.id, room.inc, id)
   return outcome.cleanup
 }

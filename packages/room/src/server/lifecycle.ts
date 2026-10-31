@@ -1,5 +1,5 @@
-export { newHoldConfig, holdCounts, holdChange, afterHoldChange, createHold, maintainHold, lapseNewRoom, cancelClose }
-export type { RoomIncarnation }
+export { newHoldConfig, holdDelta, afterHoldChange, createHold, maintainHold, lapseNewRoom, cancelClose }
+export type { HoldDelta, RoomIncarnation }
 
 // An unheld room closes on its own: the server whose write leaves it unheld closes it on a timer, and the head's lapse,
 // which every heartbeat on the room keeps ahead, removes it if no server is left to.
@@ -31,6 +31,9 @@ type HoldRecord = HoldConfig & HoldCounts & { closesIn?: number; readAt: number 
 
 type HoldChange = { before: HoldCounts; after: HoldRecord }
 
+/** A write's change to the hold counts: the counts it commits, and the change they made once committed. */
+type HoldDelta = { counts: CellCount[]; after(counters: ReadonlyMap<string, CellCounter>): HoldChange | null }
+
 /** What a room's member and hold writes carry: its incarnation and that incarnation's hold timeouts. */
 type RoomIncarnation = { id: string; inc: string; hold: HoldConfig | null }
 
@@ -39,14 +42,21 @@ function newHoldConfig(emptyTimeout: number, departureTimeout: number): HoldConf
   return { emptyTimeout, departureTimeout }
 }
 
-/** The counts that add `delta` holds, and a join with `joining`: whichever comes first, the room's creation or its
- *  first hold, creates both counters, and both come back with the commit. None in a room without hold timeouts. */
-function holdCounts(config: HoldConfig | null, delta: number, opts?: { joining?: boolean }): CellCount[] {
-  if (config === null) return []
-  return [
-    { key: HOLDS_CELL_KEY, delta, create: true },
-    { key: JOINS_CELL_KEY, delta: opts?.joining ? 1 : 0, create: true },
-  ]
+/** Adds `delta` holds, and a join with `joining`: whichever comes first, the room's creation or its first hold, creates
+ *  both counters, and both come back with the commit. No counts in a room without hold timeouts. */
+function holdDelta(config: HoldConfig | null, delta: number, opts?: { joining?: boolean }): HoldDelta {
+  const joins = opts?.joining ? 1 : 0
+  if (config === null) return { counts: [], after: () => null }
+  return {
+    counts: [
+      { key: HOLDS_CELL_KEY, delta, create: true },
+      { key: JOINS_CELL_KEY, delta: joins, create: true },
+    ],
+    after(counters) {
+      const after = holdRecord(config, counters)
+      return { before: { holds: after.holds - delta, joins: after.joins - joins }, after }
+    },
+  }
 }
 
 /** Every count creates both counters, so a room with timeouts that was counted has both. An exchange's time is taken
@@ -61,18 +71,6 @@ function holdRecord(config: HoldConfig, counters: ReadonlyMap<string, CellCounte
   const timeout = unheldTimeout(record)
   if (record.holds <= 0 && timeout !== Infinity) record.closesIn = holds.changedAt + timeout - at
   return record
-}
-
-/** The hold record a commit of `holdCounts(config, delta, opts)` left, and the counts before it. */
-function holdChange(
-  config: HoldConfig | null,
-  counters: ReadonlyMap<string, CellCounter>,
-  delta: number,
-  opts?: { joining?: boolean },
-): HoldChange | null {
-  if (config === null) return null
-  const after = holdRecord(config, counters)
-  return { before: { holds: after.holds - delta, joins: after.joins - (opts?.joining ? 1 : 0) }, after }
 }
 
 /** Null once the incarnation is gone, or while nothing counted it: it has no hold timeouts, or its creation's count
@@ -107,7 +105,7 @@ async function createHold(room: RoomIncarnation): Promise<void> {
   const result = await getRoomBackend().compareExchangeCells(room.id, room.inc, {
     expect: [],
     mutations: [],
-    counts: holdCounts(hold, 0),
+    counts: holdDelta(hold, 0).counts,
   })
   if (result === 'stale-inc') throw roomClosedError(room.id)
   assert(result !== 'conflict')
