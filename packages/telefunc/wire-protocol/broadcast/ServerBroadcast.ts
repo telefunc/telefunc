@@ -16,7 +16,8 @@ import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShi
 import { invokeChannelListener, makePublishInfo } from '../channel/channel.js'
 import { reportBug } from '../channel/server/channel.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from '../channel/server/ServerBroadcastEnd.js'
-import { assertPublishShield, type ShieldValidator } from '../../node/server/shield.js'
+import type { ShieldValidator } from '../../node/server/shield.js'
+import { ShieldValidationError } from '../../shared/ShieldValidationError.js'
 import type { BroadcastPayload, BroadcastRoute } from '../backend/broadcast/contract.js'
 import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
@@ -213,7 +214,10 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
 
   /** @internal Without a shield, the page's payload is never parsed here. */
   _onPagePublish(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
-    if (this._publishShield) assertPublishShield(this._publishShield, parse(serialized))
+    if (this._publishShield) {
+      const result = this._publishShield(parse(serialized))
+      if (result !== true) throw new ShieldValidationError(result)
+    }
     return this._publish('text', serialized)
   }
 
