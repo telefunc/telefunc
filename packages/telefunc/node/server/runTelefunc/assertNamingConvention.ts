@@ -24,13 +24,13 @@ function assertStartsWithOn(exportName: string, telefuncFilePath: string) {
   if (!/on/.test(exportName)) {
     assertWarning(
       false,
-      `We recommend the name of your telefunction ${exportName}() (${telefuncFilePath}) to start with "on", see https://telefunc.com/event-based#naming-convention'`,
+      `We recommend the name of your telefunction ${exportName}() (${telefuncFilePath}) to start with "on", see https://telefunc.com/best-practices#naming-convention'`,
       { onlyOnce: true },
     )
   } else {
     assertWarning(
       /on[A-Z]/.test(exportName),
-      `The name of your telefunction ${exportName}() (${telefuncFilePath}) starts with "on" but isn't followed by a capital letter, see https://telefunc.com/event-based#naming-convention'`,
+      `The name of your telefunction ${exportName}() (${telefuncFilePath}) starts with "on" but isn't followed by a capital letter, see https://telefunc.com/best-practices#naming-convention'`,
       { onlyOnce: true },
     )
   }
@@ -83,7 +83,7 @@ async function assertCollocation(telefuncFilePath: string, appRootDir: string | 
   assertWarning(
     collocatedFilesMatchYes.length >= 2,
     [
-      `We recommend to collocate ${telefuncFilePath} with a UI component file, see https://telefunc.com/event-based#naming-convention`,
+      `We recommend to collocate ${telefuncFilePath} with a UI component file, see https://telefunc.com/best-practices#naming-convention`,
       '    Your telefunction:',
       `      ${telefuncFilePath} (base name: '${telefuncFileBasename}')`,
       '    Its collocated files:',
