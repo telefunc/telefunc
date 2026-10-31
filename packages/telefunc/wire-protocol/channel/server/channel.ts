@@ -352,7 +352,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._closeDeadline = performance.now() + timeout
     // A channel no response carried yet has no page to acknowledge its close.
     this._awaitingCloseAck = this._didRegister
-    this._startClose()
+    this._isClosed = true
     if (this._peer) this._closeRequestSeq = this._peer.sendCloseRequest(timeout)
     else this._ensurePendingEnd().closeRequest = true
     this._closePromise = this._runFinalizationLoop()
@@ -374,7 +374,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       binaryMaxBytes: c.serverReplayBufferBinary,
     })
     if (this._didShutdown) return // the mux lets an ended channel go
-    this._clearTimer('_ttlTimer')
+    if (this._ttlTimer) clearTimeout(this._ttlTimer)
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
         this._ttlTimer = null
@@ -394,8 +394,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._sendPendingEnd(peer)
       return
     }
-    this._clearTimer('_ttlTimer')
-    this._clearTimer('_reconnectTimer')
+    if (this._ttlTimer) clearTimeout(this._ttlTimer)
+    this._ttlTimer = null
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer)
+    this._reconnectTimer = null
     // The wire of the last peer lost nothing to repair, and still answers the probe in flight.
     const rewired = this._peer?.sender !== peer.sender
     this._peer = peer
@@ -627,7 +629,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._notifyCloseProgress()
       return
     }
-    this._startClose()
+    this._isClosed = true
     void this._runFinalizationLoop()
   }
 
@@ -760,10 +762,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
   }
 
-  private _startClose(): void {
-    this._isClosed = true
-  }
-
   private async _runFinalizationLoop(): Promise<ChannelCloseResult> {
     while (!this._didShutdown) {
       // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
@@ -859,8 +857,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const pageAttached = this._peer !== null
     this._peer = null
     this._awaitingCloseAck = false
-    this._clearTimer('_ttlTimer')
-    this._clearTimer('_reconnectTimer')
+    if (this._ttlTimer) clearTimeout(this._ttlTimer)
+    this._ttlTimer = null
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer)
+    this._reconnectTimer = null
     // Before any response carried it, it keeps its end for the page a later one hands it to.
     if (!pageGone && !this._pageNeedsNothing()) {
       this._mux?.keepEnded(this, pageAttached)
@@ -953,17 +953,6 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     reportServerChannelError(err)
     return false
-  }
-
-  private _clearTimer(name: '_ttlTimer' | '_reconnectTimer'): void {
-    const timer = this[name]
-    if (!timer) return
-    clearTimeout(timer)
-    if (name === '_ttlTimer') {
-      this._ttlTimer = null
-      return
-    }
-    this._reconnectTimer = null
   }
 }
 
