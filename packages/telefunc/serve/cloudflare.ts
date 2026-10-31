@@ -47,10 +47,10 @@ import type { TelefuncDurableObjectNamespace } from '../wire-protocol/adapter/cl
 import { isTelefuncRequest, toResponse } from './shared.js'
 import { REQUEST_KIND, getRequestKind } from '../wire-protocol/wire/requestKind.js'
 import { STATUS_BODY_MALFORMED_REQUEST, STATUS_CODE_MALFORMED_REQUEST } from '../shared/constants.js'
+import { importBundledEntry } from '../node/server/runTelefunc/loadTelefuncFilesUsingVite.js'
 
-// The installed extensions' server entries, which Telefunc's Vite plugin imports (pluginCloudflareExtensions.ts).
-// `true` only where Vite bundles telefunc/cloudflare: neither another bundler nor Node sees this import.
-if (globalThis.__TELEFUNC__IS_BUNDLED) await __TELEFUNC__DYNAMIC_IMPORT('virtual:telefunc:cloudflare-extensions')
+// At Worker start, so that the extensions' server entries run before a Durable Object's first call
+await importBundledEntry()
 
 /** The extension a Durable Object belongs to, kept in its storage so that its alarm() finds the extension after an
  *  eviction. */

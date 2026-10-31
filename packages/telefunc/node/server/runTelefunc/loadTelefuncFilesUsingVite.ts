@@ -1,4 +1,5 @@
 export { loadTelefuncFilesUsingVite }
+export { importBundledEntry }
 
 import { importServerProductionEntry } from '@brillout/vite-plugin-server-entry/runtime'
 import { assert, assertWarning } from '../../../utils/assert.js'
