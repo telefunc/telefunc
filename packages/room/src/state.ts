@@ -1,5 +1,5 @@
 export { RoomModel, RoomState, RoomStateView, remoteBacking }
-export type { MembershipEvent }
+export type { MembershipEvent, RoomModelOwner, RoomStateOwner }
 
 import { assert, assertUsage } from './utils/assert.js'
 import { getGlobalObject } from './utils/getGlobalObject.js'
@@ -92,33 +92,50 @@ type RoomModelOptions = {
   /** How many meta writes `meta` reflects (see `applyRoomUpdate`). */
   metaSeq: number
   closed?: boolean
-  /** Every leave, from an event or a reconciled roster, after every view's callbacks; `hidden` is null for a member
-   *  this model didn't know. */
-  onLeave: (id: string, cause: LeaveCause, hidden: boolean | null) => void
-  /** A room meta change arrived ahead of one before it, and waits for it. */
-  onMetaWaiting?: () => void
-  /** A member of a roster still streaming in or applying, which an unstamped message may name. */
-  pendingMember?: (id: string) => MemberSnapshot | undefined
-  /** A member's meta change arrived ahead of one before it, which never arrived: the next roster read repairs it. */
-  onMemberMetaGap?: () => void
-  /** A known member's meta update applied, from an event, a stamp or a roster read. */
-  onMemberMeta?: (id: string, update: MemberMetaUpdate) => void
-  /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
-   *  doesn't hold. */
-  heldConnection?: (id: string) => boolean | null
+  owner: RoomModelOwner
 }
 
+/** What a model tells the side that holds it, as each happens. */
+interface RoomModelEvents {
+  /** Every leave, from an event or a reconciled roster, after every view's callbacks; `hidden` is null for a member
+   *  this model didn't know. */
+  onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void
+  /** A known member's meta update applied, from an event, a stamp or a roster read. */
+  onMemberMeta(id: string, update: MemberMetaUpdate): void
+  /** A room meta change arrived ahead of one before it, and waits for it. */
+  onMetaWaiting(): void
+  /** A member's meta change arrived ahead of one before it, which never arrived: the next roster read repairs it. */
+  onMemberMetaGap(): void
+}
+
+/** What a model asks the side that holds it. */
+interface RoomModelQueries {
+  /** A member of a roster still streaming in or applying, which an unstamped message may name. */
+  pendingMember(id: string): MemberSnapshot | undefined
+  /** This side's own connection to a member it holds, shown in place of the room's record of it; `null` for one it
+   *  doesn't hold. */
+  heldConnection(id: string): boolean | null
+}
+
+interface RoomModelOwner extends RoomModelEvents, RoomModelQueries {}
+
 type RoomStateOptions = {
-  owner: RoomStateView
+  view: RoomStateView
   model: RoomModel
-  /** Fired whenever the number of attached listeners changes, with the member whose own listeners changed (`null` for
-   *  a room-level one), and the binary want it turned on or off, if any. Lets the owner (de)activate its event source
-   *  (adapter subscription, wire subscription). */
-  onListenersChanged: (member: string | null, binary: BinaryWantChange | null) => void
-  /** A user callback threw. The owner decides how to report it. */
-  onCallbackError: (err: unknown) => void
+  owner: RoomStateOwner
   /** How many tracks its binary listeners may name, each `(member or room, track)` pair once; unbounded if omitted. */
   trackWantsMax?: number
+}
+
+/** What a view's state tells the side that holds it. */
+interface RoomStateOwner {
+  /** The number of attached listeners changed, with the member whose own listeners changed (`null` for a room-level
+   *  one), and the binary want it turned on or off, if any: the side (de)activates its event source (adapter
+   *  subscription, wire subscription). */
+  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void
+  /** A user callback threw: the side reports it. Called on its own, as a function, so the state hands it to each
+   *  listener's call as it is. */
+  readonly onCallbackError: (error: unknown) => void
 }
 
 /** Exact-keyed backing lets the serializer recover (room, member) without exposing a public brand. */
@@ -219,15 +236,10 @@ class RoomModel {
   private _hiddenMembers = 0
   /** The views with a listener: one without has nothing to fire. */
   private readonly _views = new Set<RoomState>()
-  private readonly _onLeave: RoomModelOptions['onLeave']
+  private readonly _owner: RoomModelOwner
   private readonly _meta: RoomMetaState
   /** Shared by the members' metas here and by the local participants of this view. */
   readonly metaRewinds: MetaRewinds = { count: 0 }
-  private readonly _onMetaWaiting: () => void
-  private readonly _pendingMember: (id: string) => MemberSnapshot | undefined
-  private readonly _onMemberMetaGap: () => void
-  private readonly _onMemberMeta: (id: string, update: MemberMetaUpdate) => void
-  private readonly _heldConnection: (id: string) => boolean | null
   private _rosterKnown: boolean
   private _closedCause: LeaveCause = ownLeaveCause({ type: 'closed' })
   private _seedCount = 0
@@ -238,12 +250,7 @@ class RoomModel {
     this.roomId = opts.roomId
     this._meta = new RoomMetaState(opts.meta, opts.metaSeq)
     this.closed = opts.closed === true
-    this._onMetaWaiting = opts.onMetaWaiting ?? (() => {})
-    this._onLeave = opts.onLeave
-    this._pendingMember = opts.pendingMember ?? (() => undefined)
-    this._onMemberMetaGap = opts.onMemberMetaGap ?? (() => {})
-    this._onMemberMeta = opts.onMemberMeta ?? (() => {})
-    this._heldConnection = opts.heldConnection ?? (() => null)
+    this._owner = opts.owner
     if ('members' in opts.seed) {
       this._rosterKnown = true
       for (const member of opts.seed.members) this._createEntry(member)
@@ -388,7 +395,7 @@ class RoomModel {
 
   /** As this side shows it: its own connection to a member it holds, the room's record for any other. */
   isConnected(entry: MemberEntry): boolean {
-    return this._heldConnection(entry.id) ?? entry.meta.connected
+    return this._owner.heldConnection(entry.id) ?? entry.meta.connected
   }
 
   /** This side's own connection to a member it holds changed from `wasConnected`, or `null` for one it didn't hold. */
@@ -464,7 +471,7 @@ class RoomModel {
     this._record({ leave: id })
     const entry = this._members.get(id)
     if (entry) this._removeEntry(entry, ownLeaveCause(cause))
-    this._onLeave(id, cause, entry ? entry.hidden : null)
+    this._owner.onMemberLeft(id, cause, entry ? entry.hidden : null)
   }
 
   private _removeEntry(entry: MemberEntry, cause: LeaveCause): void {
@@ -490,9 +497,9 @@ class RoomModel {
     const prev = listening.length > 0 ? entry.meta.object : null
     const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
-    if (applied === 'gap') this._onMemberMetaGap()
+    if (applied === 'gap') this._owner.onMemberMetaGap()
     if (applied !== 'applied') return false
-    this._onMemberMeta(id, update)
+    this._owner.onMemberMeta(id, update)
     this._bumpState()
     if (this.isConnected(entry) !== wasConnected) this._connectionChanged(entry)
     if (prev === null) return true
@@ -507,7 +514,7 @@ class RoomModel {
     const listening = [...this._views].filter((view) => view._listensToRoomMeta())
     const prev = listening.length > 0 ? this._meta.object : null
     const applied = this._meta.apply(update)
-    if (this._meta.waiting) this._onMetaWaiting()
+    if (this._meta.waiting) this._owner.onMetaWaiting()
     if (applied.length === 0) return applied
     this._bumpState()
     if (prev !== null) for (const view of listening) view._roomMetaChanged(this._meta.object, prev)
@@ -571,7 +578,7 @@ class RoomModel {
       }
       return { entry }
     }
-    const pending = this._pendingMember(from)
+    const pending = this._owner.pendingMember(from)
     if (entry) {
       if (pending !== undefined && pending.metaSeq > entry.meta.seq) {
         this.applyParticipantMeta(from, wholeUpdate(pending.metaSeq, pending.meta, pending.disconnected === true))
@@ -663,7 +670,7 @@ class RoomModel {
       this.applyParticipantMeta(member.id, update)
       return true
     }
-    if (entry.meta.apply(update) === 'applied') this._onMemberMeta(member.id, update)
+    if (entry.meta.apply(update) === 'applied') this._owner.onMemberMeta(member.id, update)
     return false
   }
 
@@ -678,15 +685,14 @@ class RoomModel {
 /** One view of a room model: its listeners and the remotes it hands out, each backed by its owner. A room-level
  *  `onLeave` or `onEmpty` never fires for a hidden member. */
 class RoomState {
-  /** @internal The owning `ServerRoom`/`ClientRoom`, for serialization backing. */
-  readonly _owner: RoomStateView
+  /** @internal The `ServerRoom`/`ClientRoom` this is the state of, for serialization backing. */
+  readonly _view: RoomStateView
   readonly model: RoomModel
   private readonly _listenerCleanups = new Map<object, Set<() => void>>()
   /** By the model's entry, so a remote still held keeps its own, and a member's leave forgets it. */
   private readonly _memberListeners = new WeakMap<MemberEntry, MemberListeners>()
   private readonly _changeCbs: Listeners<() => void> = new Listeners()
-  private readonly _onListenersChanged: RoomStateOptions['onListenersChanged']
-  private readonly _onCallbackError: (err: unknown) => void
+  private readonly _owner: RoomStateOwner
 
   private readonly _roomDataCbs: Listeners<(data: unknown, info: ChannelPublishInfo, from: Sender) => unknown> =
     new Listeners()
@@ -716,10 +722,9 @@ class RoomState {
   private readonly _trackWantsMax: number
 
   constructor(opts: RoomStateOptions) {
-    this._owner = opts.owner
+    this._view = opts.view
     this.model = opts.model
-    this._onListenersChanged = opts.onListenersChanged
-    this._onCallbackError = opts.onCallbackError
+    this._owner = opts.owner
     this._trackWantsMax = opts.trackWantsMax ?? Number.POSITIVE_INFINITY
   }
 
@@ -803,7 +808,7 @@ class RoomState {
   onClose(cb: () => void): () => void {
     if (!this.model.closed) return this._register(this._closeCbs, cb)
     // Terminal, like a departed member's onLeave: a late listener hears it at once.
-    invokeChannelListener(cb, [], this._onCallbackError)
+    invokeChannelListener(cb, [], this._owner.onCallbackError)
     return makeDisposer()
   }
 
@@ -922,7 +927,7 @@ class RoomState {
   ): void {
     for (const { cb, track: want } of cbs.list()) {
       if (want !== EVERY_TRACK && want !== track) continue
-      invokeChannelListener(invoke, [cb], this._onCallbackError)
+      invokeChannelListener(invoke, [cb], this._owner.onCallbackError)
     }
   }
 
@@ -973,7 +978,7 @@ class RoomState {
       onLeave: (cb: (cause: LeaveCause) => void) => {
         if (!entry.left) return this._register((listeners.leaveCbs ??= new Listeners()), cb, entry)
         assert(entry.leaveCause)
-        invokeChannelListener(cb, [entry.leaveCause], this._onCallbackError)
+        invokeChannelListener(cb, [entry.leaveCause], this._owner.onCallbackError)
         return makeDisposer()
       },
     }
@@ -1046,11 +1051,11 @@ class RoomState {
       if ((this._memberListeners.get(entry)?.dataCbs?.size ?? 0) > 0) this._textWanted.add(entry.id)
       else this._textWanted.delete(entry.id)
     }
-    this._onListenersChanged(entry?.id ?? null, binary)
+    this._owner.onListenersChanged(entry?.id ?? null, binary)
   }
 
   private _fireAll<Args extends unknown[]>(cbs: Listeners<(...args: Args) => unknown>, ...args: Args): void {
-    for (const cb of cbs.list()) invokeChannelListener(cb, args, this._onCallbackError)
+    for (const cb of cbs.list()) invokeChannelListener(cb, args, this._owner.onCallbackError)
   }
 }
 

@@ -39,7 +39,14 @@ import {
   type RoomSnapshotMetadata,
   type RoomStubRequest,
 } from '../protocol.js'
-import { RoomModel, RoomState, RoomStateView, type MembershipEvent } from '../state.js'
+import {
+  RoomModel,
+  RoomState,
+  RoomStateView,
+  type MembershipEvent,
+  type RoomModelOwner,
+  type RoomStateOwner,
+} from '../state.js'
 import { ROOM_TRACK_WANTS_MAX } from '../constants.js'
 import { CLIENT_ROOM_BUG_MESSAGE, roomResultValue } from '../errors.js'
 import { ParticipantBase } from '../participant.js'
@@ -144,7 +151,8 @@ class ClientRoom extends RoomStateView implements Room {
   private readonly _declaredText = new Set<string>()
   /** Settled by the first `roster` or `roster-error` event, or when this view closes. Gates `getParticipants()`. */
   private readonly _roster = createDeferred()
-  private _rosterStream: RosterStream | null = null
+  /** @internal */
+  _rosterStream: RosterStream | null = null
   /** @internal */
   readonly _bufferLimit: number
 
@@ -152,23 +160,16 @@ class ClientRoom extends RoomStateView implements Room {
     super()
     this._end = end
     this._bufferLimit = snapshot.bufferLimit
+    const owner = new ClientRoomOwner(this)
     this._model = new RoomModel({
       roomId: snapshot.roomId,
       meta: snapshot.meta,
       seed: { count: snapshot.count }, // the roster itself streams right behind the response
       metaSeq: snapshot.metaSeq,
       closed: snapshot.closed,
-      onLeave: (id, cause) => this._onLeave(id, cause),
-      pendingMember: (id) => this._rosterStream?.pending.get(id),
-      heldConnection,
+      owner,
     })
-    this._state = new RoomState({
-      owner: this,
-      model: this._model,
-      onListenersChanged: (member, binary) => this._syncWants(member, binary),
-      onCallbackError: reportClientCallbackError,
-      trackWantsMax: ROOM_TRACK_WANTS_MAX,
-    })
+    this._state = new RoomState({ view: this, model: this._model, owner, trackWantsMax: ROOM_TRACK_WANTS_MAX })
     if (snapshot.closed) this._roster.resolve()
 
     // Delivery handlers are local-only. What the server relays is driven by the declared wants: control always arrives,
@@ -372,9 +373,9 @@ class ClientRoom extends RoomStateView implements Room {
     }
   }
 
-  /** Every leave the state applies ends the member's local participant: kicked (with the kick's reason), left through
-   *  another handle, or missing from a roster. */
-  private _onLeave(id: string, cause: LeaveCause): void {
+  /** @internal Every leave the state applies ends the member's local participant: kicked (with the kick's reason),
+   *  left through another handle, or missing from a roster. */
+  _onLeave(id: string, cause: LeaveCause): void {
     const local = this._localParticipants.get(id)
     if (!local) return
     this._localParticipants.delete(id)
@@ -469,7 +470,8 @@ class ClientRoom extends RoomStateView implements Room {
   /** Room-wide text wants ride the Broadcast subscription, which reattaches before the channel's `onOpen`. Declarations
    *  are replayed channel messages, so the server keeps them across reconnects: each one carries only what changed,
    *  the room-wide text wants and those of `member`, whose listeners changed, or the one binary want that did. */
-  private _syncWants(member: string | null, binary: BinaryWantChange | null): void {
+  /** @internal */
+  _syncWants(member: string | null, binary: BinaryWantChange | null): void {
     if (this._model.closed) {
       this._end._setSubscribed('text', false) // a closed room takes no declaration
       return
@@ -654,6 +656,38 @@ abstract class ClientParticipantBase extends ParticipantBase {
 
   protected _inboxBufferLimit(): number {
     return this._bufferLimit
+  }
+}
+
+/** What a `ClientRoom`'s model and state ask of it, kept off the room itself, which is the user's `Room`. */
+class ClientRoomOwner implements RoomModelOwner, RoomStateOwner {
+  private readonly room: ClientRoom
+  readonly onCallbackError = reportClientCallbackError
+
+  constructor(room: ClientRoom) {
+    this.room = room
+  }
+
+  onMemberLeft(id: string, cause: LeaveCause): void {
+    this.room._onLeave(id, cause)
+  }
+
+  // A client's local participants take their meta where it arrives (`_acceptParticipantMeta`), and it repairs no
+  // meta: the server does.
+  onMemberMeta(): void {}
+  onMetaWaiting(): void {}
+  onMemberMetaGap(): void {}
+
+  pendingMember(id: string): MemberSnapshot | undefined {
+    return this.room._rosterStream?.pending.get(id)
+  }
+
+  heldConnection(id: string): boolean | null {
+    return heldConnection(id)
+  }
+
+  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
+    this.room._syncWants(member, binary)
   }
 }
 

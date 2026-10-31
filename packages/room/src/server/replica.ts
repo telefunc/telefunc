@@ -12,10 +12,17 @@ import { DemandReport, RoomDemand } from './demand.js'
 import { PublishedTracks } from './PublishedTracks.js'
 import { DM_FAILURE } from '../errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../protocol.js'
-import type { MemberSnapshot, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope, SenderStamp } from '../protocol.js'
+import type {
+  MemberMetaUpdate,
+  MemberSnapshot,
+  RoomCtrlEnvelope,
+  RoomDmEnvelope,
+  RoomEnvelope,
+  SenderStamp,
+} from '../protocol.js'
 import type { DemandEntry, RoomConfigRecord, RoomDataEnvelope, RoomDmAckEnvelope } from './protocol.js'
 import { Slice } from '../Slice.js'
-import { RoomModel } from '../state.js'
+import { RoomModel, type RoomModelOwner } from '../state.js'
 import type { LeaveCause } from '../types.js'
 import { AuthoritySync } from './AuthoritySync.js'
 import { PendingDmAcks } from './dmAcks.js'
@@ -151,11 +158,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
       meta: stored.entries,
       seed,
       metaSeq: stored.seq,
-      onMetaWaiting: () => this.authority.metaWaiting(),
-      onMemberMetaGap: () => this.authority.memberMetaGap(),
-      // A local participant takes each update its member's meta takes here.
-      onMemberMeta: (id, update) => this._owners.get(id)?._acceptMeta(id, update),
-      onLeave: (id, cause, hidden) => this._onLeave(id, cause, hidden),
+      owner: new ReplicaModelOwner(this),
     })
     this._gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
     this.incomingDemand = new RoomDemand({
@@ -558,8 +561,13 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     for (const stub of this.stubs) stub._relayControl(text, hiddenMember, opts)
   }
 
+  /** A local participant takes each update its member's meta takes here. */
+  memberMetaApplied(id: string, update: MemberMetaUpdate): void {
+    this._owners.get(id)?._acceptMeta(id, update)
+  }
+
   /** Every leave the model applies, event or reconcile, runs the member's cleanup. */
-  private _onLeave(id: string, cause: LeaveCause, hidden: boolean | null): void {
+  memberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
     this.acks.settleMember(id, DM_FAILURE.left) // strand no waiter on a gone sender or recipient
     for (const handle of this._receivers) handle._local.forgetMember(id)
     const owner = this._owners.get(id)
@@ -601,4 +609,38 @@ function hiddenMemberOf(event: PresenceEvent): string | null {
     return event.hidden === true ? event.id : null
   }
   return null
+}
+
+/** What a replica's model asks of it. */
+class ReplicaModelOwner implements RoomModelOwner {
+  private readonly replica: RoomReplica
+
+  constructor(replica: RoomReplica) {
+    this.replica = replica
+  }
+
+  onMemberLeft(id: string, cause: LeaveCause, hidden: boolean | null): void {
+    this.replica.memberLeft(id, cause, hidden)
+  }
+
+  onMemberMeta(id: string, update: MemberMetaUpdate): void {
+    this.replica.memberMetaApplied(id, update)
+  }
+
+  onMetaWaiting(): void {
+    this.replica.authority.metaWaiting()
+  }
+
+  onMemberMetaGap(): void {
+    this.replica.authority.memberMetaGap()
+  }
+
+  // A server reads its rosters whole, and shows each member as the room records it.
+  pendingMember(): undefined {
+    return undefined
+  }
+
+  heldConnection(): null {
+    return null
+  }
 }

@@ -32,7 +32,7 @@ import {
   type RoomResult,
 } from '../protocol.js'
 import type { RoomDataEnvelope, RoomMemberRecord } from './protocol.js'
-import { type RoomModel, RoomState, RoomStateView } from '../state.js'
+import { type RoomModel, RoomState, RoomStateView, type RoomStateOwner } from '../state.js'
 import { ParticipantBase } from '../participant.js'
 import {
   MemberMessageTexts,
@@ -105,16 +105,7 @@ class ServerRoom extends RoomStateView implements Room {
     super()
     this._replica = replica
     this._incarnation = replica._incarnation
-    this._state = new RoomState({
-      owner: this,
-      model: replica.model,
-      onListenersChanged: (member, binary) => {
-        this._replica.track(this)
-        this._onHolderTextChanged(this._local, this._local.refreshText(member))
-        if (binary !== null && this._local.applyBinary(binary)) this._onHolderBinaryChanged(this._local, binary)
-      },
-      onCallbackError: reportBug,
-    })
+    this._state = new RoomState({ view: this, model: replica.model, owner: new ServerRoomStateOwner(this) })
     this._local = new LocalHolder(this._state, this._localSuppressed)
     this._writes = new RoomWrites(this, {
       guards: () => this._guards,
@@ -631,5 +622,22 @@ class ServerLocalParticipant extends ParticipantBase {
 
   protected _inboxBufferLimit(): number {
     return getChannelLimits().bufferLimit
+  }
+}
+
+/** What a `ServerRoom`'s state asks of it, kept off the room itself, which is the user's `Room`. */
+class ServerRoomStateOwner implements RoomStateOwner {
+  private readonly room: ServerRoom
+  readonly onCallbackError = reportBug
+
+  constructor(room: ServerRoom) {
+    this.room = room
+  }
+
+  onListenersChanged(member: string | null, binary: BinaryWantChange | null): void {
+    const room = this.room
+    room._replica.track(room)
+    room._onHolderTextChanged(room._local, room._local.refreshText(member))
+    if (binary !== null && room._local.applyBinary(binary)) room._onHolderBinaryChanged(room._local, binary)
   }
 }
