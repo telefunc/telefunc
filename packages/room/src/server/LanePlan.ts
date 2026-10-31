@@ -52,7 +52,10 @@ interface LaneRoles {
   ownsAnyMember(): boolean
   /** Live. A pending admission owns its inbox. */
   ownedMembers(): Iterable<string>
-  /** What this process tells of its demand, which the plan sets as it plans. */
+}
+
+/** What this process tells of its demand, which the plan sets as it plans. */
+interface LaneDemand {
   readonly outgoingDemand: DemandReport
 }
 
@@ -68,7 +71,7 @@ interface LaneAuthority {
 }
 
 /** The replica the subscriptions serve: it aggregates every handle's holders and applies what the lanes carry. */
-type LanePlanOwner = LaneReceiver & LaneRoles & LaneAuthority
+type LanePlanOwner = LaneReceiver & LaneRoles & LaneAuthority & LaneDemand
 
 type LanePlanOptions = { owner: LanePlanOwner }
 
