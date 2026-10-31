@@ -94,11 +94,11 @@ class RoomWrites {
   /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
    *  seq order. */
   private async writeMemberMeta(id: string, write: MemberMetaWrite): Promise<MemberMetaUpdate> {
-    const host = this.owner
+    const owner = this.owner
     return await this.inCallOrder(`meta:${id}`, async (sent) => {
-      const { update, hidden, replaced } = await writeMemberMeta(host._incarnation, id, write)
+      const { update, hidden, replaced } = await writeMemberMeta(owner._incarnation, id, write)
       await this.publishMemberUpdate(id, update, hidden, sent)
-      if (replaced !== null) await dropMemberMetaGeneration(host._incarnation, id, replaced, update.seq)
+      if (replaced !== null) await dropMemberMetaGeneration(owner._incarnation, id, replaced, update.seq)
       return update
     })
   }
@@ -109,48 +109,48 @@ class RoomWrites {
     hidden: boolean,
     sent: () => void,
   ): Promise<void> {
-    const host = this.owner
+    const owner = this.owner
     const accepted: Extract<RoomCtrlEnvelope, { __r: 'p-meta' }> = { __r: 'p-meta', id, ...update }
     if (hidden) accepted.hidden = true
-    host._replica.applyControl(accepted)
-    const publishing = commitLane(controlLane(host.id, host._incarnation.inc), encodeRoomRecord(accepted))
+    owner._replica.applyControl(accepted)
+    const publishing = commitLane(controlLane(owner.id, owner._incarnation.inc), encodeRoomRecord(accepted))
     sent()
-    acceptedOrThrow(host.id, await publishing)
+    acceptedOrThrow(owner.id, await publishing)
   }
 
   async publishText(from: string, data: unknown, retain = false): Promise<ChannelPublishAck> {
-    const host = this.owner
+    const owner = this.owner
     const { sender, commit } = await this.inCallOrder(from, async (sent) => {
       const { sender, stamp } = await this.admitPublish(from, data)
       const envelope: RoomDataEnvelope = { __r: 'data', from, data, ...stamp }
       const record = encodeRoomRecord(envelope)
-      const target = { roomId: host.id, inc: host._incarnation.inc, lane: SEMANTIC_LANE }
+      const target = { roomId: owner.id, inc: owner._incarnation.inc, lane: SEMANTIC_LANE }
       const opts = { retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitLane(target, record, opts)
       sent()
-      return { sender, commit: acceptedOrThrow(host.id, await committing) }
+      return { sender, commit: acceptedOrThrow(owner.id, await committing) }
     })
     return await this.finishPublish(sender, data, commit)
   }
 
   /** `frame` is `framed` decoded; receivers trust its sender id, which every caller checked is the publisher's. */
   async publishBinaryFrame(frame: BinaryFrame, framed: Uint8Array): Promise<ChannelPublishAck> {
-    const host = this.owner
+    const owner = this.owner
     const { from } = frame
     const lane = { kind: 'binary', member: from, track: frame.track } as const
     const { sender, commit } = await this.inCallOrder(encodeLaneKey(lane), async (sent) => {
       const { sender } = await this.admitPublish(from, frame.payload)
-      const planned = host._replica.lanePlan.lanePlanned(from, lane.track)
+      const planned = owner._replica.lanePlan.lanePlanned(from, lane.track)
       if (planned !== null) await planned
-      const tracks = host._replica.publishedTracks
+      const tracks = owner._replica.publishedTracks
       if (!tracks.admits(from, lane.track)) {
         throw new RoomError(`A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
       }
-      if (tracks.add(from, lane.track)) host._replica.incomingDemand.published(from, lane.track)
+      if (tracks.add(from, lane.track)) owner._replica.incomingDemand.published(from, lane.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
-      const committing = commitLane({ roomId: host.id, inc: host._incarnation.inc, lane }, framed, opts)
+      const committing = commitLane({ roomId: owner.id, inc: owner._incarnation.inc, lane }, framed, opts)
       sent()
-      return { sender, commit: acceptedOrThrow(host.id, await committing) }
+      return { sender, commit: acceptedOrThrow(owner.id, await committing) }
     })
     return await this.finishPublish(sender, frame.payload, commit)
   }
@@ -241,8 +241,8 @@ class RoomWrites {
   }
 
   private async publishDm(from: string, to: string, data: unknown, ackId?: string): Promise<RoomSendReceipt> {
-    const host = this.owner
-    if (host._model.closed) throw roomClosedError(host.id)
+    const owner = this.owner
+    if (owner._model.closed) throw roomClosedError(owner.id)
     const target = await this.resolveMember(to)
     if (!target) throw participantGoneError(to)
     const sender = this.memberSender(from)
@@ -252,10 +252,10 @@ class RoomWrites {
     const envelope: RoomDmEnvelope = { __r: 'dm', to, from, ...stamp, data }
     if (ackId) envelope.ackId = ackId
     const requiredCellKeys = [memberCellKey(from), memberCellKey(to)]
-    const committing = commitLane(inboxOf(host.id, host._incarnation.inc, to), encodeRoomRecord(envelope), {
+    const committing = commitLane(inboxOf(owner.id, owner._incarnation.inc, to), encodeRoomRecord(envelope), {
       requiredCellKeys,
     })
-    const receipt = acceptedOrThrow(host.id, await committing)
+    const receipt = acceptedOrThrow(owner.id, await committing)
     const info: RoomSendReceipt = { seq: receipt.seq, timestamp: receipt.timestamp }
     const onAfterSend = this.owner._guards?.onAfterSend
     if (onAfterSend) await runAfterHook(() => onAfterSend(sender, target, data, info))

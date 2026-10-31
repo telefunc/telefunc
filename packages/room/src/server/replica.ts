@@ -346,7 +346,7 @@ class RoomReplica
     }
   }
 
-  // The planner's and the sync's host
+  // What the replica's parts ask of it
 
   /** @internal Whether a handle here observes the room: a client stub, a participant, or a listener. */
   _observed(): boolean {
