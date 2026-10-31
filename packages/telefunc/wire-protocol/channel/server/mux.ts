@@ -22,29 +22,12 @@ import {
   WIRE_RECV_BACKLOG_BASE_FRAMES,
   type ChannelTransports,
 } from '../../constants.js'
-import {
-  TAG,
-  ProtocolViolationError,
-  assertProtocol,
-  decodeClientFrame,
-  isProtocolViolationError,
-  encode,
-  isOneFrame,
-  messageFrames,
-  isConnCtrlTag,
-  peekTag,
-  seqThrough,
-  withTook,
-} from '../../wire/connectionFrame.js'
-import type {
-  BarrierPayload,
-  ChannelFrame,
-  PingEntry,
-  PongEntry,
-  PreparePayload,
-  ReconcileOpenEntry,
-  ReconcilePayload,
-} from '../../wire/connectionFrame.js'
+import { decodeClientFrame, encode, isOneFrame, messageFrames, peekTag, withTook } from '../../wire/connectionFrame.js'
+import { TAG, isConnCtrlTag } from '../../wire/tags.js'
+import { seqThrough } from '../../wire/seq.js'
+import { ProtocolViolationError, assertProtocol, isProtocolViolationError } from '../../wire/protocolViolation.js'
+import type { ChannelFrame, PingEntry, PongEntry } from '../../wire/connectionFrame.js'
+import type { BarrierPayload, PreparePayload, ReconcileOpenEntry, ReconcilePayload } from '../../wire/payloads.js'
 import { IndexedPeer, type PeerSender } from './IndexedPeer.js'
 import { PathRoom } from '../../flowControl/server/PathRoom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/ServerPieceReceiver.js'

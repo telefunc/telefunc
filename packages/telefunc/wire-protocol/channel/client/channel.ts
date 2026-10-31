@@ -22,16 +22,14 @@ import { resolveClientConfig } from '../../../client/clientConfig.js'
 import { createAbortError, isAbort } from '../../../shared/Abort.js'
 import {
   ACK_STATUS,
-  TAG,
-  countsCredit,
-  isChannelCtrlTag,
   type AckResultStatus,
   type ChannelCtrlFrame,
   type ChannelDataFrame,
   type ChannelFrame,
-  type ReattachState,
-  type WirePublishInfo,
 } from '../../wire/connectionFrame.js'
+import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
+import type { ReattachState } from '../../wire/payloads.js'
+import type { WirePublishInfo } from '../../wire/publishInfo.js'
 import { assert } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
 import { makeAbortError, makeBugError } from '../../../client/remoteTelefunctionCall/errors.js'

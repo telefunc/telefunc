@@ -2,7 +2,7 @@ export { encodeSseRequest, encodeSseBatch, encodeSseRequestMetadata, encodeLengt
 export type { SseRequestMetadata }
 
 import { encodeLengthPrefixedString, encodeU32 } from '../wire/frame.js'
-import { assertProtocol } from '../wire/connectionFrame.js'
+import { assertProtocol } from '../wire/protocolViolation.js'
 
 /** The metadata header that opens every SSE POST. Its `kind`:
  *  - `batch`: short outbox batch POST. Body ends quickly, so the server defers `reconciled`

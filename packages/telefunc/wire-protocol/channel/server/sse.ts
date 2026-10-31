@@ -17,7 +17,9 @@ import { parseSseRequestMetadata, type SseRequestMetadata } from '../sseRequest.
 import { OversizeFrameError, StreamReader, StreamTruncatedError } from '../../wire/StreamReader.js'
 import { getChannelMux } from './mux.js'
 import type { ReconcileOutcome, ServerTransport } from './mux.js'
-import { encode, isProtocolViolationError, passesData, ProtocolViolationError } from '../../wire/connectionFrame.js'
+import { encode } from '../../wire/connectionFrame.js'
+import { passesData } from '../../wire/tags.js'
+import { isProtocolViolationError, ProtocolViolationError } from '../../wire/protocolViolation.js'
 
 type SseChannelHttpResponse = {
   statusCode: 200 | 400

@@ -12,15 +12,9 @@ import {
   WIRE_SEND_AHEAD_MIN_BYTES,
 } from '../constants.js'
 import type { Link } from './Link.js'
-import {
-  MESSAGE_FRAME_OVERHEAD_MAX_BYTES,
-  TAG,
-  assertProtocol,
-  encode,
-  isSequencedTag,
-  passesData,
-  type PiecesAck,
-} from '../wire/connectionFrame.js'
+import { MESSAGE_FRAME_OVERHEAD_MAX_BYTES, encode, type PiecesAck } from '../wire/connectionFrame.js'
+import { TAG, isSequencedTag, passesData } from '../wire/tags.js'
+import { assertProtocol } from '../wire/protocolViolation.js'
 import { concatAll } from '../wire/frame.js'
 import { pingDeadline } from '../wire/pingDeadline.js'
 import { Fifo } from '../../utils/Fifo.js'

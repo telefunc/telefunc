@@ -38,15 +38,9 @@ import {
 } from '../../constants.js'
 import { replayWindow, type WindowKind } from '../../flowControl/FlowControl.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
-import {
-  ACK_STATUS,
-  ERROR_REASON,
-  TAG,
-  encode,
-  isSequencedFrame,
-  seqNear,
-  seqThrough,
-} from '../../wire/connectionFrame.js'
+import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/connectionFrame.js'
+import { TAG } from '../../wire/tags.js'
+import { seqNear, seqThrough } from '../../wire/seq.js'
 import type {
   AckResultStatus,
   BdpPingAck,
@@ -54,12 +48,14 @@ import type {
   DecodedFrame,
   PingEntry,
   PongEntry,
+} from '../../wire/connectionFrame.js'
+import type {
   ReadyPayload,
   ReattachState,
   ReconcileOpenEntry,
   ReconcilePayload,
   ReconciledPayload,
-} from '../../wire/connectionFrame.js'
+} from '../../wire/payloads.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'

@@ -1,16 +1,9 @@
 import { describe, expect, test } from 'vitest'
 
-import {
-  ERROR_REASON,
-  ProtocolViolationError,
-  TAG,
-  decode,
-  decodeClientFrame,
-  encode,
-  type BarrierPayload,
-  type ReconcilePayload,
-  type ReconciledPayload,
-} from '../wire/connectionFrame.js'
+import { ERROR_REASON, decode, decodeClientFrame, encode } from '../wire/connectionFrame.js'
+import { TAG } from '../wire/tags.js'
+import type { BarrierPayload, ReconcilePayload, ReconciledPayload } from '../wire/payloads.js'
+import { ProtocolViolationError } from '../wire/protocolViolation.js'
 import {
   CHANNEL_TRANSPORT,
   MAX_CHANNELS_PER_CONNECTION,

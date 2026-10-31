@@ -1,4 +1,4 @@
-import { replayLaneOf, type ReplayLaneKind } from '../wire/connectionFrame.js'
+import { replayLaneOf, type ReplayLaneKind } from '../wire/tags.js'
 import { assert } from '../../utils/assert.js'
 
 type ReplayBufferOptions = {
