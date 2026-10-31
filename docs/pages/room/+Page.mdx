@@ -139,6 +139,8 @@ room.onJoin(follow)
 
 > You also receive your own messages. To not receive them, join with `room.join({ meta, selfDelivery: false })`.
 
+> Each participant's messages arrive in the order it sent them, with `from.meta` as it was when it sent them. Joins, leaves and meta changes arrive in the same order everywhere, but two pages can see a message and someone else's join in a different order.
+
 For updates that change many times per second, such as a mouse cursor, pass `coalesce` with a name: on a slow connection, only the latest update with that name is sent, and the older ones are skipped.
 
 ```js
