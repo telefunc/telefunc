@@ -40,6 +40,7 @@ async function loadVirtualFile(failOnFailure: boolean) {
     const moduleExports = await viteDevServer.ssrLoadModule(VIRTUAL_FILE_ENTRY_ID, { fixStacktrace: true })
     return { moduleExports, viteProvider: 'Vite with `ssrLoadModule()`' as const }
   } else {
+    await importBundledEntry()
     let moduleExports: unknown
     moduleExports = await loadTelefuncFilesWithImportBuild()
     if (moduleExports === null) {
@@ -58,6 +59,11 @@ async function loadVirtualFile(failOnFailure: boolean) {
     assertProd()
     return { moduleExports, viteProvider: 'Vite with `@brillout/vite-plugin-server-entry`' as const }
   }
+}
+
+// `true` only where Vite bundles Telefunc: neither Node nor another bundler sees this import (pluginBundledEntry.ts)
+async function importBundledEntry() {
+  if (globalThis.__TELEFUNC__IS_BUNDLED) await __TELEFUNC__DYNAMIC_IMPORT('virtual:vite:telefunc:bundled-entry')
 }
 
 function assertProd() {
