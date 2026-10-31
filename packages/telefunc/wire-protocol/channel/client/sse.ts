@@ -29,13 +29,7 @@ import { SSEEvents } from './SSEEvents.js'
 import { Fifo } from '../../../utils/Fifo.js'
 import { randomUuid } from '../../../utils/randomUuid.js'
 import { settledOrAborted } from '../../../utils/settledOrAborted.js'
-import type {
-  BarrierEmission,
-  ClientConnection,
-  OutboundFrame,
-  OutboundFrameKind,
-  UpgradeSource,
-} from './connection.js'
+import type { BarrierEmission, OutboundFrame, OutboundFrameKind, TransportOwner, UpgradeSource } from './connection.js'
 import type { Heartbeat } from './Heartbeat.js'
 
 type OutboxEntry = { frame: Uint8Array<ArrayBuffer>; deadline: number; queuedAt: number }
@@ -65,14 +59,14 @@ type SseTransportOptions = {
   telefuncUrl: string
   fetchImpl: typeof fetch
   userHeaders: Record<string, string> | undefined
-  owner: ClientConnection
+  owner: TransportOwner
 }
 
 class SseTransport implements UpgradeSource {
   private readonly telefuncUrl: string
   private readonly fetchImpl: typeof fetch
   private readonly userHeaders: Record<string, string> | undefined
-  private readonly owner: ClientConnection
+  private readonly owner: TransportOwner
   readonly type = CHANNEL_TRANSPORT.SSE
   readonly sendReconcileOnOpen = false
   readonly reconcileMode = 'batch-on-reconcile' as const

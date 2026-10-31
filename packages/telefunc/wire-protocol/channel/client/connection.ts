@@ -6,6 +6,7 @@ export type {
   OutboundFrame,
   OutboundFrameKind,
   ProbeWire,
+  TransportOwner,
   UpgradeSource,
   UpgradeTarget,
 }
@@ -237,6 +238,20 @@ type ClientChannelTransport = {
   drained(): Promise<void>
   dispose(): void
 }
+
+/** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
+type TransportOwner = Pick<
+  ClientConnection,
+  | '_onTransportOpen'
+  | '_onTransportClosed'
+  | '_onTransportFrame'
+  | '_onTransportPong'
+  | '_onTransportRoom'
+  | '_onTransportBatched'
+  | '_onTransportReconcileSent'
+  | '_onTransportPostLate'
+  | 'stageReconcileBatch'
+>
 
 /** The wire an upgrade moves FROM: it has to carry the barrier as its last frame. */
 type UpgradeSource = ClientChannelTransport & {
@@ -1419,7 +1434,7 @@ class ClientConnection implements MuxConnection {
 
   // ── Protocol internals ──
 
-  buildReconcileFrame(): OutboundFrame {
+  private buildReconcileFrame(): OutboundFrame {
     const { uplink } = this.transport
     // The wire that has the session holds what the RECONCILEs before named: one there names what changed since.
     const changes = this.sessionId !== null && this.reconciledWire === this.wire
@@ -1490,7 +1505,7 @@ class ClientConnection implements MuxConnection {
     return open
   }
 
-  drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
+  private drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
     if (this.transport.reconcileMode !== 'batch-on-reconcile') return []
     // After a wire that may have lost frames, the replay goes first: a newer frame ahead gets an older one dropped.
     if (isInitialBatch && (this.sessionId !== null || this.sentBefore())) return []

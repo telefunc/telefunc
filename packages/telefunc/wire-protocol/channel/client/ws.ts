@@ -10,7 +10,7 @@ import { Downlink } from '../../flowControl/client/Downlink.js'
 import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame } from '../../wire/connectionFrame.js'
 import { TAG } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
-import type { ClientConnection, OutboundFrame, ProbeWire, UpgradeTarget } from './connection.js'
+import type { OutboundFrame, ProbeWire, TransportOwner, UpgradeTarget } from './connection.js'
 import type { Heartbeat } from './Heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */
@@ -18,7 +18,7 @@ type WsEnds = { uplink: Uplink; downlink: Downlink; budget: SendBudget; sender: 
 
 type WsTransportOptions = {
   telefuncUrl: string
-  owner: ClientConnection
+  owner: TransportOwner
 }
 
 class WsTransport implements UpgradeTarget {
@@ -40,7 +40,7 @@ class WsTransport implements UpgradeTarget {
   private pingInterval = CHANNEL_PING_INTERVAL_MIN_MS
 
   private readonly wsUrl: string
-  private readonly owner: ClientConnection
+  private readonly owner: TransportOwner
 
   constructor({ telefuncUrl, owner }: WsTransportOptions) {
     this.owner = owner
