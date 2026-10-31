@@ -281,7 +281,7 @@ class ChannelMux implements RegistrationWaitsOwner {
       },
       transport: transport as ServerTransport<unknown>,
       sender: {
-        send: (frame, onCommit) => this.send(connection, frame as Uint8Array<ArrayBuffer>, onCommit),
+        send: (frame) => this.send(connection, frame as Uint8Array<ArrayBuffer>),
         carry: (frame) => {
           if (headroom) headroom.sender.carry(() => frame as Uint8Array<ArrayBuffer>)
           else this.send(connection, frame as Uint8Array<ArrayBuffer>)
@@ -1010,9 +1010,8 @@ class ChannelMux implements RegistrationWaitsOwner {
 
   // ── Per-connection plumbing (send, recv chain, ping) ────────────────
 
-  /** Sole send path, sync so wire order is call order; a frame for a closed or over-backlog wire commits anyway. */
-  private send(connection: Wire, frame: Uint8Array<ArrayBuffer>, onCommit?: () => void): void {
-    onCommit?.()
+  /** Sole send path, sync so wire order is call order; a wire closed or past its backlog drops the frame. */
+  private send(connection: Wire, frame: Uint8Array<ArrayBuffer>): void {
     this.connectionEntries.get(connection)?.state.wireSender.send(frame)
   }
 

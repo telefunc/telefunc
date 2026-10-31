@@ -8,7 +8,7 @@ import type { SendWait } from '../../flowControl/SendWait.js'
 import type { Urgency } from '../../flowControl/credit.js'
 
 interface PeerSender {
-  send(frame: Uint8Array, onCommit?: () => void): void
+  send(frame: Uint8Array): void
   /** Sends `frame` in the next message the wire sends, where it can carry one (see `PieceSender.carry`). */
   carry(frame: Uint8Array): void
   /** Bytes the wire holds for the peer, not yet written out; `undefined` where the runtime can't tell. */
@@ -25,7 +25,7 @@ type IndexedPeerOptions = {
   replay: ReplayBuffer
 }
 
-/** Encodes a channel's frames with its index; a sequenced one joins the replay buffer once its wire commits it. */
+/** Encodes a channel's frames with its index; a sequenced one joins the replay buffer as it goes to the wire. */
 class IndexedPeer {
   readonly sender: PeerSender
   private index: number
@@ -96,8 +96,9 @@ class IndexedPeer {
     else this.sender.send(frame)
   }
 
-  /** Sends `frame` of `seq`. Replayed once committed, so a frame a dead wire lost goes again. */
+  /** Sends `frame` of `seq`, kept to replay, so a frame a dead wire lost goes again. */
   private commit(seq: number, frame: Uint8Array<ArrayBuffer>): void {
-    this.sender.send(frame, () => this.replay.push(seq, frame))
+    this.replay.push(seq, frame)
+    this.sender.send(frame)
   }
 }
