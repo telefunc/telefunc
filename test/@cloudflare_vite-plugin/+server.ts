@@ -1,4 +1,5 @@
-import vike from 'vike/fetch'
+import { Hono } from 'hono'
+import vike from '@vikejs/hono'
 import { Broadcast, config } from 'telefunc'
 import { Telefunc } from 'telefunc/cloudflare'
 
@@ -12,7 +13,7 @@ config.channel = {
 }
 
 // Cloudflare requires Durable Object classes to be named exports of the worker entry.
-// `wrangler.jsonc`'s `main: "vike:server-entry"` re-exports everything from this file,
+// `wrangler.jsonc`'s `main: "vike:server"` re-exports everything from this file,
 // so these reach Cloudflare's binding resolver intact.
 export class TelefuncDurableObject extends (tf.TelefuncDurableObject as TelefuncDurableObjectWithPresence) {
   // Test-only: the key's authority refuses the first presence of each `refused-presence:` key's subscriber.
@@ -37,43 +38,41 @@ type TelefuncDurableObjectWithPresence = new (
 }
 const refusedPresences = new Set<string>()
 
-// vike's docs example uses `export default vike` directly — meaning when vike is the
-// worker entry's default, Cloudflare invokes vike.fetch with `(request, env, ctx)`.
-// Type-wise vike/fetch is generic-typed for universal-middleware, but at runtime it
-// IS a Cloudflare handler. Cast for the wrapper call.
-const vikeAsCloudflareHandler = vike as unknown as ExportedHandler<Env>
+const app = new Hono<{ Bindings: Env }>()
+vike(app)
 
-export default {
-  async fetch(request, env, ctx): Promise<Response> {
-    const url = new URL(request.url)
-    // Outside any session DO, as a cron trigger or a queue consumer publishes.
-    if (url.pathname === '/__broadcast-publish-from-worker') {
-      await Broadcast.publish('worker-publish', { from: 'worker' })
-      return new Response(null, { status: 204 })
-    }
-    if (url.pathname === '/__broadcast-subscribe-from-worker') {
-      try {
-        Broadcast.subscribe('worker-subscribe', () => {})
-        return new Response('subscribed')
-      } catch (error) {
-        return new Response(String(error))
-      }
-    }
-    // A Room Durable Object call before any .telefunc file loads, as a room's alarm() after the Worker restarts.
-    if (url.pathname === '/__room-call-from-worker') {
-      const namespace = env.TelefuncDurableObject as DurableObjectNamespace<TelefuncDurableObject>
-      await namespace
-        .get(namespace.idFromName('__telefunc_room_directory__'))
-        .telefuncDurableObjectCall('room', 'directoryGet', ['x'])
-      return new Response(null, { status: 204 })
-    }
-    // Test-only: the run the backlog page asked for, as its telefunction recorded it; a POST says the page is stalled.
-    if (url.pathname === '/backlog-run') {
-      const run = `backlog:${url.searchParams.get('channel')}`
-      if (request.method === 'POST') await env.TelefuncKV.put(`${run}:stalled`, 'true')
-      return new Response(await env.TelefuncKV.get(run))
-    }
-    const resp = await tf.serve({ request, env, ctx })
-    return resp ?? vikeAsCloudflareHandler.fetch!(request, env, ctx)
-  },
-} satisfies ExportedHandler<Env>
+// Outside any session DO, as a cron trigger or a queue consumer publishes.
+app.all('/__broadcast-publish-from-worker', async (c) => {
+  await Broadcast.publish('worker-publish', { from: 'worker' })
+  return c.body(null, 204)
+})
+app.all('/__broadcast-subscribe-from-worker', (c) => {
+  try {
+    Broadcast.subscribe('worker-subscribe', () => {})
+    return c.text('subscribed')
+  } catch (error) {
+    return c.text(String(error))
+  }
+})
+// A Room Durable Object call before any .telefunc file loads, as a room's alarm() after the Worker restarts.
+app.all('/__room-call-from-worker', async (c) => {
+  const namespace = c.env.TelefuncDurableObject as DurableObjectNamespace<TelefuncDurableObject>
+  await namespace
+    .get(namespace.idFromName('__telefunc_room_directory__'))
+    .telefuncDurableObjectCall('room', 'directoryGet', ['x'])
+  return c.body(null, 204)
+})
+// Test-only: the run the backlog page asked for, as its telefunction recorded it; a POST says the page is stalled.
+app.all('/backlog-run', async (c) => {
+  const run = `backlog:${c.req.query('channel')}`
+  if (c.req.method === 'POST') await c.env.TelefuncKV.put(`${run}:stalled`, 'true')
+  return new Response(await c.env.TelefuncKV.get(run))
+})
+// Telefunc answers its requests and WebSocket upgrades; Vike renders the rest.
+app.use(async (c, next) => {
+  const response = await tf.serve({ request: c.req.raw, env: c.env, ctx: c.executionCtx })
+  if (response) return response
+  await next()
+})
+
+export default { fetch: app.fetch } satisfies ExportedHandler<Env>
