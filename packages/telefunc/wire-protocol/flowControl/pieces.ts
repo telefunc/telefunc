@@ -513,7 +513,7 @@ type PieceReceiverOptions = {
 }
 
 /** One WebSocket's receiver: puts a frame sent in pieces back together, and acknowledges the bytes it took. */
-abstract class PieceReceiver {
+abstract class PieceReceiver implements AckScheduleOwner {
   private readonly send: (frame: Uint8Array<ArrayBuffer>) => void
   private readonly carry: (frame: () => Uint8Array<ArrayBuffer> | null) => void
   /** The frame not yet whole: one buffer, grown as its pieces arrive, so what it holds is what arrived. */
@@ -540,13 +540,7 @@ abstract class PieceReceiver {
   private newestDataAt: number | null = null
   private acknowledgedDataAt: number | null = null
   protected ackedAt = Number.NEGATIVE_INFINITY
-  private ackTimer: ReturnType<typeof setTimeout> | null = null
-  private ackDue = 0
-  /** The acknowledgement the timer sends goes alone (see `acknowledgeIn`). */
-  private ackAlone = false
-
-  /** An acknowledgement waits to go in the message its side sends next (see `PieceSender.carry`). */
-  private carrying = false
+  private readonly ack = new AckSchedule({ owner: this })
 
   constructor({ send, carry }: PieceReceiverOptions) {
     this.send = send
@@ -659,48 +653,28 @@ abstract class PieceReceiver {
   /** Acknowledges once `ackWait` allows, in the message its side sends next then. */
   protected acknowledgeWithNextSoon(): void {
     const wait = this.ackWait()
-    if (wait > 0) this.armAck(wait)
+    if (wait > 0) this.ack.withNextIn(wait)
     else this.acknowledgeWithNext()
   }
 
   /** Acknowledges `ms` from now, or sooner where it already would. */
   protected acknowledgeIn(ms: number): void {
-    this.ackAlone = true
-    this.armAck(ms)
+    this.ack.aloneIn(ms)
   }
 
-  /** Acknowledges `ms` from now, or sooner where it already would: alone if `ackAlone`, else with the next message. */
-  private armAck(ms: number): void {
-    const due = performance.now() + ms
-    if (this.ackTimer !== null) {
-      if (this.ackDue <= due) return
-      clearTimeout(this.ackTimer)
-    }
-    this.ackDue = due
-    this.ackTimer = unrefTimer(
-      setTimeout(() => {
-        this.ackTimer = null
-        if (this.ackAlone) this.acknowledge()
-        else this.acknowledgeWithNext()
-      }, ms),
-    )
-  }
-
-  private acknowledge(): void {
+  /** Acknowledges now, alone. */
+  acknowledge(): void {
     this.send(this.takeAcknowledgement())
   }
 
   /** Acknowledges in the message its side sends next. */
-  protected acknowledgeWithNext(): void {
-    if (this.carrying) return
-    this.carrying = true
-    this.carry(() => (this.carrying ? this.takeAcknowledgement() : null))
+  acknowledgeWithNext(): void {
+    if (!this.ack.carry()) return
+    this.carry(() => (this.ack.carried ? this.takeAcknowledgement() : null))
   }
 
   private takeAcknowledgement(): Uint8Array<ArrayBuffer> {
-    if (this.ackTimer !== null) clearTimeout(this.ackTimer)
-    this.ackTimer = null
-    this.ackAlone = this.carrying = false
+    this.ack.clear()
     this.ackedAt = performance.now()
     this.acknowledgedTook = this.took
     const span =
@@ -710,5 +684,76 @@ abstract class PieceReceiver {
     this.acknowledgedDataAt = this.newestDataAt
     // Rounded down: its sender then dates the arrival no earlier than it was, and takes a rate no faster than the link's.
     return encode.piecesAck(this.took, Math.floor(this.ackedAt - this.newestAt), span)
+  }
+}
+
+/** The receiver an `AckSchedule` acknowledges for. */
+interface AckScheduleOwner {
+  acknowledge(): void
+  acknowledgeWithNext(): void
+}
+
+type AckScheduleOptions = {
+  owner: AckScheduleOwner
+}
+
+/** When a receiver's acknowledgement goes: at its timer, alone or in its side's next message, or carried in that
+ *  message. A timer to go alone runs on while it is carried: the one that comes first takes it. */
+class AckSchedule {
+  private readonly owner: AckScheduleOwner
+  private timer: ReturnType<typeof setTimeout> | null = null
+  private due = 0
+  /** The timer's acknowledgement goes alone: once one is asked alone, the timer keeps it alone, at the sooner due. */
+  private alone = false
+  private carrying = false
+
+  constructor({ owner }: AckScheduleOptions) {
+    this.owner = owner
+  }
+
+  /** It waits to go in the message its side sends next (see `PieceSender.carry`). */
+  get carried(): boolean {
+    return this.carrying
+  }
+
+  /** Acknowledges `ms` from now, or sooner where it already would, in its side's next message unless it goes alone. */
+  withNextIn(ms: number): void {
+    this.arm(ms)
+  }
+
+  /** Acknowledges `ms` from now, or sooner where it already would, alone. */
+  aloneIn(ms: number): void {
+    this.alone = true
+    this.arm(ms)
+  }
+
+  private arm(ms: number): void {
+    const due = performance.now() + ms
+    if (this.timer !== null) {
+      if (this.due <= due) return
+      clearTimeout(this.timer)
+    }
+    this.due = due
+    this.timer = unrefTimer(setTimeout(this.fire, ms))
+  }
+
+  /** Carries it in its side's next message; false where it already does. */
+  carry(): boolean {
+    if (this.carrying) return false
+    this.carrying = true
+    return true
+  }
+
+  /** The acknowledgement went: nothing waits. */
+  clear(): void {
+    if (this.timer !== null) clearTimeout(this.timer)
+    this.timer = null
+    this.alone = this.carrying = false
+  }
+
+  private readonly fire = (): void => {
+    this.timer = null
+    if (this.alone) this.owner.acknowledge()
+    else this.owner.acknowledgeWithNext()
   }
 }
