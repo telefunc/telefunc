@@ -152,6 +152,7 @@ function encodeSseRequest(metadata: WireSseRequestMetadata, frames?: Uint8Array<
 /** `frames` length-prefixed after `head`, in a Blob that takes them as they are. */
 function encodeLengthPrefixedBlob(frames: Uint8Array<ArrayBuffer>[], head?: Blob): Blob {
   const parts: (Blob | Uint8Array<ArrayBuffer>)[] = head ? [head] : []
+  if (frames.length === 0) return new Blob(parts)
   const lengths = new Uint8Array(U32_SIZE * frames.length)
   for (let i = 0; i < frames.length; i++) {
     const frame = frames[i]!
