@@ -199,9 +199,11 @@ type ClientConnectionOptions = {
   fetchImpl: typeof fetch
   /** Client-side cache-key extension — distinct values get distinct `ClientConnection` instances. Never sent on the wire. */
   connectionKey?: string
-  /** User headers (config.headers + per-call `withContext({ headers })`) merged into every transport fetch. */
+  /** User headers (config.headers + per-call `withContext({ headers })`) merged into every transport fetch: the first
+   *  channel's, for every channel the connection carries. */
   headers?: Record<string, string>
-  /** Override the idle-close delay after all channels close. Default: 60 000 ms. Pass 0 to dispose immediately. */
+  /** Override the idle-close delay after all channels close. Default: the server's `idleTimeout` once a RECONCILED says
+   *  it, 60 000 ms before. Pass 0 to dispose immediately. */
   idleTimeout?: number
 }
 
