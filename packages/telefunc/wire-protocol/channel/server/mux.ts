@@ -32,7 +32,6 @@ import { IndexedPeer } from './IndexedPeer.js'
 import { ServerHeadroom } from '../../flowControl/server/headroom.js'
 import { ServerPieceReceiver } from '../../flowControl/server/pieceReceiver.js'
 import { Deliveries } from '../../flowControl/Deliveries.js'
-import { SocketWait } from '../../flowControl/server/SocketWait.js'
 import { WireSender } from './WireSender.js'
 import { TransportSocket } from './TransportSocket.js'
 import { AwaitedChannels, type AwaitedChannel, type RecvBacklog } from './AwaitedChannels.js'
@@ -234,10 +233,6 @@ class ChannelMux implements RegistrationWaitsOwner {
     transport: ServerTransport<TConnection>,
     request?: Request,
   ): void {
-    const wait = new SocketWait({
-      held: () => this.bufferedAmount(connection),
-      ahead: () => this.queuedAhead(connection),
-    })
     const recvBacklog = { bytes: 0, frames: 0 }
     const headroom = transport.wholeMessages
       ? new ServerHeadroom({
@@ -275,7 +270,6 @@ class ChannelMux implements RegistrationWaitsOwner {
         wire: connection,
         transport: transport as ServerTransport<unknown>,
         pieces,
-        wait,
         deliveries,
         channels: () => this.wireChannels(transport, connection, attaching),
       }),
@@ -976,19 +970,6 @@ class ChannelMux implements RegistrationWaitsOwner {
     const channels = new Set(attaching)
     for (const { channel } of session?.values() ?? []) channels.add(channel)
     return channels
-  }
-
-  /** A wire that's gone holds nothing. */
-  private bufferedAmount(connection: Wire): number | undefined {
-    const entry = this.connectionEntries.get(connection)
-    if (!entry) return 0
-    return entry.sender.bufferedAmount()
-  }
-
-  /** What a frame that goes at once counts as ahead of it: the transport's `queuedAhead` where it has one. */
-  private queuedAhead(connection: Wire): number | undefined {
-    const transport = this.connectionEntries.get(connection)?.transport
-    return transport?.queuedAhead ? transport.queuedAhead(connection) : this.bufferedAmount(connection)
   }
 
   private chainRecv<T>(entry: ConnectionEntry, fn: () => Promise<T>): Promise<T> {

@@ -7,14 +7,12 @@ import type { ServerChannel } from './channel.js'
 import type { PeerSender } from './IndexedPeer.js'
 import type { ServerTransport, Wire, WirePieces } from './mux.js'
 import type { Deliveries } from '../../flowControl/Deliveries.js'
-import type { SocketWait } from '../../flowControl/server/SocketWait.js'
+import { SocketWait, type SocketWaitOwner } from '../../flowControl/server/SocketWait.js'
 
 type WireSenderOptions = {
   wire: Wire
   transport: ServerTransport<unknown>
   pieces: WirePieces | null
-  /** How long the frames that go at once wait behind what the socket holds. */
-  wait: SocketWait
   /** What the wire delivered. */
   deliveries: Deliveries
   /** The channels whose flow control the headroom counts. */
@@ -23,11 +21,12 @@ type WireSenderOptions = {
 
 /** Sends a wire's frames in call order, and terminates the wire once its backlog passes what its channels allow; the
  *  peers of its channels send through it, and once the wire closed it drops what they send. */
-class WireSender implements PeerSender {
+class WireSender implements PeerSender, SocketWaitOwner {
   private readonly wire: Wire
   private readonly transport: ServerTransport<unknown>
   private readonly pieces: WirePieces | null
-  private readonly wait: SocketWait
+  /** How long the frames that go at once wait behind what the socket holds. */
+  private readonly wait = new SocketWait({ owner: this })
   private readonly deliveries: Deliveries
   private readonly channels: () => Iterable<ServerChannel>
   /** The number of the delivery that completed the frame the wire is handling. */
@@ -43,11 +42,10 @@ class WireSender implements PeerSender {
   /** The RECONCILE's probes its RECONCILED hasn't answered: a frame ahead of it goes behind their BDP_PING_ACKs. */
   private probed: { ix: number; probe: number }[] = []
 
-  constructor({ wire, transport, pieces, wait, deliveries, channels }: WireSenderOptions) {
+  constructor({ wire, transport, pieces, deliveries, channels }: WireSenderOptions) {
     this.wire = wire
     this.transport = transport
     this.pieces = pieces
-    this.wait = wait
     this.deliveries = deliveries
     this.channels = channels
   }
@@ -104,6 +102,12 @@ class WireSender implements PeerSender {
     if (this.closed) return 0
     const socket = this.transport.bufferedAmount(this.wire)
     return socket === undefined ? undefined : socket + (this.pieces?.headroom.sender.unhandedBytes ?? 0)
+  }
+
+  /** What a frame that goes at once counts as ahead of it: the transport's `queuedAhead` where it has one. */
+  queuedAhead(): number | undefined {
+    if (this.closed) return 0
+    return this.transport.queuedAhead ? this.transport.queuedAhead(this.wire) : this.bufferedAmount()
   }
 
   /** Each answer says no credit ran out and names no round trip. */
