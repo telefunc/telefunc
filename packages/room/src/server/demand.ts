@@ -22,13 +22,13 @@ type Reporter = { expiresAt: number; page: number; telling: number; asked: boole
 
 /** The replica whose owned members the demand is for. */
 interface RoomDemandOwner {
-  _ownsMember(id: string): boolean
+  ownsMember(id: string): boolean
   /** Live. */
-  _ownedMembers(): Iterable<string>
+  ownedMembers(): Iterable<string>
   /** Tells an owned member whether a track of it is wanted. */
   deliverDemand(member: string, track: string, wanted: boolean): void
   /** Asks the reporter to tell everything again. */
-  _askDemand(instance: string): void
+  askDemand(instance: string): void
   /** A report of a member's every track covers the tracks it published on. */
   readonly publishedTracks: Pick<PublishedTracks, 'has' | 'namedOf'>
 }
@@ -339,7 +339,7 @@ class RoomDemand {
     const asksAgain = reporter.asked ? page.wants.length === 0 : !continues
     if (tellsAgain || !asksAgain) return
     reporter.asked = true
-    this.owner._askDemand(instance)
+    this.owner.askDemand(instance)
   }
 
   /** Drops what the other processes told, read from a demand lane this one no longer subscribes. It owns no member
@@ -358,7 +358,7 @@ class RoomDemand {
     const telling = this.reporters.get(instance)?.telling ?? 0
     if ('except' in entry) {
       this.takeTrack(instance, entry, on, telling)
-    } else if (!this.owner._ownsMember(entry.member)) {
+    } else if (!this.owner.ownsMember(entry.member)) {
       return
     } else if ('byMember' in entry) {
       const { member } = entry
@@ -557,7 +557,7 @@ class RoomDemand {
   private *evaluations(): Generator<void> {
     for (const [track, members] of this.due) {
       this.due.delete(track)
-      for (const member of members === EVERY_MEMBER ? this.owner._ownedMembers() : members) {
+      for (const member of members === EVERY_MEMBER ? this.owner.ownedMembers() : members) {
         this.evaluate(member, track)
         yield
       }
@@ -565,7 +565,7 @@ class RoomDemand {
   }
 
   private evaluate(member: string, track: string): void {
-    if (!this.owner._ownsMember(member)) return
+    if (!this.owner.ownsMember(member)) return
     const wanted = this.isWanted(member, track)
     if (wanted === hasEntry(this.told, track, member)) return
     toggleEntry(this.told, track, member, wanted)

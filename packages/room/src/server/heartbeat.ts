@@ -17,14 +17,14 @@ assertIsNotBrowser()
 
 /** The replica the heartbeat keeps at the authority. */
 interface RoomHeartbeatOwner {
-  readonly _incarnation: RoomIncarnation
+  readonly incarnation: RoomIncarnation
   readonly model: Pick<RoomModel, 'closed'>
   readonly lanePlan: Pick<LanePlan, 'observing' | 'ownsInbox' | 'resumeDropped'>
   readonly outgoingDemand: Pick<DemandReport, 'reporting'>
   readonly authority: Pick<AuthoritySync, 'reconcileMeta' | 'checkCoverage'>
   /** Renews what the replica told of its demand. */
-  _renewDemand(): Promise<void>
-  _renewLease(): Promise<void>
+  renewDemand(): Promise<void>
+  renewLease(): Promise<void>
 }
 
 type RoomHeartbeatOptions = { owner: RoomHeartbeatOwner }
@@ -59,19 +59,19 @@ class RoomHeartbeat {
     this.ticking = true
     const owner = this.owner
     try {
-      await owner._renewDemand()
-      const renewalFailure = await owner._renewLease().then(
+      await owner.renewDemand()
+      const renewalFailure = await owner.renewLease().then(
         () => null,
         (error: unknown) => ({ error }),
       )
       owner.lanePlan.resumeDropped()
       if (!owner.model.closed && (await owner.authority.reconcileMeta())) {
-        const incarnation = owner._incarnation
+        const incarnation = owner.incarnation
         await dropReplacedMetaGenerations(incarnation.id, incarnation.inc)
         await reapLapsedLeases(incarnation)
         await owner.authority.checkCoverage()
       }
-      if (!owner.model.closed) await maintainHold(owner._incarnation)
+      if (!owner.model.closed) await maintainHold(owner.incarnation)
       sweepLapsedRoomsSoon()
       if (renewalFailure) throw renewalFailure.error
     } finally {

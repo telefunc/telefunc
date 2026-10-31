@@ -316,12 +316,12 @@ class RoomModel {
   }
 
   /** @internal The member's entry, which its remotes read. */
-  _entry(id: string): MemberEntry | undefined {
+  entry(id: string): MemberEntry | undefined {
     return this.members.get(id)
   }
 
   /** @internal Every member's entry, live. */
-  _entries(): IterableIterator<MemberEntry> {
+  entries(): IterableIterator<MemberEntry> {
     return this.members.values()
   }
 
@@ -341,7 +341,7 @@ class RoomModel {
 
   /** @internal The entry of a revived `RemoteParticipant`: the live one if known, else seeded silently from the
    *  snapshot (its seed count already includes it). */
-  _entryFromSnapshot(snap: MemberSnapshot): MemberEntry {
+  entryFromSnapshot(snap: MemberSnapshot): MemberEntry {
     const existing = this.members.get(snap.id)
     if (existing) return existing
     if (this.closed) {
@@ -357,7 +357,7 @@ class RoomModel {
   }
 
   /** @internal A view's listeners start or stop: only a view with one hears the changes. */
-  _listen(view: RoomState, on: boolean): void {
+  listen(view: RoomState, on: boolean): void {
     if (on) this.views.add(view)
     else this.views.delete(view)
   }
@@ -390,7 +390,7 @@ class RoomModel {
   /** State changed observably: invalidate the snapshot and tell `onChange` subscribers. */
   private bumpState(): void {
     this.stateVersion++
-    for (const view of [...this.views]) view._changed()
+    for (const view of [...this.views]) view.changed()
   }
 
   /** As this side shows it: its own connection to a member it holds, the room's record for any other. */
@@ -407,7 +407,7 @@ class RoomModel {
   }
 
   private connectionChanged(entry: MemberEntry): void {
-    for (const view of [...this.views]) view._connectionChanged(entry)
+    for (const view of [...this.views]) view.connectionChanged(entry)
   }
 
   /** Runs `read`, then `settle` with what it read, recording the membership events this model gets until `settle` ends;
@@ -453,7 +453,7 @@ class RoomModel {
     }
     if (!this._rosterKnown) this.seedCount++ // pre-roster, `count` is the seed adjusted by applied events
     this.bumpState()
-    for (const view of [...this.views]) view._joined(entry)
+    for (const view of [...this.views]) view.joined(entry)
     return true
   }
 
@@ -482,7 +482,7 @@ class RoomModel {
     // A hidden participant's leave is no presence event either; its own handlers and listener release still run.
     if (!entry.hidden && !this._rosterKnown) this.seedCount = Math.max(0, this.seedCount - 1)
     this.bumpState()
-    for (const view of [...this.views]) view._left(entry, cause)
+    for (const view of [...this.views]) view.left(entry, cause)
   }
 
   /** Applies updates in seq order (see `MemberMeta.apply`): the origin's echo (same seq) and events arriving behind a
@@ -493,7 +493,7 @@ class RoomModel {
     // Before the first roster every member is unknown, and the first roster applies the changes after its own.
     if (!entry && !this._rosterKnown) getOrCreate(this.preRosterMeta, id, () => []).push(update)
     if (!entry) return false
-    const listening = 'connected' in update ? [] : [...this.views].filter((view) => view._listensToMeta(entry))
+    const listening = 'connected' in update ? [] : [...this.views].filter((view) => view.listensToMeta(entry))
     const prev = listening.length > 0 ? entry.meta.object : null
     const wasConnected = this.isConnected(entry)
     const applied = entry.meta.apply(update)
@@ -504,20 +504,20 @@ class RoomModel {
     if (this.isConnected(entry) !== wasConnected) this.connectionChanged(entry)
     if (prev === null) return true
     const next = entry.meta.object
-    for (const view of listening) view._metaChanged(entry, next, prev)
+    for (const view of listening) view.metaChanged(entry, next, prev)
     return true
   }
 
   /** Applies updates in `seq` order (see `RoomMetaState.apply`), so every model converges; returns the ones applied.
    *  `prev` is this model's own previous meta, which can differ per model. */
   applyRoomUpdate(update: RoomMetaUpdate): RoomMetaUpdate[] {
-    const listening = [...this.views].filter((view) => view._listensToRoomMeta())
+    const listening = [...this.views].filter((view) => view.listensToRoomMeta())
     const prev = listening.length > 0 ? this.metaState.object : null
     const applied = this.metaState.apply(update)
     if (this.metaState.waiting) this.owner.onMetaWaiting()
     if (applied.length === 0) return applied
     this.bumpState()
-    if (prev !== null) for (const view of listening) view._roomMetaChanged(this.metaState.object, prev)
+    if (prev !== null) for (const view of listening) view.roomMetaChanged(this.metaState.object, prev)
     return applied
   }
 
@@ -557,13 +557,13 @@ class RoomModel {
       entry.left = true
       entry.leaveCause = cause
     }
-    for (const view of [...this.views]) view._closed(departed, cause)
+    for (const view of [...this.views]) view.closed(departed, cause)
     return true
   }
 
   /** @internal A message's sender as of its send: a stamp newer than the member's meta here applies first, as the meta
    *  update it is. Unstamped, the sender is one this model was sent, maybe in a roster still applying. */
-  _resolveSender({
+  resolveSender({
     from,
     fromMeta,
     fromMetaSeq,
@@ -686,7 +686,7 @@ class RoomModel {
  *  `onLeave` or `onEmpty` never fires for a hidden member. */
 class RoomState {
   /** @internal The `ServerRoom`/`ClientRoom` this is the state of, for serialization backing. */
-  readonly _view: RoomStateView
+  readonly view: RoomStateView
   readonly model: RoomModel
   private readonly listenerCleanups = new Map<object, Set<() => void>>()
   /** By the model's entry, so a remote still held keeps its own, and a member's leave forgets it. */
@@ -722,7 +722,7 @@ class RoomState {
   private readonly trackWantsMax: number
 
   constructor(opts: RoomStateOptions) {
-    this._view = opts.view
+    this.view = opts.view
     this.model = opts.model
     this.owner = opts.owner
     this.trackWantsMax = opts.trackWantsMax ?? Number.POSITIVE_INFINITY
@@ -735,7 +735,7 @@ class RoomState {
 
   /** `join({ hidden: true })` members: routable, excluded from every presence read. */
   listHidden(): RemoteParticipant[] {
-    return [...this.model._entries()].filter((entry) => entry.hidden).map((entry) => this.remote(entry))
+    return [...this.model.entries()].filter((entry) => entry.hidden).map((entry) => this.remote(entry))
   }
 
   /** Total attached listeners; owners derive lane-specific wants from the callback lists. */
@@ -754,17 +754,17 @@ class RoomState {
   }
 
   getRemote(id: string): RemoteParticipant | null {
-    const entry = this.model._entry(id)
+    const entry = this.model.entry(id)
     return entry ? this.remote(entry) : null
   }
 
   listVisible(): RemoteParticipant[] {
-    return [...this.model._entries()].filter((entry) => !entry.hidden).map((entry) => this.remote(entry))
+    return [...this.model.entries()].filter((entry) => !entry.hidden).map((entry) => this.remote(entry))
   }
 
   /** A revived `RemoteParticipant`: the live member if known, else seeded silently from the snapshot. */
   ensureRemoteFromSnapshot(snap: MemberSnapshot): RemoteParticipant {
-    return this.remote(this.model._entryFromSnapshot(snap))
+    return this.remote(this.model.entryFromSnapshot(snap))
   }
 
   // ── Listener registration (all return an unlisten function) ──
@@ -822,17 +822,17 @@ class RoomState {
 
   // ── The model's changes, told while this view has a listener ──
   /** @internal */
-  _changed(): void {
+  changed(): void {
     this.fireAll(this.changeCbs)
   }
 
   /** @internal A visible member joined. */
-  _joined(entry: MemberEntry): void {
+  joined(entry: MemberEntry): void {
     if (this.joinCbs.size > 0) this.fireAll(this.joinCbs, this.remote(entry))
   }
 
   /** @internal */
-  _left(entry: MemberEntry, cause: LeaveCause): void {
+  left(entry: MemberEntry, cause: LeaveCause): void {
     const leaveCbs = this.memberListeners.get(entry)?.leaveCbs
     if (leaveCbs) this.fireAll(leaveCbs, cause)
     if (!entry.hidden && this.leaveCbs.size > 0) this.fireAll(this.leaveCbs, this.remote(entry), cause)
@@ -842,36 +842,36 @@ class RoomState {
   }
 
   /** @internal */
-  _connectionChanged(entry: MemberEntry): void {
+  connectionChanged(entry: MemberEntry): void {
     const listeners = this.memberListeners.get(entry)
     const cbs = this.model.isConnected(entry) ? listeners?.reconnectCbs : listeners?.disconnectCbs
     if (cbs) this.fireAll(cbs)
   }
 
   /** @internal Whether a member meta change needs its previous meta built for this view. */
-  _listensToMeta(entry: MemberEntry): boolean {
+  listensToMeta(entry: MemberEntry): boolean {
     return (this.memberListeners.get(entry)?.updateCbs ?? null) !== null || this.participantUpdateCbs.size > 0
   }
 
   /** @internal */
-  _metaChanged(entry: MemberEntry, next: ParticipantMeta, prev: ParticipantMeta): void {
+  metaChanged(entry: MemberEntry, next: ParticipantMeta, prev: ParticipantMeta): void {
     const updateCbs = this.memberListeners.get(entry)?.updateCbs
     if (updateCbs) this.fireAll(updateCbs, next, prev)
     this.fireAll(this.participantUpdateCbs, this.remote(entry), next, prev)
   }
 
   /** @internal */
-  _listensToRoomMeta(): boolean {
+  listensToRoomMeta(): boolean {
     return this.updateCbs.size > 0
   }
 
   /** @internal */
-  _roomMetaChanged(next: RoomMeta, prev: RoomMeta): void {
+  roomMetaChanged(next: RoomMeta, prev: RoomMeta): void {
     this.fireAll(this.updateCbs, next, prev)
   }
 
   /** @internal */
-  _closed(departed: MemberEntry[], cause: LeaveCause): void {
+  closed(departed: MemberEntry[], cause: LeaveCause): void {
     for (const entry of departed) {
       const leaveCbs = this.memberListeners.get(entry)?.leaveCbs
       if (leaveCbs) this.fireAll(leaveCbs, cause)
@@ -891,14 +891,14 @@ class RoomState {
   applyData(event: RoomDataEvent, info: ChannelPublishInfo): void {
     const sender = this.resolveSender(event)
     this.fireAll(this.roomDataCbs, event.data, info, sender)
-    const entry = this.model._entry(event.from)
+    const entry = this.model.entry(event.from)
     const dataCbs = entry && this.memberListeners.get(entry)?.dataCbs
     if (dataCbs) this.fireAll(dataCbs, event.data, info)
   }
 
   /** A message's sender as of its send (see `RoomModel._resolveSender`). */
   resolveSender(stamp: { from: string } & Partial<SenderStamp>): Sender {
-    const resolved = this.model._resolveSender(stamp)
+    const resolved = this.model.resolveSender(stamp)
     return 'entry' in resolved ? this.remote(resolved.entry) : resolved.sender
   }
 
@@ -911,7 +911,7 @@ class RoomState {
       track: publicTrack(track),
       meta,
     }
-    const entry = this.model._entry(from)
+    const entry = this.model.entry(from)
     const sender = entry ? this.remote(entry) : senderOf(from, {}, null)
     // Each listener gets bytes of its own: one may write into them or transfer their buffer.
     this.fireTrackFiltered(this.roomBinaryCbs, track, (cb) => cb(new Uint8Array(payload), frameInfo, sender))
@@ -1045,7 +1045,7 @@ class RoomState {
 
   private bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {
     this._listenerCount += delta
-    if (this._listenerCount === (delta > 0 ? 1 : 0)) this.model._listen(this, delta > 0)
+    if (this._listenerCount === (delta > 0 ? 1 : 0)) this.model.listen(this, delta > 0)
     if (binary !== null && binary.track !== EVERY_TRACK) this.trackWants += binary.on ? 1 : -1
     if (entry !== null) {
       if ((this.memberListeners.get(entry)?.dataCbs?.size ?? 0) > 0) this.textWanted.add(entry.id)

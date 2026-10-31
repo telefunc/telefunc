@@ -75,7 +75,7 @@ class RosterStream {
       .catch((error) => {
         reportRoomError(error)
         if (!this.owner.stubs.has(stub) || this.owner.model.closed) return
-        stub._relayEvent({ __r: 'roster-error' })
+        stub.relayEvent({ __r: 'roster-error' })
         this.owed.add(stub)
       })
   }
@@ -96,7 +96,7 @@ class RosterStream {
     const stream = {}
     for (const stub of stubs) {
       this.streamOf.set(stub, stream)
-      stub._rosterSent = false
+      stub.rosterSent = false
     }
     const model = this.owner.model
     const version = model.version
@@ -130,10 +130,10 @@ class RosterStream {
         return unorderedEventText(event)
       }
       for (const stub of receiving) {
-        const listed = members && stub._rosterMembers(members, visible!)
-        if (listed && listed !== visible) stub._relayEventText(textOf(listed))
-        else stub._relayEventText((visibleText ??= textOf(visible!)))
-        if (!more) stub._rosterSent = true
+        const listed = members && stub.rosterMembers(members, visible!)
+        if (listed && listed !== visible) stub.relayEventText(textOf(listed))
+        else stub.relayEventText((visibleText ??= textOf(visible!)))
+        if (!more) stub.rosterSent = true
       }
       if (unchanged && built === undefined && visibleText !== undefined) {
         texts[part] = { text: visibleText, hidden: visible!.length < chunk.length }

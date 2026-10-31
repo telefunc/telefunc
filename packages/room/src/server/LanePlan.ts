@@ -27,15 +27,15 @@ assertIsNotBrowser()
 
 /** Where the lanes deliver; the demand lane also tells when it delivers and when it stops. */
 interface LaneReceiver {
-  _onControl(serialized: string, info: OrderingInfo): void
-  _onTextData(serialized: string, info: OrderingInfo): void
-  _onBinary(framed: Uint8Array, info: OrderingInfo): void
-  _onDm(serialized: string, info: OrderingInfo): void
-  _onDemand(serialized: string): void
+  onControl(serialized: string, info: OrderingInfo): void
+  onTextData(serialized: string, info: OrderingInfo): void
+  onBinary(framed: Uint8Array, info: OrderingInfo): void
+  onDm(serialized: string, info: OrderingInfo): void
+  onDemand(serialized: string): void
   /** The demand lane delivers, first or again: the other processes tell their demand, which it may have missed. */
-  _askDemand(): void
+  askDemand(): void
   /** The demand lane stopped: what it renewed lapses unread. */
-  _forgetDemand(): void
+  forgetDemand(): void
 }
 
 /** What this process's handles are to the room, which decides the lanes it subscribes. */
@@ -43,15 +43,15 @@ interface LaneRoles {
   /** Read-only here: every change goes through the owner's methods. */
   readonly model: Pick<RoomModel, 'closed' | 'rosterKnown' | 'memberIds' | 'memberCount' | 'hasMember'>
   /** Whether a handle observes the room: a client stub, a participant, or a listener. */
-  _observed(): boolean
+  observed(): boolean
   /** Whether a handle has a listener. */
-  _listened(): boolean
+  listened(): boolean
   /** A pre-attach tail ingests all text. */
-  _holdsTail(): boolean
-  _ownsMember(id: string): boolean
-  _ownsAnyMember(): boolean
+  holdsTail(): boolean
+  ownsMember(id: string): boolean
+  ownsAnyMember(): boolean
   /** Live. A pending admission owns its inbox. */
-  _ownedMembers(): Iterable<string>
+  ownedMembers(): Iterable<string>
   /** What this process tells of its demand, which the plan sets as it plans. */
   readonly outgoingDemand: DemandReport
 }
@@ -59,12 +59,12 @@ interface LaneRoles {
 /** The incarnation the lanes are subscribed at, and what keeps the view in step with it. */
 interface LaneAuthority {
   readonly id: string
-  readonly _incarnation: RoomIncarnation
+  readonly incarnation: RoomIncarnation
   /** Recovers from a gap, and refreshes the members; the heartbeat runs while the plan keeps the room. */
   readonly authority: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers'>
   readonly heartbeat: Pick<RoomHeartbeat, 'update'>
-  _readOpenConfig(): Promise<RoomConfigRecord | null>
-  _closeFromAuthority(): void
+  readOpenConfig(): Promise<RoomConfigRecord | null>
+  closeFromAuthority(): void
 }
 
 /** The replica the subscriptions serve: it aggregates every handle's holders and applies what the lanes carry. */
@@ -305,18 +305,18 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const owner = this.owner
     const model = owner.model
     const open = !model.closed
-    const observing = open && owner._observed()
+    const observing = open && owner.observed()
     const becomesObserved = observing && !this._observing
     this.control.sync(
       observing,
-      this.subscriber(CONTROL_LANE, (payload, info) => owner._onControl(decodeRoomText(payload), info)),
+      this.subscriber(CONTROL_LANE, (payload, info) => owner.onControl(decodeRoomText(payload), info)),
     )
     this._observing = observing
     this.semantic.sync(
-      open && (owner._holdsTail() || this.wants.wantsText),
-      this.subscriber(SEMANTIC_LANE, (payload, info) => owner._onTextData(decodeRoomText(payload), info)),
+      open && (owner.holdsTail() || this.wants.wantsText),
+      this.subscriber(SEMANTIC_LANE, (payload, info) => owner.onTextData(decodeRoomText(payload), info)),
     )
-    const needsRoster = owner._listened() || (open && this.wants.wantsBinary)
+    const needsRoster = owner.listened() || (open && this.wants.wantsBinary)
     if ((becomesObserved && model.rosterKnown) || (open && !model.rosterKnown && needsRoster)) {
       void owner.authority.refreshMembers().catch(reportRoomError)
     }
@@ -421,9 +421,9 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     if (plan.all) {
       await this.replanEach(
         slice,
-        chain(this.inbox.keys(), owner._ownedMembers()),
+        chain(this.inbox.keys(), owner.ownedMembers()),
         once((member) => {
-          if (!owner.model.closed && owner._ownsMember(member)) this.openInbox(member)
+          if (!owner.model.closed && owner.ownsMember(member)) this.openInbox(member)
           else this.closeInbox(member)
         }),
       )
@@ -603,7 +603,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
    *  by member, or one told so before. */
   private syncExcept(member: string): void {
     const served = this.everyMember.size > 0 || this.byMemberTracks.size > 0
-    if (!this.excepted.has(member) && (!served || !this.owner._ownsMember(member))) return
+    if (!this.excepted.has(member) && (!served || !this.owner.ownsMember(member))) return
     const present = this.present(member)
     let excepted = false
     for (const track of this.wants.everyMemberTracks()) {
@@ -673,7 +673,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
     const owner = this.owner
     lane.sync(
       true,
-      this.subscriber(lane.lane, (framed, info) => owner._onBinary(framed, info)),
+      this.subscriber(lane.lane, (framed, info) => owner.onBinary(framed, info)),
     )
     return lane
   }
@@ -710,12 +710,12 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
 
   private openInbox(member: string): void {
     const owner = this.owner
-    if (owner.model.closed || !owner._ownsMember(member)) return
+    if (owner.model.closed || !owner.ownsMember(member)) return
     const inbox = { kind: 'inbox', member } as const
     const slot = getOrCreate(this.inbox, member, () => new LaneSubscription({ owner: this, lane: inbox }))
     slot.sync(
       true,
-      this.subscriber(inbox, (payload, info) => owner._onDm(decodeRoomText(payload), info)),
+      this.subscriber(inbox, (payload, info) => owner.onDm(decodeRoomText(payload), info)),
     )
   }
 
@@ -727,21 +727,21 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private syncDemandLane(): void {
     const owner = this.owner
     const lane = this.demandLane
-    if (!owner.model.closed && owner._ownsAnyMember()) {
+    if (!owner.model.closed && owner.ownsAnyMember()) {
       return lane.sync(
         true,
-        this.subscriber(DEMAND_LANE, (payload) => owner._onDemand(decodeRoomText(payload))),
+        this.subscriber(DEMAND_LANE, (payload) => owner.onDemand(decodeRoomText(payload))),
       )
     }
     if (!lane.wanted) return
     lane.stop()
-    owner._forgetDemand()
+    owner.forgetDemand()
   }
 
   /** What a lane's `sync` subscribes: `lane` of this incarnation, delivering to `receiver`. */
   private subscriber(lane: RoomSubscriptionSource['lane'], receiver: BackendReceiver): () => BackendSubscription {
     const owner = this.owner
-    return () => getRoomBackend().subscribeLane(owner.id, owner._incarnation.inc, lane, receiver)
+    return () => getRoomBackend().subscribeLane(owner.id, owner.incarnation.inc, lane, receiver)
   }
 
   onEveryMemberCoverChanged(track: string): void {
@@ -757,7 +757,7 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   onLanePending(slot: LaneSubscription, pending: boolean): void {
     const lane = slot.lane
     if (lane.kind === 'demand') {
-      if (!pending && slot.wanted) this.owner._askDemand()
+      if (!pending && slot.wanted) this.owner.askDemand()
       return
     }
     if (lane.kind !== 'binary' && lane.kind !== 'binary-all' && lane.kind !== 'binary-track') return
@@ -807,8 +807,8 @@ class LanePlan implements LaneSubscriptionOwner, WantsIndexOwner {
   private async recover(slot: LaneSubscription): Promise<void> {
     let replaced = false
     try {
-      const config = await withinRoomHorizon(this.owner._readOpenConfig())
-      if (config === null) return this.owner._closeFromAuthority()
+      const config = await withinRoomHorizon(this.owner.readOpenConfig())
+      if (config === null) return this.owner.closeFromAuthority()
       slot.retry()
       replaced = true
       await withinRoomHorizon(slot.attemptReady)

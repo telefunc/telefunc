@@ -58,13 +58,13 @@ class ReplayHold {
 
   /** Lets the held frames go before the read settled: the retained frames it reads later follow them. */
   flush(): void {
-    this.gate._flush(this)
+    this.gate.flush(this)
   }
 
   /** The read settled: the held frames follow the retained ones it emitted. */
   end(): void {
-    this.gate._flush(this)
-    this.gate._end(this)
+    this.gate.flush(this)
+    this.gate.end(this)
   }
 }
 
@@ -180,7 +180,7 @@ class ReplayGate {
   }
 
   /** @internal */
-  _flush(hold: ReplayHold): void {
+  flush(hold: ReplayHold): void {
     if (!hold.holding) return
     hold.holding = false
     this._holding--
@@ -191,7 +191,7 @@ class ReplayGate {
   }
 
   /** @internal */
-  _end(hold: ReplayHold): void {
+  end(hold: ReplayHold): void {
     this.replays.delete(hold)
     if (this.replays.size === 0) this.lateRetained.clear()
   }
@@ -230,20 +230,20 @@ type TextWantsChange = { all: boolean; members: Map<string, boolean> }
 
 /** A consumer of a room's lanes that retained frames replay into: a client's stub, or this instance's own listeners. */
 interface LaneHolder {
-  readonly _binaryWants: BinaryWants
-  readonly _wantsAnnounce: boolean
+  readonly binaryWants: BinaryWants
+  readonly wantsAnnounce: boolean
   /** The text the holder needs ingested; its relay filters further. */
-  _textDemand(): MemberWants
-  _wantsTextFrom(member: string): boolean
-  _wantsBinary(member: string, track: string): boolean
+  textDemand(): MemberWants
+  wantsTextFrom(member: string): boolean
+  wantsBinary(member: string, track: string): boolean
   /** Holds the live frames `change` newly covers, or with `change` null live messages, while its replay reads what is
    *  retained. */
-  _hold(change: BinaryWantChange | null): ReplayHold
+  hold(change: BinaryWantChange | null): ReplayHold
   /** The members whose own frames the holder doesn't get back. */
-  _suppressedMembers(): ReadonlySet<string>
+  suppressedMembers(): ReadonlySet<string>
   /** A retained frame decoded, then in its wire form, which only a holder that forwards it takes. */
-  _emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void
-  _emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void
+  emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void
+  emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void
 }
 
 /** This instance's own listeners as one holder: gated like a client's stub, with wants that change only when they
@@ -252,7 +252,7 @@ class LocalHolder implements LaneHolder {
   private readonly replay = new ReplayGate()
   private textAll = false
   private readonly textMembers = new Set<string>()
-  readonly _binaryWants: BinaryWants = emptyBinaryWants()
+  readonly binaryWants: BinaryWants = emptyBinaryWants()
 
   constructor(
     private readonly state: RoomState,
@@ -273,38 +273,38 @@ class LocalHolder implements LaneHolder {
     }
     const change = text.all !== this.textAll || before.size > 0 ? { all: this.textAll, members: before } : null
     this.textAll = text.all
-    if (change !== null) this.replay.forgetUnwantedText((member) => this._wantsTextFrom(member))
+    if (change !== null) this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
     return change
   }
 
   applyBinary(change: BinaryWantChange): boolean {
-    if (!applyBinaryWantChange(this._binaryWants, change)) return false
-    if (!change.on) this.replay.forgetUnwantedBinary((member, track) => this._wantsBinary(member, track))
+    if (!applyBinaryWantChange(this.binaryWants, change)) return false
+    if (!change.on) this.replay.forgetUnwantedBinary((member, track) => this.wantsBinary(member, track))
     return true
   }
 
-  get _wantsAnnounce(): boolean {
+  get wantsAnnounce(): boolean {
     return this.state.wantsAnnounce
   }
 
-  _textDemand(): MemberWants {
+  textDemand(): MemberWants {
     return { all: this.textAll, members: this.textMembers }
   }
 
-  _suppressedMembers(): ReadonlySet<string> {
+  suppressedMembers(): ReadonlySet<string> {
     return this.suppressed
   }
 
-  _wantsTextFrom(member: string): boolean {
+  wantsTextFrom(member: string): boolean {
     return !this.suppressed.has(member) && (this.textAll || this.textMembers.has(member))
   }
 
-  _wantsBinary(member: string, track: string): boolean {
-    return !this.suppressed.has(member) && binaryWantsCovers(this._binaryWants, member, track)
+  wantsBinary(member: string, track: string): boolean {
+    return !this.suppressed.has(member) && binaryWantsCovers(this.binaryWants, member, track)
   }
 
   relayText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string): void {
-    if (!this._wantsTextFrom(event.from)) return
+    if (!this.wantsTextFrom(event.from)) return
     const replay = this.replay
     if (replay.holding) {
       const relay = () => this.relayText(event, info, serialized)
@@ -320,7 +320,7 @@ class LocalHolder implements LaneHolder {
   }
 
   relayBinary(frame: BinaryFrame, info: OrderingInfo): void {
-    if (!this._wantsBinary(frame.from, frame.track)) return
+    if (!this.wantsBinary(frame.from, frame.track)) return
     const { from, track } = frame
     const replay = this.replay
     if (replay.holding) {
@@ -331,15 +331,15 @@ class LocalHolder implements LaneHolder {
     if (replay.admitBinary(from, track, info)) this.applyBinaryFrame(frame, info)
   }
 
-  _hold(change: BinaryWantChange | null): ReplayHold {
+  hold(change: BinaryWantChange | null): ReplayHold {
     return this.replay.hold(change)
   }
 
-  _emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, _serialized: string, hold: ReplayHold): void {
+  emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, _serialized: string, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, event.from, null, info)) this.applyTextMessage(event, info)
   }
 
-  _emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, _framed: Uint8Array, hold: ReplayHold): void {
+  emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, _framed: Uint8Array, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, frame.from, frame.track, info)) this.applyBinaryFrame(frame, info)
   }
 

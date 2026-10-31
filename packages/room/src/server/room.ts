@@ -106,7 +106,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   constructor(replica: RoomReplica) {
     super()
     this._replica = replica
-    this._incarnation = replica._incarnation
+    this._incarnation = replica.incarnation
     this._state = new RoomState({ view: this, model: replica.model, owner: new ServerRoomStateOwner(this) })
     this._local = new LocalHolder(this._state, this.localSuppressed)
     this._writes = new RoomWrites({ owner: this })
@@ -199,7 +199,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
       this.admissions.delete(id)
       this._replica.applyControl(join)
       // A drop of the page's wire during the admission skipped this member: it starts disconnected.
-      if (this.stubOf.get(id)?._end.isConnected === false) this.setMemberConnected(id, false)
+      if (this.stubOf.get(id)?.end.isConnected === false) this.setMemberConnected(id, false)
     } catch (error) {
       // A member write that rejected may still have committed, its reply lost; evicting an absent member only reads.
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
@@ -245,7 +245,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   }
 
   private async assertOpen(): Promise<void> {
-    if (this._model.closed || (await this._replica._readOpenConfig()) === null) throw roomClosedError(this.id)
+    if (this._model.closed || (await this._replica.readOpenConfig()) === null) throw roomClosedError(this.id)
   }
 
   /** @internal What the lane carried for this handle's own listeners, or for its tail while no stub took it. */
@@ -281,7 +281,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     for (const admission of this.admissions.values()) admission.abandon()
     // A client back while its channel still holds it gets `closed`.
     const timeout = getChannelLimits().reconnectWindow
-    for (const stub of this.stubs) void stub._end.close({ timeout }).catch(() => {})
+    for (const stub of this.stubs) void stub.end.close({ timeout }).catch(() => {})
     this._replica.track(this)
   }
 
@@ -294,7 +294,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
         this._replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
       }
       const texts = new MemberMessageTexts(serialized, info, envelope)
-      return holder._relayDm(texts, envelope)
+      return holder.relayDm(texts, envelope)
     }
     if (holder === undefined) return
     const msg = inboxMessageFromWire(envelope)
@@ -343,7 +343,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
     this._replica.attachStub(stub)
     if (this.tail !== null) {
       // Its expiry ends only the stub's want of all text.
-      stub._beginTail(this.tail.take(), () => this._replica.lanePlan.textChanged(stub, []))
+      stub.beginTail(this.tail.take(), () => this._replica.lanePlan.textChanged(stub, []))
       this.tail = null
     }
     this._replica.track(this)
@@ -352,16 +352,16 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
 
   _onStubAttached(stub: RoomStub): void {
     this._replica.roster.sendTo(stub)
-    stub._relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
-    for (const member of stub._heldMembers()) {
-      stub._relayEvent({ __r: 'demand-state', member, tracks: this._replica.incomingDemand.wanted(member) })
+    stub.relayEvent({ __r: 'update', seq: this._model.metaSeq, meta: this._model.metaEntries() })
+    for (const member of stub.heldMembers()) {
+      stub.relayEvent({ __r: 'demand-state', member, tracks: this._replica.incomingDemand.wanted(member) })
     }
   }
 
   /** @internal */
   _setHeldConnected(stub: RoomStub, connected: boolean): void {
     // An admission under way takes the wire's state once its join applies.
-    for (const id of stub._heldMembers()) if (!this.admissions.has(id)) this.setMemberConnected(id, connected)
+    for (const id of stub.heldMembers()) if (!this.admissions.has(id)) this.setMemberConnected(id, connected)
   }
 
   private setMemberConnected(id: string, connected: boolean): void {
@@ -372,11 +372,11 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   _detachStub(stub: RoomStub): void {
     this.stubs.delete(stub)
     this._replica.detachStub(stub)
-    stub._endTail()
-    stub._endReplayHolds()
+    stub.endTail()
+    stub.endReplayHolds()
     this._replica.track(this)
     this._replica.lanePlan.holderGone(stub)
-    for (const id of stub._heldMembers()) {
+    for (const id of stub.heldMembers()) {
       this.stubOf.delete(id)
       this._replica.disown(id, this)
       this._replica.lanePlan.memberReleased(id)
@@ -399,7 +399,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   ): Promise<{ id: string; joinedAt: number }> {
     const admission = new Admission({ meta: ownMetadata(req.meta), identity: null, hidden: false })
     await this.admit(admission, () => {
-      stub._addMember(req.reqId, admission.id, req.selfDelivery)
+      stub.addMember(req.reqId, admission.id, req.selfDelivery)
       if (this.stubs.has(stub)) {
         this.stubOf.set(admission.id, stub)
         this._replica.own(admission.id, this)
@@ -444,7 +444,7 @@ class ServerRoom extends RoomStateView implements Room, RoomWritesOwner {
   _deliverDemand(member: string, track: string, wanted: boolean): void {
     const holder = this.holderOf(member)
     if (holder instanceof ServerLocalParticipant) holder._onDemand(track, wanted)
-    else holder?._relayEvent({ __r: 'demand', member, track, wanted })
+    else holder?.relayEvent({ __r: 'demand', member, track, wanted })
   }
 }
 

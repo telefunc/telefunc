@@ -71,7 +71,7 @@ class WantsIndex {
     const ids = opts?.members === undefined ? undefined : new Set(opts.members)
     for (const _ of this.updateText(holder, { gone, members: ids })) yield NONE
     const indexed = this.indexedOf(holder)
-    const wants = gone ? null : holder._binaryWants
+    const wants = gone ? null : holder.binaryWants
     // Read live: a scope listed twice is indexed already when its second step comes.
     const scopeLists: Iterable<string | EveryMember>[] = ids
       ? [[EVERY_MEMBER], ids]
@@ -108,11 +108,11 @@ class WantsIndex {
     const gone = opts?.gone === true
     const members = opts?.members
     const indexed = this.indexedOf(holder)
-    const text = gone ? null : holder._textDemand()
+    const text = gone ? null : holder.textDemand()
     const textAll = text?.all ?? false
     if (textAll !== indexed.textAll) this.textAll += textAll ? 1 : -1
     indexed.textAll = textAll
-    const announce = !gone && holder._wantsAnnounce
+    const announce = !gone && holder.wantsAnnounce
     if (announce !== indexed.announce) this.announce += announce ? 1 : -1
     indexed.announce = announce
     // Read live: a member listed twice is indexed already when its second step comes.
@@ -198,7 +198,7 @@ class WantsIndex {
   ): [before: boolean, after: boolean] {
     const coverers = [this.everyMember.get(track), this.members.get(member)?.get(track)]
     const others = this.coveredBy(member, track, coverers, holder)
-    if (others || holder._suppressedMembers().has(member)) return [others, others]
+    if (others || holder.suppressedMembers().has(member)) return [others, others]
     // The holder may name the track of the member in the other scope too.
     const indexed = this.indexed.get(holder)
     const both =
@@ -214,7 +214,7 @@ class WantsIndex {
   ): boolean {
     // Each coverer suppresses only members it holds, so this stops within a few.
     for (const holders of coverers) {
-      for (const holder of holders ?? []) if (holder !== except && holder._wantsBinary(member, track)) return true
+      for (const holder of holders ?? []) if (holder !== except && holder.wantsBinary(member, track)) return true
     }
     return false
   }
@@ -251,12 +251,12 @@ class WantsIndex {
     if (!on) toggleEntry(this.everyMember, key, holder, false)
     const [other] = this.everyMember.get(key) ?? []
     if (on) toggleEntry(this.everyMember, key, holder, true)
-    if (key === EVERY_TRACK) return other !== undefined ? new Set(other._suppressedMembers()) : 'all'
+    if (key === EVERY_TRACK) return other !== undefined ? new Set(other.suppressedMembers()) : 'all'
     this.owner.onEveryMemberCoverChanged(key)
-    if (other !== undefined) return new Set(other._suppressedMembers())
+    if (other !== undefined) return new Set(other.suppressedMembers())
     // Only the members it is named of alone change lanes; the holder's own may stop or start being received.
     const affected = new Set(this.namedAloneOf.get(key))
-    for (const member of holder._suppressedMembers()) affected.add(member)
+    for (const member of holder.suppressedMembers()) affected.add(member)
     return affected
   }
 }

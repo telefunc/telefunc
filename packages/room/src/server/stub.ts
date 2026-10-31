@@ -167,7 +167,7 @@ type RoomStubOptions = {
 /** One client's view of a server room: it relays what the client wants and acts for the members the client joined. */
 class RoomStub implements LaneHolder, BroadcastEndOwner {
   /** Its channel to its client. */
-  readonly _end: ServerBroadcastEnd
+  readonly end: ServerBroadcastEnd
   private readonly room: ServerRoom
   private readonly publishShield: ShieldValidator | undefined
   private readonly members = new Set<string>()
@@ -187,14 +187,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   /** A tail waits for the client's first text selector, then flushes once in order. */
   private tail: TailHold | null = null
   /** @internal Whether this client was sent the whole roster since it attached. */
-  _rosterSent = false
+  rosterSent = false
 
   constructor({ room, end, publishShield, grants }: RoomStubOptions) {
     this.room = room
     this.publishShield = publishShield
     this.selfSuppressed = grants.selfSuppressed
     this.grantedHidden = grants.hidden
-    this._end = end
+    this.end = end
     end._setOwner(this)
     end.listen((message) => receiveFromPage(end, () => this.receive(message)))
     end.onClose(() => {
@@ -209,11 +209,11 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
   // Client publishes, subscriptions and attaches
 
   _onPagePublish(text: string): Promise<RoomResult> {
-    return receiveFromPage(this._end, () => roomResult(this.publishText(decodeRoomPublish(parsePeerText(text)))))
+    return receiveFromPage(this.end, () => roomResult(this.publishText(decodeRoomPublish(parsePeerText(text)))))
   }
 
   _onPagePublishBinary(framed: Uint8Array): Promise<RoomResult> {
-    return receiveFromPage(this._end, () => roomResult(this.publishBinary(decodeStubBinaryFrame(framed), framed)))
+    return receiveFromPage(this.end, () => roomResult(this.publishBinary(decodeStubBinaryFrame(framed), framed)))
   }
 
   /** Control always flows; text follows broadcast/member wants, while binary uses `sub-binary`. */
@@ -221,14 +221,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (kind === 'binary' || on === this.wantsText) return
     const before = on ? { all: this.wantsText, members: new Map<string, boolean>() } : null
     this.wantsText = on
-    if (!on) this.replay.forgetUnwantedText((member) => this._wantsTextFrom(member))
+    if (!on) this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
     // The tail flush precedes the retained back-fill, so the replay dedupes against what the flush relayed.
     if (on) this.flushTail()
     this.room._onHolderTextChanged(this, before)
   }
 
   _onPageAttach(): void {
-    this._rosterSent = false
+    this.rosterSent = false
     this.room._onStubAttached(this)
   }
 
@@ -236,14 +236,14 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   /** A request, sent with an ack, answers with its result; a declaration, sent without one, applies at once. */
   private receive(message: unknown): Promise<RoomResult> | undefined {
-    if (isRoomRequest(message)) return roomResult(this._handleRequest(decodeRoomRequest(message)))
+    if (isRoomRequest(message)) return roomResult(this.handleRequest(decodeRoomRequest(message)))
     const declaration = decodeRoomDeclaration(message)
     if (declaration.__r === 'sub-binary') this.assertTrackWantFits(declaration)
     this.applyDeclaration(declaration)
     return undefined
   }
 
-  async _handleRequest(req: RoomRequest): Promise<unknown> {
+  async handleRequest(req: RoomRequest): Promise<unknown> {
     const room = this.room
     switch (req.__r) {
       case 'req-join':
@@ -285,7 +285,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     if (on && member !== EVERY_MEMBER && !this.room._model.hasMember(member)) return
     if (!applyBinaryWantChange(this.binary, change)) return
     if (track !== EVERY_TRACK) this.trackWants += on ? 1 : -1
-    if (!on) this.replay.forgetUnwantedBinary((member, track) => this._wantsBinary(member, track))
+    if (!on) this.replay.forgetUnwantedBinary((member, track) => this.wantsBinary(member, track))
     this.room._onHolderBinaryChanged(this, change)
   }
 
@@ -296,7 +296,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
       members.set(id, !wanted)
       toggle(this.textMemberWants, id, wanted)
     }
-    this.replay.forgetUnwantedText((member) => this._wantsTextFrom(member))
+    this.replay.forgetUnwantedText((member) => this.wantsTextFrom(member))
     this.announce = announce
     this.flushTail()
     this.room._onHolderTextChanged(this, { all: this.wantsText, members })
@@ -315,11 +315,11 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   // Membership
 
-  _holds(id: string): boolean {
+  holds(id: string): boolean {
     return this.members.has(id)
   }
 
-  _heldMembers(): IterableIterator<string> {
+  heldMembers(): IterableIterator<string> {
     return this.members.values()
   }
 
@@ -330,23 +330,23 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   /** Takes the member its client's `req-join` (`reqId`) admitted, and tells the client before any event naming it; past
    *  `ROOM_VIEW_MEMBERS_MAX`, throws instead, before the join commits. */
-  _addMember(reqId: number, id: string, selfDelivery: boolean): void {
+  addMember(reqId: number, id: string, selfDelivery: boolean): void {
     if (this.members.size === ROOM_VIEW_MEMBERS_MAX) {
       throw new RoomError(`A room view joins at most ${ROOM_VIEW_MEMBERS_MAX} participants`)
     }
     this.members.add(id)
     if (!selfDelivery) this.selfSuppressed.add(id)
-    this._end.deliver(unorderedEventText({ __r: 'joined', reqId, id }))
+    this.end.deliver(unorderedEventText({ __r: 'joined', reqId, id }))
   }
 
-  _forgetMember(id: string): void {
+  forgetMember(id: string): void {
     this.members.delete(id)
     this.selfSuppressed.delete(id)
     this.replay.forgetMember(id)
   }
 
   /** Drops its wants naming `id`; returns whether it held any. */
-  _forgetWantsOf(id: string): boolean {
+  forgetWantsOf(id: string): boolean {
     const text = this.textMemberWants.delete(id)
     this.trackWants -= this.binary.members.get(id)?.tracks.size ?? 0
     return this.binary.members.delete(id) || text
@@ -354,124 +354,124 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   // Wants, as the room's subscription planner reads them
 
-  get _binaryWants(): BinaryWants {
+  get binaryWants(): BinaryWants {
     return this.binary
   }
 
-  get _wantsAnnounce(): boolean {
+  get wantsAnnounce(): boolean {
     return this.announce
   }
 
   /** A tail-pending stub ingests all text so its hold captures the whole recent tail; its selector applies at flush. */
-  _textDemand(): MemberWants {
+  textDemand(): MemberWants {
     return { all: this.wantsText || this.tail !== null, members: this.textMemberWants }
   }
 
-  _wantsTextFrom(memberId: string): boolean {
+  wantsTextFrom(memberId: string): boolean {
     return !this.selfSuppressed.has(memberId) && (this.wantsText || this.textMemberWants.has(memberId))
   }
 
-  _wantsBinary(memberId: string, track: string): boolean {
+  wantsBinary(memberId: string, track: string): boolean {
     return !this.selfSuppressed.has(memberId) && binaryWantsCovers(this.binary, memberId, track)
   }
 
-  _suppressedMembers(): ReadonlySet<string> {
+  suppressedMembers(): ReadonlySet<string> {
     return this.selfSuppressed
   }
 
   // Relays
 
   /** An event this instance originates for this client alone: state each attach sends again. */
-  _relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
-    this._end.deliver(unorderedEventText(event), { resentOnAttach: true })
+  relayEvent(event: RoomRosterEvent | RoomDemandEvent | Extract<RoomCtrlEnvelope, { __r: 'update' }>): void {
+    this.end.deliver(unorderedEventText(event), { resentOnAttach: true })
   }
 
-  /** `_relayEvent` with the event's text already made, so one text can go to many clients. */
-  _relayEventText(text: string): void {
-    this._end.deliver(text, { resentOnAttach: true })
+  /** `relayEvent` with the event's text already made, so one text can go to many clients. */
+  relayEventText(text: string): void {
+    this.end.deliver(text, { resentOnAttach: true })
   }
 
   /** A roster part's members this client gets: `visible` itself unless the part holds a hidden member this client was
    *  handed, whose meta it heals too. */
-  _rosterMembers(part: MemberSnapshot[], visible: MemberSnapshot[]): MemberSnapshot[] {
+  rosterMembers(part: MemberSnapshot[], visible: MemberSnapshot[]): MemberSnapshot[] {
     if (visible.length === part.length || this.grantedHidden.size === 0) return visible
     const members = part.filter(({ id, hidden }) => !hidden || this.grantedHidden.has(id))
     return members.length === visible.length ? visible : members
   }
 
   /** A hidden member's events reach only the clients that were handed it. */
-  _relayControl(wireText: string, hiddenMember: string | null, opts: { resentOnAttach: boolean }): void {
-    if (hiddenMember === null || this.grantedHidden.has(hiddenMember)) this._end.deliver(wireText, opts)
+  relayControl(wireText: string, hiddenMember: string | null, opts: { resentOnAttach: boolean }): void {
+    if (hiddenMember === null || this.grantedHidden.has(hiddenMember)) this.end.deliver(wireText, opts)
   }
 
-  _relayAnnouncement(wireText: string, ord: OrderingInfo): void {
+  relayAnnouncement(wireText: string, ord: OrderingInfo): void {
     if (this.announce) this.relayTextLive(ANNOUNCE_KEY, wireText, ord)
   }
 
-  _relayText(serialized: string, texts: MemberMessageTexts, from: string, ord: OrderingInfo): void {
+  relayText(serialized: string, texts: MemberMessageTexts, from: string, ord: OrderingInfo): void {
     if (this.tail !== null) {
       this.tail.push({ serialized, ord, from })
-    } else if (this._wantsTextFrom(from)) {
+    } else if (this.wantsTextFrom(from)) {
       const replay = this.replay
       if (replay.holding) {
-        const relay = () => this._relayText(serialized, texts, from, ord)
+        const relay = () => this.relayText(serialized, texts, from, ord)
         if (replay.held(from, null, heldTextWeight(serialized), relay)) return
       }
       this.relayTextLive(from, this.namesSender(from) ? texts.unstamped() : texts.stamped(), ord)
     }
   }
 
-  _relayBinary(wireData: Uint8Array, from: string, track: string, info: OrderingInfo): void {
-    if (!this._wantsBinary(from, track)) return
+  relayBinary(wireData: Uint8Array, from: string, track: string, info: OrderingInfo): void {
+    if (!this.wantsBinary(from, track)) return
     const replay = this.replay
     if (
       replay.holding &&
-      replay.held(from, track, heldWeight(wireData), () => this._relayBinary(wireData, from, track, info))
+      replay.held(from, track, heldWeight(wireData), () => this.relayBinary(wireData, from, track, info))
     ) {
       return
     }
-    if (replay.admitBinary(from, track, info)) this._end.deliverBinary(wireData)
+    if (replay.admitBinary(from, track, info)) this.end.deliverBinary(wireData)
   }
 
-  _hold(change: BinaryWantChange | null): ReplayHold {
+  hold(change: BinaryWantChange | null): ReplayHold {
     return this.replay.hold(change)
   }
 
-  _relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
+  relayDm(texts: MemberMessageTexts, { from, fromMetaSeq, ackId }: RoomDmEnvelope): void {
     if (ackId) this.awaitDmReply(ackId, from)
-    this._end.deliver(fromMetaSeq !== undefined && this.namesSender(from) ? texts.unstamped() : texts.stamped())
+    this.end.deliver(fromMetaSeq !== undefined && this.namesSender(from) ? texts.unstamped() : texts.stamped())
   }
 
   /** Whether this client names `member` as this view does: it got the whole roster since it attached, and every event
    *  after it, none dropped while it was away. A hidden member's grant may reach the client after a message does. */
   private namesSender(member: string): boolean {
     return (
-      this._end.isAttached &&
-      this._rosterSent &&
+      this.end.isAttached &&
+      this.rosterSent &&
       this.room._replica.roster.settled &&
       this.room._model.memberHidden(member) === false
     )
   }
 
-  _emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
-    if (this.replay.admitRetained(hold, event.from, null, info)) this._end.deliver(encodePublish(serialized, info))
+  emitRetainedText(event: RoomDataEnvelope, info: OrderingInfo, serialized: string, hold: ReplayHold): void {
+    if (this.replay.admitRetained(hold, event.from, null, info)) this.end.deliver(encodePublish(serialized, info))
   }
 
-  _emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void {
+  emitRetainedBinary(frame: BinaryFrame, info: OrderingInfo, framed: Uint8Array, hold: ReplayHold): void {
     if (this.replay.admitRetained(hold, frame.from, frame.track, info)) {
-      this._end.deliverBinary(encodePublish(framed, info))
+      this.end.deliverBinary(encodePublish(framed, info))
     }
   }
 
   private relayTextLive(key: string, wireText: string, ord: OrderingInfo): void {
-    if (this.replay.admit(key, ord)) this._end.deliver(wireText)
+    if (this.replay.admit(key, ord)) this.end.deliver(wireText)
   }
 
   // Ack-DM correlations
 
   /** A closing stub's close waits for the reply, as for the replies a participant stub forwards. */
   private awaitDmReply(ackId: string, sender: string): void {
-    void this._end
+    void this.end
       ._trackAck(
         this.dmReplies.await(ackId).then((reply) => reply && this.room._writes.publishDmAck(sender, ackId, reply)),
       )
@@ -482,7 +482,7 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   /** Seeded from the room's pre-attach hold, with a fresh lease; expiry drops the hold and lets
    *  the room release ingestion. */
-  _beginTail(seed: TailEntry[], onExpire: () => void): void {
+  beginTail(seed: TailEntry[], onExpire: () => void): void {
     this.tail = new TailHold(() => {
       this.tail = null
       onExpire()
@@ -496,17 +496,17 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
     const held = this.tail.take()
     this.tail = null
     for (const { serialized, ord, from } of held) {
-      if (!this._wantsTextFrom(from)) continue
+      if (!this.wantsTextFrom(from)) continue
       this.relayTextLive(from, encodePublish(serialized, ord), ord)
     }
   }
 
-  _endTail(): void {
+  endTail(): void {
     this.tail?.end()
     this.tail = null
   }
 
-  _endReplayHolds(): void {
+  endReplayHolds(): void {
     this.replay.dropHolds()
   }
 }

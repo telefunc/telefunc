@@ -58,7 +58,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
   prefix: SERIALIZER_PREFIX_ROOM_REMOTE,
   detect(value): value is RoomRemoteReplacerContract['value'] {
     // A brand, not instanceof: a dev server can load two module graphs.
-    return ServerRoom.isServerRoom(remoteBacking(value)?.state._view)
+    return ServerRoom.isServerRoom(remoteBacking(value)?.state.view)
   },
   replace(remote, context) {
     const { state, entry } = remoteBacking(remote)!
@@ -66,7 +66,7 @@ const roomRemoteReplacer: ReplacerType<RoomRemoteReplacerContract, ServerReplace
     if (entry.hidden) responseRoomGrants(context, state.roomId).hidden.add(entry.id)
     // The entry outlives a racing leave, so the snapshot stays coherent and the client's roster heals it.
     const metadata: RemoteParticipantMetadata = {
-      room: state._view,
+      room: state.view,
       id: entry.id,
       meta: entry.meta.object,
       joinedAt: entry.joinedAt,
