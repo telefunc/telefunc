@@ -103,43 +103,53 @@ function parsePreparePayload(value: unknown): PreparePayload {
   return { upgradeId, sessionId }
 }
 
-function parseOpenList(open: unknown): ReconcileOpenEntry[] {
+/** Checks the open list JSON.parse built, where it stands: no entry is copied. */
+function assertOpenList(open: unknown): asserts open is ReconcileOpenEntry[] {
   assertProtocol(Array.isArray(open), 'open list')
   assertProtocol(open.length <= MAX_CHANNELS_PER_CONNECTION, 'open list over entry cap')
   const indexes = new Set<number>()
-  return open.map((rawEntry: unknown) => {
-    const { id, ix, lastSeq, initial, probe, broadcast } = asObject(rawEntry)
-    assertProtocol(typeof id === 'string', 'open entry id')
+  for (const rawEntry of open) {
+    const entry = asObject(rawEntry)
+    assertProtocol(typeof entry.id === 'string', 'open entry id')
     // `ix` is truncated to u16 by the header writer, so a wider one would alias onto another channel.
-    assertProtocol(isUint(ix, 0xffff) && !indexes.has(ix), 'open entry ix')
-    indexes.add(ix)
-    assertProtocol(isUint(lastSeq, Number.MAX_SAFE_INTEGER), 'open entry lastSeq')
-    assertProtocol(initial === undefined || initial === true, 'open entry initial')
-    assertProtocol(probe === undefined || isUint(probe, 0xffffffff), 'open entry probe')
-    if (broadcast === undefined) return { id, ix, lastSeq, initial, probe }
-    const { text, binary } = asObject(broadcast)
-    assertProtocol(typeof text === 'boolean' && typeof binary === 'boolean', 'open entry broadcast')
-    return { id, ix, lastSeq, initial, probe, broadcast: { text, binary } }
-  })
+    assertProtocol(isUint(entry.ix, 0xffff) && !indexes.has(entry.ix), 'open entry ix')
+    indexes.add(entry.ix)
+    assertProtocol(isUint(entry.lastSeq, Number.MAX_SAFE_INTEGER), 'open entry lastSeq')
+    assertProtocol(entry.initial === undefined || entry.initial === true, 'open entry initial')
+    assertProtocol(entry.probe === undefined || isUint(entry.probe, 0xffffffff), 'open entry probe')
+    if (entry.broadcast === undefined) continue
+    const broadcast = asObject(entry.broadcast)
+    assertProtocol(typeof broadcast.text === 'boolean' && typeof broadcast.binary === 'boolean', 'open entry broadcast')
+  }
 }
 
+function assertReconcilePayload(value: unknown): asserts value is ReconcilePayload {
+  const payload = asObject(value)
+  assertOpenList(payload.open)
+  assertProtocol(payload.sessionId === undefined || isNonEmptyString(payload.sessionId), 'RECONCILE sessionId')
+  if (payload.released === undefined) return
+  assertProtocol(isNonEmptyString(payload.sessionId) && Array.isArray(payload.released), 'RECONCILE released')
+  assertProtocol(payload.released.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE released over entry cap')
+  for (const ix of payload.released) assertProtocol(isUint(ix, 0xffff), 'RECONCILE released ix')
+}
+
+/** The RECONCILE JSON.parse built, checked where it stands. */
 function parseReconcilePayload(value: unknown): ReconcilePayload {
-  const { sessionId, open, released } = asObject(value)
-  const entries = parseOpenList(open)
-  assertProtocol(sessionId === undefined || isNonEmptyString(sessionId), 'RECONCILE sessionId')
-  if (released === undefined) return { sessionId, open: entries }
-  assertProtocol(isNonEmptyString(sessionId) && Array.isArray(released), 'RECONCILE released')
-  assertProtocol(released.length <= MAX_CHANNELS_PER_CONNECTION, 'RECONCILE released over entry cap')
-  for (const ix of released) assertProtocol(isUint(ix, 0xffff), 'RECONCILE released ix')
-  return { sessionId, open: entries, released }
+  assertReconcilePayload(value)
+  return value
 }
 
-function parseBarrierPayload(value: unknown): BarrierPayload {
-  const { sessionId, upgradeId, open } = asObject(value)
-  const entries = parseOpenList(open)
+function assertBarrierPayload(value: unknown): asserts value is BarrierPayload {
+  const payload = asObject(value)
+  assertOpenList(payload.open)
   // Both ids are mandatory: a barrier that cannot name its session and its upgrade has no claim
   // on either, and there is no ordinary-reconcile leg left for it to fall through to.
-  assertProtocol(isNonEmptyString(sessionId), 'barrier sessionId')
-  assertProtocol(isNonEmptyString(upgradeId), 'barrier upgradeId')
-  return { sessionId, upgradeId, open: entries }
+  assertProtocol(isNonEmptyString(payload.sessionId), 'barrier sessionId')
+  assertProtocol(isNonEmptyString(payload.upgradeId), 'barrier upgradeId')
+}
+
+/** The BARRIER JSON.parse built, checked where it stands. */
+function parseBarrierPayload(value: unknown): BarrierPayload {
+  assertBarrierPayload(value)
+  return value
 }
