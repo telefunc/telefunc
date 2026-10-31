@@ -23,167 +23,167 @@ class SendCredit {
   private readonly owner: CreditOwner
   private readonly selfTime: SelfTime
   // What this side has sent, and the peer's limits.
-  private _sentBytes = 0
-  private _sentMessages = 0
-  private _limitBytes: number = CREDIT_WINDOW_INITIAL_BYTES
-  private _limitMessages: number = CREDIT_MSG_WINDOW_INITIAL
+  private sentBytes = 0
+  private sentMessages = 0
+  private limitBytes: number = CREDIT_WINDOW_INITIAL_BYTES
+  private limitMessages: number = CREDIT_MSG_WINDOW_INITIAL
   /** The largest window the peer grants: what this side's replay holds (see `fitReplay`). */
-  private _peerByteWindowMax: number = CREDIT_WINDOW_MAX_BYTES
+  private peerByteWindowCap: number = CREDIT_WINDOW_MAX_BYTES
   /** A `WINDOW` raised the byte limit past the one this side assumed the peer starts with. */
-  private _limitRaised = false
-  /** `_sentBytes` after the last frame sent while the byte limit was ahead of it. */
-  private _sentWithCredit = 0
+  private limitRaised = false
+  /** `sentBytes` after the last frame sent while the byte limit was ahead of it. */
+  private sentWithCredit = 0
   /** Senders waiting on credit, oldest first, from the first that waited on. */
-  private _waiters: Fifo<() => void> | null = null
+  private waiters: Fifo<() => void> | null = null
   /** A waiter was handed the credit and no send was counted since. */
-  private _released = false
-  private _releases = 0
+  private released = false
+  private releases = 0
   /** Bytes sent since this side's sender last yielded or waited. */
-  private _unyieldedBytes = 0
-  private readonly _yieldBytes: number
-  private _shutdown = false
+  private unyieldedBytes = 0
+  private readonly yieldBytes: number
+  private isShutdown = false
   /** Since it last answered a `BDP_PING`, the least its wire held as credit ran out; 0: unknown, `Infinity`: none. */
-  private _leastBacklog = Infinity
+  private leastBacklog = Infinity
 
   constructor({ owner, selfTime, yieldBytes }: SendCreditOptions) {
     this.owner = owner
     this.selfTime = selfTime
-    this._yieldBytes = yieldBytes ?? Infinity
+    this.yieldBytes = yieldBytes ?? Infinity
     macrotaskYield.assertSupported()
   }
 
   /** The largest window the peer grants. */
   get peerByteWindowMax(): number {
-    return this._peerByteWindowMax
+    return this.peerByteWindowCap
   }
 
   /** Keeps what it lets be in flight within the replay buffer that holds what it sends (see `replayWindow`). */
   fitReplay(peerWindow: number): void {
-    this._peerByteWindowMax = Math.min(CREDIT_WINDOW_MAX_BYTES, peerWindow)
-    if (!this._limitRaised) this._limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this._peerByteWindowMax)
+    this.peerByteWindowCap = Math.min(CREDIT_WINDOW_MAX_BYTES, peerWindow)
+    if (!this.limitRaised) this.limitBytes = Math.min(CREDIT_WINDOW_INITIAL_BYTES, this.peerByteWindowCap)
   }
 
   /** Its peer grants the largest window from the start: the limit is that window, at once. */
   takePeerWindowMax(): void {
-    this.onPeerByteWindow(this._peerByteWindowMax)
+    this.onPeerByteWindow(this.peerByteWindowCap)
   }
 
   /** No byte credit is left. */
   get isPastByteCredit(): boolean {
-    return this._limitBytes - this._sentBytes <= 0
+    return this.limitBytes - this.sentBytes <= 0
   }
 
   /** Bytes sent past the byte limit and still past it, but the one frame that crossed it with credit. */
   get bytesSentPastCredit(): number {
-    return Math.max(0, this._sentBytes - Math.max(this._limitBytes, this._sentWithCredit))
+    return Math.max(0, this.sentBytes - Math.max(this.limitBytes, this.sentWithCredit))
   }
 
   /** Counts a frame of `bytes` against credit; a Promise where the sender waits for credit or yields. */
   decrement(bytes: number): void | Promise<void> {
     this.countSent(bytes)
-    this._released = false
-    if (this._isOutOfCredit()) return this._waitForCredit()
-    if (this._waiters !== null && this._waiters.length > 0) {
-      this._releaseOne()
-      return this._waitForCredit()
+    this.released = false
+    if (this.isOutOfCredit()) return this.waitForCredit()
+    if (this.waiters !== null && this.waiters.length > 0) {
+      this.releaseOne()
+      return this.waitForCredit()
     }
-    this._unyieldedBytes += bytes
-    if (this.selfTime.utilisation() > FC_SELF_UTIL_THRESHOLD || this._unyieldedBytes >= this._yieldBytes) {
-      this._unyieldedBytes = 0
+    this.unyieldedBytes += bytes
+    if (this.selfTime.utilisation() > FC_SELF_UTIL_THRESHOLD || this.unyieldedBytes >= this.yieldBytes) {
+      this.unyieldedBytes = 0
       return macrotaskYield.yield()
     }
   }
 
   /** Count a frame that went out without a credit gate, one buffered while no peer was attached. */
   countSent(bytes: number): void {
-    this._countSentBytes(bytes)
-    this._sentMessages += 1
+    this.countSentBytes(bytes)
+    this.sentMessages += 1
   }
 
   /** A limit that doesn't raise the current one is stale, and ignored, as in QUIC. */
   onPeerByteWindow(limit: number): void {
-    const raise = (limit - this._limitBytes) | 0
+    const raise = (limit - this.limitBytes) | 0
     if (raise <= 0) return
-    this._noteBacklog()
-    this._limitBytes += raise
-    this._limitRaised = true
-    this._tryWakeCreditWaiters()
+    this.noteBacklog()
+    this.limitBytes += raise
+    this.limitRaised = true
+    this.tryWakeCreditWaiters()
   }
 
   onPeerMessageWindow(limit: number): void {
-    const raise = (limit - this._limitMessages) | 0
+    const raise = (limit - this.limitMessages) | 0
     if (raise <= 0) return
-    this._noteBacklog()
-    this._limitMessages += raise
-    this._tryWakeCreditWaiters()
+    this.noteBacklog()
+    this.limitMessages += raise
+    this.tryWakeCreditWaiters()
   }
 
   /** Answers a `BDP_PING` with the least its wire held whenever its credit ran out since the last. */
   onPing(): number {
-    this._noteBacklog()
-    const backlog = this._leastBacklog
-    this._leastBacklog = Infinity
+    this.noteBacklog()
+    const backlog = this.leastBacklog
+    this.leastBacklog = Infinity
     return backlog
   }
 
   /** Counts a broadcast's publish, in bytes only, which nothing waits on. */
   countPublishSent(bytes: number): void {
-    this._countSentBytes(bytes)
+    this.countSentBytes(bytes)
   }
 
   shutdown(): void {
-    if (this._shutdown) return
-    this._shutdown = true
-    this._tryWakeCreditWaiters()
+    if (this.isShutdown) return
+    this.isShutdown = true
+    this.tryWakeCreditWaiters()
   }
 
-  private _countSentBytes(bytes: number): void {
+  private countSentBytes(bytes: number): void {
     const hadCredit = !this.isPastByteCredit
-    this._sentBytes += bytes
-    if (hadCredit) this._sentWithCredit = this._sentBytes
+    this.sentBytes += bytes
+    if (hadCredit) this.sentWithCredit = this.sentBytes
   }
 
-  private _noteBacklog(): void {
-    if (this._leastBacklog === 0 || !this._isOutOfCredit()) return
-    this._leastBacklog = Math.min(this._leastBacklog, this.owner._backlogBytes() ?? 0)
+  private noteBacklog(): void {
+    if (this.leastBacklog === 0 || !this.isOutOfCredit()) return
+    this.leastBacklog = Math.min(this.leastBacklog, this.owner._backlogBytes() ?? 0)
   }
 
-  private _isOutOfCredit(): boolean {
-    return this._limitBytes - this._sentBytes <= 0 || this._limitMessages - this._sentMessages <= 0
+  private isOutOfCredit(): boolean {
+    return this.limitBytes - this.sentBytes <= 0 || this.limitMessages - this.sentMessages <= 0
   }
 
-  private _tryWakeCreditWaiters(): void {
-    const waiters = this._waiters
+  private tryWakeCreditWaiters(): void {
+    const waiters = this.waiters
     if (waiters === null) return
-    if (this._shutdown) {
+    if (this.isShutdown) {
       for (let resolve = waiters.shift(); resolve; resolve = waiters.shift()) resolve()
       return
     }
-    if (this._released || this._isOutOfCredit()) return
-    this._releaseOne()
+    if (this.released || this.isOutOfCredit()) return
+    this.releaseOne()
   }
 
   /** The oldest waiter's turn. One that hasn't sent by the next macrotask, as one that is done sending, passes it on. */
-  private _releaseOne(): void {
-    const waiters = this._waiters
+  private releaseOne(): void {
+    const waiters = this.waiters
     if (waiters === null) return
     const resolve = waiters.shift()
     if (!resolve) return
-    this._released = true
-    const release = ++this._releases
+    this.released = true
+    const release = ++this.releases
     resolve()
     if (waiters.length === 0) return
     void macrotaskYield.yield().then(() => {
-      if (!this._released || this._releases !== release) return
-      this._released = false
-      this._tryWakeCreditWaiters()
+      if (!this.released || this.releases !== release) return
+      this.released = false
+      this.tryWakeCreditWaiters()
     })
   }
 
-  private _waitForCredit(): Promise<void> {
-    if (this._shutdown) return resolvedPromise
-    this._unyieldedBytes = 0
-    const waiters = (this._waiters ??= new Fifo())
+  private waitForCredit(): Promise<void> {
+    if (this.isShutdown) return resolvedPromise
+    this.unyieldedBytes = 0
+    const waiters = (this.waiters ??= new Fifo())
     return new Promise<void>((resolve) => waiters.push(resolve))
   }
 }

@@ -11,7 +11,7 @@ export class ReplayBuffer {
   /** Each queue, from its first frame on. */
   private readonly queues: Partial<Record<ReplayKind, ReplayQueue>> = {}
   private readonly budgets: Record<ReplayKind, number>
-  private _seq = 0
+  private issuedSeq = 0
   /** The highest seq pushed. */
   private pushedSeq = 0
   /** The highest seq the peer acknowledged. */
@@ -21,7 +21,7 @@ export class ReplayBuffer {
 
   /** Current sequence number. */
   get seq(): number {
-    return this._seq
+    return this.issuedSeq
   }
 
   constructor({ maxBytes, binaryMaxBytes }: ReplayBufferOptions) {
@@ -31,23 +31,23 @@ export class ReplayBuffer {
   /** A budget lower than a queue's applies once the peer has every seq issued before: they flew under the higher one. */
   setLimits(maxBytes: number, binaryMaxBytes: number): void {
     const budgets = queueBudgets(maxBytes, binaryMaxBytes)
-    const unacknowledged = this.acknowledgedSeq < this._seq
+    const unacknowledged = this.acknowledgedSeq < this.issuedSeq
     let lowered = false
     for (const kind of REPLAY_KINDS) {
       if (unacknowledged && budgets[kind] < this.budgets[kind]) lowered = true
       this.setBudget(kind, unacknowledged ? Math.max(budgets[kind], this.budgets[kind]) : budgets[kind])
     }
-    this.lowered = lowered ? { budgets, throughSeq: this.lowered?.throughSeq ?? this._seq } : null
+    this.lowered = lowered ? { budgets, throughSeq: this.lowered?.throughSeq ?? this.issuedSeq } : null
   }
 
   /** Increment and return the next sequence number. */
   nextSeq(): number {
-    return ++this._seq
+    return ++this.issuedSeq
   }
 
   /** Stores a frame, its seq no less than the last pushed, in its queue; none larger than the queue's budget. */
   push(seq: number, frame: Uint8Array<ArrayBuffer>): void {
-    assert(seq <= this._seq)
+    assert(seq <= this.issuedSeq)
     assert(seq >= this.pushedSeq)
     this.pushedSeq = seq
     const kind = replayKindOf(frame[0]!)
@@ -92,7 +92,7 @@ export class ReplayBuffer {
 
   dispose(): void {
     for (const kind of REPLAY_KINDS) this.queues[kind]?.dispose()
-    this._seq = 0
+    this.issuedSeq = 0
     this.pushedSeq = 0
     this.acknowledgedSeq = 0
     this.lowered = null

@@ -43,13 +43,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
   readonly key: string
 
-  private readonly _broadcastListeners = new Listeners<BroadcastListener<T>>()
-  private readonly _broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
-  private _adapter: BroadcastAdapter | null = null
-  private _unsubBroadcast: BroadcastUnsubscribe | null = null
-  private _unsubBinaryBroadcast: BroadcastUnsubscribe | null = null
-  private _peerSubscribedText = false
-  private _peerSubscribedBinary = false
+  private readonly broadcastListeners = new Listeners<BroadcastListener<T>>()
+  private readonly broadcastBinaryListeners = new Listeners<BroadcastBinaryListener>()
+  private adapter: BroadcastAdapter | null = null
+  private unsubBroadcast: BroadcastUnsubscribe | null = null
+  private unsubBinaryBroadcast: BroadcastUnsubscribe | null = null
+  private peerSubscribedText = false
+  private peerSubscribedBinary = false
 
   constructor(opts: { key: string }) {
     super()
@@ -82,32 +82,32 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   publish(data: ChannelData<T>): Promise<ChannelPublishAck> {
-    this._ensureBroadcast()
-    if (!this._adapter) throw new ChannelClosedError()
+    this.ensureBroadcast()
+    if (!this.adapter) throw new ChannelClosedError()
     const serialized = stringify(data)
-    const ret = this._trackAck(Promise.resolve(this._publishBroadcast(serialized)))
+    const ret = this._trackAck(Promise.resolve(this.publishBroadcast(serialized)))
     ret.catch(() => {})
     return ret
   }
 
   subscribe(callback: BroadcastListener<T>): () => void {
-    this._ensureBroadcast()
-    this._subscribeBroadcast()
-    return this._broadcastListeners.add(callback)
+    this.ensureBroadcast()
+    this.subscribeBroadcast()
+    return this.broadcastListeners.add(callback)
   }
 
   publishBinary(data: Uint8Array): Promise<ChannelPublishAck> {
-    this._ensureBroadcast()
-    if (!this._adapter) throw new ChannelClosedError()
-    const ret = this._trackAck(Promise.resolve(this._publishBinaryBroadcast(data)))
+    this.ensureBroadcast()
+    if (!this.adapter) throw new ChannelClosedError()
+    const ret = this._trackAck(Promise.resolve(this.publishBinaryBroadcast(data)))
     ret.catch(() => {})
     return ret
   }
 
   subscribeBinary(callback: BroadcastBinaryListener): () => void {
-    this._ensureBroadcast()
-    this._subscribeBinaryBroadcast()
-    return this._broadcastBinaryListeners.add(callback)
+    this.ensureBroadcast()
+    this.subscribeBinaryBroadcast()
+    return this.broadcastBinaryListeners.add(callback)
   }
 
   // --- Transport callbacks ---
@@ -125,17 +125,17 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
-    return this._trackAck(this._dispatchPublishAckReq(text, seq))
+    return this._trackAck(this.dispatchPublishAckReq(text, seq))
   }
 
   _onPeerPublishBinaryAckReqMessage(data: Uint8Array, seq: number): Promise<void> {
-    return this._trackAck(this._dispatchPublishBinaryAckReq(data, seq))
+    return this._trackAck(this.dispatchPublishBinaryAckReq(data, seq))
   }
 
   private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
-    for (const cb of this._broadcastListeners.list()) {
+    for (const cb of this.broadcastListeners.list()) {
       try {
         const result = cb(data, info)
         if (isPromise(result)) result.catch((err: unknown) => this._handleCallbackError(err))
@@ -143,13 +143,13 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         if (this._handleCallbackError(err)) return
       }
     }
-    if (!this._peerSubscribedText) return
-    this._forwardPublish(encodePublishText(serialized, rawInfo))
+    if (!this.peerSubscribedText) return
+    this.forwardPublish(encodePublishText(serialized, rawInfo))
   }
 
   private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
-    for (const cb of this._broadcastBinaryListeners.list()) {
+    for (const cb of this.broadcastBinaryListeners.list()) {
       try {
         // A copy of its own, which a Node.js Buffer's slice() isn't: a listener may write into it or transfer its buffer.
         const result = cb(new Uint8Array(data), info)
@@ -158,22 +158,22 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         if (this._handleCallbackError(err)) return
       }
     }
-    if (!this._peerSubscribedBinary) return
-    this._forwardPublish(encodePublishBinary(data, rawInfo))
+    if (!this.peerSubscribedBinary) return
+    this.forwardPublish(encodePublishBinary(data, rawInfo))
   }
 
   /** A text (`string`) or binary publish to the page, buffered while it is away; a page behind is let go. */
-  private _forwardPublish(wire: string | Uint8Array): void {
+  private forwardPublish(wire: string | Uint8Array): void {
     const binary = typeof wire !== 'string'
     const peer = this._peer
     if (!peer) {
       if (binary) this._offlineBuffer.pushPublishBinary(wire)
       else this._offlineBuffer.pushPublish(wire)
-      this._closeIfDroppedOffline(binary)
+      this.closeIfDroppedOffline(binary)
       return
     }
     if (this._sendCredit.isPastByteCredit && this._isPeerBehind()) {
-      this._closeBehind()
+      this.closeBehind()
       return
     }
     this._sendCredit.countPublishSent(
@@ -182,7 +182,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   /** A page behind the broadcast has no send to reject: it leaves the group on both ends rather than get a gap. */
-  private _closeBehind(): void {
+  private closeBehind(): void {
     this._endWithError(
       ERROR_REASON.OVERFLOW,
       new ChannelOverflowError('Broadcast closed: its client fell further behind than the server holds for a client'),
@@ -190,7 +190,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
-  private _closeIfDroppedOffline(binary: boolean): void {
+  private closeIfDroppedOffline(binary: boolean): void {
     if (!this._offlineBuffer.dropped) return
     const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
     this._endWithError(
@@ -202,72 +202,72 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   }
 
   override _onPeerSubscription({ binary, subscribed }: { binary: boolean; subscribed: boolean }): void {
-    if (binary) this._peerSubscribedBinary = subscribed
-    else this._peerSubscribedText = subscribed
+    if (binary) this.peerSubscribedBinary = subscribed
+    else this.peerSubscribedText = subscribed
     if (subscribed) {
-      this._ensureBroadcast()
-      if (binary) this._subscribeBinaryBroadcast()
-      else this._subscribeBroadcast()
+      this.ensureBroadcast()
+      if (binary) this.subscribeBinaryBroadcast()
+      else this.subscribeBroadcast()
       return
     }
-    if (binary && this._broadcastBinaryListeners.size === 0) {
-      this._unsubBinaryBroadcast?.()
-      this._unsubBinaryBroadcast = null
+    if (binary && this.broadcastBinaryListeners.size === 0) {
+      this.unsubBinaryBroadcast?.()
+      this.unsubBinaryBroadcast = null
     }
-    if (!binary && this._broadcastListeners.size === 0) {
-      this._unsubBroadcast?.()
-      this._unsubBroadcast = null
+    if (!binary && this.broadcastListeners.size === 0) {
+      this.unsubBroadcast?.()
+      this.unsubBroadcast = null
     }
   }
 
   protected override _shutdown(err?: Error, options?: { pageGone?: boolean }): void {
-    this._unsubBroadcast?.()
-    this._unsubBroadcast = null
-    this._unsubBinaryBroadcast?.()
-    this._unsubBinaryBroadcast = null
+    this.unsubBroadcast?.()
+    this.unsubBroadcast = null
+    this.unsubBinaryBroadcast?.()
+    this.unsubBinaryBroadcast = null
     super._shutdown(err, options)
   }
 
   // --- Internal broadcast helpers ---
 
-  private _ensureBroadcast(): void {
-    if (this._adapter) return
-    this._adapter = getBroadcastAdapter()
+  private ensureBroadcast(): void {
+    if (this.adapter) return
+    this.adapter = getBroadcastAdapter()
   }
 
-  private _subscribeBroadcast(): void {
-    if (this._unsubBroadcast) return
-    assert(this._adapter)
-    this._unsubBroadcast = this._adapter.subscribe(
+  private subscribeBroadcast(): void {
+    if (this.unsubBroadcast) return
+    assert(this.adapter)
+    this.unsubBroadcast = this.adapter.subscribe(
       this.key,
       (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
       this._wireRequest,
     )
   }
 
-  private _subscribeBinaryBroadcast(): void {
-    if (this._unsubBinaryBroadcast) return
-    assert(this._adapter)
-    this._unsubBinaryBroadcast = this._adapter.subscribeBinary(
+  private subscribeBinaryBroadcast(): void {
+    if (this.unsubBinaryBroadcast) return
+    assert(this.adapter)
+    this.unsubBinaryBroadcast = this.adapter.subscribeBinary(
       this.key,
       (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
       this._wireRequest,
     )
   }
 
-  private _publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this._adapter)
-    return receiptOf(this.key, this._adapter.publish(this.key, serialized))
+  private publishBroadcast(serialized: string): ChannelPublishAck | Promise<ChannelPublishAck> {
+    assert(this.adapter)
+    return receiptOf(this.key, this.adapter.publish(this.key, serialized))
   }
 
-  private _publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
-    assert(this._adapter)
-    return receiptOf(this.key, this._adapter.publishBinary(this.key, data))
+  private publishBinaryBroadcast(data: Uint8Array): ChannelPublishAck | Promise<ChannelPublishAck> {
+    assert(this.adapter)
+    return receiptOf(this.key, this.adapter.publishBinary(this.key, data))
   }
 
-  private async _dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
+  private async dispatchPublishAckReq(serialized: string, seq: number): Promise<void> {
     try {
-      this._ensureBroadcast()
+      this.ensureBroadcast()
       const validateData = this._validators.get('data')
       if (validateData) {
         const data = parse(serialized) as ChannelData<T>
@@ -279,7 +279,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
           return
         }
       }
-      const result = await this._publishBroadcast(serialized)
+      const result = await this.publishBroadcast(serialized)
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
       if (this._handleCallbackError(err)) return
@@ -287,10 +287,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     }
   }
 
-  private async _dispatchPublishBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
+  private async dispatchPublishBinaryAckReq(data: Uint8Array, seq: number): Promise<void> {
     try {
-      this._ensureBroadcast()
-      const result = await this._publishBinaryBroadcast(data)
+      this.ensureBroadcast()
+      const result = await this.publishBinaryBroadcast(data)
       this._sendAckRes(seq, stringify(result))
     } catch (err) {
       if (this._handleCallbackError(err)) return

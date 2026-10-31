@@ -93,7 +93,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       this.transportUnsubs.set(
         key,
         this.transport.listen(key, (payload, info) => {
-          this._deliver(this.subscriptions, key, payload, info)
+          this.deliver(this.subscriptions, key, payload, info)
         }),
       )
     }
@@ -104,8 +104,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       s.delete(onMessage)
       if (s.size === 0) {
         this.subscriptions.delete(key)
-        this._releaseUnsub(this.transportUnsubs, key)
-        this._releaseSeq(key)
+        this.releaseUnsub(this.transportUnsubs, key)
+        this.releaseSeq(key)
       }
     }
   }
@@ -116,7 +116,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       if (isPromise(result)) return result
       return result
     }
-    return this._publishInMemory(this.subscriptions, key, serialized)
+    return this.publishInMemory(this.subscriptions, key, serialized)
   }
 
   subscribeBinary(key: string, onMessage: BroadcastBinaryOnMessage): BroadcastUnsubscribe {
@@ -131,7 +131,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       this.transportBinaryUnsubs.set(
         key,
         this.transport.listenBinary(key, (payload, info) => {
-          this._deliver(this.binarySubscriptions, key, payload, info)
+          this.deliver(this.binarySubscriptions, key, payload, info)
         }),
       )
     }
@@ -142,8 +142,8 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       s.delete(onMessage)
       if (s.size === 0) {
         this.binarySubscriptions.delete(key)
-        this._releaseUnsub(this.transportBinaryUnsubs, key)
-        this._releaseSeq(key)
+        this.releaseUnsub(this.transportBinaryUnsubs, key)
+        this.releaseSeq(key)
       }
     }
   }
@@ -154,12 +154,12 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       if (isPromise(result)) return result
       return result
     }
-    return this._publishInMemory(this.binarySubscriptions, key, data)
+    return this.publishInMemory(this.binarySubscriptions, key, data)
   }
 
   // ── In-memory ──
 
-  private _publishInMemory<T>(
+  private publishInMemory<T>(
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
     data: T,
@@ -172,7 +172,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
       return new Promise((resolve, reject) => {
         this.queued.push(() => {
           try {
-            resolve(this._deliverInMemory(subs, key, queuedData, timestamp))
+            resolve(this.deliverInMemory(subs, key, queuedData, timestamp))
           } catch (err) {
             reject(err)
           }
@@ -181,14 +181,14 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     }
     this.delivering = true
     try {
-      return this._deliverInMemory(subs, key, data, timestamp)
+      return this.deliverInMemory(subs, key, data, timestamp)
     } finally {
       this.delivering = false
-      if (this.queued.length > 0) this._drainQueued()
+      if (this.queued.length > 0) this.drainQueued()
     }
   }
 
-  private _deliverInMemory<T>(
+  private deliverInMemory<T>(
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
     data: T,
@@ -200,7 +200,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     if (++this.deliveredInBurst === IN_MEMORY_DELIVERY_BURST / 2) {
       afterEventLoopTurn(() => {
         this.deliveredInBurst = 0
-        this._drainQueued()
+        this.drainQueued()
       })
     }
     const info = { seq, timestamp }
@@ -215,7 +215,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     return { seq, timestamp, meta: { delivered, transport: 'in-memory' } }
   }
 
-  private _drainQueued(): void {
+  private drainQueued(): void {
     while (this.queued.length > 0 && this.deliveredInBurst < IN_MEMORY_DELIVERY_BURST) {
       const deliver = this.queued.shift()!
       this.delivering = true
@@ -226,7 +226,7 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
 
   // ── Shared ──
 
-  private _deliver<T>(
+  private deliver<T>(
     subs: Map<string, Set<(data: T, info: WirePublishInfo) => void>>,
     key: string,
     data: T,
@@ -237,13 +237,13 @@ class DefaultBroadcastAdapter implements BroadcastAdapter {
     for (const onMessage of set) onMessage(data, info)
   }
 
-  private _releaseSeq(key: string): void {
+  private releaseSeq(key: string): void {
     if (!this.subscriptions.has(key) && !this.binarySubscriptions.has(key)) {
       this.keySeqs.delete(key)
     }
   }
 
-  private _releaseUnsub(map: Map<string, () => void>, key: string): void {
+  private releaseUnsub(map: Map<string, () => void>, key: string): void {
     const unsub = map.get(key)
     if (!unsub) return
     map.delete(key)

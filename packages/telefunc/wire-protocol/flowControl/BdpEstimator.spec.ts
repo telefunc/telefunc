@@ -48,7 +48,7 @@ describe('BdpEstimator', () => {
   })
 
   // The "one ping in flight" invariant: subsequent receives during the same RTT
-  // window must NOT fire additional pings. Catches a missing `_pingInFlight` guard.
+  // window must NOT fire additional pings. Catches a missing `pingInFlight` guard.
   it('does not fire another ping while one is in flight', () => {
     const bdp = new BdpEstimator()
     bdp.onReceive(1024)

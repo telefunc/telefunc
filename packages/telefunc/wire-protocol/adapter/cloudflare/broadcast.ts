@@ -81,7 +81,7 @@ class CloudflareBucketPublishBuffer {
   private head = 0
   private totalBytes = 0
   private readonly maxBytes: number
-  private _flushing = false
+  private isFlushing = false
 
   constructor(maxBytes: number) {
     assert(maxBytes > 0, 'Cloudflare bucket publish buffer size must be > 0.')
@@ -104,12 +104,12 @@ class CloudflareBucketPublishBuffer {
   }
 
   get flushing(): boolean {
-    return this._flushing
+    return this.isFlushing
   }
 
   async flush(): Promise<void> {
-    if (this._flushing) return
-    this._flushing = true
+    if (this.isFlushing) return
+    this.isFlushing = true
     try {
       while (this.head < this.entries.length) {
         const entry = this.entries[this.head]!
@@ -124,7 +124,7 @@ class CloudflareBucketPublishBuffer {
       }
       this.compact()
     } finally {
-      this._flushing = false
+      this.isFlushing = false
     }
   }
 
