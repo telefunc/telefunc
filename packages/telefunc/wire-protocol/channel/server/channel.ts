@@ -253,9 +253,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const needsAck = opts?.ack === true
     if (!this._peer) {
       if (needsAck) {
-        return new Promise<unknown>((resolve, reject) => {
-          this._offlineBuffer.pushBinaryAck(data, resolve, reject)
-        })
+        return this._trackAck(
+          new Promise<unknown>((resolve, reject) => {
+            this._offlineBuffer.pushBinaryAck(data, resolve, reject)
+          }),
+        )
       }
       return new Promise<void>((resolve, reject) => {
         this._offlineBuffer.pushBinary(data, resolve, reject)
