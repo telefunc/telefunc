@@ -5,7 +5,7 @@ import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, ErrorReason } from '../../wire/frame.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import type { SendWait } from '../../flowControl/Link.js'
-import type { WindowKind } from '../../flowControl/FlowControl.js'
+import type { WindowKind } from '../../flowControl/credit.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void

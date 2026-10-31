@@ -55,12 +55,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     super()
     this.key = opts.key
     // Its page grants it the largest window from the start (see `ClientBroadcast`).
-    this._flow.onPeerByteWindow(this._flow.peerByteWindowMax)
+    this._sendCredit.takePeerWindowMax()
   }
 
   /** Its page grants the largest window at once: a quarter of it past credit is more than the page reads unreported. */
   protected override _pastCreditAllowance(): number {
-    return this._flow.peerByteWindowMax / 4
+    return this._sendCredit.peerByteWindowMax / 4
   }
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
@@ -172,11 +172,11 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       this._closeIfDroppedOffline(binary)
       return
     }
-    if (this._flow.isPastByteCredit && this._isPeerBehind()) {
+    if (this._sendCredit.isPastByteCredit && this._isPeerBehind()) {
       this._closeBehind()
       return
     }
-    this._flow.countPublishSent(binary ? peer.sendPublishBinary(wire) : peer.sendPublish(wire))
+    this._sendCredit.countPublishSent(binary ? peer.sendPublishBinary(wire) : peer.sendPublish(wire))
   }
 
   /** A page behind the broadcast has no send to reject: it leaves the group on both ends rather than get a gap. */

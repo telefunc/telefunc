@@ -65,7 +65,7 @@ class BdpEstimator {
    *  non-grow. Slows but never freezes — a real rate change rediscovers. */
   private _probeIntervalMs = BDP_PING_MIN_INTERVAL_MS
 
-  /** The byte window the estimator sets, which `FlowControl` grants unless it grants more. */
+  /** The byte window the estimator sets, which `ReceiveCredit` grants unless it grants more. */
   get byteWindow(): number {
     return this._byteWindow
   }

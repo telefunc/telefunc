@@ -37,7 +37,10 @@ import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './sessionRegistry.js'
 import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
-import { FlowControl, type CreditOwner, type WindowKind } from '../../flowControl/FlowControl.js'
+import type { CreditOwner, WindowKind } from '../../flowControl/credit.js'
+import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
+import { SelfTime } from '../../flowControl/SelfTime.js'
+import { SendCredit } from '../../flowControl/SendCredit.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
@@ -101,10 +104,10 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  types (`ChannelAck<C2S>`, `unknown` for binary, `ChannelPublishAck` for broadcast
    *  publishes); the stored resolver is always invoked with `parse(text)` at the boundary. */
   protected _pendingAcks = new Map<number, { resolve: (v: any) => void; reject: (err: Error) => void }>()
-  /** Owns sender-side credit, receiver-side consumption tracking, BDP estimator,
-   *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
-   *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
-  protected _flow: FlowControl
+  /** Credit governs fire-and-forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
+  protected _selfTime = new SelfTime()
+  protected _sendCredit: SendCredit
+  protected _receiveCredit: ReceiveCredit
 
   constructor({
     channelId,
@@ -117,7 +120,8 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.key = key
     this._maxFrameBytes = maxFrameBytes
-    this._flow = new FlowControl({ owner: this, yieldBytes: FC_PAGE_YIELD_BYTES })
+    this._sendCredit = new SendCredit({ owner: this, selfTime: this._selfTime, yieldBytes: FC_PAGE_YIELD_BYTES })
+    this._receiveCredit = new ReceiveCredit({ owner: this, selfTime: this._selfTime })
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(connection.telefuncUrl), this, {
       transports: connection.transports,
@@ -145,7 +149,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._selfTime.record(performance.now() - t0)
     }
   }
 
@@ -176,7 +180,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._selfTime.record(performance.now() - t0)
     }
   }
 
@@ -196,7 +200,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
    *  gates the return value. Awaiting throttles the caller's next send; not awaiting
    *  bypasses (matches the user-facing "skip await for max bandwidth" escape hatch). */
   private _waitForWindow(bytes: number): void | Promise<void> {
-    return this._flow.decrement(bytes)
+    return this._sendCredit.decrement(bytes)
   }
 
   listen(callback: ChannelListener<ServerToClient>): () => void {
@@ -277,54 +281,55 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal Probes a path it hasn't measured. */
   _reattachState(uplink: Uplink): ReattachState {
-    const probe = this._flow.probeAttach(uplink.link)
+    const probe = this._receiveCredit.probeAttach(uplink.link)
     return probe === undefined ? {} : { probe }
   }
 
   /** @internal */
   _onProbeAnswered(probe: number): void {
-    this._flow.onProbeAnswered(probe)
+    this._receiveCredit.onProbeAnswered(probe)
   }
 
   /** @internal */
   _fitReplays(window: number, peerWindow: number): void {
-    this._flow.fitReplays(window, peerWindow)
+    this._receiveCredit.fitReplay(window)
+    this._sendCredit.fitReplay(peerWindow)
   }
 
-  /** @internal At each heartbeat: see `FlowControl.acknowledge`. */
+  /** @internal At each heartbeat: see `ReceiveCredit.acknowledge`. */
   _acknowledge(): void {
-    this._flow.acknowledge()
+    this._receiveCredit.acknowledge()
   }
 
-  /** @internal See `FlowControl.answered`. */
+  /** @internal See `ReceiveCredit.answered`. */
   _answered(): void {
-    this._flow.answered()
+    this._receiveCredit.answered()
   }
 
   /** @internal */
   _onTransportBatched(): void {
-    if (!this._isClosed) this._flow.useBatchTransportInitial()
+    if (!this._isClosed) this._receiveCredit.useBatchTransportInitial()
   }
 
   /** @internal */
   _onUpgradeJoined(): void {
     if (this._isClosed) return
-    this._flow.undoBatchTransportInitial()
-    this._flow.restartRound()
+    this._receiveCredit.undoBatchTransportInitial()
+    this._receiveCredit.restartRound()
   }
 
   _onTransportOpen(batched: boolean, uplink: Uplink, downlink: Downlink): void {
     if (this._isClosed) return
-    if (batched) this._flow.useBatchTransportInitial()
-    else this._flow.undoBatchTransportInitial()
-    this._flow.attach({ sendWait: uplink, link: uplink.link, downlink })
+    if (batched) this._receiveCredit.useBatchTransportInitial()
+    else this._receiveCredit.undoBatchTransportInitial()
+    this._receiveCredit.attach({ sendWait: uplink, link: uplink.link, downlink })
     this._fireOpen()
   }
 
   _onTransportMessage(data: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._receiveCredit.onReceived(bytes)
       const parsed = parse(data) as ChannelData<ServerToClient>
       const pending: Promise<unknown>[] = []
       for (const cb of this._listeners.list()) {
@@ -338,12 +343,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         }
       }
       if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._flow.onConsumed(bytes))
+        Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
       } else {
-        this._flow.onConsumed(bytes)
+        this._receiveCredit.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._selfTime.record(performance.now() - t0)
     }
   }
 
@@ -358,7 +363,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onTransportBinaryMessage(data: Uint8Array<ArrayBuffer>, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._receiveCredit.onReceived(bytes)
       const pending: Promise<unknown>[] = []
       for (const cb of this._binaryListeners.list()) {
         try {
@@ -371,12 +376,12 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         }
       }
       if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._flow.onConsumed(bytes))
+        Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
       } else {
-        this._flow.onConsumed(bytes)
+        this._receiveCredit.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._selfTime.record(performance.now() - t0)
     }
   }
 
@@ -388,7 +393,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     const data = frame as ChannelDataFrame
-    if (!countsCredit(data.tag)) this._flow.onReceivedUncounted(data.bytes)
+    if (!countsCredit(data.tag)) this._receiveCredit.onReceivedUncounted(data.bytes)
     this._dispatchDataFrame(data)
   }
 
@@ -433,20 +438,20 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._onTransportCloseAck()
         return
       case TAG.WINDOW:
-        this._flow.onPeerByteWindow(frame.bytes)
+        this._sendCredit.onPeerByteWindow(frame.bytes)
         return
       case TAG.MSG_WINDOW:
-        this._flow.onPeerMessageWindow(frame.count)
+        this._sendCredit.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
         this._connection.sendBdpPingAck(this, {
           probe: frame.probe,
-          backlog: this._flow.onPing(),
-          pathRtt: this._flow.pathRtt(),
+          backlog: this._sendCredit.onPing(),
+          pathRtt: this._receiveCredit.pathRtt(),
         })
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame, (ms) => this._connection.deliveredBeforeLast(ms))
+        this._receiveCredit.onPingAck(frame, (ms) => this._connection.deliveredBeforeLast(ms))
         return
       // BROADCAST_SUB/UNSUB are server-side only; ABORT/ERROR handled by connection.
     }
@@ -611,7 +616,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._didTerminate) return
     this._didTerminate = true
     this._closeError = err
-    this._flow.shutdown()
+    this._sendCredit.shutdown()
     const ackErr = err ?? new ChannelClosedError()
     for (const { reject } of this._pendingAcks.values()) reject(ackErr)
     this._pendingAcks.clear()
@@ -659,7 +664,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
   constructor(options: ClientChannelOptions) {
     super(options)
     // Nothing waits on a publish's credit: the window only bounds how far behind the server lets the page fall.
-    this._flow.widenByteWindow()
+    this._receiveCredit.widenByteWindow()
   }
 
   static isClientBroadcast(value: unknown): value is ClientBroadcast {
@@ -729,7 +734,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
 
   /** A publish counts in bytes, consumed once the listeners ran, so the server sees how far behind the page is. */
   _onTransportPublish(data: string, wireInfo: WirePublishInfo, bytes: number): void {
-    this._flow.onPublishArrived()
+    this._receiveCredit.onPublishArrived()
     const parsed = parse(data) as ChannelData<T>
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastListeners.list()) {
@@ -740,11 +745,11 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
         if (this._handleCallbackError(err)) return
       }
     }
-    this._flow.onPublishConsumed(bytes)
+    this._receiveCredit.onPublishConsumed(bytes)
   }
 
   _onTransportPublishBinary(data: Uint8Array, wireInfo: WirePublishInfo, bytes: number): void {
-    this._flow.onPublishArrived()
+    this._receiveCredit.onPublishArrived()
     const info = makePublishInfo(this.key!, wireInfo.seq, wireInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners.list()) {
       try {
@@ -755,7 +760,7 @@ class ClientBroadcast<T = unknown> extends ClientChannel {
         if (this._handleCallbackError(err)) return
       }
     }
-    this._flow.onPublishConsumed(bytes)
+    this._receiveCredit.onPublishConsumed(bytes)
   }
 }
 

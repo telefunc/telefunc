@@ -34,7 +34,10 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
-import { FlowControl, replayWindow, type CreditOwner, type WindowKind } from '../../flowControl/FlowControl.js'
+import { replayWindow, type CreditOwner, type WindowKind } from '../../flowControl/credit.js'
+import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
+import { SelfTime } from '../../flowControl/SelfTime.js'
+import { SendCredit } from '../../flowControl/SendCredit.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { ServerChannelBuffer } from './channelBuffer.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
@@ -116,10 +119,10 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _pendingCloseCallbacks = 0
   protected _inflightAcks = 0
   private _ttlTimer: ReturnType<typeof setTimeout> | null = null
-  /** Owns sender-side credit, receiver-side consumption tracking, BDP estimator,
-   *  and the queue of senders blocked on credit refresh. Credit governs fire-and-
-   *  forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
-  protected _flow: FlowControl
+  /** Credit governs fire-and-forget TEXT/BINARY, and PUBLISH in bytes — see `constants.ts`. */
+  protected _selfTime = new SelfTime()
+  protected _sendCredit: SendCredit
+  protected _receiveCredit: ReceiveCredit
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
@@ -158,12 +161,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    this._flow = new FlowControl({ owner: this })
+    this._sendCredit = new SendCredit({ owner: this, selfTime: this._selfTime })
+    this._receiveCredit = new ReceiveCredit({ owner: this, selfTime: this._selfTime })
     const c = getServerConfig().channel
-    this._flow.fitReplays(
-      replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary),
-      replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary),
-    )
+    this._receiveCredit.fitReplay(replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary))
+    this._sendCredit.fitReplay(replayWindow(c.serverReplayBuffer, c.serverReplayBufferBinary))
     this._bufferLimit = bufferLimit ?? c.bufferLimit
     this._bufferLimitBinary = c.bufferLimitBinary
     this._offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
@@ -189,7 +191,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._selfTime.record(performance.now() - t0)
     }
   }
 
@@ -224,8 +226,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
     // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, until the peer is behind.
-    if (this._flow.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
-    return this._flow.decrement(this._peer.sendText(serialized))
+    if (this._sendCredit.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
+    return this._sendCredit.decrement(this._peer.sendText(serialized))
   }
 
   sendBinary(data: Uint8Array): Promise<void>
@@ -238,7 +240,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       ret.catch(() => {})
       return ret
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._selfTime.record(performance.now() - t0)
     }
   }
 
@@ -267,8 +269,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       )
     }
     // Cooperative credit model; see `_send`.
-    if (this._flow.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
-    return this._flow.decrement(this._peer.sendBinary(data))
+    if (this._sendCredit.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
+    return this._sendCredit.decrement(this._peer.sendBinary(data))
   }
 
   /** @internal The most that may wait on its wire for a reading page: credit, the allowance past it, offline buffers. */
@@ -284,7 +286,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Whether its sends past credit and unanswered ack requests, as far as its wire holds them, reach the allowance. */
   protected _isPeerBehind(): boolean {
     const allowance = this._pastCreditAllowance()
-    const behind = this._flow.bytesSentPastCredit + this._pendingAckBytes
+    const behind = this._sendCredit.bytesSentPastCredit + this._pendingAckBytes
     if (behind < allowance) return false
     const buffered = this._peer!.sender.bufferedAmount()
     return (buffered === undefined ? behind : Math.min(behind, buffered)) >= allowance
@@ -393,7 +395,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer)
     this._reconnectTimer = null
     this._peer = peer
-    this._flow.attach({ sendWait: peer.sender.sendWait() })
+    this._receiveCredit.attach({ sendWait: peer.sender.sendWait() })
     this.flushOfflineBuffer(peer)
     this._sendPendingAckRes(peer)
     if (state?.broadcast) {
@@ -424,7 +426,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       return
     }
     const data = frame as ChannelDataFrame
-    if (!countsCredit(data.tag)) this._flow.onReceivedUncounted(data.bytes)
+    if (!countsCredit(data.tag)) this._receiveCredit.onReceivedUncounted(data.bytes)
     this._dispatchDataFrame(data)
   }
 
@@ -472,18 +474,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         this._shutdown(replayLossError('client'), { pageGone: true })
         return
       case TAG.WINDOW:
-        this._flow.onPeerByteWindow(frame.bytes)
+        this._sendCredit.onPeerByteWindow(frame.bytes)
         this._onPageHas(seqThrough(frame.lastSeq, this._replayBuffer?.seq ?? 0))
         return
       case TAG.MSG_WINDOW:
-        this._flow.onPeerMessageWindow(frame.count)
+        this._sendCredit.onPeerMessageWindow(frame.count)
         return
       case TAG.BDP_PING:
         // It has no attach of its own to probe the path with.
-        this._peer?.sendBdpPingAck(frame.probe, this._flow.onPing(), Infinity)
+        this._peer?.sendBdpPingAck(frame.probe, this._sendCredit.onPing(), Infinity)
         return
       case TAG.BDP_PING_ACK:
-        this._flow.onPingAck(frame, (ms) => this._peer?.sender.deliveredBeforeFrame(ms) ?? 0)
+        this._receiveCredit.onPingAck(frame, (ms) => this._peer?.sender.deliveredBeforeFrame(ms) ?? 0)
         return
       case TAG.BROADCAST_SUB:
       case TAG.BROADCAST_UNSUB:
@@ -519,7 +521,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerMessage(text: string, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._receiveCredit.onReceived(bytes)
       const data = parsePeerText(text) as ChannelData<ClientToServer>
       const validateData = this._validators.get('data')
       // Shield fail on a no-ack message: silent drop (validator auto-logs). The client doesn't
@@ -529,7 +531,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       // Dropping still consumes: window refreshes are consumption-driven, so skipping
       // `onConsumed` would leak receive credit and eventually stall the client's sends.
       if (validateData && validateData(data) !== true) {
-        this._flow.onConsumed(bytes)
+        this._receiveCredit.onConsumed(bytes)
         return
       }
       const pending: Promise<unknown>[] = []
@@ -544,12 +546,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         }
       }
       if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._flow.onConsumed(bytes))
+        Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
       } else {
-        this._flow.onConsumed(bytes)
+        this._receiveCredit.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._selfTime.record(performance.now() - t0)
     }
   }
 
@@ -567,7 +569,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _onPeerBinaryMessage(data: Uint8Array, bytes: number): void {
     const t0 = performance.now()
     try {
-      this._flow.onReceived(bytes)
+      this._receiveCredit.onReceived(bytes)
       const pending: Promise<unknown>[] = []
       for (const cb of this._binaryListeners.list()) {
         try {
@@ -580,12 +582,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         }
       }
       if (pending.length > 0) {
-        Promise.all(pending).finally(() => this._flow.onConsumed(bytes))
+        Promise.all(pending).finally(() => this._receiveCredit.onConsumed(bytes))
       } else {
-        this._flow.onConsumed(bytes)
+        this._receiveCredit.onConsumed(bytes)
       }
     } finally {
-      this._flow._recordSelfTime(performance.now() - t0)
+      this._selfTime.record(performance.now() - t0)
     }
   }
 
@@ -690,9 +692,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._shutdown(err)
   }
 
-  /** @internal At each of its page's heartbeats: see `FlowControl.acknowledge`. */
+  /** @internal At each of its page's heartbeats: see `ReceiveCredit.acknowledge`. */
   _acknowledge(): void {
-    this._flow.acknowledge()
+    this._receiveCredit.acknowledge()
   }
 
   /** @internal The page has what this channel sent it through `lastSeq`, which its replay lets go. */
@@ -726,9 +728,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** What was sent while no peer was attached goes to `peer`; an ack request rejected at the end takes no answer. */
   private flushOfflineBuffer(peer: IndexedPeer): void {
     this._offlineBuffer.flush({
-      sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
-      sendPublish: (msg) => this._flow.countPublishSent(peer.sendPublish(msg)),
-      sendBinary: (msg) => this._flow.countSent(peer.sendBinary(msg)),
+      sendText: (msg) => this._sendCredit.countSent(peer.sendText(msg)),
+      sendPublish: (msg) => this._sendCredit.countPublishSent(peer.sendPublish(msg)),
+      sendBinary: (msg) => this._sendCredit.countSent(peer.sendBinary(msg)),
       sendTextAck: (data, cb) =>
         peer.sendTextAckReq(data, (seq, bytes) => {
           if (cb) this._addPendingAck(seq, bytes, cb)
@@ -737,7 +739,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
         peer.sendBinaryAckReq(data, (seq, bytes) => {
           if (cb) this._addPendingAck(seq, bytes, cb)
         }),
-      sendPublishBinary: (msg) => this._flow.countPublishSent(peer.sendPublishBinary(msg)),
+      sendPublishBinary: (msg) => this._sendCredit.countPublishSent(peer.sendPublishBinary(msg)),
     })
   }
 
@@ -770,7 +772,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   protected _sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
     if (this._peer) {
       this._peer.sendAckRes(ackedSeq, result, status)
-      if (ackedSeq === this._lastClientSeq) this._flow.answered()
+      if (ackedSeq === this._lastClientSeq) this._receiveCredit.answered()
     } else {
       this._pendingAckRes.push({ ackedSeq, result, status })
     }
@@ -880,7 +882,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!keep) this._release()
     this.mux?.onChannelEnded(this, { keep, pageAttached })
     this._fireClose(err)
-    this._flow.shutdown()
+    this._sendCredit.shutdown()
     this._notifyCloseProgress()
     // Building an error captures its stack: one is built only where an answer is awaited.
     if (this._pendingAcks.size > 0 || this._offlineBuffer.size > 0) {

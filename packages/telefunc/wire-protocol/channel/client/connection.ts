@@ -37,7 +37,7 @@ import {
   TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
-import { replayWindow, type WindowKind } from '../../flowControl/FlowControl.js'
+import { replayWindow, type WindowKind } from '../../flowControl/credit.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'

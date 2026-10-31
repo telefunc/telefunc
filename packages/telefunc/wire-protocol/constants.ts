@@ -241,7 +241,7 @@ export const CHANNEL_RECONNECT_MAX_DELAY_MS = 5_000
 //                             ack arrival AND credit refresh, which is confusing for
 //                             users. `await` is already the natural backpressure
 //                             signal here. Revisit if real workloads need it.
-//                             Also NOT tracked via `FlowControl.onConsumed` on
+//                             Also NOT tracked via `ReceiveCredit.onConsumed` on
 //                             receive — those bytes were never in the sender's
 //                             credit budget, so counting them would advertise
 //                             free buffer the receiver doesn't actually have.
@@ -289,7 +289,7 @@ export const CHANNEL_CLIENT_REPLAY_BUFFER_BINARY_BYTES = 2 * CREDIT_WINDOW_MAX_B
 export const CREDIT_MSG_WINDOW_INITIAL = 100
 
 /** Hard cap on the adaptive message-count window. The self-utilisation gate in
- *  `FlowControl.onPingAck` stops growth long before this on hosts that can't
+ *  `ReceiveCredit.onPingAck` stops growth long before this on hosts that can't
  *  sustain the dispatch rate. */
 export const CREDIT_MSG_WINDOW_MAX = 50_000
 
@@ -302,12 +302,12 @@ export const BDP_PING_MIN_INTERVAL_MS = 50
  *  rare without ever freezing them, so a rate change is rediscovered within this. */
 export const BDP_PING_MAX_INTERVAL_MS = 10_000
 
-/** Rolling window over which `FlowControl` measures its own contribution to the
+/** Rolling window over which `SelfTime` measures telefunc's own contribution to the
  *  event loop (telefunc-side self-time vs wall-clock). 1 s captures recent
  *  pressure without lingering on stale history. */
 export const FC_SELF_TIME_WINDOW_MS = 1000
 
-/** How much a page's channel sends between macrotask yields, so its browser keeps the wire fed (see `FlowControl`). */
+/** How much a page's channel sends between macrotask yields, so its browser keeps the wire fed (see `SendCredit`). */
 export const FC_PAGE_YIELD_BYTES = 64 * 1024
 
 /** Self-utilisation threshold above which the flow-control sender yields a
