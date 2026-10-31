@@ -171,7 +171,7 @@ class RoomReplica
     })
     this.gossip = new GossipOutbox(incarnation, this.outgoingDemand.instance)
     this.incomingDemand = new RoomDemand({ owner: this })
-    this.lanePlan = new LanePlan({ owner: this, outgoingDemand: this.outgoingDemand })
+    this.lanePlan = new LanePlan({ owner: this })
     this.authority = new AuthoritySync({ owner: this })
     this.heartbeat = new RoomHeartbeat({ owner: this })
     this.roster = new RosterStream({ owner: this })
