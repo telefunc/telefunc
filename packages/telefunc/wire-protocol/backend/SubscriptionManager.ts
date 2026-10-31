@@ -13,6 +13,7 @@ import type {
   BackendPayload,
   BackendReceiver,
   BackendSubscription,
+  ReportedState,
   SubscriptionAttempt,
   SubscriptionBinding,
   SubscriptionDriver,
@@ -282,12 +283,11 @@ class SubscriptionSlot {
     }
   }
 
-  private _onStateChange(attempt: SubscriptionAttempt, state: SubscriptionState, reason?: Error): void {
+  /** An attempt reports a `ReportedState`: ready, lost or closed, never establishing again. */
+  private _onStateChange(attempt: SubscriptionAttempt, state: ReportedState, reason?: Error): void {
     assert(this._attempt === attempt) // a slot opens one attempt, and unobserves it before cleanup
     if (state === 'ready') return this._becameReady()
     if (state === 'closed') return this._ended(reason)
-    // An attempt starts establishing and never returns to it: every driver's attempt reports ready, lost and closed.
-    assert(state === 'lost')
     this._markLost()
   }
 

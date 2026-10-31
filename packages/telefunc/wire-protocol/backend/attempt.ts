@@ -1,8 +1,8 @@
 export { DriverAttempt }
 
-import type { SubscriptionAttempt, SubscriptionState } from './subscription.js'
+import type { ReportedState, SubscriptionAttempt, SubscriptionState } from './subscription.js'
 
-type StateListener = (state: SubscriptionState, reason?: Error) => void
+type StateListener = (state: ReportedState, reason?: Error) => void
 
 /** A driver attempt's state and listeners; an ended attempt never transitions again. */
 abstract class DriverAttempt implements SubscriptionAttempt {
@@ -25,7 +25,7 @@ abstract class DriverAttempt implements SubscriptionAttempt {
   abstract unsubscribe(): Promise<void>
 
   /** `reason` explains an end, when the driver has one. */
-  protected transition(state: SubscriptionState, reason?: unknown): void {
+  protected transition(state: ReportedState, reason?: unknown): void {
     if (this._state === state || this.ended) return
     this._state = state
     const error = reason === undefined || reason instanceof Error ? reason : new Error(String(reason))

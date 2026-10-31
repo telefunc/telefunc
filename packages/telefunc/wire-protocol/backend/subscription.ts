@@ -2,6 +2,7 @@ export type {
   BackendPayload,
   BackendReceiver,
   BackendSubscription,
+  ReportedState,
   SubscriptionAttempt,
   SubscriptionBinding,
   SubscriptionDriver,
@@ -9,6 +10,8 @@ export type {
 }
 
 type SubscriptionState = 'establishing' | 'ready' | 'lost' | 'closed'
+/** What an attempt reports: it starts establishing and never returns to it. */
+type ReportedState = Exclude<SubscriptionState, 'establishing'>
 
 type BackendSubscription = {
   /** Settles when the current establishment does: replaced after loss, rejected on a terminal failure. */
@@ -26,7 +29,7 @@ type BackendReceiver<Payload = Uint8Array> = (payload: Payload, info: { seq: num
 /** One driver establishment, reporting each state change; an end carries its reason when the driver has one. */
 type SubscriptionAttempt = {
   state(): SubscriptionState
-  onStateChange(cb: (state: SubscriptionState, reason?: Error) => void): () => void
+  onStateChange(cb: (state: ReportedState, reason?: Error) => void): () => void
   /** Settles after the driver's own cleanup, which may leave transport work queued. */
   unsubscribe(): Promise<void>
 }
