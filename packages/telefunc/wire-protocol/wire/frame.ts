@@ -338,7 +338,8 @@ const encode = {
   },
 }
 
-/** `heartbeat` saying its sender took `bytes` of what its WebSocket carried (mod 2^32): it bounds the link's rate. */
+/** Writes into `heartbeat`, which its caller just encoded, that its sender took `bytes` of what its WebSocket carried
+ *  (mod 2^32): it bounds the link's rate. */
 function withTook(heartbeat: Uint8Array<ArrayBuffer>, bytes: number): Uint8Array<ArrayBuffer> {
   writeHeader(heartbeat, heartbeat[0]!, 0, bytes)
   return heartbeat
