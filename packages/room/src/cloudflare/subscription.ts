@@ -48,12 +48,12 @@ function entryKey(route: Pick<RouteInstallation, 'roomId' | 'inc' | 'laneKey'>):
 class CloudflareRoomSessionManager {
   /** Subscriptions share an attempt only within one session DO. */
   readonly partition = crypto.randomUUID()
-  readonly #authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
-  readonly #id: string
-  readonly #entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
+  private readonly authorityCalls = new OrderedStubs<CloudflareRoomAuthorityStub>()
+  private readonly id: string
+  private readonly entries = new Map<string, CloudflareRoomSubscriptionAttempt>()
 
   constructor(sessionId: string) {
-    this.#id = sessionId
+    this.id = sessionId
   }
 
   openSubscription(
@@ -61,16 +61,16 @@ class CloudflareRoomSessionManager {
     openAuthority: () => CloudflareRoomAuthorityStub,
     receiver: BackendReceiver,
   ): CloudflareRoomSubscriptionAttempt {
-    const route = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.#id, leaseId: crypto.randomUUID() }
+    const route = { roomId, inc, laneKey: encodeLaneKey(lane), sessionDoId: this.id, leaseId: crypto.randomUUID() }
     const callAuthority: AuthorityCall = (invoke) => this.callAuthority(roomId, openAuthority, invoke)
     const key = entryKey(route)
     const attempt = new CloudflareRoomSubscriptionAttempt({
       route,
       callAuthority,
       receiver,
-      onClosed: () => this.#entries.delete(key),
+      onClosed: () => this.entries.delete(key),
     })
-    this.#entries.set(key, attempt)
+    this.entries.set(key, attempt)
     attempt.start()
     return attempt
   }
@@ -82,13 +82,13 @@ class CloudflareRoomSessionManager {
     open: () => CloudflareRoomAuthorityStub,
     invoke: (authority: CloudflareRoomAuthorityStub) => Promise<T>,
   ): Promise<T> {
-    return this.#authorityCalls.call(roomId, open, invoke)
+    return this.authorityCalls.call(roomId, open, invoke)
   }
 
   /** A delivery to a lease this session no longer holds, as after a restart, is dropped: delivery is at-most-once, and
    *  the authority's route lapses with the lease. */
   deliver(request: RoomSessionDeliveryRequest): void {
-    const entry = this.#entries.get(entryKey(request.route))
+    const entry = this.entries.get(entryKey(request.route))
     if (entry?.leaseId !== request.route.leaseId) return
     entry.deliver(request.payload, request.info)
   }
@@ -96,11 +96,11 @@ class CloudflareRoomSessionManager {
 
 /** Ready once the authority has durably registered this attempt's exact route; Room owns retry and replacement. */
 class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
-  readonly #callAuthority: AuthorityCall
-  readonly #route: RouteInstallation
-  readonly #receiver: BackendReceiver
-  readonly #onClosed: () => void
-  #renewalTimer: ReturnType<typeof setTimeout> | undefined
+  private readonly callAuthority: AuthorityCall
+  private readonly route: RouteInstallation
+  private readonly receiver: BackendReceiver
+  private readonly onClosed: () => void
+  private renewalTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor({
     route,
@@ -114,68 +114,68 @@ class CloudflareRoomSubscriptionAttempt extends DriverAttempt {
     onClosed: () => void
   }) {
     super()
-    this.#callAuthority = callAuthority
-    this.#route = route
-    this.#receiver = receiver
-    this.#onClosed = onClosed
+    this.callAuthority = callAuthority
+    this.route = route
+    this.receiver = receiver
+    this.onClosed = onClosed
   }
 
   start(): void {
-    void this.#establish()
+    void this.establish()
   }
 
   get leaseId(): string {
-    return this.#route.leaseId
+    return this.route.leaseId
   }
 
   deliver(payload: Uint8Array, info: OrderingInfo): void {
-    this.#receiver(payload, info)
+    this.receiver(payload, info)
   }
 
   async unsubscribe(): Promise<void> {
-    this.#finish()
-    await this.#callAuthority((authority) => authority.unsubscribeRoute(this.#route))
+    this.finish()
+    await this.callAuthority((authority) => authority.unsubscribeRoute(this.route))
   }
 
-  async #establish(): Promise<void> {
+  private async establish(): Promise<void> {
     let registered: RegisterWire
     try {
-      registered = await this.#callAuthority((authority) => authority.registerRoute(this.#route))
+      registered = await this.callAuthority((authority) => authority.registerRoute(this.route))
     } catch (error) {
-      this.#finish(error)
+      this.finish(error)
       return
     }
     if (!('ok' in registered)) {
-      this.#finish(new Error(registered.reason))
+      this.finish(new Error(registered.reason))
       return
     }
     // Unsubscribed while it registered: its release already went out.
     if (this.ended) return
     this.transition('ready')
-    this.#scheduleRenewal()
+    this.scheduleRenewal()
   }
 
-  #scheduleRenewal(): void {
-    this.#renewalTimer = setTimeout(() => void this.#renew(), ROUTE_RENEW_EVERY_MS)
+  private scheduleRenewal(): void {
+    this.renewalTimer = setTimeout(() => void this.renew(), ROUTE_RENEW_EVERY_MS)
   }
 
-  async #renew(): Promise<void> {
+  private async renew(): Promise<void> {
     let renewed: boolean
     try {
-      renewed = await this.#callAuthority((authority) => authority.renewRoute(this.#route))
+      renewed = await this.callAuthority((authority) => authority.renewRoute(this.route))
     } catch (error) {
-      this.#finish(error)
+      this.finish(error)
       return
     }
     if (this.state() !== 'ready') return
-    if (renewed) this.#scheduleRenewal()
-    else this.#finish()
+    if (renewed) this.scheduleRenewal()
+    else this.finish()
   }
 
-  #finish(error?: unknown): void {
+  private finish(error?: unknown): void {
     if (this.ended) return
-    clearTimeout(this.#renewalTimer)
+    clearTimeout(this.renewalTimer)
     this.transition('closed', error)
-    this.#onClosed()
+    this.onClosed()
   }
 }
