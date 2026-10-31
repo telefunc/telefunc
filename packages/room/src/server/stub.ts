@@ -89,20 +89,21 @@ class MemberMessageTexts {
 
   private readonly _serialized: string
   private readonly _info: OrderingInfo
-  private readonly _unstampedEvent: () => object
+  /** What `serialized` encodes. */
+  private readonly _envelope: RoomDataEnvelope | RoomDmEnvelope
 
   constructor({
     serialized,
     info,
-    unstampedEvent,
+    envelope,
   }: {
     serialized: string
     info: OrderingInfo
-    unstampedEvent: () => object
+    envelope: RoomDataEnvelope | RoomDmEnvelope
   }) {
     this._serialized = serialized
     this._info = info
-    this._unstampedEvent = unstampedEvent
+    this._envelope = envelope
   }
 
   stamped(): string {
@@ -110,7 +111,9 @@ class MemberMessageTexts {
   }
 
   unstamped(): string {
-    return (this._unstamped ??= encodePublish(stringify(this._unstampedEvent()), this._info))
+    if (this._unstamped !== null) return this._unstamped
+    const { fromMeta, fromMetaSeq, fromIdentity, fromDisconnected, ...unstamped } = this._envelope
+    return (this._unstamped = encodePublish(stringify(unstamped), this._info))
   }
 }
 

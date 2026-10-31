@@ -508,11 +508,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     this.applyStamp(envelope.from, envelope)
     for (const handle of this._receivers) handle._relayData(serialized, envelope, info)
     if (this.stubs.size === 0) return
-    const texts = new MemberMessageTexts({
-      serialized,
-      info,
-      unstampedEvent: () => ({ __r: 'data', from: envelope.from, data: envelope.data }),
-    })
+    const texts = new MemberMessageTexts({ serialized, info, envelope })
     for (const stub of this.stubs) stub._relayText(serialized, texts, envelope.from, info)
   }
 

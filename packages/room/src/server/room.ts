@@ -300,11 +300,7 @@ class ServerRoom extends RoomStateView implements Room {
       if (envelope.fromMetaSeq !== undefined) {
         this._replica.applyStamp(envelope.from, envelope as RoomDmEnvelope & SenderStamp)
       }
-      const unstampedEvent = () => {
-        const { fromMeta, fromMetaSeq, fromIdentity, fromDisconnected, ...unstamped } = envelope
-        return unstamped
-      }
-      const texts = new MemberMessageTexts({ serialized, info, unstampedEvent })
+      const texts = new MemberMessageTexts({ serialized, info, envelope })
       return holder._relayDm(texts, envelope)
     }
     if (holder === undefined) return
