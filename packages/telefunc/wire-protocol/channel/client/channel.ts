@@ -38,7 +38,7 @@ import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './sessionRegistry.js'
 import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
-import type { CreditOwner, WindowKind } from '../../flowControl/credit.js'
+import type { CreditOwner, Urgency } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
@@ -239,13 +239,13 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by its credit (see `CreditOwner`) ──
 
   /** @internal A closed channel's server ends its sends with the close, so the channel grants it no more credit. */
-  _sendByteLimit(limit: number, kind: WindowKind): void {
-    if (!this.closed) this.connection.sendByteWindowUpdate(this, limit, kind)
+  _sendByteLimit(limit: number, urgency: Urgency): void {
+    if (!this.closed) this.connection.sendByteWindowUpdate(this, limit, urgency)
   }
 
   /** @internal */
-  _sendMessageLimit(limit: number, kind: WindowKind): void {
-    if (!this.closed) this.connection.sendMsgWindowUpdate(this, limit, kind)
+  _sendMessageLimit(limit: number, urgency: Urgency): void {
+    if (!this.closed) this.connection.sendMsgWindowUpdate(this, limit, urgency)
   }
 
   /** @internal */

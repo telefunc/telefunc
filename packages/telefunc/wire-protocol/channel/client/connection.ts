@@ -20,7 +20,7 @@ import {
   TIMER_DELAY_MAX_MS,
   WIRE_MAX_RAW_FRAME_BYTES,
 } from '../../constants.js'
-import { replayWindow, type WindowKind } from '../../flowControl/credit.js'
+import { replayWindow, type Urgency } from '../../flowControl/credit.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
@@ -46,7 +46,7 @@ import type { Downlink } from '../../flowControl/client/Downlink.js'
 import { WsTransport } from './ws.js'
 import { SseTransport } from './sse.js'
 
-type OutboundFrameKind = 'reconcile' | 'released' | 'control' | WindowKind | 'ack' | 'data' | 'heartbeat'
+type OutboundFrameKind = 'reconcile' | 'released' | 'control' | Urgency | 'ack' | 'data' | 'heartbeat'
 
 type OutboundFrame = {
   kind: OutboundFrameKind
@@ -94,8 +94,8 @@ interface MuxConnection {
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
   sendCloseAck(channel: MuxChannel): void
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void
-  sendMsgWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void
+  sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void
   sendBdpPing(channel: MuxChannel, probe: number): void
   sendBdpPingAck(channel: MuxChannel, ack: BdpPingAck): void
   /** Bytes the wire holds that haven't gone out. */
@@ -408,12 +408,12 @@ class ClientConnection implements MuxConnection, SendGateOwner, LivenessOwner, U
     this.gate.send(record, seq, buildFrame(record.ix, seq), 'control')
   }
 
-  sendByteWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void {
-    this.sendUnsequenced(channel, kind, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq))
+  sendByteWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void {
+    this.sendUnsequenced(channel, urgency, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq))
   }
 
-  sendMsgWindowUpdate(channel: MuxChannel, limit: number, kind: WindowKind): void {
-    this.sendUnsequenced(channel, kind, ({ ix }) => encode.msgWindow(ix, limit))
+  sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void {
+    this.sendUnsequenced(channel, urgency, ({ ix }) => encode.msgWindow(ix, limit))
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {

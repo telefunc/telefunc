@@ -2,7 +2,7 @@ export { ReceiveCredit }
 export type { AttachedDownlink }
 
 import { BdpEstimator } from './BdpEstimator.js'
-import type { CreditOwner, WindowKind } from './credit.js'
+import type { CreditOwner, Urgency } from './credit.js'
 import type { RoundTrips } from './RoundTrips.js'
 import type { SelfTime } from './SelfTime.js'
 import type { SendWait } from './SendWait.js'
@@ -214,7 +214,7 @@ class ReceiveCredit {
     }
   }
 
-  private advertiseBytes(kind: 'acknowledgement' | 'flow-control'): void {
+  private advertiseBytes(urgency: 'acknowledgement' | 'flow-control'): void {
     if (!this.fitted) return
     this.advertisedBytes = this.consumedBytes
     const limit = this.consumedBytes + this.byteWindow
@@ -224,7 +224,7 @@ class ReceiveCredit {
     }
     this.uncountedBytes = 0
     this.arrived = false
-    let sent: WindowKind = kind
+    let sent: Urgency = urgency
     if ((this.consumedBytes - this.urgentBytes) * 2 > this.byteWindow) {
       this.urgentBytes = this.consumedBytes
       sent = 'urgent-flow-control'
@@ -237,10 +237,10 @@ class ReceiveCredit {
   }
 
   /** An `acknowledgement` rides the next message, so it is never urgent. */
-  private advertiseMessages(kind: 'acknowledgement' | 'flow-control'): void {
+  private advertiseMessages(urgency: 'acknowledgement' | 'flow-control'): void {
     this.advertisedMessages = this.consumedMessages
-    let sent: WindowKind = kind
-    if (kind === 'flow-control' && (this.consumedMessages - this.urgentMessages) * 2 > this.bdp.msgWindow) {
+    let sent: Urgency = urgency
+    if (urgency === 'flow-control' && (this.consumedMessages - this.urgentMessages) * 2 > this.bdp.msgWindow) {
       this.urgentMessages = this.consumedMessages
       sent = 'urgent-flow-control'
     }

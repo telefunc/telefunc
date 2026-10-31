@@ -5,7 +5,7 @@ import { ACK_STATUS, encode } from '../../wire/frame.js'
 import type { AckResultStatus, ErrorReason, SequencedEncoder } from '../../wire/frame.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import type { SendWait } from '../../flowControl/SendWait.js'
-import type { WindowKind } from '../../flowControl/credit.js'
+import type { Urgency } from '../../flowControl/credit.js'
 
 interface PeerSender {
   send(frame: Uint8Array, onCommit?: () => void): void
@@ -75,12 +75,12 @@ class IndexedPeer {
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
-  sendByteWindowUpdate(limit: number, lastSeq: number, kind: WindowKind): void {
-    this.sendLimit(encode.window(this.index, limit, lastSeq), kind)
+  sendByteWindowUpdate(limit: number, lastSeq: number, urgency: Urgency): void {
+    this.sendLimit(encode.window(this.index, limit, lastSeq), urgency)
   }
 
-  sendMsgWindowUpdate(limit: number, kind: WindowKind): void {
-    this.sendLimit(encode.msgWindow(this.index, limit), kind)
+  sendMsgWindowUpdate(limit: number, urgency: Urgency): void {
+    this.sendLimit(encode.msgWindow(this.index, limit), urgency)
   }
 
   sendBdpPing(probe: number): void {
@@ -91,8 +91,8 @@ class IndexedPeer {
     this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
-  private sendLimit(frame: Uint8Array, kind: WindowKind): void {
-    if (kind === 'acknowledgement') this.sender.carry(frame)
+  private sendLimit(frame: Uint8Array, urgency: Urgency): void {
+    if (urgency === 'acknowledgement') this.sender.carry(frame)
     else this.sender.send(frame)
   }
 

@@ -34,7 +34,7 @@ import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import { ChannelLifecycle, type ChannelLifecycleOwner } from '../ChannelLifecycle.js'
-import { replayWindow, type CreditOwner, type WindowKind } from '../../flowControl/credit.js'
+import { replayWindow, type CreditOwner, type Urgency } from '../../flowControl/credit.js'
 import { ReceiveCredit } from '../../flowControl/ReceiveCredit.js'
 import { SelfTime } from '../../flowControl/SelfTime.js'
 import { SendCredit } from '../../flowControl/SendCredit.js'
@@ -472,13 +472,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   // ── Called by its credit (see `CreditOwner`) ──
 
   /** @internal */
-  _sendByteLimit(limit: number, kind: WindowKind): void {
-    this.peer?.sendByteWindowUpdate(limit, this._lastClientSeq, kind)
+  _sendByteLimit(limit: number, urgency: Urgency): void {
+    this.peer?.sendByteWindowUpdate(limit, this._lastClientSeq, urgency)
   }
 
   /** @internal */
-  _sendMessageLimit(limit: number, kind: WindowKind): void {
-    this.peer?.sendMsgWindowUpdate(limit, kind)
+  _sendMessageLimit(limit: number, urgency: Urgency): void {
+    this.peer?.sendMsgWindowUpdate(limit, urgency)
   }
 
   /** @internal */

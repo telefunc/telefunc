@@ -1,3 +1,5 @@
+export { ReplayBuffer }
+
 import { replayKindOf, type ReplayKind } from '../wire/tags.js'
 import { assert } from '../../utils/assert.js'
 
@@ -7,7 +9,7 @@ type ReplayBufferOptions = {
 }
 
 /** Sent sequenced frames till their peer acks them, in queues by tag; a data queue evicts its oldest past its budget. */
-export class ReplayBuffer {
+class ReplayBuffer {
   /** Each queue, from its first frame on. */
   private readonly queues: Partial<Record<ReplayKind, ReplayQueue>> = {}
   private readonly budgets: Record<ReplayKind, number>
