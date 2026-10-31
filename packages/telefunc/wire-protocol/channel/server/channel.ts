@@ -389,7 +389,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** RECONCILE declarations apply before `onOpen`; an ended channel sends only what it made with no peer attached. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) {
-      this._flushOfflineBuffer(peer)
+      this.flushOfflineBuffer(peer)
       this._sendPendingAckRes(peer)
       this._sendPendingEnd(peer)
       return
@@ -402,7 +402,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const rewired = this._peer?.sender !== peer.sender
     this._peer = peer
     if (rewired) this._flow.reattach()
-    this._flushOfflineBuffer(peer)
+    this.flushOfflineBuffer(peer)
     this._sendPendingAckRes(peer)
     if (state?.broadcast) {
       this._onPeerSubscription({ binary: false, subscribed: state.broadcast.text })
@@ -710,7 +710,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** What was sent while no peer was attached goes to `peer`; an ack request rejected at the end takes no answer. */
-  private _flushOfflineBuffer(peer: IndexedPeer): void {
+  private flushOfflineBuffer(peer: IndexedPeer): void {
     this._offlineBuffer.flush({
       sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
       sendPublish: (msg) => this._flow.countPublishSent(peer.sendPublish(msg)),

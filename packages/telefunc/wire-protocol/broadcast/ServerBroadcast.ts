@@ -132,7 +132,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     return this._trackAck(this._dispatchPublishBinaryAckReq(data, seq))
   }
 
-  private _deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
+  private deliverBroadcastMessage(serialized: string, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     const data = parse(serialized) as ChannelData<T>
     for (const cb of this._broadcastListeners.list()) {
@@ -147,7 +147,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     this._forwardPublish(encodePublishText(serialized, rawInfo))
   }
 
-  private _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
+  private deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
     const info = makePublishInfo(this.key, rawInfo.seq, rawInfo.timestamp)
     for (const cb of this._broadcastBinaryListeners.list()) {
       try {
@@ -238,7 +238,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     assert(this._adapter)
     this._unsubBroadcast = this._adapter.subscribe(
       this.key,
-      (serialized, rawInfo) => this._deliverBroadcastMessage(serialized, rawInfo),
+      (serialized, rawInfo) => this.deliverBroadcastMessage(serialized, rawInfo),
       this._wireRequest,
     )
   }
@@ -248,7 +248,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     assert(this._adapter)
     this._unsubBinaryBroadcast = this._adapter.subscribeBinary(
       this.key,
-      (data, rawInfo) => this._deliverBroadcastBinaryMessage(data, rawInfo),
+      (data, rawInfo) => this.deliverBroadcastBinaryMessage(data, rawInfo),
       this._wireRequest,
     )
   }
