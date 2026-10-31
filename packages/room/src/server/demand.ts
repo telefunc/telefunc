@@ -2,11 +2,11 @@ export { RoomDemand, DemandReport }
 
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { EVERY_MEMBER, DEFAULT_TRACK, type EveryMember } from '../binary.js'
-import { ROOM_MEMBER_TRACKS_MAX } from '../constants.js'
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
 import type { DemandEntry, RoomDemandPage } from './protocol.js'
 import { hasEntry, runAll, toggle, toggleEntry } from './sets.js'
 import { Slice } from '../Slice.js'
+import type { PublishedTracks } from './PublishedTracks.js'
 
 /** The reporters of an entry, each with the telling of everything (`Reporter.telling`) it last told the entry in. */
 type Leases = Map<string, number>
@@ -27,6 +27,8 @@ type DemandHost = {
   deliver(member: string, track: string, wanted: boolean): void
   /** Asks the reporter to tell everything again. */
   ask(instance: string): void
+  /** A report of a member's every track covers the tracks it published on. */
+  readonly published: PublishedTracks
 }
 
 /** What some holder of a replica receives. */
@@ -283,8 +285,6 @@ class RoomDemand {
   private readonly _fetched = new Map<string, Leases>()
   /** Per track, the reports of it of every member, whoever owns them. */
   private readonly _tracks = new Map<string, TrackLeases>()
-  /** The named tracks each member published on; a report of its every track covers them and the default one. */
-  private readonly _published = new Map<string, Set<string>>()
   /** Per track, the owned members told it is wanted, kept by track as `_due` is evaluated a track at a time. */
   private readonly _told = new Map<string, Set<string>>()
   /** Per track, the owned members whose `wanted` may have changed, or `EVERY_MEMBER`: all of them. */
@@ -363,18 +363,8 @@ class RoomDemand {
     this._settle()
   }
 
-  /** Whether the member may publish on `track`: the default track, one it publishes on, or a new one while it publishes
-   *  on fewer than `ROOM_MEMBER_TRACKS_MAX` named tracks. */
-  admitsTrack(member: string, track: string): boolean {
-    const tracks = this._published.get(member)
-    return track === DEFAULT_TRACK || tracks === undefined || tracks.size < ROOM_MEMBER_TRACKS_MAX || tracks.has(track)
-  }
-
-  /** The member publishes on `track`, which a report of its every track covers from now on. */
+  /** The member publishes on a named track it didn't before, which a report of its every track covers from now on. */
   published(member: string, track: string): void {
-    if (track === DEFAULT_TRACK) return
-    if (hasEntry(this._published, member, track)) return
-    toggleEntry(this._published, member, track, true)
     if (!this._members.has(member)) return
     this._queue(track, member)
     this._settle()
@@ -443,7 +433,6 @@ class RoomDemand {
     this._pairs.delete(member)
     this._members.delete(member)
     this._fetched.delete(member)
-    this._published.delete(member)
     for (const [track, members] of this._told) {
       if (members.delete(member) && members.size === 0) this._told.delete(track)
     }
@@ -457,7 +446,6 @@ class RoomDemand {
     this._fetched.clear()
     this._tracks.clear()
     this._told.clear()
-    this._published.clear()
     this._due.clear()
   }
 
@@ -568,8 +556,7 @@ class RoomDemand {
   /** Whether some reporter receives the owned member's track. */
   private _wanted(member: string, track: string): boolean {
     if (this._pairs.get(member)?.has(track)) return true
-    const published = track === DEFAULT_TRACK || this._published.get(member)?.has(track) === true
-    if (published && this._members.has(member)) return true
+    if (this._host.published.has(member, track) && this._members.has(member)) return true
     for (const { instance, except, byMember } of this._tracks.get(track)?.values() ?? []) {
       if (!except.has(member) && (!byMember || this._fetched.get(member)?.has(instance) === true)) return true
     }
@@ -577,7 +564,7 @@ class RoomDemand {
   }
 
   private _everyTrackOf(member: string): string[] {
-    return [DEFAULT_TRACK, ...(this._published.get(member) ?? [])]
+    return [DEFAULT_TRACK, ...this._host.published.namedOf(member)]
   }
 }
 

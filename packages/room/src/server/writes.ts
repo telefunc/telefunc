@@ -139,11 +139,11 @@ class RoomWrites {
       const { sender } = await this._admitPublish(from, frame.payload)
       const planned = host._replica.lanePlan.lanePlanned(from, lane.track)
       if (planned !== null) await planned
-      const demand = host._replica.incomingDemand
-      if (!demand.admitsTrack(from, lane.track)) {
+      const tracks = host._replica.publishedTracks
+      if (!tracks.admits(from, lane.track)) {
         throw new RoomError(`A participant publishes on at most ${ROOM_MEMBER_TRACKS_MAX} named tracks`)
       }
-      demand.published(from, lane.track)
+      if (tracks.add(from, lane.track)) host._replica.incomingDemand.published(from, lane.track)
       const opts = { retain: frame.retain, requiredCellKeys: [memberCellKey(from)] }
       const committing = commitRoomLaneOrThrow({ roomId: host.id, inc: host._incarnation.inc, lane }, framed, opts)
       sent()

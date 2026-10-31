@@ -9,6 +9,7 @@ import type { LaneId } from '../backend/contract.js'
 import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
 import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
 import { DemandReport, RoomDemand } from './demand.js'
+import { PublishedTracks } from './PublishedTracks.js'
 import { DM_FAILURE } from '../errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../protocol.js'
 import type { MemberSnapshot, RoomCtrlEnvelope, RoomDmEnvelope, RoomEnvelope, SenderStamp } from '../protocol.js'
@@ -93,6 +94,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
   readonly _incarnation: RoomIncarnation
   readonly model: RoomModel
   readonly incomingDemand: RoomDemand
+  readonly publishedTracks = new PublishedTracks()
   /** What every holder here receives, told to the other processes and to `demand`. */
   readonly outgoingDemand = new DemandReport((entry, on) => this._tellDemand(entry, on))
   readonly lanePlan: LanePlan
@@ -159,6 +161,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
       ownedMembers: () => this._owners.keys(),
       deliver: (member, track, wanted) => this._owners.get(member)?._deliverDemand(member, track, wanted),
       ask: (instance) => this._askDemand(instance),
+      published: this.publishedTracks,
     })
     this.lanePlan = new LanePlan({ owner: this, outgoingDemand: this.outgoingDemand })
     this.authority = new AuthoritySync(this, this.lanePlan)
@@ -191,6 +194,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     this._owners.delete(member)
     this._inboxSeqs.delete(member)
     this.incomingDemand.forgetMember(member)
+    this.publishedTracks.forget(member)
   }
 
   attachStub(stub: RoomStub): void {
@@ -583,6 +587,7 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
     this.acks.settleAll(DM_FAILURE.roomClosed) // no recipient will reply now
     this.roster.clear()
     this.incomingDemand.close()
+    this.publishedTracks.clear()
     for (const [id, owner] of this._owners) this.disown(id, owner)
     const handles = new Set(this._observers)
     for (const tail of this._tails) handles.add(tail)
