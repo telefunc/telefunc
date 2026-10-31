@@ -7,14 +7,9 @@ import { isObject } from '../../../../utils/isObject.js'
 import { isObjectOrFunction } from '../../../../utils/isObjectOrFunction.js'
 import { Fifo } from '../../../../utils/Fifo.js'
 import { createStreamingReviver } from './registry.js'
-import type {
-  StreamSource,
-  ClientReviverContext,
-  InternalClientReviverContext,
-  ReviverType,
-  TypeContract,
-} from '../../types.js'
+import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../../client/abort.js'
+import type { LazyResponseTypes } from '../../../../client/extensions.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
@@ -27,7 +22,7 @@ import { GcRegistry } from '../../../../utils/GcRegistry.js'
 import { ChannelStreamSource } from '../../ChannelStreamSource.js'
 import { createReadableChunkStream } from '../../createReadableChunkStream.js'
 import { readChunksToBytes } from '../../readChunksToBytes.js'
-import { SERIALIZER_PREFIX_ROOM_STEM, STREAMING_ERROR_TYPE } from '../../../constants.js'
+import { STREAMING_ERROR_TYPE } from '../../../constants.js'
 import { ownIndexedPayload } from '../../../wire/frame.js'
 import { getGlobalObject } from '../../../../utils/getGlobalObject.js'
 
@@ -43,6 +38,7 @@ type CallContext = {
   abortController: AbortController
   requestCloseHandlers: CloseHandler[]
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
+  extensionLazyResponseTypes: LazyResponseTypes[]
 }
 
 // ===== Public entry point =====
@@ -92,7 +88,6 @@ async function reviveResponse(
   connection: ConnectionOptions,
   bodyStreamReader: BaseStreamReader | null,
 ): Promise<unknown> {
-  const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
 
   const throwStreamError = (errorPayload: Record<string, unknown>): never => {
@@ -104,7 +99,7 @@ async function reviveResponse(
 
   const pendingValues: PendingValue<unknown>[] = []
   let demuxer: FrameDemuxer | undefined
-  const context: InternalClientReviverContext = {
+  const context: ClientReviverContext = {
     shareLifecycle(child, owner) {
       const close = closeHandlers.get(owner)
       assert(close)
@@ -139,10 +134,10 @@ async function reviveResponse(
 
   const allCloseHandlers = [...callContext.requestCloseHandlers]
 
-  // Keeps Room's client code out of the entry bundle: only a response whose text holds a Room prefix loads it.
-  let roomTypes: ReviverType<TypeContract, InternalClientReviverContext>[] = []
-  if (body.includes(SERIALIZER_PREFIX_ROOM_STEM)) {
-    roomTypes = (await import('./room.js')).roomTypes
+  const extensionResponseTypes = [...callContext.extensionResponseTypes]
+  for (const lazy of callContext.extensionLazyResponseTypes) {
+    if (!body.includes(lazy.stem)) continue
+    extensionResponseTypes.push(...(await lazy.load()))
     // Aborted during the load, before any revived value listens for it.
     if (callContext.abortController.signal.aborted) {
       throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
@@ -179,7 +174,6 @@ async function reviveResponse(
       // This is what the user gets
       return wrapper
     },
-    roomTypes,
     extensionResponseTypes,
   )
 

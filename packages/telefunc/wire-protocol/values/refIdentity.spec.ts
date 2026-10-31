@@ -17,8 +17,6 @@ import { config, getServerConfig } from '../../node/server/serverConfig.js'
 import type { AbortError } from '../../shared/Abort.js'
 import type {
   ClientReviverContext,
-  InternalClientReviverContext,
-  InternalServerReplacerContext,
   ReplacerType,
   ReviverType,
   ServerReplacerContext,
@@ -46,7 +44,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
   const producers: { createProducer: () => StreamingProducer; index: number }[] = []
   const lifecycles: Lifecycle[] = []
   let nextIndex = 0
-  const context: InternalServerReplacerContext = {
+  const context: ServerReplacerContext = {
     createChannel(opts) {
       const channel = new ServerChannel(opts)
       context.registerChannel(channel)
@@ -67,6 +65,7 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
     },
     validators: new Map(),
     responseState: (_key, init) => init(),
+    maxFrameBytes: undefined,
   }
   const replacer = createStreamingReplacer(
     () => context,
@@ -84,7 +83,7 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const mintedBroadcasts: { channelId: string; key: string }[] = []
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
-  const context: InternalClientReviverContext = {
+  const context: ClientReviverContext = {
     shareLifecycle() {},
     createChannel(opts) {
       mintedChannels.push(opts)
@@ -105,7 +104,6 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
       // Mirror reviveResponse: the value handed out (and cached) is the GC wrapper.
       return wrapProxy(revived.value as object)
     },
-    [],
     extensionTypes,
   )
   const parseBody = (body: string) => parse(body, { reviver })
@@ -467,6 +465,7 @@ async function roundTrip(
         abortController,
         requestCloseHandlers: [],
         extensionResponseTypes: opts.clientExtensions ?? [],
+        extensionLazyResponseTypes: [],
       },
       { transports: ['sse'], telefuncUrl: 'http://localhost/_telefunc' },
     )) as { ret: unknown }

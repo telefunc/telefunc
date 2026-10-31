@@ -18,7 +18,7 @@ type BackendSubscription = {
   unsubscribe(): Promise<void>
 }
 
-/** What a driver delivers: a string on a text Broadcast route, bytes on a binary route or a Room lane. */
+/** What a driver delivers: a string on a text Broadcast route, bytes on a binary route or an extension's source. */
 type BackendPayload = string | Uint8Array
 
 type BackendReceiver<Payload = Uint8Array> = (payload: Payload, info: { seq: number; timestamp: number }) => void

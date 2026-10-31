@@ -14,20 +14,19 @@ import type {
 } from '../channel/channel.js'
 import type { TELEFUNC_SHIELDS } from '../../node/shared/transformer/generateShield/shieldKey.js'
 import { invokeChannelListener, makePublishInfo } from '../channel/channel.js'
-import { reportServerChannelError } from '../channel/server/channel.js'
+import { reportBug } from '../channel/server/channel.js'
 import { ServerBroadcastEnd, type BroadcastEndOwner } from '../channel/server/ServerBroadcastEnd.js'
 import { assertPublishShield, type ShieldValidator } from '../../node/server/shield.js'
 import type { BroadcastPayload, BroadcastRoute } from '../backend/broadcast/contract.js'
 import { followBroadcastPlane, getBroadcastBackend, unfollowBroadcastPlane } from '../backend/install.js'
 import type { BackendReceiver, BackendSubscription } from '../backend/subscription.js'
-import { reportSubscriptionEnd } from '../backend/SubscriptionManager.js'
 import { stringify } from '@brillout/json-serializer/stringify'
 import { parse } from '@brillout/json-serializer/parse'
 import { assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { markHandled } from '../../utils/markHandled.js'
 import { Listeners } from '../../utils/Listeners.js'
-import { encodePublishText, encodePublishBinary } from '../wire/connectionFrame.js'
+import { encodePublish } from '../wire/connectionFrame.js'
 import type { BroadcastKind, WirePublishInfo } from '../wire/connectionFrame.js'
 import { assertIsNotBrowser } from '../../utils/assertIsNotBrowser.js'
 import { isAbort } from '../../node/server/Abort.js'
@@ -150,7 +149,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     const listeners = this._subscribers.text.list()
     if (!this._callListeners(listeners, rawInfo, (cb, info) => cb(data, info))) return
     if (!this._peerSubscriptions.text) return
-    this._end.deliver(encodePublishText(serialized, rawInfo))
+    this._end.deliver(encodePublish(serialized, rawInfo))
   }
 
   _deliverBroadcastBinaryMessage(data: Uint8Array, rawInfo: WirePublishInfo): void {
@@ -158,7 +157,7 @@ class ServerBroadcast<T = unknown> implements BroadcastEndOwner {
     const listeners = this._subscribers.binary.list()
     if (!this._callListeners(listeners, rawInfo, (cb, info) => cb(new Uint8Array(data), info))) return
     if (!this._peerSubscriptions.binary) return
-    this._end.deliverBinary(encodePublishBinary(data, rawInfo))
+    this._end.deliverBinary(encodePublish(data, rawInfo))
   }
 
   /** Calls each listener directly, as a channel's receive does, since this runs per subscriber per message; false once
@@ -295,7 +294,7 @@ function subscribeRoute<Kind extends BroadcastKind, Data>(
 
 /** A listener's `Abort` is no bug, and there is no channel for it to close. */
 function reportListenerError(error: unknown): void {
-  if (!isAbort(error)) reportServerChannelError(error)
+  if (!isAbort(error)) reportBug(error)
 }
 
 /** A route's subscription while wanted; one that ends on its own is reported and replaced once, and a transport that
@@ -332,10 +331,10 @@ class RouteSubscription<Kind extends BroadcastKind> {
     const subscription = getBroadcastBackend().subscribe(this._route, this._receiver)
     this._current = subscription
     let wasReady = subscription.state() === 'ready'
-    // Only a terminal end rejects `ready`, after the manager retired the subscription; an unsubscribe resolves it.
+    // Only a terminal end rejects `ready`, after the manager retired and reported the subscription; an unsubscribe
+    // resolves it.
     const ended = () =>
-      void subscription.ready.catch((error: unknown) => {
-        reportSubscriptionEnd(error, reportServerChannelError)
+      void subscription.ready.catch(() => {
         if (this._current !== subscription) return
         this._current = null
         if (!replacing || wasReady) this._subscribe(true)

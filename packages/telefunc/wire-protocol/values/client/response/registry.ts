@@ -11,8 +11,8 @@ import { promiseReviver } from './promise.js'
 import { broadcastReviver } from './broadcast.js'
 import { channelReviver } from './channel.js'
 import { functionReviver } from './function.js'
-import type { ClientReviverContext, InternalClientReviverContext, ReviverType, TypeContract } from '../../types.js'
-import { assert } from '../../../../utils/assert.js'
+import type { ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
+import { assert, assertUsage } from '../../../../utils/assert.js'
 import { isObject } from '../../../../utils/isObject.js'
 
 const clientTypes = [
@@ -35,12 +35,11 @@ const clientTypes = [
  *  value — the first occurrence revives (side effects run once), duplicates resolve to the
  *  already-revived object, and server-side `===` holds on the client too. */
 function createStreamingReviver(
-  context: InternalClientReviverContext,
+  context: ClientReviverContext,
   handOut: (revived: ReturnType<ReviverType['revive']>) => unknown,
-  roomTypes: ReviverType<TypeContract, InternalClientReviverContext>[],
   extensionTypes: ReviverType<TypeContract, ClientReviverContext>[],
 ) {
-  const allTypes = [...clientTypes, ...roomTypes, ...extensionTypes]
+  const allTypes = [...clientTypes, ...extensionTypes]
   const revivedByWireString = new Map<string, unknown>()
   const reviver: Reviver = (_path, value, parser) => {
     if (revivedByWireString.has(value)) return { replacement: revivedByWireString.get(value) }
@@ -55,6 +54,11 @@ function createStreamingReviver(
         return { replacement: handedOut }
       }
     }
+    // The serializer escapes a string the telefunction returned, so only an extension writes this prefix.
+    assertUsage(
+      !value.startsWith('!Telefunc'),
+      `The response holds a ${value.split(':')[0]} value, which no loaded extension revives: load the client entry of the package that sends it.`,
+    )
     return undefined
   }
   return reviver

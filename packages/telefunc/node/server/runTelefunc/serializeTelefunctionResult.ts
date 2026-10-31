@@ -23,14 +23,14 @@ import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/c
 import { textEncoder } from '../../../wire-protocol/wire/frame.js'
 import { uint8ArrayToBase64url } from '../../../wire-protocol/wire/base64url.js'
 import type {
-  InternalServerReplacerContext,
+  ServerReplacerContext,
   StreamingProducer,
   StreamingValueServer,
 } from '../../../wire-protocol/values/types.js'
 import { type RequestContext } from '../context/requestContext.js'
 import type { Context } from '../context/context.js'
 import type { Readable } from 'node:stream'
-import { getServerExtensionTypes } from '../serverConfig.js'
+import { getAdapterMaxFrameBytes, getServerExtensionTypes } from '../serverConfig.js'
 
 /** Look up the shields for a revived value and build its auto-logging validator map.
  *  Empty map when the value isn't tracked in `valueShields` or has no registered shields. */
@@ -131,7 +131,7 @@ function serializeTelefunctionResult(runContext: {
     return responseStates.get(key) as T
   }
   const replacer = createStreamingReplacer(
-    function getContext(value: unknown): InternalServerReplacerContext {
+    function getContext(value: unknown): ServerReplacerContext {
       return {
         createChannel,
         registerChannel,
@@ -139,6 +139,7 @@ function serializeTelefunctionResult(runContext: {
         sendStream,
         responseState,
         validators: makeValidators(value, valueShields, shieldCtx),
+        maxFrameBytes: getAdapterMaxFrameBytes(),
       }
     },
     function onReplaced({ abort }) {

@@ -1,5 +1,6 @@
 export { RedisBackend }
 
+import { roomKit, setRoomKit } from './roomKit.js'
 import { assert } from './assert.js'
 import {
   callDefinedCommand,
@@ -9,9 +10,14 @@ import {
   type RedisClient,
 } from './ioredis.js'
 import type {
+  BackendDriver,
   BroadcastDriver,
   BroadcastPayload,
   BroadcastRoute,
+  PublishResult,
+  OrderingInfo,
+} from 'telefunc/__internal'
+import type {
   CellsCx,
   CommitAccepted,
   CommitResult,
@@ -20,7 +26,6 @@ import type {
   HeadCxResult,
   HeadNext,
   LaneId,
-  PublishResult,
   RoomDriver,
   RoomHead,
   CellSelector,
@@ -30,9 +35,9 @@ import type {
   RetainedFrame,
   RetainedOf,
   DirectoryPage,
-  OrderingInfo,
-} from 'telefunc/__internal'
-import { DIRECTORY_PAGE_SIZE, decodeLaneKey, decodeOrderingFrame, encodeLaneKey } from 'telefunc/__internal'
+  RoomPlaneKit,
+} from '@telefunc/room/backend'
+import { decodeOrderingFrame } from 'telefunc/__internal'
 import {
   directoryIndexKey,
   directoryTagsKey,
@@ -58,6 +63,13 @@ type RedisBackendOptions = {
 
 class RedisBackend implements BroadcastDriver, RoomDriver {
   readonly subscriptions: RedisSubscriptionDriver
+  /** Room's plane is this driver, on the subscriber socket Broadcast uses. */
+  readonly planes = {
+    [Symbol.for('telefunc.room.plane')]: (kit: RoomPlaneKit): RoomDriver => {
+      setRoomKit(kit)
+      return this
+    },
+  } satisfies BackendDriver['planes']
 
   private readonly _publisher: RedisClient
   private readonly _prefix: string
@@ -118,7 +130,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     if (!isCluster(this._publisher)) return commit()
     // A Cluster re-sends a command Redis refused with TRYAGAIN (its slot migrating) or CLUSTERDOWN (a failover) after a
     // delay, so a later commit on the lane could land first: each is sent once the one before it was answered.
-    return this._inLaneTurn(JSON.stringify([target.roomId, target.inc, encodeLaneKey(target.lane)]), commit)
+    return this._inLaneTurn(JSON.stringify([target.roomId, target.inc, roomKit().encodeLaneKey(target.lane)]), commit)
   }
 
   private _inLaneTurn<T>(turnKey: string, commit: () => Promise<T>): Promise<T> {
@@ -137,7 +149,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     payload: Uint8Array,
     opts?: CommitOptions,
   ): Promise<CommitResult> {
-    const laneKey = encodeLaneKey(lane)
+    const laneKey = roomKit().encodeLaneKey(lane)
     const channels = commitChannels(this._prefix, roomId, inc, lane, laneKey)
     const fence = lane.kind === 'inbox' || lane.kind === 'control' ? this.subscriptions.prepareFence(channels) : null
     let reply
@@ -174,7 +186,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readLaneOrder(roomId: string, inc: string, lane: LaneId): Promise<OrderingInfo | null> {
-    const laneKey = encodeLaneKey(lane)
+    const laneKey = roomKit().encodeLaneKey(lane)
     const mark =
       lane.kind === 'inbox' || lane.kind === 'binary'
         ? await this._publisher.hget(memberOrderKey(this._prefix, roomId, inc, lane.member), laneKey)
@@ -183,7 +195,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   async readRetained(roomId: string, inc: string, lane: LaneId): Promise<RetainedFrame | null> {
-    const frame = await this._publisher.getBuffer(retainedKey(this._prefix, roomId, inc, encodeLaneKey(lane)))
+    const frame = await this._publisher.getBuffer(retainedKey(this._prefix, roomId, inc, roomKit().encodeLaneKey(lane)))
     if (frame === null) return null
     const { payload, info } = decodeOrderingFrame(frame)
     return { payload: Uint8Array.from(payload), seq: info.seq, timestamp: info.timestamp }
@@ -197,7 +209,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
           ? retainedOfKey(this._prefix, roomId, inc, of.member)
           : retainedOfTrackKey(this._prefix, roomId, inc, of.track)
     }
-    return (await this._publisher.smembers(index)).map(decodeLaneKey)
+    return (await this._publisher.smembers(index)).map(roomKit().decodeLaneKey)
   }
 
   deleteRetained(roomId: string, inc: string, lane: LaneId, opts?: { ifSeq?: number }): Promise<void> {
@@ -210,7 +222,7 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     do {
       const [next, fields] = await this._publisher.hscan(orders, cursor, 'COUNT', LANE_PAGE_SIZE)
       cursor = next
-      const lanes = fields.filter((field, i) => i % 2 === 0 && decodeLaneKey(field).kind === 'binary')
+      const lanes = fields.filter((field, i) => i % 2 === 0 && roomKit().decodeLaneKey(field).kind === 'binary')
       if (lanes.length > 0) await this._run(REDIS_COMMANDS.forgetTrackLanes, { roomId, inc, lanes })
     } while (cursor !== '0')
     await this._run(REDIS_COMMANDS.dropLaneOrders, { roomId, inc, member })
@@ -243,13 +255,13 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   async directoryList(prefix: string, cursor?: string): Promise<DirectoryPage> {
     const index = directoryIndexKey(this._prefix)
     const min = cursor === undefined ? `[${prefix}` : `(${cursor}`
-    const page = await this._publisher.zrangebylex(index, min, '+', 'LIMIT', 0, DIRECTORY_PAGE_SIZE + 1)
+    const page = await this._publisher.zrangebylex(index, min, '+', 'LIMIT', 0, roomKit().DIRECTORY_PAGE_SIZE + 1)
     const matching: string[] = []
     for (const member of page) {
       if (member.startsWith(prefix)) matching.push(member)
       else break
     }
-    const roomIds = matching.slice(0, DIRECTORY_PAGE_SIZE)
+    const roomIds = matching.slice(0, roomKit().DIRECTORY_PAGE_SIZE)
     const last = roomIds.at(-1)
     if (last === undefined) return { entries: [] }
     const tags = await this._publisher.hmget(directoryTagsKey(this._prefix), ...roomIds)
@@ -257,11 +269,11 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
       const incTag = tags[i]
       return incTag === null || incTag === undefined ? [] : [{ roomId, incTag }]
     })
-    return matching.length > DIRECTORY_PAGE_SIZE ? { entries, cursor: last } : { entries }
+    return matching.length > roomKit().DIRECTORY_PAGE_SIZE ? { entries, cursor: last } : { entries }
   }
 
   directoryDue(): Promise<DirectoryPage['entries']> {
-    return this._run(REDIS_COMMANDS.directoryDue, { limit: DIRECTORY_PAGE_SIZE })
+    return this._run(REDIS_COMMANDS.directoryDue, { limit: roomKit().DIRECTORY_PAGE_SIZE })
   }
 
   /** Each of the source's lanes' last commit, read once its SUBSCRIBE is acknowledged, by the lane key its frames carry
