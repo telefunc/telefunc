@@ -72,24 +72,23 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     },
   } satisfies BackendDriver['planes']
 
-  private readonly _publisher: RedisClient
+  private _publisher: RedisClient
   private readonly _prefix: string
   private readonly _reportsReceivers: boolean
   /** A Cluster's last commit per lane. */
   private readonly _laneTurns = new Map<string, Promise<void>>()
   /** The app clients installed with this backend: its command client ends once the last one does. */
   private readonly holders = new Set<RedisClient>()
+  /** The last holder ended, so `_publisher` was disconnected; its socket may still be closing. */
+  private publisherEnded = false
 
   constructor(options: RedisBackendOptions) {
     assertKeyPrefix(options.prefix)
-    this._publisher = createCommandClient(options.redis)
+    this._publisher = commandClientOf(options.redis)
     // Pub/Sub channels span every database, so a standalone client's names carry its database.
     this._prefix = isCluster(this._publisher) ? options.prefix : `${options.prefix}${this._publisher.options.db ?? 0}:`
     // A Cluster node's PUBLISH count is node-local, so it cannot prove global absence.
     this._reportsReceivers = !isCluster(this._publisher)
-    for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS)) {
-      this._publisher.defineCommand(name, numberOfKeys === null ? { lua } : { numberOfKeys, lua })
-    }
     this.subscriptions = new RedisSubscriptionDriver({
       prefix: this._prefix,
       createSubscriber: () => createSubscriberSocket(this._publisher),
@@ -98,14 +97,19 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
   }
 
   /** The backend's command client lives while `redis`, or another app client installed with it, does; a client
-   *  installed after the last one ended connects it again. */
+   *  installed after the last one ended gets a new one, as the old one's close may still be pending. */
   holdFor(redis: RedisClient): void {
     if (this.holders.has(redis)) return
     this.holders.add(redis)
-    if (this._publisher.status === 'end') void this._publisher.connect().catch(() => {})
+    if (this.publisherEnded) {
+      this._publisher = commandClientOf(redis)
+      this.publisherEnded = false
+    }
     redis.once('end', () => {
       this.holders.delete(redis)
-      if (this.holders.size === 0) this._publisher.disconnect()
+      if (this.holders.size > 0) return
+      this._publisher.disconnect()
+      this.publisherEnded = true
     })
   }
 
@@ -342,4 +346,13 @@ class RedisBackend implements BroadcastDriver, RoomDriver {
     const name = command.binaryReply ? `${command.name}Buffer` : command.name
     return command.parse(await callDefinedCommand(this._publisher, name, keysAndArgs), input)
   }
+}
+
+/** The backend's own client for its commands, with its scripts defined. */
+function commandClientOf(redis: RedisClient): RedisClient {
+  const commands = createCommandClient(redis)
+  for (const { name, lua, numberOfKeys } of Object.values(REDIS_COMMANDS)) {
+    commands.defineCommand(name, numberOfKeys === null ? { lua } : { numberOfKeys, lua })
+  }
+  return commands
 }
