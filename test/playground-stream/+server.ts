@@ -63,6 +63,8 @@ const tfDeno = 'Deno' in globalThis ? new TelefuncDeno() : undefined
 // On Bun and Deno, fetch() answers /_telefunc before the app's route.
 const tf = tfBun || tfDeno ? undefined : new Telefunc()
 const app = new Hono()
+// Vike's middlewares go before the app's routes, its handlers and pages after them.
+vike(app)
 
 // Bench toggle: when `TELEFUNC_NATIVE=1` the `/_telefunc` route feeds the raw
 // Node `IncomingMessage` / `ServerResponse` into `tf.serve({ req, res })`,
@@ -566,8 +568,6 @@ app.all('/_telefunc', async (c) => {
   const response = await tf!.serve({ request: c.req.raw })
   return response ?? c.text('Not found', 404)
 })
-
-vike(app)
 
 // HTTPS via `certs/localhost.{pem,-key.pem}` next to the playground root (resolved
 // from `process.cwd()` — start the server from `test/playground-stream/`). Generate:

@@ -8,8 +8,8 @@
   },
   "dependencies": {
     "@telefunc/room": "workspace:*",
-    "@vikejs/hono": "^0.2.0",
-    "hono": "^4.10.4",
+    "@vikejs/hono": "^0.4.1",
+    "hono": "^4.13.13",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "telefunc": "0.3.1",
