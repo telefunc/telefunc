@@ -5,7 +5,7 @@ import { ClientRoom, ClientStandaloneParticipant } from './room.js'
 import type { LocalParticipant, RemoteParticipant } from '../types.js'
 import type { ParticipantStubMetadata, RemoteParticipantMetadata, RoomSnapshotMetadata } from '../protocol.js'
 import { assert } from '../utils/assert.js'
-import { untether } from 'telefunc/__internal'
+import { untether, type PageClient } from 'telefunc/__internal'
 import {
   SERIALIZER_PREFIX_ROOM,
   SERIALIZER_PREFIX_ROOM_PARTICIPANT,
@@ -15,46 +15,17 @@ import {
 type RoomReviverContract = TypeContract<never, ClientRoom, RoomSnapshotMetadata>
 type RoomParticipantReviverContract = TypeContract<never, LocalParticipant, ParticipantStubMetadata>
 type RoomRemoteReviverContract = TypeContract<never, RemoteParticipant, RemoteParticipantMetadata>
+type ChannelMetadata = { channelId: string; roomId: string; maxFrameBytes?: number }
 
-const roomReviver: ReviverType<RoomReviverContract, ClientReviverContext> = {
-  prefix: SERIALIZER_PREFIX_ROOM,
-  revive(metadata, context) {
-    const end = context.createBroadcastChannel({
-      channelId: metadata.channelId,
-      key: metadata.roomId,
-      maxFrameBytes: metadata.maxFrameBytes,
-    })
-    return {
-      value: new ClientRoom(end, metadata),
-      async close() {
-        await end.close()
-      },
-      abort(abortError) {
-        end.abort(abortError.abortValue, abortError.message)
-      },
-    }
-  },
-}
+const roomReviver = channelReviver<RoomReviverContract>(
+  SERIALIZER_PREFIX_ROOM,
+  (end, metadata) => new ClientRoom(end, metadata),
+)
 
-const roomParticipantReviver: ReviverType<RoomParticipantReviverContract, ClientReviverContext> = {
-  prefix: SERIALIZER_PREFIX_ROOM_PARTICIPANT,
-  revive(metadata, context) {
-    const end = context.createBroadcastChannel({
-      channelId: metadata.channelId,
-      key: metadata.roomId,
-      maxFrameBytes: metadata.maxFrameBytes,
-    })
-    return {
-      value: new ClientStandaloneParticipant(end, metadata),
-      async close() {
-        await end.close()
-      },
-      abort(abortError) {
-        end.abort(abortError.abortValue, abortError.message)
-      },
-    }
-  },
-}
+const roomParticipantReviver = channelReviver<RoomParticipantReviverContract>(
+  SERIALIZER_PREFIX_ROOM_PARTICIPANT,
+  (end, metadata) => new ClientStandaloneParticipant(end, metadata),
+)
 
 /** Bound to the live `ClientRoom` the parser revived first, so `room.getParticipant(m.id) === m`, and sharing its
  *  lifecycle. */
@@ -76,3 +47,29 @@ const roomRemoteReviver: ReviverType<RoomRemoteReviverContract, ClientReviverCon
 }
 
 const roomTypes = [roomReviver, roomParticipantReviver, roomRemoteReviver]
+
+/** The reviver of a value that holds its own Broadcast channel to the server, which its close and abort end. */
+function channelReviver<Contract extends TypeContract<never, unknown, ChannelMetadata>>(
+  prefix: string,
+  create: (end: PageClient, metadata: Contract['metadata']) => Contract['result'],
+): ReviverType<Contract, ClientReviverContext> {
+  return {
+    prefix,
+    revive(metadata, context) {
+      const end = context.createBroadcastChannel({
+        channelId: metadata.channelId,
+        key: metadata.roomId,
+        maxFrameBytes: metadata.maxFrameBytes,
+      })
+      return {
+        value: create(end, metadata),
+        async close() {
+          await end.close()
+        },
+        abort(abortError) {
+          end.abort(abortError.abortValue, abortError.message)
+        },
+      }
+    },
+  }
+}
