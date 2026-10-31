@@ -1,5 +1,5 @@
 export { FlowControl, replayWindow }
-export type { AttachedDownlink, AttachedUplink, FlowControlOptions, WindowKind }
+export type { AttachedDownlink, AttachedUplink, CreditOwner, WindowKind }
 
 import { BdpEstimator } from './BdpEstimator.js'
 import type { Link, SendWait } from './Link.js'
@@ -18,14 +18,18 @@ import { Fifo } from '../../utils/Fifo.js'
 /** A batching wire sends `urgent-flow-control` at once; an `acknowledgement` may ride the next message it sends. */
 type WindowKind = 'urgent-flow-control' | 'acknowledgement' | 'flow-control'
 
-/** What a channel's flow control sends and reads. */
-interface FlowControlOptions {
+/** The channel a credit belongs to: it sends the frames its credit decides on, and says what its wire holds. */
+interface CreditOwner {
   // Limits go out mod 2^32; a byte limit carries the last seq this side has, which acknowledges what arrived.
-  byteWindowUpdate(limit: number, kind: WindowKind): void
-  msgWindowUpdate(limit: number, kind: WindowKind): void
-  bdpPing(probe: number): void
+  _sendByteLimit(limit: number, kind: WindowKind): void
+  _sendMessageLimit(limit: number, kind: WindowKind): void
+  _sendBdpPing(probe: number): void
   /** Bytes waiting to go out on the channel's wire, `undefined` where the runtime can't tell. */
-  backlog(): number | undefined
+  _backlogBytes(): number | undefined
+}
+
+type FlowControlOptions = {
+  owner: CreditOwner
   /** A page's: Chromium takes what a page queued on a socket only between tasks, so its sender yields past this. */
   yieldBytes?: number
   /** How long frames that go at once wait behind the wire's own data where no attach tells it, `null` for unknown. */
@@ -50,10 +54,7 @@ function replayWindow(text: number, binary: number): number {
 
 /** A channel's byte and message credit both ways, as cumulative limits, as QUIC's MAX_DATA. */
 class FlowControl {
-  private readonly _byteWindowUpdate: FlowControlOptions['byteWindowUpdate']
-  private readonly _msgWindowUpdate: FlowControlOptions['msgWindowUpdate']
-  private readonly _bdpPing: FlowControlOptions['bdpPing']
-  private readonly _backlog: FlowControlOptions['backlog']
+  private readonly owner: CreditOwner
   private readonly _sendWait: FlowControlOptions['sendWait']
   private _bdp = new BdpEstimator()
   /** The page's uplink of the last `attach`. */
@@ -109,11 +110,8 @@ class FlowControl {
   private _curBucketStart = performance.now()
   private _openedAt = performance.now()
 
-  constructor({ byteWindowUpdate, msgWindowUpdate, bdpPing, backlog, yieldBytes, sendWait }: FlowControlOptions) {
-    this._byteWindowUpdate = byteWindowUpdate
-    this._msgWindowUpdate = msgWindowUpdate
-    this._bdpPing = bdpPing
-    this._backlog = backlog
+  constructor({ owner, yieldBytes, sendWait }: FlowControlOptions) {
+    this.owner = owner
     this._yieldBytes = yieldBytes ?? Infinity
     this._sendWait = sendWait
     macrotaskYield.assertSupported()
@@ -209,7 +207,7 @@ class FlowControl {
     this._arrived = true
     this._receivedBytes += bytes
     this._downlink?.creditArrived(bytes)
-    if (this._bdp.onReceive(bytes, this._wireWait())) this._bdpPing(this._bdp.probe)
+    if (this._bdp.onReceive(bytes, this._wireWait())) this.owner._sendBdpPing(this._bdp.probe)
   }
 
   /** How long the frames that go at once wait behind the wire's own data: the attached uplink's, else `sendWait`'s. */
@@ -410,7 +408,7 @@ class FlowControl {
     if (sent !== 'acknowledgement' && this._consumedMessages > this._advertisedMessages) {
       this._advertiseMessages('acknowledgement')
     }
-    this._byteWindowUpdate(limit >>> 0, sent)
+    this.owner._sendByteLimit(limit >>> 0, sent)
   }
 
   /** An `acknowledgement` rides the next message, so it is never urgent. */
@@ -421,12 +419,12 @@ class FlowControl {
       this._urgentMessages = this._consumedMessages
       sent = 'urgent-flow-control'
     }
-    this._msgWindowUpdate((this._consumedMessages + this._bdp.msgWindow) >>> 0, sent)
+    this.owner._sendMessageLimit((this._consumedMessages + this._bdp.msgWindow) >>> 0, sent)
   }
 
   private _noteBacklog(): void {
     if (this._leastBacklog === 0 || !this._isOutOfCredit()) return
-    this._leastBacklog = Math.min(this._leastBacklog, this._backlog() ?? 0)
+    this._leastBacklog = Math.min(this._leastBacklog, this.owner._backlogBytes() ?? 0)
   }
 
   private _isOutOfCredit(): boolean {

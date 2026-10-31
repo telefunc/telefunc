@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FlowControl } from './FlowControl.js'
-import type { FlowControlOptions } from './FlowControl.js'
+import type { CreditOwner } from './FlowControl.js'
 import { BDP_PING_MIN_INTERVAL_MS, CREDIT_WINDOW_INITIAL_BYTES, CREDIT_WINDOW_MAX_BYTES } from '../constants.js'
 
 beforeEach(() => vi.useFakeTimers({ now: 1_000_000 }))
@@ -21,7 +21,7 @@ async function flushMicrotasks(): Promise<void> {
 // Spy emit — captures calls so tests can assert which wire frames the flow
 // would have produced. Each test starts with a fresh `Emit` so the spec
 // doesn't need cross-test reset hygiene.
-type Emit = FlowControlOptions & {
+type Emit = CreditOwner & {
   windowCalls: number[]
   msgWindowCalls: number[]
   bdpPingCalls: number
@@ -34,23 +34,23 @@ function makeEmit(): Emit {
     msgWindowCalls: [],
     bdpPingCalls: 0,
     probe: 0,
-    byteWindowUpdate(b) {
+    _sendByteLimit(b) {
       e.windowCalls.push(b)
     },
-    msgWindowUpdate(c) {
+    _sendMessageLimit(c) {
       e.msgWindowCalls.push(c)
     },
-    bdpPing(probe) {
+    _sendBdpPing(probe) {
       e.bdpPingCalls++
       e.probe = probe
     },
-    backlog: () => 0,
+    _backlogBytes: () => 0,
   }
   return e
 }
 function makeFlow() {
   const emit = makeEmit()
-  return { emit, flow: fitted(new FlowControl(emit)) }
+  return { emit, flow: fitted(new FlowControl({ owner: emit })) }
 }
 /** Fitted to the default replay buffers, which allow the largest window either way. */
 function fitted(flow: FlowControl): FlowControl {

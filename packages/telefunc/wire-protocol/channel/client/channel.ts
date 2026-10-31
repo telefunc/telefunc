@@ -37,7 +37,7 @@ import { ShieldValidationError } from '../../../shared/ShieldValidationError.js'
 import { ClientConnection } from './connection.js'
 import { getSessionUrl } from './sessionRegistry.js'
 import { FC_PAGE_YIELD_BYTES, WIRE_MAX_RAW_FRAME_BYTES, type ChannelTransports } from '../../constants.js'
-import { FlowControl } from '../../flowControl/FlowControl.js'
+import { FlowControl, type CreditOwner, type WindowKind } from '../../flowControl/FlowControl.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
 import type { Uplink } from '../../flowControl/client/Uplink.js'
 import type { Downlink } from '../../flowControl/client/Downlink.js'
@@ -66,7 +66,7 @@ type ClientChannelOptions = {
 }
 
 class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel
+  implements ClientChannelType<ClientToServer, ServerToClient>, MuxChannel, CreditOwner
 {
   /** @see ChannelShield in ../channel.ts — `data` validates C2S; `ack` validates ack of own C2S send. */
   declare readonly [TELEFUNC_SHIELDS]: {
@@ -117,18 +117,7 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     this.ack = ack
     this.key = key
     this._maxFrameBytes = maxFrameBytes
-    this._flow = new FlowControl({
-      // A closed channel's server ends its sends with the close, so the channel grants it no more credit.
-      byteWindowUpdate: (limit, kind) => {
-        if (!this._isClosed) this._connection.sendByteWindowUpdate(this, limit, kind)
-      },
-      msgWindowUpdate: (limit, kind) => {
-        if (!this._isClosed) this._connection.sendMsgWindowUpdate(this, limit, kind)
-      },
-      bdpPing: (probe) => this._connection.sendBdpPing(this, probe),
-      backlog: () => this._connection.bufferedAmount(),
-      yieldBytes: FC_PAGE_YIELD_BYTES,
-    })
+    this._flow = new FlowControl({ owner: this, yieldBytes: FC_PAGE_YIELD_BYTES })
     const config = resolveClientConfig()
     this._connection = ClientConnection.getOrCreate(getSessionUrl(connection.telefuncUrl), this, {
       transports: connection.transports,
@@ -260,6 +249,28 @@ class ClientChannel<ClientToServer = unknown, ServerToClient = unknown>
     const abortError = createAbortError(abortValue, message)
     this._connection.sendAbort(this, stringify(abortValue))
     this._finalizeClose(abortError)
+  }
+
+  // ── Called by its credit (see `CreditOwner`) ──
+
+  /** @internal A closed channel's server ends its sends with the close, so the channel grants it no more credit. */
+  _sendByteLimit(limit: number, kind: WindowKind): void {
+    if (!this._isClosed) this._connection.sendByteWindowUpdate(this, limit, kind)
+  }
+
+  /** @internal */
+  _sendMessageLimit(limit: number, kind: WindowKind): void {
+    if (!this._isClosed) this._connection.sendMsgWindowUpdate(this, limit, kind)
+  }
+
+  /** @internal */
+  _sendBdpPing(probe: number): void {
+    this._connection.sendBdpPing(this, probe)
+  }
+
+  /** @internal */
+  _backlogBytes(): number | undefined {
+    return this._connection.bufferedAmount()
   }
 
   // ── Called by transport connection ──

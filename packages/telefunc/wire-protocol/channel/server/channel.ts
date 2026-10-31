@@ -34,7 +34,7 @@ import { NetworkError } from '../../../shared/NetworkError.js'
 import { isPromise } from '../../../utils/isPromise.js'
 import { TIMER_DELAY_MAX_MS, CREDIT_WINDOW_MAX_BYTES } from '../../constants.js'
 import { normalizeCloseTimeout } from '../normalizeCloseTimeout.js'
-import { FlowControl, replayWindow } from '../../flowControl/FlowControl.js'
+import { FlowControl, replayWindow, type CreditOwner, type WindowKind } from '../../flowControl/FlowControl.js'
 import { STATUS_BODY_INTERNAL_SERVER_ERROR } from '../../../shared/constants.js'
 import { ServerChannelBuffer } from './channelBuffer.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
@@ -67,7 +67,7 @@ function parsePeerText(text: string): unknown {
 type PendingEnd = { closeAck: boolean; closeRequest: boolean; abort: string | null; error: ErrorReason | null }
 
 class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
-  implements Channel<ClientToServer, ServerToClient>
+  implements Channel<ClientToServer, ServerToClient>, CreditOwner
 {
   readonly [SERVER_CHANNEL_BRAND] = true
   /** @see ChannelShield in ../channel.ts — `data` validates incoming C2S, `ack` validates ack of own S2C sends. */
@@ -158,13 +158,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   } = {}) {
     this.ack = ack
     this.id = id ?? crypto.randomUUID()
-    this._flow = new FlowControl({
-      byteWindowUpdate: (limit, kind) => this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq, kind),
-      msgWindowUpdate: (limit, kind) => this._peer?.sendMsgWindowUpdate(limit, kind),
-      bdpPing: (probe) => this._peer?.sendBdpPing(probe),
-      backlog: () => this._peer?.sender.bufferedAmount(),
-      sendWait: () => this._peer?.sender.sendWait() ?? null,
-    })
+    this._flow = new FlowControl({ owner: this, sendWait: () => this._peer?.sender.sendWait() ?? null })
     const c = getServerConfig().channel
     this._flow.fitReplays(
       replayWindow(c.clientReplayBuffer, c.clientReplayBufferBinary),
@@ -497,6 +491,28 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       case TAG.BROADCAST_UNSUB:
         this._onPeerSubscription({ binary: frame.binary, subscribed: frame.tag === TAG.BROADCAST_SUB })
     }
+  }
+
+  // ── Called by its credit (see `CreditOwner`) ──
+
+  /** @internal */
+  _sendByteLimit(limit: number, kind: WindowKind): void {
+    this._peer?.sendByteWindowUpdate(limit, this._lastClientSeq, kind)
+  }
+
+  /** @internal */
+  _sendMessageLimit(limit: number, kind: WindowKind): void {
+    this._peer?.sendMsgWindowUpdate(limit, kind)
+  }
+
+  /** @internal */
+  _sendBdpPing(probe: number): void {
+    this._peer?.sendBdpPing(probe)
+  }
+
+  /** @internal */
+  _backlogBytes(): number | undefined {
+    return this._peer?.sender.bufferedAmount()
   }
 
   /** A broadcast takes subscriptions; a plain channel drops them. */
