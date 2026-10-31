@@ -44,7 +44,7 @@ import { ReplayBuffer } from '../ReplayBuffer.js'
 import { getServerConfig } from '../../../node/server/serverConfig.js'
 import { assert } from '../../../utils/assert.js'
 import { Listeners } from '../../../utils/Listeners.js'
-import { ACK_STATUS, ERROR_REASON, isSequencedFrame } from '../../wire/frame.js'
+import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG, countsCredit, isChannelCtrlTag } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
 import { ProtocolViolationError, assertProtocol } from '../../wire/protocolViolation.js'
@@ -220,14 +220,16 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       if (this._isPeerBehind()) return rejectOverflow()
       return this._trackAck(
         new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-          this._peer!.sendTextAckReq(serialized, (seq, bytes) => this._addPendingAck(seq, bytes, { resolve, reject }))
+          this._peer!.sendSequenced(encode.textAckReq, serialized, (seq, bytes) =>
+            this._addPendingAck(seq, bytes, { resolve, reject }),
+          )
         }),
       )
     }
     // Cooperative credit model: the send already fired; `decrement` only gates the return
     // value. Awaiting throttles the caller's next send; not awaiting bypasses credit, until the peer is behind.
     if (this._sendCredit.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
-    return this._sendCredit.decrement(this._peer.sendText(serialized))
+    return this._sendCredit.decrement(this._peer.sendSequenced(encode.text, serialized))
   }
 
   sendBinary(data: Uint8Array): Promise<void>
@@ -264,13 +266,15 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       if (this._isPeerBehind()) return rejectOverflow()
       return this._trackAck(
         new Promise<unknown>((resolve, reject) => {
-          this._peer!.sendBinaryAckReq(data, (seq, bytes) => this._addPendingAck(seq, bytes, { resolve, reject }))
+          this._peer!.sendSequenced(encode.binaryAckReq, data, (seq, bytes) =>
+            this._addPendingAck(seq, bytes, { resolve, reject }),
+          )
         }),
       )
     }
     // Cooperative credit model; see `_send`.
     if (this._sendCredit.isPastByteCredit && this._isPeerBehind()) return rejectOverflow()
-    return this._sendCredit.decrement(this._peer.sendBinary(data))
+    return this._sendCredit.decrement(this._peer.sendSequenced(encode.binary, data))
   }
 
   /** @internal The most that may wait on its wire for a reading page: credit, the allowance past it, offline buffers. */
@@ -719,18 +723,18 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** What was sent while no peer was attached goes to `peer`; an ack request rejected at the end takes no answer. */
   private flushOfflineBuffer(peer: IndexedPeer): void {
     this._offlineBuffer.flush({
-      sendText: (msg) => this._sendCredit.countSent(peer.sendText(msg)),
-      sendPublish: (msg) => this._sendCredit.countPublishSent(peer.sendPublish(msg)),
-      sendBinary: (msg) => this._sendCredit.countSent(peer.sendBinary(msg)),
+      sendText: (msg) => this._sendCredit.countSent(peer.sendSequenced(encode.text, msg)),
+      sendPublish: (msg) => this._sendCredit.countPublishSent(peer.sendSequenced(encode.publish, msg)),
+      sendBinary: (msg) => this._sendCredit.countSent(peer.sendSequenced(encode.binary, msg)),
       sendTextAck: (data, cb) =>
-        peer.sendTextAckReq(data, (seq, bytes) => {
+        peer.sendSequenced(encode.textAckReq, data, (seq, bytes) => {
           if (cb) this._addPendingAck(seq, bytes, cb)
         }),
       sendBinaryAck: (data, cb) =>
-        peer.sendBinaryAckReq(data, (seq, bytes) => {
+        peer.sendSequenced(encode.binaryAckReq, data, (seq, bytes) => {
           if (cb) this._addPendingAck(seq, bytes, cb)
         }),
-      sendPublishBinary: (msg) => this._sendCredit.countPublishSent(peer.sendPublishBinary(msg)),
+      sendPublishBinary: (msg) => this._sendCredit.countPublishSent(peer.sendSequenced(encode.publishBinary, msg)),
     })
   }
 

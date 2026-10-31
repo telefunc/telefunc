@@ -206,7 +206,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   expect(wire).toBe(1)
 
   // 2) Send seq 1 — goes onto wire 1's streamRequest (delivered, or "lost" in flight).
-  conn.send(channel as never, stringify(1))
+  conn.sendSequenced(channel as never, 'data', encode.text, stringify(1))
   await delay(40)
   expect(upstreamSeqsByPost[1]).toContain(1) // client always emits seq 1 on wire 1
 
@@ -216,7 +216,7 @@ async function runScenario(loseSeq1: boolean): Promise<{ received: number[]; wir
   await delay(20)
 
   // 4) Send seq 2 while reconnecting → buffered, picked up by the reconnect.
-  conn.send(channel as never, stringify(2))
+  conn.sendSequenced(channel as never, 'data', encode.text, stringify(2))
 
   // 5) Wait out the reconnect (CHANNEL_RECONNECT_INITIAL_DELAY_MS = 500ms) + settle.
   await delay(900)

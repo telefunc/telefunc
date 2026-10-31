@@ -22,6 +22,7 @@ export type {
   PongEntry,
   PiecesAck,
   BdpPingAck,
+  SequencedEncoder,
 }
 
 import { HEADER, SEQ_OFFSET, writeHeader, writeU16, writeU32, writeU64, readU16, readU32, readU64 } from './header.js'
@@ -175,6 +176,10 @@ function encodeJsonFrame(tag: number, payload: unknown): Uint8Array<ArrayBuffer>
   frame.set(json, HEADER)
   return frame
 }
+
+/** An encoder of a sequenced frame of `data`, as `encode.text`: the sender passes it by reference, so a send builds no
+ *  closure. */
+type SequencedEncoder<T> = (index: number, data: T, seq: number) => Uint8Array<ArrayBuffer>
 
 const encode = {
   text: (index: number, text: string, seq: number) => encodeTextFrame(TAG.TEXT, index, text, seq),

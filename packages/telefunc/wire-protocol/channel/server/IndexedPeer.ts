@@ -2,7 +2,7 @@ export { IndexedPeer }
 export type { PeerSender }
 
 import { ACK_STATUS, encode } from '../../wire/frame.js'
-import type { AckResultStatus, ErrorReason } from '../../wire/frame.js'
+import type { AckResultStatus, ErrorReason, SequencedEncoder } from '../../wire/frame.js'
 import { ReplayBuffer } from '../ReplayBuffer.js'
 import type { SendWait } from '../../flowControl/SendWait.js'
 import type { WindowKind } from '../../flowControl/credit.js'
@@ -37,47 +37,41 @@ class IndexedPeer {
     this.replay = replay
   }
 
-  /** Returns the bytes the frame counts against flow control. */
-  sendText(data: string): number {
-    return this.sendSequenced((seq) => encode.text(this.index, data, seq)).bytes
-  }
-
-  /** Send a text frame that requests an ack response from the receiver. `onQueued` gets its seq and charged bytes. */
-  sendTextAckReq(data: string, onQueued: (seq: number, bytes: number) => void): void {
-    this.sendSequenced((seq) => encode.textAckReq(this.index, data, seq), onQueued)
-  }
-
-  /** Returns the bytes the frame counts against flow control. */
-  sendBinary(data: Uint8Array): number {
-    return this.sendSequenced((seq) => encode.binary(this.index, data, seq)).bytes
-  }
-
-  /** Send a binary frame that requests an ack response from the receiver. `onQueued` gets its seq and charged bytes. */
-  sendBinaryAckReq(data: Uint8Array, onQueued: (seq: number, bytes: number) => void): void {
-    this.sendSequenced((seq) => encode.binaryAckReq(this.index, data, seq), onQueued)
+  /** Encodes `data` by `encodeFrame` at the next seq; `onQueued` gets its seq and bytes before the wire has it. Returns
+   *  the bytes the frame counts against flow control. */
+  sendSequenced<T>(encodeFrame: SequencedEncoder<T>, data: T, onQueued?: (seq: number, bytes: number) => void): number {
+    const seq = this.replay.nextSeq()
+    const frame = encodeFrame(this.index, data, seq)
+    onQueued?.(seq, frame.byteLength)
+    this.commit(seq, frame)
+    return frame.byteLength
   }
 
   /** Send an acknowledgement response for a message the client sent.
    *  ACK_RES frames use the normal sequenced send path and are replayable on reconnect. */
   sendAckRes(ackedSeq: number, result: string, status: AckResultStatus = ACK_STATUS.OK): void {
-    this.sendSequenced((seq) => encode.ackRes(this.index, seq, ackedSeq, result, status))
+    const seq = this.replay.nextSeq()
+    this.commit(seq, encode.ackRes(this.index, seq, ackedSeq, result, status))
   }
 
   /** Returns its seq. */
   sendCloseRequest(timeoutMs: number): number {
-    return this.sendSequenced((seq) => encode.close(this.index, timeoutMs, seq)).seq
+    const seq = this.replay.nextSeq()
+    this.commit(seq, encode.close(this.index, timeoutMs, seq))
+    return seq
   }
 
   sendCloseAck(): void {
-    this.sendSequenced((seq) => encode.closeAck(this.index, seq))
+    const seq = this.replay.nextSeq()
+    this.commit(seq, encode.closeAck(this.index, seq))
   }
 
   sendAbort(abortValue: string): void {
-    this.sendSequenced((seq) => encode.abort(this.index, abortValue, seq))
+    this.sendSequenced(encode.abort, abortValue)
   }
 
   sendError(reason: ErrorReason): void {
-    this.sendSequenced((seq) => encode.error(this.index, reason, seq))
+    this.sendSequenced(encode.error, reason)
   }
 
   /** `lastSeq`: the last seq the server has of what the page sent on the channel. */
@@ -97,30 +91,13 @@ class IndexedPeer {
     this.sender.send(encode.bdpPingAck(this.index, probe, backlog, pathRtt))
   }
 
-  /** Returns the bytes the frame counts against flow control. */
-  sendPublish(data: string): number {
-    return this.sendSequenced((seq) => encode.publish(this.index, data, seq)).bytes
-  }
-
-  /** Returns the bytes the frame counts against flow control. */
-  sendPublishBinary(data: Uint8Array): number {
-    return this.sendSequenced((seq) => encode.publishBinary(this.index, data, seq)).bytes
-  }
-
   private sendLimit(frame: Uint8Array, kind: WindowKind): void {
     if (kind === 'acknowledgement') this.sender.carry(frame)
     else this.sender.send(frame)
   }
 
-  /** Encodes at the next seq; `onQueued` runs before the wire has it. Replayed once committed, so a frame a dead wire lost goes again. */
-  private sendSequenced(
-    buildFrame: (seq: number) => Uint8Array<ArrayBuffer>,
-    onQueued?: (seq: number, bytes: number) => void,
-  ): { seq: number; bytes: number } {
-    const seq = this.replay.nextSeq()
-    const frame = buildFrame(seq)
-    onQueued?.(seq, frame.byteLength)
+  /** Sends `frame` of `seq`. Replayed once committed, so a frame a dead wire lost goes again. */
+  private commit(seq: number, frame: Uint8Array<ArrayBuffer>): void {
     this.sender.send(frame, () => this.replay.push(seq, frame))
-    return { seq, bytes: frame.byteLength }
   }
 }

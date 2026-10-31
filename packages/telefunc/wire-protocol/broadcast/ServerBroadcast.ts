@@ -20,7 +20,7 @@ import { assert, assertUsage } from '../../utils/assert.js'
 import { isPromise } from '../../utils/isPromise.js'
 import { Listeners } from '../../utils/Listeners.js'
 import { ChannelClosedError, ChannelOverflowError } from '../channel/channelErrors.js'
-import { ACK_STATUS, ERROR_REASON } from '../wire/frame.js'
+import { ACK_STATUS, ERROR_REASON, encode } from '../wire/frame.js'
 import { TAG } from '../wire/tags.js'
 import { encodePublishText, encodePublishBinary } from '../wire/publishInfo.js'
 import type { ChannelDataFrame } from '../wire/frame.js'
@@ -176,7 +176,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       this._closeBehind()
       return
     }
-    this._sendCredit.countPublishSent(binary ? peer.sendPublishBinary(wire) : peer.sendPublish(wire))
+    this._sendCredit.countPublishSent(
+      binary ? peer.sendSequenced(encode.publishBinary, wire) : peer.sendSequenced(encode.publish, wire),
+    )
   }
 
   /** A page behind the broadcast has no send to reject: it leaves the group on both ends rather than get a gap. */

@@ -42,7 +42,15 @@ import { ReplayBuffer } from '../ReplayBuffer.js'
 import { ACK_STATUS, ERROR_REASON, encode, isSequencedFrame } from '../../wire/frame.js'
 import { TAG } from '../../wire/tags.js'
 import { seqNear, seqThrough } from '../../wire/seq.js'
-import type { AckResultStatus, BdpPingAck, ChannelFrame, DecodedFrame, PingEntry, PongEntry } from '../../wire/frame.js'
+import type {
+  AckResultStatus,
+  BdpPingAck,
+  ChannelFrame,
+  DecodedFrame,
+  PingEntry,
+  PongEntry,
+  SequencedEncoder,
+} from '../../wire/frame.js'
 import type {
   ReadyPayload,
   ReattachState,
@@ -134,12 +142,13 @@ interface MuxChannel {
 }
 
 interface MuxConnection {
-  send(channel: MuxChannel, data: string): number
-  sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void
-  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void
-  sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void
-  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void
-  sendBinary(channel: MuxChannel, data: Uint8Array): number
+  sendSequenced<T>(
+    channel: MuxChannel,
+    kind: 'data' | 'ack',
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
+    onQueued?: (seq: number) => void,
+  ): number
   sendAckRes(channel: MuxChannel, ackedSeq: number, result: string, status?: AckResultStatus): void
   sendAbort(channel: MuxChannel, abortValue: string): void
   sendCloseRequest(channel: MuxChannel, timeoutMs: number): void
@@ -646,43 +655,19 @@ class ClientConnection implements MuxConnection {
     this.startTtlIfIdle()
   }
 
-  send(channel: MuxChannel, data: string): number {
-    const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.text(ix, data, seq))
-    return frame?.byteLength ?? 0
-  }
-
-  sendBinary(channel: MuxChannel, data: Uint8Array): number {
-    const frame = this.sendSequenced(channel, 'data', (ix, seq) => encode.binary(ix, data, seq))
-    return frame?.byteLength ?? 0
-  }
-
-  sendPublishAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendSequenced(channel, 'ack', (ix, seq) => encode.publishAckReq(ix, data, seq), onQueued)
-  }
-
-  sendPublishBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendSequenced(channel, 'ack', (ix, seq) => encode.publishBinaryAckReq(ix, data, seq), onQueued)
-  }
-
-  sendTextAckReq(channel: MuxChannel, data: string, onQueued: (seq: number) => void): void {
-    this.sendSequenced(channel, 'ack', (ix, seq) => encode.textAckReq(ix, data, seq), onQueued)
-  }
-
-  sendBinaryAckReq(channel: MuxChannel, data: Uint8Array, onQueued: (seq: number) => void): void {
-    this.sendSequenced(channel, 'ack', (ix, seq) => encode.binaryAckReq(ix, data, seq), onQueued)
-  }
-
-  /** Encodes at the next seq, then takes it, so a refused frame takes none; `onQueued` runs before the wire has it. */
-  private sendSequenced(
+  /** Encodes `data` by `encodeFrame` at the next seq, then takes it, so a refused frame takes none; `onQueued` runs
+   *  before the wire has it. Returns the frame's bytes, 0 once the channel sends nothing more. */
+  sendSequenced<T>(
     channel: MuxChannel,
     kind: 'data' | 'ack',
-    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
+    encodeFrame: SequencedEncoder<T>,
+    data: T,
     onQueued?: (seq: number) => void,
-  ): Uint8Array<ArrayBuffer> | undefined {
+  ): number {
     const ix = this.channelIndex.get(channel)
-    if (ix === undefined) return
+    if (ix === undefined) return 0
     const replay = this.replayBuffers.get(ix)!
-    const frame = buildFrame(ix, replay.seq + 1)
+    const frame = encodeFrame(ix, data, replay.seq + 1)
     const maxFrameBytes = this.maxFrameBytesOf(channel)
     // The server ends the wire a larger frame arrives on, and the one its replay arrives on next.
     assertUsage(
@@ -692,7 +677,7 @@ class ClientConnection implements MuxConnection {
     const seq = replay.nextSeq()
     onQueued?.(seq)
     this.sendOrQueue(ix, seq, frame, kind)
-    return frame
+    return frame.byteLength
   }
 
   /** Sends, or queues while sends are held or the transport lacks headroom; one sent at once passes the settle queue. */
