@@ -11,7 +11,7 @@ export type {
 
 import { MAX_CHANNELS_PER_CONNECTION, type ChannelTransports } from '../constants.js'
 import { ProtocolViolationError, assertProtocol } from './protocolViolation.js'
-import { textDecoder } from './frame.js'
+import { textDecoder } from './envelope.js'
 
 // ===== Reconcile payloads (JSON-encoded after the header) =====
 

@@ -13,7 +13,7 @@ import { ClientConnection } from './connection.js'
 import { decode, encode } from '../../wire/connectionFrame.js'
 import { TAG } from '../../wire/tags.js'
 import type { DecodedFrame } from '../../wire/connectionFrame.js'
-import { decodeU32 } from '../../wire/frame.js'
+import { decodeU32 } from '../../wire/envelope.js'
 import { uint8ArrayToBase64url } from '../../wire/base64url.js'
 import { WIRE_MAX_RAW_FRAME_BYTES } from '../../constants.js'
 

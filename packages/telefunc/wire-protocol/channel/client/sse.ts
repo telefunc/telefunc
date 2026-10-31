@@ -15,7 +15,7 @@ import {
   STREAM_REQUEST_HANDSHAKE_TIMEOUT_MS,
   UPGRADE_DRAIN_TIMEOUT_MS,
 } from '../../constants.js'
-import { encodeU32, encodeLengthPrefixedFrames } from '../../wire/frame.js'
+import { encodeU32, encodeLengthPrefixedFrames } from '../../wire/envelope.js'
 import { createPushReadableStream, type PushReadableStream } from '../../../utils/pushReadableStream.js'
 import { Uplink } from '../../flowControl/client/Uplink.js'
 import { Downlink } from '../../flowControl/client/Downlink.js'

@@ -1,7 +1,7 @@
 export { encodeSseRequest, encodeSseBatch, encodeSseRequestMetadata, encodeLengthPrefixedBlob, parseSseRequestMetadata }
 export type { SseRequestMetadata }
 
-import { encodeLengthPrefixedString, encodeU32 } from '../wire/frame.js'
+import { encodeLengthPrefixedString, encodeU32 } from '../wire/envelope.js'
 import { assertProtocol } from '../wire/protocolViolation.js'
 
 /** The metadata header that opens every SSE POST. Its `kind`:
