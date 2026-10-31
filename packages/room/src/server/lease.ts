@@ -32,7 +32,7 @@ class RoomLease {
   /** Whether an exchange hosting something under `_id` committed, so its cell was written. */
   private _created = false
   /** The exchange writing the cell, which the writes that would host something await. */
-  creating: Promise<void> | null = null
+  private creating: Promise<void> | null = null
 
   get id(): string {
     return this._id
@@ -52,6 +52,15 @@ class RoomLease {
     const record = decodeLeaseRecord(raw)
     if (record.cleaner !== undefined) return null
     return record.until < now ? [{ key, bytes: leaseRecordBytes(now) }] : []
+  }
+
+  /** Runs `write`, the exchange writing the cell, unless one already runs: the writes waiting to host something await
+   *  the same one. */
+  createOnce(write: () => Promise<void>): Promise<void> {
+    this.creating ??= write().finally(() => {
+      this.creating = null
+    })
+    return this.creating
   }
 
   hosted(id: string): void {

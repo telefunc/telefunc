@@ -65,18 +65,14 @@ async function mutateHosted<T>(
 function createLease(room: RoomIncarnation, lease: RoomLease): Promise<void> {
   const id = lease.id
   const key = leaseCellKey(id)
-  lease.creating ??= mutateCells(room.id, room.inc, [key], (cells, now) => {
-    const leaseWrites = lease.hosting(id, cells, now)
-    return { value: leaseWrites !== null, mutations: leaseWrites ?? [] }
+  return lease.createOnce(async () => {
+    const { value: hosted } = await mutateCells(room.id, room.inc, [key], (cells, now) => {
+      const leaseWrites = lease.hosting(id, cells, now)
+      return { value: leaseWrites !== null, mutations: leaseWrites ?? [] }
+    })
+    if (hosted) lease.hosted(id)
+    else lease.lost(id)
   })
-    .then(({ value: hosted }) => {
-      if (hosted) lease.hosted(id)
-      else lease.lost(id)
-    })
-    .finally(() => {
-      lease.creating = null
-    })
-  return lease.creating
 }
 
 /** Writes pages' views under the lease in one write, and returns their cells' keys; each holds the room, and a room
