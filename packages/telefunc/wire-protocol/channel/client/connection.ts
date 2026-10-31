@@ -243,14 +243,14 @@ type ClientChannelTransport = {
 /** What a transport tells its connection, and the reconcile batch it asks for when its wire opens. */
 type TransportOwner = Pick<
   ClientConnection,
-  | '_onTransportOpen'
-  | '_onTransportClosed'
-  | '_onTransportFrame'
-  | '_onTransportPong'
-  | '_onTransportRoom'
-  | '_onTransportBatched'
-  | '_onTransportReconcileSent'
-  | '_onTransportPostLate'
+  | 'onTransportOpen'
+  | 'onTransportClosed'
+  | 'onTransportFrame'
+  | 'onTransportPong'
+  | 'onTransportHeadroom'
+  | 'onTransportBatched'
+  | 'onTransportReconcileSent'
+  | 'onTransportPostLate'
   | 'stageReconcileBatch'
 >
 
@@ -367,7 +367,7 @@ class ClientConnection implements MuxConnection {
   /** Sticky after a permanent upgrade abort — survives every state transition until dispose. */
   private upgradeDisabled = false
   /** Server-allowed transports from the last settled RECONCILED. Kept so `maybeStartUpgrade`
-   *  can run from both `handleReconciled` and `_onTransportOpen` — transport-open and the
+   *  can run from both `handleReconciled` and `onTransportOpen` — transport-open and the
    *  first RECONCILED can arrive in either order on the SSE path. */
   private serverTransports: ReconciledPayload['transports'] | null = null
   /** RECONCILE sent, awaiting RECONCILED. SSE sets it true during connecting since the
@@ -608,8 +608,8 @@ class ClientConnection implements MuxConnection {
     channel._fitReplays(this.replayWindows.window, this.replayWindows.peerWindow)
   }
 
-  /** The transport may have room for data again: what waited for it goes. */
-  _onTransportRoom(transport: ClientChannelTransport): void {
+  /** The transport may have headroom again: what waited for it goes. */
+  onTransportHeadroom(transport: ClientChannelTransport): void {
     if (transport === this.transport && this.sendsOpen) this.sendHeldForRoom()
   }
 
@@ -629,7 +629,7 @@ class ClientConnection implements MuxConnection {
    *  can't take it (connecting, awaiting RECONCILED, from an upgrade's READY until its handoff)
    *  the obligation is KEPT, not consumed — `registerReconcileTimer` stays non-null as the marker (which also keeps
    *  `canSendImmediately` false so data frames buffer behind the RECONCILE), and the
-   *  transitions that make the wire sendable re-invoke this: `_onTransportOpen`, a settled
+   *  transitions that make the wire sendable re-invoke this: `onTransportOpen`, a settled
    *  RECONCILED, upgrade-attempt exit, and handoff completion. */
   private flushPendingRegisterReconcile(): void {
     if (this.registerReconcileTimer === null) return
@@ -834,7 +834,7 @@ class ClientConnection implements MuxConnection {
     this.sendUnsequenced(channel, 'control', (ix) => encode.broadcastUnsub(ix, binary))
   }
 
-  _onTransportOpen(transport: ClientChannelTransport): void {
+  onTransportOpen(transport: ClientChannelTransport): void {
     if (this.closed) return
     if (transport !== this.transport) return
     this.enterOpen()
@@ -852,14 +852,14 @@ class ClientConnection implements MuxConnection {
     this.maybeStartUpgrade()
   }
 
-  /** The wire's upload fell back to batch POSTs, which a channel may have opened before (see `_onTransportOpen`). */
-  _onTransportBatched(transport: ClientChannelTransport): void {
+  /** The wire's upload fell back to batch POSTs, which a channel may have opened before (see `onTransportOpen`). */
+  onTransportBatched(transport: ClientChannelTransport): void {
     if (transport !== this.transport) return
     // Open ones only, as the join's undo: one still opening takes the batched window from its own open on this wire.
     for (const { channel, state } of this.channels.values()) if (state.tag === 'open') channel._onTransportBatched()
   }
 
-  _onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
+  onTransportFrame(frame: DecodedFrame, source: ClientChannelTransport, byteLength: number, abandoned: boolean): void {
     // A wire the page gave up still delivers, but its RECONCILED answers a RECONCILE the next wire's replaces.
     if (abandoned && frame.tag === TAG.RECONCILED) return
     const u = this.committing
@@ -957,7 +957,7 @@ class ClientConnection implements MuxConnection {
   }
 
   /** An SSE wire's RECONCILE went out with the request that opens it, before the wire opens (see `beatFromReconcile`). */
-  _onTransportReconcileSent(transport: ClientChannelTransport): void {
+  onTransportReconcileSent(transport: ClientChannelTransport): void {
     if (this.closed || transport !== this.transport) return
     this.beatFromReconcile(transport)
   }
@@ -1011,7 +1011,7 @@ class ClientConnection implements MuxConnection {
   }
 
   /** How far the server has what the page sent on each channel named, or that it no longer holds it. */
-  _onTransportPong(ended: PongEntry[]): void {
+  onTransportPong(ended: PongEntry[]): void {
     for (const { ix, lastSeq } of ended) {
       const entry = this.channels.get(ix)
       if (entry === undefined || entry.state.tag !== 'closed') continue
@@ -1040,11 +1040,11 @@ class ClientConnection implements MuxConnection {
   private dropWire(transport: ClientChannelTransport): void {
     transport.detachHeartbeat()
     transport.abandonActiveTransport()
-    this._onTransportClosed(transport)
+    this.onTransportClosed(transport)
   }
 
   /** A batch POST has been out longer than its upload takes at the slowest rate a wire is held to. */
-  _onTransportPostLate(transport: ClientChannelTransport): void {
+  onTransportPostLate(transport: ClientChannelTransport): void {
     this.handlePongTimeout(transport)
   }
 
@@ -1133,7 +1133,7 @@ class ClientConnection implements MuxConnection {
     transport.dispose()
   }
 
-  _onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
+  onTransportClosed(transport: ClientChannelTransport, { rejectedByServer = false } = {}): void {
     if (this.closed) return
     transport.detachHeartbeat()
     if (transport !== this.transport) {

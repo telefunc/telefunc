@@ -249,7 +249,7 @@ class SseTransport implements UpgradeSource {
       { accept: 'text/event-stream' },
     )
     const upload = this.streamRequest.tag === 'failed' ? null : this.openUpload(abortController)
-    this.owner._onTransportReconcileSent(this)
+    this.owner.onTransportReconcileSent(this)
 
     let response: Response
     this.openPending = true
@@ -296,7 +296,7 @@ class SseTransport implements UpgradeSource {
     }
 
     this.connecting = false
-    this.owner._onTransportOpen(this)
+    this.owner.onTransportOpen(this)
     if (this.outbox.length > 0) void this.flushOutbox()
   }
 
@@ -336,7 +336,7 @@ class SseTransport implements UpgradeSource {
     this.streamRequest = { tag: 'failed' }
     const now = performance.now()
     if (unsent) this.requeue(unsent.map((frame) => ({ frame, deadline: now, queuedAt: now })))
-    this.owner._onTransportBatched(this)
+    this.owner.onTransportBatched(this)
   }
 
   /** The downstream didn't open: what the reconcile took goes back to the outbox, and the wire closes. */
@@ -346,7 +346,7 @@ class SseTransport implements UpgradeSource {
     abortController.abort()
     this.transportAbort = null
     this.connecting = false
-    this.owner._onTransportClosed(this, { rejectedByServer })
+    this.owner.onTransportClosed(this, { rejectedByServer })
   }
 
   /** Dispatches the downstream's events until it ends; `onOpenAck` runs as the upload's acknowledgement arrives. */
@@ -362,10 +362,10 @@ class SseTransport implements UpgradeSource {
         const frame = decode(raw)
         if (frame.tag === TAG.PONG) {
           this.heartbeat?.resetPong()
-          this.owner._onTransportPong(frame.ended)
+          this.owner.onTransportPong(frame.ended)
           continue
         }
-        this.owner._onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
+        this.owner.onTransportFrame(frame, this, raw.byteLength, this.abandonedControllers.has(abortController))
       }
     } catch {
       if (abortController.signal.aborted) return
@@ -380,7 +380,7 @@ class SseTransport implements UpgradeSource {
         abortController.abort()
       }
       // Abandoned controllers are owned by a successor transport — don't notify closed.
-      if (!this.abandonedControllers.has(abortController)) this.owner._onTransportClosed(this)
+      if (!this.abandonedControllers.has(abortController)) this.owner.onTransportClosed(this)
     }
   }
 
@@ -453,14 +453,14 @@ class SseTransport implements UpgradeSource {
       }
       this.requeue(queued)
       this.abandonActiveTransport()
-      this.owner._onTransportClosed(this)
+      this.owner.onTransportClosed(this)
     } finally {
       if (this.postWatch) clearTimeout(this.postWatch)
       this.postWatch = null
       this.flushing = false
       this.postOutBytes = 0
       this.flushNextOrDrain()
-      this.owner._onTransportRoom(this)
+      this.owner.onTransportHeadroom(this)
     }
   }
 
@@ -480,7 +480,7 @@ class SseTransport implements UpgradeSource {
   /** The wire is lost with the POST out for `ms`, as one that missed its pong: a reconnect resends what it carried. */
   private watchPost(wire: AbortController, ms: number): void {
     this.postWatch = setTimeout(() => {
-      this.owner._onTransportPostLate(this)
+      this.owner.onTransportPostLate(this)
       if (this.transportAbort === wire) this.watchPost(wire, SSE_POST_FLOOR_MS)
     }, ms)
   }

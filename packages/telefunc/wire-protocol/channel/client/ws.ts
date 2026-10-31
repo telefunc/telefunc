@@ -157,7 +157,7 @@ class WsTransport implements UpgradeTarget {
       ws = new WebSocket(this.wsUrl)
     } catch {
       this.connecting = false
-      this.owner._onTransportClosed(this)
+      this.owner.onTransportClosed(this)
       return
     }
 
@@ -175,7 +175,7 @@ class WsTransport implements UpgradeTarget {
   private handleOpen(ws: WebSocket): void {
     if (this.ws !== ws) return
     this.connecting = false
-    this.owner._onTransportOpen(this)
+    this.owner.onTransportOpen(this)
   }
 
   attachHeartbeat(hb: Heartbeat): void {
@@ -240,8 +240,8 @@ class WsTransport implements UpgradeTarget {
       } else if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
         this.heartbeat?.resetPong()
-        this.owner._onTransportPong(frame.ended)
-      } else this.owner._onTransportFrame(frame, this, byteLength, ws === this.abandoned?.ws)
+        this.owner.onTransportPong(frame.ended)
+      } else this.owner.onTransportFrame(frame, this, byteLength, ws === this.abandoned?.ws)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
@@ -257,7 +257,7 @@ class WsTransport implements UpgradeTarget {
       if (this.ws === ws) this.ws = null
       this.connecting = false
       this.settleDrained()
-      this.owner._onTransportClosed(this)
+      this.owner.onTransportClosed(this)
     }
     ws.onerror = () => {}
   }
@@ -265,7 +265,7 @@ class WsTransport implements UpgradeTarget {
   /** What its sender held may have gone. */
   private onRoom(sender: PieceSender): void {
     if (sender.heldBytes === 0) this.settleDrained()
-    this.owner._onTransportRoom(this)
+    this.owner.onTransportHeadroom(this)
   }
 
   hasWire(): boolean {
