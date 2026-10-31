@@ -286,7 +286,9 @@ class SubscriptionSlot {
     assert(this._attempt === attempt) // a slot opens one attempt, and unobserves it before cleanup
     if (state === 'ready') return this._becameReady()
     if (state === 'closed') return this._ended(reason)
-    this._markUnavailable(state)
+    // An attempt starts establishing and never returns to it: every driver's attempt reports ready, lost and closed.
+    assert(state === 'lost')
+    this._markLost()
   }
 
   private _becameReady(): void {
@@ -312,9 +314,9 @@ class SubscriptionSlot {
     void this._readiness.promise.catch(reportBug)
   }
 
-  private _markUnavailable(state: 'establishing' | 'lost'): void {
+  private _markLost(): void {
     if (this._state === 'ready') this._readiness = createReadiness()
-    this._transition(state)
+    this._transition('lost')
   }
 
   private _transition(state: SubscriptionState): void {
