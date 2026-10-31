@@ -32,7 +32,7 @@ function createChannel(id = crypto.randomUUID()) {
     _maxFrameBytes: WIRE_MAX_RAW_FRAME_BYTES,
     _onTransportOpen() {},
     _dispatchFrame() {},
-    _onTransportClose() {},
+    _onEnded() {},
     _onTransportBatched() {},
     _onUpgradeJoined() {},
     _reattachState: () => ({}),

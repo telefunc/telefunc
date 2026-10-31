@@ -167,8 +167,8 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     const binary = typeof wire !== 'string'
     const peer = this._peer
     if (!peer) {
-      if (binary) this._prePeerBuffer.pushPublishBinary(wire)
-      else this._prePeerBuffer.pushPublish(wire)
+      if (binary) this._offlineBuffer.pushPublishBinary(wire)
+      else this._offlineBuffer.pushPublish(wire)
       this._closeIfDroppedOffline(binary)
       return
     }
@@ -189,7 +189,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
   private _closeIfDroppedOffline(binary: boolean): void {
-    if (!this._prePeerBuffer.dropped) return
+    if (!this._offlineBuffer.dropped) return
     const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
     this._endWithError(
       ERROR_REASON.OVERFLOW,

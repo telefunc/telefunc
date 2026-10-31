@@ -35,7 +35,7 @@ function createChannel(dispatched: DecodedFrame[]) {
     _dispatchFrame(frame: DecodedFrame) {
       dispatched.push(frame)
     },
-    _onTransportClose() {},
+    _onEnded() {},
     _onTransportBatched() {},
     _onUpgradeJoined() {},
     _reattachState: () => ({}),

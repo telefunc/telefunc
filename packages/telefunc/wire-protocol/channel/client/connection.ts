@@ -127,7 +127,7 @@ interface MuxChannel {
    *  FIN/RECONCILED), channel-termination ctrls (ABORT/ERROR) and ATTACH_RESULT stay with the
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
-  _onTransportClose(err?: Error): void
+  _onEnded(err?: Error): void
   /** Its RECONCILE entry on each (re)attach to `uplink`'s wire. */
   _reattachState(uplink: Uplink): ReattachState
   /** Its RECONCILE entry's `probe` was answered by the RECONCILED. */
@@ -1646,7 +1646,7 @@ class ClientConnection implements MuxConnection {
       if (!entry) continue
       const err = new NetworkError('Channel not acknowledged by server after reconnect', true)
       this.releaseChannel(ix, entry.channel)
-      entry.channel._onTransportClose(err)
+      entry.channel._onEnded(err)
     }
   }
 
@@ -1689,7 +1689,7 @@ class ClientConnection implements MuxConnection {
   private loseChannel(ix: number, entry: ChannelEntry): OutboundFrame {
     this.droppedQueues.add(ix)
     const frame = encode.error(ix, ERROR_REASON.LOST, this.replayBuffers.get(ix)!.nextSeq())
-    entry.channel._onTransportClose(replayLossError('client'))
+    entry.channel._onEnded(replayLossError('client'))
     return { kind: 'control', frame }
   }
 
@@ -1700,12 +1700,12 @@ class ClientConnection implements MuxConnection {
     this.unregister(entry.channel)
     assert(entry.state.tag === 'closed')
     entry.state.delivered = true
-    entry.channel._onTransportClose(err)
+    entry.channel._onEnded(err)
   }
 
   private closeAll(err: Error): void {
     for (const [, entry] of this.channels) {
-      entry.channel._onTransportClose(err)
+      entry.channel._onEnded(err)
     }
     this.dispose()
   }

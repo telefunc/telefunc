@@ -93,7 +93,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _wireRequest: Request | undefined = undefined
   private readonly _listeners = new Listeners<ChannelListener<ClientToServer>>()
   private readonly _binaryListeners = new Listeners<ChannelBinaryListener>()
-  protected _prePeerBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
+  protected _offlineBuffer: ServerChannelBuffer<ChannelAck<ServerToClient>>
   protected _pendingAcks = new Map<
     number,
     { resolve: (result: ChannelAck<ServerToClient>) => void; reject: (err: Error) => void; bytes: number }
@@ -170,7 +170,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     )
     this._bufferLimit = bufferLimit ?? c.bufferLimit
     this._bufferLimitBinary = c.bufferLimitBinary
-    this._prePeerBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
+    this._offlineBuffer = new ServerChannelBuffer<ChannelAck<ServerToClient>>(
       this._bufferLimit,
       this._bufferLimitBinary,
     )
@@ -213,12 +213,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       if (needsAck) {
         return this._trackAck(
           new Promise<ChannelAck<ServerToClient>>((resolve, reject) => {
-            this._prePeerBuffer.pushTextAck(serialized, resolve, reject)
+            this._offlineBuffer.pushTextAck(serialized, resolve, reject)
           }),
         )
       }
       return new Promise<void>((resolve, reject) => {
-        this._prePeerBuffer.pushText(serialized, resolve, reject)
+        this._offlineBuffer.pushText(serialized, resolve, reject)
       })
     }
     // Ack-bearing sends bypass credit accounting — the caller's `await` on the ack
@@ -257,11 +257,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (!this._peer) {
       if (needsAck) {
         return new Promise<unknown>((resolve, reject) => {
-          this._prePeerBuffer.pushBinaryAck(data, resolve, reject)
+          this._offlineBuffer.pushBinaryAck(data, resolve, reject)
         })
       }
       return new Promise<void>((resolve, reject) => {
-        this._prePeerBuffer.pushBinary(data, resolve, reject)
+        this._offlineBuffer.pushBinary(data, resolve, reject)
       })
     }
     // Ack-bearing path bypasses credit; see `_send` for rationale.
@@ -389,7 +389,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** RECONCILE declarations apply before `onOpen`; an ended channel sends only what it made with no peer attached. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
     if (this._didShutdown) {
-      this._flushPrePeerBuffer(peer)
+      this._flushOfflineBuffer(peer)
       this._sendPendingAckRes(peer)
       this._sendPendingEnd(peer)
       return
@@ -400,7 +400,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     const rewired = this._peer?.sender !== peer.sender
     this._peer = peer
     if (rewired) this._flow.reattach()
-    this._flushPrePeerBuffer(peer)
+    this._flushOfflineBuffer(peer)
     this._sendPendingAckRes(peer)
     if (state?.broadcast) {
       this._onPeerSubscription({ binary: false, subscribed: state.broadcast.text })
@@ -697,7 +697,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._pageClosed) return true
     return (
       this._pageLastSeq >= this._replayBuffer.seq &&
-      this._prePeerBuffer.size === 0 &&
+      this._offlineBuffer.size === 0 &&
       this._pendingAckRes.length === 0 &&
       this._pendingEnd === null
     )
@@ -708,8 +708,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   /** What was sent while no peer was attached goes to `peer`; an ack request rejected at the end takes no answer. */
-  private _flushPrePeerBuffer(peer: IndexedPeer): void {
-    this._prePeerBuffer.flush({
+  private _flushOfflineBuffer(peer: IndexedPeer): void {
+    this._offlineBuffer.flush({
       sendText: (msg) => this._flow.countSent(peer.sendText(msg)),
       sendPublish: (msg) => this._flow.countPublishSent(peer.sendPublish(msg)),
       sendBinary: (msg) => this._flow.countSent(peer.sendBinary(msg)),
@@ -744,7 +744,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
   protected _endWithError(reason: ErrorReason, err: Error): void {
     if (this._didShutdown) return
-    this._prePeerBuffer.clear(err)
+    this._offlineBuffer.clear(err)
     if (this._peer) this._peer.sendError(reason)
     else this._ensurePendingEnd().error = reason
     this._shutdown(err)
@@ -873,11 +873,11 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     this._flow.shutdown()
     this._notifyCloseProgress()
     // Building an error captures its stack: one is built only where an answer is awaited.
-    if (this._pendingAcks.size > 0 || this._prePeerBuffer.size > 0) {
+    if (this._pendingAcks.size > 0 || this._offlineBuffer.size > 0) {
       const ackErr = err ?? new ChannelClosedError()
       for (const { reject } of this._pendingAcks.values()) reject(ackErr)
       // What it keeps for its page takes no answer.
-      this._prePeerBuffer.rejectAcks(ackErr)
+      this._offlineBuffer.rejectAcks(ackErr)
     }
     this._pendingAcks.clear()
     this._pendingAckBytes = 0
@@ -887,12 +887,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   _release(): void {
     this._replayBuffer?.dispose()
     this._replayBuffer = null
-    this._dropPending(this._prePeerBuffer.size === 0 ? undefined : (this._closeError ?? new ChannelClosedError()))
+    this._dropPending(this._offlineBuffer.size === 0 ? undefined : (this._closeError ?? new ChannelClosedError()))
   }
 
   /** What was sent while no peer was attached rejects with `err`. */
   private _dropPending(err?: Error): void {
-    this._prePeerBuffer.clear(err)
+    this._offlineBuffer.clear(err)
     this._pendingAckRes.length = 0
     this._pendingEnd = null
   }
