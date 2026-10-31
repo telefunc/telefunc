@@ -15,7 +15,13 @@ import type {
 import type { RoomSubscriptionSource } from '@telefunc/room/backend'
 import { DriverAttempt, decodeOrderingFrame } from 'telefunc/__internal'
 import { createDeferred, type Deferred } from './createDeferred.js'
-import { broadcastChannel, channelKey, generationInvalidationChannel, type CommitChannels } from './keys.js'
+import {
+  broadcastChannel,
+  channelKey,
+  generationInvalidationChannel,
+  type CommitChannels,
+  type FenceTokens,
+} from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
 import type { SubscriberSocket } from './ioredis.js'
 
@@ -101,7 +107,7 @@ class RedisSubscriptionDriver implements SubscriptionDriver<RedisSubscriptionSou
   /** Arms a delivery fence on the ready attempts of each channel the commit is published on: `delivery` settles once
    *  each saw the commit. */
   prepareFence(channels: CommitChannels): {
-    tokens: { lane: string; everyTrack: string; everyMember: string }
+    tokens: FenceTokens
     delivery: Promise<void>
     cancel(): void
   } {

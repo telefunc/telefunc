@@ -40,6 +40,7 @@ import {
   revKey,
   trackLanesKey,
   type CommitChannels,
+  type FenceTokens,
 } from './keys.js'
 
 const REDIS_DELIVERY_FENCE_BYTE = 0xff
@@ -516,8 +517,7 @@ type CommitInput = RoomInc & {
   retain: boolean
   closingLease: string | undefined
   requiredCellKeys: readonly string[]
-  /** Each channel's fence token, `''` where no local attempt awaits the commit. */
-  fenceTokens: { lane: string; everyTrack: string; everyMember: string }
+  fenceTokens: FenceTokens
 }
 
 type CommitReply =

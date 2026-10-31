@@ -50,11 +50,12 @@ import {
   retainedOfKey,
   retainedOfTrackKey,
   commitChannels,
+  type FenceTokens,
 } from './keys.js'
 import { LANE_PAGE_SIZE, REDIS_COMMANDS, parseOrderMark, type RedisCommand } from './commands.js'
 import { RedisSubscriptionDriver, type RedisSubscriptionSource } from './subscriber.js'
 
-const NO_FENCE_TOKENS = { lane: '', everyTrack: '', everyMember: '' }
+const NO_FENCE_TOKENS: FenceTokens = { lane: '', everyTrack: '', everyMember: '' }
 
 type RedisBackendOptions = {
   redis: RedisClient
