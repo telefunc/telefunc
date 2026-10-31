@@ -349,7 +349,7 @@ async function removeParticipant(id: string, target: ParticipantRef & { reason?:
   }
   const members = await resolveParticipantRef(incarnation, target)
   const cause = removedCause(target.reason)
-  for (const member of members) await evictMember(incarnation, member.id, member.identity ?? null, cause)
+  for (const member of members) await evictMember(incarnation, member.id, cause)
 }
 
 async function getRoomParticipants(id: string, target?: { identity: string }): Promise<ParticipantSnapshotView[]> {

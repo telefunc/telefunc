@@ -213,9 +213,9 @@ class ServerRoom extends RoomStateView implements Room {
       // In an open room only a detach of the holder, or a removal that already evicted the member, abandons it.
       const lost = this._admissions.get(id) === 'abandoned' && !this._model.closed
       const cause: LeaveCause = { type: lost ? 'disconnected' : 'left' }
-      await evictMember(this._incarnation, id, identity, cause).catch((error: unknown) => {
+      await evictMember(this._incarnation, id, cause).catch((error: unknown) => {
         reportRoomError(error)
-        this._replica.evictLater(id, identity)
+        this._replica.evictLater(id)
       })
       this._abandonAdmission(id, cause)
       throw error
@@ -243,19 +243,17 @@ class ServerRoom extends RoomStateView implements Room {
   /** @internal */
   async _removeMember(id: string, cause: LeaveCause): Promise<void> {
     if (this._model.closed) return // close() already removed everyone
-    const identity = this._state.getRemote(id)?.identity ?? null
-    await evictMember(this._incarnation, id, identity, cause)
+    await evictMember(this._incarnation, id, cause)
     this._model.applyLeave(id, cause)
   }
 
   /** @internal The member's holder is gone: ownership ends even if eviction fails, which the heartbeat then retries. */
   async _removeDepartedMember(id: string): Promise<void> {
     const cause = { type: 'disconnected' } as const
-    const identity = this._state.getRemote(id)?.identity ?? null
     try {
       await this._removeMember(id, cause)
     } catch {
-      this._replica.evictLater(id, identity)
+      this._replica.evictLater(id)
       this._model.applyLeave(id, cause)
     }
   }

@@ -117,7 +117,7 @@ class RoomReplica {
   /** A view write failed, or the session hosting the views was lost: the heartbeat writes them again. */
   private _viewsLost = false
   /** Members whose eviction failed, by id, with their identity: the session would host them for as long as it lives. */
-  private readonly _unevicted = new Map<string, string | null>()
+  private readonly _unevicted = new Set<string>()
   /** Whether this process tells its demand again, and was asked to again meanwhile. */
   private _tellingAgain = false
   private _askedAgain = false
@@ -374,8 +374,8 @@ class RoomReplica {
   }
 
   /** The heartbeat evicts the member again, as `disconnected`. */
-  evictLater(id: string, identity: string | null): void {
-    this._unevicted.set(id, identity)
+  evictLater(id: string): void {
+    this._unevicted.add(id)
   }
 
   /** @internal Renews the session, evicts again whom it failed to, and finishes the leaves its members' evicting
@@ -383,8 +383,8 @@ class RoomReplica {
    *  write, after each one's earlier write. */
   async _renewSession(): Promise<void> {
     if (!(await renewSession(this._incarnation, this.session))) this._viewsLost = true
-    for (const [id, identity] of this._unevicted) {
-      await evictMember(this._incarnation, id, identity, { type: 'disconnected' })
+    for (const id of this._unevicted) {
+      await evictMember(this._incarnation, id, { type: 'disconnected' })
       this._unevicted.delete(id)
     }
     this._pendingCleanups = await finishSessionCleanups(this._incarnation, this.session, this._pendingCleanups)

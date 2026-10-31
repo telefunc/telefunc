@@ -42,7 +42,7 @@ import {
   deleteCells,
   type MemberMetaCells,
 } from './meta.js'
-import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, decodeRoomText, encodeRoomRecord } from './lanes.js'
+import { SEMANTIC_LANE, commitControlOrThrow, decodeRoomRecord, encodeRoomRecord } from './lanes.js'
 import { CX_CONFLICT, retryCompareExchange } from './cx.js'
 import { afterHoldChange, holdChange, holdCounts, type RoomIncarnation } from './lifecycle.js'
 import {
@@ -275,9 +275,7 @@ async function reapSessions(room: RoomIncarnation, { cells, now }: CellsAt): Pro
 
 async function cleanSession(room: RoomIncarnation, session: string, cleaner: string): Promise<void> {
   const marks = await readPrefix(room.id, room.inc, sessionMemberCellPrefix(session))
-  await eachInFlight(marks, ([key, raw]) =>
-    finishSessionMember(room, session, memberIdOfSessionMemberKey(key), raw.length > 0 ? decodeRoomText(raw) : null),
-  )
+  await eachInFlight(marks.keys(), (key) => finishSessionMember(room, session, memberIdOfSessionMemberKey(key)))
   const views = await readPrefix(room.id, room.inc, sessionViewCellPrefix(session))
   await eachInFlight(views.keys(), (key) => removeView(room, key))
   const key = sessionCellKey(session)
@@ -288,14 +286,9 @@ async function cleanSession(room: RoomIncarnation, session: string, cleaner: str
   })
 }
 
-/** A member of a lapsed session leaves, or finishes leaving; its mark names its identity. */
-async function finishSessionMember(
-  room: RoomIncarnation,
-  session: string,
-  id: string,
-  identity: string | null,
-): Promise<void> {
-  if (await evictMember(room, id, identity, { type: 'disconnected' })) return
+/** A member of a lapsed session leaves, or finishes leaving. */
+async function finishSessionMember(room: RoomIncarnation, session: string, id: string): Promise<void> {
+  if (await evictMember(room, id, { type: 'disconnected' })) return
   const mark = sessionMemberCellKey(session, id)
   await mutateCells(room.id, room.inc, [mark], (current) => ({
     value: undefined,
@@ -330,14 +323,9 @@ async function eachInFlight<T>(items: Iterable<T>, task: (item: T) => Promise<un
 
 /** Remove a member and record the cleanup in one write, then finish the cleanup; false once neither the member nor
  *  its cleanup was there. */
-async function evictMember(
-  room: RoomIncarnation,
-  id: string,
-  identity: string | null,
-  cause: LeaveCause,
-): Promise<boolean> {
+async function evictMember(room: RoomIncarnation, id: string, cause: LeaveCause): Promise<boolean> {
   try {
-    return await removeMemberCells(room, id, identity, cause)
+    return await removeMemberCells(room, id, cause)
   } catch (error) {
     // A room that closed under the eviction ended the member with everyone else.
     if (!isOpenIncarnation(await getRoomBackend().readHead(room.id), room.inc)) return true
@@ -345,19 +333,13 @@ async function evictMember(
   }
 }
 
-async function removeMemberCells(
-  room: RoomIncarnation,
-  id: string,
-  identity: string | null,
-  cause: LeaveCause,
-): Promise<boolean> {
+async function removeMemberCells(room: RoomIncarnation, id: string, cause: LeaveCause): Promise<boolean> {
   const memberKey = memberCellKey(id)
   const cleanupKey = cleanupCellKey(id)
-  const removedKeys = identity === null ? [memberKey] : [memberKey, identityCellKey(identity, id)]
   const { value: outcome, counters } = await mutateCells<{ cleanup: boolean; config: HoldConfig | null }>(
     room.id,
     room.inc,
-    [...removedKeys, cleanupKey],
+    [memberKey, cleanupKey],
     (cells) => {
       const pending = cells.has(cleanupKey)
       const raw = cells.get(memberKey)
@@ -366,7 +348,9 @@ async function removeMemberCells(
       const cleanup: PendingMemberCleanup = { cause: leaveCauseToWire(cause), session: record.session }
       if (record.hidden) cleanup.hidden = true
       const config = record.hidden ? null : room.hold
-      const mutations: CellMutation[] = removedKeys.map((key) => ({ key, bytes: null }))
+      // The marker is written with the record, so the record's version covers it.
+      const mutations: CellMutation[] = [{ key: memberKey, bytes: null }]
+      if (record.identity !== undefined) mutations.push({ key: identityCellKey(record.identity, id), bytes: null })
       if (!pending) mutations.push({ key: cleanupKey, bytes: encodeRoomRecord(cleanup) })
       return { value: { cleanup: true, config }, mutations, counts: holdCounts(config, -1) }
     },
