@@ -40,7 +40,7 @@ import { RosterStream } from './RosterStream.js'
 import { toggle } from './sets.js'
 import { RoomLease } from './lease.js'
 import { MemberMessageTexts, type RoomStub, unorderedEventText } from './stub.js'
-import { RoomSubscriptions } from './subscriptions.js'
+import { RoomSubscriptions, type LanePlanOwner } from './subscriptions.js'
 assertIsNotBrowser()
 
 /** What the control lane carries for the model: everything but another process's ask, which the report answers. */
@@ -58,7 +58,7 @@ function replicasHere(): Map<string, WeakRef<RoomReplica>> {
  *  and pages the handles hold, and the heartbeat that renews it and checks the authority again. Each handle keeps its
  *  guards, its tail, the stubs it opened and its listeners. A replica no handle observes, owns a member through or
  *  tails runs no heartbeat and holds no lane; it lives while a handle holds it. */
-class RoomReplica {
+class RoomReplica implements LanePlanOwner {
   private static readonly _collected = new FinalizationRegistry<{
     replicas: Map<string, WeakRef<RoomReplica>>
     inc: string
@@ -158,7 +158,7 @@ class RoomReplica {
       deliver: (member, track, wanted) => this._owners.get(member)?._deliverDemand(member, track, wanted),
       ask: (instance) => this._askDemand(instance),
     })
-    this.plan = new RoomSubscriptions(this, this.report)
+    this.plan = new RoomSubscriptions({ owner: this, demand: this.report })
     this.sync = new AuthoritySync(this, this.plan)
     this.roster = new RosterStream({
       model: this.model,
