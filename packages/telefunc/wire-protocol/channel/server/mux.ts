@@ -198,8 +198,17 @@ class ChannelMux {
     this.sessions.removeChannel(channelId)
   }
 
+  /** An ended channel its page may still need (`keep`) stays attachable; the mux forgets any other. */
+  onChannelEnded(
+    channel: ServerChannel<any, any>,
+    { keep, pageAttached }: { keep: boolean; pageAttached: boolean },
+  ): void {
+    if (keep) this.keepEnded(channel, pageAttached)
+    else this.unregisterChannel(channel.id)
+  }
+
   /** Keeps an ended channel attachable until its page needs nothing of it, leaves it, or is away `reconnectTimeout`. */
-  keepEnded(channel: ServerChannel<any, any>, pageAttached: boolean): void {
+  private keepEnded(channel: ServerChannel, pageAttached: boolean): void {
     const timer = this.endedChannels.get(channel)
     if (timer) clearTimeout(timer)
     this.endedChannels.set(

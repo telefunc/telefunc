@@ -124,7 +124,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   private _responseAbort: ((abortValue?: unknown) => void) | null = null
   private _pendingAckRes: Array<{ ackedSeq: number; result: string; status: AckResultStatus }> = []
   /** The mux it is registered with, which keeps or forgets it once it ends. */
-  private _mux: ChannelMux | null = null
+  private mux: ChannelMux | null = null
   private _pendingEnd: PendingEnd | null = null
   private _closeRequestSeq = 0
   /** How far the page is known to have what this channel sent it. */
@@ -362,7 +362,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   /** @internal — Prepare channel state so the mux can register it. Called by
    *  `ChannelMux.registerChannel`; external code should call that instead. */
   _registerChannel(mux?: ChannelMux): void {
-    this._mux = mux ?? null
+    this.mux = mux ?? null
     if (this._peer || this._didRegister) return
     this._didRegister = true
     // Allocate the replay buffer up-front: registration is the moment the channel
@@ -862,12 +862,9 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     if (this._reconnectTimer) clearTimeout(this._reconnectTimer)
     this._reconnectTimer = null
     // Before any response carried it, it keeps its end for the page a later one hands it to.
-    if (!pageGone && !this._pageNeedsNothing()) {
-      this._mux?.keepEnded(this, pageAttached)
-    } else {
-      this._release()
-      this._mux?.unregisterChannel(this.id)
-    }
+    const keep = !pageGone && !this._pageNeedsNothing()
+    if (!keep) this._release()
+    this.mux?.onChannelEnded(this, { keep, pageAttached })
     this._fireClose(err)
     this._flow.shutdown()
     this._notifyCloseProgress()
