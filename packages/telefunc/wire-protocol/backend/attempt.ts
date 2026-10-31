@@ -1,4 +1,4 @@
-export { DriverAttempt, SourceDroppedError }
+export { DriverAttempt, SourceDroppedError, isSourceDroppedError }
 
 import type { ReportedState, SubscriptionAttempt, SubscriptionState } from './subscription.js'
 
@@ -33,6 +33,20 @@ abstract class DriverAttempt implements SubscriptionAttempt {
   }
 }
 
+const sourceDroppedErrorBrand = Symbol.for('telefunc.SourceDroppedError')
+
 /** The reason a driver ends an attempt whose source the backend dropped, as a Room generation no head names any more:
  *  an end its consumer expects, so the subscription closes without a bug report. */
-class SourceDroppedError extends Error {}
+class SourceDroppedError extends Error {
+  readonly [sourceDroppedErrorBrand] = true as const
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'SourceDroppedError'
+  }
+}
+
+/** Also true of one a second copy of telefunc made, as a driver package bundling its own does. */
+function isSourceDroppedError(thing: unknown): thing is SourceDroppedError {
+  return typeof thing === 'object' && thing !== null && sourceDroppedErrorBrand in thing
+}

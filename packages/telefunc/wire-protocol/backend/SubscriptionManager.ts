@@ -6,7 +6,7 @@ import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { ESTABLISH_HOLD_MS } from '../constants.js'
 import { reportBug } from '../channel/server/channel.js'
-import { SourceDroppedError } from './attempt.js'
+import { isSourceDroppedError } from './attempt.js'
 import { assertDriverOrdering } from './driverOrdering.js'
 import { heldSendWeight } from './heldSendWeight.js'
 import type { OrderingInfo } from '../wire/orderingFrame.js'
@@ -302,7 +302,7 @@ class SubscriptionSlot {
    *  another end is reported. */
   private _ended(reason: Error | undefined): void {
     const failure = new Error(`Backend subscription closed: ${this._config.sourceKey}`, reason && { cause: reason })
-    this._terminal(failure, { report: !(reason instanceof SourceDroppedError) })
+    this._terminal(failure, { report: !isSourceDroppedError(reason) })
   }
 
   private _terminal(error: unknown, { report = true }: { report?: boolean } = {}): void {
