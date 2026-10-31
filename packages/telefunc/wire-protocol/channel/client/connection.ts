@@ -192,8 +192,6 @@ type ReconcileBatch = {
   movedBufferedFrames: OutboundFrame[]
 }
 
-type ReconcileBufferedFramesMode = 'batch-on-reconcile' | 'release-after-reconciled'
-
 type ClientConnectionOptions = {
   transports: ChannelTransports
   fetchImpl: typeof fetch
@@ -209,8 +207,9 @@ type ClientConnectionOptions = {
 
 type ClientChannelTransport = {
   readonly type: ChannelTransport
-  readonly sendReconcileOnOpen: boolean
-  readonly reconcileMode: ReconcileBufferedFramesMode
+  /** The request that opens its wire carries the RECONCILE and the frames buffered behind it; else the RECONCILE goes
+   *  once the wire is open, and the buffered frames after its RECONCILED. */
+  readonly carriesReconcileInOpen: boolean
   /** True iff client→server frames are per-POST batched instead of pushed onto
    *  one streaming body — signals the channel to use a larger initial window. */
   readonly batched: boolean
@@ -839,7 +838,7 @@ class ClientConnection implements MuxConnection {
     if (this.closed) return
     if (transport !== this.transport) return
     this.enterOpen()
-    if (this.transport.sendReconcileOnOpen) {
+    if (!this.transport.carriesReconcileInOpen) {
       this.sendReconcileBatch(this.stageReconcileBatch(false))
       this.beatFromReconcile(transport)
       return
@@ -1508,7 +1507,7 @@ class ClientConnection implements MuxConnection {
   }
 
   private drainBufferedFramesForReconcile(isInitialBatch: boolean): OutboundFrame[] {
-    if (this.transport.reconcileMode !== 'batch-on-reconcile') return []
+    if (!this.transport.carriesReconcileInOpen) return []
     // After a wire that may have lost frames, the replay goes first: a newer frame ahead gets an older one dropped.
     if (isInitialBatch && (this.sessionId !== null || this.sentBefore())) return []
     // A channel the server awaits is left out: its replay waits for its ATTACH_RESULT.

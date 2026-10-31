@@ -68,8 +68,7 @@ class SseTransport implements UpgradeSource {
   private readonly userHeaders: Record<string, string> | undefined
   private readonly owner: TransportOwner
   readonly type = CHANNEL_TRANSPORT.SSE
-  readonly sendReconcileOnOpen = false
-  readonly reconcileMode = 'batch-on-reconcile' as const
+  readonly carriesReconcileInOpen = true
   /** Each wire's own, so a POST still in flight for a wire that died isn't dispatched on the next one. */
   private connId = randomUuid()
   uplink = new Uplink()

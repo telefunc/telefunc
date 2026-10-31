@@ -23,8 +23,7 @@ type WsTransportOptions = {
 
 class WsTransport implements UpgradeTarget {
   readonly type = CHANNEL_TRANSPORT.WS
-  readonly sendReconcileOnOpen = true
-  readonly reconcileMode = 'release-after-reconciled' as const
+  readonly carriesReconcileInOpen = false
   readonly batched = false
   heartbeat: Heartbeat | null = null
   /** The probe's socket and ends, kept as the transport adopts it: the server counts every frame the socket carries. */
