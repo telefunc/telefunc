@@ -1,5 +1,5 @@
 import { Link } from '@brillout/docpress'
-import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
+import { TelefuncStreamBeta } from '../../components'
 
 **Environment**: server.
 
@@ -8,12 +8,10 @@ import { ConfigWhereServer, TelefuncStreamBeta } from '../../components'
 ```ts
 // Environment: server
 
-import { config } from 'telefunc'
+import { config } from '@telefunc/room'
 
-config.room = {
-  emptyTimeout: 300_000,    // A room nobody joined closes this long after no page has it open (ms)
-  departureTimeout: 20_000, // A room someone joined closes this long after nobody is in it and no page has it open (ms)
-}
+config.emptyTimeout = 300_000    // A room nobody joined closes this long after no page has it open (ms)
+config.departureTimeout = 20_000 // A room someone joined closes this long after nobody is in it and no page has it open (ms)
 ```
 
 > These are the defaults of every <Link href="/room">`Room`</Link>. The options of the same names to `Room.create()` and `Room.getOrCreate()` override them for the room they create. A room keeps the timeouts it was created with.
@@ -22,7 +20,7 @@ config.room = {
 
 > For when a room closes, see <Link href="/room#close-a-room" />.
 
-<ConfigWhereServer />
+> You usually set them at your server entry.
 
 
 ## See also

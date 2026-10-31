@@ -11,25 +11,6 @@ export { withContext } from './withContext.js'
 export { ConnectionError } from './ConnectionError.js'
 export { NetworkError } from '../shared/NetworkError.js'
 export { ChannelClosedError, ChannelOverflowError } from '../wire-protocol/channel/channelErrors.js'
-export type {
-  ClientRoom as Room,
-  RoomInfo,
-  RoomMeta,
-  ClientJoinOptions as JoinOptions,
-  PublishOptions,
-  ParticipantMeta,
-  LocalParticipant,
-  RemoteParticipant,
-  Sender,
-  RoomSendReceipt,
-  RoomAckReceipt,
-  LeaveCause,
-  BinaryFrameInfo,
-  BinaryPublishOptions,
-  RoomSnapshotView,
-  ParticipantSnapshotView,
-} from '../wire-protocol/room/types.js'
-
 export type { TelefuncClientExtension } from './extensions.js'
 export type {
   TypeContract,

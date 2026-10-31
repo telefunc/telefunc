@@ -83,13 +83,15 @@ export {
 }
 
 import { Buffer } from 'node:buffer'
-import { Room, Abort, BroadcastChannel, onBug, type LeaveCause, type LocalParticipant } from 'telefunc'
+import { Abort, onBug } from 'telefunc'
+import { Room, type LeaveCause, type LocalParticipant } from '@telefunc/room'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 import {
   addBackendFault,
   endBackendSubscriptions,
   holdCellPages,
+  holdSubscriptions,
   holdRetainedReads,
   type BackendFault,
 } from '../../failing-backend'
@@ -916,28 +918,26 @@ async function onStopChurn(roomId: string) {
   return await churning.get(roomId)!()
 }
 
-/** While 2,000 broadcast publishes are delivered, more than a turn's worth, a view subscribes and a member publishes
- *  three 1,500-byte messages at once, past the 4,096-byte bufferLimit of the lane that runs it. */
+/** While the store holds a view's new subscription short of ready, a member publishes three 1,500-byte messages at once,
+ *  past the 4,096-byte bufferLimit of the lane that runs it. */
 async function onPublishWhileEstablishing(roomId: string) {
   const me = await Room.join(roomId, { meta: { name: 'Me' } })
   const room = await Room.get(roomId)
   const seen: string[] = []
   watched.set(roomId, seen)
   watchedRooms.set(roomId, room)
-  const busy = new BroadcastChannel<number>({ key: `room:busy-test:${crypto.randomUUID()}` })
-  busy.subscribe(() => {})
-  for (let i = 0; i < 2000; i++) void busy.publish(i)
+  const release = holdSubscriptions(roomId)
   room.subscribe((data, _info, from) => {
     if (from.id === me.id) seen.push((data as string)[0]!)
   })
-  const outcomes = await Promise.all(
-    ['1', '2', '3'].map((n) =>
-      me.publish(n.padEnd(1500, '.')).then(
-        () => 'sent',
-        (err: Error) => err.name,
-      ),
+  const publishes = ['1', '2', '3'].map((n) =>
+    me.publish(n.padEnd(1500, '.')).then(
+      () => 'sent',
+      (err: Error) => err.name,
     ),
   )
-  await busy.close()
-  return outcomes
+  // The one past bufferLimit settles while the others are held.
+  await publishes[2]
+  release()
+  return await Promise.all(publishes)
 }

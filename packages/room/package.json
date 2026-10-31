@@ -1,0 +1,64 @@
+{
+  "name": "@telefunc/room",
+  "version": "0.1.0",
+  "description": "Rooms for Telefunc: members, presence, meta, messages and media tracks, on one server or across many.",
+  "homepage": "https://github.com/telefunc/telefunc/tree/main/packages/room#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/telefunc/telefunc.git",
+    "directory": "packages/room"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "telefunc": {
+    "server": "@telefunc/room/server",
+    "client": "@telefunc/room/client"
+  },
+  "type": "module",
+  "sideEffects": [
+    "./dist/server.js",
+    "./dist/client.js",
+    "./dist/index.js",
+    "./dist/cloudflare/extension.js"
+  ],
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./backend": {
+      "types": "./dist/backend/index.d.ts",
+      "default": "./dist/backend/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist/ && tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@brillout/json-serializer": "^0.5.25"
+  },
+  "peerDependencies": {
+    "telefunc": ">=0.3.2 <0.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260305.1",
+    "@types/node": "^24.0.4",
+    "telefunc": "workspace:*",
+    "typescript": "^7.0.2"
+  }
+}

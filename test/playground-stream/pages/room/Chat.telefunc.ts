@@ -1,6 +1,7 @@
 export { onGetChat, onGetMembersChat, onSignIn, onWatchChat, onWhoIsOnline, onGetChatMember }
 
-import { Room, Abort } from 'telefunc'
+import { Abort } from 'telefunc'
+import { Room } from '@telefunc/room'
 import { cleanupState } from '../../cleanup-state'
 import { onServerAction } from '../../server-actions'
 
