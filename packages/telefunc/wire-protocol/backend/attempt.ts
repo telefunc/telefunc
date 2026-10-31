@@ -1,4 +1,4 @@
-export { DriverAttempt }
+export { DriverAttempt, SourceDroppedError }
 
 import type { ReportedState, SubscriptionAttempt, SubscriptionState } from './subscription.js'
 
@@ -32,3 +32,7 @@ abstract class DriverAttempt implements SubscriptionAttempt {
     for (const listener of this._listeners) listener(state, error)
   }
 }
+
+/** The reason a driver ends an attempt whose source the backend dropped, as a Room generation no head names any more:
+ *  an end its consumer expects, so the subscription closes without a bug report. */
+class SourceDroppedError extends Error {}

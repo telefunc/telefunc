@@ -26,7 +26,8 @@ type BackendPayload = string | Uint8Array
 
 type BackendReceiver<Payload = Uint8Array> = (payload: Payload, info: { seq: number; timestamp: number }) => void
 
-/** One driver establishment, reporting each state change; an end carries its reason when the driver has one. */
+/** One driver establishment, reporting each state change; an end carries its reason when the driver has one, a
+ *  `SourceDroppedError` when the backend dropped the source. */
 type SubscriptionAttempt = {
   state(): SubscriptionState
   onStateChange(cb: (state: ReportedState, reason?: Error) => void): () => void

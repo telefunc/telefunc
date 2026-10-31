@@ -11,7 +11,7 @@ import type {
   SubscriptionBinding,
 } from 'telefunc/__internal'
 import type { RoomSubscriptionSource } from '@telefunc/room/backend'
-import { DriverAttempt, decodeOrderingFrame } from 'telefunc/__internal'
+import { DriverAttempt, SourceDroppedError, decodeOrderingFrame } from 'telefunc/__internal'
 import { createDeferred, type Deferred } from './createDeferred.js'
 import type { CommitChannels, FenceTokens } from './keys.js'
 import { REDIS_DELIVERY_FENCE_BYTE, REDIS_DELIVERY_FENCE_TOKEN_LENGTH } from './commands.js'
@@ -418,7 +418,7 @@ class RedisSubscriptionAttempt extends DriverAttempt {
 
   receive(channel: string, message: Buffer): void {
     if (channel === this.invalidationChannel) {
-      return this.terminate(new Error('Redis generation subscription was invalidated'))
+      return this.terminate(new SourceDroppedError('Redis generation subscription was invalidated'))
     }
     if (this.state() === 'ready') return this.receiveFrame(message)
     if (this.awaitsConfirmation()) this.early.push(message)

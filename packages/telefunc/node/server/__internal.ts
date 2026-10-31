@@ -7,7 +7,7 @@ export type {
 } from '../../wire-protocol/backend/broadcast/contract.js'
 export { installBackend, backendPlane } from '../../wire-protocol/backend/install.js'
 export type { BackendDriver } from '../../wire-protocol/backend/install.js'
-export { DriverAttempt } from '../../wire-protocol/backend/attempt.js'
+export { DriverAttempt, SourceDroppedError } from '../../wire-protocol/backend/attempt.js'
 export { assertDriverOrdering } from '../../wire-protocol/backend/driverOrdering.js'
 export { MemoryBackend } from '../../wire-protocol/backend/memory/backend.js'
 export type { PlaneSubscriptions, SendHold } from '../../wire-protocol/backend/SubscriptionManager.js'

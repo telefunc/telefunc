@@ -6,6 +6,7 @@ import { createDeferred, type Deferred } from '../../utils/createDeferred.js'
 import { raceTimeout } from '../../utils/raceTimeout.js'
 import { ESTABLISH_HOLD_MS } from '../constants.js'
 import { reportBug } from '../channel/server/channel.js'
+import { SourceDroppedError } from './attempt.js'
 import { assertDriverOrdering } from './driverOrdering.js'
 import { heldSendWeight } from './heldSendWeight.js'
 import type { OrderingInfo } from '../wire/orderingFrame.js'
@@ -297,12 +298,14 @@ class SubscriptionSlot {
     this._transition('ready')
   }
 
-  /** The driver's reason, if any, is the failure's cause. */
+  /** The driver's reason, if any, is the failure's cause. A dropped source is an end its consumers expect, so only
+   *  another end is reported. */
   private _ended(reason: Error | undefined): void {
-    this._terminal(new Error(`Backend subscription closed: ${this._config.sourceKey}`, reason && { cause: reason }))
+    const failure = new Error(`Backend subscription closed: ${this._config.sourceKey}`, reason && { cause: reason })
+    this._terminal(failure, { report: !(reason instanceof SourceDroppedError) })
   }
 
-  private _terminal(error: unknown): void {
+  private _terminal(error: unknown, { report = true }: { report?: boolean } = {}): void {
     const failure = error instanceof Error ? error : new Error(String(error))
     this._config.unmap()
     this._stopPromise = this._release()
@@ -311,7 +314,7 @@ class SubscriptionSlot {
     this._transition('closed')
     this._readiness.reject(failure)
     // Reported here, once, however many consumers share the subscription.
-    void this._readiness.promise.catch(reportBug)
+    void this._readiness.promise.catch(report ? reportBug : () => {})
   }
 
   private _markLost(): void {
