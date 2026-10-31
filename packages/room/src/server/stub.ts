@@ -92,15 +92,8 @@ class MemberMessageTexts {
   /** What `serialized` encodes. */
   private readonly _envelope: RoomDataEnvelope | RoomDmEnvelope
 
-  constructor({
-    serialized,
-    info,
-    envelope,
-  }: {
-    serialized: string
-    info: OrderingInfo
-    envelope: RoomDataEnvelope | RoomDmEnvelope
-  }) {
+  // Positional, as one is built per message.
+  constructor(serialized: string, info: OrderingInfo, envelope: RoomDataEnvelope | RoomDmEnvelope) {
     this._serialized = serialized
     this._info = info
     this._envelope = envelope
