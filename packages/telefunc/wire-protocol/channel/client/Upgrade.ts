@@ -1,5 +1,5 @@
 export { Upgrade }
-export type { BarrierEmission, ProbeSession, ProbeWire, UpgradeOwner, UpgradeSource, UpgradeTarget }
+export type { BarrierEmission, ProbeOwner, ProbeSession, ProbeWire, UpgradeOwner, UpgradeSource, UpgradeTarget }
 
 import type { AttachExchange } from './AttachExchange.js'
 import type { ChannelTable } from './ChannelTable.js'
@@ -27,15 +27,20 @@ import { Heartbeat } from './Heartbeat.js'
  *  until the swap commits — typically driven via a transient Heartbeat. */
 type ProbeWire = {
   ping: () => void
-  onPong: (cb: () => void) => void
-  onClose: (cb: () => void) => void
-  /** `send`/`onFrame` exchange PREPARE/READY without the probe becoming the transport — adopting it
-   *  early would put a sessionless wire in the connection's `transport`. PONG stays on `onPong`. */
+  /** Exchanges PREPARE/READY without the probe becoming the transport — adopting it early would put a sessionless
+   *  wire in the connection's `transport`. */
   send: (frame: Uint8Array<ArrayBuffer>) => void
-  onFrame: (cb: (frame: DecodedFrame, byteLength: number) => void) => void
+  /** Closes it; it tells its owner nothing more. */
   close: () => void
   /** The uplink of the wire it opens. */
   uplink: Uplink
+}
+
+/** What a probed WebSocket tells the upgrade, from the PONG that proves it until it closes or is adopted. */
+interface ProbeOwner {
+  onProbePong(): void
+  onProbeFrame(frame: DecodedFrame, byteLength: number): void
+  onProbeClosed(): void
 }
 
 type ProbeSession = {
@@ -56,7 +61,7 @@ type UpgradeSource = ClientChannelTransport & {
 /** The wire an upgrade moves TO: it has to be openable without becoming the transport, and
  *  adoptable once the barrier commits. */
 type UpgradeTarget = ClientChannelTransport & {
-  probe(): Promise<ProbeWire | null>
+  probe(owner: ProbeOwner): Promise<ProbeWire | null>
   adoptProbe(): void
 }
 
@@ -66,6 +71,10 @@ type UpgradeState =
       tag: 'staging'
       attempt: AbortController
       deadline: ReturnType<typeof setTimeout> | null
+      /** Keeps the probe alive once its first PONG proved it (see `keepProbeAlive`). */
+      probeHeartbeat: Heartbeat | null
+      /** Settles the wait for the probe's READY, once its PREPARE went. */
+      settleReady: ((payload: ReadyPayload | null) => void) | null
       /** READY arrived: the barrier comes next, and a registration waits for the handoff. */
       ready: boolean
     }
@@ -128,7 +137,7 @@ type UpgradeOptions = {
 
 /** The SSE→WS upgrade: a WebSocket probe staged beside the SSE wire, the barrier that ends the old wire, and the join
  *  of both wires' frames once the connection flipped to the new one. */
-class Upgrade {
+class Upgrade implements ProbeOwner {
   private readonly owner: UpgradeOwner
   private readonly channels: ChannelTable
   private readonly liveness: Liveness
@@ -248,6 +257,20 @@ class Upgrade {
     else u.attempt.abort()
   }
 
+  onProbePong(): void {
+    const u = this.state
+    if (u.tag !== 'none') u.probeHeartbeat?.resetPong()
+  }
+
+  onProbeFrame(frame: DecodedFrame, byteLength: number): void {
+    if (frame.tag !== TAG.READY) return this.ingestDuringHandoff(frame, 'new', byteLength)
+    if (this.state.tag === 'staging') this.state.settleReady?.(frame.payload)
+  }
+
+  onProbeClosed(): void {
+    if (this.state.tag !== 'none') this.state.attempt.abort()
+  }
+
   handleFin(): void {
     const u = this.committing
     if (u === null) return
@@ -272,7 +295,7 @@ class Upgrade {
 
   private enterStaging(attempt: AbortController): void {
     assert(this.owner.connected && this.state.tag === 'none')
-    this.state = { tag: 'staging', attempt, deadline: null, ready: false }
+    this.state = { tag: 'staging', attempt, deadline: null, probeHeartbeat: null, settleReady: null, ready: false }
   }
 
   private enterReady(attempt: AbortController): void {
@@ -354,25 +377,19 @@ class Upgrade {
     sessionId: string,
     attempt: AbortController,
   ): Promise<ProbeSession | null> {
-    const probe = await to.probe()
+    const probe = await to.probe(this)
     if (attempt.signal.aborted || !probe) {
       probe?.close()
       return null
     }
+    const staging = this.state
+    assert(staging.tag === 'staging' && staging.attempt === attempt)
     const probeHeartbeat = this.keepProbeAlive(probe, attempt)
+    staging.probeHeartbeat = probeHeartbeat
 
     const upgradeId = randomUuid()
-    let onReady: ((payload: ReadyPayload) => void) | null = null
-    probe.onFrame((frame, byteLength) => {
-      if (frame.tag === TAG.READY) {
-        onReady?.(frame.payload)
-        return
-      }
-      this.ingestDuringHandoff(frame, 'new', byteLength)
-    })
-
     const readyP = new Promise<ReadyPayload | null>((resolve) => {
-      onReady = resolve
+      staging.settleReady = resolve
       attempt.signal.addEventListener('abort', () => resolve(null), { once: true })
     })
     this.armAttemptDeadline(attempt)
@@ -397,8 +414,6 @@ class Upgrade {
       send: () => probe.ping(),
       onDead: () => attempt.abort(),
     })
-    probe.onPong(() => heartbeat.resetPong())
-    probe.onClose(() => attempt.abort())
     heartbeat.start(true)
     attempt.signal.addEventListener(
       'abort',

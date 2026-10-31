@@ -11,7 +11,7 @@ import { decode, encode, isOneFrame, messageFrames, withTook, type DecodedFrame 
 import { TAG } from '../../wire/tags.js'
 import type { ReconciledPayload } from '../../wire/payloads.js'
 import type { OutboundFrame, TransportOwner } from './connection.js'
-import type { ProbeWire, UpgradeTarget } from './Upgrade.js'
+import type { ProbeOwner, ProbeWire, UpgradeTarget } from './Upgrade.js'
 import type { Heartbeat } from './Heartbeat.js'
 
 /** What a WebSocket's frames go through, each way. */
@@ -56,7 +56,7 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.wsUrl = url.href
   }
 
-  async probe(): Promise<ProbeWire | null> {
+  async probe(owner: ProbeOwner): Promise<ProbeWire | null> {
     let ws: WebSocket
     try {
       ws = new WebSocket(this.wsUrl)
@@ -67,15 +67,16 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     const ends = this.wsEnds(ws)
     const { headroom, sender, pieces } = ends
 
-    let onPong: (() => void) | null = null
-    let onClose: (() => void) | null = null
-    let onFrame: ((frame: DecodedFrame, byteLength: number) => void) | null = null
+    // Till its first PONG proves the wire, `proved` settles the wait below; from then on it tells `owner`, till closed.
+    let proved: ((alive: boolean) => void) | null = null
+    let reporting = false
     const take = (frame: DecodedFrame, byteLength: number, at: number): boolean => {
       if (frame.tag === TAG.PIECES_ACK) return headroom.acknowledged(frame)
       if (frame.tag === TAG.PONG) {
         sender.heartbeat(frame.took, at)
-        onPong?.()
-      } else onFrame?.(frame, byteLength)
+        if (reporting) owner.onProbePong()
+        else proved?.(true)
+      } else if (reporting) owner.onProbeFrame(frame, byteLength)
       return true
     }
     ws.onmessage = ({ data }: MessageEvent) => {
@@ -84,21 +85,17 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     ws.onclose = () => {
       headroom.close()
       if (this.probed?.ws === ws) this.probed = null
-      onClose?.()
+      if (reporting) owner.onProbeClosed()
+      else proved?.(false)
     }
     ws.onerror = () => {}
     ws.onopen = () => sender.send(encode.ping(), 0)
 
-    // First pong proves the wire is alive — consumer reassigns onPong/onClose after the await.
     const ready = await new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => resolve(false), WS_PROBE_TIMEOUT_MS)
-      onPong = () => {
+      proved = (alive) => {
         clearTimeout(timer)
-        resolve(true)
-      }
-      onClose = () => {
-        clearTimeout(timer)
-        resolve(false)
+        resolve(alive)
       }
     })
     if (!ready) {
@@ -112,17 +109,12 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
     this.probed = { ws, ends }
     // A RECONCILED may have come while it waited for the PONG.
     sender.setPingInterval(this.pingInterval)
+    reporting = true
     return {
       ping: () => {
         try {
           sender.send(withTook(encode.ping(), pieces.took), 0)
         } catch {}
-      },
-      onPong: (cb) => {
-        onPong = cb
-      },
-      onClose: (cb) => {
-        onClose = cb
       },
       send: (frame) => {
         try {
@@ -131,10 +123,8 @@ class WsTransport implements UpgradeTarget, ClientHeadroomOwner {
           // Socket died between the open event and this send — `onClose` aborts the attempt.
         }
       },
-      onFrame: (cb) => {
-        onFrame = cb
-      },
       close: () => {
+        reporting = false
         if (this.probed?.ws === ws) this.probed = null
         headroom.close()
         try {
