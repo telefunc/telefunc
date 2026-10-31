@@ -89,8 +89,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     return hasProp(value, SERVER_CHANNEL_BRAND)
   }
 
-  protected _isClosed = false
-  /** @internal */ _didShutdown = false
+  /** @internal `closing` once `close`, `abort` or the page's CLOSE started its end; `ended` once `_shutdown` ran. */
+  _phase: 'open' | 'closing' | 'ended' = 'open'
   private _didRegister = false
   protected _peer: IndexedPeer | null = null
   /** @internal The request that opened the wire the page last attached on. */
@@ -175,7 +175,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   get isClosed(): boolean {
-    return this._isClosed
+    return this._phase !== 'open'
   }
 
   send(data: ChannelData<ServerToClient>): Promise<void>
@@ -199,7 +199,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
     data: ChannelData<ServerToClient>,
     opts?: { ack?: boolean },
   ): void | Promise<ChannelAck<ServerToClient>> | Promise<void> {
-    if (this._isClosed) throw new ChannelClosedError()
+    if (this._phase !== 'open') throw new ChannelClosedError()
     const needsAck = opts?.ack !== false && (opts?.ack === true || this.ack === true)
     const serialized = stringify(data)
     if (!this._peer) {
@@ -245,7 +245,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _sendBinary(data: Uint8Array, opts?: { ack?: boolean }): void | Promise<unknown> | Promise<void> {
-    if (this._isClosed) throw new ChannelClosedError()
+    if (this._phase !== 'open') throw new ChannelClosedError()
     const needsAck = opts?.ack === true
     if (!this._peer) {
       if (needsAck) {
@@ -333,8 +333,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   abort(): void
   abort(abortValue: unknown, message?: string): void
   abort(abortValue?: unknown, message?: string): void {
-    if (this._didShutdown || this._isClosed) return
-    this._isClosed = true
+    if (this._phase !== 'open') return
+    this._phase = 'closing'
     const serializedAbortValue = stringify(abortValue)
     if (this._peer) this._peer.sendAbort(serializedAbortValue)
     else this._ensurePendingEnd().abort = serializedAbortValue
@@ -343,12 +343,12 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   close(opts?: ChannelCloseOptions): Promise<ChannelCloseResult> {
     if (this._closePromise) return this._closePromise
-    if (this._didShutdown) return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
+    if (this._phase === 'ended') return Promise.resolve(this._didReceiveCloseAck ? 0 : 1)
     const timeout = normalizeCloseTimeout(opts?.timeout)
     this._closeDeadline = performance.now() + timeout
     // A channel no response carried yet has no page to acknowledge its close.
     this._awaitingCloseAck = this._didRegister
-    this._isClosed = true
+    this._phase = 'closing'
     if (this._peer) this._closeRequestSeq = this._peer.sendCloseRequest(timeout)
     else this._ensurePendingEnd().closeRequest = true
     this._closePromise = this._runFinalizationLoop()
@@ -369,7 +369,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       maxBytes: c.serverReplayBuffer,
       binaryMaxBytes: c.serverReplayBufferBinary,
     })
-    if (this._didShutdown) return // the mux lets an ended channel go
+    if (this._phase === 'ended') return // the mux lets an ended channel go
     if (this._ttlTimer) clearTimeout(this._ttlTimer)
     this._ttlTimer = unrefTimer(
       setTimeout(() => {
@@ -384,7 +384,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** RECONCILE declarations apply before `onOpen`; an ended channel sends only what it made with no peer attached. */
   _attachPeer(peer: IndexedPeer, state?: ReattachState): void {
-    if (this._didShutdown) {
+    if (this._phase === 'ended') {
       this.flushOfflineBuffer(peer)
       this._sendPendingAckRes(peer)
       this._sendPendingEnd(peer)
@@ -403,7 +403,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       this._onPeerSubscription({ binary: true, subscribed: state.broadcast.binary })
     }
     this._sendPendingEnd(peer)
-    if (this._isClosed) {
+    if (this._phase === 'closing') {
       this._notifyCloseProgress()
       return
     }
@@ -420,7 +420,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
       if (frame.seq > this._lastClientSeq) this._lastClientSeq = frame.seq
     }
     // An ended channel keeps only how far the page's frames reached it.
-    if (this._didShutdown) return
+    if (this._phase === 'ended') return
     if (isChannelCtrlTag(frame.tag)) {
       this._dispatchCtrl(frame as ChannelCtrlFrame)
       return
@@ -635,22 +635,22 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onPeerCloseRequest(timeoutMs: number): void {
-    if (this._didShutdown) return
+    if (this._phase === 'ended') return
     assertProtocol(timeoutMs <= TIMER_DELAY_MAX_MS, `CLOSE timeout ${timeoutMs}`)
     const peerDeadline = performance.now() + timeoutMs
     if (!this._closeDeadline || peerDeadline < this._closeDeadline) this._closeDeadline = peerDeadline
     if (this._peer) this._peer.sendCloseAck()
     else this._ensurePendingEnd().closeAck = true
-    if (this._isClosed) {
+    if (this._phase === 'closing') {
       this._notifyCloseProgress()
       return
     }
-    this._isClosed = true
+    this._phase = 'closing'
     void this._runFinalizationLoop()
   }
 
   _onPeerCloseAck(): void {
-    if (this._didShutdown) return
+    if (this._phase === 'ended') return
     // The page acknowledges the close request as it gets it, so it has all sent before it.
     this._onPageHas(this._closeRequestSeq)
     this._didReceiveCloseAck = true
@@ -660,7 +660,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** @internal `peer`'s wire went away. A channel a later reconcile moved to another wire keeps that one. */
   _onPeerDisconnect(peer: IndexedPeer, reconnectTimeout: number): void {
-    if (this._didShutdown || this._peer?.sender !== peer.sender) return
+    if (this._phase === 'ended' || this._peer?.sender !== peer.sender) return
     this._peer = null
     this._reconnectTimer = unrefTimer(
       setTimeout(() => {
@@ -673,13 +673,13 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   _onPeerRecoveryFailure(): void {
-    if (this._didShutdown) return
+    if (this._phase === 'ended') return
     this._peer = null
     this._shutdown(new NetworkError('Channel not acknowledged by client after reconnect', true), { pageGone: true })
   }
 
   _onPeerClose(): void {
-    if (this._didShutdown) return
+    if (this._phase === 'ended') return
     this._peer = null
     this._shutdown(undefined, { pageGone: true })
   }
@@ -761,7 +761,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** Ends the channel on both ends with an ERROR of `reason`, which a page not attached gets at its next attach. */
   protected _endWithError(reason: ErrorReason, err: Error): void {
-    if (this._didShutdown) return
+    if (this._phase === 'ended') return
     this._offlineBuffer.clear(err)
     if (this._peer) this._peer.sendError(reason)
     else this._ensurePendingEnd().error = reason
@@ -779,7 +779,7 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
   }
 
   private async _runFinalizationLoop(): Promise<ChannelCloseResult> {
-    while (!this._didShutdown) {
+    while (this._phase !== 'ended') {
       // Fire onClose only once the close roundtrip is settled and no inbound work is in flight,
       // so listeners see "closed" only after the channel can no longer receive frames.
       if (this._isCloseRoundtripDone()) this._fireClose()
@@ -866,9 +866,8 @@ class ServerChannel<ClientToServer = unknown, ServerToClient = unknown>
 
   /** `pageGone`: its page left it, or never came, so nothing it lacks of the channel can reach it. */
   protected _shutdown(err?: Error, { pageGone = false } = {}): void {
-    if (this._didShutdown) return
-    this._didShutdown = true
-    this._isClosed = true
+    if (this._phase === 'ended') return
+    this._phase = 'ended'
     this._closeError = err
     const pageAttached = this._peer !== null
     this._peer = null

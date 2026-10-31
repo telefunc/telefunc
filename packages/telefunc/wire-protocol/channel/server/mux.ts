@@ -185,7 +185,7 @@ class ChannelMux {
     channel._registerChannel(this)
     this.channels.set(channel.id, channel)
     // It ended before a response carried it: it waits for its page as an ended channel does.
-    if (channel._didShutdown) this.keepEnded(channel, false)
+    if (channel._phase === 'ended') this.keepEnded(channel, false)
     const waiters = this.pendingRegisterWaiters.get(channel.id)
     if (waiters) {
       this.pendingRegisterWaiters.delete(channel.id)
