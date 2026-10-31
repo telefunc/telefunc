@@ -135,7 +135,7 @@ class SseTransport implements UpgradeSource {
   private readonly onPageHide = (event: PageTransitionEvent): void => {
     if (event.persisted) return
     // `keepalive`, as the request outlives the page; not `sendBeacon`, which can't send the request-kind header.
-    void this.post(encodeSseRequest({ connId: this.connId, close: true }), undefined, { keepalive: true }).catch(
+    void this.post(encodeSseRequest({ connId: this.connId, kind: 'close' }), undefined, { keepalive: true }).catch(
       () => {},
     )
     // The unload ends its requests next, which loses no wire: a WebSocket its upgrade opened closes with the page.
@@ -247,7 +247,7 @@ class SseTransport implements UpgradeSource {
     // SSE downstream + upstream POST fire in parallel. If upstream fails, we fall back to outbox+batch.
     const ssePromise = this.post(
       encodeSseRequest(
-        { connId: this.connId, streamResponse: true },
+        { connId: this.connId, kind: 'streamResponse' },
         encodeLengthPrefixedFrames(stage.initialFrames, (entry) => entry.frame),
       ),
       abortController.signal,
@@ -312,7 +312,7 @@ class SseTransport implements UpgradeSource {
     const body = createPushReadableStream<Uint8Array<ArrayBuffer>>()
     // Metadata header first — the server classifies the POST by it; `streamRequest: true`
     // makes it emit `reconciled` inline (the body never ends, can't defer to body-end).
-    body.push(encodeSseRequestMetadata({ connId: this.connId, streamRequest: true }))
+    body.push(encodeSseRequestMetadata({ connId: this.connId, kind: 'streamRequest' }))
     const fetch = this.postAndRead(body, abort.signal, { duplex: 'half' })
     this.streamRequest = { tag: 'active', body, unconfirmed: [] }
     // The POST ends with its body or when cut on the way; `ended` handles its rejection if openStream exits.
@@ -440,7 +440,7 @@ class SseTransport implements UpgradeSource {
     const wire = this.transportAbort
     try {
       const body = encodeSseBatch(
-        { connId: this.connId },
+        { connId: this.connId, kind: 'batch' },
         queued.slice(head?.count ?? 0).map((entry) => entry.frame),
         head?.blob,
       )
@@ -552,7 +552,7 @@ class SseTransport implements UpgradeSource {
     assert(this.transportAbort)
     try {
       await this.postAndRead(
-        encodeSseRequest({ connId: this.connId }, encodeLengthPrefixedFrames(frames)),
+        encodeSseRequest({ connId: this.connId, kind: 'batch' }, encodeLengthPrefixedFrames(frames)),
         this.transportAbort.signal,
       )
     } catch {}

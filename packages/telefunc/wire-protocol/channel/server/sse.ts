@@ -140,10 +140,16 @@ class SseConnectionTransport {
       const reader = new StreamReader(source)
       const metadata = parseMetadata(await reader.readMetadata(SSE_METADATA_MAX_BYTES))
       connId = metadata.connId
-      if (metadata.streamResponse) return await this.handleStreamResponsePost(connId, reader, useNodeStream, request)
-      if (metadata.streamRequest) return await this.handleStreamRequestPost(connId, reader)
-      if (metadata.close) return this.handleClosePost(connId)
-      return await this.handleBatchPost(connId, reader)
+      switch (metadata.kind) {
+        case 'streamResponse':
+          return await this.handleStreamResponsePost(connId, reader, useNodeStream, request)
+        case 'streamRequest':
+          return await this.handleStreamRequestPost(connId, reader)
+        case 'close':
+          return this.handleClosePost(connId)
+        case 'batch':
+          return await this.handleBatchPost(connId, reader)
+      }
     } catch (err) {
       // An oversize frame leaves no next frame boundary to resume from, so it ends the wire, not
       // just this POST.
@@ -402,11 +408,13 @@ class SseConnectionTransport {
 
 /** Malformed metadata is untrusted client ingress, not a truncation — same class as the decode seam. */
 function parseMetadata(raw: string): SseRequestMetadata {
+  let metadata: unknown
   try {
-    return parseSseRequestMetadata(raw)
+    metadata = JSON.parse(raw)
   } catch {
     throw new ProtocolViolationError('malformed SSE request metadata')
   }
+  return parseSseRequestMetadata(metadata)
 }
 
 function reportDispatchBug(err: unknown): void {
