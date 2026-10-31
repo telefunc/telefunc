@@ -389,46 +389,52 @@ class ClientConnection
     return Math.min(channel._maxFrameBytes, this.maxFrameBytes)
   }
 
+  /** Sequenced as data is, as CLOSE and CLOSE_ACK are, so a closing frame a dead wire lost replays. */
   sendAbort(channel: MuxChannel, abortValue: string): void {
-    this.sendClosingFrame(channel, (ix, seq) => encode.abort(ix, abortValue, seq))
-  }
-
-  sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
-    this.sendClosingFrame(channel, (ix, seq) => encode.close(ix, timeoutMs, seq))
-  }
-
-  sendCloseAck(channel: MuxChannel): void {
-    this.sendClosingFrame(channel, (ix, seq) => encode.closeAck(ix, seq))
-  }
-
-  /** Sequenced as data is, so a closing frame a dead wire lost replays. */
-  private sendClosingFrame(
-    channel: MuxChannel,
-    buildFrame: (ix: number, seq: number) => Uint8Array<ArrayBuffer>,
-  ): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
     const seq = record.replay.nextSeq()
-    this.gate.send(record, seq, buildFrame(record.ix, seq), 'control')
+    this.gate.send(record, seq, encode.abort(record.ix, abortValue, seq), 'control')
+  }
+
+  sendCloseRequest(channel: MuxChannel, timeoutMs: number): void {
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    const seq = record.replay.nextSeq()
+    this.gate.send(record, seq, encode.close(record.ix, timeoutMs, seq), 'control')
+  }
+
+  sendCloseAck(channel: MuxChannel): void {
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    const seq = record.replay.nextSeq()
+    this.gate.send(record, seq, encode.closeAck(record.ix, seq), 'control')
   }
 
   sendByteWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void {
-    this.sendUnsequenced(channel, urgency, ({ ix, lastSeq }) => encode.window(ix, limit, lastSeq))
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    this.gate.sendUnsequenced(record, encode.window(record.ix, limit, record.lastSeq), urgency)
   }
 
   sendMsgWindowUpdate(channel: MuxChannel, limit: number, urgency: Urgency): void {
-    this.sendUnsequenced(channel, urgency, ({ ix }) => encode.msgWindow(ix, limit))
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    this.gate.sendUnsequenced(record, encode.msgWindow(record.ix, limit), urgency)
   }
 
   sendBdpPing(channel: MuxChannel, probe: number): void {
-    this.sendUnsequenced(channel, 'flow-control', ({ ix }) => encode.bdpPing(ix, probe))
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    this.gate.sendUnsequenced(record, encode.bdpPing(record.ix, probe), 'flow-control')
   }
 
   sendBdpPingAck(channel: MuxChannel, { probe, backlog, pathRtt }: BdpPingAck): void {
+    const record = this.channels.of(channel)
+    if (record === undefined) return
     // The round trip a page measures on batch POSTs leaves out the wait for its POST, so it vouches for no path.
-    this.sendUnsequenced(channel, 'flow-control', ({ ix }) =>
-      encode.bdpPingAck(ix, probe, backlog, this.transport.batched ? Infinity : pathRtt),
-    )
+    const frame = encode.bdpPingAck(record.ix, probe, backlog, this.transport.batched ? Infinity : pathRtt)
+    this.gate.sendUnsequenced(record, frame, 'flow-control')
   }
 
   bufferedAmount(): number {
@@ -439,23 +445,16 @@ class ClientConnection
     return this.transport.heartbeat?.deliveredBefore(ms) ?? 0
   }
 
-  /** Sends what `buildFrame` builds, as `SendGate.sendUnsequenced` does. */
-  private sendUnsequenced(
-    channel: MuxChannel,
-    kind: OutboundFrameKind,
-    buildFrame: (record: ChannelRecord) => Uint8Array<ArrayBuffer>,
-  ): void {
+  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
     const record = this.channels.of(channel)
     if (record === undefined) return
-    this.gate.sendUnsequenced(record, buildFrame(record), kind)
-  }
-
-  sendBroadcastSubscribe(channel: MuxChannel, binary: boolean): void {
-    this.sendUnsequenced(channel, 'control', ({ ix }) => encode.broadcastSub(ix, binary))
+    this.gate.sendUnsequenced(record, encode.broadcastSub(record.ix, binary), 'control')
   }
 
   sendBroadcastUnsubscribe(channel: MuxChannel, binary: boolean): void {
-    this.sendUnsequenced(channel, 'control', ({ ix }) => encode.broadcastUnsub(ix, binary))
+    const record = this.channels.of(channel)
+    if (record === undefined) return
+    this.gate.sendUnsequenced(record, encode.broadcastUnsub(record.ix, binary), 'control')
   }
 
   onTransportOpen(transport: ClientChannelTransport): void {
