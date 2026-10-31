@@ -221,10 +221,6 @@ class ChannelMux {
     channel._release()
   }
 
-  hasChannels(): boolean {
-    return this.channels.size > 0
-  }
-
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
   onConnectionOpen<TConnection>(
