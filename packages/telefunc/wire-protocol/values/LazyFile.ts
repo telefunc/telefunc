@@ -85,7 +85,7 @@ class LazyBlob extends BaseStreamBlob {
   readonly [LAZY_BLOB_BRAND] = true
 
   private getStream: GetStream
-  protected _consumed = false
+  protected consumed = false
 
   // Brand-checked `instanceof` (Abort.ts pattern) — accepts any object carrying
   // the brand symbol, including plain objects across realms / serialization.
@@ -102,13 +102,13 @@ class LazyBlob extends BaseStreamBlob {
 
   /** Subclasses overriding `bytes`/etc. that consume the source via a different path
    *  must call this to keep the one-shot guard honest. */
-  protected _markConsumed(): void {
-    assertUsage(!this._consumed, 'Stream has already been consumed — each streaming Blob/File can only be read once.')
-    this._consumed = true
+  protected markConsumed(): void {
+    assertUsage(!this.consumed, 'Stream has already been consumed — each streaming Blob/File can only be read once.')
+    this.consumed = true
   }
 
   stream(): ReadableStream<Uint8Array<ArrayBuffer>> {
-    this._markConsumed()
+    this.markConsumed()
     return this.getStream()
   }
 }

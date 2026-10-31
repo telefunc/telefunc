@@ -35,7 +35,7 @@ class FileDownload extends LazyFile {
 
   constructor(metadata: FileDownloadMetadata, source: StreamSource) {
     super(metadata.size ?? 0, metadata.type, metadata.name, metadata.lastModified, source.stream)
-    this.#core = new DownloadCore(source, metadata.size, this.name, this.type, () => this._markConsumed())
+    this.#core = new DownloadCore(source, metadata.size, this.name, this.type, () => this.markConsumed())
   }
 
   get loaded(): number {
@@ -79,7 +79,7 @@ class BlobDownload extends LazyBlob {
 
   constructor(metadata: BlobDownloadMetadata, source: StreamSource) {
     super(metadata.size ?? 0, metadata.type, source.stream)
-    this.#core = new DownloadCore(source, metadata.size, '', this.type, () => this._markConsumed())
+    this.#core = new DownloadCore(source, metadata.size, '', this.type, () => this.markConsumed())
   }
 
   get loaded(): number {

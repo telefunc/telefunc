@@ -55,12 +55,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     super()
     this.key = opts.key
     // Its page grants it the largest window from the start (see `ClientBroadcast`).
-    this._sendCredit.takePeerWindowMax()
+    this.sendCredit.takePeerWindowMax()
   }
 
   /** Its page grants the largest window at once: a quarter of it past credit is more than the page reads unreported. */
-  protected override _pastCreditAllowance(): number {
-    return this._sendCredit.peerByteWindowMax / 4
+  protected override pastCreditAllowance(): number {
+    return this.sendCredit.peerByteWindowMax / 4
   }
 
   static isServerBroadcast(value: unknown): value is ServerBroadcast {
@@ -112,7 +112,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   // --- Transport callbacks ---
 
-  protected override _dispatchDataFrame(frame: ChannelDataFrame): void {
+  protected override dispatchDataFrame(frame: ChannelDataFrame): void {
     if (frame.tag === TAG.PUBLISH_ACK_REQ) {
       void this._onPeerPublishAckReqMessage(frame.text, frame.seq)
       return
@@ -121,7 +121,7 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
       void this._onPeerPublishBinaryAckReqMessage(frame.data, frame.seq)
       return
     }
-    super._dispatchDataFrame(frame)
+    super.dispatchDataFrame(frame)
   }
 
   _onPeerPublishAckReqMessage(text: string, seq: number): Promise<void> {
@@ -165,25 +165,25 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
   /** A text (`string`) or binary publish to the page, buffered while it is away; a page behind is let go. */
   private forwardPublish(wire: string | Uint8Array): void {
     const binary = typeof wire !== 'string'
-    const peer = this._peer
+    const peer = this.peer
     if (!peer) {
-      if (binary) this._offlineBuffer.pushPublishBinary(wire)
-      else this._offlineBuffer.pushPublish(wire)
+      if (binary) this.offlineBuffer.pushPublishBinary(wire)
+      else this.offlineBuffer.pushPublish(wire)
       this.closeIfDroppedOffline(binary)
       return
     }
-    if (this._sendCredit.isPastByteCredit && this._isPeerBehind()) {
+    if (this.sendCredit.isPastByteCredit && this.isPeerBehind()) {
       this.closeBehind()
       return
     }
-    this._sendCredit.countPublishSent(
+    this.sendCredit.countPublishSent(
       binary ? peer.sendSequenced(encode.publishBinary, wire) : peer.sendSequenced(encode.publish, wire),
     )
   }
 
   /** A page behind the broadcast has no send to reject: it leaves the group on both ends rather than get a gap. */
   private closeBehind(): void {
-    this._endWithError(
+    this.endWithError(
       ERROR_REASON.OVERFLOW,
       new ChannelOverflowError('Broadcast closed: its client fell further behind than the server holds for a client'),
     )
@@ -191,9 +191,9 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
 
   /** A publish the buffer for an offline page dropped would leave it a gap: it gets the end at its next attach instead. */
   private closeIfDroppedOffline(binary: boolean): void {
-    if (!this._offlineBuffer.dropped) return
+    if (!this.offlineBuffer.dropped) return
     const limit = binary ? 'bufferLimitBinary' : 'bufferLimit'
-    this._endWithError(
+    this.endWithError(
       ERROR_REASON.OVERFLOW,
       new ChannelOverflowError(
         `Broadcast closed: more was published to its client while it was offline than config.channel.${limit} lets the server hold`,
@@ -220,12 +220,12 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     }
   }
 
-  protected override _shutdown(err?: Error, options?: { pageGone?: boolean }): void {
+  protected override shutdown(err?: Error, options?: { pageGone?: boolean }): void {
     this.unsubBroadcast?.()
     this.unsubBroadcast = null
     this.unsubBinaryBroadcast?.()
     this.unsubBinaryBroadcast = null
-    super._shutdown(err, options)
+    super.shutdown(err, options)
   }
 
   // --- Internal broadcast helpers ---
@@ -275,15 +275,15 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
         // `shield-error` status lets the client reject its `publish()` promise with a branded
         // ShieldValidationError — same identity every other shield-fail surface produces.
         if (result !== true) {
-          this._sendAckRes(seq, result, ACK_STATUS.SHIELD_ERROR)
+          this.sendAckRes(seq, result, ACK_STATUS.SHIELD_ERROR)
           return
         }
       }
       const result = await this.publishBroadcast(serialized)
-      this._sendAckRes(seq, stringify(result))
+      this.sendAckRes(seq, stringify(result))
     } catch (err) {
       if (this.lifecycle.handleCallbackError(err)) return
-      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
     }
   }
 
@@ -291,10 +291,10 @@ class ServerBroadcast<T = unknown> extends ServerChannel {
     try {
       this.ensureBroadcast()
       const result = await this.publishBinaryBroadcast(data)
-      this._sendAckRes(seq, stringify(result))
+      this.sendAckRes(seq, stringify(result))
     } catch (err) {
       if (this.lifecycle.handleCallbackError(err)) return
-      this._sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
+      this.sendAckRes(seq, `${STATUS_BODY_INTERNAL_SERVER_ERROR} — see server logs`, ACK_STATUS.ERROR)
     }
   }
 }
