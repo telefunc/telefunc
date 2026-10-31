@@ -6,6 +6,7 @@ import { createStreamingReplacer } from './server/response/registry.js'
 import { createStreamingReviver } from './client/response/registry.js'
 import { ServerChannel } from '../channel/server/channel.js'
 import { ServerBroadcast } from '../broadcast/ServerBroadcast.js'
+import { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import { wrapProxy } from '../../utils/wrapProxy.js'
 import { serializeTelefunctionResult } from '../../node/server/runTelefunc/serializeTelefunctionResult.js'
 import { parseHttpRequest } from '../../node/server/runTelefunc/parseHttpRequest.js'
@@ -52,12 +53,19 @@ function createServerHarness(extensionTypes: ReplacerType<TypeContract, ServerRe
     registerChannel(channel) {
       registeredChannels.push(channel)
     },
+    createBroadcastChannel() {
+      const end = new ServerBroadcastEnd()
+      context.registerChannel(end)
+      return end
+    },
     sendStream(createProducer) {
       const index = nextIndex++
       producers.push({ createProducer, index })
       return { metadata: { __index: index }, close() {}, abort() {} }
     },
     validators: new Map(),
+    responseState: (_key, init) => init(),
+    maxFrameBytes: undefined,
   }
   const replacer = createStreamingReplacer(
     () => context,
@@ -76,11 +84,12 @@ function createClientHarness(extensionTypes: ReviverType<TypeContract, ClientRev
   const lifecycles: { value: unknown; close: () => Promise<void> | void; abort: (abortError: AbortError) => void }[] =
     []
   const context: ClientReviverContext = {
+    shareLifecycle() {},
     createChannel(opts) {
       mintedChannels.push(opts)
       return { kind: 'client-channel', ...opts, close: async () => {}, abort: () => {} } as never
     },
-    createBroadcast(opts) {
+    createBroadcastChannel(opts) {
       mintedBroadcasts.push(opts)
       return { kind: 'client-broadcast', ...opts, close: async () => {}, abort: () => {} } as never
     },
@@ -237,7 +246,7 @@ describe('reference identity — duplicates in one payload', () => {
     const broadcast = new ServerBroadcast({ key: 'room:identity' })
     const body = server.serialize({ room: broadcast, roomDupe: broadcast, roomDupe2: broadcast })
 
-    expect(server.registeredChannels).toEqual([broadcast])
+    expect(server.registeredChannels).toEqual([broadcast._end])
     expect(server.lifecycles).toHaveLength(1)
 
     const client = createClientHarness()
@@ -456,6 +465,7 @@ async function roundTrip(
         abortController,
         requestCloseHandlers: [],
         extensionResponseTypes: opts.clientExtensions ?? [],
+        extensionLazyResponseTypes: [],
       },
       { transports: ['sse'], telefuncUrl: 'http://localhost/_telefunc' },
     )) as { ret: unknown }

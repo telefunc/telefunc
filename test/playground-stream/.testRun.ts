@@ -13,15 +13,21 @@ import { testFunction } from './pages/function/e2e-test'
 import { testStreamToServer } from './pages/stream-to-server/e2e-test'
 import { testLiveQuery } from './pages/live-query/e2e-test'
 import { testRxjs } from './pages/rxjs/e2e-test'
-import { testPublish } from './pages/publish/e2e-test'
+import { testPublish, testPublishFailingBackend } from './pages/publish/e2e-test'
 import { testRefIdentity } from './pages/ref-identity/e2e-test'
 import { testUpgrade } from './pages/channel/upgrade-e2e-test'
 import { testWire } from './pages/channel/wire-e2e-test'
 import { testSlowLink } from './pages/channel/slow-link-e2e-test'
 
-function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno') {
+/** `additionalTimeout`: how much longer than test-e2e's default a test of the lane may take. */
+function runPlayground(
+  cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm preview:deno' | 'pnpm preview:redis',
+  // A room test waits out a 60 s timeout: the acknowledgement timeout, or the reconnectTimeout a closed tab gets on SSE.
+  additionalTimeout = 40_000,
+) {
   setServerRuntime(cmd === 'pnpm preview:bun' ? 'bun' : cmd === 'pnpm preview:deno' ? 'deno' : 'node')
   run(cmd, {
+    additionalTimeout,
     // `pnpm preview` runs srvx (prints `Listening on:`); `pnpm dev` is `vike dev` on vite
     // (prints `Local:` + `http://localhost:3000`). Neither matches test-e2e's default
     // "Server running at" / "Accepting connections at" matcher, so the framework times
@@ -38,6 +44,11 @@ function runPlayground(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | '
         log.logText.includes('the server responded with a status of 422') ||
         log.logText.includes('[telefunc:channel-error]') ||
         log.logText.includes('Error: server-listener-bug') ||
+        log.logText.includes('room-listener-bug') ||
+        log.logText.includes('broadcast-listener-bug') ||
+        // The failing backend's failures, which the server reports (failing-backend.ts).
+        log.logText.includes('failing-backend:') ||
+        (log.logText.includes('Backend subscription closed:') && log.logText.includes('hiccup')) ||
         log.logText.includes('TypeError: Converting circular structure to JSON') ||
         // Bun's wording of the same error.
         log.logText.includes('TypeError: JSON.stringify cannot serialize cyclic structures') ||
@@ -108,6 +119,8 @@ function testRun(cmd: 'pnpm dev' | 'pnpm preview' | 'pnpm preview:bun' | 'pnpm p
   testRxjs()
 
   testPublish(isDev)
+
+  testPublishFailingBackend()
 
   testRefIdentity()
 }

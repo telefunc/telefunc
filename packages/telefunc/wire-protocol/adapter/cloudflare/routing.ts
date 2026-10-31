@@ -8,6 +8,7 @@ export {
   assertLocationFallbackIsScaled,
   getBucketCoordinatorShardIndices,
   getDeterministicKeyBucketIndex,
+  getScaleCountForBucket,
   readForwardedTarget,
   resolveCloudflareLocationHint,
   resolveSessionRoutingTarget,
@@ -32,7 +33,7 @@ const DEFAULT_BROADCAST_BUCKETS = [
   'oc',
 ] as const satisfies readonly DurableObjectLocationHint[]
 const TELEFUNC_BROADCAST_BUCKET_HEADER = 'x-telefunc-broadcast-bucket'
-/** Internal: forwarded to the DO so it knows its own instance name. */
+/** The session Durable Object's name, which it writes into its KV pin. */
 const TELEFUNC_SHARD_HEADER = 'x-telefunc-shard'
 /** Internal: forwarded to the DO with the session token its client presented. */
 const TELEFUNC_SESSION_HEADER = 'x-telefunc-session'

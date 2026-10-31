@@ -1,10 +1,13 @@
-export { ChannelMux, getChannelMux }
+export { ChannelMux, getChannelMux, hostLocal, CHANNEL_MUX }
 export type { ConnectionEntry, ReconcileOutcome, ServerTransport, Wire, WirePieces }
 
 import { assert } from '../../../utils/assert.js'
 import { getGlobalObject } from '../../../utils/getGlobalObject.js'
+import { getRawContext } from '../../../node/server/context/context.js'
 import { getAdapterMaxFrameBytes, getServerConfig, pingDeadlineOf } from '../../../node/server/serverConfig.js'
 import { unrefTimer } from '../../../utils/unrefTimer.js'
+import { GcRegistry } from '../../../utils/GcRegistry.js'
+import { getOrCreate } from '../../../utils/getOrCreate.js'
 import { handleTelefunctionBug } from '../../../node/server/runTelefunc/validateTelefunctionError.js'
 import {
   CHANNEL_PING_INTERVAL_MIN_MS,
@@ -160,16 +163,29 @@ type ConnectionEntry = {
   transport: ServerTransport<unknown>
   /** One per wire: the peers of every reconcile on this wire share it. */
   sender: PeerSender
-  /** The request that opened the wire, where one did. */
-  request: Request | undefined
 }
 
+/** The context key of a server that hosts its own channels: a Cloudflare session DO's end with it. */
+const CHANNEL_MUX = Symbol.for('telefunc.channelMux')
+
 function getChannelMux(): ChannelMux {
-  return getGlobals().mux
+  return (getRawContext()?.[CHANNEL_MUX] as ChannelMux | undefined) ?? getGlobals().mux
+}
+
+/** One value per host: one per process on Node/Bun/Deno, one per session Durable Object on Cloudflare. */
+function hostLocal<T>(key: symbol, init: (host: { id: string | null }) => T): T {
+  const mux = getChannelMux()
+  return getOrCreate(mux.hostLocals, key, () => init({ id: mux.hostId })) as T
 }
 
 class ChannelMux {
+  /** Its session Durable Object's id on Cloudflare, else null. */
+  readonly hostId: string | null
+  readonly hostLocals = new Map<symbol, unknown>()
   private readonly channels = new Map<string, ServerChannel>()
+  /** Per mux, not per isolate: a session DO's scan timer must be made and cleared in its own calls. Not per request
+   *  either: a closure on the request context would pin the call's arguments, so a stub is never collected. */
+  readonly gcRegistry = new GcRegistry()
   /** Waiters registered by `attach` when a reconcile lands before the channel is registered.
    *  Fired synchronously from `registerChannel`. */
   private readonly pendingRegisterWaiters = new Map<string, Set<(channel: ServerChannel) => void>>()
@@ -189,6 +205,10 @@ class ChannelMux {
   /** Resolved lazily so the mux can be constructed at module-load (the globalObject factory
    *  runs before `serverConfig` is initialized). */
   private resolvedOptions: MuxServerOptions | null = null
+
+  constructor(opts?: { hostId?: string }) {
+    this.hostId = opts?.hostId ?? null
+  }
 
   private get options(): MuxServerOptions {
     return (this.resolvedOptions ??= resolveMuxServerOptions())
@@ -253,11 +273,7 @@ class ChannelMux {
 
   // ── Connection lifecycle (transport-facing) ─────────────────────────
 
-  onConnectionOpen<TConnection>(
-    connection: TConnection,
-    transport: ServerTransport<TConnection>,
-    request?: Request,
-  ): void {
+  onConnectionOpen<TConnection>(connection: TConnection, transport: ServerTransport<TConnection>): void {
     const wait = new SocketWait({
       held: () => this.bufferedAmount(connection),
       ahead: () => this.queuedAhead(connection),
@@ -315,8 +331,8 @@ class ChannelMux {
           const state = this.connectionEntries.get(connection)?.state
           return state ? state.deliveries.before(state.frameDelivery, ms) : 0
         },
+        terminate: () => this.terminateWire(connection),
       },
-      request,
     }
     this.connectionEntries.set(connection, entry)
     const connId = transport.getConnId(connection)
@@ -891,7 +907,7 @@ class ChannelMux {
     const existing = this.channels.get(open.id)
     if (existing) {
       entry.state.attaching.add(existing)
-      return this.attachChannel(existing, open, entry, replay)
+      return this.attachChannel(existing, open, entry.sender, replay)
     }
     if (open.initial && !awaited) this.awaitChannel(open, entry, connection)
     return null
@@ -919,7 +935,7 @@ class ChannelMux {
     const sessionId = entry.transport.getSessionId(wire)
     assert(sessionId, 'a channel awaited on a wire that never reconciled')
     entry.state.attaching.add(channel)
-    const handle = this.attachChannel(channel, awaited.open, entry, false)
+    const handle = this.attachChannel(channel, awaited.open, entry.sender, false)
     entry.state.attaching.delete(channel)
     if (!handle) {
       this.expireAwaited(awaited)
@@ -976,13 +992,12 @@ class ChannelMux {
   private attachChannel(
     channel: ServerChannel,
     open: ReconcileOpenEntry,
-    { sender, request }: ConnectionEntry,
+    sender: PeerSender,
     replay: boolean,
   ): ChannelHandle | null {
     const buffer = channel._replayBuffer
     if (buffer === null) return null
     channel._onPageHas(open.lastSeq)
-    channel._wireRequest = request
     const peer = new IndexedPeer({ sender, index: open.ix, replay: buffer })
     const missed = replay ? buffer.getAfter(open.lastSeq) : []
     if (missed === null) {

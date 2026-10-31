@@ -35,6 +35,18 @@ describe('prepare()', () => {
           "splitFiles": false,
         },
         {
+          "jobCmd": "pnpm run test:released-api",
+          "jobName": "Released API",
+          "jobSetups": [
+            {
+              "node_version": "26",
+              "os": "ubuntu-latest",
+            },
+          ],
+          "jobTests": null,
+          "splitFiles": false,
+        },
+        {
           "jobCmd": "pnpm exec test-e2e",
           "jobName": "Vite",
           "jobSetups": [
@@ -187,6 +199,22 @@ describe('prepare()', () => {
                   "job": "Playground Stream",
                 },
               },
+              "testFilePath": "test/playground-stream/.test-docker.redis-cluster.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-docker.redis-room.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
               "testFilePath": "test/playground-stream/.test-preview.binary-inline.node.test.ts",
             },
             {
@@ -220,6 +248,22 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/playground-stream/.test-preview.channel-slow-ping.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer.sse.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.channel-small-buffer.ws.test.ts",
             },
             {
               "localConfig": {
@@ -284,6 +328,22 @@ describe('prepare()', () => {
                 },
               },
               "testFilePath": "test/playground-stream/.test-preview.channel.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.room-redis.ws.test.ts",
+            },
+            {
+              "localConfig": {
+                "ci": {
+                  "job": "Playground Stream",
+                },
+              },
+              "testFilePath": "test/playground-stream/.test-preview.room-timeouts.ws.test.ts",
             },
             {
               "localConfig": {

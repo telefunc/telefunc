@@ -4,8 +4,8 @@ export type { RequestContext, ResponseAbortSource }
 
 import { Abort } from '../Abort.js'
 import type { AbortError } from '../Abort.js'
-import { reportServerChannelError } from '../../../wire-protocol/channel/server/channel.js'
-import { isPromise } from '../../../utils/isPromise.js'
+import { reportBug } from '../../../wire-protocol/channel/server/channel.js'
+import { invokeChannelListener } from '../../../wire-protocol/channel/channel.js'
 
 const REQUEST_CONTEXT: unique symbol = Symbol.for('telefunc.requestContext')
 
@@ -51,7 +51,7 @@ function createRequestContext(request: Request): RequestContext {
   const fireClose = () => {
     if (closed) return
     closed = true
-    for (const cb of closeCallbacks) invokeCloseCallback(cb)
+    for (const cb of closeCallbacks) invokeChannelListener(cb, [], reportBug)
     closeCallbacks.length = 0
   }
 
@@ -104,7 +104,7 @@ function createRequestContext(request: Request): RequestContext {
     markTopLevelError: fireError,
     onClose(cb) {
       if (closed) {
-        invokeCloseCallback(cb)
+        invokeChannelListener(cb, [], reportBug)
         return
       }
       closeCallbacks.push(cb)
@@ -159,14 +159,5 @@ function createResponseAbortSource(onAbort: () => void): ResponseAbortSource {
       abortCallbacks.push(cb)
     },
     errorPromise,
-  }
-}
-
-function invokeCloseCallback(cb: () => void): void {
-  try {
-    const result = cb()
-    if (isPromise(result)) result.catch(reportServerChannelError)
-  } catch (err) {
-    reportServerChannelError(err)
   }
 }

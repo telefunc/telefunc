@@ -131,6 +131,8 @@ interface MuxChannel {
    *  connection — they involve connection-side cleanup. */
   _dispatchFrame(frame: ChannelFrame): void
   _onTransportClose(err?: Error): void
+  /** Its wire went away, and the connection reconnects. */
+  _onTransportDisconnect(): void
   /** Its RECONCILE entry on each (re)attach to `uplink`'s wire. */
   _reattachState(uplink: Uplink): ReattachState
   /** Its RECONCILE entry's `probe` was answered by the RECONCILED. */
@@ -1364,6 +1366,10 @@ class ClientConnection implements MuxConnection {
       this.dispose()
       return
     }
+    if (prevAttempt === 0) {
+      for (const { channel, state } of this.channels.values())
+        if (state.tag === 'open') channel._onTransportDisconnect()
+    }
     const delay = Math.min(CHANNEL_RECONNECT_INITIAL_DELAY_MS * 2 ** prevAttempt, CHANNEL_RECONNECT_MAX_DELAY_MS)
     this.enterReconnecting(prevAttempt + 1, startedAt, delay)
   }
@@ -1831,7 +1837,7 @@ function channelErrorFor(reason: number): Error {
   switch (reason) {
     case ERROR_REASON.OVERFLOW:
       return new ChannelOverflowError(
-        'Broadcast closed: this client fell further behind than the server holds for a client',
+        'Channel closed: this client fell further behind than the server holds for a client',
       )
     case ERROR_REASON.LOST:
       return replayLossError('server')

@@ -18,18 +18,15 @@ function getTelefuncChannelHooks({
   send = (peer, frame) => peer.send(frame),
   terminate = (peer) => peer.terminate(),
   bufferedAmount = (peer) => peer.websocket.bufferedAmount,
-  wireRequest = (peer) => peer.request,
   onMessage = () => {},
 }: {
   upgrade?: Hooks['upgrade']
   send?: (peer: Peer, frame: Uint8Array<ArrayBuffer>) => void
   terminate?: (peer: Peer) => void
   bufferedAmount?: (peer: Peer) => number | undefined
-  wireRequest?: (peer: Peer) => Request
   onMessage?: (peer: Peer) => void
 } = {}) {
   enableChannelTransports(['ws'])
-  const mux = getChannelMux()
   const transport: ServerTransport<Peer> = {
     getSessionId: (peer) => peer.context.telefuncSessionId,
     setSessionId: (peer, sessionId) => {
@@ -43,6 +40,7 @@ function getTelefuncChannelHooks({
     bufferedAmount,
     // Closed at once: a Durable Object peer's terminate() is a close handshake a vanished client never answers.
     terminateConnection: (peer) => {
+      const mux = getChannelMux()
       const permanent = mux.readPermanentTermination(peer)
       terminate(peer)
       mux.onConnectionClosed(peer, { permanent })
@@ -51,15 +49,16 @@ function getTelefuncChannelHooks({
 
   return defineHooks({
     upgrade,
-    open: (peer) => mux.onConnectionOpen(peer, transport, wireRequest(peer)),
+    open: (peer) => getChannelMux().onConnectionOpen(peer, transport),
     message: (peer, message) => {
       onMessage(peer)
-      return mux.onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>)
+      return getChannelMux().onConnectionRawMessage(peer, message.uint8Array() as Uint8Array<ArrayBuffer>)
     },
     close: (peer, details) => {
+      const mux = getChannelMux()
       const isPermanent = mux.readPermanentTermination(peer) || details?.code === 1000 || details?.code === 1001
       mux.onConnectionClosed(peer, { permanent: isPermanent })
     },
-    error: (peer) => mux.onConnectionClosed(peer, { permanent: false }),
+    error: (peer) => getChannelMux().onConnectionClosed(peer, { permanent: false }),
   })
 }

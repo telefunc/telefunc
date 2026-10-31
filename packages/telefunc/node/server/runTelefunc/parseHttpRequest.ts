@@ -14,9 +14,7 @@ import type { RequestContext } from '../context/requestContext.js'
 import { ServerChannel } from '../../../wire-protocol/channel/server/channel.js'
 import { getChannelMux } from '../../../wire-protocol/channel/server/mux.js'
 import { ChannelStreamSource } from '../../../wire-protocol/values/ChannelStreamSource.js'
-import { GcRegistry } from '../../../utils/GcRegistry.js'
 import { wrapProxy } from '../../../utils/wrapProxy.js'
-import { getGlobalObject } from '../../../utils/getGlobalObject.js'
 import { isObjectOrFunction } from '../../../utils/isObjectOrFunction.js'
 import type { ServerReviverContext } from '../../../wire-protocol/values/types.js'
 import { STREAM_TRANSPORT, type StreamTransport } from '../../../wire-protocol/constants.js'
@@ -25,15 +23,6 @@ import { buildShieldValidators, getArgumentShields, type ShieldLogConfig } from 
 import { toPathKey } from '../../../utils/pathKey.js'
 import type { Telefunction } from '../types.js'
 import { getServerExtensionTypes } from '../serverConfig.js'
-
-// Holder-side GC tracking of revived request stubs (callback channels, streams). One shared
-// instance: it's a passive FinalizationRegistry, and its scan timer runs only while stubs are
-// tracked (see GcRegistry) — so it keeps nothing alive and doesn't block hibernation when idle.
-// It must NOT be created per-request: a per-request closure hung on the (rooted) request context
-// pins that request's `envelope.args` via the V8 scope chain, so the stub is never collected.
-const globalObject = getGlobalObject('node/server/runTelefunc/parseHttpRequest.ts', {
-  gcRegistry: new GcRegistry(),
-})
 
 type RunContext = {
   request: Request
@@ -144,7 +133,7 @@ async function parseHttpRequest(runContext: RunContext): Promise<ParseResult> {
           // underlying channel/stream closes and the client releases the original.
           const wrapper = wrapProxy(value)
           // Forgotten once the call's channels have closed, so the scan doesn't wait for a collection to stop.
-          requestContext.onClose(globalObject.gcRegistry.register(wrapper, close))
+          requestContext.onClose(mux.gcRegistry.register(wrapper, close))
           requestContext.onTopLevelError(close)
           requestContext.responseAbort.onAbort(abort)
           return wrapper

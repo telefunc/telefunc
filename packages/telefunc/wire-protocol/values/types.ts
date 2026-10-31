@@ -42,6 +42,7 @@ export type {
 
 import type { ServerChannel } from '../channel/server/channel.js'
 import type { ServerBroadcast } from '../broadcast/ServerBroadcast.js'
+import type { ServerBroadcastEnd } from '../channel/server/ServerBroadcastEnd.js'
 import type { ClientChannel, ClientBroadcast } from '../channel/client/channel.js'
 import type { AbortError } from '../../shared/Abort.js'
 import type { ShieldValidators } from '../../node/server/shield.js'
@@ -147,8 +148,14 @@ type ClientReviverContext = {
     ack?: boolean
     maxFrameBytes?: number
   }): ClientChannel<ClientToServer, ServerToClient>
-  createBroadcast<T = unknown>(opts: { channelId: string; key: string; maxFrameBytes?: number }): ClientBroadcast<T>
+  createBroadcastChannel<T = unknown>(opts: {
+    channelId: string
+    key: string
+    maxFrameBytes?: number
+  }): ClientBroadcast<T>
   receiveStream(metadata: StreamingMetadata): StreamSource
+  /** Gives a derived value its owner's explicit-close lifetime without changing its identity. */
+  shareLifecycle(child: object, owner: object): void
 }
 
 /** Context for all server-side request revivers (File/Blob + Function + ReadableStream). */
@@ -173,6 +180,8 @@ type ServerReplacerContext = {
   }): ServerChannel<ClientToServer, ServerToClient>
   /** Registers a channel with the response lifecycle. Also installs shield validators if the channel has shields. */
   registerChannel(channel: ServerChannel<any, any>): void
+  /** Creates and registers the server end of a page's `ClientBroadcast`. */
+  createBroadcastChannel(): ServerBroadcastEnd
   sendStream(createProducer: () => StreamingProducer): {
     metadata: StreamingMetadata
     close: () => Promise<void> | void
@@ -182,6 +191,11 @@ type ServerReplacerContext = {
    *  Replacers pick the names relevant to their data flow. Each returns `true` on success or an error
    *  string — call sites decide the action (throw, drop, ...). */
   validators: ShieldValidators
+  /** One store per response, shared by every replacer in it; `init` runs on the first call for `key`. */
+  responseState<T>(key: symbol, init: () => T): T
+  /** The largest WebSocket message the runtime accepts, where it caps them (Cloudflare); a channel's metadata tells the
+   *  page. */
+  maxFrameBytes: number | undefined
 }
 
 /** Context for all client-side request replacers (File/Blob + Function + ReadableStream). */

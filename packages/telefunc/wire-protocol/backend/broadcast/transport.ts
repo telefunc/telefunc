@@ -1,0 +1,83 @@
+export { createBroadcastTransportDriver }
+export type { BroadcastTransport }
+
+import { isOrderingPosition } from '../../wire/orderingFrame.js'
+import type { BroadcastDriver, BroadcastPayload, BroadcastRoute, PublishResult } from './contract.js'
+import type { BackendPayload, BackendReceiver, SubscriptionAttempt, SubscriptionBinding } from '../subscription.js'
+import { assertUsage } from '../../../utils/assert.js'
+import { isPromise } from '../../../utils/isPromise.js'
+import { DriverAttempt } from '../attempt.js'
+
+/** `seq`: positive safe integer, one order per key across both kinds; `timestamp`: non-negative safe integer. */
+type BroadcastTransport = {
+  send(key: string, payload: string): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listen(key: string, onMessage: (payload: string, info: { seq: number; timestamp: number }) => void): () => void
+  sendBinary(
+    key: string,
+    payload: Uint8Array,
+  ): { seq: number; timestamp: number } | Promise<{ seq: number; timestamp: number }>
+  listenBinary(
+    key: string,
+    onMessage: (payload: Uint8Array, info: { seq: number; timestamp: number }) => void,
+  ): () => void
+}
+
+function createBroadcastTransportDriver(transport: BroadcastTransport): BroadcastDriver {
+  return {
+    publish: (route, payload) => publish(transport, route, payload),
+    subscriptions: {
+      bind: (route) => bind(transport, route),
+      partitionHere: () => '',
+    },
+  }
+}
+
+function publish(
+  transport: BroadcastTransport,
+  route: BroadcastRoute,
+  payload: BroadcastPayload,
+): PublishResult | Promise<PublishResult> {
+  const result =
+    typeof payload === 'string' ? transport.send(route.key, payload) : transport.sendBinary(route.key, payload)
+  return isPromise(result) ? result.then(checkMark) : checkMark(result)
+}
+
+function checkMark<Mark extends { seq: number; timestamp: number }>(mark: Mark): Mark {
+  assertUsage(
+    isOrderingPosition(mark),
+    `config.broadcast.transport returned { seq: ${mark.seq}, timestamp: ${mark.timestamp} }: seq must be a positive safe integer and timestamp a non-negative safe integer.`,
+  )
+  return mark
+}
+
+function bind(transport: BroadcastTransport, route: BroadcastRoute): SubscriptionBinding {
+  return {
+    partition: '',
+    open: (receiver) => open(transport, route, receiver),
+  }
+}
+
+function open(
+  transport: BroadcastTransport,
+  route: BroadcastRoute,
+  receiver: BackendReceiver<BackendPayload>,
+): SubscriptionAttempt {
+  const stop =
+    route.kind === 'text'
+      ? transport.listen(route.key, (payload, info) => receiver(payload, checkMark(info)))
+      : transport.listenBinary(route.key, (payload, info) => receiver(payload, checkMark(info)))
+  return new TransportAttempt(stop)
+}
+
+/** Ready at once: a user transport's listen() has no establishment to wait for. */
+class TransportAttempt extends DriverAttempt {
+  constructor(private readonly _stop: () => void) {
+    super()
+    this.transition('ready')
+  }
+
+  async unsubscribe(): Promise<void> {
+    this._stop()
+    this.transition('closed')
+  }
+}

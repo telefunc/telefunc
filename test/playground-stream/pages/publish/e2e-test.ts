@@ -1,9 +1,10 @@
-export { testPublish }
+export { testPublish, testPublishSmallBuffer, testPublishFailingBackend }
 
 import { page, test, expect, expectLog, autoRetry, getServerUrl } from '@brillout/test-e2e'
 import {
   navigate,
   getResult,
+  failBackend,
   getCleanupState,
   resetCleanupState,
   cutWire,
@@ -37,6 +38,11 @@ type ServerBroadcastResult = {
   done: boolean
 }
 
+/** A fresh key's first seq depends on the backend (Redis seeds it from its clock): assert three in a row. */
+function consecutive(first: number): number[] {
+  return [first, first + 1, first + 2]
+}
+
 function testPublish(isDev: boolean, inDocker = false) {
   test('broadcast: paired text publish/subscribe roundtrip', async () => {
     await navigate(`${getServerUrl()}/publish`)
@@ -47,14 +53,14 @@ function testPublish(isDev: boolean, inDocker = false) {
 
       // 3 publishes → 3 acks with consecutive seqs, all keyed to the shared topic.
       expect(result.acks.length).toBe(3)
-      const first = result.acks[0]!.seq
-      expect(result.acks.map((a) => a.seq)).deep.equal([first, first + 1, first + 2])
+      const seqs = consecutive(result.acks[0]!.seq)
+      expect(result.acks.map((a) => a.seq)).deep.equal(seqs)
       for (const ack of result.acks) expect(ack.key).match(/^room:text-test:/)
 
       // Subscriber on the same key received all 3 messages in publish order.
       expect(result.received.map((r) => r.text)).deep.equal(['msg-0', 'msg-1', 'msg-2'])
       for (const r of result.received) expect(r.from).toBe('client')
-      expect(result.received.map((r) => r.seq)).deep.equal([first, first + 1, first + 2])
+      expect(result.received.map((r) => r.seq)).deep.equal(seqs)
     })
   })
 
@@ -66,15 +72,15 @@ function testPublish(isDev: boolean, inDocker = false) {
       const result = await getResult<BinaryPairResult>('#publish-result')
 
       expect(result.acks.length).toBe(3)
-      const first = result.acks[0]!.seq
-      expect(result.acks.map((a) => a.seq)).deep.equal([first, first + 1, first + 2])
+      const seqs = consecutive(result.acks[0]!.seq)
+      expect(result.acks.map((a) => a.seq)).deep.equal(seqs)
       for (const ack of result.acks) expect(ack.key).match(/^room:binary-test:/)
 
       // Each frame is 128 bytes filled with i + 10 (10, 11, 12).
       expect(result.received.length).toBe(3)
       expect(result.received.map((r) => r.size)).deep.equal([128, 128, 128])
       expect(result.received.map((r) => r.firstByte)).deep.equal([10, 11, 12])
-      expect(result.received.map((r) => r.seq)).deep.equal([first, first + 1, first + 2])
+      expect(result.received.map((r) => r.seq)).deep.equal(seqs)
     })
   })
 
@@ -93,6 +99,51 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
+  test('broadcast: binary publishes go out as they were at the call, though the server refills one buffer for each while a subscription establishes', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-binary-broadcast-reused-buffer')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ received: number[][]; seen: number[][] }>('#publish-result')
+      const frames = [
+        [1, 1, 1, 1],
+        [2, 2, 2, 2],
+        [3, 3, 3, 3],
+      ]
+      expect(result.received).deep.equal(frames)
+      expect(result.seen).deep.equal(frames)
+    })
+  })
+
+  test('broadcast: publishes right after a subscribe reach it, text and binary in call order', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-right-after')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ seen: unknown[] }>('#publish-result')
+      expect(result.seen).deep.equal(['t1', [1], 't2'])
+    })
+  })
+
+  test("broadcast: a listener's answer arrives after the message it answers; a listener answering every message lets timers fire; an awaited publish is delivered when it resolves on the in-memory backend, and every one is delivered on Redis", async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-answers')
+
+    await autoRetry(async () => {
+      const result = await getResult<{
+        received: string[]
+        timerFired: boolean
+        deliveredAtLastReceipt: number
+        delivered: number
+      }>('#publish-result')
+      expect(result.received[0]).toBe('ping')
+      expect([...result.received].sort()).deep.equal(['async-pong', 'ping', 'pong'])
+      expect(result.timerFired).toBe(true)
+      if (inDocker) expect(result.delivered).toBe(3000)
+      else expect(result.deliveredAtLastReceipt).toBe(3000)
+    })
+  })
+
   test('broadcast: shield validates client→server publishes', async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-shield')
@@ -108,6 +159,27 @@ function testPublish(isDev: boolean, inDocker = false) {
       expect(state.invalidThrew).toBe(true)
       expect(state.invalidErrorMessage).not.toBe(null)
       expect(state.receivedAfterInvalid).deep.equal([{ text: 'hi' }])
+    })
+  })
+
+  test('broadcast: what a channel publishes from its onClose reaches its key, as the chat pattern does', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-chat-leave-on-close')
+    await autoRetry(async () => {
+      expect(await getResult<{ received: string[] }>('#publish-result')).deep.equal({ received: ['left'] })
+    })
+  })
+
+  test('broadcast: a subscribe after abort opens nothing, receivers counts the subscribers a publish reached, and an unsubscribe stops deliveries', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-server-broadcast-checks')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        afterAbort: [0, 0],
+        received: ['leaving', 'joining'],
+        duringDelivery: [1, 1],
+        statically: ['first'],
+      })
     })
   })
 
@@ -180,7 +252,7 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  test("broadcast: a Broadcast.subscribe() listener that throws or rejects is reported, and the key's other subscribers still get the message", async () => {
+  test("broadcast: a Broadcast.subscribe() listener that throws or rejects is reported, one that throws Abort isn't, and the key's other subscribers still get the message", async () => {
     await navigate(`${getServerUrl()}/publish`)
     await page.click('#test-broadcast-throwing-listener')
 
@@ -241,22 +313,14 @@ function testPublish(isDev: boolean, inDocker = false) {
     })
   })
 
-  // In-memory only: the Docker lanes publish through Redis, which has no queue, and whose delivery can come after the publish resolves.
+  // The in-memory backend's: Redis delivers what reaches a key's subscription once it is there.
   if (!inDocker) {
-    test('broadcast: a subscriber that comes while publishes queue gets the next seq right after the one before it', async () => {
+    test('broadcast: a subscriber that comes while publishes queue gets only what is published after it, text and binary alike', async () => {
       await navigate(`${getServerUrl()}/publish`)
-      await page.click('#test-broadcast-seq-while-queued')
+      await page.click('#test-broadcast-join-while-queued')
 
       await autoRetry(async () => {
-        const { receipts, received } = await getResult<{ receipts: number[]; received: Array<[string, number]> }>(
-          '#publish-result',
-        )
-        const [first] = receipts
-        expect(receipts).deep.equal([first, first! + 1])
-        expect(received).deep.equal([
-          ['first', first],
-          ['second', first! + 1],
-        ])
+        expect((await getResult<{ received: Array<string | number> }>('#publish-result')).received).deep.equal(['t4'])
       })
     })
   }
@@ -344,4 +408,51 @@ function testPublish(isDev: boolean, inDocker = false) {
         })
     }
   }
+}
+
+/** Tests that need the failing backend (failing-backend.ts), which a server without Redis installs. */
+function testPublishFailingBackend() {
+  test('broadcast: a subscribe the store refuses throws and leaves no listener behind', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await failBackend({ op: 'bind', key: 'room:subscribe-throws:' })
+    await page.click('#test-subscribe-throws')
+
+    await autoRetry(async () => {
+      const result = await getResult<{ thrown: string | null; seen: string[] }>('#publish-result')
+      expect(result.thrown).toBe('failing-backend: bind refused')
+      expect(result.seen).deep.equal(['second:1'])
+    })
+  })
+
+  test('broadcast: a subscriber that throws or rejects is reported as a bug and the others get every message, and an un-awaited publish the store fails leaves no unhandled rejection', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-errors')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        seen: ['a', 'b'],
+        reported: [
+          'broadcast-listener-bug: rejected',
+          'broadcast-listener-bug: rejected',
+          'broadcast-listener-bug: thrown',
+          'broadcast-listener-bug: thrown',
+        ],
+        unhandled: 0,
+        storeFailedBoth: true,
+      })
+    })
+  })
+}
+
+/** Runs in a lane whose config.channel.bufferLimit is 4,096 bytes. */
+function testPublishSmallBuffer() {
+  test('broadcast: publishes held while a subscription establishes fit bufferLimit by their bytes, and the one past it rejects with ChannelOverflowError', async () => {
+    await navigate(`${getServerUrl()}/publish`)
+    await page.click('#test-broadcast-hold-overflow')
+    await autoRetry(async () => {
+      expect(await getResult('#publish-result')).deep.equal({
+        outcomes: ['sent', 'sent', 'ChannelOverflowError'],
+        seen: ['1', '2'],
+      })
+    })
+  })
 }

@@ -18,7 +18,7 @@ import { assertIsNotBrowser } from '../../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
 // Order: fileDownload/blobDownload before file/blob (brand-checked vs instanceof);
-// file before blob (File extends Blob); broadcast before channel (Broadcast extends Channel).
+// file before blob (File extends Blob).
 const serverTypes = [
   asyncGeneratorReplacer,
   readableStreamReplacer,

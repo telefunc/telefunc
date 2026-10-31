@@ -11,6 +11,8 @@ The following low-level **primitives** enable all kinds of <Link href="/stream">
 - <Link href="#broadcast"><code>Broadcast</code></Link> — a keyed pub/sub bus (`publish()`/`subscribe()`), server-side.
 - <Link href="#new-broadcastchannel"><code>new BroadcastChannel()</code></Link> — broadcast also on the client-side.
 
+> Building on these, <Link href="/room">`Room`</Link> adds multi-party rooms with presence, participant metadata, private messages, and admin controls.
+
 > You can use them for one-way streams (aka streaming) as well as two-way streams (aka real-time):
 > - Chat rooms
 > - Live feeds (sports scores, stock tickers)
@@ -102,6 +104,8 @@ channel.send('Hello!')
 | `listenBinary(cb)` | Receive binary. Return a value to ack. Returns an unlisten function. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
+| `onDisconnect(cb)` / `onReconnect(cb)` | Called when the other side becomes unreachable / is back. See <Link href="#reconnection" />. |
+| `isConnected` | `true` from `onOpen` until `onClose`, except while the other side is unreachable. |
 | `close()` | Close gracefully. |
 | `abort(value?)` | Terminate immediately. |
 
@@ -248,7 +252,7 @@ The static methods run purely on the server — no client, no handle, no lifecyc
 import { Broadcast } from 'telefunc'
 
 // Publish to every subscriber of the key
-Broadcast.publish('room:lobby', { text: 'Hello!' })
+await Broadcast.publish('room:lobby', { text: 'Hello!' })
 
 // Subscribe on the server
 const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
@@ -256,15 +260,16 @@ const unsub = Broadcast.subscribe('room:lobby', (msg, info) => {
 })
 ```
 
-`publish()` returns a receipt and `subscribe()` receives the same `info`:
+`subscribe()` receives this `info`, and `publish()` resolves to the same fields plus `receivers`:
 
 ```js
 info.key        // 'room:lobby' — the broadcast key
 info.seq        // monotonic sequence number for this key
 info.timestamp  // server timestamp (Unix epoch ms)
+info.receivers  // publish() only
 ```
 
-`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to `info` once the message is accepted.
+`seq` is monotonic per `key`, which is useful for ordering and gap detection. `publish()` resolves to its receipt, and rejects if the publish fails.
 
 > By default, broadcast is in-memory — messages only reach subscribers on the same server. This works out-of-the-box for single-server deployments.
 >
@@ -373,6 +378,8 @@ broadcast.subscribe((n) => showToast(n))
 | `subscribeBinary(cb)` | Receive `(data, info)` for binary messages. Returns an unsubscribe function. |
 | `onOpen(cb)` | Called when the channel opens. |
 | `onClose(cb)` | Called when the channel closes. |
+| `onDisconnect(cb)` / `onReconnect(cb)` | Called when the other side becomes unreachable / is back. See <Link href="#reconnection" />. |
+| `isConnected` | `true` from `onOpen` until `onClose`, except while the other side is unreachable. |
 | `close()` | Close gracefully. |
 | `abort(abortValue?)` | Terminate immediately. |
 
@@ -403,9 +410,9 @@ Only the two ends of a channel can use it, while anything that knows a broadcast
 | Methods | `send()` / `listen()` | `publish()` / `subscribe()` |
 | Delivery | The other end | Every subscriber of the `key`, including the publisher |
 | Message type | Asymmetric:<ul><li>Two different types: `Channel<ClientMessageType, ServerMessageType>`</li><li>The server uses the `new Channel()` instance, and returns `channel.client` to the client</li></ul> | Symmetric:<ul><li>Same type for every member: `BroadcastChannel<MessageType>`</li><li>The server uses and returns the same `BroadcastChannel` instance</li></ul> |
-| Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp }` |
+| Message return | The other end's reply (if `{ ack: true }`) | A receipt: `{ key, seq, timestamp, receivers }` |
 | `close()` | Closes the channel for both ends | Detaches this member; the group lives on |
-| Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#broadcast">Broadcast transport</Link> |
+| Multi-server | <Link href="/stream/scale#sticky-sessions">Sticky sessions</Link> | <Link href="/stream/scale#broadcast">Cross-instance backend</Link> |
 
 
 ## Errors
@@ -417,7 +424,7 @@ Channels and broadcasts signal failure through four errors:
 | `Abort` | Either side called `abort(value)`, or a callback threw `Abort` | Closed | Inspect `err.abortValue` |
 | `NetworkError` (`isChannel: true`) | Offline longer than `reconnectTimeout`, or missed more messages than the replay buffer holds | Closed | Auto-closed — recreate if needed |
 | `ChannelClosedError` | `send()` on a closed channel | Closed | Recreate the channel |
-| `ChannelOverflowError` | The client fell too far behind, or `bufferLimit` filled while it was offline | **Open** (a `BroadcastChannel`: closed) | Only the dropped `send()` rejects; `await` your sends to apply backpressure (a `BroadcastChannel`: call its telefunction again to rejoin) |
+| `ChannelOverflowError` | The client fell too far behind, or `bufferLimit` filled while it was offline | **Open** (a `BroadcastChannel` closes) | Only the dropped `send()` rejects; `await` your sends to apply backpressure (a `BroadcastChannel`: call its telefunction again to rejoin) |
 
 > A graceful `close()` isn't an error (`onClose(err)` receives `undefined`).
 
@@ -434,8 +441,9 @@ If the connection drops, Telefunc reconnects automatically and resumes existing 
 - Messages lost in the disconnect are resent after reconnect. If you `await` your sends, a reconnect loses nothing.
 - Otherwise, if the other side missed too much, the channel closes with `NetworkError`, and the error message names the setting to raise (see <Link href="/channel-config" />).
 - `onOpen()` fires only on initial open, `onClose()` only on permanent close.
+- `onDisconnect()` fires on both ends when the connection drops, and `onReconnect()` once it's back; `isConnected` is `false` in between. If it doesn't come back within `reconnectTimeout`, `onClose(err)` fires with a `NetworkError` instead of `onReconnect()`.
 
-> Reconnection is automatic — you don't need to handle it in your application code.
+> Reconnection is automatic — you don't need to handle it in your application code. Use `onDisconnect()` and `onReconnect()` to show it, for example a "reconnecting…" badge, or to act on it, for example saving whether a member is online.
 
 
 ## See also

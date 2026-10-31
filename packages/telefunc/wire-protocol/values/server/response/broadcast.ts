@@ -3,7 +3,6 @@ export { broadcastReplacer }
 import type { BroadcastContract, ReplacerType, ServerReplacerContext } from '../../types.js'
 import { SERIALIZER_PREFIX_BROADCAST } from '../../../constants.js'
 import { ServerBroadcast } from '../../../broadcast/ServerBroadcast.js'
-import { getAdapterMaxFrameBytes } from '../../../../node/server/serverConfig.js'
 import { assertIsNotBrowser } from '../../../../utils/assertIsNotBrowser.js'
 assertIsNotBrowser()
 
@@ -13,10 +12,10 @@ const broadcastReplacer: ReplacerType<BroadcastContract, ServerReplacerContext> 
     return ServerBroadcast.isServerBroadcast(value)
   },
   replace(broadcast, context) {
-    context.registerChannel(broadcast)
+    context.registerChannel(broadcast._end)
+    broadcast._publishShield = context.validators.get('data')
     const metadata: BroadcastContract['metadata'] = { channelId: broadcast.id, key: broadcast.key }
-    const maxFrameBytes = getAdapterMaxFrameBytes()
-    if (maxFrameBytes) metadata.maxFrameBytes = maxFrameBytes
+    if (context.maxFrameBytes) metadata.maxFrameBytes = context.maxFrameBytes
     return {
       metadata,
       async close() {

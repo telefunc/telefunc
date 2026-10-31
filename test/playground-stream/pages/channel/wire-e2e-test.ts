@@ -1,17 +1,19 @@
 export { testWire, testWireSmallReplay, testWireSlowPing }
 
-import { page, test, expect, autoRetry, getServerUrl } from '@brillout/test-e2e'
+import { page, test, expect, autoRetry, getServerUrl, expectLog } from '@brillout/test-e2e'
 import { startBlackHoleProxy } from '../../black-hole-proxy'
-import type { Response, WebSocket } from 'playwright-chromium'
+import type { Request, Response, WebSocket } from 'playwright-chromium'
 import {
   navigate,
   getResult,
   getCleanupState,
+  resetCleanupState,
   runServerAction,
   cutWire,
   canCutWire,
   dropNextWebSocket,
   forceServerGc,
+  sleep,
   holdNextSsePost,
   holdNextSseWire,
   holdNextSseOpen,
@@ -31,6 +33,9 @@ type WireState = {
   held: { run: string; first: number; closed: number } | null
   release: { channelId: string; close: string } | null
   upload: { channelId: string; sent: number } | null
+  connection: { channelId: string; events: string[] } | null
+  chat: { channelId: string; events: string[] } | null
+  presence: { channelId: string; online: boolean; closed?: string } | null
 }
 
 // The end card's channel sends these before the server ends it.
@@ -54,6 +59,166 @@ function testWire(isDev: boolean) {
         expect(cuts.length).toBe(2)
         expect(cuts.every((cut) => cut > 0)).toBe(true)
       })
+    })
+
+  if (canCutWire())
+    test('channel: each end is connected from onOpen until onClose, sees onDisconnect when the connection drops, and onReconnect once the page is back', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#wire-connection')
+      const events = async () => {
+        const { connection } = await getResult<WireState>('#wire-state')
+        const server = (await getCleanupState())[`wireConnection_${connection?.channelId}`]
+        return { page: connection?.events, server: server && JSON.parse(server) }
+      }
+      await autoRetry(async () => {
+        const seen = ['start:false', 'open:true']
+        expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+      await page.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        const seen = ['start:false', 'open:true', 'disconnect:false']
+        expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        const seen = ['start:false', 'open:true', 'disconnect:false', 'reconnect:true']
+        expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+      await page.click('#wire-connection-close')
+      await autoRetry(async () => {
+        const seen = ['start:false', 'open:true', 'disconnect:false', 'reconnect:true', 'close:false']
+        expect(await events()).deep.equal({ page: seen, server: seen })
+      })
+    })
+
+  if (canCutWire())
+    test("channel: while a close waits on a message's save, each end is disconnected and fires onDisconnect once the connection drops, and is connected and fires onReconnect once the page is back, until onClose", async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await page.click('#wire-chat')
+      let channelId = ''
+      const events = async () => {
+        const { chat } = await getResult<WireState>('#wire-state')
+        channelId = chat!.channelId
+        const server = (await getCleanupState())[`wireChat_${channelId}`]
+        return { page: chat!.events, server: server && JSON.parse(server) }
+      }
+      const last = async () => {
+        await page.click('#wire-chat-check')
+        await runServerAction(`wireChat_${channelId}_check`)
+        const seen = await events()
+        return { page: seen.page.at(-1), server: seen.server.at(-1) }
+      }
+      const isCheck = (event: string) => event.startsWith('closing:')
+      const lastEvent = async () => {
+        const seen = await events()
+        return {
+          page: seen.page.findLast((e) => !isCheck(e)),
+          server: seen.server.findLast((e: string) => !isCheck(e)),
+        }
+      }
+      await autoRetry(async () => {
+        expect(await events()).deep.equal({ page: ['open:true'], server: ['open:true', 'message:true'] })
+      })
+      await runServerAction(`wireChat_${channelId}_close`)
+      await autoRetry(async () => {
+        expect(await last()).deep.equal({ page: 'closing:true', server: 'closing:true' })
+      })
+      await page.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        expect(await last()).deep.equal({ page: 'closing:false', server: 'closing:false' })
+        expect(await lastEvent()).deep.equal({ page: 'disconnect:false', server: 'disconnect:false' })
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        expect(await last()).deep.equal({ page: 'closing:true', server: 'closing:true' })
+        expect(await lastEvent()).deep.equal({ page: 'reconnect:true', server: 'reconnect:true' })
+      })
+      await runServerAction(`wireChat_${channelId}_saved`)
+      await autoRetry(async () => {
+        const seen = await events()
+        expect({
+          page: seen.page.filter((e) => !isCheck(e)),
+          server: seen.server.filter((e: string) => !isCheck(e)),
+        }).deep.equal({
+          page: ['open:true', 'disconnect:false', 'reconnect:true', 'close:false'],
+          server: ['open:true', 'message:true', 'disconnect:false', 'reconnect:true', 'close:false'],
+        })
+      })
+    })
+
+  if (canCutWire())
+    test('channel: an async onDisconnect or onReconnect that fails is reported on either end and the channel goes on, and one that aborts ends the channel with its abort value', async () => {
+      await navigate(`${getServerUrl()}/channel`)
+      await resetCleanupState()
+      await page.click('#wire-presence')
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence?.online).toBe(true)
+      })
+      await page.context().setOffline(true)
+      await cutWire()
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence?.online).toBe(false)
+      })
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        const { presence } = await getResult<WireState>('#wire-state')
+        const state = await getCleanupState()
+        expect(presence?.online).toBe(true)
+        expect(state[`wirePresence_${presence?.channelId}`]).toBe('online')
+        expect(state['bug:Database unavailable']).toBe('reported')
+      })
+
+      // Signed out on another device while offline: the server's onReconnect ends the channel.
+      const { presence } = await getResult<WireState>('#wire-state')
+      await page.context().setOffline(true)
+      await cutWire()
+      await runServerAction(`wirePresence_${presence?.channelId}_signOut`)
+      await page.context().setOffline(false)
+      await autoRetry(async () => {
+        expect((await getResult<WireState>('#wire-state')).presence).deep.equal({
+          channelId: presence?.channelId,
+          online: false,
+          closed: 'abort:{"reason":"signed out"}',
+        })
+        expect((await getCleanupState())[`wirePresence_${presence?.channelId}`]).toBe('away')
+      })
+      expectLog('Database unavailable', { filter: (log) => log.logSource === 'stderr' })
+      expectLog('[telefunc:channel-error] Error: Could not load the missed messages', {
+        filter: (log) => log.logSource === 'Browser Error',
+      })
+    })
+
+  if (process.env.PUBLIC_ENV__CHANNEL_TRANSPORTS === JSON.stringify(['sse', 'ws']))
+    test('channel: a page moving from SSE to a WebSocket fires neither onDisconnect nor onReconnect on either end', async () => {
+      // The page lets go of its SSE stream once the WebSocket carries the channel.
+      let sseRetired = false
+      const onRequestFailed = (request: Request) => {
+        if (request.url().includes('_telefunc=sse') && request.failure()?.errorText === 'net::ERR_ABORTED')
+          sseRetired = true
+      }
+      let webSockets = 0
+      const onWebSocket = (ws: WebSocket) => {
+        if (ws.url().includes('/_telefunc')) webSockets++
+      }
+      page.on('requestfailed', onRequestFailed)
+      page.on('websocket', onWebSocket)
+      try {
+        await navigate(`${getServerUrl()}/channel`)
+        await page.click('#wire-connection')
+        await autoRetry(async () => expect({ sseRetired, webSockets }).deep.equal({ sseRetired: true, webSockets: 1 }))
+        await sleep(1_000)
+        const { connection } = await getResult<WireState>('#wire-state')
+        const server = (await getCleanupState())[`wireConnection_${connection!.channelId}`]
+        expect({ page: connection!.events, server: JSON.parse(server!) }).deep.equal({
+          page: ['start:false', 'open:true'],
+          server: ['start:false', 'open:true'],
+        })
+      } finally {
+        page.off('requestfailed', onRequestFailed)
+        page.off('websocket', onWebSocket)
+      }
     })
 
   const ends = [

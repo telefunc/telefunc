@@ -9,6 +9,7 @@ import { Fifo } from '../../../../utils/Fifo.js'
 import { createStreamingReviver } from './registry.js'
 import type { StreamSource, ClientReviverContext, ReviverType, TypeContract } from '../../types.js'
 import { setAbortController } from '../../../../client/abort.js'
+import type { LazyResponseTypes } from '../../../../client/extensions.js'
 import { setCloseHandlers, addExtraCloseHandlers, type CloseHandler } from '../../../../client/close.js'
 import { makeAbortError, throwAbortError, throwBugError } from '../../../../client/remoteTelefunctionCall/errors.js'
 import { BaseStreamReader } from './BaseStreamReader.js'
@@ -37,6 +38,7 @@ type CallContext = {
   abortController: AbortController
   requestCloseHandlers: CloseHandler[]
   extensionResponseTypes: ReviverType<TypeContract, ClientReviverContext>[]
+  extensionLazyResponseTypes: LazyResponseTypes[]
 }
 
 // ===== Public entry point =====
@@ -86,7 +88,6 @@ async function reviveResponse(
   connection: ConnectionOptions,
   bodyStreamReader: BaseStreamReader | null,
 ): Promise<unknown> {
-  const { extensionResponseTypes } = callContext
   const closeHandlers = new WeakMap<object, () => void>()
 
   const throwStreamError = (errorPayload: Record<string, unknown>): never => {
@@ -99,6 +100,11 @@ async function reviveResponse(
   const pendingValues: PendingValue<unknown>[] = []
   let demuxer: FrameDemuxer | undefined
   const context: ClientReviverContext = {
+    shareLifecycle(child, owner) {
+      const close = closeHandlers.get(owner)
+      assert(close)
+      closeHandlers.set(child, close)
+    },
     createChannel(opts) {
       return new ClientChannel({
         channelId: opts.channelId,
@@ -107,7 +113,7 @@ async function reviveResponse(
         connection,
       })
     },
-    createBroadcast(opts) {
+    createBroadcastChannel(opts) {
       return new ClientBroadcast({
         channelId: opts.channelId,
         key: opts.key,
@@ -128,10 +134,21 @@ async function reviveResponse(
 
   const allCloseHandlers = [...callContext.requestCloseHandlers]
 
+  const extensionResponseTypes = [...callContext.extensionResponseTypes]
+  for (const lazy of callContext.extensionLazyResponseTypes) {
+    if (!body.includes(lazy.stem)) continue
+    extensionResponseTypes.push(...(await lazy.load()))
+    // Aborted during the load, before any revived value listens for it.
+    if (callContext.abortController.signal.aborted) {
+      throwAbortError(callContext.telefunctionName, callContext.telefuncFilePath, undefined)
+    }
+  }
   const reviver = createStreamingReviver(
     context,
     function handOut(revived) {
       const { value, abort, close, onEnd } = revived
+      // An adopted value keeps exact identity and shares its tracked owner's lifecycle.
+      if (isObjectOrFunction(value) && closeHandlers.has(value)) return value
       allCloseHandlers.push(close)
       callContext.abortController.signal.addEventListener(
         'abort',
