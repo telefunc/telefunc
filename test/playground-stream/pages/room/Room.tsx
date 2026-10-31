@@ -147,8 +147,8 @@ async function joinAndSendMalformed(kind: 'request' | 'publish' | 'reply'): Prom
   const room = await onGetRoom(roomId)
   keepReachable(room)
   // The room's own channel, past the API that checks what goes on it.
-  const { _end: end } = room as unknown as {
-    _end: {
+  const { end } = room as unknown as {
+    end: {
       send(data: unknown, options: { ack: true }): Promise<unknown>
       publish(data: unknown): Promise<unknown>
       _sendReply(reply: Promise<unknown>, failure: unknown): void
