@@ -390,7 +390,7 @@ class RoomReplica
   /** @internal Renews the lease, evicts again whom it failed to, and finishes the leaves its members' evicting
    *  servers left unfinished; once the lease was lost, or a view write failed, writes every stub's view again in one
    *  write, after each one's earlier write. */
-  async renewLease(): Promise<void> {
+  async maintainLease(): Promise<void> {
     if (!(await renewLease(this.incarnation, this.lease))) this.viewsLost = true
     for (const id of this.unevicted) {
       await evictMember(this.incarnation, id, { type: 'disconnected' })

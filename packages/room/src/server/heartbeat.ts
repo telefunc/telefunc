@@ -24,7 +24,7 @@ interface RoomHeartbeatOwner {
   readonly authority: Pick<AuthoritySync, 'reconcileMeta' | 'checkCoverage'>
   /** Renews what the replica told of its demand. */
   renewDemand(): Promise<void>
-  renewLease(): Promise<void>
+  maintainLease(): Promise<void>
 }
 
 type RoomHeartbeatOptions = { owner: RoomHeartbeatOwner }
@@ -60,7 +60,7 @@ class RoomHeartbeat {
     const owner = this.owner
     try {
       await owner.renewDemand()
-      const renewalFailure = await owner.renewLease().then(
+      const renewalFailure = await owner.maintainLease().then(
         () => null,
         (error: unknown) => ({ error }),
       )

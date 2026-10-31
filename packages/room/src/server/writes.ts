@@ -75,12 +75,12 @@ class RoomWrites {
 
   /** Full replace (`setMeta`). */
   async setMemberMeta(id: string, meta: ParticipantMeta): Promise<MemberMetaUpdate> {
-    return await this.writeMemberMeta(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
+    return await this.writeMetaInOrder(id, { replace: ownMetaArgument(meta, 'setMeta() meta') })
   }
 
   /** Per-key merge (`setAttributes`); an `undefined` value deletes the key. */
   async mergeMemberMeta(id: string, attrs: ParticipantMeta): Promise<MemberMetaUpdate> {
-    return await this.writeMemberMeta(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
+    return await this.writeMetaInOrder(id, { merge: ownMetaArgument(attrs, 'setAttributes() attributes') })
   }
 
   /** The connection of the page holding the member, which its holder here saw change. */
@@ -93,7 +93,7 @@ class RoomWrites {
 
   /** The member's writes, from its single owner here, each start once the one before it was sent, so they publish in
    *  seq order. */
-  private async writeMemberMeta(id: string, write: MemberMetaWrite): Promise<MemberMetaUpdate> {
+  private async writeMetaInOrder(id: string, write: MemberMetaWrite): Promise<MemberMetaUpdate> {
     const owner = this.owner
     return await this.inCallOrder(`meta:${id}`, async (sent) => {
       const { update, hidden, replaced } = await writeMemberMeta(owner._incarnation, id, write)
