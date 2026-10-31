@@ -132,7 +132,6 @@ class SendCredit {
   }
 
   shutdown(): void {
-    if (this.isShutdown) return
     this.isShutdown = true
     this.tryWakeCreditWaiters()
   }
