@@ -168,7 +168,7 @@ type RoomStubRequest =
   | { __r: 'req-leave'; id: string }
   | (MemberMutationRequest & { id: string })
   | { __r: 'dm-reply'; ackId: string; reply: RoomResult }
-  /** A `BinaryWantChange`, with `null` for `ALL`. */
+  /** A `BinaryWantChange`, with `null` for `EVERY_MEMBER` and `EVERY_TRACK`. */
   | { __r: 'sub-binary'; member: string | null; track: string | null; on: boolean }
   /** Changes only: announcements, and each member whose own want changed. */
   | { __r: 'sub-text'; announce: boolean; members: Record<string, boolean> }

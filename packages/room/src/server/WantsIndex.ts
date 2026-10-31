@@ -3,22 +3,30 @@ export type { Affected }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
-import { ALL, DEFAULT_TRACK, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
+import {
+  EVERY_MEMBER,
+  EVERY_TRACK,
+  DEFAULT_TRACK,
+  type BinaryWantChange,
+  type EveryMember,
+  type EveryTrack,
+  type TrackKey,
+} from '../binary.js'
 import type { BinaryWants, TrackWants } from './binaryWants.js'
 import type { LaneHolder } from './replay.js'
 import { hasEntry, toggle, toggleEntry } from './sets.js'
 assertIsNotBrowser()
 
-/** A holder's text wants as last indexed, and the binary cover keys it is in per scope (`ALL`: every member). */
+/** A holder's text wants as last indexed, and the binary cover keys it is in per scope (`EVERY_MEMBER`: every member). */
 type Indexed = {
   textAll: boolean
   announce: boolean
   textMembers: Set<string>
-  binary: Map<string | All, Set<TrackKey | All>>
+  binary: Map<string | EveryMember, Set<TrackKey | EveryTrack>>
 }
 
-/** The holders covering each track of a scope; the `ALL` key covers every track. */
-type TrackCover = Map<TrackKey | All, Set<LaneHolder>>
+/** The holders covering each track of a scope; the `EVERY_TRACK` key covers every track. */
+type TrackCover = Map<TrackKey | EveryTrack, Set<LaneHolder>>
 /** The members whose binary pairs a change may have changed. */
 type Affected = ReadonlySet<string> | 'all'
 const NONE: Affected = new Set()
@@ -54,9 +62,9 @@ class WantsIndex {
     const indexed = this._indexedOf(holder)
     const wants = gone ? null : holder._binaryWants
     // Read live: a scope listed twice is indexed already when its second step comes.
-    const scopeLists: Iterable<string | All>[] = ids
-      ? [[ALL], ids]
-      : [[ALL], indexed.binary.keys(), wants?.members.keys() ?? []]
+    const scopeLists: Iterable<string | EveryMember>[] = ids
+      ? [[EVERY_MEMBER], ids]
+      : [[EVERY_MEMBER], indexed.binary.keys(), wants?.members.keys() ?? []]
     for (const scopes of scopeLists) {
       for (const scope of scopes) yield this._updateScope(holder, indexed, scope, wants)
     }
@@ -64,8 +72,13 @@ class WantsIndex {
   }
 
   /** Indexes the holder's binary wants of one scope, and the members it affected. */
-  private _updateScope(holder: LaneHolder, indexed: Indexed, scope: string | All, wants: BinaryWants | null): Affected {
-    const next = coverKeys(scope === ALL ? wants?.everyMember : wants?.members.get(scope))
+  private _updateScope(
+    holder: LaneHolder,
+    indexed: Indexed,
+    scope: string | EveryMember,
+    wants: BinaryWants | null,
+  ): Affected {
+    const next = coverKeys(scope === EVERY_MEMBER ? wants?.everyMember : wants?.members.get(scope))
     const prev = new Set(indexed.binary.get(scope))
     const affected = new Set<string>()
     let all = false
@@ -115,29 +128,32 @@ class WantsIndex {
   /** Whether some holder names a binary want of the member, or wants every track of every member: a track named of
    *  every member is fetched for all of them on one lane. */
   concerns(member: string): boolean {
-    return this._everyMember.has(ALL) || this._members.has(member)
+    return this._everyMember.has(EVERY_TRACK) || this._members.has(member)
   }
 
   /** Whether some holder receives every track of the member: a publisher's own suppressed frames are no demand. */
   wantsEveryTrack(member: string): boolean {
     // A holder covering every track wants the default one unless it suppresses the member.
-    return this._receives(member, DEFAULT_TRACK, [this._everyMember.get(ALL), this._members.get(member)?.get(ALL)])
+    return this._receives(member, DEFAULT_TRACK, [
+      this._everyMember.get(EVERY_TRACK),
+      this._members.get(member)?.get(EVERY_TRACK),
+    ])
   }
 
   /** How many tracks some holder names of every member. */
   get everyMemberTrackCount(): number {
-    return this._everyMember.size - Number(this._everyMember.has(ALL))
+    return this._everyMember.size - Number(this._everyMember.has(EVERY_TRACK))
   }
 
   /** The tracks some holder names of every member, `DEFAULT_TRACK` for the default one. */
   *everyMemberTracks(): Generator<TrackKey> {
-    for (const track of this._everyMember.keys()) if (track !== ALL) yield track
+    for (const track of this._everyMember.keys()) if (track !== EVERY_TRACK) yield track
   }
 
   /** The tracks some holder names of the member alone and none names of every member. */
   *memberTracksOf(member: string): Generator<TrackKey> {
     for (const track of this._members.get(member)?.keys() ?? []) {
-      if (track !== ALL && !this._everyMember.has(track)) yield track
+      if (track !== EVERY_TRACK && !this._everyMember.has(track)) yield track
     }
   }
 
@@ -152,8 +168,8 @@ class WantsIndex {
     return this._receives(member, track, [
       this._everyMember.get(track),
       own?.get(track),
-      this._everyMember.get(ALL),
-      own?.get(ALL),
+      this._everyMember.get(EVERY_TRACK),
+      own?.get(EVERY_TRACK),
     ])
   }
 
@@ -174,7 +190,8 @@ class WantsIndex {
     if (others || holder._suppressedMembers().has(member)) return [others, others]
     // The holder may name the track of the member in the other scope too.
     const indexed = this._indexed.get(holder)
-    const both = indexed !== undefined && hasEntry(indexed.binary, scope === ALL ? member : ALL, track)
+    const both =
+      indexed !== undefined && hasEntry(indexed.binary, scope === EVERY_MEMBER ? member : EVERY_MEMBER, track)
     return [both || !on, both || on]
   }
 
@@ -208,22 +225,22 @@ class WantsIndex {
   }
 
   /** Puts the holder in or out of one cover key of a scope. */
-  private _cover(holder: LaneHolder, scope: string | All, key: TrackKey | All, on: boolean): Affected {
+  private _cover(holder: LaneHolder, scope: string | EveryMember, key: TrackKey | EveryTrack, on: boolean): Affected {
     const indexed = this._indexedOf(holder)
     if (hasEntry(indexed.binary, scope, key) === on) return NONE
     toggleEntry(indexed.binary, scope, key, on)
-    if (scope !== ALL) {
+    if (scope !== EVERY_MEMBER) {
       const cover = getOrCreate(this._members, scope, () => new Map())
       toggleEntry(cover, key, holder, on)
       if (cover.size === 0) this._members.delete(scope)
-      if (key !== ALL) toggleEntry(this._namedAloneOf, key, scope, cover.has(key))
+      if (key !== EVERY_TRACK) toggleEntry(this._namedAloneOf, key, scope, cover.has(key))
       return new Set([scope])
     }
     // A pair a room-wide coverer adds or drops is one every other coverer of the key suppresses, so any one names it.
     if (!on) toggleEntry(this._everyMember, key, holder, false)
     const [other] = this._everyMember.get(key) ?? []
     if (on) toggleEntry(this._everyMember, key, holder, true)
-    if (key === ALL) return other !== undefined ? new Set(other._suppressedMembers()) : 'all'
+    if (key === EVERY_TRACK) return other !== undefined ? new Set(other._suppressedMembers()) : 'all'
     this._onEveryMemberCover(key)
     if (other !== undefined) return new Set(other._suppressedMembers())
     // Only the members it is named of alone change lanes; the holder's own may stop or start being received.
@@ -233,9 +250,9 @@ class WantsIndex {
   }
 }
 
-function coverKeys(wants: TrackWants | undefined): Set<TrackKey | All> {
-  const keys = new Set<TrackKey | All>(wants?.tracks)
-  if (wants?.all) keys.add(ALL)
+function coverKeys(wants: TrackWants | undefined): Set<TrackKey | EveryTrack> {
+  const keys = new Set<TrackKey | EveryTrack>(wants?.tracks)
+  if (wants?.all) keys.add(EVERY_TRACK)
   return keys
 }
 

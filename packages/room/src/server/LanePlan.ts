@@ -9,7 +9,7 @@ import type { RoomSubscriptionSource } from '../backend/contract.js'
 import { encodeLaneKey } from '../backend/laneKey.js'
 import type { BackendReceiver, BackendSubscription, OrderingInfo } from 'telefunc/__internal'
 import { ROOM_MEMBER_NAMED_LANES_MAX } from './constants.js'
-import { ALL, type All, type BinaryWantChange, type TrackKey } from '../binary.js'
+import { EVERY_TRACK, type BinaryWantChange, type EveryTrack, type TrackKey } from '../binary.js'
 import type { DemandReport } from './demand.js'
 import type { RoomConfigRecord } from './protocol.js'
 import type { RoomModel } from '../state.js'
@@ -229,10 +229,10 @@ class LanePlan {
    *  planning pass. */
   binaryChanged(holder: LaneHolder, change: BinaryWantChange): void {
     const { track } = change
-    const wasEveryMember = track !== ALL && this._wants.namesEveryMember(track)
+    const wasEveryMember = track !== EVERY_TRACK && this._wants.namesEveryMember(track)
     const affected = this._wants.applyBinary(holder, change)
     const queued = this._queued
-    if (track === ALL) {
+    if (track === EVERY_TRACK) {
       if (affected === 'all') queued.all = true
       else for (const member of affected) queued.members.add(member)
     } else {
@@ -290,12 +290,12 @@ class LanePlan {
     return this._planning
   }
 
-  /** The lanes delivering the member's `track` (or `ALL`) are ready, so a retained read after this
+  /** The lanes delivering the member's `track` (or `EVERY_TRACK`) are ready, so a retained read after this
    *  misses no live frame. */
-  async pairsReady(member: string, track: TrackKey | All): Promise<void> {
+  async pairsReady(member: string, track: TrackKey | EveryTrack): Promise<void> {
     await this._planning
     const lanes = [this._everyTrack.get(member)]
-    if (track !== ALL) {
+    if (track !== EVERY_TRACK) {
       lanes.push(this._binary.get(encodeLaneKey({ kind: 'binary', member, track })))
       lanes.push(this._everyMember.get(track))
     }

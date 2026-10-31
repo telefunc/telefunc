@@ -12,7 +12,15 @@ export type { RoomRequest, RoomDeclaration }
 
 import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { ProtocolViolationError } from './protocolViolation.js'
-import { ALL, decodeBinaryFrame, isMemberId, isRoomTrack, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import {
+  EVERY_MEMBER,
+  EVERY_TRACK,
+  decodeBinaryFrame,
+  isMemberId,
+  isRoomTrack,
+  type BinaryFrame,
+  type BinaryWantChange,
+} from '../binary.js'
 import { isRecord } from '../model.js'
 import type {
   RoomResult,
@@ -107,7 +115,12 @@ function decodeRoomDeclaration(value: unknown): RoomDeclaration {
       const { member, track, on } = decl
       if (member !== null && !isMemberId(member)) malformed('binary wants')
       if (track !== null && !isRoomTrack(track)) malformed('binary wants')
-      return { __r: 'sub-binary', member: member ?? ALL, track: track ?? ALL, on: flag(on, 'binary wants') }
+      return {
+        __r: 'sub-binary',
+        member: member ?? EVERY_MEMBER,
+        track: track ?? EVERY_TRACK,
+        on: flag(on, 'binary wants'),
+      }
     }
     case 'sub-text':
       return {

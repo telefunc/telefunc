@@ -1,5 +1,15 @@
-export { isMemberId, encodeBinaryFrame, decodeBinaryFrame, DEFAULT_TRACK, ALL, publicTrack, isNamedTrack, isRoomTrack }
-export type { TrackKey, All, BinaryWantChange, BinaryFrame }
+export {
+  isMemberId,
+  encodeBinaryFrame,
+  decodeBinaryFrame,
+  DEFAULT_TRACK,
+  EVERY_MEMBER,
+  EVERY_TRACK,
+  publicTrack,
+  isNamedTrack,
+  isRoomTrack,
+}
+export type { TrackKey, EveryMember, EveryTrack, BinaryWantChange, BinaryFrame }
 
 import { parse } from '@brillout/json-serializer/parse'
 import { stringify } from '@brillout/json-serializer/stringify'
@@ -168,16 +178,19 @@ function decodeBinaryFrame(data: Uint8Array): BinaryFrame | null {
 type TrackKey = string
 /** The default track's key; named tracks are non-empty, so `''` is unambiguous. */
 const DEFAULT_TRACK: TrackKey = ''
-/** Every track, or every member, as a want's target. */
-const ALL: unique symbol = Symbol.for('telefunc.RoomWantAll')
-type All = typeof ALL
+/** Every member, and every track, as a want's target. One symbol, so a copy of Room built before the split still
+ *  matches; the wire carries `null`. */
+const EVERY_MEMBER: unique symbol = Symbol.for('telefunc.RoomWantAll')
+const EVERY_TRACK: unique symbol = Symbol.for('telefunc.RoomWantAll')
+type EveryMember = typeof EVERY_MEMBER
+type EveryTrack = typeof EVERY_TRACK
 
 function publicTrack(track: TrackKey): string | null {
   return track === DEFAULT_TRACK ? null : track
 }
 
-/** One change of a holder's binary wants: `track` (or `ALL`) of `member` (or `ALL`), on or off. */
-type BinaryWantChange = { member: string | All; track: TrackKey | All; on: boolean }
+/** One change of a holder's binary wants: `track` (or `EVERY_TRACK`) of `member` (or `EVERY_MEMBER`), on or off. */
+type BinaryWantChange = { member: string | EveryMember; track: TrackKey | EveryTrack; on: boolean }
 
 /** Bounded by UTF-8 bytes, the unit of the frame's one-byte track length; a `.length` count could admit a track that
  *  doesn't fit. */

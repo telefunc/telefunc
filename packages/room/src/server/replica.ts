@@ -7,7 +7,7 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getRoomBackend } from '../backend/plane.js'
 import type { LaneId } from '../backend/contract.js'
 import { encodePublish, hostLocal, type OrderingInfo } from 'telefunc/__internal'
-import { ALL, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, decodeBinaryFrame, type BinaryWantChange } from '../binary.js'
 import { DemandReport, RoomDemand } from './demand.js'
 import { DM_FAILURE } from '../errors.js'
 import { joinedMember, leaveCauseFromWire, leaveCauseToWire } from '../protocol.js'
@@ -315,15 +315,15 @@ class RoomReplica implements LanePlanOwner, RoomHeartbeatOwner {
 
   private async _readRetainedBinary(holder: LaneHolder, { member, track }: BinaryWantChange, hold: ReplayHold) {
     await this.authority.ensureRoster()
-    await (member === ALL ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
+    await (member === EVERY_MEMBER ? this.lanePlan.binaryReady() : this.lanePlan.pairsReady(member, track))
     const backend = getRoomBackend()
     const lanes: LaneId[] =
-      member !== ALL && track !== ALL
+      member !== EVERY_MEMBER && track !== EVERY_TRACK
         ? [{ kind: 'binary', member, track }]
         : await backend.listRetained(
             this.id,
             this._incarnation.inc,
-            member !== ALL ? { member } : track !== ALL ? { track } : undefined,
+            member !== EVERY_MEMBER ? { member } : track !== EVERY_TRACK ? { track } : undefined,
           )
     for (const lane of lanes) {
       if (lane.kind !== 'binary' || !holder._wantsBinary(lane.member, lane.track)) continue

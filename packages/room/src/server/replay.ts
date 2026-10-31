@@ -5,7 +5,7 @@ import { assertIsNotBrowser } from '../utils/assertIsNotBrowser.js'
 import { getOrCreate } from '../utils/getOrCreate.js'
 import { makePublishInfo } from '../channel.js'
 import type { ChannelPublishInfo, OrderingInfo } from 'telefunc/__internal'
-import { ALL, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
 import type { MemberWants } from '../protocol.js'
 import type { RoomDataEnvelope } from './protocol.js'
@@ -50,7 +50,10 @@ class ReplayHold {
   covers(member: string, track: string | null): boolean {
     const { change } = this
     if (change === null || track === null) return change === null && track === null
-    return (change.member === ALL || change.member === member) && (change.track === ALL || change.track === track)
+    return (
+      (change.member === EVERY_MEMBER || change.member === member) &&
+      (change.track === EVERY_TRACK || change.track === track)
+    )
   }
 
   /** Lets the held frames go before the read settled: the retained frames it reads later follow them. */

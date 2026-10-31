@@ -10,11 +10,12 @@ import { Slice } from './Slice.js'
 import { Listeners } from './utils/Listeners.js'
 import { getOrCreate } from './utils/getOrCreate.js'
 import {
-  ALL,
+  EVERY_MEMBER,
+  EVERY_TRACK,
   DEFAULT_TRACK,
   isNamedTrack,
   publicTrack,
-  type All,
+  type EveryTrack,
   type BinaryFrame,
   type BinaryWantChange,
   type TrackKey,
@@ -42,8 +43,8 @@ import type {
   Sender,
 } from './types.js'
 
-/** A binary listener's track filter: one track, or `ALL`. */
-type TrackFilter = TrackKey | All
+/** A binary listener's track filter: one track, or `EVERY_TRACK`. */
+type TrackFilter = TrackKey | EveryTrack
 /** A membership event as this model got it, whether it applied it or not. */
 type MembershipEvent = { join: MemberSnapshot } | { leave: string } | { meta: { id: string; update: MemberMetaUpdate } }
 /** A binary listener list's filters as counts: every-track listeners, and listeners per lane track. */
@@ -920,7 +921,7 @@ class RoomState {
     invoke: (cb: CB) => unknown,
   ): void {
     for (const { cb, track: want } of cbs.list()) {
-      if (want !== ALL && want !== track) continue
+      if (want !== EVERY_TRACK && want !== track) continue
       invokeChannelListener(invoke, [cb], this._onCallbackError)
     }
   }
@@ -991,7 +992,7 @@ class RoomState {
   private _register<T>(list: Listeners<T>, cb: T, entry: MemberEntry | null = null, filter?: CountedTrack): () => void {
     assertUsage(
       filter === undefined ||
-        filter.track === ALL ||
+        filter.track === EVERY_TRACK ||
         this._trackWants < this._trackWantsMax ||
         filter.counts.named.has(filter.track),
       `Too many binary tracks subscribed on one room (${this._trackWantsMax} max): subscribe without \`{ track }\` to receive every track`,
@@ -1040,7 +1041,7 @@ class RoomState {
   private _bumpListenerCount(delta: number, entry: MemberEntry | null, binary: BinaryWantChange | null): void {
     this._listenerCount += delta
     if (this._listenerCount === (delta > 0 ? 1 : 0)) this.model._listen(this, delta > 0)
-    if (binary !== null && binary.track !== ALL) this._trackWants += binary.on ? 1 : -1
+    if (binary !== null && binary.track !== EVERY_TRACK) this._trackWants += binary.on ? 1 : -1
     if (entry !== null) {
       if ((this._memberListeners.get(entry)?.dataCbs?.size ?? 0) > 0) this._textWanted.add(entry.id)
       else this._textWanted.delete(entry.id)
@@ -1106,7 +1107,7 @@ function normalizeTrackFilter(opts: { track?: string | null } | undefined): Trac
   )
   assertKnownOptions(opts, ['track'], 'subscribeBinary()')
   const track = opts?.track
-  if (track === undefined) return ALL
+  if (track === undefined) return EVERY_TRACK
   if (track === null) return DEFAULT_TRACK
   assertUsage(isNamedTrack(track), 'subscribeBinary() track should be a valid non-empty string')
   return track
@@ -1122,7 +1123,7 @@ function newTrackCounts(): TrackCounts {
 
 /** Whether the count crossed zero, turning a want on or off. */
 function countTrack(counts: TrackCounts, track: TrackFilter, delta: 1 | -1): boolean {
-  if (track === ALL) {
+  if (track === EVERY_TRACK) {
     counts.all += delta
     return counts.all === (delta === 1 ? 1 : 0)
   }
@@ -1133,5 +1134,5 @@ function countTrack(counts: TrackCounts, track: TrackFilter, delta: 1 | -1): boo
 }
 
 function wantOf(entry: MemberEntry | null, { track }: CountedTrack, on: boolean): BinaryWantChange {
-  return { member: entry?.id ?? ALL, track, on }
+  return { member: entry?.id ?? EVERY_MEMBER, track, on }
 }

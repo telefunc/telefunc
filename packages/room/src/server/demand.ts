@@ -1,7 +1,7 @@
 export { RoomDemand, DemandReport }
 
 import { getOrCreate } from '../utils/getOrCreate.js'
-import { ALL, DEFAULT_TRACK, type All } from '../binary.js'
+import { EVERY_MEMBER, DEFAULT_TRACK, type EveryMember } from '../binary.js'
 import { ROOM_MEMBER_TRACKS_MAX } from '../constants.js'
 import { ROOM_DEMAND_TTL_MS } from './constants.js'
 import type { DemandEntry, RoomDemandPage } from './protocol.js'
@@ -287,8 +287,8 @@ class RoomDemand {
   private readonly _published = new Map<string, Set<string>>()
   /** Per track, the owned members told it is wanted, kept by track as `_due` is evaluated a track at a time. */
   private readonly _told = new Map<string, Set<string>>()
-  /** Per track, the owned members whose `wanted` may have changed, or `ALL` of them. */
-  private readonly _due = new Map<string, Set<string> | All>()
+  /** Per track, the owned members whose `wanted` may have changed, or `EVERY_MEMBER`: all of them. */
+  private readonly _due = new Map<string, Set<string> | EveryMember>()
   private _settling = false
 
   constructor(private readonly _host: DemandHost) {}
@@ -503,7 +503,7 @@ class RoomDemand {
       for (const member of was.except) if (!now.except.has(member)) this._queue(track, member)
       for (const member of now.except) if (!was.except.has(member)) this._queue(track, member)
     } else {
-      this._queue(track, ALL)
+      this._queue(track, EVERY_MEMBER)
     }
   }
 
@@ -516,10 +516,10 @@ class RoomDemand {
     for (const member of members) this._queue(track, member)
   }
 
-  private _queue(track: string, member: string | All): void {
+  private _queue(track: string, member: string | EveryMember): void {
     const due = this._due.get(track)
-    if (due === ALL) return
-    if (member === ALL) this._due.set(track, ALL)
+    if (due === EVERY_MEMBER) return
+    if (member === EVERY_MEMBER) this._due.set(track, EVERY_MEMBER)
     else if (due) due.add(member)
     else this._due.set(track, new Set([member]))
   }
@@ -550,7 +550,7 @@ class RoomDemand {
   private *_evaluations(): Generator<void> {
     for (const [track, members] of this._due) {
       this._due.delete(track)
-      for (const member of members === ALL ? this._host.ownedMembers() : members) {
+      for (const member of members === EVERY_MEMBER ? this._host.ownedMembers() : members) {
         this._evaluate(member, track)
         yield
       }

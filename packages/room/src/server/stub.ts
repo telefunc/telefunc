@@ -32,7 +32,7 @@ import {
 } from './requests.js'
 import { ANNOUNCE_KEY, ReplayGate, heldTextWeight, heldWeight, type LaneHolder, type ReplayHold } from './replay.js'
 import { TailHold, type TailEntry } from './tail.js'
-import { ALL, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
+import { EVERY_MEMBER, EVERY_TRACK, DEFAULT_TRACK, type BinaryFrame, type BinaryWantChange } from '../binary.js'
 import { applyBinaryWantChange, binaryWantsCovers, emptyBinaryWants, type BinaryWants } from './binaryWants.js'
 import { DM_FAILURE, RoomError, ROOM_BUG_MESSAGE, toRoomFailure } from '../errors.js'
 import {
@@ -277,8 +277,8 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
 
   /** The client library names at most `ROOM_TRACK_WANTS_MAX` tracks, so only a peer bypassing it names more. */
   private _assertTrackWantFits({ member, track, on }: BinaryWantChange): void {
-    if (!on || track === ALL || this._trackWants < ROOM_TRACK_WANTS_MAX) return
-    const scope = member === ALL ? this._binary.everyMember : this._binary.members.get(member)
+    if (!on || track === EVERY_TRACK || this._trackWants < ROOM_TRACK_WANTS_MAX) return
+    const scope = member === EVERY_MEMBER ? this._binary.everyMember : this._binary.members.get(member)
     assertProtocol(scope?.tracks.has(track), 'Room binary wants over ROOM_TRACK_WANTS_MAX')
   }
 
@@ -286,9 +286,9 @@ class RoomStub implements LaneHolder, BroadcastEndOwner {
    *  left or never was. */
   private _declareBinaryWant(change: BinaryWantChange): void {
     const { member, track, on } = change
-    if (on && member !== ALL && !this._room._model.hasMember(member)) return
+    if (on && member !== EVERY_MEMBER && !this._room._model.hasMember(member)) return
     if (!applyBinaryWantChange(this._binary, change)) return
-    if (track !== ALL) this._trackWants += on ? 1 : -1
+    if (track !== EVERY_TRACK) this._trackWants += on ? 1 : -1
     if (!on) this._replay.forgetUnwantedBinary((member, track) => this._wantsBinary(member, track))
     this._room._onHolderBinaryChanged(this, change)
   }

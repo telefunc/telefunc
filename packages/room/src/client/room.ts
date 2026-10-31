@@ -7,7 +7,14 @@ import { getOrCreate } from '../utils/getOrCreate.js'
 import { getGlobalObject } from '../utils/getGlobalObject.js'
 import type { TELEFUNC_SHIELDS, ChannelPublishAck, ChannelPublishInfo, PageClient } from 'telefunc/__internal'
 import { makePublishInfo } from '../channel.js'
-import { ALL, decodeBinaryFrame, encodeBinaryFrame, type BinaryWantChange, type TrackKey } from '../binary.js'
+import {
+  EVERY_MEMBER,
+  EVERY_TRACK,
+  decodeBinaryFrame,
+  encodeBinaryFrame,
+  type BinaryWantChange,
+  type TrackKey,
+} from '../binary.js'
 import { assertKnownOptions, normalizeJoinOptions, ownMessage, ownMetaArgument, recipientId } from '../model.js'
 import {
   hasRoomTag,
@@ -486,8 +493,8 @@ class ClientRoom extends RoomStateView implements Room {
     const { member: wantMember, track, on } = binary
     this._notify({
       __r: 'sub-binary',
-      member: wantMember === ALL ? null : wantMember,
-      track: track === ALL ? null : track,
+      member: wantMember === EVERY_MEMBER ? null : wantMember,
+      track: track === EVERY_TRACK ? null : track,
       on,
     })
   }
