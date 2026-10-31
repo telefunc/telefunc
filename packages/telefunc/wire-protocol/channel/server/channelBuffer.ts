@@ -37,51 +37,51 @@ type EntryCallback = {
  * in insertion order by merge-iterating both lanes. There are no gaps or null markers.
  */
 class ServerChannelBuffer<TAck = never> {
-  readonly #text: BufferLane
-  readonly #binary: BufferLane
-  #insertionSeq = 0
+  private readonly text: BufferLane
+  private readonly binary: BufferLane
+  private insertionSeq = 0
 
   constructor(maxBytes: number, binaryMaxBytes: number) {
-    this.#text = new BufferLane(maxBytes)
-    this.#binary = new BufferLane(binaryMaxBytes)
+    this.text = new BufferLane(maxBytes)
+    this.binary = new BufferLane(binaryMaxBytes)
   }
 
   get byteLength(): number {
-    return this.#text.byteLength + this.#binary.byteLength
+    return this.text.byteLength + this.binary.byteLength
   }
 
   get size(): number {
-    return this.#text.size + this.#binary.size
+    return this.text.size + this.binary.size
   }
 
   /** An entry was dropped to stay within the budget since the buffer was last flushed or cleared. */
   get dropped(): boolean {
-    return this.#text.dropped || this.#binary.dropped
+    return this.text.dropped || this.binary.dropped
   }
 
   pushText(data: string, resolve: () => void, reject: (err: Error) => void): void {
-    this.#text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++)
+    this.text.push(TAG.TEXT, data, utf8ByteLength(data), { resolve, reject }, this.insertionSeq++)
   }
 
   pushTextAck(data: string, resolve: (value: TAck) => void, reject: (err: Error) => void): void {
-    this.#text.push(TAG.TEXT_ACK_REQ, data, utf8ByteLength(data), { resolve, reject }, this.#insertionSeq++)
+    this.text.push(TAG.TEXT_ACK_REQ, data, utf8ByteLength(data), { resolve, reject }, this.insertionSeq++)
   }
 
   pushPublish(data: string): void {
-    this.#text.push(TAG.PUBLISH, data, utf8ByteLength(data), null, this.#insertionSeq++)
+    this.text.push(TAG.PUBLISH, data, utf8ByteLength(data), null, this.insertionSeq++)
   }
 
   /** Holds a copy, as an attached send encodes the caller's bytes at once and the caller may then reuse them. */
   pushBinary(data: Uint8Array, resolve: () => void, reject: (err: Error) => void): void {
-    this.#binary.pushCopy(TAG.BINARY, data, { resolve, reject }, this.#insertionSeq++)
+    this.binary.pushCopy(TAG.BINARY, data, { resolve, reject }, this.insertionSeq++)
   }
 
   pushBinaryAck(data: Uint8Array, resolve: (value: unknown) => void, reject: (err: Error) => void): void {
-    this.#binary.pushCopy(TAG.BINARY_ACK_REQ, data, { resolve, reject }, this.#insertionSeq++)
+    this.binary.pushCopy(TAG.BINARY_ACK_REQ, data, { resolve, reject }, this.insertionSeq++)
   }
 
   pushPublishBinary(data: Uint8Array): void {
-    this.#binary.push(TAG.PUBLISH_BINARY, data, data.byteLength, null, this.#insertionSeq++)
+    this.binary.push(TAG.PUBLISH_BINARY, data, data.byteLength, null, this.insertionSeq++)
   }
 
   /**
@@ -97,27 +97,27 @@ class ServerChannelBuffer<TAck = never> {
     sendBinaryAck: (data: Uint8Array, cb: EntryCallback | null) => void
     sendPublishBinary: (data: Uint8Array) => void
   }): void {
-    let ti = this.#text.head
-    let bi = this.#binary.head
-    const textLen = this.#text.dataLength
-    const binaryLen = this.#binary.dataLength
+    let ti = this.text.head
+    let bi = this.binary.head
+    const textLen = this.text.dataLength
+    const binaryLen = this.binary.dataLength
 
     while (ti < textLen && bi < binaryLen) {
-      if (this.#text.orderAt(ti) < this.#binary.orderAt(bi)) {
-        this.#flushEntry(this.#text, ti++, handlers)
+      if (this.text.orderAt(ti) < this.binary.orderAt(bi)) {
+        this.flushEntry(this.text, ti++, handlers)
       } else {
-        this.#flushEntry(this.#binary, bi++, handlers)
+        this.flushEntry(this.binary, bi++, handlers)
       }
     }
-    while (ti < textLen) this.#flushEntry(this.#text, ti++, handlers)
-    while (bi < binaryLen) this.#flushEntry(this.#binary, bi++, handlers)
+    while (ti < textLen) this.flushEntry(this.text, ti++, handlers)
+    while (bi < binaryLen) this.flushEntry(this.binary, bi++, handlers)
 
-    this.#text.clear()
-    this.#binary.clear()
-    this.#insertionSeq = 0
+    this.text.clear()
+    this.binary.clear()
+    this.insertionSeq = 0
   }
 
-  #flushEntry(
+  private flushEntry(
     lane: BufferLane,
     i: number,
     h: {
@@ -163,15 +163,15 @@ class ServerChannelBuffer<TAck = never> {
   }
 
   clear(err?: Error): void {
-    this.#text.clear(err)
-    this.#binary.clear(err)
-    this.#insertionSeq = 0
+    this.text.clear(err)
+    this.binary.clear(err)
+    this.insertionSeq = 0
   }
 
   /** Rejects the ack requests, whose answers can't be taken, and keeps them to flush with the rest. */
   rejectAcks(err: Error): void {
-    this.#text.rejectAcks(err)
-    this.#binary.rejectAcks(err)
+    this.text.rejectAcks(err)
+    this.binary.rejectAcks(err)
   }
 }
 
@@ -183,50 +183,46 @@ class ServerChannelBuffer<TAck = never> {
 
 class BufferLane {
   // Parallel arrays for cache-friendly access
-  #tags: number[] = []
-  #data: (string | Uint8Array)[] = []
-  #sizes: number[] = []
-  #callbacks: (EntryCallback | EntryCallback | null)[] = []
-  #order: number[] = []
-  #head = 0
-  #totalBytes = 0
-  readonly #maxBytes: number
+  private tags: number[] = []
+  private data: (string | Uint8Array)[] = []
+  private sizes: number[] = []
+  private callbacks: (EntryCallback | EntryCallback | null)[] = []
+  private order: number[] = []
+  head = 0
+  private totalBytes = 0
+  private readonly maxBytes: number
   dropped = false
 
   constructor(maxBytes: number) {
-    this.#maxBytes = maxBytes
+    this.maxBytes = maxBytes
   }
 
   get byteLength(): number {
-    return this.#totalBytes
+    return this.totalBytes
   }
 
   get size(): number {
-    return this.#data.length - this.#head
-  }
-
-  get head(): number {
-    return this.#head
+    return this.data.length - this.head
   }
 
   get dataLength(): number {
-    return this.#data.length
+    return this.data.length
   }
 
   tagAt(i: number): number {
-    return this.#tags[i]!
+    return this.tags[i]!
   }
 
   dataAt(i: number): string | Uint8Array {
-    return this.#data[i]!
+    return this.data[i]!
   }
 
   callbackAt(i: number): EntryCallback | null {
-    return this.#callbacks[i]!
+    return this.callbacks[i]!
   }
 
   orderAt(i: number): number {
-    return this.#order[i]!
+    return this.order[i]!
   }
 
   push(
@@ -236,46 +232,46 @@ class BufferLane {
     callback: EntryCallback | EntryCallback | null,
     order: number,
   ): void {
-    const held = this.#admit(bytes, callback)
-    if (held !== null) this.#append(tag, data, held, callback, order)
+    const held = this.admit(bytes, callback)
+    if (held !== null) this.append(tag, data, held, callback, order)
   }
 
   /** Holds a copy of `data`, made only once the lane admits it. */
   pushCopy(tag: number, data: Uint8Array, callback: EntryCallback, order: number): void {
-    const held = this.#admit(data.byteLength, callback)
-    if (held !== null) this.#append(tag, new Uint8Array(data), held, callback, order)
+    const held = this.admit(data.byteLength, callback)
+    if (held !== null) this.append(tag, new Uint8Array(data), held, callback, order)
   }
 
   clear(err?: Error): void {
     if (err) {
-      for (let i = this.#head; i < this.#callbacks.length; i++) {
-        this.#callbacks[i]?.reject(err)
+      for (let i = this.head; i < this.callbacks.length; i++) {
+        this.callbacks[i]?.reject(err)
       }
     }
-    this.#tags.length = 0
-    this.#data.length = 0
-    this.#sizes.length = 0
-    this.#callbacks.length = 0
-    this.#order.length = 0
-    this.#head = 0
-    this.#totalBytes = 0
+    this.tags.length = 0
+    this.data.length = 0
+    this.sizes.length = 0
+    this.callbacks.length = 0
+    this.order.length = 0
+    this.head = 0
+    this.totalBytes = 0
     this.dropped = false
   }
 
   rejectAcks(err: Error): void {
-    for (let i = this.#head; i < this.#callbacks.length; i++) {
-      if (!isAckTag(this.#tags[i]!)) continue
-      this.#callbacks[i]?.reject(err)
-      this.#callbacks[i] = null
+    for (let i = this.head; i < this.callbacks.length; i++) {
+      if (!isAckTag(this.tags[i]!)) continue
+      this.callbacks[i]?.reject(err)
+      this.callbacks[i] = null
     }
   }
 
   // ── Private ──
 
   /** The bytes holding the entry takes, or `null` once the lane is cleared for an entry larger than it. */
-  #admit(bytes: number, callback: EntryCallback | null): number | null {
+  private admit(bytes: number, callback: EntryCallback | null): number | null {
     const held = bytes + (callback === null ? HELD_PUBLISH_OVERHEAD_BYTES : HELD_SEND_OVERHEAD_BYTES)
-    if (held <= this.#maxBytes) return held
+    if (held <= this.maxBytes) return held
     const overflowErr = new ChannelOverflowError()
     this.clear(overflowErr)
     this.dropped = true
@@ -283,35 +279,41 @@ class BufferLane {
     return null
   }
 
-  #append(tag: number, data: string | Uint8Array, bytes: number, callback: EntryCallback | null, order: number): void {
-    this.#tags.push(tag)
-    this.#data.push(data)
-    this.#sizes.push(bytes)
-    this.#callbacks.push(callback)
-    this.#order.push(order)
-    this.#totalBytes += bytes
-    this.#evict()
+  private append(
+    tag: number,
+    data: string | Uint8Array,
+    bytes: number,
+    callback: EntryCallback | null,
+    order: number,
+  ): void {
+    this.tags.push(tag)
+    this.data.push(data)
+    this.sizes.push(bytes)
+    this.callbacks.push(callback)
+    this.order.push(order)
+    this.totalBytes += bytes
+    this.evict()
   }
 
-  #evict(): void {
+  private evict(): void {
     let evictionErr: ChannelOverflowError | undefined
     // Evict oldest entries until within the cap.
     // Safe to run after push: the oversized guard ensures the new entry has
     // bytes ≤ maxBytes, so eviction drains old entries and always leaves it.
-    while (this.#totalBytes > this.#maxBytes && this.#head < this.#data.length) {
+    while (this.totalBytes > this.maxBytes && this.head < this.data.length) {
       this.dropped = true
-      this.#callbacks[this.#head]?.reject((evictionErr ??= new ChannelOverflowError()))
-      this.#totalBytes -= this.#sizes[this.#head]!
-      this.#head++
+      this.callbacks[this.head]?.reject((evictionErr ??= new ChannelOverflowError()))
+      this.totalBytes -= this.sizes[this.head]!
+      this.head++
     }
     // Compact when dead zone ≥ live zone (amortised O(1)).
-    if (this.#head > 0 && this.#head >= this.#data.length - this.#head) {
-      this.#tags = this.#tags.slice(this.#head)
-      this.#data = this.#data.slice(this.#head)
-      this.#sizes = this.#sizes.slice(this.#head)
-      this.#callbacks = this.#callbacks.slice(this.#head)
-      this.#order = this.#order.slice(this.#head)
-      this.#head = 0
+    if (this.head > 0 && this.head >= this.data.length - this.head) {
+      this.tags = this.tags.slice(this.head)
+      this.data = this.data.slice(this.head)
+      this.sizes = this.sizes.slice(this.head)
+      this.callbacks = this.callbacks.slice(this.head)
+      this.order = this.order.slice(this.head)
+      this.head = 0
     }
   }
 }
