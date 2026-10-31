@@ -19,6 +19,7 @@ import { Slice } from '../Slice.js'
 import type { LaneHolder } from './replay.js'
 import type { RoomIncarnation } from './lifecycle.js'
 import type { AuthoritySync } from './AuthoritySync.js'
+import type { RoomHeartbeat } from './heartbeat.js'
 import { WantsIndex } from './WantsIndex.js'
 import { runAll, toggle, toggleEntry } from './sets.js'
 import { CONTROL_LANE, DEMAND_LANE, SEMANTIC_LANE, decodeRoomText, withinRoomHorizon } from './lanes.js'
@@ -57,8 +58,9 @@ interface LaneRoles {
 interface LaneAuthority {
   readonly id: string
   readonly _incarnation: RoomIncarnation
-  /** Recovers from a gap, refreshes the members, and runs the heartbeat. */
-  readonly sync: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers' | 'heartbeat'>
+  /** Recovers from a gap, and refreshes the members; the heartbeat runs while the plan keeps the room. */
+  readonly sync: Pick<AuthoritySync, 'reconcileAuthority' | 'refreshMembers'>
+  readonly heartbeat: Pick<RoomHeartbeat, 'update'>
   _readOpenConfig(): Promise<RoomConfigRecord | null>
   _closeFromAuthority(): void
 }
@@ -168,6 +170,11 @@ class RoomSubscriptions {
   /** Whether some handle observes the room through the control lane. */
   get observing(): boolean {
     return this._observing
+  }
+
+  /** Whether this process owns an inbox, which a member it owns reads. */
+  get ownsInbox(): boolean {
+    return this._inbox.size > 0
   }
 
   get controlEstablished(): boolean {
@@ -335,7 +342,7 @@ class RoomSubscriptions {
     }
     this._syncDemandLane()
     if (this._planning === null) this._demand.flush()
-    this._syncHeartbeat()
+    this._owner.heartbeat.update()
   }
 
   /** Indexes the holder's wants a step at a time, each step queueing the members it affected. */
@@ -390,7 +397,7 @@ class RoomSubscriptions {
       }
     } finally {
       this._planning = null
-      this._syncHeartbeat()
+      this._owner.heartbeat.update()
     }
   }
 
@@ -829,12 +836,6 @@ class RoomSubscriptions {
     }
     // Catch up on what the outage dropped; a later end of the lane gets its own recovery.
     await this._owner.sync.reconcileAuthority()
-  }
-
-  /** The heartbeat runs while a handle observes the room or owns a member, or the demand tells anything. */
-  private _syncHeartbeat(): void {
-    const owner = this._owner
-    owner.sync.heartbeat(!owner.model.closed && (this._observing || this._inbox.size > 0 || this._demand.reporting))
   }
 }
 
